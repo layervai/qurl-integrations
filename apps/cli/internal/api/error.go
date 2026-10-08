@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/layervai/qurl-go/qurl"
 )
@@ -95,7 +96,8 @@ func CustomerMessages() []string {
 		msgGrantEditUnconfirmed,
 		msgAccessRequestsUnsupported, msgAccessRequestsCreateIgnored, msgAccessRequestsSettingIgnored,
 		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgAccessRequestsNotTurnedOn, msgApprovalUnconfirmed,
-		msgRequestCodeNotFound, msgDeviceIDNotFound, msgRemovalUnconfirmed,
+		msgRequestCodeNotFound, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
+		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed,
 	}
 }
 
@@ -128,9 +130,27 @@ const (
 
 	// %s is the code, written as two groups of three.
 	msgRequestCodeNotFound = "no pending request has the code %s for this resource. It may have expired, or been approved or denied already. Run `qurl requests <CRID>` to see the pending requests"
-	// %s is the device id. Nothing was removed, and the message says so: a
-	// mistyped id must never read as access taken away.
-	msgDeviceIDNotFound = "no approved person has the device id %s on this resource, so nothing was removed. Run `qurl grants <CRID>` to see who has access"
+	// The messages of a removal of approved people that did not remove every
+	// person it named. A mistyped device id must never read as access taken
+	// away, and access that was taken away must never read as a typo, so
+	// each says exactly what happened to which device id. %s is a device id
+	// or a list of them; the last %s of the three that have one is the
+	// identifier the command was given.
+	//
+	// Nothing was removed: an id is not on the list.
+	msgDeviceIDNotFound  = "no approved person has the device id %s on this resource, so nothing was removed"
+	msgDeviceIDsNotFound = "no approved person has the device ids %s on this resource, so nothing was removed"
+	// Access was taken away from some, and then an id was not found, or a
+	// removal failed for another reason.
+	msgRemovedThenNotFound = "access was taken away from %s. Then no approved person had the device id %s on this resource, and the command stopped"
+	msgRemovedThenFailed   = "access was taken away from %s. Then taking it away from %s failed, and the command stopped"
+	// The device ids the command named that still have access as far as it
+	// knows, and the next step.
+	msgStillHasAccess  = "%s still has access"
+	msgStillHaveAccess = "%s still have access"
+	msgSeeWhoHasAccess = "Run `qurl grants %s` to see who has access now"
+	// msgApprovedPersonNotFound is the text of ErrApprovedPersonNotFound.
+	msgApprovedPersonNotFound = "no approved person has that device id"
 
 	// msgRemovalUnconfirmed is shown when the service answered a removal
 	// with success and the resource still lists the person.
@@ -200,6 +220,133 @@ func (e *AccessRequestsNotTurnedOnError) Reason() string {
 }
 
 func (e *AccessRequestsNotTurnedOnError) Unwrap() error { return e.cause }
+
+// ErrApprovedPersonNotFound marks a removal that named a device id no approved
+// person has. The command and the resource are fine; the thing that was named
+// is not there, which is the not-found exit code.
+var ErrApprovedPersonNotFound = errors.New(msgApprovedPersonNotFound)
+
+// PasskeyRemovalError is a removal of approved people that did not take every
+// person it named off the list. It says what happened to each device id, so
+// that neither kind of wrong reading is possible: a mistyped id as access
+// taken away, or access taken away as a typo.
+//
+// The three lists hold every device id the command named, each in one of
+// them, in the order given.
+type PasskeyRemovalError struct {
+	// ID is the resource identifier the command was given.
+	ID string
+	// Removed are the device ids whose access was taken away.
+	Removed []string
+	// NotFound are the device ids that are not on the list.
+	NotFound []string
+	// NotRemoved are the device ids that still have access as far as the
+	// command knows: the ones it did not get to, and one whose removal
+	// failed.
+	NotRemoved []string
+	// KeysNotChanged is set by a caller that was also asked to change the
+	// public keys in the same command. That change comes after the removals,
+	// so it was not made, and the outcome says so.
+	KeysNotChanged bool
+
+	// failed is the device id whose removal failed for another reason than
+	// not being found, and cause that reason.
+	failed string
+	cause  error
+	// problem is the service's not-found answer, when a removal got one.
+	problem *Error
+}
+
+// Headline says what happened, in one sentence or two, without the reason of
+// a failure and without the next step.
+func (e *PasskeyRemovalError) Headline() string {
+	var text string
+	switch {
+	case e.failed != "":
+		text = fmt.Sprintf(msgRemovedThenFailed, wordList(e.Removed), e.failed)
+	case len(e.Removed) > 0:
+		text = fmt.Sprintf(msgRemovedThenNotFound, wordList(e.Removed), wordList(e.NotFound))
+	case len(e.NotFound) == 1:
+		text = fmt.Sprintf(msgDeviceIDNotFound, e.NotFound[0])
+	default:
+		text = fmt.Sprintf(msgDeviceIDsNotFound, wordList(e.NotFound))
+	}
+	switch len(e.NotRemoved) {
+	case 0:
+		return text
+	case 1:
+		return text + ". " + fmt.Sprintf(msgStillHasAccess, e.NotRemoved[0])
+	}
+	return text + ". " + fmt.Sprintf(msgStillHaveAccess, wordList(e.NotRemoved))
+}
+
+// Reason is why a removal failed, when it failed for another reason than a
+// device id that was not found; empty otherwise. It is the service's own text
+// for a problem it reported, and the failure as it is otherwise.
+func (e *PasskeyRemovalError) Reason() string {
+	if e.cause == nil {
+		return ""
+	}
+	var worded interface{ UserMessage() string }
+	if errors.As(e.cause, &worded) {
+		return worded.UserMessage()
+	}
+	var problem *Error
+	if errors.As(e.cause, &problem) {
+		if problem.Detail != "" {
+			return problem.Detail
+		}
+		if problem.Title != "" {
+			return problem.Title
+		}
+	}
+	return e.cause.Error()
+}
+
+// NextStep is the command that shows who has access now.
+func (e *PasskeyRemovalError) NextStep() string {
+	id := e.ID
+	if id == "" {
+		id = "<CRID>"
+	}
+	return fmt.Sprintf(msgSeeWhoHasAccess, id)
+}
+
+func (e *PasskeyRemovalError) Error() string {
+	text := e.Headline()
+	if reason := e.Reason(); reason != "" {
+		text += ": " + reason
+	}
+	return text + ". " + e.NextStep()
+}
+
+// Unwrap exposes what decides the exit code. A device id that was not found
+// is the not-found sentinel, with the service's answer when there was one.
+// A removal that failed for another reason is that failure.
+func (e *PasskeyRemovalError) Unwrap() []error {
+	var chain []error
+	if len(e.NotFound) > 0 {
+		chain = append(chain, ErrApprovedPersonNotFound)
+	}
+	if e.problem != nil {
+		chain = append(chain, e.problem)
+	}
+	if e.cause != nil {
+		chain = append(chain, e.cause)
+	}
+	return chain
+}
+
+// wordList writes values as a phrase: "a", "a and b", "a, b and c".
+func wordList(values []string) string {
+	switch len(values) {
+	case 0:
+		return ""
+	case 1:
+		return values[0]
+	}
+	return strings.Join(values[:len(values)-1], ", ") + " and " + values[len(values)-1]
+}
 
 // answerError is an answer that does not confirm what a command asked for,
 // with the message a customer reads. It is an answer outside the contract, so

@@ -271,7 +271,12 @@ func TestGrantsUsageErrorsSendNothing(t *testing.T) {
 		{name: "add a value that is not a public key", flags: []string{"--add", "invalid"}, want: "--add requires unique canonical"},
 		{name: "remove a value that is neither a public key nor a device id", flags: []string{"--remove", "invalid"}, want: msgGrantsRemoveInvalid},
 		{name: "add the same key twice", flags: []string{"--add", key, "--add", key}, want: "--add requires unique canonical"},
-		{name: "remove the same key twice", flags: []string{"--remove", key, "--remove", key}, want: msgGrantsRemoveInvalid},
+		{name: "remove the same key twice", flags: []string{"--remove", key, "--remove", key}, want: msgGrantsRemoveTwice},
+		// The flag that replaced the list is answered first, whatever else
+		// is wrong with the command line: a command from earlier
+		// documentation must be told that the flag is gone.
+		{name: "the replace flag with a remove that is invalid", flags: []string{"--allow-device-key", key, "--remove", "invalid"}, want: "--allow-device-key no longer replaces the list: use --add <public-key>"},
+		{name: "the replace flag with a remove given twice", flags: []string{"--remove", key, "--remove", key, "--allow-device-key", key}, want: "--allow-device-key no longer replaces the list: use --add <public-key>"},
 		{name: "add and remove the same key", flags: []string{"--add", key, "--remove", key}, want: msgGrantsAddAndRemove},
 		{name: "more keys than a list can hold", flags: tooMany, want: "--add accepts at most 256 keys"},
 	} {

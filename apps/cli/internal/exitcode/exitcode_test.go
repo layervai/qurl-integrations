@@ -126,6 +126,9 @@ var cliSentinels = map[string]struct {
 	// surface: the Unavailable row, whether a missing route or an answer
 	// without the setting showed it.
 	"qurlapi.ErrAccessRequestsUnsupported": {qurlapi.ErrAccessRequestsUnsupported, Unavailable},
+
+	// A device id that no approved person has is a thing that is not there.
+	"qurlapi.ErrApprovedPersonNotFound": {qurlapi.ErrApprovedPersonNotFound, NotFound},
 }
 
 // sdkSentinels pins the mapping for every qurl-go sentinel the CLI can

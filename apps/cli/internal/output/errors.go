@@ -59,6 +59,9 @@ func renderErrorLines(p *Printer, err error) []string {
 	if lines, ok := requestsNotTurnedOnLines(p, head, err); ok {
 		return lines
 	}
+	if lines, ok := passkeyRemovalLines(p, head, err); ok {
+		return lines
+	}
 	if errors.Is(err, auth.ErrAccountRecoveryState) {
 		return []string{head + " " + msgAccountRecoveryState, "", "  " + p.dim(hintAccountRecoveryState)}
 	}
@@ -137,6 +140,31 @@ func requestsNotTurnedOnLines(p *Printer, head string, err error) ([]string, boo
 		"", "  " + p.ServiceReason(failed.Reason()),
 		"", "  " + p.dim(fmt.Sprintf(hintAccessRequestsNotTurnedOn, failed.CRID)),
 	}
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
+		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
+	}
+	return lines, true
+}
+
+// passkeyRemovalLines renders a removal of approved people that did not take
+// every person it named off the list: what happened to which device id, the
+// reason when a removal failed for another reason than an id that was not
+// found, the command that shows who has access now, and the request id. The
+// reason can be the service's own text, so it is held to one printable line.
+func passkeyRemovalLines(p *Printer, head string, err error) ([]string, bool) {
+	var outcome *qurlapi.PasskeyRemovalError
+	if !errors.As(err, &outcome) {
+		return nil, false
+	}
+	lines := []string{head + " " + outcome.Headline() + "."}
+	if reason := outcome.Reason(); reason != "" {
+		lines = append(lines, "", "  "+p.ServiceReason(reason))
+	}
+	if outcome.KeysNotChanged {
+		lines = append(lines, "", "  "+msgRemovalKeysNotChanged)
+	}
+	lines = append(lines, "", "  "+p.dim(outcome.NextStep()+"."))
 	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
 		lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))

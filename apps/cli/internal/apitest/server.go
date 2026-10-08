@@ -68,6 +68,8 @@ type Server struct {
 	pendingRequests  []accessRequestFixture
 	approvedPeople   []approvedPersonFixture
 	noAccessRequests bool
+	// omitApprovedPeople leaves allowed_passkeys out of every resource row.
+	omitApprovedPeople bool
 	// failf reports a contract violation to the owning test. It is t.Errorf,
 	// which is safe to call from a handler goroutine; this package's own
 	// tests replace it to observe the report without failing themselves.

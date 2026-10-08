@@ -1,2 +1,3 @@
-Error: no approved person has the device id qrst-uvwx-yz67-abcd on this resource, so nothing was removed. Run `qurl grants <CRID>` to see who has access
-  Request ID: req_test
+Error: no approved person has the device id qrst-uvwx-yz67-abcd on this resource, so nothing was removed.
+
+  Run `qurl grants qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q` to see who has access now.

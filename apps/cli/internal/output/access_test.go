@@ -3,6 +3,7 @@ package output
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -186,8 +187,9 @@ func TestAccessRequestsListingAlwaysEndsWithTheSafetyLine(t *testing.T) {
 }
 
 // TestEmptyAccessRequestsListing pins the empty listing: nothing on stdout in
-// text, a note on stderr, an empty array in JSON, and no safety line, because
-// there is no code to approve.
+// text, a note on stderr and no safety line, because there is no code to
+// approve. JSON has an empty array, and the rule all the same: the document
+// has one shape, and the reader may list again when there is a code.
 func TestEmptyAccessRequestsListing(t *testing.T) {
 	t.Parallel()
 	for all, note := range map[bool]string{true: msgNoPendingRequests, false: msgNoPendingRequestsForOne} {
@@ -203,8 +205,8 @@ func TestEmptyAccessRequestsListing(t *testing.T) {
 		if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).AccessRequests(nil, all); err != nil {
 			t.Fatal(err)
 		}
-		if got := strings.Join(strings.Fields(out.String()), ""); got != `{"requests":[]}` || errBuf.Len() != 0 {
-			t.Fatalf("all=%t: empty JSON listing = %q, stderr %q", all, out.String(), errBuf.String())
+		if want := "{\n  \"requests\": [],\n  \"approval_rule\": \"" + msgApproveOnlyGivenCodes + "\"\n}\n"; out.String() != want || errBuf.Len() != 0 {
+			t.Fatalf("all=%t: empty JSON listing = %q, stderr %q, want %q", all, out.String(), errBuf.String(), want)
 		}
 	}
 }
@@ -224,6 +226,29 @@ func TestAccessRequestsJSONAndQuiet(t *testing.T) {
 	}
 	if err := json.Unmarshal(out.Bytes(), &document); err != nil || len(document.Requests) != 2 {
 		t.Fatalf("JSON listing %q: %v", out.String(), err)
+	}
+	// The document has two members: the rows, and the rule the text listing
+	// ends with, in the same words. The rule is said once, beside the rows,
+	// not on each of them.
+	for _, all := range []bool{true, false} {
+		var listing bytes.Buffer
+		if err := newTestPrinter(&listing, &errBuf, FormatJSON, false, false, false).AccessRequests(fixtureRequests("Ana Lopez"), all); err != nil {
+			t.Fatal(err)
+		}
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal(listing.Bytes(), &top); err != nil {
+			t.Fatal(err)
+		}
+		var rule string
+		if err := json.Unmarshal(top["approval_rule"], &rule); err != nil || rule != msgApproveOnlyGivenCodes || len(top) != 2 {
+			t.Fatalf("all=%t: listing members = %v with approval_rule %q, want requests and the rule %q", all, top, rule, msgApproveOnlyGivenCodes)
+		}
+		if strings.Count(listing.String(), msgApproveOnlyGivenCodes) != 1 {
+			t.Fatalf("all=%t: the rule is not said exactly once:\n%s", all, listing.String())
+		}
+	}
+	if rule := "Approve a code only when the person gave it to you themselves; a name can be typed by anyone."; msgApproveOnlyGivenCodes != rule {
+		t.Fatalf("the rule changed its words: %q", msgApproveOnlyGivenCodes)
 	}
 	first, second := document.Requests[0], document.Requests[1]
 	want := map[string]any{
@@ -361,14 +386,21 @@ func TestPublishWithAccessRequestsPrintsTheGuidanceBeforeTheCRID(t *testing.T) {
 func TestAccessRequestsSettingOff(t *testing.T) {
 	t.Parallel()
 	off := false
+	// -1 stands for an answer that does not say who is approved. That is not
+	// "nobody": it gets no count, and a line that still says where to look.
 	for people, want := range map[int]string{
+		-1: "Access requests are off for " + accessCRID + ". Nobody new can ask for access.\n" +
+			"Anyone you approved earlier still has access. See them, or take access away, with `qurl grants " + accessCRID + "`.\n",
 		0: "Access requests are off for " + accessCRID + ". Nobody new can ask for access.\n",
 		1: "Access requests are off for " + accessCRID + ". Nobody new can ask for access.\n" +
-			"1 approved person still has access. See them, or take the access away, with `qurl grants " + accessCRID + "`.\n",
+			"1 approved person still has access. See them, or take access away, with `qurl grants " + accessCRID + "`.\n",
 		3: "Access requests are off for " + accessCRID + ". Nobody new can ask for access.\n" +
 			"3 approved people still have access. See them, or take access away, with `qurl grants " + accessCRID + "`.\n",
 	} {
-		resource := &qurlapi.ResourceSummary{CRID: accessCRID, AccessRequests: &off, AllowedPasskeys: make([]qurlapi.AllowedPasskey, people)}
+		resource := &qurlapi.ResourceSummary{CRID: accessCRID, AccessRequests: &off}
+		if people >= 0 {
+			resource.AllowedPasskeys = make([]qurlapi.AllowedPasskey, people)
+		}
 		var out, errBuf bytes.Buffer
 		if err := newTestPrinter(&out, &errBuf, FormatText, false, false, false).AccessRequestsSetting(resource, accessAddress); err != nil {
 			t.Fatal(err)
@@ -433,9 +465,26 @@ func TestApprovedSaysWhoHasAccessAndHowToTakeItAway(t *testing.T) {
 	if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).Approved(accessCRID, person); err != nil {
 		t.Fatal(err)
 	}
-	wantJSON := `{"crid":"` + accessCRID + `","approved":true,"name":"AnaLopez","name_verified":false,"device_id":"` + accessDevice + `","approved_at":"2026-03-02T00:00:00Z"}`
-	if got := strings.Join(strings.Fields(out.String()), ""); got != wantJSON {
-		t.Fatalf("approved JSON = %q, want %q", got, wantJSON)
+	wantJSON := "{\n" +
+		"  \"crid\": \"" + accessCRID + "\",\n" +
+		"  \"approved\": true,\n" +
+		"  \"name\": \"Ana Lopez\",\n" +
+		"  \"name_verified\": false,\n" +
+		"  \"device_id\": \"" + accessDevice + "\",\n" +
+		"  \"approved_at\": \"2026-03-02T00:00:00Z\",\n" +
+		"  \"name_note\": \"The name was typed by the person who asked. Nobody checked it.\"\n" +
+		"}\n"
+	if out.String() != wantJSON {
+		t.Fatalf("approved JSON = %q, want %q", out.String(), wantJSON)
+	}
+	// The note is there for a person who gave no name too: the document has
+	// one shape, and name_verified is false either way.
+	out.Reset()
+	if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).Approved(accessCRID, &qurlapi.AllowedPasskey{DeviceID: accessDevice}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "\"name_note\": \""+msgRequesterNameNote+"\"") || strings.Contains(out.String(), "\"name\":") {
+		t.Fatalf("approved JSON for a person with no name = %s", out.String())
 	}
 	out.Reset()
 	if err := newTestPrinter(&out, &errBuf, FormatText, true, false, false).Approved(accessCRID, person); err != nil || out.String() != accessDevice+"\n" {
@@ -554,5 +603,71 @@ func TestStatusAndInspectDocumentsKeepTheirKeys(t *testing.T) {
 				t.Errorf("the status document (%s) gained %q:\n%s", format, added, out.String())
 			}
 		}
+	}
+}
+
+// TestRemovalOutcomeDocumentAndMessage pins the two forms of a removal of
+// approved people that did not remove everyone it named. The message says
+// which device ids were removed, which was not found and which still have
+// access, then the command that shows who has access now. In JSON mode the
+// same outcome is a document with three arrays that are always there, so a
+// script can tell which people lost access. Text and --quiet write no
+// document: the message is the outcome.
+func TestRemovalOutcomeDocumentAndMessage(t *testing.T) {
+	t.Parallel()
+	const first, second, third = "aaaa-aaaa-aaaa-aaaa", "bbbb-bbbb-bbbb-bbbb", "cccc-cccc-cccc-cccc"
+	for _, test := range []struct {
+		name     string
+		outcome  *qurlapi.PasskeyRemovalError
+		message  string
+		document string
+	}{
+		{
+			name:    "nothing removed",
+			outcome: &qurlapi.PasskeyRemovalError{ID: accessCRID, NotFound: []string{second}, NotRemoved: []string{first}},
+			message: "Error: no approved person has the device id " + second + " on this resource, so nothing was removed. " + first + " still has access.\n\n" +
+				"  Run `qurl grants " + accessCRID + "` to see who has access now.\n",
+			document: `{"crid":"` + accessCRID + `","removed":[],"not_found":["` + second + `"],"not_removed":["` + first + `"]}`,
+		},
+		{
+			name:    "removed, then one not found",
+			outcome: &qurlapi.PasskeyRemovalError{ID: accessCRID, Removed: []string{first}, NotFound: []string{second}, NotRemoved: []string{third}},
+			message: "Error: access was taken away from " + first + ". Then no approved person had the device id " + second + " on this resource, and the command stopped. " + third + " still has access.\n\n" +
+				"  Run `qurl grants " + accessCRID + "` to see who has access now.\n",
+			document: `{"crid":"` + accessCRID + `","removed":["` + first + `"],"not_found":["` + second + `"],"not_removed":["` + third + `"]}`,
+		},
+		{
+			name:    "the last one not found",
+			outcome: &qurlapi.PasskeyRemovalError{ID: accessCRID, Removed: []string{first, second}, NotFound: []string{third}},
+			message: "Error: access was taken away from " + first + " and " + second + ". Then no approved person had the device id " + third + " on this resource, and the command stopped.\n\n" +
+				"  Run `qurl grants " + accessCRID + "` to see who has access now.\n",
+			document: `{"crid":"` + accessCRID + `","removed":["` + first + `","` + second + `"],"not_found":["` + third + `"],"not_removed":[]}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var rendered bytes.Buffer
+			RenderError(&rendered, fmt.Errorf("grants: %w", test.outcome), false)
+			if rendered.String() != test.message {
+				t.Fatalf("message =\n%s\nwant\n%s", rendered.String(), test.message)
+			}
+			var out, errBuf bytes.Buffer
+			if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).RemovalOutcome(test.outcome); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(strings.Fields(out.String()), ""); got != test.document || errBuf.Len() != 0 {
+				t.Fatalf("document = %s, want %s", got, test.document)
+			}
+			for _, quiet := range []bool{false, true} {
+				out.Reset()
+				if err := newTestPrinter(&out, &errBuf, FormatText, quiet, false, false).RemovalOutcome(test.outcome); err != nil || out.Len() != 0 || errBuf.Len() != 0 {
+					t.Fatalf("quiet %t: text mode wrote %q / %q, %v; want nothing", quiet, out.String(), errBuf.String(), err)
+				}
+			}
+		})
+	}
+	var out, errBuf bytes.Buffer
+	if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).RemovalOutcome(nil); err != nil || out.Len() != 0 {
+		t.Fatalf("no outcome wrote %q, %v", out.String(), err)
 	}
 }

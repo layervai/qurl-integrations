@@ -97,13 +97,26 @@ func (s *Server) addAccessRequestFields(row map[string]any) {
 		return
 	}
 	row[fieldAccessRequests] = s.accessRequests
-	if len(s.approvedPeople) > 0 {
-		people := make([]map[string]any, 0, len(s.approvedPeople))
-		for _, person := range s.approvedPeople {
-			people = append(people, person.payload())
-		}
-		row[fieldAllowedPasskeys] = people
+	if s.omitApprovedPeople {
+		return
 	}
+	// The member is on every row, as an empty array when nobody was
+	// approved: "nobody" is said, never left out.
+	people := make([]map[string]any, 0, len(s.approvedPeople))
+	for _, person := range s.approvedPeople {
+		people = append(people, person.payload())
+	}
+	row[fieldAllowedPasskeys] = people
+}
+
+// OmitApprovedPeople makes the mock leave the list of approved people out of
+// every resource row. The service does not do that. A client must read the
+// missing member as "not said", never as "nobody", and this is how a test
+// shows that it does.
+func (s *Server) OmitApprovedPeople() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.omitApprovedPeople = true
 }
 
 func (p approvedPersonFixture) payload() map[string]any {

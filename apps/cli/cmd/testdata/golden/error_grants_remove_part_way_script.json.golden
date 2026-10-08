@@ -1,0 +1,12 @@
+{
+  "crid": "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q",
+  "removed": [
+    "abcd-efgh-2345-mnop"
+  ],
+  "not_found": [
+    "qrst-uvwx-yz67-abcd"
+  ],
+  "not_removed": [
+    "keep-keep-keep-keep"
+  ]
+}

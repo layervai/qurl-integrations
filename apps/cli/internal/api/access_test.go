@@ -737,9 +737,39 @@ func TestDenyAccessRequest(t *testing.T) {
 	}
 }
 
-// TestRemoveAllowedPasskeys pins the removal of approved people: one DELETE
-// for each device id, in order, then one read of the resource, which must not
-// list a removed person.
+// removalOutcome fails the test unless err is a PasskeyRemovalError with these
+// three lists, and returns it.
+func removalOutcome(t *testing.T, err error, removed, notFound, notRemoved []string) *PasskeyRemovalError {
+	t.Helper()
+	var outcome *PasskeyRemovalError
+	if !errors.As(err, &outcome) {
+		t.Fatalf("error = %v, want a removal outcome", err)
+	}
+	if !slices.Equal(outcome.Removed, removed) || !slices.Equal(outcome.NotFound, notFound) || !slices.Equal(outcome.NotRemoved, notRemoved) {
+		t.Fatalf("outcome: removed %v, not found %v, not removed %v; want %v, %v, %v",
+			outcome.Removed, outcome.NotFound, outcome.NotRemoved, removed, notFound, notRemoved)
+	}
+	return outcome
+}
+
+// approvedIDs reads the device ids of the approved people from the mock.
+func approvedIDs(t *testing.T, srv *apitest.Server) []string {
+	t.Helper()
+	resource, err := newTestClient(t, srv, nil).Resource(t.Context(), srv.Key.CRID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(resource.AllowedPasskeys))
+	for index := range resource.AllowedPasskeys {
+		ids = append(ids, resource.AllowedPasskeys[index].DeviceID)
+	}
+	return ids
+}
+
+// TestRemoveAllowedPasskeys pins the removal of approved people when every
+// device id is on the list: one read of the list, one DELETE for each device
+// id, in order, then one read of the resource, which must not list a removed
+// person.
 func TestRemoveAllowedPasskeys(t *testing.T) {
 	const kept = "keep-keep-keep-keep"
 	t.Run("removed", func(t *testing.T) {
@@ -752,24 +782,9 @@ func TestRemoveAllowedPasskeys(t *testing.T) {
 			t.Fatalf("RemoveAllowedPasskeys = %+v, %v", resource, err)
 		}
 		base := "/v1/resources/" + srv.Key.CRID
-		want := []string{"DELETE " + base + "/allowed-passkeys/" + testDeviceID, "DELETE " + base + "/allowed-passkeys/" + testOtherDevice, "GET " + base}
+		want := []string{"GET " + base, "DELETE " + base + "/allowed-passkeys/" + testDeviceID, "DELETE " + base + "/allowed-passkeys/" + testOtherDevice, "GET " + base}
 		if got := requestLines(srv); !slices.Equal(got, want) {
 			t.Fatalf("requests = %v, want %v", got, want)
-		}
-	})
-	t.Run("a device id that is not on the list stops the rest", func(t *testing.T) {
-		srv := apitest.NewServer(t)
-		srv.AddApprovedPerson(testOtherDevice, testOtherPerson)
-		resource, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{testDeviceID, testOtherDevice})
-		var problem *Error
-		if resource != nil || !errors.As(err, &problem) || problem.StatusCode != http.StatusNotFound ||
-			!strings.Contains(err.Error(), "no approved person has the device id "+testDeviceID) || !strings.Contains(err.Error(), "nothing was removed") {
-			t.Fatalf("RemoveAllowedPasskeys = %+v, %v", resource, err)
-		}
-		for _, line := range requestLines(srv) {
-			if strings.Contains(line, testOtherDevice) {
-				t.Fatalf("a removal after the failed one was sent: %v", requestLines(srv))
-			}
 		}
 	})
 	t.Run("the service has no access requests", func(t *testing.T) {
@@ -777,6 +792,15 @@ func TestRemoveAllowedPasskeys(t *testing.T) {
 		srv.PlayNoAccessRequests()
 		_, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{testDeviceID})
 		wantUnsupported(t, err)
+	})
+	t.Run("the resource is unknown", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		_, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), unknownTestCRID, []string{testDeviceID})
+		var problem *Error
+		var outcome *PasskeyRemovalError
+		if !errors.As(err, &problem) || problem.StatusCode != http.StatusNotFound || errors.As(err, &outcome) {
+			t.Fatalf("error = %v, want the resource's own not-found answer", err)
+		}
 	})
 	t.Run("the person is still listed", func(t *testing.T) {
 		srv := apitest.NewServer(t)
@@ -791,13 +815,197 @@ func TestRemoveAllowedPasskeys(t *testing.T) {
 	})
 	t.Run("nothing that is not a device id is sent", func(t *testing.T) {
 		srv := apitest.NewServer(t)
-		for _, ids := range [][]string{nil, {"abcd"}, {testDeviceID, "../" + testOtherDevice}} {
+		for _, ids := range [][]string{nil, {"abcd"}, {testDeviceID, "../" + testOtherDevice}, {testDeviceID, testDeviceID}} {
 			if _, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, ids); !errors.Is(err, qurl.ErrInvalidResourceRequest) {
 				t.Errorf("ids %v: error = %v", ids, err)
 			}
 		}
 		if got := len(srv.Requests()); got != 0 {
 			t.Fatalf("a refused removal sent %d requests", got)
+		}
+	})
+}
+
+// TestRemovalChecksEveryDeviceIDBeforeItRemovesAny pins what makes "nothing
+// was removed" true with several device ids in one command. The list is read
+// first, and a device id that is not on it stops the command before any
+// access is taken away, wherever in the command line it stands. The error
+// names the ids that were not found and the ones that still have access, has
+// the not-found exit code, and the only request is the read.
+func TestRemovalChecksEveryDeviceIDBeforeItRemovesAny(t *testing.T) {
+	const (
+		known, known2     = testDeviceID, testOtherDevice
+		unknown, unknown2 = "nope-nope-nope-nope", "gone-gone-gone-gone"
+	)
+	for _, test := range []struct {
+		name                 string
+		ids                  []string
+		notFound, notRemoved []string
+		message              string
+	}{
+		{name: "one, unknown", ids: []string{unknown}, notFound: []string{unknown},
+			message: "no approved person has the device id " + unknown + " on this resource, so nothing was removed"},
+		{name: "unknown first", ids: []string{unknown, known}, notFound: []string{unknown}, notRemoved: []string{known},
+			message: "no approved person has the device id " + unknown + " on this resource, so nothing was removed. " + known + " still has access"},
+		{name: "unknown last", ids: []string{known, unknown}, notFound: []string{unknown}, notRemoved: []string{known},
+			message: "no approved person has the device id " + unknown + " on this resource, so nothing was removed. " + known + " still has access"},
+		{name: "unknown in the middle", ids: []string{known, unknown, known2}, notFound: []string{unknown}, notRemoved: []string{known, known2},
+			message: "no approved person has the device id " + unknown + " on this resource, so nothing was removed. " + known + " and " + known2 + " still have access"},
+		{name: "two unknown", ids: []string{unknown, known, unknown2}, notFound: []string{unknown, unknown2}, notRemoved: []string{known},
+			message: "no approved person has the device ids " + unknown + " and " + unknown2 + " on this resource, so nothing was removed. " + known + " still has access"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.AddApprovedPerson(known, testRequester)
+			srv.AddApprovedPerson(known2, testOtherPerson)
+			resource, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, test.ids)
+			if resource != nil {
+				t.Fatalf("a refused removal returned %+v", resource)
+			}
+			outcome := removalOutcome(t, err, nil, test.notFound, test.notRemoved)
+			if !errors.Is(err, ErrApprovedPersonNotFound) {
+				t.Fatalf("error = %v, want the not-found sentinel", err)
+			}
+			if outcome.Headline() != test.message || outcome.Reason() != "" {
+				t.Fatalf("message = %q with reason %q, want %q", outcome.Headline(), outcome.Reason(), test.message)
+			}
+			if want := test.message + ". Run `qurl grants " + srv.Key.CRID + "` to see who has access now"; err.Error() != want {
+				t.Fatalf("error text = %q, want %q", err.Error(), want)
+			}
+			if lines := requestLines(srv); !slices.Equal(lines, []string{"GET /v1/resources/" + srv.Key.CRID}) {
+				t.Fatalf("requests = %v, want the one read: nothing may be removed", lines)
+			}
+			if ids := approvedIDs(t, srv); !slices.Equal(ids, []string{known, known2}) {
+				t.Fatalf("approved people afterwards = %v, want both still there", ids)
+			}
+		})
+	}
+}
+
+// TestRemovalSaysExactlyWhatWasRemovedWhenItStopsPartWay pins the outcome of
+// a removal that stops after access was taken away from someone: the list
+// changed between the read and a removal, or a removal failed for another
+// reason. The error says which device ids were removed, which was not found
+// and which still have access, so that access taken away never reads as
+// "nothing happened". The removals after the one that stopped are not sent.
+func TestRemovalSaysExactlyWhatWasRemovedWhenItStopsPartWay(t *testing.T) {
+	const first, second, third = testDeviceID, testOtherDevice, "keep-keep-keep-keep"
+	people := func(srv *apitest.Server) {
+		for _, id := range []string{first, second, third} {
+			srv.AddApprovedPerson(id, "person "+id)
+		}
+	}
+	gone := func(t *testing.T) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteProblem(t, w, http.StatusNotFound, "not_found", "Not Found", "no such approved person")
+		}
+	}
+	removal := func(srv *apitest.Server, deviceID string) string {
+		return "/v1/resources/" + srv.Key.CRID + "/allowed-passkeys/" + deviceID
+	}
+	sentRemovals := func(srv *apitest.Server) []string {
+		var ids []string
+		for _, request := range srv.Requests() {
+			if request.Method == http.MethodDelete {
+				ids = append(ids, request.Path[strings.LastIndex(request.Path, "/")+1:])
+			}
+		}
+		return ids
+	}
+
+	t.Run("the second id is gone by the time it is removed", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		people(srv)
+		srv.Script(http.MethodDelete, removal(srv, second), gone(t))
+		_, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{first, second, third})
+		outcome := removalOutcome(t, err, []string{first}, []string{second}, []string{third})
+		want := "access was taken away from " + first + ". Then no approved person had the device id " + second + " on this resource, and the command stopped. " + third + " still has access"
+		if outcome.Headline() != want || outcome.Reason() != "" || !errors.Is(err, ErrApprovedPersonNotFound) {
+			t.Fatalf("message = %q (not found: %t), want %q", outcome.Headline(), errors.Is(err, ErrApprovedPersonNotFound), want)
+		}
+		var problem *Error
+		if !errors.As(err, &problem) || problem.StatusCode != http.StatusNotFound || problem.RequestID == "" {
+			t.Fatalf("the service's answer is not in the chain: %v", err)
+		}
+		if sent := sentRemovals(srv); !slices.Equal(sent, []string{first, second}) {
+			t.Fatalf("removals sent = %v, want the first two and not the third", sent)
+		}
+		if ids := approvedIDs(t, srv); !slices.Equal(ids, []string{second, third}) {
+			t.Fatalf("approved people afterwards = %v: the outcome must match what happened", ids)
+		}
+	})
+	t.Run("the first id is gone by the time it is removed", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		people(srv)
+		srv.Script(http.MethodDelete, removal(srv, first), gone(t))
+		_, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{first, second})
+		outcome := removalOutcome(t, err, nil, []string{first}, []string{second})
+		want := "no approved person has the device id " + first + " on this resource, so nothing was removed. " + second + " still has access"
+		if outcome.Headline() != want {
+			t.Fatalf("message = %q, want %q", outcome.Headline(), want)
+		}
+	})
+	t.Run("the last id is gone by the time it is removed", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		people(srv)
+		srv.Script(http.MethodDelete, removal(srv, third), gone(t))
+		_, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{first, second, third})
+		outcome := removalOutcome(t, err, []string{first, second}, []string{third}, nil)
+		want := "access was taken away from " + first + " and " + second + ". Then no approved person had the device id " + third + " on this resource, and the command stopped"
+		if outcome.Headline() != want {
+			t.Fatalf("message = %q, want %q", outcome.Headline(), want)
+		}
+	})
+	t.Run("a removal fails for another reason after one was made", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		people(srv)
+		srv.Script(http.MethodDelete, removal(srv, second), func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+		})
+		_, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{first, second, third})
+		outcome := removalOutcome(t, err, []string{first}, nil, []string{second, third})
+		want := "access was taken away from " + first + ". Then taking it away from " + second + " failed, and the command stopped. " + second + " and " + third + " still have access"
+		if outcome.Headline() != want || outcome.Reason() != "the resource is being changed; try again" {
+			t.Fatalf("message = %q with reason %q, want %q", outcome.Headline(), outcome.Reason(), want)
+		}
+		var problem *Error
+		if errors.Is(err, ErrApprovedPersonNotFound) || !errors.As(err, &problem) || problem.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("error = %v, want the failure's own exit class, not not-found", err)
+		}
+		if sent := sentRemovals(srv); !slices.Equal(sent, []string{first, second}) {
+			t.Fatalf("removals sent = %v, want the first two, the second not retried", sent)
+		}
+	})
+	t.Run("the first removal fails for another reason", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		people(srv)
+		srv.Script(http.MethodDelete, removal(srv, first), func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "try again")
+		})
+		_, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{first, second})
+		var outcome *PasskeyRemovalError
+		var problem *Error
+		if errors.As(err, &outcome) || !errors.As(err, &problem) || problem.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("error = %v, want the plain failure: nothing was removed and nothing needs sorting out", err)
+		}
+		if ids := approvedIDs(t, srv); len(ids) != 3 {
+			t.Fatalf("approved people afterwards = %v, want all three", ids)
+		}
+	})
+
+	// A service that leaves the list out of its rows cannot be checked
+	// against before the removals. They then find out one at a time, and the
+	// outcome is as exact.
+	t.Run("the list is not sent", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.AddApprovedPerson(first, testRequester)
+		srv.OmitApprovedPeople()
+		_, err := newTestClient(t, srv, nil).RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{first, second, third})
+		if outcome := removalOutcome(t, err, []string{first}, []string{second}, []string{third}); !errors.Is(outcome, ErrApprovedPersonNotFound) {
+			t.Fatalf("outcome = %v, want the not-found sentinel", outcome)
+		}
+		if sent := sentRemovals(srv); !slices.Equal(sent, []string{first, second}) {
+			t.Fatalf("removals sent = %v, want the first two", sent)
 		}
 	})
 }
@@ -898,6 +1106,7 @@ func TestDeviceCredentialReachesEveryAccessRequestRoute(t *testing.T) {
 		"POST " + base + "/access-requests/" + testRequestCode + "/approve",
 		"DELETE " + base + "/access-requests/" + testOtherCode,
 		"GET " + base + "/access-requests",
+		"GET " + base,
 		"DELETE " + base + "/allowed-passkeys/" + testDeviceID,
 		"GET " + base,
 	}
@@ -946,5 +1155,116 @@ func TestDeviceCredentialStillRefusesWhatIsNotARoute(t *testing.T) {
 		if errors.As(err, &shown) && strings.Contains(shown.UserMessage(), "release") {
 			t.Errorf("%s: the refusal reads as a missing feature of this release: %q", name, shown.UserMessage())
 		}
+	}
+}
+
+// TestAccessRequestMethodsHandleTheIdentifierOneWay pins that every request
+// here that names a resource treats its identifier as a grant change does:
+// surrounding space is trimmed, and an identifier that is empty or could
+// never name a resource is refused before any request. A listing with no
+// identifier is the listing of every resource, the one call an empty value
+// has a meaning for.
+func TestAccessRequestMethodsHandleTheIdentifierOneWay(t *testing.T) {
+	calls := map[string]struct {
+		call func(Client, string) error
+		// sent is the first request for the trimmed identifier.
+		sent func(base string) string
+	}{
+		"setting": {
+			call: func(client Client, id string) error {
+				_, err := client.SetAccessRequests(t.Context(), id, true)
+				return err
+			},
+			sent: func(base string) string { return "PATCH " + base },
+		},
+		"listing": {
+			call: func(client Client, id string) error { _, err := client.AccessRequests(t.Context(), id); return err },
+			sent: func(base string) string { return "GET " + base + "/access-requests" },
+		},
+		"approval": {
+			call: func(client Client, id string) error {
+				_, err := client.ApproveAccessRequest(t.Context(), id, testRequestCode)
+				return err
+			},
+			sent: func(base string) string { return "POST " + base + "/access-requests/" + testRequestCode + "/approve" },
+		},
+		"denial": {
+			call: func(client Client, id string) error {
+				return client.DenyAccessRequest(t.Context(), id, testRequestCode)
+			},
+			sent: func(base string) string { return "DELETE " + base + "/access-requests/" + testRequestCode },
+		},
+		"removal": {
+			call: func(client Client, id string) error {
+				_, err := client.RemoveAllowedPasskeys(t.Context(), id, []string{testDeviceID})
+				return err
+			},
+			sent: func(base string) string { return "GET " + base },
+		},
+	}
+	for name, test := range calls {
+		srv := apitest.NewServer(t)
+		srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
+		srv.AddApprovedPerson(testDeviceID, testRequester)
+		if err := test.call(newTestClient(t, srv, nil), " \t"+srv.Key.CRID+"\n"); err != nil {
+			t.Errorf("%s with a padded identifier: %v", name, err)
+			continue
+		}
+		if lines, want := requestLines(srv), test.sent("/v1/resources/"+srv.Key.CRID); len(lines) == 0 || lines[0] != want {
+			t.Errorf("%s: requests = %v, want the first to be %s", name, lines, want)
+		}
+
+		for _, id := range []string{"a/b", "a b", "a%2Fb", "../" + srv.Key.CRID, srv.Key.CRID + "?x=1", srv.Key.CRID + "#x"} {
+			srv := apitest.NewServer(t)
+			if err := test.call(newTestClient(t, srv, nil), id); err == nil || len(srv.Requests()) != 0 {
+				t.Errorf("%s with identifier %q: error %v after %d requests, want a refusal before any request", name, id, err, len(srv.Requests()))
+			}
+		}
+		if name == "listing" {
+			continue
+		}
+		for _, id := range []string{"", "  \n"} {
+			srv := apitest.NewServer(t)
+			if err := test.call(newTestClient(t, srv, nil), id); !errors.Is(err, qurl.ErrInvalidResourceRequest) || len(srv.Requests()) != 0 {
+				t.Errorf("%s with an empty identifier: error %v after %d requests, want an invalid request and nothing sent", name, err, len(srv.Requests()))
+			}
+		}
+	}
+}
+
+// TestApprovedPeopleSaidToBeNobodyIsNotTheSameAsNotSaid pins the difference a
+// caller needs before it tells a publisher who still has access. A row that
+// says nobody was approved reads as an empty list. A row without the member
+// reads as nil: the service did not say. That holds for a read and for the
+// answer to a change.
+func TestApprovedPeopleSaidToBeNobodyIsNotTheSameAsNotSaid(t *testing.T) {
+	read := func(t *testing.T, srv *apitest.Server) (fromRead, fromChange []AllowedPasskey) {
+		t.Helper()
+		client := newTestClient(t, srv, nil)
+		resource, err := client.Resource(t.Context(), srv.Key.CRID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed, err := client.SetAccessRequests(t.Context(), srv.Key.CRID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resource.AllowedPasskeys, changed.AllowedPasskeys
+	}
+
+	srv := apitest.NewServer(t)
+	if fromRead, fromChange := read(t, srv); fromRead == nil || len(fromRead) != 0 || fromChange == nil || len(fromChange) != 0 {
+		t.Fatalf("nobody approved: read %#v, change %#v; want two empty lists that are not nil", fromRead, fromChange)
+	}
+	srv = apitest.NewServer(t)
+	srv.AddApprovedPerson(testDeviceID, testRequester)
+	if fromRead, fromChange := read(t, srv); len(fromRead) != 1 || len(fromChange) != 1 {
+		t.Fatalf("one person approved: read %#v, change %#v", fromRead, fromChange)
+	}
+	srv = apitest.NewServer(t)
+	srv.AddApprovedPerson(testDeviceID, testRequester)
+	srv.OmitApprovedPeople()
+	if fromRead, fromChange := read(t, srv); fromRead != nil || fromChange != nil {
+		t.Fatalf("the list left out: read %#v, change %#v; want nil for both, never an empty list", fromRead, fromChange)
 	}
 }

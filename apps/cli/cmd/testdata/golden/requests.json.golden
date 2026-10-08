@@ -18,5 +18,6 @@
       "expires_at": "2026-03-02T00:58:00Z",
       "crid": "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
     }
-  ]
+  ],
+  "approval_rule": "Approve a code only when the person gave it to you themselves; a name can be typed by anyone."
 }

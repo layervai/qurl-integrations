@@ -979,10 +979,19 @@ flags, and `--clear` cannot be combined with either.
 
 An approved person is shown with the name they typed, in quotes, the id of
 their device, and when you approved them. The name proves nothing about who
-they are. `--remove <device id>` takes that person's access away. Each device
-id is its own change, made before any change to public keys in the same
-command. A device id that is not on the list is an error (exit code 5) and
-removes nothing, so a mistyped id is never mistaken for access taken away.
+they are. `--remove <device id>` takes that person's access away, for at most
+256 people in one command.
+
+The command reads the list first and checks every device id against it before
+it takes any access away. A device id that is not on the list is an error
+(exit code 5) and removes nothing, wherever it stands among the others, so a
+mistyped id is never mistaken for access taken away. Then each person is
+removed with a change of their own, before any change to public keys in the
+same command. If one of those changes fails after others were made, because
+the list changed in between or the service refused it, the command stops and
+says exactly what happened: from whom access was taken away, which device id
+was not found, and who still has access. Access that was taken away never
+reads as "nothing was removed". `qurl grants <CRID>` shows who has access now.
 
 A list holds at most 256 devices. `--add` and `--remove` each take at most 256
 public keys in one command, which is checked before anything is sent. The
@@ -1467,15 +1476,32 @@ Access requests in `-o json`:
 | Command | Members |
 |---------|---------|
 | `publish` | `access_requests` when the service's answer says whether people can ask; `resource_url`, the resource's address for people with no CLI, only when access requests are on and this install knows the web address for its deployment |
-| `requests`, `requests <CRID>` | `requests`: an array, `[]` when there are none, of `code` (six digits), `name` (omitted when the person typed none), `name_verified` (always `false`), `device_id`, `requested_at`, `expires_at`, `crid` |
+| `requests`, `requests <CRID>` | `requests`: an array, `[]` when there are none, of `code` (six digits), `name` (omitted when the person typed none), `name_verified` (always `false`), `device_id`, `requested_at`, `expires_at`, `crid`. Beside it, `approval_rule`: always present, one sentence |
 | `requests <CRID> --on`, `--off` | `crid`, `access_requests`, and `resource_url` under the same rule as `publish` |
-| `approve` | `crid`, `approved` (`true`), `device_id`, `name`, `name_verified` (always `false`), `approved_at` |
+| `approve` | `crid`, `approved` (`true`), `device_id`, `name`, `name_verified` (always `false`), `approved_at`, and `name_note`: always present, one sentence |
 | `deny` | `crid`, `code`, `denied` (`true`) |
 | `grants` | the resource document with `allowed_device_keys`, `approved_people` (an array, `[]` when there are none, of `name`, `name_verified`, `device_id`, `approved_at`), and `access_requests` when the service says |
+| `grants --remove <device id>` that did not remove everyone it named | `crid` and three arrays that are always present and together hold every device id the command named: `removed`, `not_found`, `not_removed`. `public_keys_changed` (`false`) when the command also named public keys |
 
 A requester's `name` is that person's own text, exactly like a publisher's:
 quote or escape it before showing it, and never treat it as proof of who
 asked. `name_verified` is always present and always `false`.
+
+Two members carry, for a reader of JSON, the sentences the text output has.
+An agent that runs these commands reads JSON, so the rule it must follow is
+in the document it reads:
+
+- `approval_rule`, in both listings: "Approve a code only when the person gave
+  it to you themselves; a name can be typed by anyone." It is one member
+  beside `requests`, not one for each request, and it is there for an empty
+  listing too.
+- `name_note`, in the `approve` document: "The name was typed by the person
+  who asked. Nobody checked it."
+
+A removal that fails is the one failure that writes a document to stdout:
+exit code 5 when a device id was not found, with the message on stderr as in
+text mode. Read `removed` before deciding what to do next: those people have
+lost access, whatever the exit code says.
 
 ### Exit codes
 

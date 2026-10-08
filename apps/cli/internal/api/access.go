@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -83,8 +82,18 @@ func ValidDeviceID(id string) bool {
 // whose device id is not a device id is an answer outside the contract: the
 // id is what a publisher passes to take access away, so it is never shown in
 // a form that could not be passed back.
+//
+// The result is nil only when the row has no such member, which means the
+// service did not say. A row that says nobody was approved gives an empty
+// list, never nil: "nobody" and "not said" are different answers, and a
+// caller that reports who still has access must not read the second as the
+// first.
+//
+// TODO(upstream-contract): the service writes allowed_passkeys on every
+// resource row, as an empty array when nobody was approved, on the answer to
+// a change as on a read.
 func allowedPasskeys(rows []passkeyRow, source string) ([]AllowedPasskey, error) {
-	if len(rows) == 0 {
+	if rows == nil {
 		return nil, nil
 	}
 	people := make([]AllowedPasskey, 0, len(rows))
@@ -98,10 +107,19 @@ func allowedPasskeys(rows []passkeyRow, source string) ([]AllowedPasskey, error)
 	return people, nil
 }
 
-// accessRequestsPath is the pending-request listing of one resource.
-func accessRequestsPath(id string) string {
-	return "/v1/resources/" + url.PathEscape(id) + "/access-requests"
+// resourcePath returns the trimmed identifier of a resource and its escaped
+// path, for every request here that names one. It is the idiom of a grant
+// change (deviceGrantsPath): the identifier is trimmed, and an empty one, or
+// one that could never name a resource, is refused before any request. The
+// routes of this file are that path or lie below it, and what they append, a
+// request code or a device id, is checked by its own rule before it is added.
+func resourcePath(id string) (trimmed, path string, err error) {
+	return deviceGrantsPath(id)
 }
+
+// accessRequestsSegment is the part of a resource's path that holds its
+// pending requests.
+const accessRequestsSegment = "/access-requests"
 
 // SetAccessRequests turns access requests on or off with one authenticated
 // PATCH. It never retries.
@@ -149,7 +167,12 @@ func (c *client) AccessRequests(ctx context.Context, id string) ([]AccessRequest
 	id = strings.TrimSpace(id)
 	path := "/v1/access-requests"
 	if id != "" {
-		path = accessRequestsPath(id)
+		var base string
+		var err error
+		if id, base, err = resourcePath(id); err != nil {
+			return nil, err
+		}
+		path = base + accessRequestsSegment
 	}
 	reply, err := c.doREST(ctx, http.MethodGet, path, nil)
 	if err != nil {
@@ -216,7 +239,11 @@ func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*Al
 	if !ValidRequestCode(code) {
 		return nil, fmt.Errorf("%w: a request code is six digits", qurl.ErrInvalidResourceRequest)
 	}
-	reply, err := c.doRESTOnce(ctx, http.MethodPost, accessRequestsPath(id)+"/"+code+"/approve", struct{}{})
+	id, base, err := resourcePath(id)
+	if err != nil {
+		return nil, err
+	}
+	reply, err := c.doRESTOnce(ctx, http.MethodPost, base+accessRequestsSegment+"/"+code+"/approve", struct{}{})
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +274,11 @@ func (c *client) DenyAccessRequest(ctx context.Context, id, code string) error {
 	if !ValidRequestCode(code) {
 		return fmt.Errorf("%w: a request code is six digits", qurl.ErrInvalidResourceRequest)
 	}
-	reply, err := c.doRESTOnce(ctx, http.MethodDelete, accessRequestsPath(id)+"/"+code, nil)
+	id, base, err := resourcePath(id)
+	if err != nil {
+		return err
+	}
+	reply, err := c.doRESTOnce(ctx, http.MethodDelete, base+accessRequestsSegment+"/"+code, nil)
 	if err != nil {
 		return err
 	}
@@ -261,36 +292,42 @@ func (c *client) DenyAccessRequest(ctx context.Context, id, code string) error {
 	}
 }
 
-// RemoveAllowedPasskeys takes approved people off the list, one
-// authenticated DELETE for each device id, in the order given. No request is
-// retried. A device id that is not on the list is an error, not a removal: a
-// mistyped id must never read as access taken away. The requests are separate
-// changes, so the first failure stops the rest and the people before it stay
-// removed.
+// RemoveAllowedPasskeys takes approved people off the list, and returns the
+// resource as it reads afterwards.
 //
-// Then the resource is read, and no removed device id may be on the list it
-// shows. That read is the resource the caller prints.
+// The list is read first, and every device id is checked against it before
+// any access is taken away. A device id that is not on the list stops the
+// command there: nothing was removed, and the error says so. A mistyped id
+// must never read as access taken away, and with several ids in one command
+// the reverse must not happen either, access taken away from one person
+// while the output says that nothing changed.
+//
+// Then the people are removed, one authenticated DELETE for each device id,
+// in the order given. No request is retried. The requests are separate
+// changes, so one that fails after others succeeded leaves those people
+// removed, and the list can change between the read and a removal. Such an
+// error is a PasskeyRemovalError that says exactly which device ids were
+// removed, which was not found, and which were not attempted.
+//
+// Last, the resource is read again, and no removed device id may be on the
+// list it shows. That read is the resource the caller prints.
 func (c *client) RemoveAllowedPasskeys(ctx context.Context, id string, deviceIDs []string) (*ResourceSummary, error) {
-	if len(deviceIDs) == 0 {
-		return nil, fmt.Errorf("%w: no device id to remove", qurl.ErrInvalidResourceRequest)
+	if err := validateDeviceIDs(deviceIDs); err != nil {
+		return nil, err
 	}
-	for _, deviceID := range deviceIDs {
-		if !ValidDeviceID(deviceID) {
-			return nil, fmt.Errorf("%w: a device id has the form xxxx-xxxx-xxxx-xxxx", qurl.ErrInvalidResourceRequest)
-		}
+	id, base, err := resourcePath(id)
+	if err != nil {
+		return nil, err
 	}
-	for _, deviceID := range deviceIDs {
-		reply, err := c.doRESTOnce(ctx, http.MethodDelete, "/v1/resources/"+url.PathEscape(id)+"/allowed-passkeys/"+deviceID, nil)
-		if err != nil {
-			return nil, err
-		}
-		switch reply.status {
-		case http.StatusOK, http.StatusNoContent:
-		case http.StatusNotFound:
-			return nil, c.accessNotFound(ctx, id, reply, fmt.Sprintf(msgDeviceIDNotFound, deviceID))
-		default:
-			return nil, reply.problem()
-		}
+	before, err := c.Resource(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if outcome := peopleNotOnList(id, before.AllowedPasskeys, deviceIDs); outcome != nil {
+		return nil, outcome
+	}
+	if err := c.removePeopleInOrder(ctx, id, base, deviceIDs); err != nil {
+		return nil, err
 	}
 	resource, err := c.Resource(ctx, id)
 	if err != nil {
@@ -304,33 +341,125 @@ func (c *client) RemoveAllowedPasskeys(ctx context.Context, id string, deviceIDs
 	return resource, nil
 }
 
+// validateDeviceIDs refuses a removal that names nobody, a value that is not
+// a device id, and a device id given twice, before any request.
+func validateDeviceIDs(deviceIDs []string) error {
+	if len(deviceIDs) == 0 {
+		return fmt.Errorf("%w: no device id to remove", qurl.ErrInvalidResourceRequest)
+	}
+	for index, deviceID := range deviceIDs {
+		if !ValidDeviceID(deviceID) {
+			return fmt.Errorf("%w: a device id has the form xxxx-xxxx-xxxx-xxxx", qurl.ErrInvalidResourceRequest)
+		}
+		if slices.Contains(deviceIDs[:index], deviceID) {
+			return fmt.Errorf("%w: a device id was given twice", qurl.ErrInvalidResourceRequest)
+		}
+	}
+	return nil
+}
+
+// peopleNotOnList checks every device id of a removal against the list of
+// approved people as it was just read, and returns the outcome when one is
+// not on it: nothing was removed, and nothing will be. It returns nil when
+// every device id is on the list.
+//
+// It also returns nil for a list the service did not send, which cannot be
+// checked against. The removals then find out one at a time, and report as
+// exactly.
+func peopleNotOnList(id string, approved []AllowedPasskey, deviceIDs []string) *PasskeyRemovalError {
+	if approved == nil {
+		return nil
+	}
+	outcome := &PasskeyRemovalError{ID: id}
+	for _, deviceID := range deviceIDs {
+		if slices.ContainsFunc(approved, func(person AllowedPasskey) bool { return person.DeviceID == deviceID }) {
+			outcome.NotRemoved = append(outcome.NotRemoved, deviceID)
+		} else {
+			outcome.NotFound = append(outcome.NotFound, deviceID)
+		}
+	}
+	if len(outcome.NotFound) == 0 {
+		return nil
+	}
+	return outcome
+}
+
+// removePeopleInOrder sends one DELETE for each device id, in the order
+// given, and stops at the first that does not succeed. base is the escaped
+// path of the resource.
+//
+// A failure of the first removal is returned as it is: nothing was removed,
+// and the failure is the whole story. After that, and for a device id that
+// is not found at any position, the error is the outcome that says what
+// happened to each device id.
+func (c *client) removePeopleInOrder(ctx context.Context, id, base string, deviceIDs []string) error {
+	for index, deviceID := range deviceIDs {
+		outcome := &PasskeyRemovalError{ID: id, Removed: deviceIDs[:index], NotRemoved: deviceIDs[index+1:]}
+		reply, err := c.doRESTOnce(ctx, http.MethodDelete, base+"/allowed-passkeys/"+deviceID, nil)
+		if err == nil && reply.status != http.StatusOK && reply.status != http.StatusNoContent && reply.status != http.StatusNotFound {
+			err = reply.problem()
+		}
+		switch {
+		case err != nil && index == 0:
+			return err
+		case err != nil:
+			outcome.NotRemoved, outcome.failed, outcome.cause = deviceIDs[index:], deviceID, err
+			return outcome
+		case reply.status != http.StatusNotFound:
+			continue
+		}
+		problem, err := c.classifyAccessNotFound(ctx, id, reply)
+		if err != nil {
+			return err
+		}
+		outcome.NotFound, outcome.problem = []string{deviceID}, problem
+		return outcome
+	}
+	return nil
+}
+
 // spacedRequestCode writes a valid request code as two groups of three, the
-// form it is read aloud and typed in.
+// form it is read aloud and typed in. The text output of a listing writes
+// codes the same way, with its own function for a value it did not check; a
+// change to one form belongs in both.
 func spacedRequestCode(code string) string {
 	return code[:3] + " " + code[3:]
 }
 
-// accessNotFound explains a 404 from a route that names a request code or a
-// device id. The service gives that one answer for three different facts, and
-// the remedy differs for each, so the client asks which it is:
-//
-//   - the resource is unknown: the resource read's own not-found answer;
-//   - the service has no access requests at all: the unsupported error;
-//   - neither: the code or the device id is the thing that was not found, and
-//     the error says so with message.
+// accessNotFound explains a 404 from a route that names a request code. The
+// thing that was not found is told apart by classifyAccessNotFound; when it
+// is the code, the error says so with message.
 func (c *client) accessNotFound(ctx context.Context, id string, reply *restReply, message string) error {
-	offered, err := c.accessRequestsOffered(ctx, id, true)
+	problem, err := c.classifyAccessNotFound(ctx, id, reply)
 	if err != nil {
 		return err
 	}
+	return &accessNotFoundError{message: message, problem: problem}
+}
+
+// classifyAccessNotFound tells apart the facts behind a 404 from a route that
+// names a request code or a device id. The service gives that one answer for
+// three different facts, and the remedy differs for each, so the client asks
+// which it is:
+//
+//   - the resource is unknown: the resource read's own not-found answer;
+//   - the service has no access requests at all: the unsupported error;
+//   - neither: the code or the device id is the thing that was not found.
+//     Then there is no error, and the service's problem is returned for the
+//     caller's own message.
+func (c *client) classifyAccessNotFound(ctx context.Context, id string, reply *restReply) (*Error, error) {
+	offered, err := c.accessRequestsOffered(ctx, id, true)
+	if err != nil {
+		return nil, err
+	}
 	if !offered {
-		return &accessRequestsUnsupportedError{}
+		return nil, &accessRequestsUnsupportedError{}
 	}
 	var problem *Error
 	if !errors.As(reply.problem(), &problem) {
 		problem = &Error{StatusCode: http.StatusNotFound}
 	}
-	return &accessNotFoundError{message: message, problem: problem}
+	return problem, nil
 }
 
 // accessRequestsOffered reports whether the service offers access requests,
@@ -343,7 +472,11 @@ func (c *client) accessNotFound(ctx context.Context, id string, reply *restReply
 // asked too when probeList is set: that route exists only on a service that
 // has them.
 func (c *client) accessRequestsOffered(ctx context.Context, id string, probeList bool) (bool, error) {
-	reply, err := c.doREST(ctx, http.MethodGet, "/v1/resources/"+url.PathEscape(id), nil)
+	_, base, err := resourcePath(id)
+	if err != nil {
+		return false, err
+	}
+	reply, err := c.doREST(ctx, http.MethodGet, base, nil)
 	if err != nil {
 		return false, err
 	}
@@ -364,7 +497,7 @@ func (c *client) accessRequestsOffered(ctx context.Context, id string, probeList
 	if !probeList {
 		return false, nil
 	}
-	reply, err = c.doREST(ctx, http.MethodGet, accessRequestsPath(id), nil)
+	reply, err = c.doREST(ctx, http.MethodGet, base+accessRequestsSegment, nil)
 	if err != nil {
 		return false, err
 	}

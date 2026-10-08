@@ -45,6 +45,9 @@ func goldenVariants() []string { return []string{"tty", "plain", "json"} }
 const (
 	goldenDevicePublicKey       = "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="
 	goldenSecondDevicePublicKey = "cXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXE="
+	// goldenThirdDevice is a device id for the cases that need a third
+	// approved person. No device has it.
+	goldenThirdDevice = "keep-keep-keep-keep"
 )
 
 // TestGoldens pins the rendered bytes of every implemented command across
@@ -432,6 +435,71 @@ func TestGoldens(t *testing.T) {
 			prepare:      func(srv *apitest.Server) { srv.AddApprovedPerson(requesterDevice, requesterName) },
 			variants:     []string{"plain"},
 			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// Two device ids, the second not on the list. The list is read
+			// before any access is taken away, so nothing was removed, and
+			// the message says who still has access.
+			name: "error_grants_remove_one_unknown",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}
+			},
+			prepare:      func(srv *apitest.Server) { srv.AddApprovedPerson(requesterDevice, requesterName) },
+			variants:     []string{"tty", "plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// The same in JSON mode: the outcome is also a document, with
+			// every device id in one of its three arrays.
+			name: "error_grants_remove_one_unknown_script",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}
+			},
+			prepare:      func(srv *apitest.Server) { srv.AddApprovedPerson(requesterDevice, requesterName) },
+			variants:     []string{"json"},
+			wantCode:     5,
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// A person is gone by the time they are removed, after another
+			// was removed: the message says from whom access was taken away,
+			// who was not found and who still has access.
+			name: "error_grants_remove_part_way",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice, "--remove", goldenThirdDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, otherRequester)
+				srv.AddApprovedPerson(goldenThirdDevice, "")
+				srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID+"/allowed-passkeys/"+otherDevice, func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusNotFound, "not_found", "Not Found", "no such approved person")
+				})
+			},
+			variants:     []string{"plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// The script-facing form of the same outcome.
+			name: "error_grants_remove_part_way_script",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice, "--remove", goldenThirdDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, otherRequester)
+				srv.AddApprovedPerson(goldenThirdDevice, "")
+				srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID+"/allowed-passkeys/"+otherDevice, func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusNotFound, "not_found", "Not Found", "no such approved person")
+				})
+			},
+			variants:     []string{"json"},
+			wantCode:     5,
+			stdoutGolden: true,
 			stderrGolden: true,
 		},
 		{

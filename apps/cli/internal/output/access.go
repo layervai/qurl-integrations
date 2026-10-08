@@ -30,27 +30,36 @@ const (
 	// by `qurl requests <CRID> --on`. It has two openings: the address on the
 	// link site when this install knows that site, and the CRID when it does
 	// not. Nothing here names a site the install was not told about.
-	msgRequestsSendAddress     = "People can ask you for access to this resource. Send them this address:"
-	msgRequestsSendCRID        = "People can ask you for access to this resource. This install does not know the web address where a CRID is opened for its deployment, so send them the CRID itself:"
-	msgRequestsNextStep        = "They ask for access there and get a six-digit code to give you. Approve a code with:"
-	msgRequestsNextStepNoSite  = "Where they open it, they ask for access and get a six-digit code to give you. Approve a code with:"
-	msgRequestsApproveCommand  = "qurl approve %s <code>"
-	msgRequestsSafeToSend      = "The address and the CRID are safe to send to anyone: a private resource opens only for you and the people you allow."
-	msgRequestsSafeToSendCRID  = "The CRID is safe to send to anyone: a private resource opens only for you and the people you allow."
-	msgRequestsOn              = "Access requests are on for %s."
-	msgRequestsOff             = "Access requests are off for %s. Nobody new can ask for access."
-	msgRequestsOffOnePerson    = "1 approved person still has access. See them, or take the access away, with `qurl grants %s`."
-	msgRequestsOffPeople       = "%d approved people still have access. See them, or take access away, with `qurl grants %s`."
-	msgNoPendingRequests       = "No pending access requests."
-	msgNoPendingRequestsForOne = "No pending access requests for this resource."
+	msgRequestsSendAddress    = "People can ask you for access to this resource. Send them this address:"
+	msgRequestsSendCRID       = "People can ask you for access to this resource. This install does not know the web address where a CRID is opened for its deployment, so send them the CRID itself:"
+	msgRequestsNextStep       = "They ask for access there and get a six-digit code to give you. Approve a code with:"
+	msgRequestsNextStepNoSite = "Where they open it, they ask for access and get a six-digit code to give you. Approve a code with:"
+	msgRequestsApproveCommand = "qurl approve %s <code>"
+	msgRequestsSafeToSend     = "The address and the CRID are safe to send to anyone: a private resource opens only for you and the people you allow."
+	msgRequestsSafeToSendCRID = "The CRID is safe to send to anyone: a private resource opens only for you and the people you allow."
+	msgRequestsOn             = "Access requests are on for %s."
+	msgRequestsOff            = "Access requests are off for %s. Nobody new can ask for access."
+	msgRequestsOffOnePerson   = "1 approved person still has access. See them, or take access away, with `qurl grants %s`."
+	msgRequestsOffPeople      = "%d approved people still have access. See them, or take access away, with `qurl grants %s`."
+	// msgRequestsOffPeopleUnknown is for an answer that does not say who is
+	// approved. It gives no count, and it does not read as "nobody": turning
+	// requests off never takes access away from anyone.
+	msgRequestsOffPeopleUnknown = "Anyone you approved earlier still has access. See them, or take access away, with `qurl grants %s`."
+	msgNoPendingRequests        = "No pending access requests."
+	msgNoPendingRequestsForOne  = "No pending access requests for this resource."
 
-	// msgApproveOnlyGivenCodes ends every text listing of requests.
+	// msgApproveOnlyGivenCodes ends every text listing of requests, and is
+	// the approval_rule member of every JSON listing: the reader of JSON is
+	// most often an agent, which decides what to approve from that document.
 	msgApproveOnlyGivenCodes = "Approve a code only when the person gave it to you themselves; a name can be typed by anyone."
 
 	// msgRequesterNoName stands in for a name the requester left empty, and
 	// msgRequesterNameUnchecked qualifies a name wherever it stands alone.
+	// msgRequesterNameNote says the same in the JSON document of an
+	// approval, where no sentence stands beside the name.
 	msgRequesterNoName        = "no name given"
 	msgRequesterNameUnchecked = "typed by them, not checked"
+	msgRequesterNameNote      = "The name was typed by the person who asked. Nobody checked it."
 
 	// The approval document and the denial line.
 	msgApproved         = "Approved"
@@ -66,6 +75,9 @@ const (
 	msgStateOn          = "on"
 	msgStateOff         = "off"
 	msgRemovePersonHint = "Take one person's access away with `qurl grants %s --remove <device id>`."
+	// msgRemovalKeysNotChanged follows a removal of approved people that did
+	// not finish, when the same command also named public keys.
+	msgRemovalKeysNotChanged = "No public key was added or removed: that change comes after the removals, and they did not finish."
 )
 
 // requesterName is the only form in which a requester's name sits beside
@@ -79,7 +91,9 @@ func (p *Printer) requesterName(name string) string {
 }
 
 // spacedCode writes a six-digit request code as two groups of three, the
-// form it is read aloud in. Anything else is returned as it is.
+// form it is read aloud in. Anything else is returned as it is. The API
+// client writes a code it has checked the same way in its own messages; a
+// change to one form belongs in both.
 func spacedCode(code string) string {
 	if len(code) != 6 {
 		return code
@@ -113,8 +127,13 @@ type accessRequestJSON struct {
 	CRID         string            `json:"crid"`
 }
 
+// accessRequestsJSON is the document of both listings. ApprovalRule is always
+// present, with an empty listing too, and always the sentence that ends the
+// text listing: what a code and a name are worth does not depend on the
+// output mode, and the reader of this one is most often an agent.
 type accessRequestsJSON struct {
-	Requests []accessRequestJSON `json:"requests"`
+	Requests     []accessRequestJSON `json:"requests"`
+	ApprovalRule string              `json:"approval_rule"`
 }
 
 // AccessRequests renders pending access requests. all says that the listing
@@ -127,7 +146,7 @@ type accessRequestsJSON struct {
 func (p *Printer) AccessRequests(requests []qurlapi.AccessRequest, all bool) error {
 	switch {
 	case p.format == FormatJSON:
-		out := accessRequestsJSON{Requests: make([]accessRequestJSON, 0, len(requests))}
+		out := accessRequestsJSON{Requests: make([]accessRequestJSON, 0, len(requests)), ApprovalRule: msgApproveOnlyGivenCodes}
 		for index := range requests {
 			request := &requests[index]
 			out.Requests = append(out.Requests, accessRequestJSON{
@@ -195,7 +214,12 @@ type accessRequestsSettingJSON struct {
 // off. On, it prints what the publisher sends to people; address is the
 // resource's address on the link site, empty when this install does not know
 // that site. Off, it says how many approved people still have access, read
-// from the service's answer.
+// from the service's answer. When that answer does not say who is approved,
+// no count is printed and nothing reads as "nobody": the line says that
+// anyone approved earlier still has access, and where to look.
+//
+// TODO(upstream-contract): the count rests on the answer to the change
+// carrying allowed_passkeys, as every resource row does.
 func (p *Printer) AccessRequestsSetting(resource *qurlapi.ResourceSummary, address string) error {
 	if resource == nil || resource.AccessRequests == nil {
 		return errors.New("qURL access-request setting is incomplete")
@@ -219,6 +243,8 @@ func (p *Printer) AccessRequestsSetting(resource *qurlapi.ResourceSummary, addre
 	}
 	ew.printf(msgRequestsOff+"\n", resource.CRID)
 	switch people := len(resource.AllowedPasskeys); {
+	case resource.AllowedPasskeys == nil:
+		ew.printf(msgRequestsOffPeopleUnknown+"\n", resource.CRID)
 	case people == 1:
 		ew.printf(msgRequestsOffOnePerson+"\n", resource.CRID)
 	case people > 1:
@@ -238,10 +264,15 @@ func approvedPersonDocument(person *qurlapi.AllowedPasskey) approvedPersonJSON {
 	return approvedPersonJSON{Name: escapedJSONString(person.Name), DeviceID: person.DeviceID, ApprovedAt: person.ApprovedAt}
 }
 
+// approvedJSON is the document of an approval. NameNote is always present
+// and says in words what name_verified: false says as a value: the text
+// document has that sentence beside the name, and this one is read by an
+// agent that just gave a person access.
 type approvedJSON struct {
 	CRID     string `json:"crid"`
 	Approved bool   `json:"approved"`
 	approvedPersonJSON
+	NameNote string `json:"name_note"`
 }
 
 // Approved renders a completed approval: who now has access, and the exact
@@ -253,7 +284,7 @@ func (p *Printer) Approved(resourceCRID string, person *qurlapi.AllowedPasskey) 
 	}
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(approvedJSON{CRID: resourceCRID, Approved: true, approvedPersonJSON: approvedPersonDocument(person)})
+		return p.writeJSON(approvedJSON{CRID: resourceCRID, Approved: true, approvedPersonJSON: approvedPersonDocument(person), NameNote: msgRequesterNameNote})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, person.DeviceID)
 		return err
@@ -300,6 +331,42 @@ func (p *Printer) Denied(resourceCRID, code string) error {
 	}
 	_, err := fmt.Fprintf(p.err, msgDenied+"\n", spacedCode(code), resourceCRID)
 	return err
+}
+
+// removalOutcomeJSON is what `qurl grants --remove -o json` writes when the
+// removal of approved people did not take every person it named off the
+// list. Every device id the command named is in exactly one of the three
+// arrays, each of which is always present.
+type removalOutcomeJSON struct {
+	CRID       string   `json:"crid"`
+	Removed    []string `json:"removed"`
+	NotFound   []string `json:"not_found"`
+	NotRemoved []string `json:"not_removed"`
+	// PublicKeysChanged is present, and false, only when the command also
+	// named public keys to add or remove: that change was not made.
+	PublicKeysChanged *bool `json:"public_keys_changed,omitempty"`
+}
+
+// RemovalOutcome writes, in JSON mode only, what happened to each device id
+// of a removal that failed. The failure itself is the command's error, with
+// its message on stderr and its exit code; this document is what a script or
+// an agent reads to learn which people lost access all the same. Text and
+// --quiet write nothing here: the message says it.
+func (p *Printer) RemovalOutcome(outcome *qurlapi.PasskeyRemovalError) error {
+	if outcome == nil || p.format != FormatJSON {
+		return nil
+	}
+	document := removalOutcomeJSON{
+		CRID:       outcome.ID,
+		Removed:    append([]string{}, outcome.Removed...),
+		NotFound:   append([]string{}, outcome.NotFound...),
+		NotRemoved: append([]string{}, outcome.NotRemoved...),
+	}
+	if outcome.KeysNotChanged {
+		changed := false
+		document.PublicKeysChanged = &changed
+	}
+	return p.writeJSON(document)
 }
 
 // grantsJSON is the `qurl grants` document: the resource status document with

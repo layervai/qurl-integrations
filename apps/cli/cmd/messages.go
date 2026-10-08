@@ -105,6 +105,13 @@ const (
 	// msgGrantsRemoveInvalid refuses a --remove value that is neither of the
 	// two things the flag takes.
 	msgGrantsRemoveInvalid = "--remove takes public keys and device ids of the form xxxx-xxxx-xxxx-xxxx, each given once"
+	// msgGrantsRemoveTwice refuses a value that --remove was given more than
+	// once, which is another mistake than a value that is neither a public
+	// key nor a device id.
+	msgGrantsRemoveTwice = "--remove was given the same value twice; give each public key and each device id once"
+	// msgGrantsRemoveTooManyPeople bounds the device ids of one command as
+	// public keys are bounded: each is one request, sent one after another.
+	msgGrantsRemoveTooManyPeople = "--remove accepts at most 256 device ids"
 
 	// Usage errors of the commands for access requests.
 	msgAllowRequestsWithPublic  = "--allow-requests cannot be used with --public: access requests are for a private resource, and a public one already opens for anyone who has the CRID"
@@ -202,6 +209,8 @@ func customerMessages() []string {
 		msgGrantsClearWithEdit,
 		msgGrantsAddAndRemove,
 		msgGrantsRemoveInvalid,
+		msgGrantsRemoveTwice,
+		msgGrantsRemoveTooManyPeople,
 		msgAllowRequestsWithPublic,
 		msgRequestsOnAndOff,
 		msgRequestsSettingNeedsCRID,

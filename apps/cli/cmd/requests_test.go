@@ -710,7 +710,7 @@ func TestRequestsOnAndOff(t *testing.T) {
 		srv.AddApprovedPerson(requesterDevice, requesterName)
 		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--off"}, linkSite: testLinkSite})
 		want := "Access requests are off for " + srv.Key.CRID + ". Nobody new can ask for access.\n" +
-			"1 approved person still has access. See them, or take the access away, with `qurl grants " + srv.Key.CRID + "`.\n"
+			"1 approved person still has access. See them, or take access away, with `qurl grants " + srv.Key.CRID + "`.\n"
 		if res.code != 0 || res.stdout.String() != want || res.stderr.Len() != 0 {
 			t.Fatalf("--off: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
 		}
@@ -869,9 +869,24 @@ func TestApproveSendsTheCodeThatWasGiven(t *testing.T) {
 	srv := apitest.NewServer(t)
 	twoRequests(srv)
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "approve", srv.Key.CRID, requestCode, "-o", "json"}})
-	want := `{"crid":"` + srv.Key.CRID + `","approved":true,"name":"AnaLopez","name_verified":false,"device_id":"` + requesterDevice + `","approved_at":"2026-03-02T00:00:00Z"}`
-	if got := strings.Join(strings.Fields(res.stdout.String()), ""); res.code != 0 || got != want || res.stderr.Len() != 0 {
-		t.Fatalf("approve -o json = %q, want %q", got, want)
+	var approval map[string]any
+	if err := json.Unmarshal(res.stdout.Bytes(), &approval); res.code != 0 || err != nil || res.stderr.Len() != 0 {
+		t.Fatalf("approve -o json: exit %d, %v: %s%s", res.code, err, res.stdout.String(), res.stderr.String())
+	}
+	// name_note says in words, for a reader of JSON, what the text document
+	// says beside the name.
+	wantApproval := map[string]any{
+		"crid": srv.Key.CRID, "approved": true, "name": "Ana Lopez", "name_verified": false,
+		"device_id": requesterDevice, "approved_at": "2026-03-02T00:00:00Z",
+		"name_note": "The name was typed by the person who asked. Nobody checked it.",
+	}
+	if len(approval) != len(wantApproval) {
+		t.Fatalf("approve -o json has members %v, want exactly %v", approval, wantApproval)
+	}
+	for member, value := range wantApproval {
+		if approval[member] != value {
+			t.Errorf("approve -o json %s = %v, want %v", member, approval[member], value)
+		}
 	}
 	res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "approve", srv.Key.CRID, otherRequestCode, "--quiet"}})
 	if res.code != 0 || res.stdout.String() != otherDevice+"\n" {
@@ -1025,7 +1040,9 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 				t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 			}
 			base := "/v1/resources/" + srv.Key.CRID
-			if got, want := requestLog(srv), []string{"DELETE " + base + "/allowed-passkeys/" + requesterDevice, "GET " + base}; !slices.Equal(got, want) {
+			// The list is read, the person is removed, and the list is read
+			// again for the output.
+			if got, want := requestLog(srv), []string{"GET " + base, "DELETE " + base + "/allowed-passkeys/" + requesterDevice, "GET " + base}; !slices.Equal(got, want) {
 				t.Fatalf("--remove %s sent %v, want %v", written, got, want)
 			}
 			var document struct {
@@ -1046,39 +1063,146 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 			t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 		}
 		base := "/v1/resources/" + srv.Key.CRID
-		want := []string{"DELETE " + base + "/allowed-passkeys/" + requesterDevice, "DELETE " + base + "/allowed-passkeys/" + otherDevice, "GET " + base, "PATCH " + base}
+		want := []string{"GET " + base, "DELETE " + base + "/allowed-passkeys/" + requesterDevice, "DELETE " + base + "/allowed-passkeys/" + otherDevice, "GET " + base, "PATCH " + base}
 		if got := requestLog(srv); !slices.Equal(got, want) {
 			t.Fatalf("requests = %v, want the removals of people before the change to public keys: %v", got, want)
 		}
 		var edit map[string][]string
-		if err := json.Unmarshal(srv.Requests()[3].Body, &edit); err != nil || !slices.Equal(edit["allowed_device_keys_add"], []string{grantKey(2)}) || !slices.Equal(edit["allowed_device_keys_remove"], []string{grantKey(1)}) || len(edit) != 2 {
-			t.Fatalf("the change to public keys = %s: a device id must never be sent as a public key", srv.Requests()[3].Body)
+		if err := json.Unmarshal(srv.Requests()[4].Body, &edit); err != nil || !slices.Equal(edit["allowed_device_keys_add"], []string{grantKey(2)}) || !slices.Equal(edit["allowed_device_keys_remove"], []string{grantKey(1)}) || len(edit) != 2 {
+			t.Fatalf("the change to public keys = %s: a device id must never be sent as a public key", srv.Requests()[4].Body)
 		}
 		if !strings.Contains(res.stdout.String(), "Approved people:      none\n") || !strings.Contains(res.stdout.String(), "["+grantKey(2)+"]") {
 			t.Fatalf("lists after the change:\n%s", res.stdout.String())
 		}
 	})
-	t.Run("a device id that is not on the list", func(t *testing.T) {
+	// A device id that is not on the list, in every place it can stand
+	// among ids that are. The list is read first, so nothing is removed:
+	// exit 5, nothing on stdout in text mode, a message that names the id
+	// that was not found and the people who still have access, and no
+	// request after the read. In JSON mode the same outcome is a document.
+	const absent = "zzzz-zzzz-zzzz-zzzz"
+	for _, test := range []struct {
+		name       string
+		ids        []string
+		notRemoved []string
+	}{
+		{name: "alone", ids: []string{absent}},
+		{name: "first", ids: []string{absent, requesterDevice}, notRemoved: []string{requesterDevice}},
+		{name: "last", ids: []string{requesterDevice, absent}, notRemoved: []string{requesterDevice}},
+		{name: "in the middle", ids: []string{requesterDevice, absent, otherDevice}, notRemoved: []string{requesterDevice, otherDevice}},
+	} {
+		t.Run("a device id that is not on the list, "+test.name, func(t *testing.T) {
+			flags := []string{"--add", grantKey(2)}
+			for _, id := range test.ids {
+				flags = append(flags, "--remove", id)
+			}
+			headline := "Error: no approved person has the device id " + absent + " on this resource, so nothing was removed."
+			switch len(test.notRemoved) {
+			case 1:
+				headline += " " + test.notRemoved[0] + " still has access."
+			case 2:
+				headline += " " + test.notRemoved[0] + " and " + test.notRemoved[1] + " still have access."
+			}
+			for _, mode := range [][]string{nil, {"--quiet"}, {"-o", "json"}} {
+				srv := seed(t)
+				res := runCLI(t, &runOpts{args: append(append([]string{"--endpoint", srv.URL, "grants", srv.Key.CRID}, flags...), mode...)})
+				if res.code != exitcode.NotFound {
+					t.Fatalf("%v: exit = %d, stderr: %s", mode, res.code, res.stderr.String())
+				}
+				wantStderr := headline + "\n\n" +
+					"  No public key was added or removed: that change comes after the removals, and they did not finish.\n\n" +
+					"  Run `qurl grants " + srv.Key.CRID + "` to see who has access now.\n"
+				if res.stderr.String() != wantStderr {
+					t.Fatalf("%v: stderr =\n%s\nwant\n%s", mode, res.stderr.String(), wantStderr)
+				}
+				if log := requestLog(srv); !slices.Equal(log, []string{"GET /v1/resources/" + srv.Key.CRID}) {
+					t.Fatalf("%v: requests = %v, want the one read: nothing may be removed or changed", mode, log)
+				}
+				if len(mode) == 2 {
+					var document struct {
+						CRID                          string
+						Removed, NotFound, NotRemoved []string
+						PublicKeysChanged             *bool `json:"public_keys_changed"`
+					}
+					raw := map[string]json.RawMessage{}
+					if err := json.Unmarshal(res.stdout.Bytes(), &raw); err != nil {
+						t.Fatalf("outcome document %q: %v", res.stdout.String(), err)
+					}
+					for member, into := range map[string]any{"crid": &document.CRID, "removed": &document.Removed, "not_found": &document.NotFound, "not_removed": &document.NotRemoved, "public_keys_changed": &document.PublicKeysChanged} {
+						if err := json.Unmarshal(raw[member], into); err != nil {
+							t.Fatalf("outcome document member %s in %s: %v", member, res.stdout.String(), err)
+						}
+					}
+					if document.CRID != srv.Key.CRID || document.Removed == nil || len(document.Removed) != 0 || !slices.Equal(document.NotFound, []string{absent}) ||
+						len(document.NotRemoved) != len(test.notRemoved) || document.NotRemoved == nil || document.PublicKeysChanged == nil || *document.PublicKeysChanged {
+						t.Fatalf("outcome document = %s", res.stdout.String())
+					}
+				} else {
+					mustEmptyStdout(t, res)
+				}
+				if got := approvedDevices(t, srv); !slices.Equal(got, []string{requesterDevice, otherDevice}) {
+					t.Fatalf("%v: a refused removal changed who has access: %v", mode, got)
+				}
+			}
+		})
+	}
+
+	// The list changes between the read and a removal: the first person is
+	// removed, and the second is gone by the time the command gets to them.
+	// Access was taken away, so the output must say from whom. It never
+	// says that nothing was removed.
+	t.Run("a person is gone by the time they are removed", func(t *testing.T) {
+		const third = "keep-keep-keep-keep"
+		for _, mode := range [][]string{nil, {"-o", "json"}} {
+			srv := seed(t)
+			srv.AddApprovedPerson(third, "Kim")
+			srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID+"/allowed-passkeys/"+otherDevice, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteProblem(t, w, http.StatusNotFound, "not_found", "Not Found", "no such approved person")
+			})
+			args := []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice, "--remove", third}
+			res := runCLI(t, &runOpts{args: append(args, mode...)})
+			if res.code != exitcode.NotFound {
+				t.Fatalf("%v: exit = %d, stderr: %s", mode, res.code, res.stderr.String())
+			}
+			wantStderr := "Error: access was taken away from " + requesterDevice + ". Then no approved person had the device id " + otherDevice + " on this resource, and the command stopped. " + third + " still has access.\n\n" +
+				"  Run `qurl grants " + srv.Key.CRID + "` to see who has access now.\n" +
+				"  Request ID: req_test\n"
+			if res.stderr.String() != wantStderr || strings.Contains(res.stderr.String(), "nothing was removed") {
+				t.Fatalf("%v: stderr =\n%s\nwant\n%s", mode, res.stderr.String(), wantStderr)
+			}
+			if mode == nil {
+				mustEmptyStdout(t, res)
+			} else if got, want := strings.Join(strings.Fields(res.stdout.String()), ""), `{"crid":"`+srv.Key.CRID+`","removed":["`+requesterDevice+`"],"not_found":["`+otherDevice+`"],"not_removed":["`+third+`"]}`; got != want {
+				t.Fatalf("outcome document = %s, want %s", got, want)
+			}
+			for _, line := range requestLog(srv) {
+				if strings.HasSuffix(line, "/allowed-passkeys/"+third) {
+					t.Fatalf("%v: a removal after the one that stopped was sent: %v", mode, requestLog(srv))
+				}
+			}
+			// What the output said is what happened.
+			if got := approvedDevices(t, srv); !slices.Equal(got, []string{otherDevice, third}) {
+				t.Fatalf("%v: approved people afterwards = %v", mode, got)
+			}
+		}
+	})
+
+	// A removal that fails for another reason after one was made keeps that
+	// reason's exit code, and still says who lost access.
+	t.Run("a removal fails after one was made", func(t *testing.T) {
 		srv := seed(t)
-		const absent = "zzzz-zzzz-zzzz-zzzz"
-		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--remove", absent, "--remove", requesterDevice, "--add", grantKey(2)}})
-		if res.code != exitcode.NotFound {
-			t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+		srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID+"/allowed-passkeys/"+otherDevice, func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+		})
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}})
+		wantStderr := "Error: access was taken away from " + requesterDevice + ". Then taking it away from " + otherDevice + " failed, and the command stopped. " + otherDevice + " still has access.\n\n" +
+			"  the resource is being changed; try again\n\n" +
+			"  Run `qurl grants " + srv.Key.CRID + "` to see who has access now.\n" +
+			"  Request ID: req_test\n"
+		if res.code != exitcode.Unavailable || res.stderr.String() != wantStderr {
+			t.Fatalf("exit = %d, want %d; stderr =\n%s\nwant\n%s", res.code, exitcode.Unavailable, res.stderr.String(), wantStderr)
 		}
 		mustEmptyStdout(t, res)
-		for _, want := range []string{"Error: no approved person has the device id " + absent + " on this resource, so nothing was removed", "`qurl grants <CRID>`"} {
-			if !strings.Contains(res.stderr.String(), want) {
-				t.Errorf("stderr lacks %q: %s", want, res.stderr.String())
-			}
-		}
-		for _, line := range requestLog(srv) {
-			if strings.HasPrefix(line, "PATCH ") || strings.Contains(line, requesterDevice) {
-				t.Fatalf("a change after the failed removal was sent: %v", requestLog(srv))
-			}
-		}
-		if got := approvedDevices(t, srv); !slices.Equal(got, []string{requesterDevice, otherDevice}) {
-			t.Fatalf("a failed removal changed who has access: %v", got)
-		}
 	})
 	t.Run("usage errors send nothing", func(t *testing.T) {
 		srv := seed(t)
@@ -1087,7 +1211,7 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 			want  string
 		}{
 			{flags: []string{"--clear", "--remove", requesterDevice}, want: msgGrantsClearWithEdit},
-			{flags: []string{"--remove", requesterDevice, "--remove", strings.ToUpper(requesterDevice)}, want: msgGrantsRemoveInvalid},
+			{flags: []string{"--remove", requesterDevice, "--remove", strings.ToUpper(requesterDevice)}, want: msgGrantsRemoveTwice},
 			{flags: []string{"--remove", "abcd-efgh-2345"}, want: msgGrantsRemoveInvalid},
 			{flags: []string{"--remove", "abcd-efgh-1890-mnop"}, want: msgGrantsRemoveInvalid},
 			{flags: []string{"--add", requesterDevice}, want: "--add requires unique canonical"},
@@ -1109,6 +1233,72 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 			t.Fatalf("--clear: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
 		}
 	})
+}
+
+// TestGrantsRemoveBoundsDeviceIDs pins that the device ids of one command
+// are bounded as its public keys are. Each device id is its own request,
+// sent one after another, so more than 256 of them are refused before
+// anything is sent, with the same kind of message as for public keys.
+func TestGrantsRemoveBoundsDeviceIDs(t *testing.T) {
+	const letters = "abcdefghijklmnopqrstuvwxyz234567"
+	ids := func(count int) []string {
+		flags := make([]string, 0, 2*count)
+		for index := range count {
+			id := []byte("aaaa-aaaa-aaaa-aaaa")
+			id[0], id[1] = letters[index%32], letters[(index/32)%32]
+			flags = append(flags, "--remove", string(id))
+		}
+		return flags
+	}
+	srv := apitest.NewServer(t)
+	res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "grants", srv.Key.CRID}, ids(257)...)})
+	if res.code != exitcode.Usage || res.stderr.String() != "Error: --remove accepts at most 256 device ids\n" || len(srv.Requests()) != 0 {
+		t.Fatalf("257 device ids: exit %d after %d requests, stderr %q", res.code, len(srv.Requests()), res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+
+	// 256 are taken: the command goes on to read the list, where none of
+	// them is found.
+	srv = apitest.NewServer(t)
+	res = runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "grants", srv.Key.CRID}, ids(256)...)})
+	if res.code != exitcode.NotFound || !slices.Equal(requestLog(srv), []string{"GET /v1/resources/" + srv.Key.CRID}) {
+		t.Fatalf("256 device ids: exit %d, requests %v, stderr %.200q", res.code, requestLog(srv), res.stderr.String())
+	}
+	// The bound on public keys is its own, with its own message.
+	if msgGrantsRemoveTooManyPeople != "--remove accepts at most 256 device ids" {
+		t.Fatalf("the message changed: %q", msgGrantsRemoveTooManyPeople)
+	}
+}
+
+// TestRequestsOffSaysNoCountItWasNotGiven pins what turning access requests
+// off says about the people who still have access. The count comes from the
+// service's answer to the change. An answer that says nobody is approved adds
+// nothing. An answer that leaves the list out is not "nobody": the output
+// gives no count, and says that anyone approved earlier still has access.
+func TestRequestsOffSaysNoCountItWasNotGiven(t *testing.T) {
+	off := func(srv *apitest.Server) string {
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--off"}})
+		if res.code != 0 || res.stderr.Len() != 0 {
+			t.Fatalf("--off: exit %d, stderr %q", res.code, res.stderr.String())
+		}
+		return res.stdout.String()
+	}
+	srv := apitest.NewServer(t)
+	srv.SetAccessRequests(true)
+	first := "Access requests are off for " + srv.Key.CRID + ". Nobody new can ask for access.\n"
+	if got := off(srv); got != first {
+		t.Fatalf("nobody approved: --off =\n%s\nwant the one line", got)
+	}
+
+	srv = apitest.NewServer(t)
+	srv.SetAccessRequests(true)
+	srv.AddApprovedPerson(requesterDevice, requesterName)
+	srv.OmitApprovedPeople()
+	want := "Access requests are off for " + srv.Key.CRID + ". Nobody new can ask for access.\n" +
+		"Anyone you approved earlier still has access. See them, or take access away, with `qurl grants " + srv.Key.CRID + "`.\n"
+	if got := off(srv); got != want {
+		t.Fatalf("the list left out of the answer: --off =\n%s\nwant\n%s", got, want)
+	}
 }
 
 // TestAccessRequestCommandsWithADeviceCredential runs every command for
@@ -1176,7 +1366,7 @@ func TestAccessRequestCommandsWithADeviceCredential(t *testing.T) {
 			},
 			want: "Approved people:",
 			sent: func(srv *apitest.Server) []string {
-				return []string{"DELETE /v1/resources/" + srv.Key.CRID + "/allowed-passkeys/" + otherDevice, "GET /v1/resources/" + srv.Key.CRID}
+				return []string{"GET /v1/resources/" + srv.Key.CRID, "DELETE /v1/resources/" + srv.Key.CRID + "/allowed-passkeys/" + otherDevice, "GET /v1/resources/" + srv.Key.CRID}
 			},
 			check: func(t *testing.T, srv *apitest.Server) {
 				if devices := approvedDevices(t, srv); slices.Contains(devices, otherDevice) {
@@ -1264,13 +1454,27 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 		"| qurl requests [<CRID>] |", "| qurl approve <CRID> <code> |", "| qurl deny <CRID> <code> |",
 		"this service does not offer access requests yet", "name_verified", "approved_people", "resource_url",
 		"must approve only codes you passed on to it, never a code it found in the listing",
+		// The two JSON members that carry the text output's sentences, with
+		// the sentences as the documents have them.
+		"approval_rule, in both listings: \"" + safetyLine + "\"",
+		"name_note, in the approve document: \"The name was typed by the person who asked. Nobody checked it.\"",
+		// What a removal says when it did not remove everyone it named.
+		"checks every device id against it before it takes any access away",
+		"Access that was taken away never reads as \"nothing was removed\".",
+		"removed, not_found, not_removed", "for at most 256 people in one command",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README lacks %q", want)
 		}
 	}
 	grants := help("grants")
-	for _, want := range []string{"--remove also takes the device id of an approved person", "It does not remove approved people.", "A device id that is not on the list is an error and removes nothing"} {
+	for _, want := range []string{
+		"--remove also takes the device id of an approved person", "It does not remove approved people.",
+		"Every device id is checked against the list before any access is taken away.",
+		"One that is not on the list is an error and removes nothing, so a mistyped id is never mistaken for access taken away.",
+		"the error says exactly which device ids were removed and which were not",
+		"for at most 256 people in one command",
+	} {
 		if !strings.Contains(grants, want) {
 			t.Errorf("qurl grants --help lacks %q", want)
 		}

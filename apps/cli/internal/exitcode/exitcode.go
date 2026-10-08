@@ -292,6 +292,11 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 		// change after creation. A request that conflicts with state which
 		// already exists is the Conflict row, as for ErrFileExists above.
 		return Conflict, true
+	case errors.Is(err, qurlapi.ErrApprovedPersonNotFound):
+		// A removal named a device id that no approved person has. The read
+		// of the list that showed it answered 200, so no status says it: the
+		// thing the command named is not there, which is the NotFound row.
+		return NotFound, true
 	case errors.Is(err, qurlapi.ErrAccessRequestsUnsupported):
 		// The service has no access requests: their routes are missing, or
 		// its answer does not have the setting. Nothing about the command is

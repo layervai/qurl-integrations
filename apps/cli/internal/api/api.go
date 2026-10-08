@@ -71,9 +71,11 @@ type Client interface {
 	// person gets no access.
 	DenyAccessRequest(ctx context.Context, id, code string) error
 	// RemoveAllowedPasskeys takes away the access of approved people, named
-	// by device id, and returns the resource as it reads afterwards. A device
-	// id that is not on the list is an error, and nothing after it is
-	// removed.
+	// by device id, and returns the resource as it reads afterwards. Every
+	// device id is checked against the list before any access is taken
+	// away, so one that is not on it is an error and removes nothing. A
+	// removal that stops part way is a PasskeyRemovalError, which says what
+	// happened to each device id.
 	RemoveAllowedPasskeys(ctx context.Context, id string, deviceIDs []string) (*ResourceSummary, error)
 	// Sharing returns the durable desired state and current platform-observed
 	// connection state of one tunnel resource. It is the connector sharing
@@ -289,7 +291,8 @@ type ResourceSummary struct {
 	// nil when the service's row does not say, as a service from before
 	// access requests never does.
 	AccessRequests *bool
-	// AllowedPasskeys are the people the publisher approved.
+	// AllowedPasskeys are the people the publisher approved. An empty list
+	// means the service said nobody is; nil means it did not say.
 	AllowedPasskeys []AllowedPasskey
 }
 
