@@ -103,24 +103,6 @@ func accessRequestsPath(id string) string {
 	return "/v1/resources/" + url.PathEscape(id) + "/access-requests"
 }
 
-// doAccess sends one request on a route that exists only on a service with
-// access requests. This release's device credential can be used on a fixed
-// list of routes, and a route outside it is refused before anything is sent;
-// that refusal becomes the message that says so.
-func (c *client) doAccess(ctx context.Context, method, path string, body any, allowRetry bool) (*restReply, error) {
-	var reply *restReply
-	var err error
-	if allowRetry {
-		reply, err = c.doREST(ctx, method, path, body)
-	} else {
-		reply, err = c.doRESTOnce(ctx, method, path, body)
-	}
-	if errors.Is(err, qurl.ErrRegisteredAgentResourceRequestDenied) {
-		return nil, &accessRouteRefusedError{cause: err}
-	}
-	return reply, err
-}
-
 // SetAccessRequests turns access requests on or off with one authenticated
 // PATCH. It never retries.
 //
@@ -169,7 +151,7 @@ func (c *client) AccessRequests(ctx context.Context, id string) ([]AccessRequest
 	if id != "" {
 		path = accessRequestsPath(id)
 	}
-	reply, err := c.doAccess(ctx, http.MethodGet, path, nil, true)
+	reply, err := c.doREST(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +216,7 @@ func (c *client) ApproveAccessRequest(ctx context.Context, id, code string) (*Al
 	if !ValidRequestCode(code) {
 		return nil, fmt.Errorf("%w: a request code is six digits", qurl.ErrInvalidResourceRequest)
 	}
-	reply, err := c.doAccess(ctx, http.MethodPost, accessRequestsPath(id)+"/"+code+"/approve", struct{}{}, false)
+	reply, err := c.doRESTOnce(ctx, http.MethodPost, accessRequestsPath(id)+"/"+code+"/approve", struct{}{})
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +247,7 @@ func (c *client) DenyAccessRequest(ctx context.Context, id, code string) error {
 	if !ValidRequestCode(code) {
 		return fmt.Errorf("%w: a request code is six digits", qurl.ErrInvalidResourceRequest)
 	}
-	reply, err := c.doAccess(ctx, http.MethodDelete, accessRequestsPath(id)+"/"+code, nil, false)
+	reply, err := c.doRESTOnce(ctx, http.MethodDelete, accessRequestsPath(id)+"/"+code, nil)
 	if err != nil {
 		return err
 	}
@@ -298,7 +280,7 @@ func (c *client) RemoveAllowedPasskeys(ctx context.Context, id string, deviceIDs
 		}
 	}
 	for _, deviceID := range deviceIDs {
-		reply, err := c.doAccess(ctx, http.MethodDelete, "/v1/resources/"+url.PathEscape(id)+"/allowed-passkeys/"+deviceID, nil, false)
+		reply, err := c.doRESTOnce(ctx, http.MethodDelete, "/v1/resources/"+url.PathEscape(id)+"/allowed-passkeys/"+deviceID, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -382,7 +364,7 @@ func (c *client) accessRequestsOffered(ctx context.Context, id string, probeList
 	if !probeList {
 		return false, nil
 	}
-	reply, err = c.doAccess(ctx, http.MethodGet, accessRequestsPath(id), nil, true)
+	reply, err = c.doREST(ctx, http.MethodGet, accessRequestsPath(id), nil)
 	if err != nil {
 		return false, err
 	}

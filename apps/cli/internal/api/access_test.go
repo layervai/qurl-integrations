@@ -831,53 +831,120 @@ func TestResourceRowsCarryAccessRequestsAndApprovedPeople(t *testing.T) {
 	}
 }
 
-// TestDeviceCredentialCannotReachAccessRequestRoutesYet records a limit of
-// this release, and fails when the limit is gone.
-//
-// A device credential is used through the SDK, on the routes the SDK lists.
-// The pinned SDK does not list the five routes that exist only for access
-// requests, so on a real install, where every command uses the device
-// credential, those requests are refused before anything is sent. The client
-// turns that into a message that says so. Creating a resource with access
-// requests, changing the setting and reading a resource use routes the SDK
-// does list, and work.
-//
-// When the SDK lists these routes, this test fails. The fix is to delete its
-// second half and to assert the opposite: that the five calls succeed with a
-// device credential.
-func TestDeviceCredentialCannotReachAccessRequestRoutesYet(t *testing.T) {
+// TestDeviceCredentialReachesEveryAccessRequestRoute pins that access
+// requests work the way a real install uses them: with the device's own
+// credential. That credential is used through the SDK, which sends only on
+// the routes it lists, and refuses any other before anything leaves the
+// machine. The five routes that exist only for access requests are on that
+// list: both listings, the approval, the denial and the removal of an
+// approved person are sent, each with the device credential, and each does
+// what it says. So are the three requests that use routes the SDK listed
+// before: creating a resource with access requests, changing the setting and
+// reading the resource.
+func TestDeviceCredentialReachesEveryAccessRequestRoute(t *testing.T) {
 	srv := apitest.NewServer(t)
-	srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
 	client := newRegisteredTestClient(t, srv)
+	crid := srv.Key.CRID
 
 	if result, err := client.Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true}); err != nil || result.AccessRequests == nil || !*result.AccessRequests {
 		t.Fatalf("publish with access requests through a device credential = %+v, %v", result, err)
 	}
-	if resource, err := client.SetAccessRequests(t.Context(), srv.Key.CRID, false); err != nil || *resource.AccessRequests {
+	if resource, err := client.SetAccessRequests(t.Context(), crid, false); err != nil || *resource.AccessRequests {
 		t.Fatalf("turning access requests off through a device credential = %+v, %v", resource, err)
 	}
+	if resource, err := client.SetAccessRequests(t.Context(), crid, true); err != nil || !*resource.AccessRequests {
+		t.Fatalf("turning access requests on through a device credential = %+v, %v", resource, err)
+	}
+	// Two people ask. The second code is listed first, so a call that took
+	// "the first row" instead of the code it was given would show here.
+	srv.AddAccessRequest(testOtherCode, testOtherPerson, testOtherDevice)
+	srv.AddAccessRequest(testRequestCode, testRequester, testDeviceID)
 	sent := len(srv.Requests())
 
+	codes := func(requests []AccessRequest) []string {
+		out := make([]string, 0, len(requests))
+		for index := range requests {
+			out = append(out, requests[index].Code)
+		}
+		return out
+	}
+	all, err := client.AccessRequests(t.Context(), "")
+	if err != nil || !slices.Equal(codes(all), []string{testOtherCode, testRequestCode}) || all[1].CRID != crid {
+		t.Fatalf("listing of every resource = %+v, %v", all, err)
+	}
+	one, err := client.AccessRequests(t.Context(), crid)
+	if err != nil || !slices.Equal(codes(one), []string{testOtherCode, testRequestCode}) {
+		t.Fatalf("listing of one resource = %+v, %v", one, err)
+	}
+	person, err := client.ApproveAccessRequest(t.Context(), crid, testRequestCode)
+	if err != nil || person.DeviceID != testDeviceID || person.Name != testRequester {
+		t.Fatalf("approval = %+v, %v, want the person who was given that code", person, err)
+	}
+	if err := client.DenyAccessRequest(t.Context(), crid, testOtherCode); err != nil {
+		t.Fatalf("denial: %v", err)
+	}
+	if left, err := client.AccessRequests(t.Context(), crid); err != nil || len(left) != 0 {
+		t.Fatalf("requests after one approval and one denial = %+v, %v, want none", left, err)
+	}
+	resource, err := client.RemoveAllowedPasskeys(t.Context(), crid, []string{testDeviceID})
+	if err != nil || len(resource.AllowedPasskeys) != 0 {
+		t.Fatalf("removal = %+v, %v, want nobody left on the list", resource, err)
+	}
+
+	base := "/v1/resources/" + crid
+	want := []string{
+		"GET /v1/access-requests",
+		"GET " + base + "/access-requests",
+		"POST " + base + "/access-requests/" + testRequestCode + "/approve",
+		"DELETE " + base + "/access-requests/" + testOtherCode,
+		"GET " + base + "/access-requests",
+		"DELETE " + base + "/allowed-passkeys/" + testDeviceID,
+		"GET " + base,
+	}
+	if got := requestLines(srv)[sent:]; !slices.Equal(got, want) {
+		t.Fatalf("requests = %v, want %v", got, want)
+	}
+	credential := "Bearer " + registeredAPIState(t).DeviceAPIKey
+	for _, request := range srv.Requests() {
+		if got := request.Header.Get("Authorization"); got != credential {
+			t.Errorf("%s %s authorization = %q, want the device credential", request.Method, request.Path, got)
+		}
+	}
+}
+
+// TestDeviceCredentialStillRefusesWhatIsNotARoute pins that the SDK's list is
+// still a list. A request code or a device id that could never be one is
+// refused by this client before the SDK is asked, and an identifier that
+// could never name a resource is refused by the SDK. Nothing is sent in
+// either case, and neither is shown as a missing feature of this release.
+func TestDeviceCredentialStillRefusesWhatIsNotARoute(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client := newRegisteredTestClient(t, srv)
 	for name, call := range map[string]func() error{
-		"list all": func() error { _, err := client.AccessRequests(t.Context(), ""); return err },
-		"list one": func() error { _, err := client.AccessRequests(t.Context(), srv.Key.CRID); return err },
-		"approve": func() error {
-			_, err := client.ApproveAccessRequest(t.Context(), srv.Key.CRID, testRequestCode)
+		"a code that is not six digits": func() error {
+			_, err := client.ApproveAccessRequest(t.Context(), srv.Key.CRID, "12345a")
 			return err
 		},
-		"deny": func() error { return client.DenyAccessRequest(t.Context(), srv.Key.CRID, testRequestCode) },
-		"remove": func() error {
-			_, err := client.RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{testDeviceID})
+		"a device id in another form": func() error {
+			_, err := client.RemoveAllowedPasskeys(t.Context(), srv.Key.CRID, []string{"ABCD-EFGH-2345-MNOP"})
 			return err
+		},
+		"an identifier that is not one": func() error {
+			_, err := client.AccessRequests(t.Context(), "not a resource")
+			return err
+		},
+		"a denial for an identifier that is not one": func() error {
+			return client.DenyAccessRequest(t.Context(), "a/b", testRequestCode)
 		},
 	} {
 		err := call()
-		var shown interface{ UserMessage() string }
-		if !errors.Is(err, qurl.ErrRegisteredAgentResourceRequestDenied) || !errors.As(err, &shown) || shown.UserMessage() != msgAccessRouteRefused {
-			t.Errorf("%s through a device credential: error = %v; if it succeeded, the SDK now lists the route: see this test's comment", name, err)
+		if err == nil || len(srv.Requests()) != 0 {
+			t.Errorf("%s: error %v after %d requests, want a refusal before any request", name, err, len(srv.Requests()))
+			continue
 		}
-	}
-	if got := len(srv.Requests()); got != sent {
-		t.Fatalf("a refused request was sent: %d requests after the two that are allowed", got-sent)
+		var shown interface{ UserMessage() string }
+		if errors.As(err, &shown) && strings.Contains(shown.UserMessage(), "release") {
+			t.Errorf("%s: the refusal reads as a missing feature of this release: %q", name, shown.UserMessage())
+		}
 	}
 }

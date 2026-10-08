@@ -1111,17 +1111,14 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 	})
 }
 
-// TestAccessRequestCommandsWithADeviceCredential runs the commands the way a
-// real install does, with the device's own credential, and records a limit of
-// this release: the SDK lets that credential be used only on the routes it
-// lists, and the routes that exist only for access requests are not among
-// them yet. Those commands stop with exit 1 and a message that says so, and
-// send nothing. The commands that use routes the SDK does list work.
-//
-// When the SDK lists the routes, the first half of this test fails; see
-// TestDeviceCredentialCannotReachAccessRequestRoutesYet in the api package.
+// TestAccessRequestCommandsWithADeviceCredential runs every command for
+// access requests the way a real install does: with the device's own
+// credential, which the SDK lets be used only on the routes it lists. Both
+// listings, the approval, the denial and the removal of an approved person
+// are sent and do what they say, and so are the commands that use routes the
+// SDK listed before. Every request carries the device credential and no
+// other.
 func TestAccessRequestCommandsWithADeviceCredential(t *testing.T) {
-	const refused = "Error: this release of qurl cannot send this request with this device's identity yet, so nothing was sent. It needs a later release\n"
 	state := bootstrapRegisteredState(t)
 	device := func(srv *apitest.Server) func(context.Context) (qurlapi.Client, error) {
 		return func(ctx context.Context) (qurlapi.Client, error) {
@@ -1131,26 +1128,82 @@ func TestAccessRequestCommandsWithADeviceCredential(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		args func(*apitest.Server) []string
+		// want is in the output; sent is what the command sent.
+		want string
+		sent func(*apitest.Server) []string
+		// check looks at what the command left behind.
+		check func(*testing.T, *apitest.Server)
 	}{
-		{name: "requests", args: func(*apitest.Server) []string { return []string{"requests"} }},
-		{name: "requests for one resource", args: func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID} }},
-		{name: "approve", args: func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, requestCode} }},
-		{name: "deny", args: func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requestCode} }},
-		{name: "remove a person", args: func(srv *apitest.Server) []string {
-			return []string{"grants", srv.Key.CRID, "--remove", requesterDevice}
-		}},
+		{
+			name: "requests", args: func(*apitest.Server) []string { return []string{"requests"} },
+			want: "482 913",
+			sent: func(*apitest.Server) []string { return []string{"GET /v1/access-requests"} },
+		},
+		{
+			name: "requests for one resource", args: func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID} },
+			want: "175 306",
+			sent: func(srv *apitest.Server) []string {
+				return []string{"GET /v1/resources/" + srv.Key.CRID + "/access-requests"}
+			},
+		},
+		{
+			name: "approve", args: func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, requestCode} },
+			want: "This person can now open",
+			sent: func(srv *apitest.Server) []string {
+				return []string{"POST /v1/resources/" + srv.Key.CRID + "/access-requests/" + requestCode + "/approve"}
+			},
+			check: func(t *testing.T, srv *apitest.Server) {
+				if devices := approvedDevices(t, srv); !slices.Contains(devices, requesterDevice) {
+					t.Fatalf("approved devices = %v, want the person whose code was given", devices)
+				}
+			},
+		},
+		{
+			name: "deny", args: func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requestCode} },
+			want: "No access was given.",
+			sent: func(srv *apitest.Server) []string {
+				return []string{"DELETE /v1/resources/" + srv.Key.CRID + "/access-requests/" + requestCode}
+			},
+			check: func(t *testing.T, srv *apitest.Server) {
+				if devices := approvedDevices(t, srv); slices.Contains(devices, requesterDevice) {
+					t.Fatalf("approved devices = %v: a denial gave access", devices)
+				}
+			},
+		},
+		{
+			name: "remove a person", args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", otherDevice}
+			},
+			want: "Approved people:",
+			sent: func(srv *apitest.Server) []string {
+				return []string{"DELETE /v1/resources/" + srv.Key.CRID + "/allowed-passkeys/" + otherDevice, "GET /v1/resources/" + srv.Key.CRID}
+			},
+			check: func(t *testing.T, srv *apitest.Server) {
+				if devices := approvedDevices(t, srv); slices.Contains(devices, otherDevice) {
+					t.Fatalf("approved devices = %v: the person is still on the list", devices)
+				}
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			twoRequests(srv)
-			srv.AddApprovedPerson(requesterDevice, requesterName)
+			srv.AddApprovedPerson(otherDevice, otherRequester)
 			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL}, test.args(srv)...), env: map[string]string{}, openAPIClient: device(srv)})
-			if res.code != exitcode.General || res.stderr.String() != refused {
-				t.Fatalf("exit = %d, stderr %q; want exit 1 and the message that this release cannot send it", res.code, res.stderr.String())
+			// A denial is confirmed on stderr; the others print a document.
+			if res.code != 0 || !strings.Contains(res.stdout.String()+res.stderr.String(), test.want) {
+				t.Fatalf("exit = %d, want 0 with %q\nstdout: %s\nstderr: %s", res.code, test.want, res.stdout.String(), res.stderr.String())
 			}
-			mustEmptyStdout(t, res)
-			if got := len(srv.Requests()); got != 0 {
-				t.Fatalf("a refused request was sent: %v", requestLog(srv))
+			if log := requestLog(srv); !slices.Equal(log, test.sent(srv)) {
+				t.Fatalf("requests = %v, want %v", log, test.sent(srv))
+			}
+			for _, request := range srv.Requests() {
+				if got := request.Header.Get("Authorization"); got != "Bearer "+state.DeviceAPIKey {
+					t.Errorf("%s %s authorization = %q, want the device credential", request.Method, request.Path, got)
+				}
+			}
+			if test.check != nil {
+				test.check(t, srv)
 			}
 		})
 	}

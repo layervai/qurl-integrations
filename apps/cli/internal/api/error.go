@@ -95,7 +95,7 @@ func CustomerMessages() []string {
 		msgGrantEditUnconfirmed,
 		msgAccessRequestsUnsupported, msgAccessRequestsCreateIgnored, msgAccessRequestsSettingIgnored,
 		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgAccessRequestsNotTurnedOn, msgApprovalUnconfirmed,
-		msgRequestCodeNotFound, msgDeviceIDNotFound, msgAccessRouteRefused, msgRemovalUnconfirmed,
+		msgRequestCodeNotFound, msgDeviceIDNotFound, msgRemovalUnconfirmed,
 	}
 }
 
@@ -135,10 +135,6 @@ const (
 	// msgRemovalUnconfirmed is shown when the service answered a removal
 	// with success and the resource still lists the person.
 	msgRemovalUnconfirmed = "the service still lists a person whose access was removed. Run `qurl grants <CRID>` to see who has access now"
-
-	// msgAccessRouteRefused is shown when this release may not use the
-	// device's identity on the route the command needs. Nothing was sent.
-	msgAccessRouteRefused = "this release of qurl cannot send this request with this device's identity yet, so nothing was sent. It needs a later release"
 )
 
 // ErrAccessRequestsUnsupported marks a service that does not offer access
@@ -234,18 +230,6 @@ func (e *accessNotFoundError) Error() string { return e.message }
 func (e *accessNotFoundError) UserMessage() string { return e.message }
 
 func (e *accessNotFoundError) Unwrap() error { return e.problem }
-
-// accessRouteRefusedError is a request this release may not send with the
-// device's identity. The SDK refused it before anything left the machine.
-type accessRouteRefusedError struct{ cause error }
-
-func (e *accessRouteRefusedError) Error() string { return msgAccessRouteRefused }
-
-// UserMessage is the text the terminal rendering shows in place of the SDK's
-// own wording, which names a method and a path.
-func (e *accessRouteRefusedError) UserMessage() string { return msgAccessRouteRefused }
-
-func (e *accessRouteRefusedError) Unwrap() error { return e.cause }
 
 // msgGrantEditUnconfirmed is shown when the answer to an add or remove of
 // single device grants does not show the change. It says what is known first:

@@ -1077,13 +1077,6 @@ commands with "this service does not offer access requests yet" and exit code
 11, never with a success. For `publish --allow-requests` the message also says
 that the resource was published as a private resource without them.
 
-<!-- TODO(upstream-contract): this release uses the device's identity only on the routes its SDK lists, and the routes for listing, approving, denying and removing are not among them yet. -->
-In this release, `qurl requests` (the listings), `qurl approve`, `qurl deny`
-and `qurl grants --remove <device id>` need a later release to work with a
-device identity: they stop with exit code 1 and send nothing.
-`publish --allow-requests`, `requests <CRID> --on` and `--off`, and
-`qurl grants <CRID>` work.
-
 ### qurl get
 
 `qurl get <CRID>` mints a share link exactly like `qurl share`, with this
@@ -1492,7 +1485,7 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | Code | Name | Meaning |
 |-----:|------|---------|
 | 0 | success | The command did what was asked. |
-| 1 | general | An unclassified failure, including features not yet available in this build — such as a request this release cannot send with the device's identity yet. |
+| 1 | general | An unclassified failure, including features not yet available in this build. |
 | 2 | usage | The command line itself was wrong: flags, arguments, or missing confirmation. |
 | 3 | configuration | Settings or profiles are invalid, or this CRID needs a newer CLI. |
 | 4 | authentication | No credential, an implausible credential, or the service rejected the credential. |
