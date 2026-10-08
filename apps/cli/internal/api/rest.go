@@ -261,7 +261,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		return nil, err
 	}
 	if reply.status != http.StatusCreated {
-		refusal := publishProblem(reply, &opts)
+		refusal := c.publishRefusal(ctx, reply, &opts)
 		if !mayKeepExistingPublic(&opts, refusal) {
 			return nil, refusal
 		}
@@ -294,6 +294,26 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		}
 	}
 	return published, nil
+}
+
+// publishRefusal builds the error for a create that the service refused.
+//
+// It is publishProblem's reading of the answer, with one more question for a
+// request that asked for access requests. A service that does not have them
+// and validates request bodies strictly refuses the member it does not know
+// with its generic validation problem, and nothing was created. That is told
+// apart from a real refusal by asking the service, not by reading the
+// problem's words; see refusedForNoAccessRequests. A conflict with a resource
+// that exists is never that case: the service read the request to find it.
+func (c *client) publishRefusal(ctx context.Context, reply *restReply, opts *PublishOptions) error {
+	refusal := publishProblem(reply, opts)
+	if !opts.AllowRequests || errors.Is(refusal, ErrPublishAccessConflict) {
+		return refusal
+	}
+	if c.refusedForNoAccessRequests(ctx, reply) {
+		return &accessRequestsUnsupportedError{detail: msgAccessRequestsCreateRefused}
+	}
+	return refusal
 }
 
 // publishedFromReply decodes a 201 answer to a create request and checks the

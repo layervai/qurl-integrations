@@ -121,12 +121,40 @@ func resourcePath(id string) (trimmed, path string, err error) {
 // pending requests.
 const accessRequestsSegment = "/access-requests"
 
+// refusedForNoAccessRequests reports whether an HTTP 400 answer to a request
+// that carried the access_requests member is the answer of a service that
+// has no access requests. When it is not, the refusal is a real one, and the
+// caller shows the service's problem as it is.
+//
+// A service from before access requests answers such a request in one of two
+// ways. It ignores the member, which the checks on the answer catch. Or it
+// validates the body strictly and refuses a member it does not know, before
+// it looks at anything else: that is its generic validation problem, which
+// tells a publisher nothing they can act on.
+//
+// The wording of that problem is not read. The client asks instead whether
+// the service has access requests at all, with the listing that exists only
+// on a service that has them. A missing listing means it does not. Any other
+// answer to that question, a failure to ask it included, leaves the refusal
+// standing: a service that has access requests refused the request for a
+// reason of its own, or the client did not learn which it is and claims
+// nothing.
+func (c *client) refusedForNoAccessRequests(ctx context.Context, reply *restReply) bool {
+	if reply.status != http.StatusBadRequest {
+		return false
+	}
+	listing, err := c.doREST(ctx, http.MethodGet, "/v1/access-requests", nil)
+	return err == nil && listing.status == http.StatusNotFound
+}
+
 // SetAccessRequests turns access requests on or off with one authenticated
 // PATCH. It never retries.
 //
 // The answer must carry the setting that was asked for. A service from before
 // access requests ignores the member and answers with a row that does not
-// have it; that answer fails here instead of being reported as a change.
+// have it; that answer fails here instead of being reported as a change. One
+// that refuses the member it does not know is told apart from a service that
+// refused the change itself; see refusedForNoAccessRequests.
 func (c *client) SetAccessRequests(ctx context.Context, id string, on bool) (*ResourceSummary, error) {
 	// The setting is changed on the route a grant change uses, and the path
 	// is built the same way: the identifier trimmed and escaped.
@@ -141,6 +169,9 @@ func (c *client) SetAccessRequests(ctx context.Context, id string, on bool) (*Re
 		return nil, err
 	}
 	if reply.status != http.StatusOK {
+		if c.refusedForNoAccessRequests(ctx, reply) {
+			return nil, &accessRequestsUnsupportedError{}
+		}
 		return nil, reply.problem()
 	}
 	var env struct {

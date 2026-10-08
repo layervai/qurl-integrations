@@ -94,7 +94,7 @@ func CustomerMessages() []string {
 		msgPublishAccessConflict, msgPublishExistingPublic, msgPublishExistingPrivate, msgPublishOtherDevices, msgPublishAccessDiffers,
 		msgPrivateUnconfirmed, msgPublicUnconfirmed, msgUnaskedPublicDeleted, msgUnaskedPublicNotDeleted,
 		msgGrantEditUnconfirmed,
-		msgAccessRequestsUnsupported, msgAccessRequestsCreateIgnored, msgAccessRequestsSettingIgnored,
+		msgAccessRequestsUnsupported, msgAccessRequestsCreateIgnored, msgAccessRequestsCreateRefused, msgAccessRequestsSettingIgnored,
 		msgAccessRequestsCreateUnconfirmed, msgAccessRequestsSettingUnconfirmed, msgAccessRequestsNotTurnedOn, msgApprovalUnconfirmed,
 		msgRequestCodeNotFound, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
 		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed,
@@ -107,10 +107,13 @@ func CustomerMessages() []string {
 const (
 	// msgAccessRequestsUnsupported is the text of
 	// ErrAccessRequestsUnsupported, and the start of every message for it.
-	// The two details after it say what the service did do, where the command
-	// can know.
+	// The details after it say what the service did do, where the command can
+	// know: a create it answered without the setting, a create it refused
+	// because it does not know the member, and a change whose answer does not
+	// show the setting.
 	msgAccessRequestsUnsupported    = "this service does not offer access requests yet"
 	msgAccessRequestsCreateIgnored  = ". The resource was published as a private resource without them; run the command again without --allow-requests to see its CRID"
+	msgAccessRequestsCreateRefused  = ". Nothing was published; run the command again without --allow-requests to publish the resource as private"
 	msgAccessRequestsSettingIgnored = ": its answer to this change does not show the setting"
 
 	// The service has access requests and its answer does not show the

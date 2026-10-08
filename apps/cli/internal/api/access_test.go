@@ -1268,3 +1268,128 @@ func TestApprovedPeopleSaidToBeNobodyIsNotTheSameAsNotSaid(t *testing.T) {
 		t.Fatalf("the list left out: read %#v, change %#v; want nil for both, never an empty list", fromRead, fromChange)
 	}
 }
+
+// TestServiceThatRefusesTheAccessRequestsMember pins the second way a service
+// from before access requests answers a request that carries the setting. It
+// does not ignore the member: it validates the body strictly and refuses it
+// with its generic validation problem, before anything is created or changed.
+// A publisher must be told what the other commands tell them, that the
+// service does not offer access requests, not "validation error".
+//
+// The client does not read the problem's words. It asks the service whether
+// it has access requests, with the listing that exists only when it does.
+func TestServiceThatRefusesTheAccessRequestsMember(t *testing.T) {
+	const listing = "GET /v1/access-requests"
+
+	t.Run("publish", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.PlayStrictWithoutAccessRequests()
+		result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
+		wantUnsupported(t, err)
+		if result != nil || err.Error() != msgAccessRequestsUnsupported+msgAccessRequestsCreateRefused {
+			t.Fatalf("publish = %+v, %v", result, err)
+		}
+		for _, part := range []string{"Nothing was published", "run the command again without --allow-requests to publish the resource as private"} {
+			if !strings.Contains(err.Error(), part) {
+				t.Fatalf("the message lost %q: %v", part, err)
+			}
+		}
+		if lines := requestLines(srv); !slices.Equal(lines, []string{"POST /v1/resources", listing}) {
+			t.Fatalf("requests = %v, want the create and the one question", lines)
+		}
+		// Without the flag that service publishes as it always did, and the
+		// advice in the message is true.
+		plain, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{})
+		if err != nil || plain.Private == nil || !*plain.Private || plain.AccessRequests != nil {
+			t.Fatalf("a plain publish against that service = %+v, %v", plain, err)
+		}
+	})
+
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("setting on=%t", on), func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.PlayStrictWithoutAccessRequests()
+			resource, err := newTestClient(t, srv, nil).SetAccessRequests(t.Context(), srv.Key.CRID, on)
+			wantUnsupported(t, err)
+			if resource != nil || err.Error() != msgAccessRequestsUnsupported {
+				t.Fatalf("SetAccessRequests = %+v, %v, want the message every other command gives", resource, err)
+			}
+			if lines := requestLines(srv); !slices.Equal(lines, []string{"PATCH /v1/resources/" + srv.Key.CRID, listing}) {
+				t.Fatalf("requests = %v, want the change and the one question", lines)
+			}
+		})
+	}
+
+	// A service that has access requests and refuses the request has a
+	// reason of its own. Its problem is shown as it is.
+	t.Run("a real refusal of the setting", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.SetResourceAccess(false)
+		_, err := newTestClient(t, srv, nil).SetAccessRequests(t.Context(), srv.Key.CRID, true)
+		var problem *Error
+		if errors.Is(err, ErrAccessRequestsUnsupported) || !errors.As(err, &problem) || problem.StatusCode != http.StatusBadRequest || !strings.Contains(problem.Detail, "private resource") {
+			t.Fatalf("error = %v, want the service's own refusal", err)
+		}
+		if lines := requestLines(srv); !slices.Equal(lines, []string{"PATCH /v1/resources/" + srv.Key.CRID, listing}) {
+			t.Fatalf("requests = %v", lines)
+		}
+	})
+	t.Run("a real refusal of a create", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", "target_url is not allowed")
+		})
+		_, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{AllowRequests: true})
+		var problem *Error
+		if errors.Is(err, ErrAccessRequestsUnsupported) || !errors.As(err, &problem) || problem.Detail != "target_url is not allowed" {
+			t.Fatalf("error = %v, want the service's own refusal", err)
+		}
+	})
+
+	// The question is asked only when its answer can matter: for a 400, to a
+	// request that carried the member, that is not a conflict with a
+	// resource that exists. A conflict means the service read the request.
+	for _, test := range []struct {
+		name   string
+		opts   PublishOptions
+		status int
+		code   string
+	}{
+		{name: "no access requests asked for", status: http.StatusBadRequest, code: "validation_error"},
+		{name: "a conflict with a resource that exists", opts: PublishOptions{AllowRequests: true}, status: http.StatusBadRequest, code: apitest.CodePrivacyMismatch},
+		{name: "another status", opts: PublishOptions{AllowRequests: true}, status: http.StatusInternalServerError, code: "internal_error"},
+		{name: "unauthorized", opts: PublishOptions{AllowRequests: true}, status: http.StatusUnauthorized, code: "unauthorized"},
+	} {
+		t.Run("no question: "+test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.PlayStrictWithoutAccessRequests()
+			srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteProblem(t, w, test.status, test.code, "Refused", "d")
+			})
+			_, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", test.opts)
+			if err == nil || errors.Is(err, ErrAccessRequestsUnsupported) {
+				t.Fatalf("error = %v, want the refusal as it is", err)
+			}
+			if lines := requestLines(srv); !slices.Equal(lines, []string{"POST /v1/resources"}) {
+				t.Fatalf("requests = %v, want the create alone", lines)
+			}
+		})
+	}
+
+	// When the question cannot be answered, the refusal stands as it is: the
+	// client claims nothing it did not learn.
+	t.Run("the question is not answered", func(t *testing.T) {
+		for _, status := range []int{http.StatusServiceUnavailable, http.StatusForbidden} {
+			srv := apitest.NewServer(t)
+			srv.PlayStrictWithoutAccessRequests()
+			srv.ScriptRepeat(http.MethodGet, "/v1/access-requests", 8, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteProblem(t, w, status, "refused", "Refused", "d")
+			})
+			_, err := newTestClient(t, srv, nil).SetAccessRequests(t.Context(), srv.Key.CRID, true)
+			var problem *Error
+			if errors.Is(err, ErrAccessRequestsUnsupported) || !errors.As(err, &problem) || problem.StatusCode != http.StatusBadRequest {
+				t.Fatalf("listing answered %d: error = %v, want the change's own 400", status, err)
+			}
+		}
+	})
+}

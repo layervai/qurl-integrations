@@ -68,6 +68,37 @@ func (s *Server) PlayNoAccessRequests() {
 	s.noAccessRequests = true
 }
 
+// PlayStrictWithoutAccessRequests makes the mock answer like the other kind
+// of service from before access requests: one that validates request bodies
+// strictly. Their routes do not exist and no row has the setting, as after
+// PlayNoAccessRequests, and a create request or a change that carries the
+// access_requests member is refused with the service's generic validation
+// problem, HTTP 400, before anything else about the request is looked at.
+// Nothing is created or changed by such a request.
+//
+// TODO(upstream-contract): mirrors what a deployment without access requests
+// answers to a body with a member it does not know. The problem's code and
+// wording are that service's generic ones; a client must not read them.
+func (s *Server) PlayStrictWithoutAccessRequests() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noAccessRequests = true
+	s.refuseAccessRequestsMember = true
+}
+
+// refusesAccessRequestsMember answers a request that carries the
+// access_requests member the way PlayStrictWithoutAccessRequests describes,
+// and reports whether it did.
+func (s *Server) refusesAccessRequestsMember(w http.ResponseWriter, stated *bool) bool {
+	s.mu.Lock()
+	refuse := s.refuseAccessRequestsMember && stated != nil
+	s.mu.Unlock()
+	if refuse {
+		WriteProblem(s.t, w, http.StatusBadRequest, "validation_error", "Validation Error", "Request validation failed")
+	}
+	return refuse
+}
+
 // SetAccessRequests turns access requests on or off for the mock's resource
 // without a request.
 func (s *Server) SetAccessRequests(on bool) {

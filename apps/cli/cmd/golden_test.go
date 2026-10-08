@@ -312,6 +312,31 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
+			// A service without access requests that refuses the setting it
+			// does not know: exit 11, the message every access-request
+			// command gives there, and that nothing was published.
+			name: "error_publish_requests_refused",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.PlayStrictWithoutAccessRequests() },
+			variants:     []string{"plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
+			// The same service, asked to turn access requests on for a
+			// resource.
+			name: "error_requests_on_refused",
+			args: func(srv *apitest.Server) []string {
+				return []string{"requests", srv.Key.CRID, "--on"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.PlayStrictWithoutAccessRequests() },
+			variants:     []string{"plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
 			// A service from before access requests: exit 11 and no CRID.
 			name: "error_publish_requests_unsupported",
 			args: func(*apitest.Server) []string {

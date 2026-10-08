@@ -1235,6 +1235,81 @@ func TestGrantsRemoveTakesADeviceID(t *testing.T) {
 	})
 }
 
+// TestAccessRequestsOnAServiceThatRefusesTheSetting pins the two commands a
+// person meets first, against a service that has no access requests and
+// validates request bodies strictly: it refuses the setting it does not know
+// with its generic validation problem. Both commands must say what every
+// other access-request command says on such a service, with exit 11, and not
+// "validation error" with exit 8. Nothing is on stdout in any output mode.
+// The publish also says that nothing was published and how to publish
+// without access requests, and that advice works.
+func TestAccessRequestsOnAServiceThatRefusesTheSetting(t *testing.T) {
+	const listing = "GET /v1/access-requests"
+	modes := [][]string{nil, {"-o", "json"}, {"--quiet"}}
+
+	for _, flag := range []string{"--on", "--off"} {
+		for _, mode := range modes {
+			t.Run(fmt.Sprintf("requests %s/%v", flag, mode), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				srv.PlayStrictWithoutAccessRequests()
+				res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "requests", srv.Key.CRID, flag}, mode...), linkSite: testLinkSite})
+				if res.code != exitcode.Unavailable || res.stderr.String() != "Error: "+unsupportedText+"\n" {
+					t.Fatalf("exit = %d, want %d; stderr %q", res.code, exitcode.Unavailable, res.stderr.String())
+				}
+				mustEmptyStdout(t, res)
+				if log := requestLog(srv); !slices.Equal(log, []string{"PATCH /v1/resources/" + srv.Key.CRID, listing}) {
+					t.Fatalf("requests = %v, want the change and the one question", log)
+				}
+			})
+		}
+	}
+
+	const refused = "Error: " + unsupportedText + ". Nothing was published; run the command again without --allow-requests to publish the resource as private\n"
+	for _, local := range []bool{false, true} {
+		for _, mode := range modes {
+			t.Run(fmt.Sprintf("publish/local=%t/%v", local, mode), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				srv.PlayStrictWithoutAccessRequests()
+				opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}}
+				if local {
+					opts = refusingLocalPublish(t, srv, "--allow-requests")
+				}
+				opts.args = append(opts.args, mode...)
+				opts.linkSite = testLinkSite
+				res := runCLI(t, opts)
+				if res.code != exitcode.Unavailable || res.stderr.String() != refused {
+					t.Fatalf("exit = %d, want %d; stderr %q", res.code, exitcode.Unavailable, res.stderr.String())
+				}
+				mustEmptyStdout(t, res)
+				if strings.Contains(res.stderr.String(), srv.Key.CRID) || strings.Contains(res.stderr.String(), testLinkSite) {
+					t.Fatalf("stderr names a CRID or an address for a publish that made nothing: %s", res.stderr.String())
+				}
+				if log := requestLog(srv); !slices.Equal(log, []string{"POST /v1/resources", listing}) {
+					t.Fatalf("requests = %v, want the create and the one question", log)
+				}
+			})
+		}
+	}
+
+	// The message's advice, followed: the same publish without the flag.
+	srv := apitest.NewServer(t)
+	srv.PlayStrictWithoutAccessRequests()
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}})
+	if res.code != 0 || !strings.Contains(publishRows(res.stdout.String()), "\n"+privateAccessRow+"\n") || !strings.HasSuffix(res.stdout.String(), "\nCRID: "+srv.Key.CRID+"\n") {
+		t.Fatalf("publish without --allow-requests on that service: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
+	}
+
+	// A service that has access requests and refuses the change has its own
+	// reason, and that is what the publisher reads.
+	srv = apitest.NewServer(t)
+	srv.SetResourceAccess(false)
+	res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "requests", srv.Key.CRID, "--on"}})
+	if res.code != exitcode.InvalidInput || strings.Contains(res.stderr.String(), unsupportedText) || !strings.Contains(res.stderr.String(), "access requests can be turned on only for a private resource") {
+		t.Fatalf("a real refusal: exit %d, stderr %q", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+}
+
 // TestGrantsRemoveBoundsDeviceIDs pins that the device ids of one command
 // are bounded as its public keys are. Each device id is its own request,
 // sent one after another, so more than 256 of them are refused before
@@ -1458,6 +1533,10 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 		// the sentences as the documents have them.
 		"approval_rule, in both listings: \"" + safetyLine + "\"",
 		"name_note, in the approve document: \"The name was typed by the person who asked. Nobody checked it.\"",
+		// A service without access requests, in both ways it can answer a
+		// publish that asks for them.
+		"A service that ignores the setting published the resource as private, without access requests",
+		"A service that refuses the setting published nothing: run the command again without --allow-requests to publish the resource as private.",
 		// What a removal says when it did not remove everyone it named.
 		"checks every device id against it before it takes any access away",
 		"Access that was taken away never reads as \"nothing was removed\".",

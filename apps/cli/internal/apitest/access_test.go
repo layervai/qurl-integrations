@@ -211,6 +211,52 @@ func TestOlderServiceHasNoAccessRequests(t *testing.T) {
 	}
 }
 
+// TestStrictServiceRefusesTheAccessRequestsMember pins the mock of the other
+// service from before access requests, the one that validates request bodies
+// strictly. A create or a change that carries the access_requests member is
+// refused with a 400, in either value, and nothing is created or changed. The
+// same requests without the member are answered as always, the routes for
+// access requests do not exist, and no row has the setting.
+func TestStrictServiceRefusesTheAccessRequestsMember(t *testing.T) {
+	srv := NewServer(t)
+	srv.SetResourceAccess(true, "kept")
+	srv.PlayStrictWithoutAccessRequests()
+	base := "/v1/resources/" + srv.Key.CRID
+	const create = `{"type":"url","target_url":"https://example.com/data","private":true%s}`
+
+	for _, member := range []string{`"access_requests":true`, `"access_requests":false`} {
+		if status, answer := accessCall(t, srv, http.MethodPost, "/v1/resources", strings.Replace(create, "%s", ","+member, 1)); status != http.StatusBadRequest || answer.Error.Code != "validation_error" {
+			t.Fatalf("create with %s = %d %q, want the 400 validation problem", member, status, answer.Error.Code)
+		}
+		// The whole request is refused, the part the service knows included.
+		if status, _ := accessCall(t, srv, http.MethodPatch, base, `{"allowed_device_keys":[],`+member+`}`); status != http.StatusBadRequest {
+			t.Fatalf("change with %s = %d, want 400", member, status)
+		}
+	}
+	_, detail := accessCall(t, srv, http.MethodGet, base, "")
+	var row struct {
+		Resource struct {
+			Keys []string `json:"allowed_device_keys"`
+		} `json:"resource"`
+	}
+	if err := json.Unmarshal(detail.Data, &row); err != nil || len(row.Resource.Keys) != 1 {
+		t.Fatalf("a refused change touched the device list: %s (%v)", detail.Data, err)
+	}
+
+	if status, _ := accessCall(t, srv, http.MethodPost, "/v1/resources", strings.Replace(create, "%s", "", 1)); status != http.StatusCreated {
+		t.Fatalf("a create without the member = %d, want 201", status)
+	}
+	if status, _ := accessCall(t, srv, http.MethodPatch, base, `{"allowed_device_keys":[]}`); status != http.StatusOK {
+		t.Fatalf("a change without the member = %d, want 200", status)
+	}
+	if status, answer := accessCall(t, srv, http.MethodGet, "/v1/access-requests", ""); status != http.StatusNotFound || answer.Error.Code != "not_found" {
+		t.Fatalf("the listing = %d %q, want 404: the route does not exist on this service", status, answer.Error.Code)
+	}
+	if on, people := resourceState(t, srv); on != nil || people != nil {
+		t.Fatalf("a row of that service has the setting or the people: %v %+v", on, people)
+	}
+}
+
 // TestAccessRequestRoutesNeedACredential pins that every access-request route
 // refuses a request with no credential and changes nothing.
 func TestAccessRequestRoutesNeedACredential(t *testing.T) {

@@ -1083,8 +1083,17 @@ Access requests can be turned on only for a private resource.
 
 A service that does not offer access requests yet answers every one of these
 commands with "this service does not offer access requests yet" and exit code
-11, never with a success. For `publish --allow-requests` the message also says
-that the resource was published as a private resource without them.
+11, never with a success, and prints nothing on stdout. That holds whichever
+way such a service treats the setting it does not know: `requests <CRID> --on`
+and `--off` get that message when it ignores the setting, and when it refuses
+the request.
+
+For `publish --allow-requests` the message also says what became of the
+publish, and prints no CRID in either case. A service that ignores the setting
+published the resource as private, without access requests: run the command
+again without `--allow-requests` to see its CRID. A service that refuses the
+setting published nothing: run the command again without `--allow-requests` to
+publish the resource as private.
 
 ### qurl get
 

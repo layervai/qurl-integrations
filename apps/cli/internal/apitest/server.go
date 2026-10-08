@@ -70,6 +70,10 @@ type Server struct {
 	noAccessRequests bool
 	// omitApprovedPeople leaves allowed_passkeys out of every resource row.
 	omitApprovedPeople bool
+	// refuseAccessRequestsMember makes a create or a change that carries
+	// access_requests a validation failure; see
+	// PlayStrictWithoutAccessRequests.
+	refuseAccessRequestsMember bool
 	// failf reports a contract violation to the owning test. It is t.Errorf,
 	// which is safe to call from a handler goroutine; this package's own
 	// tests replace it to observe the report without failing themselves.
@@ -555,6 +559,9 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 			"the request had invalid fields", invalid, nil)
 		return
 	}
+	if s.refusesAccessRequestsMember(w, body.AccessRequests) {
+		return
+	}
 	meta := map[string]any{}
 	s.mu.Lock()
 	refusal := s.applyCreateAccess(body.Private, body.AllowedDeviceKeys)
@@ -679,6 +686,9 @@ func (s *Server) handleDeviceGrants(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_request", "Bad Request", "request body must be JSON")
+		return
+	}
+	if s.refusesAccessRequestsMember(w, body.AccessRequests) {
 		return
 	}
 	s.mu.Lock()
