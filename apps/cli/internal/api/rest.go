@@ -330,22 +330,43 @@ func mayKeepExistingPublic(opts *PublishOptions, refusal error) bool {
 	return conflict.Existing == ExistingAccessPublic || conflict.Existing == ExistingAccessUnknown
 }
 
-// createdAtClockTolerance is how far before this command's first create the
-// created_at of a resource may lie for the resource to still count as made by
-// this command. created_at is read from the service's clock and the moment
-// the first create was sent from this machine's, so the two are compared with
-// room for a local clock that runs ahead. The room is small on purpose. A
-// wider one would let a resource that existed shortly before the command
-// pass as new. A local clock that is further ahead only means that a new
-// resource is left in place and the publisher is told to look, which is the
-// safe side: a delete cannot be undone.
+// createdAtClockTolerance is the room given to the two clocks when the
+// created_at of a resource is compared with this command's own times.
+// created_at is read from the service's clock, and the moments the first
+// create was sent and the last answer arrived from this machine's.
+//
+// The room is small on purpose. It is what a correct pair of clocks needs,
+// and no more: a wider one would let a resource that existed shortly before
+// the command pass as new.
 const createdAtClockTolerance = time.Minute
 
-// madeSince reports whether createdAt says that a resource was made after
-// this command sent its first create: it is present and not older than that
-// moment, less the clock tolerance.
-func madeSince(createdAt *time.Time, firstCreateSentAt time.Time) bool {
-	return createdAt != nil && !createdAt.Before(firstCreateSentAt.Add(-createdAtClockTolerance))
+// madeDuring reports whether createdAt is evidence that a resource was made
+// by the requests this command sent: it is present, not older than the
+// moment the first create was sent, and not later than the moment the answer
+// that carries it arrived, each with the clock tolerance.
+//
+// Both bounds are needed, because a local clock can be wrong either way.
+//
+// A local clock that runs ahead of the service's makes a resource this
+// command made look older than the command. It fails the first bound.
+//
+// A local clock that runs behind makes a resource that was made before the
+// command look newer than the first create, by as much as the clock is
+// behind, and the first bound alone would pass it. It also puts every
+// creation time the service reports into this machine's future. So a
+// creation time later than the answer that carried it fails the second
+// bound: a clock that far off cannot place the creation at all.
+//
+// A wrong clock therefore costs a delete that would have been right, never
+// one that is wrong: the resource is left in place and the publisher is told
+// to look. A delete cannot be undone.
+func madeDuring(createdAt *time.Time, firstCreateSentAt, answerArrivedAt time.Time) bool {
+	if createdAt == nil {
+		return false
+	}
+	earliest := firstCreateSentAt.Add(-createdAtClockTolerance)
+	latest := answerArrivedAt.Add(createdAtClockTolerance)
+	return !createdAt.Before(earliest) && !createdAt.After(latest)
 }
 
 // keepExistingPublic finishes a publish that named no privacy and was refused
@@ -367,11 +388,11 @@ func madeSince(createdAt *time.Time, firstCreateSentAt time.Time) bool {
 //
 // A delete is final: the CRID never comes back. So the command deletes only
 // what two things in the answer say this request made. The answer must say
-// the resource did not exist before, and its creation time must not be older
-// than firstCreateSentAt, the moment this command sent its first create. An
-// answer that lacks either, or that cannot be read, is not acted on: the
-// publish fails with the unconfirmed-privacy message, which sends the
-// publisher to look at what exists.
+// the resource did not exist before, and its creation time must lie between
+// firstCreateSentAt, the moment this command sent its first create, and the
+// moment that answer arrived. An answer that lacks either, or that cannot be
+// read, is not acted on: the publish fails with the unconfirmed-privacy
+// message, which sends the publisher to look at what exists.
 //
 // TODO(upstream-contract): the delete rests on two members of the service's
 // create answer: meta.found_existing is false only for a resource this
@@ -386,6 +407,7 @@ func (c *client) keepExistingPublic(ctx context.Context, body *publishRequest, r
 	if err != nil {
 		return nil, err
 	}
+	answerArrivedAt := c.now()
 	if reply.status != http.StatusCreated {
 		if problem := publishProblem(reply, &PublishOptions{}); !errors.Is(problem, ErrPublishAccessConflict) {
 			return nil, problem
@@ -412,7 +434,7 @@ func (c *client) keepExistingPublic(ctx context.Context, body *publishRequest, r
 	case *published.FoundExisting:
 		published.KeptPublic = true
 		return published, nil
-	case !madeSince(published.CreatedAt, firstCreateSentAt):
+	case !madeDuring(published.CreatedAt, firstCreateSentAt, answerArrivedAt):
 		// The answer says the resource is new, and its creation time does
 		// not bear that out. It may be the one that was published before,
 		// so it is left alone.

@@ -275,12 +275,14 @@ func TestPublishHoldsTheSecondCreateToWhatWasMeant(t *testing.T) {
 // TestPublishDeletesOnlyAResourceItsOwnRequestMade pins the two things that
 // must both hold before the command deletes the public resource a second
 // create answered with. A delete is final, so the answer's word that the
-// resource is new is not enough: its creation time must also be no older
-// than the moment this command sent its first create, less one minute for a
-// local clock that runs ahead of the service's. An answer with no creation
-// time, an older one, or one that is not a time is never acted on: nothing
+// resource is new is not enough: its creation time must also lie between the
+// moment this command sent its first create and the moment the answer
+// arrived, with one minute of room on each side for the two clocks. The
+// first bound is for a local clock that runs ahead of the service's, the
+// second for one that runs behind. An answer with no creation time, one
+// outside those bounds, or one that is not a time is never acted on: nothing
 // is deleted, no CRID is named, and the publisher is sent to look at what
-// exists.
+// exists. In this table the clock stands still, so both moments are the same.
 func TestPublishDeletesOnlyAResourceItsOwnRequestMade(t *testing.T) {
 	at := func(offset time.Duration) string { return firstCreateTime.Add(offset).Format(time.RFC3339) }
 	for _, test := range []struct {
@@ -294,6 +296,10 @@ func TestPublishDeletesOnlyAResourceItsOwnRequestMade(t *testing.T) {
 		{name: "at the clock tolerance", createdAt: at(-time.Minute), deleted: true},
 		{name: "just outside the clock tolerance", createdAt: at(-61 * time.Second)},
 		{name: "made a day before", createdAt: at(-24 * time.Hour)},
+		{name: "ahead of the answer, inside the clock tolerance", createdAt: at(59 * time.Second), deleted: true},
+		{name: "ahead of the answer, at the clock tolerance", createdAt: at(time.Minute), deleted: true},
+		{name: "ahead of the answer, just outside the clock tolerance", createdAt: at(61 * time.Second)},
+		{name: "a day ahead of the answer", createdAt: at(24 * time.Hour)},
 		{name: "no creation time"},
 		{name: "a creation time of zero", createdAt: "0001-01-01T00:00:00Z"},
 		{name: "a creation time that is not a time", createdAt: "yesterday"},
@@ -359,47 +365,68 @@ func TestPublishDeletesOnlyAResourceItsOwnRequestMade(t *testing.T) {
 		}
 	})
 
-	// The clock is read once, before the first create is sent. Here an hour
-	// passes while the first create is answered. Read afterwards, the clock
-	// would make the new resource look an hour old and it would be left in
-	// place; read before, the resource is newer than the command, and it is
-	// deleted.
-	t.Run("the clock is read before the first create", func(t *testing.T) {
-		srv := apitest.NewServer(t)
-		var mu sync.Mutex
-		now, readings := firstCreateTime, 0
-		srv.Script(http.MethodPost, "/v1/resources",
-			func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				now = now.Add(time.Hour)
-				mu.Unlock()
-				publicExistsRefusal(t)(w, r)
-			},
-			func(w http.ResponseWriter, _ *http.Request) {
-				apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
-					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "status": "active", "private": false, "created_at": at(time.Second),
-				}, map[string]any{"found_existing": false})
-			})
-		client, err := New(&Config{
-			BaseURL: srv.URL, APIKey: "lv_test_apitestingvalue123456789", Version: "test",
-			Now: func() time.Time {
+	// The clock is read twice, and when matters: before the first create is
+	// sent, and when the answer to the second arrives. Each case moves the
+	// clock while one of the two creates is being answered, and returns a
+	// creation time that is inside the bounds only if both readings were
+	// taken at those moments.
+	for _, test := range []struct {
+		name string
+		// duringFirst and duringSecond are how far the clock moves while
+		// each create is answered.
+		duringFirst, duringSecond time.Duration
+		createdAt                 time.Duration
+	}{
+		// An hour passes while the first create is refused. Read after
+		// that answer, the first reading would make a resource made one
+		// second into the command look an hour old.
+		{name: "the first reading is before the first create", duringFirst: time.Hour, createdAt: time.Second},
+		// Ten minutes pass while the second create is answered, and the
+		// resource was made five minutes in. Measured against the first
+		// reading, that creation time would lie in the future.
+		{name: "the second reading is when the answer arrives", duringSecond: 10 * time.Minute, createdAt: 5 * time.Minute},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			var mu sync.Mutex
+			now, readings := firstCreateTime, 0
+			advance := func(by time.Duration) {
 				mu.Lock()
 				defer mu.Unlock()
-				readings++
-				return now
-			},
+				now = now.Add(by)
+			}
+			srv.Script(http.MethodPost, "/v1/resources",
+				func(w http.ResponseWriter, r *http.Request) {
+					advance(test.duringFirst)
+					publicExistsRefusal(t)(w, r)
+				},
+				func(w http.ResponseWriter, _ *http.Request) {
+					advance(test.duringSecond)
+					apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+						"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "status": "active", "private": false, "created_at": at(test.createdAt),
+					}, map[string]any{"found_existing": false})
+				})
+			client, err := New(&Config{
+				BaseURL: srv.URL, APIKey: "lv_test_apitestingvalue123456789", Version: "test",
+				Now: func() time.Time {
+					mu.Lock()
+					defer mu.Unlock()
+					readings++
+					return now
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.Publish(t.Context(), existingTarget, PublishOptions{KeepExistingPublic: true})
+			var shown interface{ UserMessage() string }
+			mu.Lock()
+			defer mu.Unlock()
+			if !errors.As(err, &shown) || shown.UserMessage() != msgUnaskedPublicDeleted || readings != 2 {
+				t.Fatalf("error = %v after %d clock readings, want the deleted-resource failure after two readings", err, readings)
+			}
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = client.Publish(t.Context(), existingTarget, PublishOptions{KeepExistingPublic: true})
-		var shown interface{ UserMessage() string }
-		mu.Lock()
-		defer mu.Unlock()
-		if !errors.As(err, &shown) || shown.UserMessage() != msgUnaskedPublicDeleted || readings != 1 {
-			t.Fatalf("error = %v after %d clock readings, want the deleted-resource failure after one reading", err, readings)
-		}
-	})
+	}
 }
 
 // TestPublishSecondCreateRefused pins a second create that is refused too.

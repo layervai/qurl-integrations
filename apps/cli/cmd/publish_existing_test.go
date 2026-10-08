@@ -263,16 +263,19 @@ func TestPublishNeverKeepsAPublicResourceThatWasJustMade(t *testing.T) {
 }
 
 // TestPublishDeletesNothingItCannotShowItMade pins the second thing the
-// command needs before it deletes: a creation time in the answer that is no
-// older than the command's first create. A delete is final, and the answer's
-// word that the resource is new is one member of one answer. When the
-// creation time is older, or is not there, the resource may be the one that
-// was published before: nothing is deleted, no CRID is printed, the exit
-// code is 10, and the message sends the publisher to `qurl list`.
+// command needs before it deletes: a creation time in the answer that lies
+// within the time the command ran, give or take a minute for the clocks. A
+// delete is final, and the answer's word that the resource is new is one
+// member of one answer. When the creation time is older, lies ahead of the
+// answer, or is not there, the resource may be the one that was published
+// before, or the clocks cannot place it: nothing is deleted, no CRID is
+// printed, the exit code is 10, and the message sends the publisher to
+// `qurl list`.
 func TestPublishDeletesNothingItCannotShowItMade(t *testing.T) {
 	for name, createdAt := range map[string]string{
 		"a day before the command":       fixedNow.Add(-24 * time.Hour).Format(time.RFC3339),
 		"two minutes before the command": fixedNow.Add(-2 * time.Minute).Format(time.RFC3339),
+		"two minutes after the command":  fixedNow.Add(2 * time.Minute).Format(time.RFC3339),
 		"no creation time":               "",
 	} {
 		for _, local := range []bool{false, true} {

@@ -269,8 +269,8 @@ type Config struct {
 	Sleep func(time.Duration)
 	// NewRequestID mints the X-Request-Id value; nil means a random one.
 	NewRequestID func() string
-	// Now is the clock; nil means time.Now. Publish reads it once, to tell
-	// a resource this command made from one that existed before it.
+	// Now is the clock; nil means time.Now. Publish reads it to tell a
+	// resource this command made from one that existed before it.
 	Now func() time.Time
 	// HTTPClient is the underlying HTTP client. Nil, or an injected client with
 	// Timeout zero, gets a 30-second bound for each HTTP attempt. A nonzero
