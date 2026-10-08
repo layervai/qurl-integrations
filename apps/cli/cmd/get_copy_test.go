@@ -20,6 +20,17 @@ import (
 // section about private CRIDs (TestSharingCopyStatesTheDeviceAccessRule) and
 // in the share not-found hint.
 //
+// Both say in the same words which request comes first where it is offered:
+// get asks for a link this way first, a device that has an identity asks as
+// this device and mints a share link only when no link is given, and without
+// a device identity the answer is final and no identity is created.
+//
+// The README also says what asking this way costs: the service limits these
+// requests for each source address, a device that has an identity can send
+// two of them for one CRID, and a device that reaches the limit still gets
+// its link from the share link it mints. It gives no number for the limit:
+// the public documents of the SDK give none.
+//
 // Both name the three most common answers when no link is given, with the
 // exit codes of the table in internal/exitcode. Both say that these are the
 // most common answers and not all of them: get has more, such as a publisher
@@ -42,6 +53,11 @@ func TestGetCopyStatesWhatOpensWithOnlyACRID(t *testing.T) {
 		promise = "a public resource can also be fetched on any machine with only its CRID: no account and no setup."
 		notYet  = "The deployment this release ships does not offer it yet."
 		noNew   = "a machine with no device identity creates none"
+		// order says which request comes first, and how a device asks.
+		order = "Where it is offered, get asks for a link this way first. " +
+			"A device that has an identity asks as this device, so it can also get a link for a private resource it is allowed to open. " +
+			"Only when no link is given does it mint a share link. " +
+			"Without a device identity the answer is final, and " + noNew + "."
 		// common introduces the list of answers. allOfThem is the earlier
 		// wording, which claimed that the list was complete.
 		common    = "The three most common answers when no link is given:"
@@ -65,7 +81,7 @@ func TestGetCopyStatesWhatOpensWithOnlyACRID(t *testing.T) {
 		{"qurl get --help", help, `"%s" (exit code %d): %s`},
 		{"README", readme, "%s %d %s"},
 	} {
-		for _, want := range []string{"Where the deployment offers it, " + promise + " " + notYet, noNew + ". " + common} {
+		for _, want := range []string{"Where the deployment offers it, " + promise + " " + notYet, noNew + ". " + common, notYet + " " + order + " " + common} {
 			if got := strings.Count(surface.text, want); got != 1 {
 				t.Errorf("%s states %q %d times, want exactly once", surface.name, want, got)
 			}
@@ -81,8 +97,23 @@ func TestGetCopyStatesWhatOpensWithOnlyACRID(t *testing.T) {
 		}
 	}
 
-	// The whole of get's help, and the README's paragraph with its table,
-	// which ends where the table of get's flags begins.
+	// What asking this way costs, in the README only.
+	for _, want := range []string{
+		"The service limits these requests for each source address, so machines that reach the service from one shared address use the same limit.",
+		"A machine with no device identity sends one request for each link.",
+		`A device that has an identity sends one request for a public resource. For any other CRID it sends up to two: when the first answer is "not found", it asks once more as this device.`,
+		"When the limit is reached, a device that has an identity still gets its link: it mints a share link, as it does for every answer that is not a link.",
+		`A machine with no device identity gets "too many requests" and has to wait.`,
+		"With --session-duration, get mints the share link first, as it did before, because only a share link can carry that lifetime.",
+	} {
+		if got := strings.Count(readme, want); got != 1 {
+			t.Errorf("the README states %q %d times, want exactly once", want, got)
+		}
+	}
+
+	// The whole of get's help, and the README's paragraphs with the table of
+	// answers and the cost of asking, which end where the table of get's
+	// flags begins.
 	start := strings.Index(readme, "Where the deployment offers it, "+promise)
 	if start < 0 {
 		t.Fatal("the README has no paragraph about fetching with only a CRID")

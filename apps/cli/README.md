@@ -1191,15 +1191,35 @@ downloads — nothing is ever acted on unverified:
 Where the deployment offers it, a public resource can also be fetched on any
 machine with only its CRID: no account and no setup. The deployment this
 release ships does not offer it yet. Where it is offered, `get` asks for a
-link with the CRID alone when this device cannot share the resource, and a
-machine with no device identity creates none. The three most common answers
-when no link is given:
+link this way first. A device that has an identity asks as this device, so it
+can also get a link for a private resource it is allowed to open. Only when no
+link is given does it mint a share link. Without a device identity the answer
+is final, and a machine with no device identity creates none. The three most
+common answers when no link is given:
 
 | Answer | Exit code | What it means |
 |--------|-----------|---------------|
 | not found | 5 | The CRID is mistyped, the resource was removed, or it is not open to this machine. |
 | can't give a link right now | 11 | Nothing is wrong with the CRID. Try again later. |
 | too many requests | 9 | Wait, then try again. |
+
+Asking for a link this way has a cost. The service limits these requests for
+each source address, so machines that reach the service from one shared
+address use the same limit.
+
+- A machine with no device identity sends one request for each link.
+- A device that has an identity sends one request for a public resource. For
+  any other CRID it sends up to two: when the first answer is "not found", it
+  asks once more as this device.
+- A download whose link expired before any content arrived asks again in the
+  same way.
+
+When the limit is reached, a device that has an identity still gets its link:
+it mints a share link, as it does for every answer that is not a link. A
+machine with no device identity gets "too many requests" and has to wait.
+
+With `--session-duration`, `get` mints the share link first, as it did before,
+because only a share link can carry that lifetime.
 
 | Flag | Description |
 |------|-------------|
