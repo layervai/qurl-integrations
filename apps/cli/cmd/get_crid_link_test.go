@@ -1976,10 +1976,12 @@ func TestGetThroughTheRealSDKCheckIsUnchanged(t *testing.T) {
 // the owner's instruction to enroll this machine under their account, so the
 // machine counts as one with an identity and keeps its share request.
 //
-// Where the link request is offered, it comes first here too. The machine
-// has no device state, so it has no device key: it asks with the CRID alone,
-// never as a device, and the read of the key changes nothing in its empty
-// state directory.
+// Where the link request is offered, it comes first here too, and that is
+// intended. The machine has no device state, so it has no device key: it
+// asks with the CRID alone, never as a device, and the read of the key
+// changes nothing in its empty state directory. The cost is one link request
+// before the share request, with the short time limit a link request has
+// when a share request follows it.
 //
 //   - A resource that opens with the CRID alone is answered there. The share
 //     request is not sent, so the machine is not enrolled by this run. That
@@ -2048,6 +2050,52 @@ func TestGetWithAnAccountKeyAsksWithTheCRIDAloneFirst(t *testing.T) {
 			run.mustHaveDelivered(t, mode)
 			if len(requests.asked) != 1 || requests.askedAsDevice() != 0 {
 				t.Errorf("made the link request %d times, %d of them as a device; want once, with the CRID alone", len(requests.asked), requests.askedAsDevice())
+			}
+			if !enrolled {
+				t.Error("the machine did not enroll under the account")
+			}
+			if got, want := apiRequests(srv), enrollingShare(srv); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Errorf("qURL API requests = %q, want %q", got, want)
+			}
+		})
+
+		// The order and the cost, with the production read of the device key.
+		// The read finds no device state, so the one link request is made
+		// with the CRID alone: before anything is sent to the qURL API, and
+		// with the short limit. The share request comes after it and enrolls
+		// the machine. Nothing else reads a key: the request as a device
+		// fails the test.
+		t.Run("the link request first, then the share request/"+mode.name, func(t *testing.T) {
+			srv := downloadServer(t)
+			enrolled := false
+			requests := &linkRequests{err: notFound}
+			contexts := &requestContexts{}
+			var apiSeen [][]string
+			configure := func(args []string) *runOpts {
+				opts := accountKeyMachine(t, srv, &enrolled)(append(args, "--verbose"))
+				opts.requestCRIDLink = func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
+					contexts.record(ctx)
+					apiSeen = append(apiSeen, apiRequests(srv))
+					return requests.answer(ctx, resourceCRID)
+				}
+				opts.requestCRIDLinkAsDevice = mustNotAskAsTheDevice(t)
+				return opts
+			}
+			run := runShareMode(t, srv, srv.URL, mode, configure)
+			run.mustHaveDelivered(t, mode)
+
+			if len(requests.asked) != 1 || len(apiSeen[0]) != 0 {
+				t.Fatalf("made the link request %d times, the first after %q; want once, before anything is sent to the qURL API", len(requests.asked), apiSeen)
+			}
+			if !contexts.bounded[0] || contexts.limits[0] > cridLinkTimeoutBeforeShare {
+				t.Errorf("the link request: time limit set = %t (%s), want a limit of at most %s", contexts.bounded[0], contexts.limits[0], cridLinkTimeoutBeforeShare)
+			}
+			stderr := run.result.stderr.String()
+			if want := "[debug] " + fmt.Sprintf(msgCRIDLinkDeviceKeyNotRead, connectorstate.NoDeviceKeyNoState) + "\n"; strings.Count(stderr, want) != 1 {
+				t.Errorf("stderr = %q, want the line %q once: the read of the device key found no device state", stderr, want)
+			}
+			if strings.Contains(stderr, msgCRIDLinkAsDevice) {
+				t.Errorf("stderr = %q, must not say that the machine asked as a device", stderr)
 			}
 			if !enrolled {
 				t.Error("the machine did not enroll under the account")

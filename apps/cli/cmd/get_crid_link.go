@@ -43,6 +43,18 @@ import (
 // no CRID, sends nothing and creates nothing. It has three answers: the
 // request is offered, it is not offered, or the settings are wrong.
 //
+// "A device with an identity" is a machine that can make the share request
+// without creating an identity that belongs to no account
+// (hasDeviceIdentity). There are two kinds: a machine that holds device
+// state, and a machine that has an account key in its environment and no
+// device state yet. "A machine with no identity" has neither. The rules
+// below are the same for both kinds of device with an identity, and this is
+// intended: a machine with only an account key also makes the link request
+// before its share request. It has no device key, so it asks with the CRID
+// alone. For a resource it may share, that is one request more than it sent
+// before the link request came first, and it waits for the answer for up to
+// the short time limit (cridLinkTimeoutBeforeShare).
+//
 // The rules:
 //
 //   - A device with an identity, where the request is offered and no share
@@ -57,7 +69,8 @@ import (
 //   - That device asks as this device when it can read its own key, and with
 //     the CRID alone when it cannot. The key is read without changing the
 //     device state (opts.readDeviceKey). A read that fails is not an error:
-//     the device asks with the CRID alone.
+//     the device asks with the CRID alone. A machine with only an account
+//     key has no device state, so its read always gives no key.
 //   - When a share option is set, get keeps the order it had before: the
 //     share request first, and the link request with the CRID alone only
 //     after "not found". Only the share request can carry the option.
@@ -515,8 +528,10 @@ func (opts *globalOpts) readDeviceStaticPrivateKey(ctx context.Context) ([]byte,
 	return connectorstate.ReadDeviceStaticPrivateKey(ctx, stateDir, opts.resolvedSupervision)
 }
 
-// linkWithNoIdentity is linkForGet for a machine that holds no device
-// identity and has no account key.
+// linkWithNoIdentity is linkForGet for a machine with no identity: it holds
+// no device state and has no account key. A machine that has only an account
+// key does not come here. It is a device with an identity, and linkForGet
+// sends it to linkShareFirst or to linkRequestFirst.
 //
 // Where the link request is offered, its answer is final, a refusal
 // included, and so is a fault in the settings. In both cases this function
