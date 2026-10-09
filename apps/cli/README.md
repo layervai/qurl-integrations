@@ -1229,9 +1229,11 @@ with the CRID alone and waits longer for that answer, as it did before it
 asked this way first. So a slow service does not cost a link. That request
 counts in the limit too.
 
-When the limit is reached, a device that has an identity still gets its link:
-it mints a share link, as it does for every answer that is not a link. A
-machine with no device identity gets "too many requests" and has to wait.
+When the limit is reached, a device that has an identity mints a share link,
+as it does for every answer that is not a link, and so does a machine that has
+an account key. That gives a link when this device may share the resource.
+When it may not, the answer is "too many requests", as it is on a machine with
+no device identity and no account key. Wait, then try again.
 
 With `--session-duration`, `get` mints the share link first, as it did before,
 because only a share link can carry that lifetime.

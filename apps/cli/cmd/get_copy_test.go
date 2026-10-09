@@ -35,9 +35,9 @@ import (
 // request before it mints a share link. Both wait for the answer before they
 // mint a share link, for as long as cridLinkTimeoutBeforeShare says; when no
 // answer came in that time and no share link can be minted, get asks once
-// more. A device that reaches the limit still gets its link from the share
-// link it mints. The README gives no number for the limit: the public
-// documents of the SDK give none.
+// more. A device that reaches the limit mints a share link, which gives a
+// link only when the device may share the resource. The README gives no
+// number for the limit: the public documents of the SDK give none.
 //
 // Both name the three most common answers when no link is given, with the
 // exit codes of the table in internal/exitcode. Both say that these are the
@@ -124,13 +124,19 @@ func TestGetCopyStatesWhatOpensWithOnlyACRID(t *testing.T) {
 			cridLinkTimeoutBeforeShare/time.Second),
 		`If no answer came in that time, and the attempt to mint a share link ends in "not found", get asks once more with the CRID alone and waits longer for that answer, as it did before it asked this way first. ` +
 			"So a slow service does not cost a link. That request counts in the limit too.",
-		"When the limit is reached, a device that has an identity still gets its link: it mints a share link, as it does for every answer that is not a link.",
-		`A machine with no device identity gets "too many requests" and has to wait.`,
+		"When the limit is reached, a device that has an identity mints a share link, as it does for every answer that is not a link, and so does a machine that has an account key. " +
+			"That gives a link when this device may share the resource.",
+		`When it may not, the answer is "too many requests", as it is on a machine with no device identity and no account key. Wait, then try again.`,
 		"With --session-duration, get mints the share link first, as it did before, because only a share link can carry that lifetime.",
 	} {
 		if got := strings.Count(readme, want); got != 1 {
 			t.Errorf("the README states %q %d times, want exactly once", want, got)
 		}
+	}
+	// The earlier wording promised a link at the limit to every device that
+	// has an identity. A device that may not share the resource gets none.
+	if stillGets := "still gets its link"; strings.Contains(readme, stillGets) {
+		t.Errorf("the README says %q, but a device that reaches the limit and may not share the resource gets no link", stillGets)
 	}
 
 	// The whole of get's help, and the README's paragraphs with the table of
