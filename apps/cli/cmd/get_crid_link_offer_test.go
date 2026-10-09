@@ -628,6 +628,80 @@ func TestGetOnAMachineWithNoIdentityThroughTheSDK(t *testing.T) {
 	}
 }
 
+// relayThatIsSlowOnce is the HTTP transport of a relay that does not answer
+// the first request it gets. That request waits until its context ends, and
+// then fails with the error of the context, as a transport does. Every later
+// request goes to next.
+type relayThatIsSlowOnce struct {
+	next     http.RoundTripper
+	requests int
+}
+
+func (r *relayThatIsSlowOnce) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.requests++
+	if r.requests > 1 {
+		return r.next.RoundTrip(req)
+	}
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+// TestGetMakesTheLinkRequestOnceMoreThroughTheSDK runs the link request that
+// is made once more with nothing injected between the command and the SDK.
+// The relay does not answer the first link request, so it is the SDK itself
+// that reports the end of the short time limit. get must read that report as
+// "no answer when the short limit ran out". If it read it as anything else,
+// it would not ask once more, and the device would get no link.
+//
+// The share request says "not found". The request made once more reaches the
+// SDK's server, which issues the link, and the link passes the production
+// check against the CRID. The server answers one request, and not under a
+// device key, also when the first request was made as this device.
+func TestGetMakesTheLinkRequestOnceMoreThroughTheSDK(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	for _, readable := range []bool{true, false} {
+		for _, mode := range getModes() {
+			t.Run(fmt.Sprintf("key readable=%t/%s", readable, mode.name), func(t *testing.T) {
+				path := newSDKLinkPath(t, nil)
+				relay := &relayThatIsSlowOnce{next: path.server}
+				path.opener.CRIDLinkHTTPClient = &http.Client{Transport: relay}
+				srv := serverForCRID(t, path.server.CRID())
+				shareNotFoundTwice(t, srv)
+				keyReads := noDeviceKey(connectorstate.NoDeviceKeyUnreadable)
+				if readable {
+					keyReads = deviceKeyOf(t, state)
+				}
+				var verified, granted []string
+				configure := func(args []string) *runOpts {
+					opts := withDeviceKey(path.wire(t, srv, enrolledDevice(t, state), &verified, &granted), keyReads.read)(args)
+					opts.linkTimeoutBeforeShare = testShortLimit
+					return opts
+				}
+
+				run := runShareMode(t, srv, srv.URL, mode, configure)
+				run.link = path.link
+				run.mustHaveDelivered(t, mode)
+
+				requests := path.server.Requests()
+				if relay.requests != 2 || len(requests) != 1 || requests[0].AsDevice || requests[0].CRID != path.server.CRID() {
+					t.Errorf("the relay got %d request(s) and the service answered %+v; want two requests to the relay, and one answer of the service, for the CRID and not under a device key",
+						relay.requests, requests)
+				}
+				if len(verified) != 1 || verified[0] != path.server.CRID() {
+					t.Errorf("the issued link was checked against %q, want exactly once against %s", verified, path.server.CRID())
+				}
+				if got, want := apiRequests(srv), []string{"GET /v1/me", "POST " + shareRoute(srv)}; strings.Join(got, "\n") != strings.Join(want, "\n") {
+					t.Errorf("qURL API requests = %q, want %q: one share request, between the two link requests", got, want)
+				}
+				mustHaveReadTheKeyOnce(t, keyReads)
+			})
+		}
+	}
+}
+
 // TestGetReportsLinkSettingsThatCannotBeUsed covers each way the settings
 // can name where to ask for a link and be wrong about it. On a machine with
 // no identity that is the whole answer: the setup message, the configuration
