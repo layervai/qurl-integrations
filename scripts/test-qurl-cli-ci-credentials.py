@@ -107,6 +107,7 @@ class FakeAPI:
         body: bytes | None = None,
         content_type: str | None = None,
         extra_headers: dict[str, str] | None = None,
+        max_response: int = credentials.MAX_RESPONSE,
     ) -> tuple[int, bytes]:
         parsed = urllib.parse.urlsplit(url)
         assert parsed.netloc == "sandbox.example", "unexpected Auth0 request"
@@ -696,10 +697,13 @@ def test_pair_failure_revokes_both_exact_keys_with_the_same_token() -> None:
         body: bytes | None = None,
         content_type: str | None = None,
         extra_headers: dict[str, str] | None = None,
+        max_response: int = credentials.MAX_RESPONSE,
     ) -> tuple[int, bytes]:
         if method == "GET" and bearer == "lv_test_" + f"{1:043d}":
             return 401, b"{}"
-        return fake(url, method, bearer, body, content_type, extra_headers)
+        return fake(
+            url, method, bearer, body, content_type, extra_headers, max_response
+        )
 
     with (
         tempfile.TemporaryDirectory() as raw_root,
@@ -1054,8 +1058,9 @@ def test_bounded_valid_pagination() -> None:
         body: bytes | None = None,
         content_type: str | None = None,
         extra_headers: dict[str, str] | None = None,
+        max_response: int = credentials.MAX_RESPONSE,
     ) -> tuple[int, bytes]:
-        del bearer, body, content_type, extra_headers
+        del bearer, body, content_type, extra_headers, max_response
         assert method == "GET"
         parsed = urllib.parse.urlsplit(url)
         query = urllib.parse.parse_qs(parsed.query)
@@ -1089,6 +1094,185 @@ def test_bounded_valid_pagination() -> None:
     )
 
 
+class FakeHTTPResponse:
+    """What urllib hands to request(): a status and a body read up to a limit."""
+
+    def __init__(self, raw: bytes, status: int = 200) -> None:
+        self.status = status
+        self.raw = raw
+        self.read_limits: list[int] = []
+
+    def read(self, limit: int) -> bytes:
+        self.read_limits.append(limit)
+        return self.raw[:limit]
+
+    def close(self) -> None:
+        pass
+
+
+@contextlib.contextmanager
+def served(raw: bytes):
+    """Runs the real request(), with its size check, on one response of these bytes.
+
+    Every request inside the block gets these same bytes, so it fits a flow of
+    one request or of requests that may all be answered alike, not pagination.
+    """
+    response = FakeHTTPResponse(raw)
+    opener = mock.Mock()
+    opener.open.return_value = response
+    with mock.patch.object(
+        credentials.urllib.request, "build_opener", return_value=opener
+    ):
+        yield response
+
+
+def service_resource_row(index: int, device_keys: int = 0) -> dict[str, object]:
+    """One row of GET /v1/resources with the members the service sends today."""
+    return {
+        "private": True,
+        "allowed_device_keys": [
+            "k" * 40 + f"{key:03d}" + "=" for key in range(device_keys)
+        ],
+        "access_requests": False,
+        "allowed_passkeys": [],
+        "resource_id": f"r_{index:011d}",
+        "crid": "q" * 60,
+        "type": "url",
+        "target_url": f"https://example.com/?qurl-private-sandbox-device-journey={index}",
+        "knock_resource_id": f"kr_{index:028d}",
+        "connector_routing_id": "",
+        "status": "revoked",
+        "desired_state": "off",
+        "serving_epoch": 0,
+        "description": f"qurl CLI journey v2 resource {index}/1/host",
+        "tags": ["journey", "ci"],
+        "custom_domain": None,
+        "alias": "",
+        "slug": "",
+        "preserve_host": False,
+        "session_duration_cap": 0,
+        "qurl_count": 0,
+        "created_at": "2026-10-09T05:20:34.989796520Z",
+        "expires_at": "2126-09-15T05:20:34.989796520Z",
+        "publisher": {"verified": False},
+        "tombstoned_at": "2026-10-09T05:24:09.062330042Z",
+    }
+
+
+def inventory_page(rows: list[dict[str, object]]) -> bytes:
+    return json.dumps({"data": rows, "meta": {"has_more": False}}).encode()
+
+
+def read_inventory() -> list[dict[str, object]]:
+    return credentials.paged_rows(
+        "https://sandbox.example",
+        "automation_key",
+        "/v1/resources",
+        "qURL resource cleanup",
+        status_filter=None,
+        deadline=time.monotonic() + 60,
+    )
+
+
+def test_a_page_of_rows_has_the_bound_of_a_page() -> None:
+    # A full page of ordinary rows of the CI owner. It is more than the bound of
+    # an ordinary response, which is what broke every journey cleanup: the
+    # inventory was refused for its size although every row was fine.
+    ordinary = [
+        service_resource_row(index) for index in range(credentials.INVENTORY_PAGE_SIZE)
+    ]
+    page = inventory_page(ordinary)
+    assert credentials.MAX_RESPONSE < len(page) < credentials.INVENTORY_MAX_RESPONSE
+    with served(page) as response:
+        rows = read_inventory()
+    assert [row["resource_id"] for row in rows] == [
+        row["resource_id"] for row in ordinary
+    ]
+    assert response.read_limits == [credentials.INVENTORY_MAX_RESPONSE + 1]
+
+    # A page whose every row carries a full list of device keys still fits.
+    heavy = inventory_page(
+        [
+            service_resource_row(index, device_keys=256)
+            for index in range(credentials.INVENTORY_PAGE_SIZE)
+        ]
+    )
+    assert 1024 * 1024 < len(heavy) < credentials.INVENTORY_MAX_RESPONSE
+    with served(heavy):
+        assert len(read_inventory()) == credentials.INVENTORY_PAGE_SIZE
+
+    # The bound of a page is a bound: one byte more is refused before parsing.
+    with served(b"x" * (credentials.INVENTORY_MAX_RESPONSE + 1)):
+        try:
+            read_inventory()
+        except credentials.CredentialError as exc:
+            assert str(exc) == "credential HTTP response exceeds its size limit"
+        else:
+            raise AssertionError("an inventory page above its bound was accepted")
+    with served(b" " * (credentials.INVENTORY_MAX_RESPONSE - len(page)) + page):
+        assert len(read_inventory()) == credentials.INVENTORY_PAGE_SIZE
+
+    # What an operator reads when a page is above its bound: each inventory
+    # failed, by its name, and neither stopped the other from being tried.
+    with served(b"x" * (credentials.INVENTORY_MAX_RESPONSE + 1)):
+        inventory = credentials.reconciliation_inventory(
+            "https://sandbox.example", "automation_key"
+        )
+    assert inventory.resource_failure == "resource_inventory"
+    assert inventory.resources is None
+    assert inventory.credential_failure == "credential_inventory"
+
+    # Every other response keeps the small bound, to the byte.
+    with served(b"x" * (credentials.MAX_RESPONSE + 1)) as response:
+        try:
+            credentials.qurl_json("https://sandbox.example", "token", "GET", "/v1/me")
+        except credentials.CredentialError as exc:
+            assert str(exc) == "credential HTTP response exceeds its size limit"
+        else:
+            raise AssertionError("an ordinary response above 64 KiB was accepted")
+    assert response.read_limits == [credentials.MAX_RESPONSE + 1]
+    # So does a call of request() that names no bound.
+    with served(b"x" * (credentials.MAX_RESPONSE + 1)) as response:
+        try:
+            credentials.request("https://sandbox.example/v1/me", "GET")
+        except credentials.CredentialError as exc:
+            assert str(exc) == "credential HTTP response exceeds its size limit"
+        else:
+            raise AssertionError("request() without a bound read more than 64 KiB")
+    assert response.read_limits == [credentials.MAX_RESPONSE + 1]
+    identity = json.dumps({"data": {"padding": ""}}).encode()
+    with served(identity + b" " * (credentials.MAX_RESPONSE - len(identity))):
+        status, _ = credentials.qurl_json(
+            "https://sandbox.example", "token", "GET", "/v1/me"
+        )
+    assert status == 200
+
+    # The lookup of one Connector resource is a list of resource rows too.
+    limits: list[int] = []
+
+    def lookup(
+        url: str,
+        method: str,
+        bearer: str | None = None,
+        body: bytes | None = None,
+        content_type: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+        max_response: int = credentials.MAX_RESPONSE,
+    ) -> tuple[int, bytes]:
+        del bearer, body, content_type, extra_headers
+        assert method == "GET" and urllib.parse.urlsplit(url).path == "/v1/resources"
+        limits.append(max_response)
+        return 200, b'{"data":[]}'
+
+    with mock.patch.object(credentials, "request", lookup):
+        assert not credentials.retry_connector_resource_delete(
+            "https://sandbox.example",
+            "automation_key",
+            "connector-cli-journey-v2-" + "0" * 24,
+        )
+    assert limits == [credentials.INVENTORY_MAX_RESPONSE]
+
+
 def test_pagination_safety_limits_fail_closed() -> None:
     calls = 0
 
@@ -1099,9 +1283,10 @@ def test_pagination_safety_limits_fail_closed() -> None:
         body: bytes | None = None,
         content_type: str | None = None,
         extra_headers: dict[str, str] | None = None,
+        max_response: int = credentials.MAX_RESPONSE,
     ) -> tuple[int, bytes]:
         nonlocal calls
-        del url, bearer, body, content_type, extra_headers
+        del url, bearer, body, content_type, extra_headers, max_response
         assert method == "GET"
         calls += 1
         return (
@@ -1288,8 +1473,9 @@ def test_connector_cleanup_lookup_fails_closed() -> None:
             body: bytes | None = None,
             content_type: str | None = None,
             extra_headers: dict[str, str] | None = None,
+            max_response: int = credentials.MAX_RESPONSE,
         ) -> tuple[int, bytes]:
-            del bearer, body, content_type, extra_headers
+            del bearer, body, content_type, extra_headers, max_response
             parsed = urllib.parse.urlsplit(url)
             assert parsed.path == "/v1/resources"
             assert urllib.parse.parse_qs(parsed.query) == {"slug": [connector_id]}
@@ -1319,8 +1505,9 @@ def test_connector_cleanup_lookup_fails_closed() -> None:
         body: bytes | None = None,
         content_type: str | None = None,
         extra_headers: dict[str, str] | None = None,
+        max_response: int = credentials.MAX_RESPONSE,
     ) -> tuple[int, bytes]:
-        del url, bearer, body, content_type, extra_headers
+        del url, bearer, body, content_type, extra_headers, max_response
         assert method == "GET"
         return 200, b'{"data":[]}'
 
@@ -1794,6 +1981,7 @@ def main() -> None:
     test_cleanup_budgets_and_batch_caps_stay_consistent()
     test_automation_key_identity_and_lifetime_fail_closed()
     test_bounded_valid_pagination()
+    test_a_page_of_rows_has_the_bound_of_a_page()
     test_pagination_safety_limits_fail_closed()
     test_reconciliation_reserves_time_for_resource_inventory()
     test_connector_cleanup_lookup_fails_closed()
