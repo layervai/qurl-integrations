@@ -43,13 +43,14 @@ device gets "not found".
 Where the deployment offers it, a public resource can also be fetched on any
 machine with only its CRID: no account and no setup. The deployment this
 release ships does not offer it yet. Where it is offered, get asks for a link
-this way first. A device that has an identity asks as this device, so it can
-also get a link for a private resource it is allowed to open. A machine that
+this way first. On Linux and macOS a device that has an identity asks as this
+device, so it can also get a link this way for a private resource it is
+allowed to open. On other systems it asks with the CRID alone. A machine that
 has an account key in its environment and no device identity yet asks first
-too, with the CRID alone. Only when no link is given do these two mint a
-share link. On a machine with no device identity and no account key the
-answer is final, and that machine creates no device identity. The three most
-common answers when no link is given:
+too, with the CRID alone. Only when no link is given do these mint a share
+link. On a machine with no device identity and no account key the answer is
+final, and that machine creates no device identity. The three most common
+answers when no link is given:
 
   - "not found" (exit code 5): the CRID is mistyped, the resource was
     removed, or it is not open to this machine.

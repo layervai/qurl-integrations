@@ -65,9 +65,10 @@ func TestGetCopyStatesWhatOpensWithOnlyACRID(t *testing.T) {
 		// order says which request comes first, and how each kind of machine
 		// asks.
 		order = "Where it is offered, get asks for a link this way first. " +
-			"A device that has an identity asks as this device, so it can also get a link for a private resource it is allowed to open. " +
+			"On Linux and macOS a device that has an identity asks as this device, so it can also get a link this way for a private resource it is allowed to open. " +
+			"On other systems it asks with the CRID alone. " +
 			"A machine that has an account key in its environment and no device identity yet asks first too, with the CRID alone. " +
-			"Only when no link is given do these two mint a share link. " +
+			"Only when no link is given do these mint a share link. " +
 			"On a machine with no device identity and no account key the answer is final, and " + noNew + "."
 		// common introduces the list of answers. allOfThem is the earlier
 		// wording, which claimed that the list was complete.
@@ -116,7 +117,7 @@ func TestGetCopyStatesWhatOpensWithOnlyACRID(t *testing.T) {
 	for _, want := range []string{
 		"The service limits these requests for each source address, so machines that reach the service from one shared address use the same limit.",
 		"A machine with no device identity and no account key sends one request for each link.",
-		`A device that has an identity sends one request for a public resource. For any other CRID it sends up to two: when the first answer is "not found", it asks once more as this device.`,
+		`A device that has an identity sends one request for a public resource. For any other CRID it sends up to two on Linux and macOS: when the first answer is "not found", it asks once more as this device. On other systems it sends one.`,
 		"A machine that has an account key and no device identity yet sends one request for each link before it mints a share link, and that request counts in the limit. " +
 			"For a resource it may share, that is one request more than it sent before get asked this way first.",
 		fmt.Sprintf("Asking first also costs time when the service does not answer. "+
