@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.4.0](https://github.com/layervai/qurl-integrations/compare/v3.3.1...v3.4.0) (2026-10-09)
+
+
+### Features
+
+* **cli:** add and remove device grants without replacing the list ([0844a34](https://github.com/layervai/qurl-integrations/commit/0844a34030160e467912d66781998ac6b281eda3))
+* **cli:** let people without the CLI ask for access to a private resource ([fcc9905](https://github.com/layervai/qurl-integrations/commit/fcc9905251753d94c8a6232b629fa4e590cb01ae))
+* **cli:** publish is private unless --public ([0844a34](https://github.com/layervai/qurl-integrations/commit/0844a34030160e467912d66781998ac6b281eda3))
+
+
+### Bug Fixes
+
+* **cli:** say "not said" when the service does not list who has access ([5a591fe](https://github.com/layervai/qurl-integrations/commit/5a591fe2ec115614874ea77f3aeda0ad3eaed1e6))
+* **deps:** build the CLI and Slack images with Go 1.26.9 ([#1574](https://github.com/layervai/qurl-integrations/issues/1574)) ([56ca8ef](https://github.com/layervai/qurl-integrations/commit/56ca8efa35c15e0e229592525d73256afb13786f))
+
 ## [3.3.1](https://github.com/layervai/qurl-integrations/compare/v3.3.0...v3.3.1) (2026-10-06)
 
 
