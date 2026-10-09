@@ -68,11 +68,13 @@ devices you allowed; any other device gets "not found".
 To share a private resource with people who have no qURL CLI, publish it with
 --allow-requests. They open the resource's address in a browser, ask for
 access, and are shown a six-digit code to give you. You approve each person
-with "qurl approve <CRID> <code>": approve a code only when the person gave it
-to you themselves. The address and the CRID are safe to send to anyone,
-because a private resource opens only for you and the people you allow. If the
-target is already published as a private resource, --allow-requests turns
-access requests on for that resource.
+with "qurl approve <CRID> <code>". A name can be typed by anyone, and a code
+shows only that it came from the screen that asked: approve a code only when
+the person you mean to let in gave it to you themselves, in a way you know it
+is them. The address and the CRID are safe to send to anyone, because a
+private resource opens only for you and the people you allow. If the target is
+already published as a private resource, --allow-requests turns access
+requests on for that resource.
 
 Where the deployment offers it, a public resource can also be opened by anyone
 who has its CRID. The deployment this release ships does not offer it yet.

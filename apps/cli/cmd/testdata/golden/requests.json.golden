@@ -17,6 +17,6 @@
       "crid": "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
     }
   ],
-  "approval_rule": "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve \u003cCRID\u003e \u003ccode\u003e`; a name can be typed by anyone, so the code is the only proof of who is asking.",
+  "approval_rule": "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve \u003cCRID\u003e \u003ccode\u003e`; a name can be typed by anyone, and a code shows only that it came from the screen that asked, so approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them (in person, on a call, or from their usual number or account).",
   "has_more": false
 }

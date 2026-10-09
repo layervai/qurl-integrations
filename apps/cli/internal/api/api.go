@@ -219,12 +219,14 @@ type AllowedPasskey struct {
 
 // AccessRequest is one pending request for access to a private resource.
 //
-// It has no code, on purpose. The six-digit code of a request is shown to the
-// person who asked and to nobody else, and approving by that code is what
-// ties an approval to a person. A listing that carried the codes would let a
-// publisher, or an agent working for one, approve from the list: approval by
-// name with one more step. So the type that every listing is made of cannot
-// hold one, and nothing that renders a listing can print one.
+// It has no code, on purpose. The six-digit code of a request is shown on the
+// screen that asked and nowhere else, and approving by that code is what ties
+// an approval to that screen. Who is at the screen is for the publisher to
+// know: they approve a code only when the person they mean to let in gave it
+// to them. A listing that carried the codes would let a publisher, or an
+// agent working for one, approve from the list: approval by name with one
+// more step. So the type that every listing is made of cannot hold one, and
+// nothing that renders a listing can print one.
 type AccessRequest struct {
 	// Name is what the requester typed. Anyone can type any name.
 	Name string

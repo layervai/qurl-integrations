@@ -185,7 +185,7 @@ func TestAccessRequestsListing(t *testing.T) {
 		if !all {
 			approve = "qurl approve " + accessCRID + " <code>"
 		}
-		want += "\nTo let one of these people in, ask them for the six-digit code on their screen and run `" + approve + "`; a name can be typed by anyone, so the code is the only proof of who is asking.\n"
+		want += "\nTo let one of these people in, ask them for the six-digit code on their screen and run `" + approve + "`; a name can be typed by anyone, and a code shows only that it came from the screen that asked, so approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them (in person, on a call, or from their usual number or account).\n"
 		if got := out.String(); got != want || errBuf.Len() != 0 {
 			t.Fatalf("all=%t: listing =\n%s\nwant\n%s\nstderr %q", all, got, want, errBuf.String())
 		}
@@ -223,13 +223,22 @@ func TestAccessRequestsListingAlwaysEndsWithTheSafetyLine(t *testing.T) {
 			}
 		}
 	}
+	// The line says both halves of the rule: what a name is worth, and what
+	// a code shows and from whom to take one.
 	for _, part := range []string{
 		"ask them for the six-digit code on their screen", "`qurl approve <CRID> <code>`",
-		"a name can be typed by anyone", "the code is the only proof of who is asking",
+		"a name can be typed by anyone", "a code shows only that it came from the screen that asked",
+		"approve a code only when the person you mean to let in gave it to you themselves",
+		"in a way you know it is them (in person, on a call, or from their usual number or account)",
 	} {
 		if !strings.Contains(approvalRule(""), part) {
 			t.Errorf("the safety line lost %q", part)
 		}
+	}
+	// A code shows which screen asked, not who is at that screen. The line
+	// calls nothing proof.
+	if strings.Contains(strings.ToLower(approvalRule("")), "proof") {
+		t.Errorf("the safety line calls something proof: %q", approvalRule(""))
 	}
 }
 
