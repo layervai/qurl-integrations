@@ -1,8 +1,9 @@
-# qURL Discord Bot
+# qURL Discord bot for one-time file sharing
 
-Share files and locations in Discord as **one-time, expiring qURL™ links** —
-delivered privately to each recipient's DMs, never posted in the channel, and
-revocable at any time.
+Share files in Discord through **one-time, expiring qURL™ access links**.
+Each recipient receives their own link in a direct message, and the sender
+can revoke links from a previous share. Location sharing is also available
+where the deployment enables it.
 
 ## Features
 

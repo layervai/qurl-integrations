@@ -1,12 +1,34 @@
-# qurl-integrations
+# qURL CLI and integrations for private app sharing
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that make protected resources invisible by default.
+Use [qURL™](https://layerv.ai/qurl/) to share local web apps, private resources,
+and uploaded files through temporary access links. This repository contains
+LayerV's CLI, Slack and Discord integrations, browser extensions for Gmail,
+and Microsoft Teams integration source.
 
-qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock grants the caller's IP temporary access — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
+For an app running on localhost, the CLI connects outward to LayerV without
+opening an inbound port. Publish the app, create a short-lived access link,
+and send that link to its recipient. The app must stay running, and its own
+sign-in still applies. Adding a link to an existing remote URL does not
+restrict any separate public route to that URL.
 
-This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and Chrome and Edge extensions for Gmail — plus shared Go libraries. A Microsoft Teams OAuth core is in progress.
+qURL uses [OpenNHP](https://github.com/OpenNHP/opennhp) to authorize access to
+protected resources. Start with the guide for the task you want to complete:
+
+| Task | Guide |
+| --- | --- |
+| Share a local web app or API with a temporary link | [qURL CLI quickstart](apps/cli/README.md#publish-localhost-in-60-seconds) |
+| Share internal resources from a Slack channel | [qURL for Slack](apps/slack/README.md) |
+| Send one-time file or location links in Discord | [qURL Discord bot](apps/discord/README.md) |
+| Share files in Gmail through expiring links | [Browser extension for Gmail](apps/chrome-extension/README.md) |
+| Build or submit the Microsoft Edge extension | [Edge installation and release guide](apps/edge-extension/README.md) |
+| Develop or deploy the Microsoft Teams integration | [Teams integration source and deployment guide](apps/teams/README.md) |
+| Serve a private S3 static site through a connector | [Private S3 origin image](origins/s3-static-connector/README.md) |
+
+The CLI guide documents local publishing and sharing. Each integration guide
+lists its own setup requirements. Teams deployment is managed outside this
+repository; the presence of its source does not establish a public rollout.
 
 ## Structure
 
@@ -32,8 +54,9 @@ Language SDKs and the qURL MCP server live in standalone repositories:
 
 | Library | Install | Repo |
 |---------|---------|------|
-| Python SDK | `pip install layerv-qurl` | [layervai/qurl-python](https://github.com/layervai/qurl-python) |
+| Python SDK | `pip install qurl-python` | [layervai/qurl-python](https://github.com/layervai/qurl-python) |
 | TypeScript SDK | `npm install @layervai/qurl` | [layervai/qurl-typescript](https://github.com/layervai/qurl-typescript) |
+| Go SDK | `go get github.com/layervai/qurl-go/qurl` | [layervai/qurl-go](https://github.com/layervai/qurl-go) |
 | MCP server | `npx @layervai/qurl-mcp` | [layervai/qurl-mcp](https://github.com/layervai/qurl-mcp) |
 
 ## Configuration

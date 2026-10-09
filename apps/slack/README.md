@@ -1,10 +1,10 @@
-# qURL for Slack
+# qURL for Slack secure links to internal resources
 
-Share internal resources from Slack as secure, one-time links — without
-leaving the channel. Admins protect a resource once; anyone in the channel
-mints a fresh, expiring link with a single slash command.
+Share internal dashboards and resources in Slack through one-time, expiring
+qURL™ access links. An administrator protects a resource for the channel;
+channel members mint fresh links with a slash command, without leaving Slack.
 
-A **qURL™** is a one-time-use access link: it works for the first person who
+A **qURL** is a one-time-use access link: it works for the first person who
 opens it, then burns. Links also expire on their own, so nothing stays live
 longer than it needs to.
 

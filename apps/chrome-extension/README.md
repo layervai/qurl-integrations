@@ -1,8 +1,9 @@
-# qURL browser extension for Gmail
+# qURL browser extension for Gmail file sharing
 
-Upload files straight from Gmail's compose window and drop secure, expiring
-links into your draft — no need to attach them to the email itself. Your
-files go to qURL™, and only a short link travels in the message.
+Share files from Gmail through expiring qURL™ access links. Upload a file
+from the browser extension and insert its link into your email draft instead
+of attaching the file. The extension uses shared source for both supported
+browser builds; follow the installation instructions for your operator's build.
 
 A **qURL** is a secure access link to an uploaded file. Links carry an
 expiry, so a file you share today won't stay reachable forever.

@@ -1,12 +1,14 @@
-# qURL CLI
+# qURL CLI for sharing localhost and private apps
 
-Publish an app running on your machine with one command:
+Share a local web app or API through temporary qURL™ access links without a
+public deployment or inbound port. Start with an app running on your machine,
+then publish it:
 
 ```bash
 qurl publish http://127.0.0.1:3000
 ```
 
-qURL™ gives the app a permanent **CRID** you can give to recipients in chat,
+qURL gives the app a permanent **CRID** you can give to recipients in chat,
 documentation, or an agent prompt. `qurl share` and `qurl get` turn a CRID
 into a short-lived access link using this device's identity. They work on the
 resource owner's devices and, for a private resource, on the devices the

@@ -1,7 +1,12 @@
-# qURL Teams integration
+# qURL Microsoft Teams integration source and deployment
+
+Develop the qURL™ Microsoft Teams integration for managing private resources
+and issuing temporary access links in team conversations. This repository
+contains the implementation and deployment guidance; production deployment
+and public rollout are managed separately.
 
 This package is the deployable, dependency-injected TypeScript implementation
-for the qURL™ Microsoft Teams integration. It implements opaque one-shot state,
+for the qURL Microsoft Teams integration. It implements opaque one-shot state,
 PKCE S256, OIDC nonce binding, a hardened confidential-client token exchange,
 ID-token verification, and a production provider-binding adapter.
 
