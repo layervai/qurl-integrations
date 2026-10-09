@@ -26,11 +26,20 @@ import (
 // The answer depends on the deployment only. Whether the SDK will ask for one
 // particular CRID is a second question, which CRIDNotRequestable answers from
 // the request's own error.
+//
+// A registered device can ask in a second way (qurl.RequestCRIDLinkAsDevice).
+// The SDK then follows one rule: a random key first, the device key only
+// after "not found". The first request is the request described above. Only
+// when the service answers it "not found" does the SDK send one second
+// request, under the device key. A private resource can be opened this way by
+// the owner's own device and by a device the owner allowed. The same check
+// says whether this way is offered: both ways use the same settings.
 
-// cridLinkRequestTimeout bounds one request. The SDK sends it with a client
-// that has no timeout of its own, so without this bound a service that never
+// cridLinkRequestTimeout bounds one call. The SDK sends with a client that
+// has no timeout of its own, so without this bound a service that never
 // answers would hold the command until the user interrupts it. The value is
-// the bound one qURL API attempt has.
+// the bound one qURL API attempt has. A call made as a device can send two
+// requests, and the bound covers both together.
 const cridLinkRequestTimeout = 30 * time.Second
 
 // Fixed customer-facing messages for a link requested with only a CRID,
@@ -213,6 +222,57 @@ func (o *AccessOpener) checkCRIDLinkConfig() error {
 // No user agent is sent: the SDK's own resolution cannot set one, and what is
 // sent must not depend on where the settings came from.
 func (o *AccessOpener) RequestCRIDLink(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
+	return o.requestCRIDLink(ctx, cridLinkCalls{
+		resolved: func(ctx context.Context) (*qurl.CRIDLink, error) {
+			return qurl.RequestCRIDLink(ctx, resourceCRID)
+		},
+		with: func(ctx context.Context, cfg qurl.Config) (*qurl.CRIDLink, error) {
+			return qurl.RequestCRIDLinkWith(ctx, resourceCRID, cfg)
+		},
+	})
+}
+
+// RequestCRIDLinkAsDevice is RequestCRIDLink for a registered device. It can
+// return a link for a private resource too, when the owner of the resource
+// allowed the device or the device is the owner's own.
+// deviceStaticPrivateKey is the device's 32-byte X25519 static private key.
+//
+// The SDK follows one rule: a random key first, the device key only after
+// "not found". So this call sends one request for a public resource, and two
+// for every answer that is "not found". The time limit and the context cover
+// both requests together.
+//
+// Everything RequestCRIDLink says about deployment settings, about the answer
+// and about the two failures it reports itself holds here. There is one more
+// answer: a key the SDK cannot use (DeviceKeyRefused). The SDK gives it
+// before it looks at the CRID or at the settings, and nothing was sent.
+//
+// The key stays the caller's. Neither this function nor the SDK keeps it or
+// wipes it, and neither puts it in an error. The caller must not change or
+// wipe it while the call runs.
+func (o *AccessOpener) RequestCRIDLinkAsDevice(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string) (*qurl.CRIDLink, error) {
+	return o.requestCRIDLink(ctx, cridLinkCalls{
+		resolved: func(ctx context.Context) (*qurl.CRIDLink, error) {
+			return qurl.RequestCRIDLinkAsDevice(ctx, deviceStaticPrivateKey, resourceCRID)
+		},
+		with: func(ctx context.Context, cfg qurl.Config) (*qurl.CRIDLink, error) {
+			return qurl.RequestCRIDLinkAsDeviceWith(ctx, deviceStaticPrivateKey, resourceCRID, cfg)
+		},
+	})
+}
+
+// cridLinkCalls is one way to ask the SDK for a link, in its two forms.
+// resolved lets the SDK find its own settings. with takes the settings of a
+// deployment file.
+type cridLinkCalls struct {
+	resolved func(ctx context.Context) (*qurl.CRIDLink, error)
+	with     func(ctx context.Context, cfg qurl.Config) (*qurl.CRIDLink, error)
+}
+
+// requestCRIDLink is the one path behind RequestCRIDLink and
+// RequestCRIDLinkAsDevice: the time limit, the settings, and the HTTP client.
+// Only the SDK call differs between the two.
+func (o *AccessOpener) requestCRIDLink(ctx context.Context, calls cridLinkCalls) (*qurl.CRIDLink, error) {
 	ctx, cancel := context.WithTimeout(ctx, cridLinkRequestTimeout)
 	defer cancel()
 
@@ -227,14 +287,14 @@ func (o *AccessOpener) RequestCRIDLink(ctx context.Context, resourceCRID string)
 			// silence.
 			return nil, errCRIDLinkClientNeedsSettings
 		}
-		return qurl.RequestCRIDLink(ctx, resourceCRID)
+		return calls.resolved(ctx)
 	}
 	cfg, err := cridLinkConfig(&d)
 	if err != nil {
 		return nil, err
 	}
 	cfg.HTTPClient = o.CRIDLinkHTTPClient
-	return qurl.RequestCRIDLinkWith(ctx, resourceCRID, cfg)
+	return calls.with(ctx, cfg)
 }
 
 // cridLinkConfig is openerConfig plus the deployment's CRID link endpoint.
@@ -274,6 +334,24 @@ func cridLinkConfig(d *qurl.Deployment) (qurl.Config, error) {
 // error after sending a request, this must change with it.
 func CRIDNotRequestable(err error) bool {
 	return errors.Is(err, qurl.ErrInvalidResourceRequest)
+}
+
+// DeviceKeyRefused reports whether err says the SDK will not use the device
+// key it was given for a request as a device: the key is not 32 bytes, or it
+// holds only zero bytes, as a wiped key does. The SDK checks the key before
+// it looks at the CRID or at the settings, and nothing was sent.
+//
+// It says nothing about the CRID. A caller that gets this answer has no
+// usable key, and asks with the CRID alone as a machine with no key does.
+//
+// TODO(upstream-contract): qurl-go returns qurl.ErrInvalidDeviceKey only
+// before it sends anything, and documents that it does not match
+// qurl.ErrInvalidResourceRequest. So a key that cannot be used never reads
+// as "the SDK will not ask for this CRID" (CRIDNotRequestable). If qurl-go
+// ever makes the two match, or returns this error after it sent a request,
+// this must change with it.
+func DeviceKeyRefused(err error) bool {
+	return errors.Is(err, qurl.ErrInvalidDeviceKey)
 }
 
 // CRIDNotRequestableClass names why the SDK will not ask for a link for a
@@ -361,8 +439,8 @@ func CRIDLinkRefusalCode(err error) (code string, ok bool) {
 	return deny.ErrCode, true
 }
 
-// ClassifyCRIDLinkError maps a failed RequestCRIDLink onto the CLI's
-// customer-language sentinels. The mapping is closed: an error it does not
+// ClassifyCRIDLinkError maps a failed RequestCRIDLink or
+// RequestCRIDLinkAsDevice onto the CLI's customer-language sentinels. The mapping is closed: an error it does not
 // know is treated as an answer that failed its check, so nothing the service
 // says can reach the terminal or be acted on, and nothing the SDK says about
 // an answer can either. One error passes through with its detail: settings
@@ -384,7 +462,18 @@ func CRIDLinkRefusalCode(err error) (code string, ok bool) {
 // does. The CLI gives the user one piece of advice for both, and --verbose
 // shows the code (CRIDLinkRefusalCode).
 //
-// Callers pass an err for which CRIDNotRequestable is false.
+// Callers pass an err for which CRIDNotRequestable and DeviceKeyRefused are
+// both false.
+//
+// TODO(upstream-contract): for a call made as a device, qurl-go documents
+// that three answers are not proof of what the service said: a busy service
+// (qurl.ErrServerOverloaded), a reply that is not a usable answer
+// (qurl.ErrCRIDLinkProtocol), and a malformed reply (qurl.ErrMalformedReply).
+// Whoever carries the request under the device key can cause them. They keep
+// the messages they have for a request with only the CRID. Each of those
+// messages tells the user to try again, and none of them says whether the
+// resource exists or whether this device may open it. A link and a refusal
+// are proof, and "not found" is a refusal.
 //
 // TODO(upstream-contract): the two answers about the endpoint are matched by
 // qurl-go's own sentinels, the ones CRIDLinkOffered matches, and not by

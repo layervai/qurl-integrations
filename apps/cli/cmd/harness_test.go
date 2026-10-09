@@ -130,18 +130,36 @@ type runOpts struct {
 	// this machine. Only the guard's own tests pass one.
 	egress     *egressGuard
 	verifyLink func(context.Context, string, string) error
-	// cridLinkOffered is the injected answer to "can this machine ask for a
-	// link with only a CRID at all". nil means the answer the shipped
-	// deployment gives, "not offered", unless the test injects
-	// requestCRIDLink: a test that supplies an answer to the request says
-	// the request can be made (the clisandbox journey uses the production
-	// wiring via realOpener).
+	// cridLinkOffered is the injected answer to "can this machine make the
+	// link request at all". nil means the answer the shipped deployment
+	// gives, "not offered", unless the test injects requestCRIDLink or
+	// requestCRIDLinkAsDevice: a test that supplies an answer to either form
+	// of the request says the request can be made (the clisandbox journey
+	// uses the production wiring via realOpener).
 	cridLinkOffered func() (bool, error)
 	// requestCRIDLink is the injected answer to "give me a link for this CRID
 	// alone"; nil fails a test that asks, so no hermetic test can ever send
 	// that request (the clisandbox journey uses the production wiring via
 	// realOpener).
 	requestCRIDLink func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
+	// requestCRIDLinkAsDevice is the injected answer to "give me a link for
+	// this CRID, as this device"; nil fails a test that asks, so no hermetic
+	// test can ever send that request either (the clisandbox journey uses the
+	// production wiring via realOpener).
+	requestCRIDLinkAsDevice func(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string) (*qurl.CRIDLink, error)
+	// readDeviceKey is the injected read of the device key that the request
+	// as this device takes. nil is the production reader. It needs no fake:
+	// it only reads a file in this invocation's state directory and sends
+	// nothing, and TestMain pins the plaintext key storage. A test injects a
+	// reader to make the key readable or not readable on every platform, or
+	// to fail when the key is read at all.
+	readDeviceKey func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey)
+	// linkTimeoutBeforeShare is the time limit of a link request that is
+	// followed by a share request when it gives no link. Zero leaves the
+	// production limit of ten seconds. A test sets a short limit together
+	// with a link request that gives no answer until its context ends, so
+	// the limit runs out without a real wait.
+	linkTimeoutBeforeShare time.Duration
 	// linkSite is the origin this install knows as its link site. Empty
 	// leaves the production wiring in place, which reads the injected
 	// environment only and so knows no site unless a test names a settings
@@ -198,18 +216,30 @@ type runResult struct {
 	// read back from the command tree's own options: nil is the production
 	// client.
 	httpClient *http.Client
+	// linkRequestGuard is what the harness wires for a form of the link
+	// request that the test gave no answer for. cridLinkOffered,
+	// requestCRIDLink and requestCRIDLinkAsDevice are what the invocation was
+	// wired with, read back from the command tree's own options.
+	linkRequestGuard        *linkRequestGuard
+	cridLinkOffered         func() (bool, error)
+	requestCRIDLink         func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
+	requestCRIDLinkAsDevice func(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string) (*qurl.CRIDLink, error)
+	// readDeviceKey is the read of the device key the invocation was wired
+	// with, read back the same way.
+	readDeviceKey func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey)
 }
 
 // runCLI executes the real command tree with injected process context: no
 // real environment, no real TTYs, a fixed clock, recorded sleeps, and qURL API
 // clients that cannot send past this machine. That last fence covers the API
 // client only. The access opener is a separate boundary that is refused by
-// default below; the native runtime and the target preflight are replaced only
-// when a test injects one, and are otherwise the production implementations.
+// default below, and so is the link request in both of its forms; the native
+// runtime and the target preflight are replaced only when a test injects one,
+// and are otherwise the production implementations.
 func runCLI(t *testing.T, o *runOpts) *runResult {
 	t.Helper()
 
-	res := &runResult{}
+	res := &runResult{linkRequestGuard: &linkRequestGuard{report: t.Errorf}}
 	env := o.env
 	if env == nil {
 		env = map[string]string{"QURL_API_KEY": testAPIKey}
@@ -312,7 +342,7 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		switch {
 		case o.cridLinkOffered != nil:
 			g.cridLinkOffered = o.cridLinkOffered
-		case o.requestCRIDLink != nil:
+		case o.requestCRIDLink != nil || o.requestCRIDLinkAsDevice != nil:
 			g.cridLinkOffered = cridLinkIsOffered
 		case o.realOpener:
 			// nil is the production default, as for enterPortalGrant above.
@@ -325,8 +355,20 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		case o.realOpener:
 			// nil is the production default, as for enterPortalGrant above.
 		default:
-			g.requestCRIDLink = mustNotAskWithTheCRIDAlone(t)
+			g.requestCRIDLink = res.linkRequestGuard.withTheCRIDAlone
 		}
+		switch {
+		case o.requestCRIDLinkAsDevice != nil:
+			g.requestCRIDLinkAsDevice = o.requestCRIDLinkAsDevice
+		case o.realOpener:
+			// nil is the production default, as for enterPortalGrant above.
+		default:
+			g.requestCRIDLinkAsDevice = res.linkRequestGuard.asTheDevice
+		}
+		if o.readDeviceKey != nil {
+			g.readDeviceKey = o.readDeviceKey
+		}
+		g.linkTimeoutBeforeShare = o.linkTimeoutBeforeShare
 		if o.linkSite != "" {
 			g.linkSite = func() string { return o.linkSite }
 		}
@@ -394,6 +436,8 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		ctx = context.Background()
 	}
 	res.httpClient = opts.httpClient
+	res.cridLinkOffered, res.requestCRIDLink, res.requestCRIDLinkAsDevice = opts.cridLinkOffered, opts.requestCRIDLink, opts.requestCRIDLinkAsDevice
+	res.readDeviceKey = opts.readDeviceKey
 	res.code = run(ctx, root, opts)
 	return res
 }
