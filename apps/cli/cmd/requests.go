@@ -83,10 +83,12 @@ has the name the person typed, the id of their device, when they asked, and
 when the request expires.
 
 The listing never shows a request's six-digit code, in any output mode. The
-code is on the screen of the person who asked, and it is the only proof of who
-is asking: the name is typed by whoever asked, and anyone can type any name.
-To let a person in, ask them for their code and run
-"qurl approve <CRID> <code>". To refuse a request, run
+code is on the screen of the person who asked. The name is typed by whoever
+asked, and anyone can type any name. A code shows only that it came from the
+screen that asked, so approve a code only when the person you mean to let in
+gave it to you themselves, in a way you know it is them (in person, on a call,
+or in a conversation you already have with them). To let a person in, ask them
+for their code and run "qurl approve <CRID> <code>". To refuse a request, run
 "qurl deny <CRID> <device id>" with the device id from the listing.
 
 The listing of all your resources is bounded, and it has no next page. When
@@ -199,10 +201,13 @@ func approveCmd(opts *globalOpts) *cobra.Command {
 can open the resource.
 
 The code is the six digits the person was shown when they asked. They give it
-to you; no qURL command shows it. Approve it only when that person gave it to
-you themselves: the code is what ties the approval to them. The name on a
-request is typed by whoever asked and can be typed by anyone, so never approve
-because of a name alone. To see who is waiting, run "qurl requests <CRID>".
+to you; no qURL command shows it. A code shows only that it came from the
+screen that asked, so approve a code only when the person you mean to let in
+gave it to you themselves, in a way you know it is them (in person, on a call,
+or in a conversation you already have with them). The name on a request is
+typed by whoever asked and can be typed by anyone, so never approve because of
+a name, even when a code comes with it. To see who is waiting, run
+"qurl requests <CRID>".
 
 Write the code as 123456, 123 456 or 123-456. The command prints who now has
 access and the command that takes that access away again.
@@ -254,6 +259,10 @@ Name the request by the device id it came from, in the form
 xxxx-xxxx-xxxx-xxxx, as "qurl requests <CRID>" shows it. If the person gave
 you their six-digit code and you want to refuse it, the code is accepted in
 the same place: write it as 123456, 123 456 or 123-456.
+
+A name can be typed by anyone, and a code shows only that it came from the
+screen that asked: refuse a request, or let it expire, unless the person you
+mean to let in gave you its code themselves, in a way you know it is them.
 
 A code that is not pending counts toward the service's limit on wrong codes:
 after 5 wrong codes for one resource within an hour, it refuses every code for

@@ -18,12 +18,15 @@ import (
 //     who they are. It never reaches a terminal raw: it goes through the same
 //     quoting and escaping as a publisher name, and JSON carries it with
 //     name_verified false beside it.
-//   - What ties an approval to a person is the code, which only the person
-//     who asked was shown. No listing shows a code, in any output mode: a
-//     listing with the codes would let a publisher, or the agent that runs
-//     these commands for them, approve from the list, which is approval by
-//     name with one more step. Every listing says instead how a person is let
-//     in: ask them for the code on their screen.
+//   - A code ties an approval to the screen that asked, and to whoever passed
+//     the code on. It does not say who that is: the address of a private
+//     resource is safe to send to anyone, so anyone who has it can ask. No
+//     listing shows a code, in any output mode: a listing with the codes
+//     would let a publisher, or the agent that runs these commands for them,
+//     approve from the list, which is approval by name with one more step.
+//     Every listing says instead how a person is let in: ask them for the
+//     code on their screen, and approve a code only when the person the
+//     publisher means to let in gave it to them themselves.
 
 // Fixed customer-facing strings for access requests, registered in
 // CustomerMessages.
@@ -32,11 +35,17 @@ const (
 	// by `qurl requests <CRID> --on`. It has two openings: the address on the
 	// link site when this install knows that site, and the CRID when it does
 	// not. Nothing here names a site the install was not told about.
+	//
+	// msgRequestsApproveRule follows the approve command, the same with both
+	// openings. This guidance is the first thing a new owner reads, and an
+	// owner can go from it to `qurl approve` without reading a listing or a
+	// help text, so it says here from whom to take a code.
 	msgRequestsSendAddress    = "People can ask you for access to this resource. Send them this address:"
 	msgRequestsSendCRID       = "People can ask you for access to this resource. This install does not know the web address where a CRID is opened for its deployment, so send them the CRID itself:"
 	msgRequestsNextStep       = "They ask for access there and get a six-digit code to give you. Approve a code with:"
 	msgRequestsNextStepNoSite = "Where they open it, they ask for access and get a six-digit code to give you. Approve a code with:"
 	msgRequestsApproveCommand = "qurl approve %s <code>"
+	msgRequestsApproveRule    = "Approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them."
 	msgRequestsSafeToSend     = "The address and the CRID are safe to send to anyone: a private resource opens only for you and the people you allow."
 	msgRequestsSafeToSendCRID = "The CRID is safe to send to anyone: a private resource opens only for you and the people you allow."
 	msgRequestsOn             = "Access requests are on for %s."
@@ -54,10 +63,12 @@ const (
 	// the approval_rule member of every JSON listing: the reader of JSON is
 	// most often an agent, which decides what to approve from that document.
 	// A listing shows no code, and this is the sentence that says where the
-	// code is. %s is the CRID of the resource in the listing of one
+	// code is and from whom to take one. It says both halves of the rule: a
+	// name can be typed by anyone, and a code shows only which screen asked,
+	// not who is at it. %s is the CRID of the resource in the listing of one
 	// resource, where the command knows it, and the placeholder in the
 	// listing of all resources, where each row has its own.
-	msgApproveOnlyGivenCodes = "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve %s <code>`; a name can be typed by anyone, so the code is the only proof of who is asking."
+	msgApproveOnlyGivenCodes = "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve %s <code>`; a name can be typed by anyone, and a code shows only that it came from the screen that asked, so approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them (in person, on a call, or in a conversation you already have with them)."
 
 	// msgRequestsMayBeMore follows a listing of all resources that the
 	// service said may be incomplete. That listing is bounded; the listing
@@ -127,6 +138,10 @@ func saidPrivate(private *bool) bool {
 // resource's address on the link site, empty when this install does not know
 // that site.
 //
+// After the approve command it says from whom to take a code, in the same
+// sentence with or without an address. It is text only: the JSON documents of
+// the commands that print this guidance have no member for it.
+//
 // It says that the address and the CRID are safe to send to anyone, because
 // a private resource opens only for the people the publisher allows. Every
 // caller therefore checks saidPrivate first.
@@ -137,6 +152,7 @@ func (p *Printer) requestGuidance(ew *errWriter, resourceCRID, address string) {
 	}
 	ew.printf("%s\n\n  %s\n\n", opening, sent)
 	ew.printf("%s\n\n  %s\n\n", next, fmt.Sprintf(msgRequestsApproveCommand, resourceCRID))
+	ew.printf("%s\n\n", msgRequestsApproveRule)
 	ew.printf("%s\n", safe)
 }
 

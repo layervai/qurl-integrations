@@ -404,7 +404,7 @@ func CustomerMessages() []string {
 		msgPublishKeptPublic,
 		hintAccessRequestsNotTurnedOn, msgPublishRequestsTurnedOn,
 		msgRequestsSendAddress, msgRequestsSendCRID, msgRequestsNextStep, msgRequestsNextStepNoSite,
-		msgRequestsApproveCommand, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,
+		msgRequestsApproveCommand, msgRequestsApproveRule, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,
 		msgRequestsOn, msgRequestsOff, msgRequestsOffOnePerson, msgRequestsOffPeople, msgRequestsOffPeopleUnknown,
 		msgRequesterNameNote, msgRemovalKeysNotChanged, msgRequestsMayBeMore, msgRequestsMayBeMoreForOne, msgDeniedDevice, msgRemovalFinishKeys,
 		msgNoPendingRequests, msgNoPendingRequestsForOne, msgApproveOnlyGivenCodes,

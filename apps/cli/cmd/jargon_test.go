@@ -132,16 +132,24 @@ func TestNoJargonOnHelpSurfaces(t *testing.T) {
 	}
 }
 
-// TestNoJargonInCustomerMessages asserts every fixed customer-facing message
-// constant in the CLI — command messages, CRID warnings, API error framing,
-// error-rendering hints — is free of forbidden jargon.
-func TestNoJargonInCustomerMessages(t *testing.T) {
+// allCustomerMessages returns every fixed customer-facing message constant
+// in the CLI: command messages, CRID warnings, API error framing and
+// error-rendering hints.
+func allCustomerMessages() []string {
 	all := make([]string, 0, 64)
 	all = append(all, customerMessages()...)
 	all = append(all, consume.CustomerMessages()...)
 	all = append(all, cridux.Messages()...)
 	all = append(all, qurlapi.CustomerMessages()...)
 	all = append(all, output.CustomerMessages()...)
+	return all
+}
+
+// TestNoJargonInCustomerMessages asserts every fixed customer-facing message
+// constant in the CLI — command messages, CRID warnings, API error framing,
+// error-rendering hints — is free of forbidden jargon.
+func TestNoJargonInCustomerMessages(t *testing.T) {
+	all := allCustomerMessages()
 
 	if len(all) == 0 {
 		t.Fatal("no customer messages collected; the gate would be vacuous")
