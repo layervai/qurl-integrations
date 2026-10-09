@@ -1112,7 +1112,11 @@ class FakeHTTPResponse:
 
 @contextlib.contextmanager
 def served(raw: bytes):
-    """Runs the real request(), with its size check, on one response of these bytes."""
+    """Runs the real request(), with its size check, on one response of these bytes.
+
+    Every request inside the block gets these same bytes, so it fits a flow of
+    one request or of requests that may all be answered alike, not pagination.
+    """
     response = FakeHTTPResponse(raw)
     opener = mock.Mock()
     opener.open.return_value = response

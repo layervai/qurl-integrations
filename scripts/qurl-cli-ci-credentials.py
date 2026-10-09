@@ -30,7 +30,8 @@ MAX_RESPONSE = 64 * 1024
 # the service added two members to every row), and every journey cleanup with
 # it. The bound stays: a page is read into memory before it is parsed. What
 # one inventory holds in all is bounded by INVENTORY_MAX_ROWS rows of that
-# size, about 160 MiB at the worst, and no longer by pages of 64 KiB.
+# size: about 160 MiB of response bytes at the worst, and more once parsed.
+# It is no longer bounded by pages of 64 KiB.
 # TODO(upstream-contract): 8 MiB is 100 rows of about 80 KiB, above what the
 # service's limits on those lists allow today. Recalibrate it with them.
 INVENTORY_MAX_RESPONSE = 8 * 1024 * 1024
