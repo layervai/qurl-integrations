@@ -47,7 +47,8 @@ import (
 //   - A device with an identity, where the request is offered and no share
 //     option is set, makes the link request first. A link ends the run. Any
 //     other answer leads to the share request, and the result is the one get
-//     gave when the share request came first.
+//     gave when the share request came first. For that, one case makes the
+//     link request once more: get_link_request_first_test.go has it.
 //   - That device asks as this device when its key can be read, and with the
 //     CRID alone when it cannot.
 //   - With a share option, get keeps the earlier order: the share request
@@ -1420,6 +1421,12 @@ func TestGetMakesTheShareRequestOnlyWhenTheLinkRequestGivesNoLink(t *testing.T) 
 //
 // The result is the same in both orders: the link request first, and the
 // share request first, which a share option keeps.
+//
+// Where the link request comes first, this is the row "no answer for another
+// reason": both answers here come at once, while the short time limit of
+// that request still has time left. A request that ends because the short
+// limit ran out is made once more, and
+// TestGetMakesTheLinkRequestOnceMoreAfterItsShortLimitRanOut has that row.
 func TestGetSaysTheServiceDidNotAnswerAfterShareNotFound(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	for name, noAnswer := range map[string]error{

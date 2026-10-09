@@ -154,6 +154,12 @@ type runOpts struct {
 	// reader to make the key readable or not readable on every platform, or
 	// to fail when the key is read at all.
 	readDeviceKey func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey)
+	// linkTimeoutBeforeShare is the time limit of a link request that is
+	// followed by a share request when it gives no link. Zero leaves the
+	// production limit of ten seconds. A test sets a short limit together
+	// with a link request that gives no answer until its context ends, so
+	// the limit runs out without a real wait.
+	linkTimeoutBeforeShare time.Duration
 	// linkSite is the origin this install knows as its link site. Empty
 	// leaves the production wiring in place, which reads the injected
 	// environment only and so knows no site unless a test names a settings
@@ -362,6 +368,7 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		if o.readDeviceKey != nil {
 			g.readDeviceKey = o.readDeviceKey
 		}
+		g.linkTimeoutBeforeShare = o.linkTimeoutBeforeShare
 		if o.linkSite != "" {
 			g.linkSite = func() string { return o.linkSite }
 		}

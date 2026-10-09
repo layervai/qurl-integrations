@@ -116,6 +116,12 @@ type globalOpts struct {
 	// the production reader, which is safe in a hermetic test: it reads a
 	// file in the test's own state directory.
 	readDeviceKey func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey)
+	// linkTimeoutBeforeShare is the time limit of a link request that is
+	// followed by a share request when it gives no link. Zero means
+	// cridLinkTimeoutBeforeShare, and production leaves it zero. A test sets
+	// a short limit, so it can let the limit run out without a wait of ten
+	// seconds.
+	linkTimeoutBeforeShare time.Duration
 	// linkSite returns the origin of the site where a person opens a resource
 	// in a browser with only its CRID, or the empty string when this install
 	// does not know it for its deployment. It reads settings only: it sends

@@ -28,8 +28,10 @@ import (
 
 // Tests for the order in which a device with an identity makes its two
 // requests where the link request is offered and no share option is set: the
-// link request first, and the share request only when no link is given.
-// get_crid_link.go has the tables these tests pin.
+// link request first, and the share request only when no link is given. In
+// one case the link request is then made once more: the first one had no
+// answer when its short time limit ran out, and the share request said "not
+// found". get_crid_link.go has the tables these tests pin.
 
 // getFileMode returns get's file action: it runs piped, so stderr holds
 // plain text that can be compared byte for byte.
@@ -134,6 +136,12 @@ func linkRequestAnswers() []linkRequestAnswer {
 // and where the link request gives no link, the two runs must tell the user
 // the same thing, byte for byte, with the same exit code and the same
 // content. Only the order of the two requests may differ.
+//
+// Every link request here is answered at once, so its short time limit
+// never runs out, and it is made exactly once. That holds for the row "timed
+// out" too: there the SDK reports a timeout while the limit still has time
+// left. TestGetMakesTheLinkRequestOnceMoreAfterItsShortLimitRanOut has the
+// runs in which the limit does run out.
 func TestGetLinkRequestFirstAnswerPairs(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	mode := getFileMode(t)
@@ -453,6 +461,12 @@ func TestGetGivesTheLinkRequestBeforeAShareRequestAShorterTimeLimit(t *testing.T
 			if len(contexts.bounded) != 1 || !contexts.bounded[0] || contexts.limits[0] <= 0 || contexts.limits[0] > cridLinkTimeoutBeforeShare {
 				t.Fatalf("link request contexts: limits set %v, limits %v; want one request with a limit of at most %s", contexts.bounded, contexts.limits, cridLinkTimeoutBeforeShare)
 			}
+			// No test set another limit here, so this is the production one.
+			// The request sees most of it: half is a wide margin for a slow
+			// machine.
+			if contexts.limits[0] < cridLinkTimeoutBeforeShare/2 {
+				t.Errorf("the link request had %s left of its limit, want most of %s", contexts.limits[0], cridLinkTimeoutBeforeShare)
+			}
 			if len(keyReads.bounded) != 1 || keyReads.bounded[0] {
 				t.Errorf("the device key was read %d times, with a time limit: %v; want one read with the context of the command, which has none here",
 					len(keyReads.bounded), keyReads.bounded)
@@ -475,6 +489,551 @@ func TestGetGivesTheLinkRequestBeforeAShareRequestAShorterTimeLimit(t *testing.T
 
 	if cridLinkTimeoutBeforeShare != 10*time.Second {
 		t.Errorf("cridLinkTimeoutBeforeShare = %s, want 10s", cridLinkTimeoutBeforeShare)
+	}
+}
+
+// testShortLimit stands in for cridLinkTimeoutBeforeShare in the tests of a
+// link request that gets no answer in time. Such a request waits until its
+// context ends, so this value only says how long each of them waits. It does
+// not decide a result.
+const testShortLimit = 5 * time.Millisecond
+
+// noAnswerUntilTheContextEnds is the link request to a relay that does not
+// answer. It waits until the context of the request ends, and then returns
+// the error the SDK builds for that: the context's own error, beside the
+// error of the transport. It sets no time itself. The request ends when the
+// command's limit for it runs out, or when the command's own context ends.
+//
+// A context that never ends would hold the test for ever. So after one
+// minute this function fails the test.
+func noAnswerUntilTheContextEnds(ctx context.Context, t *testing.T) error {
+	t.Helper()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("qurl: CRID link request did not complete: %w: %w", ctx.Err(), &qurl.RelayError{Msg: "relay POST https://endpoint.example.test/x failed"})
+	case <-time.After(time.Minute):
+		t.Error("the context of the link request did not end within one minute")
+		return errors.New("the context of the link request did not end")
+	}
+}
+
+// slowRelay is the injected link request, in both of its forms, for a relay
+// that is slow. The first request gets no answer until its context ends.
+// Every later request is answered at once with the answer in requests.
+//
+// It records what each request looked like: requests has the form and the
+// key, contexts has the time limit, and apiSeen has what the qURL API had
+// seen when the request was made.
+type slowRelay struct {
+	t        *testing.T
+	srv      *apitest.Server
+	requests *linkRequests
+	contexts requestContexts
+	apiSeen  [][]string
+}
+
+func (r *slowRelay) next(ctx context.Context) (*qurl.CRIDLink, error) {
+	r.contexts.record(ctx)
+	r.apiSeen = append(r.apiSeen, apiRequests(r.srv))
+	if len(r.requests.asked) == 1 {
+		return nil, noAnswerUntilTheContextEnds(ctx, r.t)
+	}
+	return r.requests.result()
+}
+
+// wire sets both forms of the link request of an invocation to r, and gives
+// the link request that comes before a share request the limit
+// testShortLimit.
+func (r *slowRelay) wire(configure func(args []string) *runOpts) func(args []string) *runOpts {
+	return func(args []string) *runOpts {
+		opts := configure(args)
+		opts.linkTimeoutBeforeShare = testShortLimit
+		opts.requestCRIDLink = func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
+			_, _ = r.requests.answer(ctx, resourceCRID)
+			return r.next(ctx)
+		}
+		opts.requestCRIDLinkAsDevice = func(ctx context.Context, key []byte, resourceCRID string) (*qurl.CRIDLink, error) {
+			_, _ = r.requests.answerAsDevice(ctx, key, resourceCRID)
+			return r.next(ctx)
+		}
+		return opts
+	}
+}
+
+// mustHaveAsked checks the link requests of one run. The first was made in
+// the form the device key allows, before anything was sent to the qURL API,
+// and with the short limit. When onceMore is set there was exactly one more:
+// with the CRID alone, after the share request, and with no time limit from
+// the command, so internal/consume gives it the long one. Otherwise there
+// was no second request.
+func (r *slowRelay) mustHaveAsked(readable, onceMore bool) {
+	r.t.Helper()
+	asked, asDevice, contexts := r.requests.asked, r.requests.asDevice, &r.contexts
+	wantAsked := 1
+	if onceMore {
+		wantAsked = 2
+	}
+	if len(asked) != wantAsked {
+		r.t.Fatalf("made the link request %d times, want %d", len(asked), wantAsked)
+	}
+	if asDevice[0] != readable || !contexts.bounded[0] || contexts.limits[0] > testShortLimit || len(r.apiSeen[0]) != 0 {
+		r.t.Errorf("the first link request: as this device = %t, time limit set = %t (%s), made after %q; want as this device = %t, a limit of at most %s, and nothing sent to the qURL API before it",
+			asDevice[0], contexts.bounded[0], contexts.limits[0], r.apiSeen[0], readable, testShortLimit)
+	}
+	if !onceMore {
+		return
+	}
+	wantSeen := []string{"GET /v1/me", "POST " + shareRoute(r.srv)}
+	if asDevice[1] || contexts.bounded[1] || strings.Join(r.apiSeen[1], "\n") != strings.Join(wantSeen, "\n") {
+		r.t.Errorf("the link request made once more: as this device = %t, time limit from the command = %t, made after %q; want the CRID alone, no limit from the command, and after the share request: %q",
+			asDevice[1], contexts.bounded[1], r.apiSeen[1], wantSeen)
+	}
+}
+
+// mustHaveReadTheKeyOnce checks that the device key was read once in the
+// run, and that the bytes the read handed out were wiped.
+func mustHaveReadTheKeyOnce(t *testing.T, keyReads *deviceKeyReads) {
+	t.Helper()
+	if len(keyReads.given) != 1 {
+		t.Errorf("the device key was read %d times, want once", len(keyReads.given))
+	}
+	for i, given := range keyReads.given {
+		if given != nil && !bytes.Equal(given, make([]byte, len(given))) {
+			t.Errorf("the device key of read %d was not wiped", i+1)
+		}
+	}
+}
+
+// TestGetMakesTheLinkRequestOnceMoreAfterItsShortLimitRanOut pins the two
+// rows "the short time limit ran out" of the second table in
+// get_crid_link.go, and the text below that table.
+//
+// The first link request of every run gets no answer: it waits until its
+// short limit runs out. The run goes on to the share request. Every answer
+// of the share request is tried with every answer the link request can get
+// when it is made once more, for a device that can read its key and for one
+// that cannot.
+//
+//   - The share request gives a link, or fails in its own way. That is the
+//     result, and the link request is not made once more.
+//   - The share request says "not found". The link request is made once
+//     more: after the share request, with the CRID alone, and with no time
+//     limit from the command. Its answer is the result. No third request is
+//     made, and the device key is not read again.
+//
+// Each result is also compared with the order where the share request comes
+// first, which a share option keeps. That order makes its one link request
+// with the long limit, so a relay that is slow costs it nothing: the answers
+// here are the ones it gets. For the same answers the two orders must tell
+// the user the same thing, byte for byte. Without the request made once
+// more, this order said "the service did not answer" where that order gave
+// a link.
+func TestGetMakesTheLinkRequestOnceMoreAfterItsShortLimitRanOut(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	mode := getFileMode(t)
+
+	// outcome is what one run told the user and did.
+	type outcome struct {
+		code      int
+		stderr    string
+		delivered string
+		shares    int
+	}
+	outcomeOf := func(t *testing.T, run *shareRun, srv *apitest.Server) outcome {
+		t.Helper()
+		got := outcome{
+			code: run.result.code, stderr: strings.ReplaceAll(run.result.stderr.String(), run.dest, "<file>"),
+			shares: len(shareRequests(srv)),
+		}
+		if got.code == exitcode.Success {
+			got.delivered = mode.delivered(t, run)
+		} else {
+			run.mustNotHaveActed(t)
+		}
+		return got
+	}
+	// answered returns the injected link request that gets answer at once.
+	answered := func(srv *apitest.Server, answer linkRequestAnswer) *linkRequests {
+		if answer.link {
+			return &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
+		}
+		return &linkRequests{err: answer.err}
+	}
+
+	for _, again := range linkRequestAnswers() {
+		for _, share := range shareRequestAnswers() {
+			// The result of the order where the share request comes first, for
+			// the same answers. It is not a subtest of its own, so each subtest
+			// below has it when it runs alone.
+			beforeSrv := downloadServer(t)
+			share.prepare(t, beforeSrv)
+			earlierOrder := withDeviceKey(withLinkRequestsOf(withArgs(enrolledDevice(t, state), "--session-duration", "5m"), answered(beforeSrv, again)), mustNotReadTheDeviceKey(t))
+			before := outcomeOf(t, runShareMode(t, beforeSrv, beforeSrv.URL, mode, earlierOrder), beforeSrv)
+
+			for _, readable := range []bool{true, false} {
+				t.Run(fmt.Sprintf("once more %s/share %s/key readable=%t", again.name, share.name, readable), func(t *testing.T) {
+					srv := downloadServer(t)
+					share.prepare(t, srv)
+					keyReads := noDeviceKey(connectorstate.NoDeviceKeyUnreadable)
+					if readable {
+						keyReads = deviceKeyOf(t, state)
+					}
+					relay := &slowRelay{t: t, srv: srv, requests: answered(srv, again)}
+					got := outcomeOf(t, runShareMode(t, srv, srv.URL, mode, relay.wire(withDeviceKey(enrolledDevice(t, state), keyReads.read))), srv)
+
+					// The link request is made once more only after a share "not
+					// found".
+					relay.mustHaveAsked(readable, share.notFound)
+					mustHaveReadTheKeyOnce(t, keyReads)
+
+					// What the text below the table says.
+					fromLinkRequest := false
+					switch {
+					case share.link:
+						if got.code != exitcode.Success || got.delivered != apitest.DefaultDownloadPayload || got.shares != 1 {
+							t.Fatalf("exit = %d, delivered %q after %d share request(s); want the content of the share link after one share request\nstderr: %s",
+								got.code, got.delivered, got.shares, got.stderr)
+						}
+					case !share.notFound:
+						// A failure of the share request. What it is exactly is
+						// compared with the earlier order below.
+						if got.code == exitcode.Success || got.code == exitcode.Interrupted {
+							t.Fatalf("exit = %d, want the share request's failure; stderr: %s", got.code, got.stderr)
+						}
+					case again.link:
+						fromLinkRequest = true
+						if got.code != exitcode.Success || got.delivered != apitest.DefaultDownloadPayload || got.shares != 1 {
+							t.Fatalf("exit = %d, delivered %q after %d share request(s); want the content of the link from the request made once more, after one share request\nstderr: %s",
+								got.code, got.delivered, got.shares, got.stderr)
+						}
+					case again.interrupted:
+						if got.code != exitcode.Interrupted || got.stderr != "" {
+							t.Fatalf("exit = %d, stderr = %q; want %d and nothing printed", got.code, got.stderr, exitcode.Interrupted)
+						}
+					case again.notSent:
+						if want := goldenBytes(t, "error_share_notfound.plain.stderr.golden"); got.code != exitcode.NotFound || got.stderr != want {
+							t.Fatalf("exit = %d, stderr = %q; want %d and the share request's own not-found %q", got.code, got.stderr, exitcode.NotFound, want)
+						}
+					default:
+						if want := goldenBytes(t, again.golden+".plain.stderr.golden"); got.code != again.wantCode || got.stderr != want {
+							t.Fatalf("exit = %d, stderr = %q; want %d and the answer of the request made once more %q", got.code, got.stderr, again.wantCode, want)
+						}
+					}
+
+					// What the order with the share request first gave, for the
+					// same answers. A link from the link request is the one case
+					// where stderr differs: that order has a share option, and
+					// says that the link could not carry it.
+					if got.code != before.code || got.delivered != before.delivered || (!fromLinkRequest && got.stderr != before.stderr) {
+						t.Errorf("after the short limit ran out, get gave\nexit %d, delivered %q, stderr %q\nwant what the share request first gave:\nexit %d, delivered %q, stderr %q",
+							got.code, got.delivered, got.stderr, before.code, before.delivered, before.stderr)
+					}
+					if got.shares != before.shares {
+						t.Errorf("the share request was sent %d times, want %d as in the earlier order", got.shares, before.shares)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestGetRefreshAfterTheLinkRequestWasMadeOnceMore pins where a link from
+// the request made once more comes from: the link request, in a run whose
+// share request cannot give a link. That is the third row of the refresh
+// table in get_crid_link.go.
+//
+// The first link request gets no answer until its short limit runs out, the
+// share request says "not found", and the request made once more gives the
+// link. That link expires before any byte is served, and the download asks
+// again. The refresh asks with the CRID alone and with no time limit from
+// the command. It does not read the device key again, and it sends no share
+// request: here a second share request would be answered "unavailable", and
+// would end the download.
+func TestGetRefreshAfterTheLinkRequestWasMadeOnceMore(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	ran := 0
+	for _, mode := range getModes() {
+		if !mode.downloads {
+			continue
+		}
+		for _, readable := range []bool{true, false} {
+			ran++
+			t.Run(fmt.Sprintf("%s/key readable=%t", mode.name, readable), func(t *testing.T) {
+				srv := downloadServer(t)
+				srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
+				srv.Script(http.MethodPost, shareRoute(srv), apitest.HandlerNotFound404(t, "resource_not_found"))
+				srv.ScriptRepeat(http.MethodPost, shareRoute(srv), 3, apitest.HandlerDark503(t))
+				keyReads := noDeviceKey(connectorstate.NoDeviceKeyUnreadable)
+				if readable {
+					keyReads = deviceKeyOf(t, state)
+				}
+				relay := &slowRelay{t: t, srv: srv, requests: &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}}
+
+				run := runShareMode(t, srv, srv.URL, mode, relay.wire(withDeviceKey(enrolledDevice(t, state), keyReads.read)))
+				run.mustHaveDelivered(t, mode)
+
+				asked, asDevice, bounded := relay.requests.asked, relay.requests.asDevice, relay.contexts.bounded
+				if len(asked) != 3 {
+					t.Fatalf("made the link request %d times, want 3: the first, the one made once more, and the refresh", len(asked))
+				}
+				if asDevice[0] != readable || !bounded[0] || asDevice[1] || bounded[1] {
+					t.Errorf("the first two link requests: as this device %v, time limit from the command %v; want the first in the form the key allows with the short limit, and the second with the CRID alone and no limit",
+						asDevice[:2], bounded[:2])
+				}
+				if asDevice[2] || bounded[2] {
+					t.Errorf("the refresh: as this device = %t, time limit from the command = %t; want the CRID alone and no limit from the command", asDevice[2], bounded[2])
+				}
+				mustHaveReadTheKeyOnce(t, keyReads)
+				if got := len(shareRequests(srv)); got != 1 {
+					t.Errorf("the share request was sent %d times, want once: the refresh must not send it again", got)
+				}
+				if stderr := run.result.stderr.String(); strings.Count(stderr, "UNVERIFIED publisher") != 1 {
+					t.Errorf("stderr = %q, want the publisher notice once", stderr)
+				}
+			})
+		}
+	}
+	if ran == 0 {
+		t.Fatal("no get mode downloads; this test would pin nothing")
+	}
+}
+
+// TestLinkRequestBeforeAShareRequestSaysWhenItsShortLimitRanOut pins how get
+// tells "the short limit ran out" from every other way the link request
+// before a share request can end. Only that one ending leads to the link
+// request made once more.
+//
+// It is true when the request gave no answer, the short limit ended the
+// request, and the command's own context had not ended. Each row below takes
+// one of the three away, or is the case itself.
+func TestLinkRequestBeforeAShareRequestSaysWhenItsShortLimitRanOut(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	// request is the answer of one link request. interrupt ends the command's
+	// own context, as the user does with an interrupt.
+	type request func(ctx context.Context, t *testing.T, interrupt context.CancelFunc) (*qurl.CRIDLink, error)
+	noAnswer := func(ctx context.Context, t *testing.T, _ context.CancelFunc) (*qurl.CRIDLink, error) {
+		return nil, noAnswerUntilTheContextEnds(ctx, t)
+	}
+	atOnce := func(link *qurl.CRIDLink, err error) request {
+		return func(context.Context, *testing.T, context.CancelFunc) (*qurl.CRIDLink, error) { return link, err }
+	}
+
+	for _, tc := range []struct {
+		name string
+		// shortLimit is the limit of the request. Zero leaves the production
+		// limit, which no row here waits for.
+		shortLimit time.Duration
+		// commandLimit, if set, is a time limit of the command's own context.
+		commandLimit time.Duration
+		request      request
+		wantRanOut   bool
+		// wantErr is the error the request must end with; nil is a link.
+		wantErr error
+	}{
+		{
+			name: "no answer until the short limit runs out", shortLimit: testShortLimit, request: noAnswer,
+			wantRanOut: true, wantErr: consume.ErrCRIDLinkNoAnswer,
+		},
+		{
+			// A limit of the command that has not run out changes nothing.
+			name: "no answer until the short limit runs out, the command has a longer limit", shortLimit: testShortLimit, commandLimit: time.Hour,
+			request: noAnswer, wantRanOut: true, wantErr: consume.ErrCRIDLinkNoAnswer,
+		},
+		{
+			// The second error the SDK has for a context that ended: a device
+			// got "not found" for its first request, and the limit ran out
+			// before the request under its key was sent.
+			name: "the short limit runs out before the request under the device key", shortLimit: testShortLimit,
+			request: func(ctx context.Context, _ *testing.T, _ context.CancelFunc) (*qurl.CRIDLink, error) {
+				<-ctx.Done()
+				return nil, fmt.Errorf("qurl: the CRID link request with the device key was not sent because the context ended first: %w", ctx.Err())
+			},
+			wantRanOut: true, wantErr: consume.ErrCRIDLinkNoAnswer,
+		},
+		{
+			name: "no answer until the command's own limit runs out", commandLimit: testShortLimit, request: noAnswer,
+			wantErr: consume.ErrCRIDLinkNoAnswer,
+		},
+		{
+			name: "the user interrupts the command while it waits",
+			request: func(ctx context.Context, t *testing.T, interrupt context.CancelFunc) (*qurl.CRIDLink, error) {
+				interrupt()
+				return nil, noAnswerUntilTheContextEnds(ctx, t)
+			},
+			wantErr: context.Canceled,
+		},
+		{
+			// The short limit ended the request, and the user interrupted the
+			// command before the request returned.
+			name: "the user interrupts the command after the short limit ran out", shortLimit: testShortLimit,
+			request: func(ctx context.Context, t *testing.T, interrupt context.CancelFunc) (*qurl.CRIDLink, error) {
+				err := noAnswerUntilTheContextEnds(ctx, t)
+				interrupt()
+				return nil, err
+			},
+			wantErr: consume.ErrCRIDLinkNoAnswer,
+		},
+		{
+			name:    "the service cannot be reached",
+			request: atOnce(nil, &qurl.RelayError{Msg: "relay POST https://endpoint.example.test/x failed: connection refused"}),
+			wantErr: consume.ErrCRIDLinkNoAnswer,
+		},
+		{
+			name: "the SDK reports a timeout while the short limit has time left",
+			request: atOnce(nil, fmt.Errorf("qurl: CRID link request did not complete: %w: %w",
+				context.DeadlineExceeded, &qurl.RelayError{Msg: "relay POST https://endpoint.example.test/x failed"})),
+			wantErr: consume.ErrCRIDLinkNoAnswer,
+		},
+		{
+			name: "a refusal that comes when the short limit has run out", shortLimit: testShortLimit,
+			request: func(ctx context.Context, _ *testing.T, _ context.CancelFunc) (*qurl.CRIDLink, error) {
+				<-ctx.Done()
+				return nil, sdkRefusal(qurl.ErrCRIDLinkRateLimited, "52603")
+			},
+			wantErr: consume.ErrCRIDLinkRateLimited,
+		},
+		{
+			name: "a link that comes when the short limit has run out", shortLimit: testShortLimit,
+			request: func(ctx context.Context, _ *testing.T, _ context.CancelFunc) (*qurl.CRIDLink, error) {
+				<-ctx.Done()
+				return issuedLink("https://link.example.test/x"), nil
+			},
+		},
+	} {
+		for _, readable := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/key readable=%t", tc.name, readable), func(t *testing.T) {
+				ctx, interrupt := context.WithCancel(t.Context())
+				defer interrupt()
+				if tc.commandLimit > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, tc.commandLimit)
+					defer cancel()
+				}
+				keyReads := noDeviceKey(connectorstate.NoDeviceKeyUnreadable)
+				if readable {
+					keyReads = deviceKeyOf(t, state)
+				}
+				asked, askedAsDevice := 0, 0
+				opts := &globalOpts{
+					linkTimeoutBeforeShare: tc.shortLimit,
+					readDeviceKey:          keyReads.read,
+					requestCRIDLink: func(ctx context.Context, _ string) (*qurl.CRIDLink, error) {
+						asked++
+						return tc.request(ctx, t, interrupt)
+					},
+					requestCRIDLinkAsDevice: func(ctx context.Context, _ []byte, _ string) (*qurl.CRIDLink, error) {
+						asked++
+						askedAsDevice++
+						return tc.request(ctx, t, interrupt)
+					},
+				}
+
+				link, ranOut, err := opts.linkByRequestBeforeShare(ctx, exampleCRID)
+				if ranOut != tc.wantRanOut {
+					t.Errorf("the short limit ran out = %t, want %t (error %v)", ranOut, tc.wantRanOut, err)
+				}
+				if !errors.Is(err, tc.wantErr) || (tc.wantErr == nil) != (link != nil) {
+					t.Errorf("the request ended with link present = %t and error %v, want error %v", link != nil, err, tc.wantErr)
+				}
+				wantAsDevice := 0
+				if readable {
+					wantAsDevice = 1
+				}
+				if asked != 1 || askedAsDevice != wantAsDevice {
+					t.Errorf("made the link request %d times, %d of them as this device; want 1 and %d", asked, askedAsDevice, wantAsDevice)
+				}
+			})
+		}
+	}
+}
+
+// TestGetDoesNotMakeTheLinkRequestOnceMoreWhenTheCommandEnded runs get for
+// the two endings that are not "the short limit ran out", although the link
+// request waited until its context ended. In both, the short limit is the
+// production one and has time left.
+//
+// The user interrupts the command: it stops at once, with exit code 130. It
+// sends nothing to the qURL API and makes no second link request.
+//
+// The command's own context has a time limit, and it runs out: the command
+// goes on to its share request, which cannot be answered any more, and that
+// failure is the result. No second link request is made.
+func TestGetDoesNotMakeTheLinkRequestOnceMoreWhenTheCommandEnded(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	mode := getFileMode(t)
+	for _, readable := range []bool{true, false} {
+		for _, tc := range []struct {
+			name string
+			// command returns the command's own context, and the function that
+			// ends it as an interrupt does.
+			command func(t *testing.T) (context.Context, context.CancelFunc)
+			// interrupted says the user interrupts while the request waits.
+			interrupted bool
+		}{
+			{
+				name: "interrupted by the user", interrupted: true,
+				command: func(t *testing.T) (context.Context, context.CancelFunc) { return context.WithCancel(t.Context()) },
+			},
+			{
+				name: "the command's own limit ran out",
+				command: func(t *testing.T) (context.Context, context.CancelFunc) {
+					return context.WithTimeout(t.Context(), testShortLimit)
+				},
+			},
+		} {
+			t.Run(fmt.Sprintf("%s/key readable=%t", tc.name, readable), func(t *testing.T) {
+				srv := downloadServer(t)
+				shareNotFoundTwice(t, srv)
+				ctx, end := tc.command(t)
+				defer end()
+				keyReads := noDeviceKey(connectorstate.NoDeviceKeyUnreadable)
+				if readable {
+					keyReads = deviceKeyOf(t, state)
+				}
+				requests := &linkRequests{}
+				wait := func(ctx context.Context) (*qurl.CRIDLink, error) {
+					if tc.interrupted {
+						end()
+					}
+					return nil, noAnswerUntilTheContextEnds(ctx, t)
+				}
+				configure := func(args []string) *runOpts {
+					opts := withDeviceKey(enrolledDevice(t, state), keyReads.read)(args)
+					opts.ctx = ctx
+					opts.requestCRIDLink = func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
+						_, _ = requests.answer(ctx, resourceCRID)
+						return wait(ctx)
+					}
+					opts.requestCRIDLinkAsDevice = func(ctx context.Context, key []byte, resourceCRID string) (*qurl.CRIDLink, error) {
+						_, _ = requests.answerAsDevice(ctx, key, resourceCRID)
+						return wait(ctx)
+					}
+					return opts
+				}
+
+				run := runShareMode(t, srv, srv.URL, mode, configure)
+				run.mustNotHaveActed(t)
+				if len(requests.asked) != 1 {
+					t.Errorf("made the link request %d times, want once", len(requests.asked))
+				}
+				if got := len(shareRequests(srv)); got != 0 {
+					t.Errorf("the share request was answered %d times, want none: the command's context had ended", got)
+				}
+				stderr := run.result.stderr.String()
+				if tc.interrupted {
+					if run.result.code != exitcode.Interrupted || stderr != "" || len(srv.Requests()) != 0 {
+						t.Errorf("exit = %d, stderr = %q, %d request(s) to the qURL API; want %d, nothing printed and no request",
+							run.result.code, stderr, len(srv.Requests()), exitcode.Interrupted)
+					}
+					return
+				}
+				// The share request's own failure: it is not the link request's
+				// "the service did not answer".
+				if run.result.code == exitcode.Success || run.result.code == exitcode.Interrupted || strings.Contains(stderr, consume.MsgCRIDLinkNoAnswer) {
+					t.Errorf("exit = %d, stderr = %q; want the failure of the share request", run.result.code, stderr)
+				}
+			})
+		}
 	}
 }
 

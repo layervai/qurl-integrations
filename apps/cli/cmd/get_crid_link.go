@@ -47,9 +47,13 @@ import (
 //
 //   - A device with an identity, where the request is offered and no share
 //     option is set, makes the link request first. A link ends the run, and
-//     no share request is sent. Any other answer leads to the share request,
-//     so every case that gave a link before this order existed still gives
-//     one.
+//     no share request is sent. Any other answer leads to the share request.
+//     In one case the device then makes the link request once more: the
+//     first one had no answer when its short time limit ran out, and the
+//     share request said "not found". The text below the second table says
+//     why. With that request, every case that gave a link before this order
+//     existed still gives one, when the service gives the same answers. This
+//     order costs requests and time. It does not cost a link.
 //   - That device asks as this device when it can read its own key, and with
 //     the CRID alone when it cannot. The key is read without changing the
 //     device state (opts.readDeviceKey). A read that fails is not an error:
@@ -103,8 +107,10 @@ import (
 //	link                              (not asked)       the link
 //	"not found"                       link              the share link
 //	"not found"                       "not found"       "not found", with the hint for a device
-//	no answer in time, or none        link              the share link
-//	no answer in time, or none        "not found"       "the service did not answer"
+//	the short time limit ran out      link              the share link
+//	the short time limit ran out      "not found"       the link request once more: see below
+//	no answer for another reason      link              the share link
+//	no answer for another reason      "not found"       "the service did not answer"
 //	another refusal                   link              the share link
 //	another refusal                   "not found"       that refusal
 //	not sent: this client cannot      link              the share link
@@ -124,6 +130,41 @@ import (
 // limit than the one whose answer is final (cridLinkTimeoutBeforeShare). A
 // relay that does not answer must not hold back for long a share request
 // that would give the link.
+//
+// The short limit must not cost a link that the long limit gives. Before the
+// link request came first, a device that may not share a public resource got
+// "not found" from its share request, and then made one link request with
+// the CRID alone and the long limit. A relay that needs more time than the
+// short limit, and less than the long one, gave that device its link. So in
+// the row "the link request once more", get makes that same request: once,
+// with the CRID alone, and with the long limit. It is not made as this
+// device, also when the first request was: the share request has already
+// said that this device may not open the resource. The answer of this
+// request is the result, as it was when the share request came first:
+//
+//   - A link is used. A refresh of that link asks with the CRID alone: the
+//     third row of the refresh table.
+//   - "Not found", another refusal, and no answer are told to the user as
+//     they are. No third request is made.
+//   - "This client cannot ask for the CRID" is not an answer the SDK gives
+//     here, because it sent the first request for the same CRID. If it ever
+//     does, the share request's "not found" stands.
+//   - An interrupt by the user ends the command with exit code 130 and no
+//     error text.
+//
+// "The short time limit ran out" means three things together: the link
+// request ended with "the service did not answer", the time of the short
+// limit was over, and the command's own context had not ended. So it is not
+// this row when the user interrupted the command, and not when the command's
+// own context ended. "No answer for another reason" is a service that could
+// not be reached, or a relay that answered with an error. That answer came
+// inside the short limit, and the long limit would not change it, so the
+// request is not made once more.
+//
+// The row costs time. The command can wait for the short limit, then for the
+// share request, then for the long limit, before it says that the service
+// did not answer. The order where the share request comes first does not
+// wait for the short limit.
 //
 // The refresh, by the link that is in use when a download asks again:
 //
@@ -160,6 +201,16 @@ import (
 // request as this device, which can be two requests. The link request whose
 // answer is final keeps the longer limit that internal/consume sets.
 const cridLinkTimeoutBeforeShare = 10 * time.Second
+
+// timeoutBeforeShare returns the time limit of the link request that comes
+// before a share request. It is cridLinkTimeoutBeforeShare, unless a test set
+// another limit.
+func (opts *globalOpts) timeoutBeforeShare() time.Duration {
+	if opts.linkTimeoutBeforeShare > 0 {
+		return opts.linkTimeoutBeforeShare
+	}
+	return cridLinkTimeoutBeforeShare
+}
 
 // linkOrigin says where a link of this run came from. A refresh is decided
 // by the origin of the link in use: see the third table at the top of this
@@ -351,10 +402,11 @@ func (opts *globalOpts) linkShareFirst(
 
 // linkRequestFirst is linkForGet for a device with an identity, where the
 // link request is offered and no share option is set: the link request
-// first, and the share request only when it gives no link. The second table
-// at the top of this file is this function.
+// first, and the share request only when it gives no link. In one case the
+// link request is then made once more. The second table at the top of this
+// file, with the text below it, is this function.
 func (opts *globalOpts) linkRequestFirst(ctx context.Context, assessment *cridux.Assessment, options qurlapi.ShareOptions) (*qurlapi.ShareLink, linkOrigin, error) {
-	link, requestErr := opts.linkByRequestBeforeShare(ctx, assessment.Input)
+	link, limitRanOut, requestErr := opts.linkByRequestBeforeShare(ctx, assessment.Input)
 	if requestErr == nil {
 		// A link ends the run. The share request is not sent.
 		return link, linkFromRequest, nil
@@ -374,10 +426,31 @@ func (opts *globalOpts) linkRequestFirst(ctx context.Context, assessment *cridux
 		// Nothing was sent for a link, because this client cannot ask for
 		// this CRID. The share request's "not found" is the only answer.
 		return nil, linkFromShare, shareErr
+	case !limitRanOut:
+		// The share request said "not found", so the link request's answer is
+		// the result, as it was when the share request came first.
+		return nil, linkFromShare, requestErr
 	}
-	// The share request said "not found", so the link request's answer is
-	// the result, as it was when the share request came first.
-	return nil, linkFromShare, requestErr
+
+	// The share request said "not found", and the link request had no answer
+	// when its short limit ran out. The order where the share request comes
+	// first makes one link request at this point, with the long limit, and a
+	// relay that is slow can still answer it. So get makes that request now:
+	// once, with the CRID alone, and with the command's own context, so the
+	// only limit is the long one that internal/consume sets. It is not made
+	// as this device, for the reason linkShareFirst gives.
+	link, err := opts.linkByCRIDAlone(ctx, assessment.Input, true)
+	if errors.Is(err, errCRIDNotRequestable) {
+		// The SDK sent the first request for this same CRID, so it does not
+		// give this answer now. If it ever does, the share request's "not
+		// found" stands, as in linkShareFirst, and the error does not leave
+		// this file.
+		return nil, linkFromShare, shareErr
+	}
+	// The answer of this request is the result, whatever it is. The share
+	// request cannot give this run a link, so the origin is the one a
+	// refresh asks with the CRID alone for.
+	return linkWithOrigin(link, linkFromRequestOnly, err)
 }
 
 // linkByRequestBeforeShare makes the link request of a device that makes its
@@ -387,16 +460,35 @@ func (opts *globalOpts) linkRequestFirst(ctx context.Context, assessment *cridux
 // The key is read with the command's own context and no shorter time limit.
 // The request then has the limit cridLinkTimeoutBeforeShare. The key is
 // wiped when the request has been answered.
-func (opts *globalOpts) linkByRequestBeforeShare(ctx context.Context, resourceCRID string) (*qurlapi.ShareLink, error) {
+//
+// limitRanOut reports that the request had no answer when that short limit
+// ran out. It is true only when three things hold together:
+//
+//   - The result is "the service did not answer". Any other result is an
+//     answer, also when it comes at the moment the limit runs out.
+//   - The context that carries the short limit ended because its time was
+//     over.
+//   - The command's own context has not ended. When the user interrupts the
+//     command, or the command's own time limit runs out, the command's
+//     context ends, and the context of the request ends with it. That is not
+//     the short limit running out.
+//
+// So limitRanOut is false for a service that could not be reached: that
+// answer comes while the short limit still has time left.
+func (opts *globalOpts) linkByRequestBeforeShare(ctx context.Context, resourceCRID string) (link *qurlapi.ShareLink, limitRanOut bool, err error) {
 	key, why := opts.readDeviceKey(ctx)
 	defer clear(key)
 
-	requestCtx, cancel := context.WithTimeout(ctx, cridLinkTimeoutBeforeShare)
+	requestCtx, cancel := context.WithTimeout(ctx, opts.timeoutBeforeShare())
 	defer cancel()
+	ranOut := func(requestErr error) bool {
+		return errors.Is(requestErr, consume.ErrCRIDLinkNoAnswer) &&
+			errors.Is(requestCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+	}
 	if why == "" {
-		link, err := opts.linkAsDevice(requestCtx, key, resourceCRID)
+		link, err = opts.linkAsDevice(requestCtx, key, resourceCRID)
 		if !errors.Is(err, errDeviceKeyRefused) {
-			return link, err
+			return link, ranOut(err), err
 		}
 		// The SDK will not use the key and sent nothing. That is a key this
 		// device cannot ask with, like one it could not read.
@@ -405,7 +497,8 @@ func (opts *globalOpts) linkByRequestBeforeShare(ctx context.Context, resourceCR
 	if logf := opts.verboseLogger(); logf != nil {
 		logf(msgCRIDLinkDeviceKeyNotRead, string(why))
 	}
-	return opts.linkByCRIDAlone(requestCtx, resourceCRID, true)
+	link, err = opts.linkByCRIDAlone(requestCtx, resourceCRID, true)
+	return link, ranOut(err), err
 }
 
 // readDeviceStaticPrivateKey is the production opts.readDeviceKey: the key
