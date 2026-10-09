@@ -13,6 +13,8 @@ They ask for access there and get a six-digit code to give you. Approve a code w
 
   qurl approve qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q <code>
 
+Approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them.
+
 The address and the CRID are safe to send to anyone: a private resource opens only for you and the people you allow.
 
 CRID: qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q

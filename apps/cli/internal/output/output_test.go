@@ -1263,7 +1263,7 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers,
 		hintAccessRequestsNotTurnedOn, msgPublishRequestsTurnedOn,
 		msgRequestsSendAddress, msgRequestsSendCRID, msgRequestsNextStep, msgRequestsNextStepNoSite,
-		msgRequestsApproveCommand, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,
+		msgRequestsApproveCommand, msgRequestsApproveRule, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,
 		msgRequestsOn, msgRequestsOff, msgRequestsOffOnePerson, msgRequestsOffPeople,
 		msgNoPendingRequests, msgNoPendingRequestsForOne, msgApproveOnlyGivenCodes,
 		msgRequesterNoName, msgRequesterNameUnchecked,

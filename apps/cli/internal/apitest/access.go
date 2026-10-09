@@ -388,9 +388,9 @@ func (s *Server) serveApproval(w http.ResponseWriter, code string) {
 }
 
 // serveDenial refuses one pending request. It is named by the device id it
-// came from, which a listing shows, or by its code, which only the person
-// who asked could have given. Only a denial by code can be a wrong guess at
-// a code, so only that is limited and counted.
+// came from, which a listing shows, or by its code, which only the screen
+// that asked was shown. Only a denial by code can be a wrong guess at a
+// code, so only that is limited and counted.
 func (s *Server) serveDenial(w http.ResponseWriter, operand string) {
 	byCode := isRequestCode(operand)
 	if byCode && s.codeLimited(w) {

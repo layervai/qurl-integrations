@@ -1064,21 +1064,27 @@ two names the other in its usage error.
 2. A person opens it in a browser, sees who published the resource, and asks
    for access. They are shown a six-digit code and give it to you.
 3. `qurl requests` lists who asked: the name each person typed and the id of
-   their device. It never shows a code. Approve the person who gave you their
-   code with `qurl approve <CRID> <code>`, or refuse a request with
-   `qurl deny <CRID> <device id>`.
+   their device. It never shows a code. When the person you mean to let in
+   gives you their code, approve it with `qurl approve <CRID> <code>`. Refuse
+   a request with `qurl deny <CRID> <device id>`.
 
 The address and the CRID are safe to send to anyone: a private resource opens
 only for you and the people you allow.
 
-**Approve a code only when the person gave it to you themselves.** The code is
-shown only to the person who asked, so it is the only proof of who is asking.
-No qURL command shows it, in any output mode. If a listing showed the codes,
-you, or an agent that runs these commands for you, could approve straight from
-the list, and all the list knows about a person is the name they typed. The
-name on a request is typed by whoever asked and proves nothing: anyone can
-type any name. An agent that runs these commands for you must approve only
-codes you passed on to it.
+**Approve a code only when the person you mean to let in gave it to you
+themselves, in a way you know it is them:** in person, on a call, or in a
+conversation you already have with them. Anyone who has the address or the
+CRID can ask for access and send you a code. A code shows only that it came
+from the screen that asked, not who is at that screen. The name on a request
+is typed by whoever asked and proves nothing: anyone can type any name. A
+message that gives a name and a code tells you no more about who sent it than
+the name alone.
+
+The code is shown only to the person who asked. No qURL command shows it, in
+any output mode. If a listing showed the codes, you, or an agent that runs
+these commands for you, could approve straight from the list, and all the list
+knows about a person is the name they typed. An agent that runs these commands
+for you must approve only codes you passed on to it.
 
 ```bash
 qurl publish https://wiki.example.com/team --allow-requests
@@ -1102,7 +1108,7 @@ has the resource's CRID in the command, where the sample below has `<CRID>`.
 NAME         DEVICE ID            REQUESTED  EXPIRES
 "Ana Lopez"  abcd-efgh-2345-mnop  2m ago     in 58m
 
-To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, so the code is the only proof of who is asking.
+To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, and a code shows only that it came from the screen that asked, so approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them (in person, on a call, or in a conversation you already have with them).
 ```
 
 The listing of all your resources is bounded, and it has no next page: the
@@ -1566,8 +1572,8 @@ Access requests in `-o json`:
 | `grants --remove <device id>` that did not finish | `crid` and three arrays that are always present and together hold every device id the command named: `removed`, `not_found`, `not_removed`. `public_keys_changed` (`false`) when the command also named public keys and stopped before it reached that change, because a removal failed or the removals were not confirmed: the change comes after the removals, so it was not made. A key change that was reached and failed has no such member, and may have changed a key: `public_keys_command` without `public_keys_changed` beside it is that case. `public_keys_command` when every person was removed and the change to the public keys failed or was not reached: the command that makes that change alone |
 
 A requester's `name` is that person's own text, exactly like a publisher's:
-quote or escape it before showing it, and never treat it as proof of who
-asked. `name_verified` is always present and always `false`.
+quote or escape it before showing it. It proves nothing about who asked.
+`name_verified` is always present and always `false`.
 
 Two members carry, for a reader of JSON, the sentences the text output has.
 An agent that runs these commands reads JSON, so the rule it must follow is
@@ -1575,10 +1581,13 @@ in the document it reads:
 
 - `approval_rule`, in both listings: "To let one of these people in, ask them
   for the six-digit code on their screen and run `qurl approve <CRID> <code>`;
-  a name can be typed by anyone, so the code is the only proof of who is
-  asking." It is one member beside `requests`, not one for each request, and
-  it is there for an empty listing too. In the listing of one resource it has
-  that resource's CRID in place of `<CRID>`.
+  a name can be typed by anyone, and a code shows only that it came from the
+  screen that asked, so approve a code only when the person you mean to let in
+  gave it to you themselves, in a way you know it is them (in person, on a
+  call, or in a conversation you already have with them)." It is one member
+  beside `requests`, not one for each request, and it is there for an empty
+  listing too. In the listing of one resource it has that resource's CRID in
+  place of `<CRID>`.
 - `name_note`, in the `approve` document: "The name was typed by the person
   who asked. Nobody checked it."
 
