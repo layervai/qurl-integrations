@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.4.1](https://github.com/layervai/qurl-integrations/compare/v3.4.0...v3.4.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **cli:** say what a code shows, and from whom to take one ([#1576](https://github.com/layervai/qurl-integrations/issues/1576)) ([105c7aa](https://github.com/layervai/qurl-integrations/commit/105c7aabc4ed84a0ecdf8027585b2afc1f01f556))
+
 ## [3.4.0](https://github.com/layervai/qurl-integrations/compare/v3.3.1...v3.4.0) (2026-10-09)
 
 
