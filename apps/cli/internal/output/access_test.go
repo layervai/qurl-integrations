@@ -185,7 +185,7 @@ func TestAccessRequestsListing(t *testing.T) {
 		if !all {
 			approve = "qurl approve " + accessCRID + " <code>"
 		}
-		want += "\nTo let one of these people in, ask them for the six-digit code on their screen and run `" + approve + "`; a name can be typed by anyone, and a code shows only that it came from the screen that asked, so approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them (in person, on a call, or from their usual number or account).\n"
+		want += "\nTo let one of these people in, ask them for the six-digit code on their screen and run `" + approve + "`; a name can be typed by anyone, and a code shows only that it came from the screen that asked, so approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them (in person, on a call, or in a conversation you already have with them).\n"
 		if got := out.String(); got != want || errBuf.Len() != 0 {
 			t.Fatalf("all=%t: listing =\n%s\nwant\n%s\nstderr %q", all, got, want, errBuf.String())
 		}
@@ -229,7 +229,7 @@ func TestAccessRequestsListingAlwaysEndsWithTheSafetyLine(t *testing.T) {
 		"ask them for the six-digit code on their screen", "`qurl approve <CRID> <code>`",
 		"a name can be typed by anyone", "a code shows only that it came from the screen that asked",
 		"approve a code only when the person you mean to let in gave it to you themselves",
-		"in a way you know it is them (in person, on a call, or from their usual number or account)",
+		"in a way you know it is them (in person, on a call, or in a conversation you already have with them)",
 	} {
 		if !strings.Contains(approvalRule(""), part) {
 			t.Errorf("the safety line lost %q", part)
@@ -446,6 +446,7 @@ func TestRequestGuidanceSaysWhatToSendAndWhatHappensNext(t *testing.T) {
 			"  " + accessAddress + "\n\n" +
 			"They ask for access there and get a six-digit code to give you. Approve a code with:\n\n" +
 			"  qurl approve " + accessCRID + " <code>\n\n" +
+			"Approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them.\n\n" +
 			"The address and the CRID are safe to send to anyone: a private resource opens only for you and the people you allow.\n"
 		if address == "" {
 			want = "Access requests are on for " + accessCRID + ".\n\n" +
@@ -453,6 +454,7 @@ func TestRequestGuidanceSaysWhatToSendAndWhatHappensNext(t *testing.T) {
 				"  " + accessCRID + "\n\n" +
 				"Where they open it, they ask for access and get a six-digit code to give you. Approve a code with:\n\n" +
 				"  qurl approve " + accessCRID + " <code>\n\n" +
+				"Approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them.\n\n" +
 				"The CRID is safe to send to anyone: a private resource opens only for you and the people you allow.\n"
 		}
 		if got := out.String(); got != want || errBuf.Len() != 0 {
@@ -553,6 +555,7 @@ func TestPublishWithAccessRequestsPrintsTheGuidanceBeforeTheCRID(t *testing.T) {
 		"  " + accessAddress + "\n\n" +
 		"They ask for access there and get a six-digit code to give you. Approve a code with:\n\n" +
 		"  qurl approve " + accessCRID + " <code>\n\n" +
+		"Approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them.\n\n" +
 		"The address and the CRID are safe to send to anyone: a private resource opens only for you and the people you allow.\n\n" +
 		"CRID: " + accessCRID + "\n"
 	if text != want {

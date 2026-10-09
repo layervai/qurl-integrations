@@ -87,8 +87,8 @@ code is on the screen of the person who asked. The name is typed by whoever
 asked, and anyone can type any name. A code shows only that it came from the
 screen that asked, so approve a code only when the person you mean to let in
 gave it to you themselves, in a way you know it is them (in person, on a call,
-or from their usual number or account). To let a person in, ask them for their
-code and run "qurl approve <CRID> <code>". To refuse a request, run
+or in a conversation you already have with them). To let a person in, ask them
+for their code and run "qurl approve <CRID> <code>". To refuse a request, run
 "qurl deny <CRID> <device id>" with the device id from the listing.
 
 The listing of all your resources is bounded, and it has no next page. When
@@ -204,9 +204,9 @@ The code is the six digits the person was shown when they asked. They give it
 to you; no qURL command shows it. A code shows only that it came from the
 screen that asked, so approve a code only when the person you mean to let in
 gave it to you themselves, in a way you know it is them (in person, on a call,
-or from their usual number or account). The name on a request is typed by
-whoever asked and can be typed by anyone, so never approve because of a name,
-even when a code comes with it. To see who is waiting, run
+or in a conversation you already have with them). The name on a request is
+typed by whoever asked and can be typed by anyone, so never approve because of
+a name, even when a code comes with it. To see who is waiting, run
 "qurl requests <CRID>".
 
 Write the code as 123456, 123 456 or 123-456. The command prints who now has

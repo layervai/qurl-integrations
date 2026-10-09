@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -33,7 +34,7 @@ const (
 	otherRequester   = "Sam Okafor"
 	testLinkSite     = "https://links.example.test"
 	unsupportedText  = "this service does not offer access requests yet"
-	safetyLine       = "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, and a code shows only that it came from the screen that asked, so approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them (in person, on a call, or from their usual number or account)."
+	safetyLine       = "To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, and a code shows only that it came from the screen that asked, so approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them (in person, on a call, or in a conversation you already have with them)."
 )
 
 // safetyLineFor is the last line of the listing of one resource: safetyLine
@@ -1968,7 +1969,7 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 	const (
 		codeShows   = "code shows only that it came from the screen that asked"
 		fromWhom    = "a code only when the person you mean to let in gave it to you themselves, in a way you know it is them"
-		knownWays   = "in person, on a call, or from their usual number or account"
+		knownWays   = "in person, on a call, or in a conversation you already have with them"
 		anyNameHalf = "A name can be typed by anyone, and a code shows only that it came from the screen that asked"
 	)
 	for where, wants := range map[string][]string{
@@ -1985,6 +1986,30 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 		for _, want := range wants {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s does not state the rule: missing %q", where, want)
+			}
+		}
+	}
+	// The guidance printed when access requests are turned on is the first
+	// thing a new owner reads, and it gives the approve command. Both
+	// commands that print it say from whom to take a code, once, right after
+	// that command, with and without a known link site. It is text only:
+	// the JSON documents of these commands carry no sentence.
+	const guidanceRule = "Approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them."
+	for name, args := range map[string]func(*apitest.Server) []string{
+		"publish --allow-requests": func(*apitest.Server) []string { return []string{"publish", privacyRemoteTarget, "--allow-requests"} },
+		"requests <CRID> --on":     func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--on"} },
+	} {
+		for _, site := range []string{testLinkSite, ""} {
+			srv := apitest.NewServer(t)
+			res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL}, args(srv)...), linkSite: site})
+			afterCommand := "\n  qurl approve " + srv.Key.CRID + " <code>\n\n" + guidanceRule + "\n\n"
+			if stdout := res.stdout.String(); res.code != 0 || strings.Count(stdout, afterCommand) != 1 || strings.Count(stdout, guidanceRule) != 1 {
+				t.Errorf("qurl %s, link site %q: exit %d, and the output does not say from whom to take a code, once, right after the approve command:\n%s", name, site, res.code, stdout)
+			}
+			srv = apitest.NewServer(t)
+			res = runCLI(t, &runOpts{args: append(append([]string{"--endpoint", srv.URL}, args(srv)...), "-o", "json"), linkSite: site})
+			if document := res.stdout.String(); res.code != 0 || !json.Valid(res.stdout.Bytes()) || strings.Contains(document, "Approve a code") {
+				t.Errorf("qurl %s -o json, link site %q: exit %d, want a JSON document with no sentence on approving:\n%s", name, site, res.code, document)
 			}
 		}
 	}
@@ -2043,7 +2068,10 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 		}
 	}
 	// The README has the last line of a listing twice, word for word as the
-	// command prints it: in the sample listing, and as approval_rule.
+	// command prints it: in the sample listing, and as approval_rule. The
+	// README is compared with its line breaks joined and its backticks
+	// removed, and exactly two quotes are expected: a third quote in the
+	// README is a deliberate change to this test.
 	if got := strings.Count(readme, strings.ReplaceAll(safetyLine, "`", "")); got != 2 {
 		t.Errorf("README has the last line of a listing %d times, want 2: in the sample listing and as approval_rule", got)
 	}
@@ -2069,9 +2097,9 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 }
 
 // TestNoCopyCallsACodeProofOfWhoIsAsking pins that nothing a publisher, or an
-// agent working for one, reads says "proof of who". A code shows which screen
-// asked. A reader who takes a code as telling who is at that screen approves
-// any code that arrives with a name.
+// agent working for one, reads says "proof of who", "proves who" or "prove
+// who". A code shows which screen asked. A reader who takes a code as telling
+// who is at that screen approves any code that arrives with a name.
 //
 // It reads four sources: the help of every visible command and flag, from the
 // command tree; every registered customer message; every golden file, which
@@ -2079,11 +2107,26 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 // sentence on what a code shows, so that a source that is read empty, or not
 // read at all, fails here instead of passing.
 func TestNoCopyCallsACodeProofOfWhoIsAsking(t *testing.T) {
-	const (
-		banned   = "proof of who"
-		whatItIs = "came from the screen that asked"
-	)
-	// The phrase is looked for in any case and across a line break: help
+	const whatItIs = "came from the screen that asked"
+	// The banned phrases. The bare word "proof" is not one of them: "a claim,
+	// not as proof", of a publisher's name, is right. Each phrase is matched
+	// from the start of a word, so that "approve who" is not read as "prove
+	// who".
+	banned := []string{"proof of who", "proves who", "prove who"}
+	bannedPhrase := regexp.MustCompile(`\b(?:` + strings.Join(banned, "|") + `)`)
+	for text, want := range map[string]string{
+		"the code is the only proof of who is asking": "proof of who",
+		"a code proves who is asking":                 "proves who",
+		"a code does not prove who is asking":         "prove who",
+		"approve whoever gave you their code":         "",
+		"treat the name as a claim, not as proof":     "",
+		"the name proves nothing about who they are":  "",
+	} {
+		if got := bannedPhrase.FindString(text); got != want {
+			t.Errorf("the check finds %q in %q, want %q", got, text, want)
+		}
+	}
+	// A phrase is looked for in any case and across a line break: help
 	// texts and the README are wrapped.
 	normalize := func(text string) string { return strings.ToLower(strings.Join(strings.Fields(text), " ")) }
 
@@ -2119,8 +2162,8 @@ func TestNoCopyCallsACodeProofOfWhoIsAsking(t *testing.T) {
 		stated := 0
 		for where, text := range texts {
 			text = normalize(text)
-			if strings.Contains(text, banned) {
-				t.Errorf("%s %q says %q", source, where, banned)
+			if said := bannedPhrase.FindString(text); said != "" {
+				t.Errorf("%s %q says %q", source, where, said)
 			}
 			if strings.Contains(text, whatItIs) {
 				stated++
