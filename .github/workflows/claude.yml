@@ -389,7 +389,8 @@ jobs:
           # Match the remote structurally, not by token value: claude.yml omits
           # github_token so the action embeds its own GitHub App token, which
           # this step never sees. Userinfo must be x-access-token plus a single
-          # opaque secret of URL-unreserved characters, so a crafted host cannot be
+          # opaque secret of URL-unreserved characters or percent-escapes, so a crafted
+          # host cannot be
           # smuggled through the credential field.
           # The secret is held to an allowlist rather than "anything but @ and
           # /": a URL client ends the host at "#", "?" or "\" as well, so
