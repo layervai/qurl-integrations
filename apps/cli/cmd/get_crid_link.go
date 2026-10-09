@@ -488,6 +488,15 @@ func (opts *globalOpts) linkRequestFirst(ctx context.Context, assessment *cridux
 //
 // So limitRanOut is false for a service that could not be reached: that
 // answer comes while the short limit still has time left.
+//
+// TODO(upstream-contract): the first condition rests on the order of the
+// cases in consume.ClassifyCRIDLinkError. It tests qurl-go's
+// ErrServerOverloaded and *ServerDenyError before the deadline of the
+// context, and today qurl-go reports a deadline that ran out as neither. If
+// qurl-go ever wraps a deadline in one of the two, the result is no longer
+// "the service did not answer", and the request under the full limit is not
+// made. TestGetMakesTheLinkRequestOnceMoreThroughTheSDK holds today's
+// behavior through the SDK.
 func (opts *globalOpts) linkByRequestBeforeShare(ctx context.Context, resourceCRID string) (link *qurlapi.ShareLink, limitRanOut bool, err error) {
 	key, why := opts.readDeviceKey(ctx)
 	defer clear(key)
