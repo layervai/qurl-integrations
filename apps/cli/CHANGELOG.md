@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.5.0](https://github.com/layervai/qurl-integrations/compare/v3.4.1...v3.5.0) (2026-10-09)
+
+
+### Features
+
+* **cli:** get asks for a CRID link first where the deployment offers it, also on a machine that has only an account key (no change with the deployment this release ships) ([4e5266d](https://github.com/layervai/qurl-integrations/commit/4e5266d00d43e04cad1fb890de970f5badc83ca3))
+
 ## [3.4.1](https://github.com/layervai/qurl-integrations/compare/v3.4.0...v3.4.1) (2026-10-09)
 
 
