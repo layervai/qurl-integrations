@@ -2,6 +2,14 @@ module github.com/layervai/qurl-integrations
 
 go 1.26.6
 
+// CI builds, tests, scans and releases with this toolchain: setup-go reads this
+// line before the go line. The go line stays at 1.26.6 until the golang:1.26.9
+// build image passes the 14-day image age rule (2026-10-22T17:12Z). Both
+// Dockerfiles build with GOTOOLCHAIN=local, which refuses a go line above the
+// image's own version and ignores this line. Raise the go line and both image
+// pins together, then remove this line.
+toolchain go1.26.9
+
 require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/anthropics/anthropic-sdk-go v1.72.0
