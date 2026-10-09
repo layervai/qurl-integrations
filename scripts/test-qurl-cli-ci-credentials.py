@@ -1127,7 +1127,7 @@ def service_resource_row(index: int, device_keys: int = 0) -> dict[str, object]:
     return {
         "private": True,
         "allowed_device_keys": [
-            "k" * 42 + f"{key:02d}"[-2:] + "=" for key in range(device_keys)
+            "k" * 40 + f"{key:03d}" + "=" for key in range(device_keys)
         ],
         "access_requests": False,
         "allowed_passkeys": [],
@@ -1207,6 +1207,16 @@ def test_a_page_of_rows_has_the_bound_of_a_page() -> None:
             raise AssertionError("an inventory page above its bound was accepted")
     with served(b" " * (credentials.INVENTORY_MAX_RESPONSE - len(page)) + page):
         assert len(read_inventory()) == credentials.INVENTORY_PAGE_SIZE
+
+    # What an operator reads when a page is above its bound: each inventory
+    # failed, by its name, and neither stopped the other from being tried.
+    with served(b"x" * (credentials.INVENTORY_MAX_RESPONSE + 1)):
+        inventory = credentials.reconciliation_inventory(
+            "https://sandbox.example", "automation_key"
+        )
+    assert inventory.resource_failure == "resource_inventory"
+    assert inventory.resources is None
+    assert inventory.credential_failure == "credential_inventory"
 
     # Every other response keeps the small bound, to the byte.
     with served(b"x" * (credentials.MAX_RESPONSE + 1)) as response:

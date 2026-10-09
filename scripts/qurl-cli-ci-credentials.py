@@ -28,7 +28,9 @@ MAX_RESPONSE = 64 * 1024
 # bound for a page, the cleanup inventory failed as soon as 100 ordinary rows
 # of the CI owner came to more than 64 KiB (66,609 bytes on 2026-10-09, after
 # the service added two members to every row), and every journey cleanup with
-# it. The bound stays: a page is read into memory before it is parsed.
+# it. The bound stays: a page is read into memory before it is parsed. What
+# one inventory holds in all is bounded by INVENTORY_MAX_ROWS rows of that
+# size, about 160 MiB at the worst, and no longer by pages of 64 KiB.
 # TODO(upstream-contract): 8 MiB is 100 rows of about 80 KiB, above what the
 # service's limits on those lists allow today. Recalibrate it with them.
 INVENTORY_MAX_RESPONSE = 8 * 1024 * 1024
