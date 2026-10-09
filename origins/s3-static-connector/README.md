@@ -1,4 +1,4 @@
-# Private S3 static sites with qURL Connector
+# s3-static-connector
 
 Reusable origin image for a **private S3 static site behind qURL™ Connector**.
 It serves a private S3 bucket over plain HTTP on **loopback only**, so the qURL

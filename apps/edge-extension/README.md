@@ -1,9 +1,4 @@
-# qURL for Microsoft Edge installation and releases
-
-Use the qURL™ browser extension in Microsoft Edge to share files from Gmail
-through expiring access links. Follow the [shared Gmail usage guide](../chrome-extension/README.md)
-for uploading files and inserting links into a draft. This directory contains
-the Edge packaging and store-submission instructions.
+# qURL for Microsoft Edge
 
 The Edge release uses the shared browser-extension source in
 `../chrome-extension`. Release Please keeps its package version equal to the
