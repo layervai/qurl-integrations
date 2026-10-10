@@ -200,8 +200,10 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 		t.Fatalf("qURL user job after publish = %+v, %v; want installed and running", jobWait.Last, err)
 	}
 	if jobWait.Samples > 1 {
-		t.Logf("qURL user job after publish was %+v (answer failed: %t) when first asked; it was installed and running after %d answers in %s",
-			jobWait.First, jobWait.FirstErr != nil, jobWait.Samples, jobWait.Waited.Round(time.Millisecond))
+		// Two flags and no more of the status: this line is in the log of a
+		// run that passes.
+		t.Logf("qURL user job after publish was installed: %t, running: %t (answer failed: %t) when first asked; it was installed and running after %d answers in %s",
+			jobWait.First.Installed, jobWait.First.Running, jobWait.FirstErr != nil, jobWait.Samples, jobWait.Waited.Round(time.Millisecond))
 	}
 	assertPOSIXUserJobContainsNoCredential(t, cliEnv["QURL_ENDPOINT"], cliEnv[hub.EnvHost], cliEnv[hub.EnvServerPublicKey], bootstrapKey, cleanupJWT)
 
@@ -725,8 +727,14 @@ func waitSandboxDaemonExited(stateDir string, limit time.Duration) error {
 		return fmt.Errorf("qURL daemon did not release its state directory within %s of the removal of its job", limit)
 	}
 	if err != nil {
-		return fmt.Errorf("check that the qURL daemon released its state directory: %w", err)
+		// A reduced reason, as for a temp directory that cannot be removed:
+		// the error of the lease can name the state directory, and the log
+		// of a run is public.
+		return fmt.Errorf("the check that the qURL daemon released its state directory failed (%s)", sandboxTempRemovalReason(err))
 	}
+	// Taking the lease made the state directory again if it was gone, and
+	// left the lease file in it. The removal of the temp directories, which
+	// runs after this, takes both away.
 	return unlock()
 }
 
