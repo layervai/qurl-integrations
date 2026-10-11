@@ -788,6 +788,8 @@ publisher; they are not anonymous access. Mailbox verification does not prove
 legal identity. Contract grants use an opaque consumer reference. Approve
 contract access only from a trusted publisher backend receipt and expiration;
 these commands do not verify payment with a payment processor.
+The publisher backend can subscribe to `consumer.subscribed` webhooks.
+If its notification is pending, repeat the same receipt, expiry and version.
 
 `qurl access --help` lists all owner actions. Changes require the current
 version. If session removal is pending, retry the exact removal and version;

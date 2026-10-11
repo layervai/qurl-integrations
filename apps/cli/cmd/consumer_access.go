@@ -35,6 +35,7 @@ Read the version from a listing before a decision. Use --version with that
 version. A key opt-in uses decision-id new and --version 0. Contract approval
 requires a trusted publisher entitlement receipt and expiry; it does not
 verify payment. Mailbox verification proves email control, not legal identity.
+If a contract notification is pending, repeat the same receipt, expiry and version.
 A removal is complete only when connection cleanup says complete. If pending,
 repeat the same removal and version. Invitations send email on your request.
 Use --access when you publish to choose the initial policy.`,
