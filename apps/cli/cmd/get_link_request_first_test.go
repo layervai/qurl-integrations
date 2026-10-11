@@ -205,9 +205,9 @@ func TestGetLinkRequestFirstAnswerPairs(t *testing.T) {
 					if errors.Is(link.err, qurl.ErrCRIDLinkNotFound) {
 						wantKeyReads = 1
 					}
-					if got.asks != 1 || got.asDevice != 1 || len(keyReads.given) != wantKeyReads {
+					if got.asks != 1 || got.asDevice != 1 || len(keyReads.keysGiven()) != wantKeyReads {
 						t.Errorf("made the link request %d times, %d of them as this device, and read the key %d times; want 1, 1 and %d",
-							got.asks, got.asDevice, len(keyReads.given), wantKeyReads)
+							got.asks, got.asDevice, len(keyReads.keysGiven()), wantKeyReads)
 					}
 
 					// What the table says.
@@ -416,11 +416,11 @@ func TestGetRefreshIsDecidedAgainAfterALinkFromTheLinkRequest(t *testing.T) {
 							wantKeyReads++
 						}
 					}
-					if len(requests.asked) != 2 || requests.askedAsDevice() != 2 || offer.checks != 2 || len(keyReads.given) != wantKeyReads {
+					if len(requests.asked) != 2 || requests.askedAsDevice() != 2 || offer.checks != 2 || len(keyReads.keysGiven()) != wantKeyReads {
 						t.Errorf("made the link request %d times, %d of them as this device, asked whether it is offered %d times and read the key %d times; want 2, 2, 2 and %d",
-							len(requests.asked), requests.askedAsDevice(), offer.checks, len(keyReads.given), wantKeyReads)
+							len(requests.asked), requests.askedAsDevice(), offer.checks, len(keyReads.keysGiven()), wantKeyReads)
 					}
-					for i, given := range keyReads.given {
+					for i, given := range keyReads.keysGiven() {
 						if given != nil && !bytes.Equal(given, make([]byte, len(given))) {
 							t.Errorf("the device key of read %d was not wiped", i+1)
 						}
@@ -503,9 +503,9 @@ func TestGetGivesTheLinkRequestBeforeAShareRequestAShorterTimeLimit(t *testing.T
 			if contexts.limits[0] < cridLinkTimeoutBeforeShare/2 {
 				t.Errorf("the link request had %s left of its limit, want most of %s", contexts.limits[0], cridLinkTimeoutBeforeShare)
 			}
-			if len(keyReads.bounded) != 1 || keyReads.bounded[0] {
+			if len(keyReads.limitsSeen()) != 1 || keyReads.limitsSeen()[0] {
 				t.Errorf("the device key was read %d times, with a time limit: %v; want one read with the context of the command, which has none here",
-					len(keyReads.bounded), keyReads.bounded)
+					len(keyReads.limitsSeen()), keyReads.limitsSeen())
 			}
 		})
 	}
@@ -635,8 +635,8 @@ func (r *slowRelay) mustHaveAsked(onceMore bool) {
 // found": only that answer needs the key.
 func mustNotHaveReadTheKey(t *testing.T, keyReads *deviceKeyReads) {
 	t.Helper()
-	if len(keyReads.given) != 0 {
-		t.Errorf("the device key was read %d times, want never: no link request as this device was answered \"not found\"", len(keyReads.given))
+	if len(keyReads.keysGiven()) != 0 {
+		t.Errorf("the device key was read %d times, want never: no link request as this device was answered \"not found\"", len(keyReads.keysGiven()))
 	}
 }
 
@@ -1119,17 +1119,17 @@ func TestGetReadsTheDeviceKeyOnlyForTheRequestUnderIt(t *testing.T) {
 				t.Fatalf("made the link request %d times, %d of them as this device; want once, as this device", len(tc.answer.asked), tc.answer.askedAsDevice())
 			}
 			if !tc.read {
-				if len(keyReads.given) != 0 || len(tc.answer.keys) != 0 {
+				if len(keyReads.keysGiven()) != 0 || len(tc.answer.keys) != 0 {
 					t.Fatalf("the device key was read %d times and %d request(s) were sent under it; want no read: the first request settled the link request",
-						len(keyReads.given), len(tc.answer.keys))
+						len(keyReads.keysGiven()), len(tc.answer.keys))
 				}
 				return
 			}
 			if len(tc.answer.keys) != 1 || !bytes.Equal(tc.answer.keys[0], keyReads.key) {
 				t.Fatalf("%d request(s) were sent under the device key, want one, with exactly the key that was read", len(tc.answer.keys))
 			}
-			if len(keyReads.given) != 1 || !bytes.Equal(keyReads.given[0], make([]byte, 32)) {
-				t.Errorf("the device key was read %d times, want once, and the key that was read must be wiped after the request", len(keyReads.given))
+			if len(keyReads.keysGiven()) != 1 || !bytes.Equal(keyReads.keysGiven()[0], make([]byte, 32)) {
+				t.Errorf("the device key was read %d times, want once, and the key that was read must be wiped after the request", len(keyReads.keysGiven()))
 			}
 		})
 	}
@@ -1226,8 +1226,8 @@ func TestGetAsksWithTheCRIDAloneWhenTheSDKWillNotUseTheKey(t *testing.T) {
 			if got, want := apiRequests(srv), []string{"GET /v1/me", "POST " + shareRoute(srv)}; strings.Join(got, "\n") != strings.Join(want, "\n") {
 				t.Errorf("qURL API requests = %q, want %q: the share request after \"not found\"", got, want)
 			}
-			if len(keyReads.given) != 1 || !bytes.Equal(keyReads.given[0], make([]byte, len(badKey))) {
-				t.Errorf("the key was read %d times, want once, and the bytes the SDK refused must be wiped", len(keyReads.given))
+			if len(keyReads.keysGiven()) != 1 || !bytes.Equal(keyReads.keysGiven()[0], make([]byte, len(badKey))) {
+				t.Errorf("the key was read %d times, want once, and the bytes the SDK refused must be wiped", len(keyReads.keysGiven()))
 			}
 			stderr := run.result.stderr.String()
 			if strings.Count(stderr, notReadLine) != 1 || strings.Contains(stderr, msgCRIDLinkAsDevice) {

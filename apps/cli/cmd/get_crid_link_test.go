@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -235,15 +237,16 @@ func mustNotReadTheDeviceKey(t *testing.T) func(context.Context) ([]byte, connec
 // readable or not readable on every platform, and it remembers what it
 // handed out.
 //
-// It has no lock. The real SDK calls a read on a goroutine of its own, and
-// waits for it, so a test looks at the record only after the command has
-// returned. A test in which the command does not wait for the read uses a
-// read of its own.
+// The real SDK calls a read on a goroutine of its own, and it does not wait
+// for the read when the context of the request ends. So the record has a
+// lock, and a test looks at it through keysGiven and limitsSeen.
 type deviceKeyReads struct {
 	// key is the key a read returns; nil means the key cannot be read, and
 	// why is then the reason.
 	key []byte
 	why connectorstate.NoDeviceKey
+
+	mu sync.Mutex
 	// given holds the slices the reads returned. The command owns them and
 	// wipes them, so each read returns a copy of its own.
 	given [][]byte
@@ -254,6 +257,8 @@ type deviceKeyReads struct {
 
 func (r *deviceKeyReads) read(ctx context.Context) ([]byte, connectorstate.NoDeviceKey) {
 	_, bounded := ctx.Deadline()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.bounded = append(r.bounded, bounded)
 	if r.key == nil {
 		r.given = append(r.given, nil)
@@ -262,6 +267,23 @@ func (r *deviceKeyReads) read(ctx context.Context) ([]byte, connectorstate.NoDev
 	key := bytes.Clone(r.key)
 	r.given = append(r.given, key)
 	return key, ""
+}
+
+// keysGiven returns the slices the reads returned so far, one for each read.
+// The slices are the ones the command was given, so a test sees whether the
+// command wiped them.
+func (r *deviceKeyReads) keysGiven() [][]byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.given)
+}
+
+// limitsSeen returns, for each read so far, whether its context had a time
+// limit.
+func (r *deviceKeyReads) limitsSeen() []bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.bounded)
 }
 
 // deviceKeyOf returns reads that give the device key in state.
@@ -1442,9 +1464,9 @@ func TestGetMakesTheShareRequestOnlyWhenTheLinkRequestGivesNoLink(t *testing.T) 
 							wantAsks = 0
 						}
 					}
-					if len(requests.asked) != wantAsks || observed.askedAsDevice() != wantAsDevice || len(key.given) != wantKeyReads {
+					if len(requests.asked) != wantAsks || observed.askedAsDevice() != wantAsDevice || len(key.keysGiven()) != wantKeyReads {
 						t.Errorf("made the link request %d times, %d of them as this device, and read the device key %d times; want %d, %d and %d",
-							len(requests.asked), observed.askedAsDevice(), len(key.given), wantAsks, wantAsDevice, wantKeyReads)
+							len(requests.asked), observed.askedAsDevice(), len(key.keysGiven()), wantAsks, wantAsDevice, wantKeyReads)
 					}
 					for _, seen := range apiSeen {
 						if order.linkRequestFirst && len(seen) != 0 {
@@ -1786,9 +1808,9 @@ func TestLinkForGetIsTheSharePathWhenNoLinkCanBeAskedFor(t *testing.T) {
 					case offer.offered:
 						wantAsks = 1
 					}
-					if offer.checks != wantChecks || asks != wantAsks || len(keyReads.given) != 0 || len(unread.given) != 0 {
+					if offer.checks != wantChecks || asks != wantAsks || len(keyReads.keysGiven()) != 0 || len(unread.keysGiven()) != 0 {
 						t.Errorf("asked whether the request is offered %d times, made it %d times and read the device key %d times; want %d, %d and 0",
-							offer.checks, asks, len(keyReads.given), wantChecks, wantAsks)
+							offer.checks, asks, len(keyReads.keysGiven()), wantChecks, wantAsks)
 					}
 				})
 			}

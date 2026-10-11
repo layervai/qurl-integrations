@@ -535,10 +535,10 @@ func TestGetDecisionTable(t *testing.T) {
 				// The device key: read as often as the row says, and wiped. A
 				// row with no read of its own fails on any read at all.
 				if keyReads != nil {
-					if len(keyReads.given) != row.reads {
-						t.Errorf("the device key was read %d times, want %d", len(keyReads.given), row.reads)
+					if len(keyReads.keysGiven()) != row.reads {
+						t.Errorf("the device key was read %d times, want %d", len(keyReads.keysGiven()), row.reads)
 					}
-					for _, given := range keyReads.given {
+					for _, given := range keyReads.keysGiven() {
 						if given != nil && !bytes.Equal(given, make([]byte, len(given))) {
 							t.Error("the device key was not wiped after the link request")
 						}
