@@ -1884,6 +1884,7 @@ func TestCLIReleasePrunesSupersededDraftsOnlyAfterPublication(t *testing.T) {
 		t.Errorf("%s needs = %v, want publish-cli-release and cli-release-gate", jobID, needs)
 	}
 	for _, fragment := range []string{
+		"!cancelled()",
 		"needs.publish-cli-release.result == 'success'",
 		"needs.cli-release-gate.outputs.required == 'true'",
 	} {
@@ -1893,6 +1894,13 @@ func TestCLIReleasePrunesSupersededDraftsOnlyAfterPublication(t *testing.T) {
 	}
 	assertJobPermissions(t, jobID, job.Permissions, map[string]string{"contents": "write"})
 	assertExecutableRepoScript(t, script)
+
+	// The branch guard is the only protection if the workflow is dispatched
+	// from another ref, so it must be the first step, ahead of the checkout.
+	const branchGuard = `[ "$GITHUB_REF" = refs/heads/main ] || {`
+	if len(job.Steps) == 0 || !strings.Contains(job.Steps[0].Run, branchGuard) || !strings.Contains(job.Steps[0].Run, "exit 1") {
+		t.Errorf("%s does not start by refusing every ref but refs/heads/main", jobID)
+	}
 
 	checkouts, prunes := 0, 0
 	for index := range job.Steps {

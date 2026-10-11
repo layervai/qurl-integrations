@@ -139,6 +139,10 @@ run_case prerelease-draft-kept v3.5.0 0 '' 'No draft CLI release is superseded' 
 run_case four-field-draft-kept v3.5.0 0 '' 'No draft CLI release is superseded' \
   GH_STUB_RELEASES="$(release 26 v3.4.0.1 true 0)"
 run_case no-releases v3.5.0 0 '' 'No draft CLI release is superseded' GH_STUB_RELEASES=
+[[ ! -s "$summary_out" ]] || {
+  failures=$((failures + 1))
+  echo "FAIL no-releases: a step summary was written with nothing deleted"
+}
 
 # --- versions compare numerically per field, never as text: "10" sorts
 # before "9" as a string, in each of the three positions.
@@ -187,10 +191,20 @@ for bad_record in \
     GH_STUB_RELEASES="$(release 40 v3.4.0 true 0; printf '%s\n' "$bad_record")"
 done
 
-# A failed deletion stops the run red; the drafts before it are already gone
-# and the ones after it are not attempted.
-run_case delete-fails v3.5.0 1 '12' 'draft release v3.4.0 (id 12) could not be deleted' \
-  GH_STUB_RELEASES="$mixed" GH_STUB_DELETE_FAILS=12
+# A failed deletion stops the run red. The draft before it is already gone
+# and stays on record in the step summary; the one after it is not attempted.
+three="$(
+  release 50 v3.4.0 true 0
+  release 51 v3.3.0 true 0
+  release 52 v3.2.0 true 0
+)"
+run_case delete-fails v3.5.0 1 '50 51' 'draft release v3.3.0 (id 51) could not be deleted' \
+  GH_STUB_RELEASES="$three" GH_STUB_DELETE_FAILS=51
+expect_summary delete-fails "- \`v3.4.0\`"
+if grep -qF -e 'v3.3.0' -e 'v3.2.0' "$summary_out"; then
+  failures=$((failures + 1))
+  echo "FAIL delete-fails: the step summary records a draft that was not deleted"
+fi
 
 # Missing required environment is a refusal, not an empty success.
 run_case missing-tag '' 1 '' 'CLI_TAG must be set' GH_STUB_RELEASES="$mixed"

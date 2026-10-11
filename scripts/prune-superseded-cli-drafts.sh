@@ -17,6 +17,11 @@
 #   - it holds no assets, so nothing GoReleaser built is ever discarded;
 #   - its version is lower than CLI_TAG's, compared numerically per field.
 #
+# "Lower means superseded" assumes CLI versions only ever go up, which holds
+# while release-please releases from main alone. A maintenance line would
+# break it: the empty draft of a v3.4.2 prepared after v3.5.0 is public would
+# be deleted here. Whoever adds one must narrow this rule first.
+#
 # The release is deleted by its ID and the tag is never touched:
 # apps/cli/CHANGELOG.md links every version's compare view to its tag,
 # including the versions that were never published.
@@ -75,20 +80,20 @@ if [[ -z "$superseded" ]]; then
   exit 0
 fi
 
-deleted=()
+# Each deletion is written to the step summary as it happens, not at the end:
+# when a later deletion fails, the ones already made stay on record.
+summarize() {
+  [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
+  printf '%s\n' "$@" >>"$GITHUB_STEP_SUMMARY"
+}
+
+summarize "### Superseded CLI drafts removed" "" \
+  "\`${CLI_TAG}\` is public. These earlier CLI versions were tagged but never published; their empty draft releases were deleted and their tags kept:" ""
+# gh reads nothing from stdin here; closing it keeps the loop's own input, the
+# remaining drafts, out of reach of anything that one day does.
 while IFS=$'\t' read -r id tag; do
-  gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}" >/dev/null ||
+  gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}" >/dev/null </dev/null ||
     fail "draft release ${tag} (id ${id}) could not be deleted"
   echo "Deleted the empty draft release ${tag} (id ${id}), superseded by ${CLI_TAG}; the tag ${tag} is kept."
-  deleted+=("$tag")
+  summarize "- \`${tag}\`"
 done <<<"$superseded"
-
-if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-  {
-    echo "### Superseded CLI drafts removed"
-    echo
-    echo "\`${CLI_TAG}\` is public. These earlier CLI versions were tagged but never published; their empty draft releases were deleted and their tags kept:"
-    echo
-    printf -- "- \`%s\`\n" "${deleted[@]}"
-  } >>"$GITHUB_STEP_SUMMARY"
-fi
