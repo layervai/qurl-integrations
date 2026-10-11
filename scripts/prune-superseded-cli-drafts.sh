@@ -23,7 +23,10 @@
 #     draft that run may still be working on is left for the next
 #     publication to remove. TODO(upstream-contract): this depends on what
 #     GitHub puts in `created_at`, and on the release PR's merge commit
-#     being dated at its merge.
+#     being dated at its merge. If GitHub ever reported the draft's own
+#     creation time instead, drafts would only look younger and be kept
+#     longer. Do not replace this with an older date such as the commit's
+#     author date: that is the direction that deletes too early.
 #
 # A draft that failed after GoReleaser uploaded to it holds assets and is
 # never removed here; that one needs a person to look at it.

@@ -1184,6 +1184,8 @@ jobs:
     # Two publications that finish close together would otherwise both list
     # the same draft, and the second deletion would fail on a release that is
     # already gone. Queued, the second run lists what the first one left.
+    # GitHub keeps one pending job per group, so a third would cancel the
+    # second; the drafts it would have removed wait for the next publication.
     concurrency:
       group: prune-superseded-cli-drafts
       cancel-in-progress: false
