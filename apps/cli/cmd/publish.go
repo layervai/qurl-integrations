@@ -103,6 +103,8 @@ owns the share and turns it off when it exits.`,
 			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
 				return exitcode.UsageError(err)
 			}
+			// Before the publish, so a foreground publish says it too.
+			opts.noteOutdatedSkill()
 			named := publishAccessFlags(cmd)
 			access := qurlapi.PublishOptions{
 				Public: public, AllowedDeviceKeys: allowedDeviceKeys, AllowRequests: allowRequests,
