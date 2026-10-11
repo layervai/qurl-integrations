@@ -1595,10 +1595,10 @@ describe('handleAddRecipients', () => {
     const result = await handleAddRecipients('send-batch', users, mockOriginalInteraction, 'test-api-key');
 
     expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
-    expect(mockReUploadBuffer).toHaveBeenCalledTimes(1);
+    expect(mockReUploadBuffer).not.toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', { expiresAt: expect.any(String), n: 10, apiKey: 'test-api-key', selfDestructSeconds: null });
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-B', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(result.msg).toMatch(/Added 12 recipients/);
   });
 
