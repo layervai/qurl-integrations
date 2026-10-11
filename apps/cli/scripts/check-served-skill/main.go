@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -24,13 +25,22 @@ import (
 )
 
 const (
-	// attempts and pause are for a fetch that fails. A served file that is
-	// too old is not tried again: waiting does not change it.
+	// attempts and pause are for a fetch that may go better a moment later:
+	// no answer, a cut-off answer, or a server that says it is in trouble. A
+	// served file that is too old is not tried again, and neither is an
+	// answer such as 404: waiting does not change either.
 	attempts = 3
 	pause    = 5 * time.Second
 
 	fetchTimeout = 30 * time.Second
+
+	// userAgent names these requests in the server's log, and keeps them
+	// from being turned away as an unnamed program's.
+	userAgent = "qurl-release-check/1"
 )
+
+// errRefused is an answer that the next attempt would get again.
+var errRefused = errors.New("the server will not serve the file")
 
 func main() {
 	client := &http.Client{Timeout: fetchTimeout}
@@ -42,7 +52,8 @@ func main() {
 }
 
 // check returns an error when the skill served at url carries a version
-// below minimum, or none, or cannot be fetched in a few attempts.
+// below minimum, or none, or cannot be fetched. A fetch that may go better
+// a moment later is tried a few times.
 func check(ctx context.Context, client *http.Client, url string, minimum int, wait time.Duration) error {
 	var served int
 	var err error
@@ -50,6 +61,9 @@ func check(ctx context.Context, client *http.Client, url string, minimum int, wa
 		served, err = servedVersion(ctx, client, url)
 		if err == nil {
 			break
+		}
+		if errors.Is(err, errRefused) {
+			return fmt.Errorf("could not read the skill served at %s: %w", url, err)
 		}
 		if attempt == attempts {
 			return fmt.Errorf("could not read the skill served at %s in %d attempts: %w", url, attempts, err)
@@ -78,18 +92,26 @@ func check(ctx context.Context, client *http.Client, url string, minimum int, wa
 // servedVersion fetches url once and returns the version its file carries.
 // Any answer but 200 is an error, as it is for the `curl -f` in the CLI's
 // note: an error page has no version, and must not read as an old skill.
+// It asks for the file as it is now and not as a cache last saw it, so that
+// a run made right after the skill was replaced reads the new one.
 func servedVersion(ctx context.Context, client *http.Client, url string) (int, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return 0, err
 	}
+	request.Header.Set("User-Agent", userAgent)
+	request.Header.Set("Cache-Control", "no-cache")
 	response, err := client.Do(request)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK {
+	switch code := response.StatusCode; {
+	case code == http.StatusOK:
+	case code >= 500, code == http.StatusRequestTimeout, code == http.StatusTooManyRequests:
 		return 0, fmt.Errorf("the server answered %s", response.Status)
+	default:
+		return 0, fmt.Errorf("%w: it answered %s", errRefused, response.Status)
 	}
 	return agentskill.ReadVersion(response.Body)
 }

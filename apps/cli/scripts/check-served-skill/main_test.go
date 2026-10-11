@@ -45,6 +45,14 @@ func status(code int, content string) func(http.ResponseWriter) {
 	}
 }
 
+// cutOff promises more of the file than it sends.
+func cutOff(content string) func(http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)+100))
+		_, _ = w.Write([]byte(content))
+	}
+}
+
 func TestCheck(t *testing.T) {
 	const minimum = 3
 
@@ -61,7 +69,22 @@ func TestCheck(t *testing.T) {
 		{
 			"an error page that holds a version is not a skill",
 			[]func(http.ResponseWriter){status(http.StatusNotFound, versioned(minimum))},
-			"in 3 attempts: the server answered 404", 3,
+			"the server will not serve the file: it answered 404", 1,
+		},
+		{
+			"a server that asks for a slower pace is tried again",
+			[]func(http.ResponseWriter){status(http.StatusTooManyRequests, ""), body(versioned(minimum))},
+			"", 2,
+		},
+		{
+			"a server in trouble every time fails after the last attempt",
+			[]func(http.ResponseWriter){status(http.StatusBadGateway, "")},
+			"in 3 attempts: the server answered 502", 3,
+		},
+		{
+			"an answer that is cut off is tried again, and is not a skill with no version",
+			[]func(http.ResponseWriter){cutOff(skill("")), body(versioned(minimum))},
+			"", 2,
 		},
 		{
 			"a fetch that fails is tried again",
@@ -109,5 +132,24 @@ func TestCheckStopsWaitingWhenItsContextEnds(t *testing.T) {
 	}
 	if got := requests.Load(); got > 1 {
 		t.Errorf("made %d requests after the context ended", got)
+	}
+}
+
+func TestCheckNamesItselfAndAsksForTheFileAsItIsNow(t *testing.T) {
+	var agent, cache atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agent.Store(r.Header.Get("User-Agent"))
+		cache.Store(r.Header.Get("Cache-Control"))
+		_, _ = w.Write([]byte(versioned(1)))
+	}))
+	t.Cleanup(server.Close)
+	if err := check(context.Background(), http.DefaultClient, server.URL, 1, 0); err != nil {
+		t.Fatalf("check = %v, want no error", err)
+	}
+	if got := agent.Load(); got != "qurl-release-check/1" {
+		t.Errorf("User-Agent = %q", got)
+	}
+	if got := cache.Load(); got != "no-cache" {
+		t.Errorf("Cache-Control = %q", got)
 	}
 }

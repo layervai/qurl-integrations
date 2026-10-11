@@ -468,7 +468,9 @@ jobs:
       # is below its minimum version, and the note's command downloads the
       # served skill. This holds the ship order: skill first, then the CLI
       # that needs it. It runs before GoReleaser so a failure uploads
-      # nothing; serve the newer skill, then use "Re-run failed jobs".
+      # nothing; serve the newer skill, then use "Re-run failed jobs". The
+      # check asks for the file past any cache, so it can pass a little
+      # before every user's download is the new skill.
       #
       # The one skip is for a recovery dispatch of a tag from before the
       # checker existed. internal/ciworkflows pins that the checker is in the
@@ -482,7 +484,7 @@ jobs:
             exit 0
           fi
           go run ./apps/cli/scripts/check-served-skill || {
-            echo "::error::the served agent skill is older than ${CLI_TAG} needs, or could not be read; see the step log" >&2
+            echo "::error::the served agent skill is older than ${CLI_TAG} needs, or the check could not read it or could not run; see the step log" >&2
             exit 1
           }
 
