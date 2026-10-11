@@ -68,12 +68,14 @@ func check(ctx context.Context, client *http.Client, url string, minimum int, wa
 		if attempt == attempts {
 			return fmt.Errorf("could not read the skill served at %s in %d attempts: %w", url, attempts, err)
 		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
-		case <-time.After(wait):
+		case <-timer.C:
 		}
+		timer.Stop()
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return fmt.Errorf("stopped reading the skill served at %s: %w", url, ctx.Err())
 		}
 	}
 	if served >= minimum {
@@ -92,8 +94,9 @@ func check(ctx context.Context, client *http.Client, url string, minimum int, wa
 // servedVersion fetches url once and returns the version its file carries.
 // Any answer but 200 is an error, as it is for the `curl -f` in the CLI's
 // note: an error page has no version, and must not read as an old skill.
-// It asks for the file as it is now and not as a cache last saw it, so that
-// a run made right after the skill was replaced reads the new one.
+// It asks a cache on the way to check that its copy is still the current
+// one. A cache may not heed that, and then this reads the copy a person's
+// download gets, which is the one that counts.
 func servedVersion(ctx context.Context, client *http.Client, url string) (int, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {

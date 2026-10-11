@@ -15,7 +15,7 @@ name: Release Please
 #      asks for (apps/cli/scripts/check-served-skill): the CLI tells a person
 #      with an older saved copy to download the served one, so a release
 #      that ships ahead of its skill leaves that note in place for good.
-#      The workflow verifies every artifact, audits and
+#      After the build the workflow verifies every artifact, audits and
 #      installs the exact staged Homebrew cask, publishes the release, and
 #      only then updates the Homebrew tap.
 #   3. Once a CLI release is public, the empty draft releases of lower CLI
@@ -469,8 +469,9 @@ jobs:
       # served skill. This holds the ship order: skill first, then the CLI
       # that needs it. It runs before GoReleaser so a failure uploads
       # nothing; serve the newer skill, then use "Re-run failed jobs". The
-      # check asks for the file past any cache, so it can pass a little
-      # before every user's download is the new skill.
+      # check asks a cache to revalidate its copy but does not depend on it:
+      # if the run still reads the old skill, so do users, and it is right
+      # to wait and run again.
       #
       # The one skip is for a recovery dispatch of a tag from before the
       # checker existed. internal/ciworkflows pins that the checker is in the

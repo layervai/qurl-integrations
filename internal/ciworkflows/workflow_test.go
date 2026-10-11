@@ -2184,10 +2184,17 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	if releaseCLI == nil {
 		t.Fatal("release-please.yml is missing release-cli")
 	}
-	check, build := -1, -1
+	// The step's script names the tag under `set -u`, on the skip path too,
+	// so the tag has to be in the job's environment.
+	if _, ok := releaseCLI.Env["CLI_TAG"]; !ok {
+		t.Error("release-cli does not set CLI_TAG for the served-skill check, which reads it under `set -u`")
+	}
+	toolchain, check, build := -1, -1, -1
 	for index := range releaseCLI.Steps {
 		current := &releaseCLI.Steps[index]
 		switch {
+		case strings.HasPrefix(current.Uses, "actions/setup-go@"):
+			toolchain = index
 		case current.Name == stepName:
 			check = index
 		case strings.HasPrefix(current.Uses, "goreleaser/goreleaser-action@"):
@@ -2196,6 +2203,11 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	}
 	if check < 0 || build < 0 {
 		t.Fatalf("release-cli steps: served-skill check at %d, GoReleaser at %d; want both", check, build)
+	}
+	// Without the repository's Go the check would fail for a reason that
+	// has nothing to do with the skill, under an error that names the skill.
+	if toolchain < 0 || toolchain > check {
+		t.Errorf("actions/setup-go at step %d does not come before the served-skill check at step %d", toolchain, check)
 	}
 	if check > build {
 		t.Error("the served-skill check runs after GoReleaser has uploaded the release's files")
