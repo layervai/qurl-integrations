@@ -101,6 +101,14 @@ const (
 	// error text or any part of a key.
 	msgCRIDLinkDeviceKeyNotRead = "> CRID link request with the CRID alone, the device key was not read: %s"
 
+	// msgCRIDLinkAsDeviceRefused is the --verbose diagnostic for a request as
+	// this device that the SDK refused before it sent anything, because it
+	// was given no function to read the device key with. get always gives it
+	// one, so the line shows a fault in the CLI itself. It is not a fault of
+	// the device key, which was not read, or of the CRID. The device then
+	// asked with the CRID alone.
+	msgCRIDLinkAsDeviceRefused = "> CRID link request with the CRID alone, the request as this device was refused before it was sent: the SDK got no way to read the device key"
+
 	// msgShareNeedsDevice frames a failure to open this device's identity on
 	// the share path, which share and get both take. The cause follows it
 	// unchanged, so the exit code stays the cause's.

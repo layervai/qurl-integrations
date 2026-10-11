@@ -259,15 +259,20 @@ func (o linkOrigin) byLinkRequest() bool { return o != linkFromShare }
 // errCRIDNotRequestable reports that the SDK will not ask for a link for this
 // CRID and sent nothing. errCRIDVersionNotRequestable is the one cause that
 // reaches it in practice: a CRID version this client cannot check a link
-// against. errDeviceKeyRefused reports that the SDK will not ask as a device
-// with what it was given, and sent nothing. None of the three leaves this
-// file. The functions below turn the first two into the share request's own
-// answer on a device with an identity, and into a refusal on a machine with
-// none. The third makes the device ask with the CRID alone.
+// against. None of the errors here leaves this file. The functions below turn
+// these two into the share request's own answer on a device with an
+// identity, and into a refusal on a machine with none.
+//
+// errDeviceKeyRefused reports that the SDK refused a request as a device
+// before it sent anything, because it was given no function to read the
+// device key with. get always gives it one (deviceKeyOnDemand). So this error
+// does not come up unless the wiring in this file is wrong, and the code that
+// handles it is a guard: the device then asks with the CRID alone. The error
+// says nothing about a device key: none was read.
 var (
 	errCRIDNotRequestable        = errors.New("no link can be asked for with this CRID alone")
 	errCRIDVersionNotRequestable = fmt.Errorf("%w: its version is not one this client can check", errCRIDNotRequestable)
-	errDeviceKeyRefused          = errors.New("the device key cannot be used for a link request")
+	errDeviceKeyRefused          = errors.New("the link request as this device was refused before it was sent")
 )
 
 // errNoDeviceKey is what the function that reads the device key for the SDK
@@ -529,11 +534,14 @@ func (opts *globalOpts) linkByRequestBeforeShare(ctx context.Context, resourceCR
 	if !errors.Is(err, errDeviceKeyRefused) {
 		return link, ranOut(err), err
 	}
-	// The SDK will not ask as a device with what it was given, and sent
-	// nothing. That is a device that cannot ask with its key, like one that
-	// could not read it.
+	// A guard for a fault in the wiring. The SDK gives this answer when it
+	// gets no function to read the device key with, and deviceKeyOnDemand
+	// always gives it one. So only a test comes here today. Nothing was sent,
+	// and the answer says nothing about the CRID or about a device key. The
+	// device asks with the CRID alone, as a device with no key does, so the
+	// fault does not cost a link that the CRID alone gives.
 	if logf := opts.verboseLogger(); logf != nil {
-		logf(msgCRIDLinkDeviceKeyNotRead, string(connectorstate.NoDeviceKeyInvalid))
+		logf(msgCRIDLinkAsDeviceRefused)
 	}
 	link, err = opts.linkByCRIDAlone(requestCtx, resourceCRID, true)
 	return link, ranOut(err), err

@@ -1139,22 +1139,25 @@ func TestGetReadsTheDeviceKeyOnlyForTheRequestUnderIt(t *testing.T) {
 // it gives it before it looks at the CRID or sends anything.
 var errSDKWillNotAskAsDevice = fmt.Errorf("%w: no device key source was given", qurl.ErrInvalidDeviceKey)
 
-// TestGetAsksWithTheCRIDAloneWhenTheSDKWillNotUseTheKey covers a device whose
-// key the SDK will not use. Such a device has asked with the CRID alone, as a
-// device does that could not read its key.
+// TestGetAsksWithTheCRIDAloneWhenTheSDKWillNotUseTheKey covers a device that
+// the SDK does not let ask with its key. Such a device has asked with the
+// CRID alone, as a device does that could not read its key.
 //
-// The refusal of a key must never be read as "this client cannot ask for
-// this CRID". That would send the device straight to its share request, and
-// on a share "not found" it would tell the user that the CRID is the
-// problem.
+// Neither refusal must ever be read as "this client cannot ask for this
+// CRID". That would send the device straight to its share request, and on a
+// share "not found" it would tell the user that the CRID is the problem.
 func TestGetAsksWithTheCRIDAloneWhenTheSDKWillNotUseTheKey(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	mode := getFileMode(t)
 	notReadLine := "[debug] " + fmt.Sprintf(msgCRIDLinkDeviceKeyNotRead, connectorstate.NoDeviceKeyInvalid) + "\n"
+	refusedLine := "[debug] " + msgCRIDLinkAsDeviceRefused + "\n"
 
-	// The SDK refuses the request as a device before it sends anything. The
+	// The guard. The SDK refuses the request as a device before it sends
+	// anything. It does that for a call with no function to read the key
+	// with, which get never makes, so only this test gives that answer. The
 	// device then makes the request with the CRID alone, and the key is not
-	// read at all.
+	// read at all. The diagnostic line names that cause. It does not say that
+	// a device key could not be read: none was looked for.
 	t.Run("the request as this device is refused before it is sent", func(t *testing.T) {
 		srv := downloadServer(t)
 		shareNotFoundTwice(t, srv)
@@ -1180,8 +1183,11 @@ func TestGetAsksWithTheCRIDAloneWhenTheSDKWillNotUseTheKey(t *testing.T) {
 			t.Errorf("qURL API requests = %q, want none: the request with the CRID alone gave the link", got)
 		}
 		stderr := run.result.stderr.String()
-		if strings.Count(stderr, notReadLine) != 1 {
-			t.Errorf("stderr = %q, want the line %q once", stderr, notReadLine)
+		if strings.Count(stderr, refusedLine) != 1 {
+			t.Errorf("stderr = %q, want the line %q once", stderr, refusedLine)
+		}
+		if strings.Contains(stderr, "the device key was not read") {
+			t.Errorf("stderr = %q, must not say that a device key could not be read: none was looked for", stderr)
 		}
 		if strings.Contains(stderr, msgCRIDLinkAsDevice) || strings.Contains(stderr, "CRID link request not sent") {
 			t.Errorf("stderr = %q, must not say that the device asked as itself, or that the CRID cannot be asked for", stderr)
