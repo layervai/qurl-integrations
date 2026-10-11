@@ -343,6 +343,41 @@ func TestRequestCRIDLinkAsDeviceWhenTheReadGivesNoKey(t *testing.T) {
 	})
 }
 
+// TestAnswerWithoutDeviceKeyWhenThereIsNoAnswer pins the two cases in which
+// AnswerWithoutDeviceKey has no answer to return, and returns nil. A caller
+// treats nil as no answer at all, and fails closed.
+//
+//   - The error says that the read gave no key, and it holds no answer to the
+//     first request. The SDK does not build such an error today.
+//   - The error is of another kind, or there is none.
+func TestAnswerWithoutDeviceKeyWhenThereIsNoAnswer(t *testing.T) {
+	t.Parallel()
+	errNoState := errors.New("this device holds no key")
+
+	noFirstAnswer := &qurl.DeviceKeySourceError{Err: errNoState}
+	if !DeviceKeyNotGiven(noFirstAnswer) {
+		t.Fatalf("DeviceKeyNotGiven(%v) = false, want true", noFirstAnswer)
+	}
+	if got := AnswerWithoutDeviceKey(noFirstAnswer); got != nil {
+		t.Errorf("AnswerWithoutDeviceKey of an error with no first answer = %v, want nil", got)
+	}
+	// The cause is not the answer. An error of the read must never be handed
+	// on as what the service said.
+	if got := AnswerWithoutDeviceKey(&qurl.DeviceKeySourceError{Err: qurl.ErrCRIDLinkNotFound}); got != nil {
+		t.Errorf("AnswerWithoutDeviceKey returned the cause %v as the answer, want nil", got)
+	}
+
+	for name, err := range map[string]error{
+		"no error":         nil,
+		"another error":    errNoState,
+		"the SDK's answer": sdkRefusal(qurl.ErrCRIDLinkNotFound, "52602"),
+	} {
+		if got := AnswerWithoutDeviceKey(err); got != nil {
+			t.Errorf("%s: AnswerWithoutDeviceKey = %v, want nil", name, got)
+		}
+	}
+}
+
 // TestRequestCRIDLinkAsDeviceIsRefusedBeforeAnythingIsSent pins the two
 // answers the SDK gives before it sends anything, and their order.
 //

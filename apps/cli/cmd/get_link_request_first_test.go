@@ -1283,6 +1283,69 @@ func TestGetSaysThroughTheSDKWhyTheKeyWasNotRead(t *testing.T) {
 	}
 }
 
+// TestGetGivesNoLinkWhenTheFirstAnswerIsMissing pins what get does with an
+// error the SDK does not build today: the read of the device key gave no
+// key, and the error holds no answer to the first request (a
+// *qurl.DeviceKeySourceError with no FirstAnswer).
+//
+// Such a device has asked with the CRID alone, and there is no answer to act
+// on. get fails closed. It does not read the missing answer as "not found",
+// and no link comes from that request: it counts as an answer that failed
+// its check. The share request follows, as it does after every answer that
+// is not a link. No second link request is made.
+func TestGetGivesNoLinkWhenTheFirstAnswerIsMissing(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	mode := getFileMode(t)
+
+	for _, tc := range []struct {
+		name          string
+		shareNotFound bool
+		wantCode      int
+	}{
+		{name: "the share request gives the link", wantCode: exitcode.Success},
+		{name: "the share request says not found", shareNotFound: true, wantCode: exitcode.VerificationFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := downloadServer(t)
+			if tc.shareNotFound {
+				shareNotFoundTwice(t, srv)
+			}
+			asked := 0
+			keyReads := noDeviceKey(connectorstate.NoDeviceKeyUnreadable)
+			configure := func(args []string) *runOpts {
+				opts := withDeviceKey(enrolledDevice(t, state), keyReads.read)(args)
+				opts.requestCRIDLink = mustNotAskWithTheCRIDAlone(t)
+				opts.requestCRIDLinkAsDevice = func(ctx context.Context, deviceKey qurl.DeviceKeySource, _ string) (*qurl.CRIDLink, error) {
+					asked++
+					_, readErr := deviceKey(ctx)
+					return nil, &qurl.DeviceKeySourceError{Err: readErr}
+				}
+				return opts
+			}
+
+			run := runShareMode(t, srv, srv.URL, mode, configure)
+			if run.result.code != tc.wantCode {
+				t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, tc.wantCode, run.result.stderr.String())
+			}
+			if tc.wantCode == exitcode.Success {
+				// The share link of the mock API.
+				run.mustHaveDelivered(t, mode)
+			} else {
+				run.mustNotHaveActed(t)
+				if got, want := run.result.stderr.String(), goldenBytes(t, "error_get_crid_refused.plain.stderr.golden"); got != want {
+					t.Errorf("stderr = %q, want the message for an answer that failed its check %q", got, want)
+				}
+			}
+			if asked != 1 {
+				t.Errorf("made the link request %d times, want once", asked)
+			}
+			if got := len(shareRequests(srv)); got != 1 {
+				t.Errorf("the share request was sent %d times, want once", got)
+			}
+		})
+	}
+}
+
 // debugLines returns the lines of stderr that --verbose adds.
 func debugLines(stderr string) []string {
 	var lines []string
