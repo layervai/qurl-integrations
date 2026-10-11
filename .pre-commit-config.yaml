@@ -74,6 +74,13 @@ repos:
         pass_filenames: false
         files: '^scripts/(verify-cli-release|test-verify-cli-release)\.sh$'
 
+      - id: cli-draft-pruner
+        name: superseded CLI draft pruner tests
+        entry: scripts/test-prune-superseded-cli-drafts.sh
+        language: system
+        pass_filenames: false
+        files: '^scripts/(prune-superseded-cli-drafts|test-prune-superseded-cli-drafts)\.sh$'
+
       - id: release-please-sync-check
         name: release-please sync check tests
         entry: scripts/test-check-release-please-sync.sh

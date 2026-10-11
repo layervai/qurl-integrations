@@ -13,6 +13,11 @@ name: Release Please
 #      deb/rpm packages. The workflow verifies every artifact, audits and
 #      installs the exact staged Homebrew cask, publishes the release, and
 #      only then updates the Homebrew tap.
+#   3. Once a CLI release is public, the empty draft releases of lower CLI
+#      versions are deleted and their tags kept
+#      (scripts/prune-superseded-cli-drafts.sh). A version whose gate failed
+#      and was replaced by the next one would otherwise stay listed as a
+#      draft indefinitely.
 #
 # GoReleaser runs as a dependent job here — NOT as a tag-triggered workflow —
 # because release-please tags with the workflow's GITHUB_TOKEN, and GitHub
@@ -1145,3 +1150,45 @@ jobs:
             '{message:$message,content:$content,sha:$sha,branch:$branch}' |
             gh api --method PUT "repos/${tap_repo}/contents/${cask_path}" --input - |
             jq -e '.commit.sha | test("^[0-9a-f]{40}$")' >/dev/null
+
+  # A version whose customer journey fails is usually not repaired: the fix
+  # lands, release-please cuts the next version, and that one is published
+  # instead. The earlier draft then stays in the release list, empty, beside
+  # the version that replaced it. Once this release is public, remove the
+  # empty draft CLI releases below it; their tags stay, because the changelog
+  # links every version to its tag. scripts/prune-superseded-cli-drafts.sh
+  # states the exact rules and refuses on any doubt.
+  #
+  # A separate job on purpose. It checks out the workflow's own commit, so the
+  # script that deletes is the reviewed one on main and not the copy in the
+  # tag being published, which is absent from every tag older than this job.
+  # Nothing needs it, so a failure here turns the run red without holding back
+  # the Homebrew tap.
+  prune-superseded-cli-drafts:
+    name: Remove superseded CLI drafts
+    needs: [publish-cli-release, cli-release-gate]
+    if: >-
+      !cancelled() && needs.publish-cli-release.result == 'success' &&
+      needs.cli-release-gate.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Deleting a release, and listing drafts at all, requires write access.
+      contents: write
+    steps:
+      - name: Require the canonical release branch
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || {
+            echo "::error::CLI draft pruning must run from refs/heads/main, got ${GITHUB_REF}" >&2
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Delete the empty draft releases this release superseded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+        run: scripts/prune-superseded-cli-drafts.sh
