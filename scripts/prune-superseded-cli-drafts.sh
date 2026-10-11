@@ -15,7 +15,13 @@
 #     component-prefixed tag (`slack-v0.4.0`) and no prerelease
 #     (`v1.2.3-rc.1`) can match;
 #   - it holds no assets, so nothing GoReleaser built is ever discarded;
-#   - its version is lower than CLI_TAG's, compared numerically per field.
+#   - its version is lower than CLI_TAG's, compared numerically per field;
+#   - it was created more than a day ago, so the draft of a lower version
+#     whose own release run may still be active is left for the next
+#     publication to remove.
+#
+# A draft that failed after GoReleaser uploaded to it holds assets and is
+# never removed here; that one needs a person to look at it.
 #
 # "Lower means superseded" assumes CLI versions only ever go up, which holds
 # while release-please releases from main alone. A maintenance line would
@@ -24,7 +30,9 @@
 #
 # The release is deleted by its ID and the tag is never touched:
 # apps/cli/CHANGELOG.md links every version's compare view to its tag,
-# including the versions that were never published.
+# including the versions that were never published. The notes
+# release-please wrote into the draft go with it; the same text remains in
+# that changelog.
 #
 # A deleted draft cannot be restored, so every doubt is a refusal: if CLI_TAG
 # is not public yet, or one release in the list cannot be read exactly,
@@ -55,22 +63,27 @@ is_draft="$(gh release view "$CLI_TAG" --repo "$GITHUB_REPOSITORY" --json isDraf
 # One compact object per release, across every page: all components share this
 # list, so the CLI's drafts are not guaranteed to sit on the first page.
 releases="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-  --jq '.[] | {id, tag_name, draft, assets: (.assets | length)}')" ||
+  --jq '.[] | {id, tag_name, draft, created_at, assets: (.assets | length)}')" ||
   fail "the release list could not be read"
 
 # Select in one pass and refuse the whole list on any record that is not
 # exact, before the first deletion. `tonumber` on the captured fields cannot
-# fail: the pattern admits only digits.
-superseded="$(jq -r --arg published "$CLI_TAG" --arg bare "$bare_tag" '
+# fail: the pattern admits only digits. A creation time that does not parse
+# is an error like any other inexact field.
+min_age_seconds=86400
+superseded="$(jq -r --arg published "$CLI_TAG" --arg bare "$bare_tag" \
+  --argjson min_age "$min_age_seconds" '
   def version_of($tag): $tag | [match($bare).captures[].string | tonumber];
   if (.id | type) != "number" or (.id | floor) != .id or .id <= 0
     or (.tag_name | type) != "string"
     or (.draft | type) != "boolean"
     or (.assets | type) != "number"
+    or (.created_at | type) != "string"
   then error("release record is not exact: \(tojson)")
   else
     select(.draft and .assets == 0 and (.tag_name | test($bare)))
     | select(version_of(.tag_name) < version_of($published))
+    | select(now - (.created_at | fromdateiso8601) > $min_age)
     | "\(.id)\t\(.tag_name)"
   end' <<<"$releases")" ||
   fail "the release list holds a record that is not exact"

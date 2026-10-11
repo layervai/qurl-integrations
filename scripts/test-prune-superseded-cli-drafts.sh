@@ -44,8 +44,13 @@ esac
 STUB_EOF
 chmod +x "$bindir/gh"
 
-release() { # id tag draft assets
-  printf '{"id":%s,"tag_name":"%s","draft":%s,"assets":%s}\n' "$1" "$2" "$3" "$4"
+# Creation times are relative to the run, because the script compares them
+# with the clock: `old` is safely past the one-day minimum age.
+ago() { jq -nr --argjson seconds "$1" 'now - $seconds | todate'; }
+old="$(ago 172800)"
+
+release() { # id tag draft assets [created_at]
+  printf '{"id":%s,"tag_name":"%s","draft":%s,"assets":%s,"created_at":"%s"}\n' "$1" "$2" "$3" "$4" "${5:-$old}"
 }
 
 case_no=0
@@ -138,6 +143,12 @@ run_case prerelease-draft-kept v3.5.0 0 '' 'No draft CLI release is superseded' 
   GH_STUB_RELEASES="$(release 25 v3.4.0-rc.1 true 0)"
 run_case four-field-draft-kept v3.5.0 0 '' 'No draft CLI release is superseded' \
   GH_STUB_RELEASES="$(release 26 v3.4.0.1 true 0)"
+# The minimum age, on both sides of one day. A draft this recent may belong
+# to a release run that is still active.
+run_case young-draft-kept v3.5.0 0 '' 'No draft CLI release is superseded' \
+  GH_STUB_RELEASES="$(release 27 v3.4.0 true 0 "$(ago 82800)")"
+run_case day-old-draft-deleted v3.5.0 0 '28' 'Deleted the empty draft release v3.4.0' \
+  GH_STUB_RELEASES="$(release 28 v3.4.0 true 0 "$(ago 90000)")"
 run_case no-releases v3.5.0 0 '' 'No draft CLI release is superseded' GH_STUB_RELEASES=
 [[ ! -s "$summary_out" ]] || {
   failures=$((failures + 1))
@@ -179,13 +190,17 @@ done
 # One inexact record refuses the whole list, including the deletable draft
 # that precedes it: selection finishes before the first deletion.
 for bad_record in \
-  '{"id":"41","tag_name":"v3.3.0","draft":true,"assets":0}' \
-  '{"id":41.5,"tag_name":"v3.3.0","draft":true,"assets":0}' \
-  '{"id":0,"tag_name":"v3.3.0","draft":true,"assets":0}' \
-  '{"id":41,"tag_name":null,"draft":true,"assets":0}' \
-  '{"id":41,"tag_name":"v3.3.0","draft":"true","assets":0}' \
-  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":null}' \
-  '{"id":41,"tag_name":"v3.3.0","draft":true}' \
+  '{"id":"41","tag_name":"v3.3.0","draft":true,"assets":0,"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":41.5,"tag_name":"v3.3.0","draft":true,"assets":0,"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":0,"tag_name":"v3.3.0","draft":true,"assets":0,"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":41,"tag_name":null,"draft":true,"assets":0,"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":"true","assets":0,"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":null,"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":true,"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":0}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":0,"created_at":null}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":0,"created_at":"yesterday"}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":false,"assets":20,"created_at":null}' \
   'not json'; do
   run_case "inexact-record[$bad_record]" v3.5.0 1 '' 'the release list holds a record that is not exact' \
     GH_STUB_RELEASES="$(release 40 v3.4.0 true 0; printf '%s\n' "$bad_record")"
