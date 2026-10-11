@@ -125,6 +125,7 @@ homebrew_casks:
     description: "Publish and access protected resources"
     license: "MIT"
     manpages:
+      - manpages/qurl-access.1
       - manpages/qurl-approve.1
       - manpages/qurl-completion.1
       - manpages/qurl-daemon-retarget-local.1

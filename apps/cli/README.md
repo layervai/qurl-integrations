@@ -478,6 +478,7 @@ than switching in place.
 | `qurl publish <target-url>` | Publish a remote URL or serve a loopback HTTP app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |
+| `qurl access <action> <CRID> [<decision-id>]` | Manage private consumer policies, invitations, and grants |
 | `qurl requests [<CRID>]` | List access requests, or turn them on or off for a private resource |
 | `qurl approve <CRID> <code>` | Approve one person's request for access to a private resource |
 | `qurl deny <CRID> <device id>` | Refuse one person's request for access to a private resource |
@@ -752,6 +753,48 @@ immediate revocation. See
 |--------|--------------|
 | `http://127.0.0.1:3000` | qURL starts the background share, waits for serving, prints its CRID, and exits |
 | `https://api.example.com/reports` | qURL registers the remote URL, prints its CRID, and exits |
+
+#### Private consumer policies
+
+On a deployment that supports consumer policies, choose private access with
+`--access invite_only`, `email_capture`, `review`, `keys`, or `contract`.
+Contract mode also needs `--contract <identifier>`. These flags cannot be
+combined with `--public`, legacy access requests, or legacy device allowlists.
+The reply must confirm `private: true` and the requested `consumer_access` policy.
+
+For a share controlled only by the publisher:
+
+```bash
+qurl publish http://127.0.0.1:3000 --access invite_only -o json
+qurl access invite <CRID> --email ana@example.com -o json
+qurl access list_invitations <CRID> -o json
+```
+
+An accepted email delivery is not proof that the recipient has enrolled.
+The recipient must verify mailbox control and bind a credential. Invite-only
+resources do not accept access requests from other consumers.
+
+For review, list grants and approve only the verified mailbox that the
+publisher authorized, using the returned decision ID and version:
+
+```bash
+qurl access list_grants <CRID> -o json
+qurl access approve <CRID> <decision-id> --version <version> -o json
+qurl access revoke_grant <CRID> <decision-id> --version <current-version> -o json
+```
+
+Email capture and review disclose the consumer's verified email to the
+publisher; they are not anonymous access. Mailbox verification does not prove
+legal identity. Contract grants use an opaque consumer reference. Approve
+contract access only from a trusted publisher backend receipt and expiration;
+these commands do not verify payment with a payment processor.
+
+`qurl access --help` lists all owner actions. Changes require the current
+version. If session removal is pending, retry the exact removal and version;
+report it as complete only when `session_cleanup` is `complete`. A policy
+change uses `access configure` with the current policy version. If that update
+returns a pending-session error, retry the same update. Do not invent a newer
+version or fall back to public or legacy access.
 
 #### Local apps
 
