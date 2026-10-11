@@ -15,8 +15,8 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 # The stub records every invocation. The list route prints GH_STUB_RELEASES as
-# is: one compact object per release, the shape the script's own --jq filter
-# produces, which a stub cannot evaluate.
+# is: one whole release object per line, which is what the script's `.[]`
+# filter yields from each page.
 bindir="$tmp/bin"
 mkdir -p "$bindir"
 cat >"$bindir/gh" <<'STUB_EOF'
@@ -49,8 +49,12 @@ chmod +x "$bindir/gh"
 ago() { jq -nr --argjson seconds "$1" 'now - $seconds | todate'; }
 old="$(ago 172800)"
 
-release() { # id tag draft assets [created_at]
-  printf '{"id":%s,"tag_name":"%s","draft":%s,"assets":%s,"created_at":"%s"}\n' "$1" "$2" "$3" "$4" "${5:-$old}"
+# Records carry the fields the script reads in the shape the API sends them,
+# with the asset list as a list, plus one field it must ignore.
+release() { # id tag draft asset-count [created_at]
+  jq -nc --argjson id "$1" --arg tag "$2" --argjson draft "$3" --argjson assets "$4" --arg created "${5:-$old}" \
+    '{id: $id, tag_name: $tag, name: $tag, draft: $draft, created_at: $created,
+      assets: [range($assets) | {id: ., name: "asset-\(.)"}]}'
 }
 
 case_no=0
@@ -123,6 +127,12 @@ grep -qxF 'release view v3.5.0 --repo layervai/qurl-integrations --json isDraft 
   failures=$((failures + 1))
   echo "FAIL superseded-drafts: the published release was not read by its exact tag"
 }
+# The list is read whole. A filter that projected the records could turn a
+# missing asset list into an empty one before the script ever checked it.
+grep -qxF 'api --paginate repos/layervai/qurl-integrations/releases?per_page=100 --jq .[]' "$argv_out" || {
+  failures=$((failures + 1))
+  echo "FAIL superseded-drafts: the release list was not read as whole records"
+}
 if grep -qE 'release delete|cleanup-tag|git/refs' "$argv_out"; then
   failures=$((failures + 1))
   echo "FAIL superseded-drafts: a call could delete a tag"
@@ -190,17 +200,19 @@ done
 # One inexact record refuses the whole list, including the deletable draft
 # that precedes it: selection finishes before the first deletion.
 for bad_record in \
-  '{"id":"41","tag_name":"v3.3.0","draft":true,"assets":0,"created_at":"2020-01-01T00:00:00Z"}' \
-  '{"id":41.5,"tag_name":"v3.3.0","draft":true,"assets":0,"created_at":"2020-01-01T00:00:00Z"}' \
-  '{"id":0,"tag_name":"v3.3.0","draft":true,"assets":0,"created_at":"2020-01-01T00:00:00Z"}' \
-  '{"id":41,"tag_name":null,"draft":true,"assets":0,"created_at":"2020-01-01T00:00:00Z"}' \
-  '{"id":41,"tag_name":"v3.3.0","draft":"true","assets":0,"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":"41","tag_name":"v3.3.0","draft":true,"assets":[],"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":41.5,"tag_name":"v3.3.0","draft":true,"assets":[],"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":0,"tag_name":"v3.3.0","draft":true,"assets":[],"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":41,"tag_name":null,"draft":true,"assets":[],"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":"true","assets":[],"created_at":"2020-01-01T00:00:00Z"}' \
   '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":null,"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":0,"created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":{},"created_at":"2020-01-01T00:00:00Z"}' \
   '{"id":41,"tag_name":"v3.3.0","draft":true,"created_at":"2020-01-01T00:00:00Z"}' \
-  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":0}' \
-  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":0,"created_at":null}' \
-  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":0,"created_at":"yesterday"}' \
-  '{"id":41,"tag_name":"v3.3.0","draft":false,"assets":20,"created_at":null}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":[]}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":[],"created_at":null}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":true,"assets":[],"created_at":"yesterday"}' \
+  '{"id":41,"tag_name":"v3.3.0","draft":false,"assets":[{"id":1}],"created_at":null}' \
   'not json'; do
   run_case "inexact-record[$bad_record]" v3.5.0 1 '' 'the release list holds a record that is not exact' \
     GH_STUB_RELEASES="$(release 40 v3.4.0 true 0; printf '%s\n' "$bad_record")"

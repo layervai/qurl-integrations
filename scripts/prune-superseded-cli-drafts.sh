@@ -23,6 +23,10 @@
 # A draft that failed after GoReleaser uploaded to it holds assets and is
 # never removed here; that one needs a person to look at it.
 #
+# Once a higher version is public, a lower one can no longer be published
+# from its draft: resuming its release run after this has removed the draft
+# fails, visibly, at that run's own draft check.
+#
 # "Lower means superseded" assumes CLI versions only ever go up, which holds
 # while release-please releases from main alone. A maintenance line would
 # break it: the empty draft of a v3.4.2 prepared after v3.5.0 is public would
@@ -45,7 +49,7 @@ set -euo pipefail
 : "${CLI_TAG:?CLI_TAG must be set}"
 
 fail() {
-  printf '::error::Could not prune superseded CLI drafts: %s. No further release was deleted.\n' "$1" >&2
+  printf '::error::Could not prune superseded CLI drafts: %s. No release was deleted after this point.\n' "$1" >&2
   exit 1
 }
 
@@ -61,9 +65,11 @@ is_draft="$(gh release view "$CLI_TAG" --repo "$GITHUB_REPOSITORY" --json isDraf
   fail "the ${CLI_TAG} release is not public (isDraft=${is_draft:-<empty>})"
 
 # One compact object per release, across every page: all components share this
-# list, so the CLI's drafts are not guaranteed to sit on the first page.
-releases="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-  --jq '.[] | {id, tag_name, draft, created_at, assets: (.assets | length)}')" ||
+# list, so the CLI's drafts are not guaranteed to sit on the first page. The
+# records are passed through whole, so the checks below see the fields as the
+# API sent them and not a projection that could turn a missing asset list
+# into a count of zero.
+releases="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[]')" ||
   fail "the release list could not be read"
 
 # Select in one pass and refuse the whole list on any record that is not
@@ -77,11 +83,11 @@ superseded="$(jq -r --arg published "$CLI_TAG" --arg bare "$bare_tag" \
   if (.id | type) != "number" or (.id | floor) != .id or .id <= 0
     or (.tag_name | type) != "string"
     or (.draft | type) != "boolean"
-    or (.assets | type) != "number"
+    or (.assets | type) != "array"
     or (.created_at | type) != "string"
-  then error("release record is not exact: \(tojson)")
+  then error("release record is not exact: \({id, tag_name, draft, created_at, assets: (.assets | type)} | tojson)")
   else
-    select(.draft and .assets == 0 and (.tag_name | test($bare)))
+    select(.draft and (.assets | length) == 0 and (.tag_name | test($bare)))
     | select(version_of(.tag_name) < version_of($published))
     | select(now - (.created_at | fromdateiso8601) > $min_age)
     | "\(.id)\t\(.tag_name)"
