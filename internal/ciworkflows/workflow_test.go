@@ -1884,7 +1884,7 @@ func TestCLIReleasePrunesSupersededDraftsOnlyAfterPublication(t *testing.T) {
 		t.Errorf("%s needs = %v, want publish-cli-release and cli-release-gate", jobID, needs)
 	}
 	for _, fragment := range []string{
-		"!cancelled()",
+		"!cancelled()", //nolint:misspell // GitHub expression function spelling.
 		"needs.publish-cli-release.result == 'success'",
 		"needs.cli-release-gate.outputs.required == 'true'",
 	} {
