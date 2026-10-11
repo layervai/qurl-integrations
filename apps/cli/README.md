@@ -1546,6 +1546,15 @@ and its shape is a stable contract, so scripts may parse it
 configuration, credentials, or network: a broken config file can never
 brick shell startup or a version check.
 
+A coding agent that uses qURL keeps a copy of the qURL agent skill in its
+skills folder (`~/.claude/skills/qurl/SKILL.md` for Claude Code) and reads
+that copy in every session, so the copy never updates by itself. When a
+saved copy is older than the release works with, `qurl version`,
+`qurl --version`, and `qurl publish` say so in one note on stderr, with the
+command that replaces it. Stdout is unchanged, `--quiet` leaves the note
+out, and nothing is said when no copy is saved. The CLI only reads the file:
+it downloads nothing and changes nothing.
+
 There is also a hidden maintenance command, `qurl docs [man|markdown] -d
 <dir>`, which generates the man pages and markdown docs from the command
 tree itself; release packaging runs it to produce the man pages shipped

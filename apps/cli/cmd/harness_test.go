@@ -105,7 +105,11 @@ type runOpts struct {
 	tty   bool // stdout+stderr TTY-ness
 
 	configDir string
-	sleeps    *[]time.Duration
+	// home is the home directory the invocation looks under for a saved copy
+	// of the qURL agent skill. Empty means it does not look, so no test
+	// reads the home directory of the person who runs the suite.
+	home   string
+	sleeps *[]time.Duration
 	// realSleep leaves the production sleep path in place instead of
 	// injecting a test double, so the API transport waits out its bounded
 	// 429 retries (Retry-After included) on its own context-aware timer.
@@ -284,6 +288,9 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			return v, ok
 		}
 		g.configDir = configDir
+		if o.home != "" {
+			g.userHomeDir = func() (string, error) { return o.home, nil }
+		}
 		g.now = func() time.Time { return fixedNow }
 		g.newRequestID = func() string { return "cli-req-fixed" }
 		g.openAPIClient = func(context.Context) (qurlapi.Client, error) {
