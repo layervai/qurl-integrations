@@ -746,7 +746,8 @@ func bindRegisteredDeviceOwner(
 // noteOutdatedSkill look under the user's home directory.
 func lookForSavedSkill(o *globalOpts) { o.userHomeDir = os.UserHomeDir }
 
-// versionFlagGiven reports whether the invocation was `qurl --version`.
+// versionFlagGiven reports whether the invocation was `qurl --version`. The
+// value is compared too, so `--version=false` is not taken for it.
 func versionFlagGiven(root *cobra.Command) bool {
 	flag := root.Flags().Lookup("version")
 	return flag != nil && flag.Changed && flag.Value.String() == "true"

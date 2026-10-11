@@ -111,13 +111,27 @@ func describe(home, location, goos string) Copy {
 		// curl.exe ships with Windows and runs the same from PowerShell and
 		// from cmd. The folder exists, because the copy is in it.
 		full := filepath.Join(home, filepath.FromSlash(location))
-		return Copy{Path: full, ReplaceCommand: `curl.exe -fsSL ` + SourceURL + ` -o "` + full + `"`}
+		return Copy{Path: full, ReplaceCommand: `curl.exe -fsSL ` + SourceURL + ` -o ` + windowsQuoted(full)}
 	}
 	saved := "~/" + location
 	return Copy{
 		Path:           saved,
 		ReplaceCommand: "mkdir -p " + path.Dir(saved) + " && curl -fsSL " + SourceURL + " -o " + saved,
 	}
+}
+
+// windowsQuoted quotes a path for the command line of a Windows shell. Double
+// quotes are read the same by PowerShell and by cmd, so they are the form
+// for an ordinary path. Inside them PowerShell expands `$` and takes a
+// backtick as an escape, and cmd expands `%NAME%`, and a user name may hold
+// any of the three. No one form is safe in both shells for such a path, so
+// it gets PowerShell's single quotes, which keep every character as it is:
+// PowerShell is the shell a coding agent has on Windows.
+func windowsQuoted(full string) string {
+	if strings.ContainsAny(full, "$`%") {
+		return "'" + strings.ReplaceAll(full, "'", "''") + "'"
+	}
+	return `"` + full + `"`
 }
 
 // readHead returns the first headLimit bytes of a regular file. It asks what
@@ -164,16 +178,18 @@ func readHead(name string) ([]byte, error) {
 func Version(head []byte) int {
 	text := strings.ReplaceAll(string(bytes.TrimPrefix(head, []byte("\xef\xbb\xbf"))), "\r\n", "\n")
 	lines := strings.Split(text, "\n")
-	if lines[0] != "---" {
+	if !isFence(lines[0]) {
 		return 0
 	}
 	inMetadata := false
 	childIndent := ""
 	for _, line := range lines[1:] {
-		if line == "---" {
+		if isFence(line) {
 			break
 		}
-		if line == "" {
+		// An empty line or a comment line is no key, and says nothing of how
+		// far the keys are in.
+		if rest := strings.TrimSpace(line); rest == "" || rest[0] == '#' {
 			continue
 		}
 		if line[0] != ' ' && line[0] != '\t' {
@@ -198,15 +214,17 @@ func Version(head []byte) int {
 	return 0
 }
 
+// isFence reports whether line opens or closes the frontmatter. Space after
+// the three dashes is passed over, as a skill loader passes over it.
+func isFence(line string) bool { return strings.TrimRight(line, " \t") == "---" }
+
 // withoutComment drops a YAML comment that ends a line, and the space around
 // what is left. A `#` starts a comment only after a space.
 func withoutComment(s string) string {
-	if at := strings.IndexAny(s, " \t"); at >= 0 {
-		for i := at; i < len(s)-1; i++ {
-			if (s[i] == ' ' || s[i] == '\t') && s[i+1] == '#' {
-				s = s[:i]
-				break
-			}
+	for i := 0; i < len(s)-1; i++ {
+		if (s[i] == ' ' || s[i] == '\t') && s[i+1] == '#' {
+			s = s[:i]
+			break
 		}
 	}
 	return strings.TrimSpace(s)

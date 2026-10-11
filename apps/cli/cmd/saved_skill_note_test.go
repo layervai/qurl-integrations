@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +12,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/agentskill"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 // The note for a saved copy of the qURL agent skill that is older than this
@@ -156,6 +160,25 @@ func TestOtherCommandsSayNothingOfAnOldSavedSkill(t *testing.T) {
 		res := runCLI(t, &runOpts{args: args, home: homeWithOldSkill(t)})
 		if res.code != 0 || strings.Contains(res.stderr.String(), "skill") {
 			t.Errorf("qurl %s: exit = %d, stderr = %q, want no note", strings.Join(args, " "), res.code, res.stderr.String())
+		}
+	}
+}
+
+// The note goes through the printer, which masks what looks like a
+// credential. The command in it must come out as it went in, in both forms:
+// a reader runs it as printed.
+func TestTheNoteIsPrintedAsItIsWritten(t *testing.T) {
+	home := homeWithOldSkill(t)
+	for _, goos := range []string{"linux", "windows"} {
+		saved, found := agentskill.FindOutdated(home, goos)
+		if !found {
+			t.Fatalf("%s: no old copy found", goos)
+		}
+		var stderr bytes.Buffer
+		printer := output.New(&output.Streams{Out: io.Discard, Err: &stderr}, output.FormatText, false, false, false, nil)
+		printer.Notef(msgSavedSkillOutdated, saved.Path, saved.ReplaceCommand)
+		if want := fmt.Sprintf(msgSavedSkillOutdated, saved.Path, saved.ReplaceCommand) + "\n"; stderr.String() != want {
+			t.Errorf("%s: printed %q, want %q", goos, stderr.String(), want)
 		}
 	}
 }

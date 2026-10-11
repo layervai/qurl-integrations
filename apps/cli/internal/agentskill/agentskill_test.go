@@ -32,6 +32,9 @@ func TestVersion(t *testing.T) {
 		{"a comment after the version", skillWith("metadata:\n  version: \"7\"  # raise with care\n"), 7},
 		{"a comment after a bare version", skillWith("metadata:\n  version: 7 # raise with care\n"), 7},
 		{"a comment after the map's key", skillWith("metadata: # for programs\n  version: \"7\"\n"), 7},
+		{"a comment line further in than the keys", skillWith("metadata:\n      # raise with care\n  version: \"7\"\n"), 7},
+		{"a line of spaces further in than the keys", skillWith("metadata:\n      \n  version: \"7\"\n"), 7},
+		{"space after the dashes", strings.Replace(strings.Replace(versioned(7), "---\n", "--- \n", 1), "\n---\n", "\n---\t\n", 1), 7},
 		{"tab indent", skillWith("metadata:\n\tversion: \"3\"\n"), 3},
 		{"windows line ends", strings.ReplaceAll(versioned(4), "\n", "\r\n"), 4},
 		{"byte order mark", "\xef\xbb\xbf" + versioned(4), 4},
@@ -179,8 +182,9 @@ func TestFindOutdated(t *testing.T) {
 	t.Run("a version beyond what is read is not found", func(t *testing.T) {
 		home := t.TempDir()
 		save(t, home, ".claude", "---\nname: qurl\ndescription: "+strings.Repeat("x", headLimit)+"\nmetadata:\n  version: \"9\"\n---\n")
-		if _, ok := FindOutdated(home, "linux"); !ok {
-			t.Error("a version past the read limit counted; the read is not bounded")
+		found, ok := FindOutdated(home, "linux")
+		if !ok || found.Path != "~/.claude/skills/qurl/SKILL.md" {
+			t.Errorf("found %+v (%v): a version past the read limit counted; the read is not bounded", found, ok)
 		}
 	})
 	t.Run("Windows gets the full path and a command its shells run", func(t *testing.T) {
@@ -197,6 +201,24 @@ func TestFindOutdated(t *testing.T) {
 			t.Errorf("ReplaceCommand = %q, want %q", found.ReplaceCommand, want)
 		}
 	})
+}
+
+// A Windows user name may hold a character that a shell expands inside
+// double quotes. Such a path is quoted so that PowerShell keeps it as it is.
+func TestWindowsQuoted(t *testing.T) {
+	tests := []struct{ path, want string }{
+		{`C:\Users\Ada Lovelace\.claude\skills\qurl\SKILL.md`, `"C:\Users\Ada Lovelace\.claude\skills\qurl\SKILL.md"`},
+		{`C:\Users\O'Brien\SKILL.md`, `"C:\Users\O'Brien\SKILL.md"`},
+		{`C:\Users\pay$roll\SKILL.md`, `'C:\Users\pay$roll\SKILL.md'`},
+		{"C:\\Users\\a`b\\SKILL.md", "'C:\\Users\\a`b\\SKILL.md'"},
+		{`C:\Users\50%off%\SKILL.md`, `'C:\Users\50%off%\SKILL.md'`},
+		{`C:\Users\O'Brien$\SKILL.md`, `'C:\Users\O''Brien$\SKILL.md'`},
+	}
+	for _, tc := range tests {
+		if got := windowsQuoted(tc.path); got != tc.want {
+			t.Errorf("windowsQuoted(%s) = %s, want %s", tc.path, got, tc.want)
+		}
+	}
 }
 
 func TestACopyThisProcessMayNotReadIsNotAFinding(t *testing.T) {
