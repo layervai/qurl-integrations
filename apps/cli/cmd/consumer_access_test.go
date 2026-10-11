@@ -9,6 +9,30 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
+func TestConsumerAccessConfiguresFirstPolicyWithVersionZero(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Expected int64 `json:"expected_consumer_access_version"`
+			Policy   struct {
+				Mode    string `json:"mode"`
+				Version int64  `json:"version"`
+			} `json:"consumer_access"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Expected != 0 || body.Policy.Mode != "review" || body.Policy.Version != 1 {
+			t.Fatalf("first policy request=%+v error=%v", body, err)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
+			"private": true, "type": "url", "status": "active", "consumer_access": body.Policy,
+		}, nil)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "access", "configure", srv.Key.CRID, "--mode", "review", "--version", "0", "-o", "json"}})
+	if result.code != 0 {
+		t.Fatalf("exit=%d error=%s", result.code, result.stderr.String())
+	}
+}
+
 func TestConsumerAccessInvitationFiltersSecrets(t *testing.T) {
 	srv := apitest.NewServer(t)
 	id := strings.Repeat("a", 64)

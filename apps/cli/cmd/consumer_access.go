@@ -32,7 +32,8 @@ func consumerAccessCmd(opts *globalOpts) *cobra.Command {
 Actions: invite, list_invitations, list_grants, resend, revoke_invitation,
 approve, deny, revoke_grant, configure.
 Read the version from a listing before a decision. Use --version with that
-version. A key opt-in uses decision-id new and --version 0. Contract approval
+version. The first policy on an existing private resource uses --version 0.
+A key opt-in uses decision-id new and --version 0. Contract approval
 requires a trusted publisher entitlement receipt and expiry; it does not
 verify payment. Mailbox verification proves email control, not legal identity.
 If a contract notification is pending, repeat the same receipt, expiry and version.
@@ -142,7 +143,7 @@ func validateConsumerDecision(input *consumerAccessInput) error {
 		return exitcode.UsageError(errors.New("use a decision id from a listing, or new for a key opt-in"))
 	}
 	minimum := int64(1)
-	if newKey {
+	if newKey || input.action == consumerConfigure {
 		minimum = 0
 	}
 	if (needsDecision || input.action == consumerConfigure) && (input.version < minimum || input.version >= 1<<53-1) {
