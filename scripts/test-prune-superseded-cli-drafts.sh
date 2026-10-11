@@ -206,6 +206,15 @@ if grep -qF -e 'v3.3.0' -e 'v3.2.0' "$summary_out"; then
   echo "FAIL delete-fails: the step summary records a draft that was not deleted"
 fi
 
+# When the first deletion fails nothing was deleted, and the summary must not
+# say otherwise.
+run_case first-delete-fails v3.5.0 1 '50' 'draft release v3.4.0 (id 50) could not be deleted' \
+  GH_STUB_RELEASES="$three" GH_STUB_DELETE_FAILS=50
+[[ ! -s "$summary_out" ]] || {
+  failures=$((failures + 1))
+  echo "FAIL first-delete-fails: a step summary was written with nothing deleted"
+}
+
 # Missing required environment is a refusal, not an empty success.
 run_case missing-tag '' 1 '' 'CLI_TAG must be set' GH_STUB_RELEASES="$mixed"
 run_case missing-repository v3.5.0 1 '' 'GITHUB_REPOSITORY must be set' \

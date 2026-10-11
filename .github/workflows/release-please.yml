@@ -17,7 +17,10 @@ name: Release Please
 #      versions are deleted and their tags kept
 #      (scripts/prune-superseded-cli-drafts.sh). A version whose gate failed
 #      and was replaced by the next one would otherwise stay listed as a
-#      draft indefinitely.
+#      draft indefinitely. This treats every lower version as superseded,
+#      which holds only while CLI versions are released from main in
+#      ascending order: narrow that script's rule before adding a
+#      maintenance line, or it deletes the line's drafts.
 #
 # GoReleaser runs as a dependent job here — NOT as a tag-triggered workflow —
 # because release-please tags with the workflow's GITHUB_TOKEN, and GitHub
@@ -1164,6 +1167,11 @@ jobs:
   # tag being published, which is absent from every tag older than this job.
   # Nothing needs it, so a failure here turns the run red without holding back
   # the Homebrew tap.
+  #
+  # The concurrency group above is per tag and source, so the run of a lower
+  # version is not serialized against this one. If such a run is still active,
+  # its draft can be deleted between the gate and GoReleaser's first upload,
+  # and that run then fails for a version this release already replaced.
   prune-superseded-cli-drafts:
     name: Remove superseded CLI drafts
     needs: [publish-cli-release, cli-release-gate]

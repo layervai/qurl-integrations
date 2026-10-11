@@ -81,19 +81,26 @@ if [[ -z "$superseded" ]]; then
 fi
 
 # Each deletion is written to the step summary as it happens, not at the end:
-# when a later deletion fails, the ones already made stay on record.
-summarize() {
+# when a later deletion fails, the ones already made stay on record. The
+# heading goes out with the first deletion that succeeds, so a summary never
+# says releases were deleted above an empty list.
+summary_started=false
+summarize_deleted() {
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
-  printf '%s\n' "$@" >>"$GITHUB_STEP_SUMMARY"
+  if [[ "$summary_started" == false ]]; then
+    summary_started=true
+    printf '%s\n' "### Superseded CLI drafts removed" "" \
+      "\`${CLI_TAG}\` is public. These earlier CLI versions were tagged but never published; their empty draft releases were deleted and their tags kept:" "" \
+      >>"$GITHUB_STEP_SUMMARY"
+  fi
+  printf -- "- \`%s\`\n" "$1" >>"$GITHUB_STEP_SUMMARY"
 }
 
-summarize "### Superseded CLI drafts removed" "" \
-  "\`${CLI_TAG}\` is public. These earlier CLI versions were tagged but never published; their empty draft releases were deleted and their tags kept:" ""
 # gh reads nothing from stdin here; closing it keeps the loop's own input, the
 # remaining drafts, out of reach of anything that one day does.
 while IFS=$'\t' read -r id tag; do
   gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}" >/dev/null </dev/null ||
     fail "draft release ${tag} (id ${id}) could not be deleted"
   echo "Deleted the empty draft release ${tag} (id ${id}), superseded by ${CLI_TAG}; the tag ${tag} is kept."
-  summarize "- \`${tag}\`"
+  summarize_deleted "$tag"
 done <<<"$superseded"
