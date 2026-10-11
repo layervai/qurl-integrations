@@ -2193,9 +2193,11 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	for index := range releaseCLI.Steps {
 		current := &releaseCLI.Steps[index]
 		switch {
-		case strings.HasPrefix(current.Uses, checkoutActionPrefix):
+		// Only what stands before the check counts: a later checkout or
+		// toolchain, for another purpose, says nothing about this step.
+		case check < 0 && strings.HasPrefix(current.Uses, checkoutActionPrefix):
 			source = index
-		case strings.HasPrefix(current.Uses, "actions/setup-go@"):
+		case check < 0 && strings.HasPrefix(current.Uses, "actions/setup-go@"):
 			toolchain = index
 		case current.Name == stepName:
 			check = index
@@ -2208,13 +2210,13 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	}
 	// Before the checkout no checker is on disk, and the step would take
 	// its skip on every release.
-	if source < 0 || source > check {
-		t.Errorf("the checkout at step %d does not come before the served-skill check at step %d", source, check)
+	if source < 0 {
+		t.Errorf("no checkout comes before the served-skill check at step %d", check)
 	}
 	// Without the repository's Go the check would fail for a reason that
 	// has nothing to do with the skill, under an error that names the skill.
-	if toolchain < 0 || toolchain > check {
-		t.Errorf("actions/setup-go at step %d does not come before the served-skill check at step %d", toolchain, check)
+	if toolchain < 0 {
+		t.Errorf("no actions/setup-go comes before the served-skill check at step %d", check)
 	}
 	if check > build {
 		t.Error("the served-skill check runs after GoReleaser has uploaded the release's files")

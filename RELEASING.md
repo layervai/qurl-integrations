@@ -81,7 +81,10 @@ Before cutting the next CLI patch release:
 
 Merging the CLI's release-please PR tags `vX.Y.Z` and creates a draft GitHub
 Release. The `release-cli` job runs GoReleaser, verifies the result, publishes
-the GitHub Release, and then updates Homebrew. The release attaches:
+the GitHub Release, and then updates Homebrew. Before GoReleaser, the job
+checks that the qURL agent skill served to users is at least the version the
+tagged CLI asks for. If that step fails, nothing has been uploaded: serve the
+newer skill, then use **Re-run failed jobs**. The release attaches:
 
 | Asset | What it is |
 |---|---|
