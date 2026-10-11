@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -733,8 +734,32 @@ func (opts *globalOpts) linkByCRIDAlone(ctx context.Context, resourceCRID string
 // It returns errDeviceKeyRefused when the SDK will not ask as a device with
 // what it was given and sent nothing. linkFromLinkRequest says what it
 // returns for every other answer.
+//
+// With --verbose, one line says what was done about the device key. There
+// are three, and each is true on every machine:
+//
+//   - The SDK did not ask for the key, because the first request settled the
+//     link request (msgCRIDLinkKeyNotNeeded). The line does not say "as this
+//     device". Nothing was read, so it is not known whether this machine has
+//     a device key. A machine with only an account key has none.
+//   - The SDK asked for the key and got none (msgCRIDLinkDeviceKeyNotRead,
+//     with the word for the reason).
+//   - The SDK asked for the key, and the read did not say that there is none
+//     (msgCRIDLinkAsDevice).
 func (opts *globalOpts) linkAsDevice(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurlapi.ShareLink, error) {
-	issued, err := opts.requestCRIDLinkAsDevice(ctx, deviceKey, resourceCRID)
+	// keyAsked records that the SDK asked for the device key. The SDK asks on
+	// a goroutine of its own, and it does not wait for the read when the
+	// context ends. So the record is atomic.
+	var keyAsked atomic.Bool
+	source := deviceKey
+	if deviceKey != nil {
+		// A missing function stays missing, so the SDK still refuses it.
+		source = func(readCtx context.Context) ([]byte, error) {
+			keyAsked.Store(true)
+			return deviceKey(readCtx)
+		}
+	}
+	issued, err := opts.requestCRIDLinkAsDevice(ctx, source, resourceCRID)
 	if consume.DeviceKeyNotGiven(err) {
 		if logf := opts.verboseLogger(); logf != nil {
 			logf(msgCRIDLinkDeviceKeyNotRead, string(whyNoDeviceKey(err)))
@@ -748,10 +773,15 @@ func (opts *globalOpts) linkAsDevice(ctx context.Context, deviceKey qurl.DeviceK
 	case consume.DeviceKeyRefused(err):
 		return nil, errDeviceKeyRefused
 	case !consume.CRIDNotRequestable(err):
-		// The line says how the device asked. It does not say that the
-		// device key was read or sent: that happens only after "not found".
 		if logf := opts.verboseLogger(); logf != nil {
-			logf(msgCRIDLinkAsDevice)
+			if keyAsked.Load() {
+				// The line does not say that a request was sent under the
+				// device key. The time limit can run out while the key is
+				// read.
+				logf(msgCRIDLinkAsDevice)
+			} else {
+				logf(msgCRIDLinkKeyNotNeeded)
+			}
 		}
 	}
 	return opts.linkFromLinkRequest(resourceCRID, true, issued, err)

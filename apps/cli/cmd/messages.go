@@ -78,11 +78,21 @@ const (
 	// request's own answer, which says nothing about this request at all.
 	msgCRIDLinkNotSent = "> CRID link request not sent, the SDK will not ask for this CRID: %s"
 
-	// msgCRIDLinkAsDevice is the --verbose diagnostic for a link request that
-	// was made as this device. It states the rule the SDK follows, so nobody
-	// reads the line as "the device key was sent": that happens only after
-	// the answer "not found".
+	// msgCRIDLinkAsDevice is the --verbose diagnostic for a link request in
+	// which the SDK asked this device for its key: the first request was
+	// answered "not found". It states the rule the SDK follows, so nobody
+	// reads the line as "the device key was sent". The line is not written
+	// when the SDK did not ask for the key, and not when the read gave none.
 	msgCRIDLinkAsDevice = "> CRID link request as this device: a random key first, the device key only after \"not found\""
+
+	// msgCRIDLinkKeyNotNeeded is the --verbose diagnostic for a link request
+	// of a device with an identity that the first request settled: with a
+	// link, with a refusal other than "not found", or with no answer. That
+	// request goes under a random key, and the SDK did not ask for the device
+	// key. The line does not say "as this device": nothing was read, so it is
+	// not known whether this machine has a device key. A machine with only an
+	// account key has none.
+	msgCRIDLinkKeyNotNeeded = "> CRID link request under a random key, no device key was read: one is read only after \"not found\""
 
 	// msgCRIDLinkDeviceKeyNotRead is the --verbose diagnostic for a device
 	// with an identity that asked for a link with only the CRID, because it

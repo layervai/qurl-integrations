@@ -2131,6 +2131,31 @@ func TestGetWithAnAccountKeyAsksWithTheCRIDAloneFirst(t *testing.T) {
 			}
 		})
 
+		// What --verbose says on this machine when the first request gives
+		// the link. The machine has no device state, so the line must not
+		// say that it asked as a device. It says that the request went under
+		// a random key and that no device key was read. A read of the key
+		// fails the test: only the answer "not found" leads to one.
+		t.Run("the line with --verbose does not name a device/"+mode.name, func(t *testing.T) {
+			srv := downloadServer(t)
+			enrolled := false
+			requests := &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
+			machine := withDeviceKey(withLinkRequestsOf(accountKeyMachine(t, srv, &enrolled), requests), mustNotReadTheDeviceKey(t))
+			run := runShareMode(t, srv, srv.URL, mode, withArgs(machine, "--verbose"))
+			run.mustHaveDelivered(t, mode)
+
+			stderr := run.result.stderr.String()
+			if want := "[debug] " + msgCRIDLinkKeyNotNeeded + "\n"; strings.Count(stderr, want) != 1 {
+				t.Errorf("stderr = %q, want the line %q once", stderr, want)
+			}
+			if strings.Contains(stderr, msgCRIDLinkAsDevice) || strings.Contains(stderr, "> CRID link request with the CRID alone") {
+				t.Errorf("stderr = %q, must not say that the machine asked as a device, or that it looked for a device key", stderr)
+			}
+			if enrolled {
+				t.Error("the machine enrolled although the link request gave the link")
+			}
+		})
+
 		t.Run("the owner's own private resource/"+mode.name, func(t *testing.T) {
 			srv := downloadServer(t)
 			enrolled := false

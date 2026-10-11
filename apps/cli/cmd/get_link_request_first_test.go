@@ -1245,15 +1245,18 @@ func debugLines(stderr string) []string {
 	return lines
 }
 
-// TestGetSaysHowItAskedForALinkOnlyWithVerbose pins the two diagnostic lines
-// about the form of the link request. Without --verbose there is no such
-// line. With --verbose there is one line for a device that made the link
-// request first: that it asked as this device, or that it asked with the
-// CRID alone and one fixed word for why the device key was not read.
+// TestGetSaysHowItAskedForALinkOnlyWithVerbose pins the three diagnostic
+// lines about the form of the link request. Without --verbose there is no
+// such line. With --verbose there is one line for a device that made the
+// link request first, and it says what was done about the device key:
 //
-// The answer in every row is "not found", the one answer the device key is
-// read for. So a device with no readable key learns here that it has none,
-// and its line is the second one.
+//   - The first request settled the link request, so the key was not asked
+//     for and not read. The line says that the request went under a random
+//     key. It does not say "as this device".
+//   - The answer was "not found", and the key was read: the device asked as
+//     this device.
+//   - The answer was "not found", and the read gave no key: the device asked
+//     with the CRID alone, and the line has one fixed word for the reason.
 //
 // The message for the user is the same with and without --verbose. No line
 // carries any part of the key.
@@ -1261,15 +1264,23 @@ func TestGetSaysHowItAskedForALinkOnlyWithVerbose(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	mode := getFileMode(t)
 	asDeviceLine := "[debug] " + msgCRIDLinkAsDevice
+	keyNotNeededLine := "[debug] " + msgCRIDLinkKeyNotNeeded
 	notReadLine := func(why connectorstate.NoDeviceKey) string {
 		return "[debug] " + fmt.Sprintf(msgCRIDLinkDeviceKeyNotRead, why)
 	}
-	if !strings.HasPrefix(msgCRIDLinkAsDevice, "> CRID link request as this device") ||
-		!strings.HasPrefix(msgCRIDLinkDeviceKeyNotRead, "> CRID link request with the CRID alone") {
-		t.Fatalf("the two lines are %q and %q; this test tells them apart by how they start", msgCRIDLinkAsDevice, msgCRIDLinkDeviceKeyNotRead)
+	// starts are how the three lines start. The test finds the lines by
+	// them, so no two may start the same way.
+	starts := []string{"> CRID link request as this device", "> CRID link request with the CRID alone", "> CRID link request under a random key"}
+	for i, message := range []string{msgCRIDLinkAsDevice, msgCRIDLinkDeviceKeyNotRead, msgCRIDLinkKeyNotNeeded} {
+		if !strings.HasPrefix(message, starts[i]) {
+			t.Fatalf("the line %q does not start with %q; this test tells the three lines apart by how they start", message, starts[i])
+		}
 	}
 	stateDir := filepath.Join(t.TempDir(), "no-device-state")
 	notFound := sdkRefusal(qurl.ErrCRIDLinkNotFound, "52602")
+	// An answer of the first request that is not "not found". The SDK does
+	// not ask for the device key after it.
+	rateLimited := sdkRefusal(qurl.ErrCRIDLinkRateLimited, "52603")
 
 	type row struct {
 		name    string
@@ -1284,12 +1295,28 @@ func TestGetSaysHowItAskedForALinkOnlyWithVerbose(t *testing.T) {
 		connectorstate.NoDeviceKeyStorage, connectorstate.NoDeviceKeyUnreadable, connectorstate.NoDeviceKeyNotRegistered,
 		connectorstate.NoDeviceKeyInvalid, connectorstate.NoDeviceKeyAgentID,
 	}
-	rows := make([]row, 0, 4+len(reasons))
+	rows := make([]row, 0, 6+len(reasons))
 	rows = append(rows, []row{
 		{
 			name: "device that reads its key", err: notFound, want: asDeviceLine,
 			machine: func(t *testing.T) func(args []string) *runOpts {
 				return withDeviceKey(enrolledDevice(t, state), deviceKeyOf(t, state).read)
+			},
+		},
+		{
+			// The first request settled it. The key is not read, so a read
+			// fails the test.
+			name: "device that can read its key, another refusal", err: rateLimited, want: keyNotNeededLine,
+			machine: func(t *testing.T) func(args []string) *runOpts {
+				return withDeviceKey(enrolledDevice(t, state), mustNotReadTheDeviceKey(t))
+			},
+		},
+		{
+			// The same line for a device that could not read its key: nothing
+			// was read, so the line cannot say which of the two it is.
+			name: "device with no readable key, another refusal", err: rateLimited, want: keyNotNeededLine,
+			machine: func(t *testing.T) func(args []string) *runOpts {
+				return withDeviceKey(enrolledDevice(t, state), noDeviceKey(connectorstate.NoDeviceKeyNoState).read)
 			},
 		},
 		{
@@ -1352,8 +1379,10 @@ func TestGetSaysHowItAskedForALinkOnlyWithVerbose(t *testing.T) {
 			verbose := run(t, true)
 			var about []string
 			for _, line := range debugLines(verbose) {
-				if strings.HasPrefix(line, "[debug] > CRID link request as this device") || strings.HasPrefix(line, "[debug] > CRID link request with the CRID alone") {
-					about = append(about, line)
+				for _, start := range starts {
+					if strings.HasPrefix(line, "[debug] "+start) {
+						about = append(about, line)
+					}
 				}
 			}
 			if tc.want == "" && len(about) != 0 {
