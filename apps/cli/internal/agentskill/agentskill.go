@@ -73,6 +73,8 @@ type Copy struct {
 	// it: from `~` where the shell expands that, in full on Windows.
 	Path string
 	// ReplaceCommand is the one command that puts the current skill there.
+	// On Windows a path that holds a character a shell expands is quoted
+	// for PowerShell only; see windowsQuoted.
 	ReplaceCommand string
 }
 
@@ -206,7 +208,9 @@ func Version(head []byte) int {
 			childIndent = indent
 		}
 		value, isVersion := strings.CutPrefix(line[len(indent):], "version:")
-		if !isVersion || indent != childIndent {
+		// As in YAML, the key ends at a colon that a space or the end of
+		// the line follows: `version:"7"` is another key.
+		if !isVersion || indent != childIndent || (value != "" && value[0] != ' ' && value[0] != '\t') {
 			continue
 		}
 		return wholeNumber(withoutComment(value))

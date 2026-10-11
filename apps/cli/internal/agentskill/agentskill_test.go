@@ -48,6 +48,8 @@ func TestVersion(t *testing.T) {
 		{"version one level further in", skillWith("metadata:\n  other:\n    version: \"9\"\n"), 0},
 		{"the inline form", skillWith("metadata: { version: \"9\" }\n"), 0},
 		{"a number sign inside the value", skillWith("metadata:\n  version: 7#1\n"), 0},
+		{"no space after the colon", skillWith("metadata:\n  version:\"9\"\n"), 0},
+		{"a longer key", skillWith("metadata:\n  version:x: \"9\"\n"), 0},
 		{"version in the body", skillWith("") + "metadata:\n  version: \"9\"\n", 0},
 		{"version in the description", "---\nname: qurl\ndescription: metadata: version: \"9\"\n---\n", 0},
 		{"a date", skillWith("metadata:\n  version: \"2026-10-11\"\n"), 0},

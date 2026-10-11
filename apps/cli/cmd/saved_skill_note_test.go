@@ -47,7 +47,7 @@ func homeWithSkill(t *testing.T, frontmatter string) string {
 func homeWithOldSkill(t *testing.T) string { return homeWithSkill(t, "") }
 
 func homeWithCurrentSkill(t *testing.T) string {
-	return homeWithSkill(t, "metadata:\n  version: \""+strings.Repeat("9", 3)+"\"\n")
+	return homeWithSkill(t, "metadata:\n  version: \"999\"\n")
 }
 
 // savedSkillCommands are the invocations that say the note: the ones the
