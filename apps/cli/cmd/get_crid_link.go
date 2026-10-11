@@ -616,6 +616,14 @@ func (opts *globalOpts) deviceKeyOnDemand(ctx context.Context) qurl.DeviceKeySou
 // whyNoDeviceKey returns the one fixed word for why a request as this device
 // got no device key. err is an error for which consume.DeviceKeyNotGiven is
 // true.
+//
+// TODO(upstream-contract): the word is found in the chain of err. qurl-go
+// documents that *qurl.DeviceKeySourceError unwraps to the error that the
+// function which reads the key returned, unchanged. If qurl-go ever leaves
+// that error out of the chain, every read that gave no key reads as
+// "invalid_key" here. Only the --verbose line shows the word.
+// TestGetSaysThroughTheSDKWhyTheKeyWasNotRead holds today's behavior through
+// the SDK.
 func whyNoDeviceKey(err error) connectorstate.NoDeviceKey {
 	var none errNoDeviceKey
 	if errors.As(err, &none) {

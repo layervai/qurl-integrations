@@ -1240,6 +1240,49 @@ func TestGetAsksWithTheCRIDAloneWhenTheSDKWillNotUseTheKey(t *testing.T) {
 	}
 }
 
+// TestGetSaysThroughTheSDKWhyTheKeyWasNotRead pins the word in the diagnostic
+// line for a read that gave no key, with the real SDK between the read and
+// the command. The command finds the word in the error the SDK returns: the
+// SDK keeps the error of the read in the chain of its own error, unchanged
+// (whyNoDeviceKey). If it did not, every word would read as "invalid_key".
+// So the words here are two others.
+//
+// The resource is private, so the first request is answered "not found" and
+// the SDK asks for the key. The read gives none. Nothing is sent under a
+// device key, and the share request gives the link.
+func TestGetSaysThroughTheSDKWhyTheKeyWasNotRead(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	mode := getFileMode(t)
+	devicePublicKey, err := base64.StdEncoding.DecodeString(state.PublicKeyB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, why := range []connectorstate.NoDeviceKey{connectorstate.NoDeviceKeyNoState, connectorstate.NoDeviceKeyUnreadable} {
+		t.Run(string(why), func(t *testing.T) {
+			path := newSDKLinkPath(t, nil)
+			path.server.PrivateFor(devicePublicKey)
+			srv := serverForCRID(t, path.server.CRID())
+			var verified, granted []string
+			keyReads := noDeviceKey(why)
+
+			run := runShareMode(t, srv, srv.URL, mode,
+				withArgs(withDeviceKey(path.wire(t, srv, enrolledDevice(t, state), &verified, &granted), keyReads.read), "--verbose"))
+			run.mustHaveDelivered(t, mode)
+
+			stderr := run.result.stderr.String()
+			if want := "[debug] " + fmt.Sprintf(msgCRIDLinkDeviceKeyNotRead, why) + "\n"; strings.Count(stderr, want) != 1 {
+				t.Errorf("stderr = %q, want the line %q once", stderr, want)
+			}
+			if strings.Contains(stderr, msgCRIDLinkAsDevice) {
+				t.Errorf("stderr = %q, must not say that the device asked as itself", stderr)
+			}
+			if requests := path.server.Requests(); len(requests) != 1 || requests[0].AsDevice {
+				t.Errorf("the service answered %+v, want one request, not under a device key", requests)
+			}
+		})
+	}
+}
+
 // debugLines returns the lines of stderr that --verbose adds.
 func debugLines(stderr string) []string {
 	var lines []string
