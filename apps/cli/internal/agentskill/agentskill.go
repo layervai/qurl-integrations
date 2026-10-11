@@ -105,20 +105,22 @@ func describe(home, location, goos string) Copy {
 	}
 }
 
-// readHead returns the first headLimit bytes of a regular file.
+// readHead returns the first headLimit bytes of a regular file. It asks what
+// the name is before it opens it: opening a named pipe would wait for a
+// writer, and a version check must never wait.
 func readHead(name string) ([]byte, error) {
-	file, err := os.Open(name) // #nosec G304 -- a fixed location under the user's home directory, read only
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
+	info, err := os.Stat(name)
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("not a regular file")
 	}
+	file, err := os.Open(name) // #nosec G304 -- a fixed location under the user's home directory, read only
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
 	return io.ReadAll(io.LimitReader(file, headLimit))
 }
 
