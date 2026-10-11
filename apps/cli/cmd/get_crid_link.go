@@ -552,6 +552,45 @@ func (opts *globalOpts) linkByRequestBeforeShare(ctx context.Context, resourceCR
 // when the context of the request ends, and it wipes a key that arrives
 // after that.
 //
+// So a read that is slow can still run when get goes on to its share
+// request, and the share request opens the same device state. The two are
+// safe at the same time:
+//
+//   - The read changes nothing and takes no lock. It opens the state with a
+//     reader that has no way to write
+//     (connectorstate.ReadDeviceStaticPrivateKey): qurl-go's
+//     OpenFileAgentStateReadOnly for the plaintext file, and
+//     qurl-connector's OpenSDKStateReader for state sealed to the TPM. Both
+//     document that open, load and close create no lock and write nothing.
+//     The lock of the share request's store is on a file of its own beside
+//     the state file, and the read never opens it. So the read cannot hold
+//     back the share request, and it cannot make its open, load or save
+//     fail.
+//   - The share request's store replaces the state file by a rename. The
+//     read gets the whole file. If the file was replaced while it was read,
+//     the read finds that out and gives no key ("unreadable"). It never
+//     returns a part of a file.
+//   - Nothing uses what a late read returns. The SDK has stopped waiting,
+//     and it wipes the key.
+//   - On a machine that seals its state to the TPM, the state is then
+//     unsealed twice: for the read, and for the share request. The unseal of
+//     the read is work for nothing. Each unseal opens a connection of its
+//     own to the TPM, and none of them asks the user anything. A key storage
+//     that could ask the user, or call a service, is one the read refuses
+//     before it opens the state.
+//   - One thing in the process is shared. After a TPM call was given up
+//     because its context ended, qurl-connector lets later TPM calls fail at
+//     once for some time. That is the reason the read gets the command's
+//     context: with the short limit, a run in which the limit ran out during
+//     the read could then fail its share request. With the command's
+//     context, a TPM call of the read is given up only when the command
+//     ends, or when the TPM itself does not answer in time. The share
+//     request needs the TPM too, and then reports that fault.
+//
+// TestGetOpensTheDeviceStateWhileTheKeyIsStillRead and
+// TestReadDeviceStaticPrivateKeyNextToTheStateStore run the read next to the
+// store, for the plaintext file. No test here runs two unseals on a TPM.
+//
 // A key the read returns goes to the SDK, which wipes it when the request
 // has been answered. A read that gives no key is reported to the SDK as
 // errNoDeviceKey, with the one fixed word for the reason.

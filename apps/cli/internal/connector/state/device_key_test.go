@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -494,6 +496,156 @@ func TestReadDeviceStaticPrivateKeyEndsWithItsContext(t *testing.T) {
 		key, why := ReadDeviceStaticPrivateKey(ctx, dir, RuntimeSupervisionNative)
 		if want := wantNoKey(NoDeviceKeyUnreadable); key != nil || why != want {
 			t.Errorf("ReadDeviceStaticPrivateKey returned a key of %d bytes and %q, want no key and %q", len(key), why, want)
+		}
+	})
+}
+
+// openLoadSaveClose does to the state in dir what a command does that opens
+// the state to use it and to change it: it opens the store, loads the state,
+// saves it again and closes the store. The save replaces the state file.
+func openLoadSaveClose(dir string) error {
+	store, err := Open(dir)
+	if err != nil {
+		return fmt.Errorf("open the state store: %w", err)
+	}
+	sdkStore, err := store.Handoff()
+	if err != nil {
+		return errors.Join(fmt.Errorf("hand off the state store: %w", err), store.Close())
+	}
+	loaded, err := sdkStore.LoadAgentState(context.Background())
+	if err != nil || loaded == nil {
+		return errors.Join(fmt.Errorf("load the device state: state present %t: %w", loaded != nil, err), store.Close())
+	}
+	if err := sdkStore.SaveAgentState(context.Background(), loaded); err != nil {
+		return errors.Join(fmt.Errorf("save the device state: %w", err), store.Close())
+	}
+	if err := store.Close(); err != nil {
+		return fmt.Errorf("close the state store: %w", err)
+	}
+	return nil
+}
+
+// TestReadDeviceStaticPrivateKeyNextToTheStateStore runs the read at the same
+// time as the store that opens the same state to change it. `qurl get` needs
+// the two to be safe together: a read of the key that is slow can still run
+// when the command goes on to its share request, and that request opens the
+// state through the store.
+//
+// The read takes no lock and writes nothing, and the store replaces the state
+// file by a rename. So neither can break the other:
+//
+//   - The store opens, loads, saves and closes without an error, whatever a
+//     read does at that moment.
+//   - A read gives the key, or no key and the word "unreadable". That word is
+//     a read that met a save: the file it had opened was replaced, so it does
+//     not use what it read. A read never gives another key, a part of a key,
+//     or another word.
+func TestReadDeviceStaticPrivateKeyNextToTheStateStore(t *testing.T) {
+	if !deviceKeyReadSupported {
+		t.Skip("the read opens no state on this platform, so nothing can run next to it")
+	}
+
+	// The store is open and has loaded the state, as it is for the length of
+	// a share request. A read at that moment gives the key and leaves the
+	// directory as it is. The save after it replaces the state file, so the
+	// read left nothing behind that stops a save. The read after the save
+	// gives the key again.
+	t.Run("a read while the store is open", func(t *testing.T) {
+		clearStateEnv(t)
+		dir := secureStateTestDir(t)
+		state, privateKey := registeredDeviceState(t)
+		saveStateThroughTheStore(t, dir, state)
+
+		store, err := Open(dir)
+		if err != nil {
+			t.Fatalf("open the state store: %v", err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		sdkStore, err := store.Handoff()
+		if err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := sdkStore.LoadAgentState(context.Background())
+		if err != nil || loaded == nil {
+			t.Fatalf("load the device state: state present %t, error %v", loaded != nil, err)
+		}
+
+		mustLeaveUnchanged(t, filepath.Dir(dir), func() {
+			if key, why := ReadDeviceStaticPrivateKey(context.Background(), dir, RuntimeSupervisionNative); why != "" || !bytes.Equal(key, privateKey) {
+				t.Errorf("the read next to the open store returned a key of %d bytes and %q, want the stored key", len(key), why)
+			}
+		})
+		if err := sdkStore.SaveAgentState(context.Background(), loaded); err != nil {
+			t.Fatalf("the save after the read failed: %v", err)
+		}
+		if key, why := ReadDeviceStaticPrivateKey(context.Background(), dir, RuntimeSupervisionNative); why != "" || !bytes.Equal(key, privateKey) {
+			t.Errorf("the read after the save returned a key of %d bytes and %q, want the stored key", len(key), why)
+		}
+		if err := store.Close(); err != nil {
+			t.Errorf("close the state store: %v", err)
+		}
+	})
+
+	// Reads and saves with no order between them. Some goroutines read the
+	// key again and again. This one opens the store, loads, saves and closes,
+	// several times. Every save replaces the state file under the reads.
+	t.Run("reads and saves at the same time", func(t *testing.T) {
+		clearStateEnv(t)
+		dir := secureStateTestDir(t)
+		state, privateKey := registeredDeviceState(t)
+		saveStateThroughTheStore(t, dir, state)
+
+		const readers, saves = 4, 20
+		var keys, unreadable atomic.Int64
+		var mu sync.Mutex
+		var other []string
+		stop := make(chan struct{})
+		var reading sync.WaitGroup
+		for range readers {
+			reading.Go(func() {
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					key, why := ReadDeviceStaticPrivateKey(context.Background(), dir, RuntimeSupervisionNative)
+					switch {
+					case why == "" && bytes.Equal(key, privateKey):
+						keys.Add(1)
+					case key == nil && why == NoDeviceKeyUnreadable:
+						unreadable.Add(1)
+					default:
+						mu.Lock()
+						other = append(other, fmt.Sprintf("a key of %d bytes and %q", len(key), why))
+						mu.Unlock()
+					}
+				}
+			})
+		}
+		var storeErr error
+		for range saves {
+			if storeErr = openLoadSaveClose(dir); storeErr != nil {
+				break
+			}
+		}
+		close(stop)
+		reading.Wait()
+
+		if storeErr != nil {
+			t.Errorf("the store failed next to the reads: %v", storeErr)
+		}
+		if len(other) != 0 {
+			t.Errorf("%d read(s) gave something else than the key or \"unreadable\", the first: %s", len(other), other[0])
+		}
+		if keys.Load() == 0 {
+			t.Error("no read gave the key, so this run shows nothing about a read next to a save")
+		}
+		t.Logf("%d reads gave the key and %d met a save, next to %d saves", keys.Load(), unreadable.Load(), saves)
+
+		// The state is whole after all of it.
+		if key, why := ReadDeviceStaticPrivateKey(context.Background(), dir, RuntimeSupervisionNative); why != "" || !bytes.Equal(key, privateKey) {
+			t.Errorf("the read after the last save returned a key of %d bytes and %q, want the stored key", len(key), why)
 		}
 	})
 }

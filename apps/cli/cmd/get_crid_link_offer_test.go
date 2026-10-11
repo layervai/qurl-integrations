@@ -14,10 +14,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	"github.com/layervai/qurl-go/qurl"
 	"github.com/layervai/qurl-go/qurl/qurltest"
@@ -923,6 +925,166 @@ func TestGetDoesNotWaitForTheKeyWhenTheShortLimitRunsOut(t *testing.T) {
 				t.Error("the read of the device key got a context with a time limit, want the context of the command, which has none here")
 			}
 		})
+	}
+}
+
+// TestGetOpensTheDeviceStateWhileTheKeyIsStillRead runs the two things that
+// can run at the same time after the short time limit ran out during the read
+// of the device key: the read, which goes on, and the share request, which
+// opens the same device state.
+//
+// The read is the production one, over the state of this device. The test
+// holds it back until the short limit has run out and the share request has
+// the state open. Then the read runs, next to the open store. The store is
+// the one the device runtime opens (qurl-connector's NewSDKStore). After the
+// read it saves the state, which replaces the state file, and closes.
+//
+// Each side must do what it does alone. The store opens, loads, saves and
+// closes without an error. The read gives the key of the state: it got the
+// context of the command, so the end of the short limit did not end it. The
+// command gives the share link. Nothing is sent under the device key,
+// because the SDK had stopped waiting for it.
+func TestGetOpensTheDeviceStateWhileTheKeyIsStillRead(t *testing.T) {
+	if !deviceKeyReadable {
+		t.Skip("the production read opens no device state on this platform, so nothing can run next to the share request")
+	}
+	state := bootstrapRegisteredState(t)
+	devicePublicKey, err := base64.StdEncoding.DecodeString(state.PublicKeyB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := getFileMode(t)
+	// As in TestGetDoesNotWaitForTheKeyWhenTheShortLimitRunsOut: the first
+	// request is answered at once, and the run waits for the rest of the
+	// limit.
+	const shortLimit = time.Second
+
+	path := newSDKLinkPath(t, nil)
+	path.server.PrivateFor(devicePublicKey)
+	srv := serverForCRID(t, path.server.CRID())
+
+	// The read waits until the share request lets it go. finished is closed
+	// when the read has returned, and readKey and readWhy then hold what it
+	// returned. A second read would be a fault, and gives no key.
+	started, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	letTheReadGo := func() { releaseOnce.Do(func() { close(release) }) }
+	var reads atomic.Int32
+	var stateDir string
+	var readKey []byte
+	var readWhy connectorstate.NoDeviceKey
+	read := func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey) {
+		if reads.Add(1) != 1 {
+			return nil, connectorstate.NoDeviceKeyUnreadable
+		}
+		defer close(finished)
+		close(started)
+		<-release
+		key, why := connectorstate.ReadDeviceStaticPrivateKey(ctx, stateDir, connectorstate.RuntimeSupervisionNative)
+		// The SDK wipes the slice it is given, so the test keeps a copy.
+		readKey, readWhy = bytes.Clone(key), why
+		return key, why
+	}
+	// A command that waits for the read must fail here, and not hang.
+	giveUp := time.AfterFunc(time.Minute, letTheReadGo)
+	t.Cleanup(func() {
+		giveUp.Stop()
+		letTheReadGo()
+	})
+
+	storeOpens := 0
+	var verified, granted []string
+	configure := func(args []string) *runOpts {
+		opts := withDeviceKey(path.wire(t, srv, enrolledDevice(t, state), &verified, &granted), read)(args)
+		opts.linkTimeoutBeforeShare = shortLimit
+		stateDir = opts.shareStateDir
+		opts.openNativeRuntime = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+			storeOpens++
+			select {
+			case <-started:
+			case <-time.After(30 * time.Second):
+				t.Error("the device key was not asked for before the share request: the short limit ran out before the first answer, and this run shows nothing")
+				return nil, errors.New("the device key was not asked for")
+			}
+			select {
+			case <-finished:
+				t.Error("the read of the device key had returned before the share request opened the device state, so the two did not run together")
+			default:
+			}
+
+			// The store refuses a path with a symbolic link in it, and the
+			// temporary directory of a test has one on macOS. So the store
+			// gets the same directory by its real path.
+			storeDir, err := filepath.EvalSymlinks(cfg.StateDir)
+			if err != nil {
+				t.Errorf("resolve the device state directory: %v", err)
+				return nil, err
+			}
+			store, err := connectoragentstate.NewSDKStore(storeDir, cfg.AgentID)
+			if err != nil {
+				t.Errorf("open the device state next to the read: %v", err)
+				return nil, err
+			}
+			defer func() {
+				if err := store.Close(); err != nil {
+					t.Errorf("close the device state store: %v", err)
+				}
+			}()
+			sdkStore, err := store.Handoff()
+			if err != nil {
+				t.Errorf("hand off the device state store: %v", err)
+				return nil, err
+			}
+			loaded, err := sdkStore.LoadAgentState(ctx)
+			if err != nil || loaded == nil {
+				t.Errorf("load the device state next to the read: state present %t, error %v", loaded != nil, err)
+				return nil, errors.New("the device state did not load")
+			}
+
+			// Now the read runs, with this store open beside it.
+			letTheReadGo()
+			select {
+			case <-finished:
+			case <-time.After(30 * time.Second):
+				t.Error("the read of the device key did not return while the share request had the device state open")
+				return nil, errors.New("the read of the device key did not return")
+			}
+			if err := sdkStore.SaveAgentState(ctx, loaded); err != nil {
+				t.Errorf("save the device state after the read: %v", err)
+				return nil, err
+			}
+			return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}, nil
+		}
+		return opts
+	}
+
+	run := runShareMode(t, srv, srv.URL, mode, configure)
+	// The share link of the mock API.
+	run.mustHaveDelivered(t, mode)
+	if storeOpens != 1 {
+		t.Fatalf("the share request opened the device state %d times, want once", storeOpens)
+	}
+	select {
+	case <-finished:
+	default:
+		t.Fatal("the read of the device key has not returned")
+	}
+	if want := deviceKeyOf(t, state).key; readWhy != "" || !bytes.Equal(readKey, want) {
+		t.Errorf("the read next to the open store gave %d bytes and %q, want the %d bytes of the key in the device state", len(readKey), readWhy, len(want))
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("the device key was read %d times, want once", got)
+	}
+	requests := path.server.Requests()
+	if len(requests) != 1 || requests[0].AsDevice {
+		t.Errorf("the service answered %+v, want one link request, not under the device key: the key arrived after the short limit", requests)
+	}
+	if got, want := apiRequests(srv), []string{"GET /v1/me", "POST " + shareRoute(srv)}; strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("qURL API requests = %q, want %q: the share request after the short limit ran out", got, want)
+	}
+	// The state is whole after the read and the save.
+	if key, why := connectorstate.ReadDeviceStaticPrivateKey(t.Context(), stateDir, connectorstate.RuntimeSupervisionNative); why != "" || !bytes.Equal(key, deviceKeyOf(t, state).key) {
+		t.Errorf("a read after the command gave %d bytes and %q, want the key in the device state", len(key), why)
 	}
 }
 
