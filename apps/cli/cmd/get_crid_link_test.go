@@ -2888,3 +2888,20 @@ func TestDeviceKeyOnDemandWipesAKeyThatComesAfterTheRequestEnded(t *testing.T) {
 		})
 	}
 }
+
+// A read that gives a reason gives no key. If a read ever gives bytes with
+// its reason, those bytes do not leave deviceKeyOnDemand and are wiped there.
+func TestDeviceKeyOnDemandWipesBytesThatComeWithAReason(t *testing.T) {
+	read := bytes.Repeat([]byte{0x5a}, 32)
+	opts := &globalOpts{readDeviceKey: func(context.Context) ([]byte, connectorstate.NoDeviceKey) {
+		return read, connectorstate.NoDeviceKeyUnreadable
+	}}
+	key, err := opts.deviceKeyOnDemand(context.Background())(context.Background())
+	var none errNoDeviceKey
+	if key != nil || !errors.As(err, &none) || none.why != connectorstate.NoDeviceKeyUnreadable {
+		t.Fatalf("key = %d bytes, error = %v, want no key and the reason of the read", len(key), err)
+	}
+	if !bytes.Equal(read, make([]byte, len(read))) {
+		t.Error("the bytes that came with a reason are not wiped")
+	}
+}

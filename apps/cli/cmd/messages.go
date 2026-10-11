@@ -99,7 +99,11 @@ const (
 	// key. The line does not say "as this device": nothing was read, so it is
 	// not known whether this machine has a device key. A machine with only an
 	// account key has none.
-	msgCRIDLinkKeyNotNeeded = "> CRID link request under a random key, no device key was read: one is read only after \"not found\""
+	//
+	// It says "not asked for", and not "not read": when the request ends at
+	// the moment of a "not found", the SDK can start the read after it has
+	// already returned, and this line is written before that.
+	msgCRIDLinkKeyNotNeeded = "> CRID link request under a random key, the device key was not asked for: it is asked for only after \"not found\""
 
 	// msgCRIDLinkNoUsableDeviceKey is the --verbose diagnostic for a request
 	// that was answered "not found" under a random key and could not be made

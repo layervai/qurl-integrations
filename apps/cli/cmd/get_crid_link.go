@@ -627,6 +627,9 @@ func (opts *globalOpts) deviceKeyOnDemand(ctx context.Context) qurl.DeviceKeySou
 	return func(requestCtx context.Context) ([]byte, error) {
 		key, why := opts.readDeviceKey(ctx)
 		if why != "" {
+			// A read that gives a reason gives no key. If one ever gives
+			// bytes too, they do not leave this function either.
+			clear(key)
 			return nil, errNoDeviceKey{why: why}
 		}
 		if err := requestCtx.Err(); err != nil {
@@ -802,6 +805,17 @@ func (opts *globalOpts) linkAsDevice(ctx context.Context, deviceKey qurl.DeviceK
 		}
 	}
 	issued, err := opts.requestCRIDLinkAsDevice(ctx, source, resourceCRID)
+	if ended := ctx.Err(); ended != nil && consume.DeviceKeyNotGiven(err) {
+		// The request ended while the key was read. The SDK looks at the
+		// context first and reports the end of the request itself then. If
+		// it ever hands back what the function that reads the key returned
+		// in its place (deviceKeyOnDemand returns the end of the request
+		// for a key that came too late), this is still the end of the
+		// request and not a device with no usable key. So the result is "no
+		// answer", as the SDK says it, whatever the function returned, and
+		// the caller can tell that the short limit ran out.
+		err = ended
+	}
 	if consume.DeviceKeyNotGiven(err) {
 		if logf := opts.verboseLogger(); logf != nil {
 			logf(msgCRIDLinkNoUsableDeviceKey, string(whyNoDeviceKey(err)))

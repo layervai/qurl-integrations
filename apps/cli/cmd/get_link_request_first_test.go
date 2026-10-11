@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -627,6 +628,58 @@ func (r *slowRelay) mustHaveAsked(onceMore bool) {
 	if asDevice[1] || contexts.bounded[1] || strings.Join(r.apiSeen[1], "\n") != strings.Join(wantSeen, "\n") {
 		r.t.Errorf("the link request made once more: as this device = %t, time limit from the command = %t, made after %q; want the CRID alone, no limit from the command, and after the share request: %q",
 			asDevice[1], contexts.bounded[1], r.apiSeen[1], wantSeen)
+	}
+}
+
+// The request ends while the key is read, and the SDK hands back the error of
+// the function that reads the key in place of the end of the request. qurl-go
+// does not do that today: it looks at the context first. If it ever does, get
+// must still read it as "the service did not answer in the short limit" and
+// not as "this device has no usable key": after a share request that says
+// "not found", the link request is then made once more, with the CRID alone.
+//
+// The fake SDK here calls the function and wraps its error, as
+// asDeviceAfterNotFound does for every read that gives no key. The read
+// returns only when the request has ended, so nothing here waits and hopes.
+func TestGetReadsARequestThatEndedDuringTheKeyReadAsNoAnswer(t *testing.T) {
+	state := bootstrapRegisteredState(t)
+	mode := getFileMode(t)
+	srv := downloadServer(t)
+	shareNotFoundTwice(t, srv)
+	notFound := sdkRefusal(qurl.ErrCRIDLinkNotFound, "52602")
+	key := deviceKeyOf(t, state).key
+
+	requestOfTheDevice := make(chan context.Context, 1)
+	read := func(context.Context) ([]byte, connectorstate.NoDeviceKey) {
+		request := <-requestOfTheDevice
+		<-request.Done()
+		return bytes.Clone(key), ""
+	}
+	var asDevice, alone atomic.Int32
+	configure := func(args []string) *runOpts {
+		opts := withDeviceKey(enrolledDevice(t, state), read)(args)
+		opts.linkTimeoutBeforeShare = 50 * time.Millisecond
+		opts.requestCRIDLink = func(context.Context, string) (*qurl.CRIDLink, error) {
+			alone.Add(1)
+			return nil, notFound
+		}
+		opts.requestCRIDLinkAsDevice = func(ctx context.Context, deviceKey qurl.DeviceKeySource, _ string) (*qurl.CRIDLink, error) {
+			asDevice.Add(1)
+			requestOfTheDevice <- ctx
+			return asDeviceAfterNotFound(ctx, deviceKey, notFound, func([]byte) (*qurl.CRIDLink, error) {
+				t.Error("the key reached the request although the request had ended")
+				return nil, notFound
+			})
+		}
+		return opts
+	}
+	run := runShareMode(t, srv, srv.URL, mode, configure)
+	if run.result.code != exitcode.NotFound {
+		t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.NotFound, run.result.stderr.String())
+	}
+	if asDevice.Load() != 1 || alone.Load() != 1 {
+		t.Fatalf("link requests: %d as this device and %d with the CRID alone, want 1 and 1: the short limit ran out during the read, so after the share request said \"not found\" the link request is made once more",
+			asDevice.Load(), alone.Load())
 	}
 }
 
