@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-notification-payload test-validated-base check-cli check-discord test-discord check-chrome-extension check-edge-extension check-teams check-teams-docker check-e2e check-node pre-commit-install pre-commit-run clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier test-cli-draft-pruner check-notification-payload test-validated-base check-cli check-discord test-discord check-chrome-extension check-edge-extension check-teams check-teams-docker check-e2e check-node pre-commit-install pre-commit-run clean
 
 VERSION ?= dev
 
@@ -100,6 +100,9 @@ test-validated-base:
 
 test-cli-release-verifier:
 	scripts/test-verify-cli-release.sh
+
+test-cli-draft-pruner:
+	scripts/test-prune-superseded-cli-drafts.sh
 
 test-release-please-sync:
 	scripts/test-check-release-please-sync.sh
@@ -254,7 +257,7 @@ check-node: check-chrome-extension check-edge-extension check-discord check-team
 ## Full check (Go + repo-wide checks, matching the Go CI path; the Node.js
 ## suites are opt-in above — `make check-node` or a single `check-<app>`)
 
-check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-notification-payload test-validated-base lint test-race
+check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier test-cli-draft-pruner check-notification-payload test-validated-base lint test-race
 
 ## Cleanup
 
