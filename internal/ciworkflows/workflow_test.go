@@ -2189,10 +2189,12 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	if _, ok := releaseCLI.Env["CLI_TAG"]; !ok {
 		t.Error("release-cli does not set CLI_TAG for the served-skill check, which reads it under `set -u`")
 	}
-	toolchain, check, build := -1, -1, -1
+	source, toolchain, check, build := -1, -1, -1, -1
 	for index := range releaseCLI.Steps {
 		current := &releaseCLI.Steps[index]
 		switch {
+		case strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			source = index
 		case strings.HasPrefix(current.Uses, "actions/setup-go@"):
 			toolchain = index
 		case current.Name == stepName:
@@ -2203,6 +2205,11 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	}
 	if check < 0 || build < 0 {
 		t.Fatalf("release-cli steps: served-skill check at %d, GoReleaser at %d; want both", check, build)
+	}
+	// Before the checkout no checker is on disk, and the step would take
+	// its skip on every release.
+	if source < 0 || source > check {
+		t.Errorf("the checkout at step %d does not come before the served-skill check at step %d", source, check)
 	}
 	// Without the repository's Go the check would fail for a reason that
 	// has nothing to do with the skill, under an error that names the skill.

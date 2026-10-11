@@ -82,7 +82,7 @@ func TestCheck(t *testing.T) {
 			"in 3 attempts: the server answered 502", 3,
 		},
 		{
-			"an answer that is cut off is tried again, and is not a skill with no version",
+			"an answer cut off inside what is read is tried again, and is not a skill with no version",
 			[]func(http.ResponseWriter){cutOff(skill("")), body(versioned(minimum))},
 			"", 2,
 		},
