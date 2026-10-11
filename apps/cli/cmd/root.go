@@ -23,6 +23,7 @@ import (
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/agentskill"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
@@ -64,8 +65,13 @@ type globalOpts struct {
 	version string
 
 	// Injected process context; tests override via root options.
-	streams      *output.Streams
-	lookupEnv    func(string) (string, bool)
+	streams   *output.Streams
+	lookupEnv func(string) (string, bool)
+	// userHomeDir is the home directory where noteOutdatedSkill looks for a
+	// saved copy of the qURL agent skill. Nil means the CLI does not look,
+	// and newRoot leaves it nil: only Main sets it, so no test reads the
+	// home directory of the person who runs the suite.
+	userHomeDir  func() (string, error)
 	configDir    string
 	now          func() time.Time
 	sleep        func(time.Duration)
@@ -207,7 +213,7 @@ type registeredNativeRuntime interface {
 func Main(version string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	root, opts := newRoot(version, output.Detect())
+	root, opts := newRoot(version, output.Detect(), lookForSavedSkill)
 	return run(ctx, root, opts)
 }
 
@@ -223,6 +229,10 @@ func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 	// example a failed compensation after the job install) is not a reason to
 	// hide the local remedy.
 	err := root.ExecuteContext(ctx)
+	if err == nil && versionFlagGiven(root) {
+		// cobra answers --version itself, before any command runs.
+		opts.noteOutdatedSkill()
+	}
 	if apiErr := (*qurlapi.Error)(nil); !errors.As(err, &apiErr) || !connectorstate.MentionsUnsafeDirectory(apiErr.Error()) {
 		err = connectorstate.ExplainUnsafeDirectory(err)
 	}
@@ -347,7 +357,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		whoamiCmd(opts),
 		publisherCmd(opts),
 		requestCmd(opts),
-		versionCmd(version),
+		versionCmd(opts),
 		completionCmd(),
 		docsCmd(),
 	)
@@ -730,6 +740,38 @@ func bindRegisteredDeviceOwner(
 		}
 	}
 	return nil
+}
+
+// lookForSavedSkill is the root option of the real process: it lets
+// noteOutdatedSkill look under the user's home directory.
+func lookForSavedSkill(o *globalOpts) { o.userHomeDir = os.UserHomeDir }
+
+// versionFlagGiven reports whether the invocation was `qurl --version`. The
+// value is compared too, so `--version=false` is not taken for it.
+func versionFlagGiven(root *cobra.Command) bool {
+	flag := root.Flags().Lookup("version")
+	return flag != nil && flag.Changed && flag.Value.String() == "true"
+}
+
+// noteOutdatedSkill says, in one note on stderr, that a copy of the qURL
+// agent skill saved on this machine is older than this release works with,
+// and gives the command that replaces it. A coding agent reads its saved
+// copy in every session and nothing else tells it the copy is old. The
+// commands that say it are the ones the skill has an agent run: `qurl
+// --version`, `qurl version` and `qurl publish`. It only reads files: it
+// sends nothing, never fails a command, and says nothing when no copy is
+// saved or under --quiet. Stdout is never written.
+func (o *globalOpts) noteOutdatedSkill() {
+	if o.quiet || o.userHomeDir == nil || o.streams == nil || o.streams.Err == nil {
+		return
+	}
+	home, err := o.userHomeDir()
+	if err != nil {
+		return
+	}
+	if saved, found := agentskill.FindOutdated(home, runtime.GOOS); found {
+		o.printer().Notef(msgSavedSkillOutdated, saved.Path, saved.ReplaceCommand)
+	}
 }
 
 // noteTPMSealing tells the user, before any state is written, that a new
