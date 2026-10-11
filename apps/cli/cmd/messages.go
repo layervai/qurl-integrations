@@ -94,12 +94,17 @@ const (
 	// account key has none.
 	msgCRIDLinkKeyNotNeeded = "> CRID link request under a random key, no device key was read: one is read only after \"not found\""
 
-	// msgCRIDLinkDeviceKeyNotRead is the --verbose diagnostic for a device
-	// with an identity that asked for a link with only the CRID, because it
-	// had no device key to ask with. %s is one fixed word for the reason,
-	// from connectorstate.NoDeviceKey. The line never carries a path, an
-	// error text or any part of a key.
-	msgCRIDLinkDeviceKeyNotRead = "> CRID link request with the CRID alone, the device key was not read: %s"
+	// msgCRIDLinkNoUsableDeviceKey is the --verbose diagnostic for a request
+	// that was answered "not found" under a random key and could not be made
+	// again as this device, because there was no device key to make it with.
+	// %s is one fixed word for the reason, from connectorstate.NoDeviceKey:
+	// the key could not be read, or it was read and is not a key
+	// ("invalid_key"). So the line does not say that nothing was read. It
+	// never carries a path, an error text or any part of a key.
+	//
+	// No two of these lines start the same way: a test finds each line by
+	// its start (TestGetSaysHowItAskedForALinkOnlyWithVerbose).
+	msgCRIDLinkNoUsableDeviceKey = "> CRID link request not made as this device, no usable device key: %s"
 
 	// msgCRIDLinkAsDeviceRefused is the --verbose diagnostic for a request as
 	// this device that the SDK refused before it sent anything, because it

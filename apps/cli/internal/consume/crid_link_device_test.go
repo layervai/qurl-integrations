@@ -71,6 +71,18 @@ func (r *deviceKeyReads) read(ctx context.Context) ([]byte, error) {
 	return key, nil
 }
 
+// firstReadWasBounded says whether the context of the first read had a time
+// limit. It fails the test when nothing was read.
+func (r *deviceKeyReads) firstReadWasBounded(t *testing.T) bool {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.bounded) == 0 {
+		t.Fatal("the device key was not read")
+	}
+	return r.bounded[0]
+}
+
 // count returns how often the key was read.
 func (r *deviceKeyReads) count() int {
 	r.mu.Lock()
@@ -160,7 +172,7 @@ func TestRequestCRIDLinkAsDeviceFollowsTheRuleOfTheSDK(t *testing.T) {
 			t.Errorf("the device key was read %d times, want once", got)
 		}
 		// The read is inside the time limit of the request.
-		if !reads.bounded[0] {
+		if !reads.firstReadWasBounded(t) {
 			t.Error("the read of the device key got a context with no time limit, want the context of the request")
 		}
 		// The SDK wiped the key the read gave it. The caller's own copy is

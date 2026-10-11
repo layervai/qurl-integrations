@@ -2231,7 +2231,7 @@ func TestGetWithAnAccountKeyAsksWithTheCRIDAloneFirst(t *testing.T) {
 				t.Errorf("the link request: time limit set = %t (%s), want a limit of at most %s", contexts.bounded[0], contexts.limits[0], cridLinkTimeoutBeforeShare)
 			}
 			stderr := run.result.stderr.String()
-			if want := "[debug] " + fmt.Sprintf(msgCRIDLinkDeviceKeyNotRead, connectorstate.NoDeviceKeyNoState) + "\n"; strings.Count(stderr, want) != 1 {
+			if want := "[debug] " + fmt.Sprintf(msgCRIDLinkNoUsableDeviceKey, connectorstate.NoDeviceKeyNoState) + "\n"; strings.Count(stderr, want) != 1 {
 				t.Errorf("stderr = %q, want the line %q once: the read of the device key found no device state", stderr, want)
 			}
 			if strings.Contains(stderr, msgCRIDLinkAsDevice) {
@@ -2833,5 +2833,58 @@ func TestShareLinkFromCRIDLink(t *testing.T) {
 		if got := shareLinkFromCRIDLink(exampleCRID, issued); got.ResourceCreatedAt != nil {
 			t.Errorf("%s creation date became %v, want absent", name, got.ResourceCreatedAt)
 		}
+	}
+}
+
+// A key that the read returns after the request has ended does not leave
+// deviceKeyOnDemand. It is wiped there, and the function reports the end of
+// the request. The SDK wipes a late key too; this test does not rest on that.
+//
+// The control is a request that has not ended: it gets the key as it was
+// read. So the wipe is not the wipe of a function that never returns a key.
+func TestDeviceKeyOnDemandWipesAKeyThatComesAfterTheRequestEnded(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		requestEnds   bool
+		wantKey       bool
+		wantErrIsDone bool
+	}{
+		{"the request ended while the key was read", true, false, true},
+		{"the request still waits for the key", false, true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			read := bytes.Repeat([]byte{0x5a}, 32)
+			requestCtx, endRequest := context.WithCancel(context.Background())
+			defer endRequest()
+			var readCtx context.Context
+			opts := &globalOpts{readDeviceKey: func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey) {
+				readCtx = ctx
+				if test.requestEnds {
+					endRequest()
+				}
+				return read, ""
+			}}
+			commandCtx := context.WithValue(context.Background(), struct{ name string }{"command"}, true)
+			key, err := opts.deviceKeyOnDemand(commandCtx)(requestCtx)
+			// The read gets the command's context, never the request's.
+			if readCtx != commandCtx {
+				t.Error("the read of the device key got another context than the command's own")
+			}
+			if test.wantErrIsDone != errors.Is(err, context.Canceled) {
+				t.Errorf("error = %v, want the end of the request: %t", err, test.wantErrIsDone)
+			}
+			if test.wantKey {
+				if err != nil || !bytes.Equal(key, bytes.Repeat([]byte{0x5a}, 32)) {
+					t.Fatalf("key = %x, error = %v, want the key as it was read and no error", key, err)
+				}
+				return
+			}
+			if key != nil {
+				t.Errorf("the function returned %d bytes of a key after the request ended, want none", len(key))
+			}
+			if !bytes.Equal(read, make([]byte, len(read))) {
+				t.Error("the key that was read after the request ended is not wiped")
+			}
+		})
 	}
 }

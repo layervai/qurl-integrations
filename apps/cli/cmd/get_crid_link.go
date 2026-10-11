@@ -515,6 +515,16 @@ func (opts *globalOpts) linkRequestFirst(ctx context.Context, assessment *cridux
 // the limit ran out while the key was read: the SDK then reports a request
 // that was not sent because its time was over.
 //
+// TODO(upstream-contract): that last sentence is qurl-go's behavior. When
+// the context of the request ends while the key is read, qurl-go reports the
+// end of the context, which consume.ClassifyCRIDLinkError reads as "no
+// answer". If qurl-go ever reported that case as a *qurl.DeviceKeySourceError
+// instead, linkAsDevice would take the first answer, "not found", as the
+// result, limitRanOut would be false, and after a share request that also
+// says "not found" the link request would not be made again.
+// TestGetDoesNotWaitForTheKeyWhenTheShortLimitRunsOut holds today's behavior
+// through the SDK.
+//
 // TODO(upstream-contract): the first condition rests on the order of the
 // cases in consume.ClassifyCRIDLinkError. It tests qurl-go's
 // ErrServerOverloaded and *ServerDenyError before the deadline of the
@@ -603,11 +613,27 @@ func (opts *globalOpts) linkByRequestBeforeShare(ctx context.Context, resourceCR
 // A key the read returns goes to the SDK, which wipes it when the request
 // has been answered. A read that gives no key is reported to the SDK as
 // errNoDeviceKey, with the one fixed word for the reason.
+//
+// TODO(upstream-contract): three things here rest on what qurl-go documents
+// for a DeviceKeySource, and nothing in this repository can hold them: the
+// SDK calls the function at most once in a request; it calls it on a
+// goroutine of its own, so a slow read does not hold the request; and it
+// wipes a key that the function returns after the request has ended. The
+// wipe below does not rest on the third one for the usual case: when the
+// request has ended by the time the read returns, the key is wiped here and
+// is not given to the SDK. A request that ends in the instant after that
+// check still leaves the wipe to the SDK.
 func (opts *globalOpts) deviceKeyOnDemand(ctx context.Context) qurl.DeviceKeySource {
-	return func(context.Context) ([]byte, error) {
+	return func(requestCtx context.Context) ([]byte, error) {
 		key, why := opts.readDeviceKey(ctx)
 		if why != "" {
 			return nil, errNoDeviceKey{why: why}
+		}
+		if err := requestCtx.Err(); err != nil {
+			// The request ended while the key was read. Nothing uses the
+			// key now, so it does not leave this function.
+			clear(key)
+			return nil, err
 		}
 		return key, nil
 	}
@@ -758,7 +784,7 @@ func (opts *globalOpts) linkByCRIDAlone(ctx context.Context, resourceCRID string
 //     link request (msgCRIDLinkKeyNotNeeded). The line does not say "as this
 //     device". Nothing was read, so it is not known whether this machine has
 //     a device key. A machine with only an account key has none.
-//   - The SDK asked for the key and got none (msgCRIDLinkDeviceKeyNotRead,
+//   - The SDK asked for the key and got none (msgCRIDLinkNoUsableDeviceKey,
 //     with the word for the reason).
 //   - The SDK asked for the key, and the read did not say that there is none
 //     (msgCRIDLinkAsDevice).
@@ -778,7 +804,7 @@ func (opts *globalOpts) linkAsDevice(ctx context.Context, deviceKey qurl.DeviceK
 	issued, err := opts.requestCRIDLinkAsDevice(ctx, source, resourceCRID)
 	if consume.DeviceKeyNotGiven(err) {
 		if logf := opts.verboseLogger(); logf != nil {
-			logf(msgCRIDLinkDeviceKeyNotRead, string(whyNoDeviceKey(err)))
+			logf(msgCRIDLinkNoUsableDeviceKey, string(whyNoDeviceKey(err)))
 		}
 		// No link came with this answer, whatever the SDK returned beside it.
 		// An answer that is missing is refused there: no error and no link is

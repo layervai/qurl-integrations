@@ -740,6 +740,9 @@ func TestGetMakesTheLinkRequestOnceMoreThroughTheSDK(t *testing.T) {
 // answer is "not found", the state is opened once, and the link comes from
 // the request under the key in that state. So the zero for a public resource
 // is not the zero of a read that never opens anything.
+//
+// This test and its subtests must not run in parallel: each subtest replaces
+// connectorstate.ResolveKeyProvider, a variable of the package, for its run.
 func TestGetOfAPublicResourceDoesNotOpenTheDeviceState(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	devicePublicKey, err := base64.StdEncoding.DecodeString(state.PublicKeyB64)
