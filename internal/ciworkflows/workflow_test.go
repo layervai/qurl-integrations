@@ -1861,6 +1861,98 @@ func TestReleasePleaseVerifiesTheCLIReleaseWasCreated(t *testing.T) {
 	})
 }
 
+// TestCLIReleasePrunesSupersededDraftsOnlyAfterPublication pins the job that
+// deletes the empty draft releases a published CLI release has superseded.
+// Deleting a release cannot be undone, so the job may start only after
+// publication succeeded, must run the reviewed script from the workflow's own
+// commit and not the copy in the tag being published, and must hold nothing
+// beyond the one permission that deleting a release needs. Nothing may need
+// it: a failed cleanup must not hold back the Homebrew tap.
+func TestCLIReleasePrunesSupersededDraftsOnlyAfterPublication(t *testing.T) {
+	t.Parallel()
+
+	const (
+		jobID  = "prune-superseded-cli-drafts"
+		script = "scripts/prune-superseded-cli-drafts.sh"
+	)
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	job := workflow.Jobs[jobID]
+	if job == nil {
+		t.Fatalf("%s is missing the %s job", releasePleaseWorkflow, jobID)
+	}
+	if needs := parseWorkflowNeeds(t, jobID, job.Needs); !slices.Equal(needs, []string{"publish-cli-release", "cli-release-gate"}) {
+		t.Errorf("%s needs = %v, want publish-cli-release and cli-release-gate", jobID, needs)
+	}
+	// Compared whole, not by fragment: an added `|| always()` would keep every
+	// fragment and still let the job delete releases after a failed publication.
+	const wantIf = "!cancelled() && needs.publish-cli-release.result == 'success' && needs.cli-release-gate.outputs.required == 'true'" //nolint:misspell // GitHub expression function spelling.
+	if got := strings.Join(strings.Fields(job.If), " "); got != wantIf {
+		t.Errorf("%s if = %q, want exactly %q", jobID, got, wantIf)
+	}
+	assertJobPermissions(t, jobID, job.Permissions, map[string]string{"contents": "write"})
+	assertExecutableRepoScript(t, script)
+
+	// The branch guard is the only protection if the workflow is dispatched
+	// from another ref, so it must be the first step, ahead of the checkout.
+	const branchGuard = `[ "$GITHUB_REF" = refs/heads/main ] || {`
+	if len(job.Steps) == 0 || !strings.Contains(job.Steps[0].Run, branchGuard) || !strings.Contains(job.Steps[0].Run, "exit 1") {
+		t.Errorf("%s does not start by refusing every ref but refs/heads/main", jobID)
+	}
+
+	checkouts, prunes := 0, 0
+	for index := range job.Steps {
+		current := &job.Steps[index]
+		switch {
+		case strings.HasPrefix(current.Uses, "actions/checkout@"):
+			checkouts++
+			if ref, pinned := current.With["ref"]; pinned {
+				t.Errorf("%s checks out ref %v; it must run the script from the workflow's own commit", jobID, ref)
+			}
+			if prunes != 0 {
+				t.Errorf("%s checks out after it prunes", jobID)
+			}
+		case strings.Contains(current.Run, script):
+			prunes++
+			if strings.TrimSpace(current.Run) != script {
+				t.Errorf("%s runs %q, want exactly %s", jobID, strings.TrimSpace(current.Run), script)
+			}
+			if got, want := current.Env["CLI_TAG"], "${{ needs.cli-release-gate.outputs.cli_tag }}"; got != want {
+				t.Errorf("%s prunes below CLI_TAG %q, want the gated tag %q", jobID, got, want)
+			}
+			// The job's own token is bounded by the permissions above. Any
+			// other credential here would delete with a reach they do not show.
+			if got, want := current.Env["GH_TOKEN"], "${{ github.token }}"; got != want {
+				t.Errorf("%s deletes with GH_TOKEN %q, want the job token %q", jobID, got, want)
+			}
+		}
+	}
+	if checkouts != 1 || prunes != 1 {
+		t.Errorf("%s has %d checkout and %d prune steps, want one of each", jobID, checkouts, prunes)
+	}
+
+	for otherID, other := range workflow.Jobs {
+		if slices.Contains(parseWorkflowNeeds(t, otherID, other.Needs), jobID) {
+			t.Errorf("%s needs %s; draft cleanup must not gate another job", otherID, jobID)
+		}
+	}
+
+	// Two prune jobs listing the same draft would have the second fail on a
+	// release that is already gone, so the job is serialized across runs.
+	// Read from the raw file: the job struct carries no concurrency field.
+	var raw struct {
+		Jobs map[string]struct {
+			Concurrency map[string]any `yaml:"concurrency"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(readWorkflowBytes(t, releasePleaseWorkflow), &raw); err != nil {
+		t.Fatal(err)
+	}
+	concurrency := raw.Jobs[jobID].Concurrency
+	if concurrency["group"] != jobID || concurrency["cancel-in-progress"] != false {
+		t.Errorf("%s concurrency = %v, want one constant group that never cancels a running prune", jobID, concurrency)
+	}
+}
+
 // TestCLIReleaseUsesAnExactEventDrivenGate keeps publication behind the exact
 // packaged journey without holding a polling runner. The release creator
 // starts the exact main CLI workflow, which signals the SHA-bound continuation
