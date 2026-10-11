@@ -2197,6 +2197,11 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 		// toolchain, for another purpose, says nothing about this step.
 		case check < 0 && strings.HasPrefix(current.Uses, checkoutActionPrefix):
 			source = index
+			// The check must read the minimum of the release being built,
+			// not that of whatever branch a checkout defaults to.
+			if ref := current.With["ref"]; ref != "${{ env.CLI_TAG }}" {
+				t.Errorf("the checkout before the served-skill check has ref %v, want the release tag", ref)
+			}
 		case check < 0 && strings.HasPrefix(current.Uses, "actions/setup-go@"):
 			toolchain = index
 		case current.Name == stepName:
