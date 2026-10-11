@@ -26,9 +26,16 @@ import (
 // that skill is the one served at SourceURL: the note's command downloads
 // from there, and a download that is still too old would leave the note in
 // place for good.
+//
+// TODO(upstream-contract): the skill served at SourceURL must carry
+// `metadata.version` of at least this value, in the form Version reads.
+// Nothing in this repository fails when it does not.
 const MinVersion = 1
 
 // SourceURL is where the current skill is served.
+//
+// TODO(upstream-contract): the address is the skill's own, and the skill
+// names it in the command it has an agent save.
 const SourceURL = "https://layerv.ai/skills/qurl/SKILL.md"
 
 // skillFile is the skill's place inside an agent's folder.
@@ -40,7 +47,12 @@ const skillFile = "skills/qurl/SKILL.md"
 // these are the folders a copy lands in: Claude Code's, the folder several
 // agents share, and those of the other agents that load skills from a
 // folder of their own. A project's folder is not here, because the skill
-// never has an agent save it there.
+// never has an agent save it there. The last one is where that agent looks
+// by default; a person who moved it with XDG_CONFIG_HOME gets no note,
+// which is the safe way to miss.
+//
+// TODO(upstream-contract): each folder is where another vendor's agent
+// keeps its skills, and the first is the one the skill's own command names.
 var agentFolders = []string{
 	".claude",
 	".agents",
@@ -91,6 +103,9 @@ func FindOutdated(home, goos string) (Copy, bool) {
 // For Claude Code's folder on a POSIX shell the command is, to the byte, the
 // one the skill has an agent keep in its saved note, so an agent can see
 // that it is the same command and not a new one.
+//
+// TODO(upstream-contract): the POSIX form mirrors the command in the skill's
+// rule 0 and in its saved note; when the skill changes it, change it here.
 func describe(home, location, goos string) Copy {
 	if goos == "windows" {
 		// curl.exe ships with Windows and runs the same from PowerShell and
@@ -107,7 +122,9 @@ func describe(home, location, goos string) Copy {
 
 // readHead returns the first headLimit bytes of a regular file. It asks what
 // the name is before it opens it: opening a named pipe would wait for a
-// writer, and a version check must never wait.
+// writer, and a version check must never wait. A file that is swapped for a
+// pipe between the two calls would still be opened; in a person's own home
+// directory that is left as it is.
 func readHead(name string) ([]byte, error) {
 	info, err := os.Stat(name)
 	if err != nil {
@@ -136,7 +153,14 @@ func readHead(name string) ([]byte, error) {
 //
 // The frontmatter is read line by line and not with a YAML parser: the only
 // thing wanted is this one line, and a strict parser refuses a description
-// that a skill loader accepts.
+// that a skill loader accepts. The form it reads is the block form above: a
+// `metadata:` line at the left margin, and `version:` as one of the lines
+// directly under it. A comment after either is passed over. The inline form
+// `metadata: { version: "1" }` is not read, and neither is a `version:` one
+// level further in, which belongs to another map.
+//
+// TODO(upstream-contract): the skill writes its version in this form, and a
+// test in the skill's repository holds it to it.
 func Version(head []byte) int {
 	text := strings.ReplaceAll(string(bytes.TrimPrefix(head, []byte("\xef\xbb\xbf"))), "\r\n", "\n")
 	lines := strings.Split(text, "\n")
@@ -144,6 +168,7 @@ func Version(head []byte) int {
 		return 0
 	}
 	inMetadata := false
+	childIndent := ""
 	for _, line := range lines[1:] {
 		if line == "---" {
 			break
@@ -152,19 +177,39 @@ func Version(head []byte) int {
 			continue
 		}
 		if line[0] != ' ' && line[0] != '\t' {
-			inMetadata = strings.TrimRight(line, " \t") == "metadata:"
+			inMetadata = withoutComment(line) == "metadata:"
+			childIndent = ""
 			continue
 		}
 		if !inMetadata {
 			continue
 		}
-		value, isVersion := strings.CutPrefix(strings.TrimSpace(line), "version:")
-		if !isVersion {
+		// The first line under `metadata:` sets how far its keys are in.
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		if childIndent == "" {
+			childIndent = indent
+		}
+		value, isVersion := strings.CutPrefix(line[len(indent):], "version:")
+		if !isVersion || indent != childIndent {
 			continue
 		}
-		return wholeNumber(strings.TrimSpace(value))
+		return wholeNumber(withoutComment(value))
 	}
 	return 0
+}
+
+// withoutComment drops a YAML comment that ends a line, and the space around
+// what is left. A `#` starts a comment only after a space.
+func withoutComment(s string) string {
+	if at := strings.IndexAny(s, " \t"); at >= 0 {
+		for i := at; i < len(s)-1; i++ {
+			if (s[i] == ' ' || s[i] == '\t') && s[i+1] == '#' {
+				s = s[:i]
+				break
+			}
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 // wholeNumber reads a positive whole number, bare or in one pair of quotes.

@@ -18,7 +18,7 @@ import (
 // savedSkillNote is the whole of what stderr carries for an old copy in
 // Claude Code's folder. The command in it is, to the byte, the one the skill
 // has an agent keep in its saved note.
-const savedSkillNote = "The qURL skill saved at ~/.claude/skills/qurl/SKILL.md is older than this qurl release works with. To replace it, run:\n" +
+const savedSkillNote = "The qURL skill saved at ~/.claude/skills/qurl/SKILL.md is older than this release of the qURL CLI works with. To replace it, run:\n" +
 	"  mkdir -p ~/.claude/skills/qurl && curl -fsSL https://layerv.ai/skills/qurl/SKILL.md -o ~/.claude/skills/qurl/SKILL.md\n"
 
 // homeWithSkill returns a home directory whose Claude Code folder holds a
@@ -193,6 +193,6 @@ func TestOnlyTheRealProcessLooksForASavedSkill(t *testing.T) {
 // A release that raises this must ship after the skill it names is served.
 func TestTheOldestSkillThisReleaseWorksWith(t *testing.T) {
 	if agentskill.MinVersion != 1 {
-		t.Errorf("MinVersion = %d; raising it is a change of what the CLI prints for every saved copy below it: update this test with it", agentskill.MinVersion)
+		t.Errorf("MinVersion = %d; raising it is a change of what the CLI prints for every saved copy below it: ship the skill with that version at %s first, then update this test", agentskill.MinVersion, agentskill.SourceURL)
 	}
 }

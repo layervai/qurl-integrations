@@ -34,6 +34,7 @@ func TestANamedPipeWhereTheFileShouldBeIsNotOpened(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		// Let the stuck open finish, so the test's folder can be removed.
+		// #nosec G304 -- the pipe this test made in its own temporary folder.
 		if writer, err := os.OpenFile(pipe, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
 			_ = writer.Close()
 		}

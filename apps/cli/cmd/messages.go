@@ -23,7 +23,7 @@ const (
 	// with. The first %s is where the copy is and the second is the one
 	// command that replaces it. It states what is so and leaves the choice
 	// to run the command with the reader.
-	msgSavedSkillOutdated = "The qURL skill saved at %s is older than this qurl release works with. To replace it, run:\n  %s"
+	msgSavedSkillOutdated = "The qURL skill saved at %s is older than this release of the qURL CLI works with. To replace it, run:\n  %s"
 
 	// msgNeedsYes is the non-interactive guard for destructive commands.
 	msgNeedsYes = "confirmation required: re-run with --yes (interactive confirmation needs a terminal)"
