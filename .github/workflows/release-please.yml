@@ -1181,6 +1181,12 @@ jobs:
       needs.cli-release-gate.outputs.required == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Two publications that finish close together would otherwise both list
+    # the same draft, and the second deletion would fail on a release that is
+    # already gone. Queued, the second run lists what the first one left.
+    concurrency:
+      group: prune-superseded-cli-drafts
+      cancel-in-progress: false
     permissions:
       # Deleting a release, and listing drafts at all, requires write access.
       contents: write

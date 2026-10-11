@@ -21,7 +21,9 @@
 #     draft was made. release-please tags a version as its release PR
 #     merges, so this is when that version's first release run began, and a
 #     draft that run may still be working on is left for the next
-#     publication to remove.
+#     publication to remove. TODO(upstream-contract): this depends on what
+#     GitHub puts in `created_at`, and on the release PR's merge commit
+#     being dated at its merge.
 #
 # A draft that failed after GoReleaser uploaded to it holds assets and is
 # never removed here; that one needs a person to look at it.
@@ -52,8 +54,9 @@ set -euo pipefail
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set}"
 : "${CLI_TAG:?CLI_TAG must be set}"
 
+deleted_count=0
 fail() {
-  printf '::error::Could not prune superseded CLI drafts: %s. No release was deleted after this point.\n' "$1" >&2
+  printf '::error::Could not prune superseded CLI drafts: %s. Releases deleted before this: %d.\n' "$1" "$deleted_count" >&2
   exit 1
 }
 
@@ -126,5 +129,6 @@ while IFS=$'\t' read -r id tag; do
   gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}" >/dev/null </dev/null ||
     fail "draft release ${tag} (id ${id}) could not be deleted"
   echo "Deleted the empty draft release ${tag} (id ${id}), superseded by ${CLI_TAG}; the tag ${tag} is kept."
+  deleted_count=$((deleted_count + 1))
   summarize_deleted "$tag"
 done <<<"$superseded"

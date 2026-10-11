@@ -1935,6 +1935,22 @@ func TestCLIReleasePrunesSupersededDraftsOnlyAfterPublication(t *testing.T) {
 			t.Errorf("%s needs %s; draft cleanup must not gate another job", otherID, jobID)
 		}
 	}
+
+	// Two prune jobs listing the same draft would have the second fail on a
+	// release that is already gone, so the job is serialized across runs.
+	// Read from the raw file: the job struct carries no concurrency field.
+	var raw struct {
+		Jobs map[string]struct {
+			Concurrency map[string]any `yaml:"concurrency"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(readWorkflowBytes(t, releasePleaseWorkflow), &raw); err != nil {
+		t.Fatal(err)
+	}
+	concurrency := raw.Jobs[jobID].Concurrency
+	if concurrency["group"] != jobID || concurrency["cancel-in-progress"] != false {
+		t.Errorf("%s concurrency = %v, want one constant group that never cancels a running prune", jobID, concurrency)
+	}
 }
 
 // TestCLIReleaseUsesAnExactEventDrivenGate keeps publication behind the exact

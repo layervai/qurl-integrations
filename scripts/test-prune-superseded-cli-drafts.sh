@@ -159,6 +159,10 @@ run_case young-draft-kept v3.5.0 0 '' 'No draft CLI release is superseded' \
   GH_STUB_RELEASES="$(release 27 v3.4.0 true 0 "$(ago 82800)")"
 run_case day-old-draft-deleted v3.5.0 0 '28' 'Deleted the empty draft release v3.4.0' \
   GH_STUB_RELEASES="$(release 28 v3.4.0 true 0 "$(ago 90000)")"
+# The rules together: of two superseded drafts, only the one past the minimum
+# age goes.
+run_case young-and-old-drafts v3.5.0 0 '61' 'Deleted the empty draft release v3.3.0' \
+  GH_STUB_RELEASES="$(release 60 v3.4.0 true 0 "$(ago 3600)"; release 61 v3.3.0 true 0)"
 run_case no-releases v3.5.0 0 '' 'No draft CLI release is superseded' GH_STUB_RELEASES=
 [[ ! -s "$summary_out" ]] || {
   failures=$((failures + 1))
@@ -225,7 +229,7 @@ three="$(
   release 51 v3.3.0 true 0
   release 52 v3.2.0 true 0
 )"
-run_case delete-fails v3.5.0 1 '50 51' 'draft release v3.3.0 (id 51) could not be deleted' \
+run_case delete-fails v3.5.0 1 '50 51' 'draft release v3.3.0 (id 51) could not be deleted. Releases deleted before this: 1.' \
   GH_STUB_RELEASES="$three" GH_STUB_DELETE_FAILS=51
 expect_summary delete-fails "- \`v3.4.0\`"
 if grep -qF -e 'v3.3.0' -e 'v3.2.0' "$summary_out"; then
@@ -235,7 +239,7 @@ fi
 
 # When the first deletion fails nothing was deleted, and the summary must not
 # say otherwise.
-run_case first-delete-fails v3.5.0 1 '50' 'draft release v3.4.0 (id 50) could not be deleted' \
+run_case first-delete-fails v3.5.0 1 '50' 'draft release v3.4.0 (id 50) could not be deleted. Releases deleted before this: 0.' \
   GH_STUB_RELEASES="$three" GH_STUB_DELETE_FAILS=50
 [[ ! -s "$summary_out" ]] || {
   failures=$((failures + 1))
