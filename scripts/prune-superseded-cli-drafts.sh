@@ -16,16 +16,20 @@
 #     (`v1.2.3-rc.1`) can match;
 #   - it holds no assets, so nothing GoReleaser built is ever discarded;
 #   - its version is lower than CLI_TAG's, compared numerically per field;
-#   - it was created more than a day ago, so the draft of a lower version
-#     whose own release run may still be active is left for the next
+#   - its tagged commit is more than a day old. GitHub reports a release's
+#     `created_at` as the date of the commit it points at, not the time the
+#     draft was made. release-please tags a version as its release PR
+#     merges, so this is when that version's first release run began, and a
+#     draft that run may still be working on is left for the next
 #     publication to remove.
 #
 # A draft that failed after GoReleaser uploaded to it holds assets and is
 # never removed here; that one needs a person to look at it.
 #
-# Once a higher version is public, a lower one can no longer be published
-# from its draft: resuming its release run after this has removed the draft
-# fails, visibly, at that run's own draft check.
+# The age rule does not cover a run resumed or re-dispatched more than a day
+# after the version was tagged. Once a higher version is public, a lower one
+# can no longer be published from its draft: resuming its release run after
+# this has removed the draft fails, visibly, at that run's own draft check.
 #
 # "Lower means superseded" assumes CLI versions only ever go up, which holds
 # while release-please releases from main alone. A maintenance line would
@@ -74,8 +78,9 @@ releases="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100"
 
 # Select in one pass and refuse the whole list on any record that is not
 # exact, before the first deletion. `tonumber` on the captured fields cannot
-# fail: the pattern admits only digits. A creation time that does not parse
-# is an error like any other inexact field.
+# fail: the pattern admits only digits. A `created_at` that does not parse is
+# an error like any other inexact field. Release IDs are far below 2^53, so
+# jq reads them exactly and the whole-number check is sound.
 min_age_seconds=86400
 superseded="$(jq -r --arg published "$CLI_TAG" --arg bare "$bare_tag" \
   --argjson min_age "$min_age_seconds" '

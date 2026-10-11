@@ -1169,9 +1169,10 @@ jobs:
   # the Homebrew tap.
   #
   # The concurrency group above is per tag and source, so the run of a lower
-  # version is not serialized against this one. The script therefore leaves a
-  # draft created within the last day, which may belong to a run that is still
-  # active, for the next publication to remove.
+  # version is not serialized against this one. The script therefore leaves
+  # the draft of a version tagged within the last day, whose first run may
+  # still be active, for the next publication to remove. A run resumed later
+  # than that is not covered and fails at its own draft check.
   prune-superseded-cli-drafts:
     name: Remove superseded CLI drafts
     needs: [publish-cli-release, cli-release-gate]

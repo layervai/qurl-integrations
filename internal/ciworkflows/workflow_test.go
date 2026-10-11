@@ -1919,6 +1919,11 @@ func TestCLIReleasePrunesSupersededDraftsOnlyAfterPublication(t *testing.T) {
 			if got, want := current.Env["CLI_TAG"], "${{ needs.cli-release-gate.outputs.cli_tag }}"; got != want {
 				t.Errorf("%s prunes below CLI_TAG %q, want the gated tag %q", jobID, got, want)
 			}
+			// The job's own token is bounded by the permissions above. Any
+			// other credential here would delete with a reach they do not show.
+			if got, want := current.Env["GH_TOKEN"], "${{ github.token }}"; got != want {
+				t.Errorf("%s deletes with GH_TOKEN %q, want the job token %q", jobID, got, want)
+			}
 		}
 	}
 	if checkouts != 1 || prunes != 1 {
