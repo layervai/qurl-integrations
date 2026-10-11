@@ -29,7 +29,10 @@ import (
 //
 // TODO(upstream-contract): the skill served at SourceURL must carry
 // `metadata.version` of at least this value, in the form Version reads.
-// Nothing in this repository fails when it does not.
+// A release is held to it: scripts/check-served-skill reads the served file
+// before the release is built, and fails the release when it is too old.
+// Nothing fails earlier than that, so a change that raises this still passes
+// its own checks.
 const MinVersion = 1
 
 // SourceURL is where the current skill is served.
@@ -155,6 +158,18 @@ func readHead(name string) ([]byte, error) {
 	}
 	defer func() { _ = file.Close() }()
 	return io.ReadAll(io.LimitReader(file, headLimit))
+}
+
+// ReadVersion returns the version of the skill file that r holds, reading no
+// more of it than is read of a saved copy. It is for a file that is not a
+// saved copy, such as the one served at SourceURL: a version that stands
+// further in than a saved copy is read counts as none here too.
+func ReadVersion(r io.Reader) (int, error) {
+	head, err := io.ReadAll(io.LimitReader(r, headLimit))
+	if err != nil {
+		return 0, err
+	}
+	return Version(head), nil
 }
 
 // Version returns the version a skill file carries, or 0 when it carries

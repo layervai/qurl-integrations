@@ -2160,6 +2160,61 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	assertExecutableRepoScript(t, "scripts/check-exact-cli-release-gate.sh")
 }
 
+// TestCLIReleaseChecksTheServedSkillBeforeBuilding pins the release-time
+// guard on the qURL agent skill. The CLI tells a person with an old saved
+// copy to download the served one, so the release must fail while the served
+// one is still too old, and must fail before GoReleaser uploads anything.
+//
+// The step skips when the tagged source has no checker, for recovery of an
+// older tag. That is safe only while the checker is in the tree, so its
+// place is asserted here: moving or deleting it fails this test rather than
+// turning the skip into the path every release takes.
+func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
+	t.Parallel()
+
+	const (
+		checkerDir = "apps/cli/scripts/check-served-skill"
+		stepName   = "Verify the served agent skill is new enough"
+	)
+	if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(checkerDir), "main.go")); err != nil {
+		t.Fatalf("the served-skill checker is not at %s: %v", checkerDir, err)
+	}
+
+	releaseCLI := readWorkflow(t, releasePleaseWorkflow).Jobs["release-cli"]
+	if releaseCLI == nil {
+		t.Fatal("release-please.yml is missing release-cli")
+	}
+	check, build := -1, -1
+	for index := range releaseCLI.Steps {
+		current := &releaseCLI.Steps[index]
+		switch {
+		case current.Name == stepName:
+			check = index
+		case strings.HasPrefix(current.Uses, "goreleaser/goreleaser-action@"):
+			build = index
+		}
+	}
+	if check < 0 || build < 0 {
+		t.Fatalf("release-cli steps: served-skill check at %d, GoReleaser at %d; want both", check, build)
+	}
+	if check > build {
+		t.Error("the served-skill check runs after GoReleaser has uploaded the release's files")
+	}
+	guard := &releaseCLI.Steps[check]
+	if guard.If != "" || guard.ContinueOnError != nil {
+		t.Errorf("the served-skill check is conditional or allowed to fail: if=%q continue-on-error=%v", guard.If, guard.ContinueOnError)
+	}
+	if !strings.Contains(guard.Run, "set -euo pipefail") {
+		t.Error("the served-skill check does not stop at its first failing command")
+	}
+	if !strings.Contains(guard.Run, "go run ./"+checkerDir+" ||") {
+		t.Errorf("the served-skill check does not run ./%s", checkerDir)
+	}
+	if !strings.Contains(guard.Run, "[[ ! -d "+checkerDir+" ]]") {
+		t.Errorf("the served-skill check's skip is not keyed on %s, the directory this test holds in place", checkerDir)
+	}
+}
+
 // TestCLIReleaseDraftAwareStepsExecuteBothStates runs the checked-in shell,
 // not a duplicate implementation. A valid JSON false must remain a successful
 // lookup so an already-public release can take its intended no-op path.

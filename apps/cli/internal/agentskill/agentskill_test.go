@@ -1,11 +1,13 @@
 package agentskill
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 // skillWith is a skill file whose frontmatter carries the given lines after
@@ -235,4 +237,25 @@ func TestACopyThisProcessMayNotReadIsNotAFinding(t *testing.T) {
 	if found, ok := FindOutdated(home, "linux"); ok {
 		t.Errorf("found %+v for a file that cannot be read", found)
 	}
+}
+
+func TestReadVersion(t *testing.T) {
+	t.Run("reads the version a file carries", func(t *testing.T) {
+		got, err := ReadVersion(strings.NewReader(versioned(7)))
+		if err != nil || got != 7 {
+			t.Errorf("ReadVersion = %d, %v; want 7", got, err)
+		}
+	})
+	t.Run("a version past what is read of a saved copy is none", func(t *testing.T) {
+		far := skillWith("x-padding: " + strings.Repeat("a", headLimit) + "\nmetadata:\n  version: \"7\"\n")
+		got, err := ReadVersion(strings.NewReader(far))
+		if err != nil || got != 0 {
+			t.Errorf("ReadVersion = %d, %v; want 0", got, err)
+		}
+	})
+	t.Run("a reader that fails is an error, not a version of none", func(t *testing.T) {
+		if _, err := ReadVersion(iotest.ErrReader(errors.New("cut off"))); err == nil {
+			t.Error("ReadVersion returned no error")
+		}
+	})
 }
