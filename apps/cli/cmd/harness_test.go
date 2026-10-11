@@ -145,14 +145,16 @@ type runOpts struct {
 	// requestCRIDLinkAsDevice is the injected answer to "give me a link for
 	// this CRID, as this device"; nil fails a test that asks, so no hermetic
 	// test can ever send that request either (the clisandbox journey uses the
-	// production wiring via realOpener).
-	requestCRIDLinkAsDevice func(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string) (*qurl.CRIDLink, error)
+	// production wiring via realOpener). deviceKey reads the device key. The
+	// SDK calls it only after "not found", and an injected answer that stands
+	// for the SDK does the same: see asDeviceAfterNotFound.
+	requestCRIDLinkAsDevice func(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error)
 	// readDeviceKey is the injected read of the device key that the request
-	// as this device takes. nil is the production reader. It needs no fake:
-	// it only reads a file in this invocation's state directory and sends
-	// nothing, and TestMain pins the plaintext key storage. A test injects a
-	// reader to make the key readable or not readable on every platform, or
-	// to fail when the key is read at all.
+	// as this device makes when it needs the key. nil is the production
+	// reader. It needs no fake: it only reads a file in this invocation's
+	// state directory and sends nothing, and TestMain pins the plaintext key
+	// storage. A test injects a reader to make the key readable or not
+	// readable on every platform, or to fail when the key is read at all.
 	readDeviceKey func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey)
 	// linkTimeoutBeforeShare is the time limit of a link request that is
 	// followed by a share request when it gives no link. Zero leaves the
@@ -223,7 +225,7 @@ type runResult struct {
 	linkRequestGuard        *linkRequestGuard
 	cridLinkOffered         func() (bool, error)
 	requestCRIDLink         func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
-	requestCRIDLinkAsDevice func(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string) (*qurl.CRIDLink, error)
+	requestCRIDLinkAsDevice func(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error)
 	// readDeviceKey is the read of the device key the invocation was wired
 	// with, read back the same way.
 	readDeviceKey func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey)

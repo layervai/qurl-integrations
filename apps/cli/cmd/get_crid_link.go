@@ -30,7 +30,8 @@ import (
 //     above, and the device key is used only when the first answer is "not
 //     found". The service then also gives a link for a private resource that
 //     this device may open: the owner's own device, or a device the owner
-//     allowed.
+//     allowed. The device key is read at that moment and not before: get
+//     gives the SDK a function that reads it (opts.deviceKeyOnDemand).
 //
 // The share request is a request to the qURL API with this device's
 // credential. The service answers it on the resource owner's devices and on
@@ -66,11 +67,15 @@ import (
 //     why. With that request, every case that gave a link before this order
 //     existed still gives one, when the service gives the same answers. This
 //     order costs requests and time. It does not cost a link.
-//   - That device asks as this device when it can read its own key, and with
-//     the CRID alone when it cannot. The key is read without changing the
-//     device state (opts.readDeviceKey). A read that fails is not an error:
-//     the device asks with the CRID alone. A machine with only an account
-//     key has no device state, so its read always gives no key.
+//   - That device asks as this device. Its key is read only when the SDK
+//     needs it: after the first request of the link request was answered
+//     "not found". For every other answer the key is not read at all, so a
+//     public resource costs no read of the device state. The key is read
+//     without changing the device state (opts.readDeviceKey). A read that
+//     gives no key is not an error. The device has then asked with the CRID
+//     alone, and the answer to that first request, "not found", is the
+//     result of the link request. A machine with only an account key has no
+//     device state, so its read always gives no key.
 //   - When a share option is set, get keeps the order it had before: the
 //     share request first, and the link request with the CRID alone only
 //     after "not found". Only the share request can carry the option.
@@ -95,7 +100,10 @@ import (
 // The first link. "CRID" is one that passed the local check every command
 // applies first; a CRID that fails it is refused before this file runs, on
 // every machine, with nothing sent and nothing created. "Key" is what
-// opts.readDeviceKey gives.
+// opts.readDeviceKey gives when it is called. It is called only when the
+// first request of the link request is answered "not found". For every other
+// answer the two rows that differ in "key" are the same row, and nothing is
+// read.
 //
 //	identity  share   request      CRID this   key       result
 //	          option               client can
@@ -202,8 +210,8 @@ import (
 // goes on. The first row keeps the rule get always had: a link from the
 // share request does not fix the choice.
 //
-// The key is read again at a refresh and wiped again. It is not kept for the
-// length of a download.
+// A refresh that needs the key reads it again. The key is not kept for the
+// length of a download: the SDK wipes it when the request has been answered.
 //
 // getLinkSource holds the memory of one run. Nothing is kept between runs.
 //
@@ -211,8 +219,9 @@ import (
 
 // cridLinkTimeoutBeforeShare bounds the link request of a device that makes
 // its share request afterwards when no link is given. It covers the whole
-// request as this device, which can be two requests. The link request whose
-// answer is final keeps the longer limit that internal/consume sets.
+// request as this device, which can be two requests and the read of the
+// device key between them. The link request whose answer is final keeps the
+// longer limit that internal/consume sets.
 const cridLinkTimeoutBeforeShare = 10 * time.Second
 
 // timeoutBeforeShare returns the time limit of the link request that comes
@@ -249,16 +258,24 @@ func (o linkOrigin) byLinkRequest() bool { return o != linkFromShare }
 // errCRIDNotRequestable reports that the SDK will not ask for a link for this
 // CRID and sent nothing. errCRIDVersionNotRequestable is the one cause that
 // reaches it in practice: a CRID version this client cannot check a link
-// against. errDeviceKeyRefused reports that the SDK will not use the device
-// key it was given, and sent nothing. None of the three leaves this file.
-// The functions below turn the first two into the share request's own answer
-// on a device with an identity, and into a refusal on a machine with none.
-// The third makes the device ask with the CRID alone.
+// against. errDeviceKeyRefused reports that the SDK will not ask as a device
+// with what it was given, and sent nothing. None of the three leaves this
+// file. The functions below turn the first two into the share request's own
+// answer on a device with an identity, and into a refusal on a machine with
+// none. The third makes the device ask with the CRID alone.
 var (
 	errCRIDNotRequestable        = errors.New("no link can be asked for with this CRID alone")
 	errCRIDVersionNotRequestable = fmt.Errorf("%w: its version is not one this client can check", errCRIDNotRequestable)
 	errDeviceKeyRefused          = errors.New("the device key cannot be used for a link request")
 )
+
+// errNoDeviceKey is what the function that reads the device key for the SDK
+// returns when the read gave no key. why is the one fixed word for the
+// reason. The error does not leave this file, and it holds no path, no other
+// error text and no part of a key.
+type errNoDeviceKey struct{ why connectorstate.NoDeviceKey }
+
+func (e errNoDeviceKey) Error() string { return "no device key: " + string(e.why) }
 
 // hasDeviceIdentity reports whether this machine can make the share request
 // without creating a new device identity that belongs to no account.
@@ -467,12 +484,13 @@ func (opts *globalOpts) linkRequestFirst(ctx context.Context, assessment *cridux
 }
 
 // linkByRequestBeforeShare makes the link request of a device that makes its
-// share request afterwards when no link is given: as this device when the
-// device key can be read, and with the CRID alone when it cannot.
+// share request afterwards when no link is given. It asks as this device.
 //
-// The key is read with the command's own context and no shorter time limit.
-// The request then has the limit cridLinkTimeoutBeforeShare. The key is
-// wiped when the request has been answered.
+// The device key is not read here. The SDK gets a function that reads it
+// (deviceKeyOnDemand) and calls it only when the first request was answered
+// "not found". So a request that the first answer settles reads nothing. The
+// request has the limit cridLinkTimeoutBeforeShare, and that limit covers the
+// read of the key too.
 //
 // limitRanOut reports that the request had no answer when that short limit
 // ran out. It is true only when three things hold together:
@@ -487,7 +505,9 @@ func (opts *globalOpts) linkRequestFirst(ctx context.Context, assessment *cridux
 //     the short limit running out.
 //
 // So limitRanOut is false for a service that could not be reached: that
-// answer comes while the short limit still has time left.
+// answer comes while the short limit still has time left. It is true when
+// the limit ran out while the key was read: the SDK then reports a request
+// that was not sent because its time was over.
 //
 // TODO(upstream-contract): the first condition rests on the order of the
 // cases in consume.ClassifyCRIDLinkError. It tests qurl-go's
@@ -498,29 +518,63 @@ func (opts *globalOpts) linkRequestFirst(ctx context.Context, assessment *cridux
 // made. TestGetMakesTheLinkRequestOnceMoreThroughTheSDK holds today's
 // behavior through the SDK.
 func (opts *globalOpts) linkByRequestBeforeShare(ctx context.Context, resourceCRID string) (link *qurlapi.ShareLink, limitRanOut bool, err error) {
-	key, why := opts.readDeviceKey(ctx)
-	defer clear(key)
-
 	requestCtx, cancel := context.WithTimeout(ctx, opts.timeoutBeforeShare())
 	defer cancel()
 	ranOut := func(requestErr error) bool {
 		return errors.Is(requestErr, consume.ErrCRIDLinkNoAnswer) &&
 			errors.Is(requestCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 	}
-	if why == "" {
-		link, err = opts.linkAsDevice(requestCtx, key, resourceCRID)
-		if !errors.Is(err, errDeviceKeyRefused) {
-			return link, ranOut(err), err
-		}
-		// The SDK will not use the key and sent nothing. That is a key this
-		// device cannot ask with, like one it could not read.
-		why = connectorstate.NoDeviceKeyInvalid
+	link, err = opts.linkAsDevice(requestCtx, opts.deviceKeyOnDemand(ctx), resourceCRID)
+	if !errors.Is(err, errDeviceKeyRefused) {
+		return link, ranOut(err), err
 	}
+	// The SDK will not ask as a device with what it was given, and sent
+	// nothing. That is a device that cannot ask with its key, like one that
+	// could not read it.
 	if logf := opts.verboseLogger(); logf != nil {
-		logf(msgCRIDLinkDeviceKeyNotRead, string(why))
+		logf(msgCRIDLinkDeviceKeyNotRead, string(connectorstate.NoDeviceKeyInvalid))
 	}
 	link, err = opts.linkByCRIDAlone(requestCtx, resourceCRID, true)
 	return link, ranOut(err), err
+}
+
+// deviceKeyOnDemand returns the function the SDK calls when a request as this
+// device needs the device key. The SDK calls it at most once in a request,
+// and only after the first request was answered "not found". Until then
+// nothing is read: the device state is not opened, and on a machine that
+// keeps its state sealed nothing is unsealed.
+//
+// ctx is the command's own context. The read gets that context, and not the
+// one the SDK passes, which carries the short time limit of the request.
+// connectorstate.ReadDeviceStaticPrivateKey says why: a read that is given up
+// early can break a later step of the same command that opens the state. The
+// short limit still ends the request. The SDK does not wait for the read
+// when the context of the request ends, and it wipes a key that arrives
+// after that.
+//
+// A key the read returns goes to the SDK, which wipes it when the request
+// has been answered. A read that gives no key is reported to the SDK as
+// errNoDeviceKey, with the one fixed word for the reason.
+func (opts *globalOpts) deviceKeyOnDemand(ctx context.Context) qurl.DeviceKeySource {
+	return func(context.Context) ([]byte, error) {
+		key, why := opts.readDeviceKey(ctx)
+		if why != "" {
+			return nil, errNoDeviceKey{why: why}
+		}
+		return key, nil
+	}
+}
+
+// whyNoDeviceKey returns the one fixed word for why a request as this device
+// got no device key. err is an error for which consume.DeviceKeyNotGiven is
+// true.
+func whyNoDeviceKey(err error) connectorstate.NoDeviceKey {
+	var none errNoDeviceKey
+	if errors.As(err, &none) {
+		return none.why
+	}
+	// The read gave bytes, and the SDK will not use them as a key.
+	return connectorstate.NoDeviceKeyInvalid
 }
 
 // readDeviceStaticPrivateKey is the production opts.readDeviceKey: the key
@@ -630,19 +684,33 @@ func (opts *globalOpts) linkByCRIDAlone(ctx context.Context, resourceCRID string
 }
 
 // linkAsDevice asks for a link as this device and returns it in the shape a
-// share answer has. key is the device's static private key. It stays the
-// caller's, and the caller wipes it.
+// share answer has. deviceKey reads the device's static private key. The SDK
+// calls it only when it needs the key, and wipes the key it returned.
 //
-// It returns errDeviceKeyRefused when the SDK will not use the key and sent
-// nothing. linkFromLinkRequest says what it returns for every other answer.
-func (opts *globalOpts) linkAsDevice(ctx context.Context, key []byte, resourceCRID string) (*qurlapi.ShareLink, error) {
-	issued, err := opts.requestCRIDLinkAsDevice(ctx, key, resourceCRID)
+// When the SDK asked for the key and got none, the device has asked with the
+// CRID alone: the first request is that request, and nothing was sent after
+// it. Its answer is the result, as linkByCRIDAlone gives it for a device.
+//
+// It returns errDeviceKeyRefused when the SDK will not ask as a device with
+// what it was given and sent nothing. linkFromLinkRequest says what it
+// returns for every other answer.
+func (opts *globalOpts) linkAsDevice(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurlapi.ShareLink, error) {
+	issued, err := opts.requestCRIDLinkAsDevice(ctx, deviceKey, resourceCRID)
+	if consume.DeviceKeyNotGiven(err) {
+		if logf := opts.verboseLogger(); logf != nil {
+			logf(msgCRIDLinkDeviceKeyNotRead, string(whyNoDeviceKey(err)))
+		}
+		// No link came with this answer, whatever the SDK returned beside it.
+		// An answer that is missing is refused there: no error and no link is
+		// not an answer.
+		return opts.linkFromLinkRequest(resourceCRID, true, nil, consume.AnswerWithoutDeviceKey(err))
+	}
 	switch {
 	case consume.DeviceKeyRefused(err):
 		return nil, errDeviceKeyRefused
 	case !consume.CRIDNotRequestable(err):
 		// The line says how the device asked. It does not say that the
-		// device key was sent: the SDK sends it only after "not found".
+		// device key was read or sent: that happens only after "not found".
 		if logf := opts.verboseLogger(); logf != nil {
 			logf(msgCRIDLinkAsDevice)
 		}

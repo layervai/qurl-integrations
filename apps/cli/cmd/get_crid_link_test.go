@@ -92,29 +92,78 @@ var (
 // linkRequests is the injected answer to the link request, in both of its
 // forms. It records every CRID that was asked for, and for each request
 // whether it was made as this device.
+//
+// It stands where the SDK stands, so the request as this device does with the
+// device key what the SDK does: it asks for the key only after the answer
+// "not found" to a first request, and only once.
 type linkRequests struct {
-	link  *qurl.CRIDLink
-	err   error
-	asked []string
+	// link and err are the answer. For a resource that is not private it is
+	// the answer to the first request. When that answer is "not found", a
+	// request as this device with a key gets it a second time, as a device
+	// that may not open the resource does.
+	link *qurl.CRIDLink
+	err  error
+	// private says that the resource is private. A request with only the
+	// CRID is then answered "not found", and so is the first request of a
+	// request as this device. link and err are the answer to the request
+	// under the device key.
+	private bool
+	asked   []string
 	// asDevice has one entry for each entry of asked.
 	asDevice []bool
-	// keys holds a copy of the key each request as this device was given.
+	// keys holds a copy of the key each request under the device key was
+	// sent with. It has no entry for a request that needed no key.
 	keys [][]byte
 }
+
+// errSDKNotFound is the SDK's answer "not found", with the service's code.
+var errSDKNotFound = sdkRefusal(qurl.ErrCRIDLinkNotFound, "52602")
 
 // answer is the request with only the CRID.
 func (r *linkRequests) answer(_ context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
 	r.asked = append(r.asked, resourceCRID)
 	r.asDevice = append(r.asDevice, false)
+	if r.private {
+		return nil, errSDKNotFound
+	}
 	return r.result()
 }
 
 // answerAsDevice is the request as this device.
-func (r *linkRequests) answerAsDevice(_ context.Context, key []byte, resourceCRID string) (*qurl.CRIDLink, error) {
+func (r *linkRequests) answerAsDevice(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error) {
 	r.asked = append(r.asked, resourceCRID)
 	r.asDevice = append(r.asDevice, true)
-	r.keys = append(r.keys, bytes.Clone(key))
-	return r.result()
+	first := r.err
+	if r.private {
+		first = errSDKNotFound
+	}
+	if !errors.Is(first, qurl.ErrCRIDLinkNotFound) {
+		// The first request settles it. The SDK does not ask for the key.
+		return r.result()
+	}
+	return asDeviceAfterNotFound(ctx, deviceKey, first, func(key []byte) (*qurl.CRIDLink, error) {
+		r.keys = append(r.keys, bytes.Clone(key))
+		return r.result()
+	})
+}
+
+// asDeviceAfterNotFound is the part of the SDK's request as a device that
+// follows the answer "not found" to the first request. An injected answer to
+// that request calls it, so that it treats the device key as the SDK does.
+//
+// It asks deviceKey for the key, once, with the context of the request. With
+// a key it calls second, the request under the device key, and then wipes
+// the key, because the key is the SDK's. Without one it returns the SDK's
+// error for that, which keeps notFound, the answer to the first request.
+func asDeviceAfterNotFound(
+	ctx context.Context, deviceKey qurl.DeviceKeySource, notFound error, second func(key []byte) (*qurl.CRIDLink, error),
+) (*qurl.CRIDLink, error) {
+	key, err := deviceKey(ctx)
+	if err != nil {
+		return nil, &qurl.DeviceKeySourceError{Err: err, FirstAnswer: notFound}
+	}
+	defer clear(key)
+	return second(key)
 }
 
 func (r *linkRequests) result() (*qurl.CRIDLink, error) {
@@ -153,7 +202,7 @@ func (g *linkRequestGuard) withTheCRIDAlone(context.Context, string) (*qurl.CRID
 	return nil, errors.New("unexpected request for a link with only the CRID")
 }
 
-func (g *linkRequestGuard) asTheDevice(context.Context, []byte, string) (*qurl.CRIDLink, error) {
+func (g *linkRequestGuard) asTheDevice(context.Context, qurl.DeviceKeySource, string) (*qurl.CRIDLink, error) {
 	g.report("the command asked for a link as this device")
 	return nil, errors.New("unexpected request for a link as this device")
 }
@@ -167,7 +216,7 @@ func mustNotAskWithTheCRIDAlone(t *testing.T) func(context.Context, string) (*qu
 
 // mustNotAskAsTheDevice fails the test if the request as this device is made
 // at all.
-func mustNotAskAsTheDevice(t *testing.T) func(context.Context, []byte, string) (*qurl.CRIDLink, error) {
+func mustNotAskAsTheDevice(t *testing.T) func(context.Context, qurl.DeviceKeySource, string) (*qurl.CRIDLink, error) {
 	t.Helper()
 	return (&linkRequestGuard{report: t.Errorf}).asTheDevice
 }
@@ -185,6 +234,11 @@ func mustNotReadTheDeviceKey(t *testing.T) func(context.Context) ([]byte, connec
 // deviceKeyReads is an injected read of the device key. It makes the key
 // readable or not readable on every platform, and it remembers what it
 // handed out.
+//
+// It has no lock. The real SDK calls a read on a goroutine of its own, and
+// waits for it, so a test looks at the record only after the command has
+// returned. A test in which the command does not wait for the read uses a
+// read of its own.
 type deviceKeyReads struct {
 	// key is the key a read returns; nil means the key cannot be read, and
 	// why is then the reason.
@@ -411,18 +465,19 @@ func machineThatEnrolls(t *testing.T, state *qurl.AgentState, enrolled *bool) fu
 }
 
 // withLinkRequests adds one answer for the link request in both of its
-// forms: the request with only the CRID, and the request as this device,
-// whose key the answer does not look at. The harness then answers that the
-// request is offered.
+// forms: the request with only the CRID, and the request as this device. The
+// harness then answers that the request is offered.
 //
-// One answer for both forms keeps a test the same on every platform: which
-// form a device with the production read of its key makes depends on
-// deviceKeyReadable. A test about the form itself uses withLinkRequestsOf.
+// The answer is the result of the whole request, in either form. The request
+// as this device does not ask for the device key here, so the key is not
+// read. That keeps a test the same on every platform: whether a device with
+// the production read can read its key depends on deviceKeyReadable. A test
+// about the key uses withLinkRequestsOf, which asks for it as the SDK does.
 func withLinkRequests(configure func(args []string) *runOpts, answer func(context.Context, string) (*qurl.CRIDLink, error)) func(args []string) *runOpts {
 	return func(args []string) *runOpts {
 		opts := configure(args)
 		opts.requestCRIDLink = answer
-		opts.requestCRIDLinkAsDevice = func(ctx context.Context, _ []byte, resourceCRID string) (*qurl.CRIDLink, error) {
+		opts.requestCRIDLinkAsDevice = func(ctx context.Context, _ qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error) {
 			return answer(ctx, resourceCRID)
 		}
 		return opts
@@ -431,7 +486,8 @@ func withLinkRequests(configure func(args []string) *runOpts, answer func(contex
 
 // withLinkRequestsOf adds requests as the answer to both forms of the link
 // request. requests then knows which form each request had, and the key a
-// request as this device was given.
+// request under the device key was sent with. Its request as this device
+// asks for the device key as the SDK does: only after "not found".
 func withLinkRequestsOf(configure func(args []string) *runOpts, requests *linkRequests) func(args []string) *runOpts {
 	return func(args []string) *runOpts {
 		opts := configure(args)
@@ -758,10 +814,19 @@ func TestGetByCRIDAloneGoldens(t *testing.T) {
 					if variant == "plain" {
 						args = append(args, "--file", "out.bin")
 					}
+					// A machine with no identity asks with the CRID alone. The
+					// device here asks as this device. It holds no device
+					// state, so it has no key: after "not found" the answer to
+					// its first request stands.
+					answer := &linkRequests{err: row.err}
 					result := runCLI(t, &runOpts{
 						args: args, env: env, tty: variant == "tty",
-						requestCRIDLink: (&linkRequests{err: row.err}).answer,
+						requestCRIDLink: answer.answer, requestCRIDLinkAsDevice: answer.answerAsDevice,
 					})
+					if len(answer.asked) != 1 || answer.askedAsDevice() != map[bool]int{true: 1, false: 0}[device] || len(answer.keys) != 0 {
+						t.Fatalf("made the link request %d times, %d of them as this device, %d under a device key; want once, in the form of the machine, and none under a device key",
+							len(answer.asked), answer.askedAsDevice(), len(answer.keys))
+					}
 					if result.code != row.wantCode || result.stdout.Len() != 0 {
 						t.Fatalf("exit = %d, want %d; stdout = %q, stderr: %s", result.code, row.wantCode, result.stdout.String(), result.stderr.String())
 					}
@@ -782,10 +847,12 @@ func TestGetByCRIDAloneGoldens(t *testing.T) {
 // what the order is for: the link request gave the link, so no share request
 // was sent, and the device did not prove its identity to the API either.
 //
-// The device here reads its key with the production read, from the state the
-// fixture wrote. Where that read is supported it asks as this device, with
-// exactly the key in that state. A machine with no identity never asks that
-// way.
+// The device here asks as this device, and has the production read of its
+// key over the state the fixture wrote. The first request gives the link, so
+// the key is not asked for and nothing is sent under it.
+// TestGetAnsweredByTheLinkRequestLeavesTheDeviceStateAsItWas has the private
+// resource, where the key in that state is used. A machine with no identity
+// never asks as a device.
 func TestGetOpensALinkGivenForTheCRIDAlone(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	for _, device := range []bool{true, false} {
@@ -825,14 +892,14 @@ func TestGetOpensALinkGivenForTheCRIDAlone(t *testing.T) {
 					t.Errorf("made the link request for %q, want exactly once for %s", requests.asked, srv.Key.CRID)
 				}
 				wantAsDevice := 0
-				if device && deviceKeyReadable {
+				if device {
 					wantAsDevice = 1
 				}
 				if got := requests.askedAsDevice(); got != wantAsDevice {
 					t.Errorf("asked as this device %d times, want %d", got, wantAsDevice)
 				}
-				if wantAsDevice == 1 && (len(requests.keys) != 1 || !bytes.Equal(requests.keys[0], deviceKeyOf(t, state).key)) {
-					t.Error("the request as this device was not given the key in the device state")
+				if len(requests.keys) != 0 {
+					t.Errorf("%d request(s) were sent under a device key, want none: the first request gave the link", len(requests.keys))
 				}
 				// The same check a share link gets, before anything is done with it.
 				if want := link + " for " + srv.Key.CRID; len(verified) != 1 || verified[0] != want {
@@ -1250,8 +1317,10 @@ func getOrders() []getOrder {
 //
 // With no share option the link request comes first, once, before anything
 // is sent to the qURL API. A link from it ends the run and no share request
-// is sent. Any other answer leads to one share request, and a link or a
-// failure of that request is its own result.
+// is sent, and the device key is not read for it. Any other answer leads to
+// one share request, and a link or a failure of that request is its own
+// result. The answer here is "not found", which is the one answer the device
+// key is read for.
 //
 // With a share option the order is the earlier one: the share request first,
 // and the link request only after its "not found". Then the request is made
@@ -1345,10 +1414,10 @@ func TestGetMakesTheShareRequestOnlyWhenTheLinkRequestGivesNoLink(t *testing.T) 
 						observed.asDevice = append(observed.asDevice, false)
 						return requests.answer(ctx, resourceCRID)
 					}
-					answerAsDevice := func(ctx context.Context, key []byte, resourceCRID string) (*qurl.CRIDLink, error) {
+					answerAsDevice := func(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error) {
 						apiSeen = append(apiSeen, apiRequests(srv))
 						observed.asDevice = append(observed.asDevice, true)
-						return requests.answerAsDevice(ctx, key, resourceCRID)
+						return requests.answerAsDevice(ctx, deviceKey, resourceCRID)
 					}
 					key := deviceKeyOf(t, state)
 					configure := func(args []string) *runOpts {
@@ -1359,8 +1428,14 @@ func TestGetMakesTheShareRequestOnlyWhenTheLinkRequestGivesNoLink(t *testing.T) 
 
 					run := runShareMode(t, srv, srv.URL, mode, configure)
 
-					// The link request: how often, in which form, and when.
+					// The link request: how often, in which form, and when. The
+					// device key is read only when the request as this device
+					// is answered "not found". A link from its first request
+					// needs no key.
 					wantAsks, wantAsDevice, wantKeyReads := 1, 1, 1
+					if tc.linkGiven {
+						wantKeyReads = 0
+					}
 					if !order.linkRequestFirst {
 						wantAsDevice, wantKeyReads = 0, 0
 						if !tc.shareNotFound {
@@ -1557,23 +1632,34 @@ func renderedError(err error) string {
 
 // accountKeyOpts is a command context that shares with the harness's account
 // key against srv, with offered as the check for the link request and answer
-// as the request with only the CRID. The machine holds no device state, so
-// keyReads gives no key, and the request as this device fails the test.
+// as the answer to a link request sent under a random key. That is the
+// request with only the CRID, and the first request of the request as this
+// device. The machine holds no device state, so keyReads gives no key, and a
+// request under a device key fails the test.
 func accountKeyOpts(
 	t *testing.T, srv *apitest.Server, offered func() (bool, error),
 	answer func(context.Context, string) (*qurl.CRIDLink, error), keyReads *deviceKeyReads,
 ) *globalOpts {
 	t.Helper()
 	opts := &globalOpts{
-		resolvedEndpoint:        srv.URL,
-		version:                 "test",
-		lookupEnv:               func(key string) (string, bool) { return testAPIKey, key == "QURL_API_KEY" },
-		newRequestID:            func() string { return "cli-req-fixed" },
-		sleep:                   func(time.Duration) {},
-		cridLinkOffered:         offered,
-		requestCRIDLink:         answer,
-		requestCRIDLinkAsDevice: mustNotAskAsTheDevice(t),
-		readDeviceKey:           keyReads.read,
+		resolvedEndpoint: srv.URL,
+		version:          "test",
+		lookupEnv:        func(key string) (string, bool) { return testAPIKey, key == "QURL_API_KEY" },
+		newRequestID:     func() string { return "cli-req-fixed" },
+		sleep:            func(time.Duration) {},
+		cridLinkOffered:  offered,
+		requestCRIDLink:  answer,
+		requestCRIDLinkAsDevice: func(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error) {
+			link, err := answer(ctx, resourceCRID)
+			if !errors.Is(err, qurl.ErrCRIDLinkNotFound) {
+				return link, err
+			}
+			return asDeviceAfterNotFound(ctx, deviceKey, err, func([]byte) (*qurl.CRIDLink, error) {
+				t.Error("a link request was sent under a device key on a machine that holds no device state")
+				return nil, err
+			})
+		},
+		readDeviceKey: keyReads.read,
 	}
 	opts.openAPIClient = func(context.Context) (qurlapi.Client, error) { return opts.apiClient(testAPIKey) }
 	return opts
@@ -1593,8 +1679,10 @@ func accountKeyOpts(
 // whatever the share request then answers; where the request is offered, the
 // link request is made first, once, and the SDK sends nothing for it.
 //
-// The device key is read only where a link request is made first. Where the
-// request is not offered it is never read.
+// The device key is never read here. Where the request is not offered, no
+// link request is made. Where it is made first, the SDK refuses the CRID
+// before it sends anything, and the key is read only after an answer "not
+// found".
 func TestLinkForGetIsTheSharePathWhenNoLinkCanBeAskedFor(t *testing.T) {
 	key := apitest.FixedResourceKey(t)
 	other := apitest.GenerateResourceKey(t)
@@ -1686,21 +1774,21 @@ func TestLinkForGetIsTheSharePathWhenNoLinkCanBeAskedFor(t *testing.T) {
 					// With a share option the link request is looked at only
 					// after a share not-found, and then exactly once. With none
 					// it is looked at first, once. The request itself is made
-					// only where it is offered, and the key is read only for a
-					// request that comes first.
-					wantChecks, wantAsks, wantKeyReads := 1, 0, 0
+					// only where it is offered. The key is not read for a
+					// request that the SDK does not send.
+					wantChecks, wantAsks := 1, 0
 					switch {
 					case linkRequestFirst && offer.offered:
-						wantAsks, wantKeyReads = 1, 1
+						wantAsks = 1
 					case linkRequestFirst:
 					case !strings.HasPrefix(name, "not found"):
 						wantChecks = 0
 					case offer.offered:
 						wantAsks = 1
 					}
-					if offer.checks != wantChecks || asks != wantAsks || len(keyReads.given) != wantKeyReads || len(unread.given) != 0 {
-						t.Errorf("asked whether the request is offered %d times, made it %d times and read the device key %d times; want %d, %d and %d",
-							offer.checks, asks, len(keyReads.given), wantChecks, wantAsks, wantKeyReads)
+					if offer.checks != wantChecks || asks != wantAsks || len(keyReads.given) != 0 || len(unread.given) != 0 {
+						t.Errorf("asked whether the request is offered %d times, made it %d times and read the device key %d times; want %d, %d and 0",
+							offer.checks, asks, len(keyReads.given), wantChecks, wantAsks)
 					}
 				})
 			}
@@ -1977,11 +2065,12 @@ func TestGetThroughTheRealSDKCheckIsUnchanged(t *testing.T) {
 // machine counts as one with an identity and keeps its share request.
 //
 // Where the link request is offered, it comes first here too, and that is
-// intended. The machine has no device state, so it has no device key: it
-// asks with the CRID alone, never as a device, and the read of the key
-// changes nothing in its empty state directory. The cost is one link request
-// before the share request, with the short time limit a link request has
-// when a share request follows it.
+// intended. The machine has no device state, so it has no device key. What
+// it sends is the request with the CRID alone: nothing is ever sent under a
+// device key. When the answer is "not found", the machine looks for its key,
+// finds no device state, and the read changes nothing in its empty state
+// directory. The cost is one link request before the share request, with the
+// short time limit a link request has when a share request follows it.
 //
 //   - A resource that opens with the CRID alone is answered there. The share
 //     request is not sent, so the machine is not enrolled by this run. That
@@ -2031,8 +2120,8 @@ func TestGetWithAnAccountKeyAsksWithTheCRIDAloneFirst(t *testing.T) {
 			requests := &linkRequests{link: issuedLink(srv.URL + apitest.DownloadPath)}
 			run := runShareMode(t, srv, srv.URL, mode, withLinkRequestsOf(accountKeyMachine(t, srv, &enrolled), requests))
 			run.mustHaveDelivered(t, mode)
-			if len(requests.asked) != 1 || requests.askedAsDevice() != 0 {
-				t.Errorf("made the link request %d times, %d of them as a device; want once, with the CRID alone", len(requests.asked), requests.askedAsDevice())
+			if len(requests.asked) != 1 || len(requests.keys) != 0 {
+				t.Errorf("made the link request %d times, and sent %d request(s) under a device key; want once, and nothing under a device key", len(requests.asked), len(requests.keys))
 			}
 			if enrolled {
 				t.Error("the machine enrolled although the link request gave the link")
@@ -2048,8 +2137,8 @@ func TestGetWithAnAccountKeyAsksWithTheCRIDAloneFirst(t *testing.T) {
 			requests := &linkRequests{err: notFound}
 			run := runShareMode(t, srv, srv.URL, mode, withLinkRequestsOf(accountKeyMachine(t, srv, &enrolled), requests))
 			run.mustHaveDelivered(t, mode)
-			if len(requests.asked) != 1 || requests.askedAsDevice() != 0 {
-				t.Errorf("made the link request %d times, %d of them as a device; want once, with the CRID alone", len(requests.asked), requests.askedAsDevice())
+			if len(requests.asked) != 1 || len(requests.keys) != 0 {
+				t.Errorf("made the link request %d times, and sent %d request(s) under a device key; want once, and nothing under a device key", len(requests.asked), len(requests.keys))
 			}
 			if !enrolled {
 				t.Error("the machine did not enroll under the account")
@@ -2060,11 +2149,12 @@ func TestGetWithAnAccountKeyAsksWithTheCRIDAloneFirst(t *testing.T) {
 		})
 
 		// The order and the cost, with the production read of the device key.
-		// The read finds no device state, so the one link request is made
-		// with the CRID alone: before anything is sent to the qURL API, and
-		// with the short limit. The share request comes after it and enrolls
-		// the machine. Nothing else reads a key: the request as a device
-		// fails the test.
+		// The one link request is made before anything is sent to the qURL
+		// API, and with the short limit. It is answered "not found", the read
+		// then finds no device state, and nothing is sent under a device key.
+		// The share request comes after it and enrolls the machine. No second
+		// link request is made: the request with only the CRID fails the
+		// test.
 		t.Run("the link request first, then the share request/"+mode.name, func(t *testing.T) {
 			srv := downloadServer(t)
 			enrolled := false
@@ -2073,17 +2163,20 @@ func TestGetWithAnAccountKeyAsksWithTheCRIDAloneFirst(t *testing.T) {
 			var apiSeen [][]string
 			configure := func(args []string) *runOpts {
 				opts := accountKeyMachine(t, srv, &enrolled)(append(args, "--verbose"))
-				opts.requestCRIDLink = func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error) {
+				opts.requestCRIDLinkAsDevice = func(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error) {
 					contexts.record(ctx)
 					apiSeen = append(apiSeen, apiRequests(srv))
-					return requests.answer(ctx, resourceCRID)
+					return requests.answerAsDevice(ctx, deviceKey, resourceCRID)
 				}
-				opts.requestCRIDLinkAsDevice = mustNotAskAsTheDevice(t)
+				opts.requestCRIDLink = mustNotAskWithTheCRIDAlone(t)
 				return opts
 			}
 			run := runShareMode(t, srv, srv.URL, mode, configure)
 			run.mustHaveDelivered(t, mode)
 
+			if len(requests.keys) != 0 {
+				t.Errorf("%d request(s) were sent under a device key, want none: the machine holds no device state", len(requests.keys))
+			}
 			if len(requests.asked) != 1 || len(apiSeen[0]) != 0 {
 				t.Fatalf("made the link request %d times, the first after %q; want once, before anything is sent to the qURL API", len(requests.asked), apiSeen)
 			}
@@ -2115,9 +2208,9 @@ func TestGetWithAnAccountKeyAsksWithTheCRIDAloneFirst(t *testing.T) {
 				t.Fatalf("exit = %d, want %d; stderr: %s", run.result.code, exitcode.NotFound, run.result.stderr.String())
 			}
 			run.mustNotHaveActed(t)
-			if !enrolled || len(requests.asked) != 1 || requests.askedAsDevice() != 0 {
-				t.Errorf("enrolled = %t, made the link request %d times, %d of them as a device; want the machine enrolled and one request with the CRID alone",
-					enrolled, len(requests.asked), requests.askedAsDevice())
+			if !enrolled || len(requests.asked) != 1 || len(requests.keys) != 0 {
+				t.Errorf("enrolled = %t, made the link request %d times, and sent %d request(s) under a device key; want the machine enrolled, one link request, and nothing under a device key",
+					enrolled, len(requests.asked), len(requests.keys))
 			}
 			if got, want := apiRequests(srv), enrollingShare(srv); strings.Join(got, "\n") != strings.Join(want, "\n") {
 				t.Errorf("qURL API requests = %q, want %q", got, want)

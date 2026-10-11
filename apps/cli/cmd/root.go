@@ -101,18 +101,20 @@ type globalOpts struct {
 	requestCRIDLink func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
 	// requestCRIDLinkAsDevice asks the service for a link as this registered
 	// device, through the SDK, and returns the SDK's answer unchanged. The SDK
-	// sends a first request under a random key, and a second one under
-	// deviceStaticPrivateKey only when the first is answered "not found". The
-	// key stays the caller's. Only `qurl get` calls it, after cridLinkOffered
-	// said the request is offered and readDeviceKey gave a key. Tests always
-	// inject (the harness fails a test that reaches it without an answer), so
-	// no hermetic test sends a real request.
-	requestCRIDLinkAsDevice func(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string) (*qurl.CRIDLink, error)
+	// sends a first request under a random key. Only when that one is
+	// answered "not found" does it call deviceKey, once, and send a second
+	// request under the key deviceKey returned. That key is then the SDK's:
+	// the SDK wipes it. Only `qurl get` calls this, after cridLinkOffered said
+	// the request is offered. Tests always inject (the harness fails a test
+	// that reaches it without an answer), so no hermetic test sends a real
+	// request.
+	requestCRIDLinkAsDevice func(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error)
 	// readDeviceKey returns this device's static private key for
 	// requestCRIDLinkAsDevice, or no key and one fixed word for the reason.
 	// It only reads the device state: it creates nothing, changes nothing,
-	// takes no lock and sends nothing. The caller wipes the key after use.
-	// Only `qurl get` calls it, and only where the request is offered. Nil is
+	// takes no lock and sends nothing. Only `qurl get` uses it, and only
+	// where the request is offered. It is not called before the request: the
+	// SDK calls it, through deviceKeyOnDemand, when it needs the key. Nil is
 	// the production reader, which is safe in a hermetic test: it reads a
 	// file in the test's own state directory.
 	readDeviceKey func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey)
