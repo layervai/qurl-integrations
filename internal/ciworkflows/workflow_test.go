@@ -2160,6 +2160,87 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	assertExecutableRepoScript(t, "scripts/check-exact-cli-release-gate.sh")
 }
 
+// TestCLIReleaseChecksTheServedSkillBeforeBuilding pins the release-time
+// guard on the qURL agent skill. The CLI tells a person with an old saved
+// copy to download the served one, so the release must fail while the served
+// one is still too old, and must fail before GoReleaser uploads anything.
+//
+// The step skips when the tagged source has no checker, for recovery of an
+// older tag. That is safe only while the checker is in the tree, so its
+// place is asserted here: moving or deleting it fails this test rather than
+// turning the skip into the path every release takes.
+func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
+	t.Parallel()
+
+	const (
+		checkerDir = "apps/cli/scripts/check-served-skill"
+		stepName   = "Verify the served agent skill is new enough"
+	)
+	if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(checkerDir), "main.go")); err != nil {
+		t.Fatalf("the served-skill checker is not at %s: %v", checkerDir, err)
+	}
+
+	releaseCLI := readWorkflow(t, releasePleaseWorkflow).Jobs["release-cli"]
+	if releaseCLI == nil {
+		t.Fatal("release-please.yml is missing release-cli")
+	}
+	// The step's script names the tag under `set -u`, on the skip path too,
+	// so the tag has to be in the job's environment.
+	if _, ok := releaseCLI.Env["CLI_TAG"]; !ok {
+		t.Error("release-cli does not set CLI_TAG for the served-skill check, which reads it under `set -u`")
+	}
+	source, toolchain, check, build := -1, -1, -1, -1
+	for index := range releaseCLI.Steps {
+		current := &releaseCLI.Steps[index]
+		switch {
+		// Only what stands before the check counts: a later checkout or
+		// toolchain, for another purpose, says nothing about this step.
+		case check < 0 && strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			source = index
+			// The check must read the minimum of the release being built,
+			// not that of whatever branch a checkout defaults to.
+			if ref := current.With["ref"]; ref != "${{ env.CLI_TAG }}" {
+				t.Errorf("the checkout before the served-skill check has ref %v, want the release tag", ref)
+			}
+		case check < 0 && strings.HasPrefix(current.Uses, "actions/setup-go@"):
+			toolchain = index
+		case current.Name == stepName:
+			check = index
+		case strings.HasPrefix(current.Uses, "goreleaser/goreleaser-action@"):
+			build = index
+		}
+	}
+	if check < 0 || build < 0 {
+		t.Fatalf("release-cli steps: served-skill check at %d, GoReleaser at %d; want both", check, build)
+	}
+	// Before the checkout no checker is on disk, and the step would take
+	// its skip on every release.
+	if source < 0 {
+		t.Errorf("no checkout comes before the served-skill check at step %d", check)
+	}
+	// Without the repository's Go the check would fail for a reason that
+	// has nothing to do with the skill, under an error that names the skill.
+	if toolchain < 0 {
+		t.Errorf("no actions/setup-go comes before the served-skill check at step %d", check)
+	}
+	if check > build {
+		t.Error("the served-skill check runs after GoReleaser has uploaded the release's files")
+	}
+	guard := &releaseCLI.Steps[check]
+	if guard.If != "" || guard.ContinueOnError != nil {
+		t.Errorf("the served-skill check is conditional or allowed to fail: if=%q continue-on-error=%v", guard.If, guard.ContinueOnError)
+	}
+	if !strings.Contains(guard.Run, "set -euo pipefail") {
+		t.Error("the served-skill check does not stop at its first failing command")
+	}
+	if !strings.Contains(guard.Run, "go run ./"+checkerDir+" ||") {
+		t.Errorf("the served-skill check does not run ./%s", checkerDir)
+	}
+	if !strings.Contains(guard.Run, "[[ ! -d "+checkerDir+" ]]") {
+		t.Errorf("the served-skill check's skip is not keyed on %s, the directory this test holds in place", checkerDir)
+	}
+}
+
 // TestCLIReleaseDraftAwareStepsExecuteBothStates runs the checked-in shell,
 // not a duplicate implementation. A valid JSON false must remain a successful
 // lookup so an already-public release can take its intended no-op path.
