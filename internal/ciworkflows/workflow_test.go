@@ -2241,6 +2241,83 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	}
 }
 
+// TestCLINightlyChecksTheServedSkillWithoutGating pins the early signal for
+// the release-time guard above: the nightly runs the same checker against
+// the branch it was started on, and a failure reaches people through the
+// main-CI notifier rather than through a check that can hold up a merge or
+// a release.
+func TestCLINightlyChecksTheServedSkillWithoutGating(t *testing.T) {
+	t.Parallel()
+
+	const (
+		nightlyWorkflow = "cli-nightly.yml"
+		checkerDir      = "apps/cli/scripts/check-served-skill"
+		stepName        = "Verify the served agent skill is new enough"
+	)
+	workflow := readWorkflow(t, nightlyWorkflow)
+	triggers := parseWorkflowTriggers(t, nightlyWorkflow, workflow.On)
+	for _, trigger := range []string{"schedule", "workflow_dispatch"} {
+		if _, ok := triggers[trigger]; !ok {
+			t.Errorf("%s has no %s trigger, so the served-skill check loses its nightly or its on-demand run", nightlyWorkflow, trigger)
+		}
+	}
+	// A `required` job would make this package list the nightly among the
+	// workflows that gate a PR. The check is a warning, not a gate.
+	if workflow.Jobs["required"] != nil {
+		t.Errorf("%s has a required job; the served-skill check must not gate", nightlyWorkflow)
+	}
+	// A scheduled failure is seen only if the notifier listens for it.
+	if !strings.Contains(string(readWorkflowBytes(t, "main-ci-notifications.yml")), `- "cli: Nightly"`) {
+		t.Error("main-ci-notifications.yml does not listen for cli: Nightly, so a failed served-skill check tells nobody")
+	}
+
+	job := workflow.Jobs["served-skill"]
+	if job == nil {
+		t.Fatalf("%s is missing the served-skill job", nightlyWorkflow)
+	}
+	if job.If != "" || job.Needs != nil {
+		t.Errorf("served-skill is conditional or waits on another job: if=%q needs=%v", job.If, job.Needs)
+	}
+	source, toolchain, check := -1, -1, -1
+	for index := range job.Steps {
+		current := &job.Steps[index]
+		switch {
+		case check < 0 && strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			source = index
+			// The default ref is main on a schedule and the chosen branch
+			// on a dispatch. A fixed ref would answer for some other tree.
+			if ref, ok := current.With["ref"]; ok {
+				t.Errorf("the checkout before the nightly served-skill check pins ref %v, want the run's own ref", ref)
+			}
+		case check < 0 && strings.HasPrefix(current.Uses, "actions/setup-go@"):
+			toolchain = index
+		case current.Name == stepName:
+			check = index
+		}
+	}
+	if check < 0 {
+		t.Fatalf("served-skill has no step named %q", stepName)
+	}
+	if source < 0 || toolchain < 0 {
+		t.Errorf("served-skill steps before the check: checkout at %d, actions/setup-go at %d; want both", source, toolchain)
+	}
+	guard := &job.Steps[check]
+	if guard.If != "" || guard.ContinueOnError != nil {
+		t.Errorf("the nightly served-skill check is conditional or allowed to fail, so it would go green on an old skill: if=%q continue-on-error=%v", guard.If, guard.ContinueOnError)
+	}
+	if !strings.Contains(guard.Run, "set -euo pipefail") {
+		t.Error("the nightly served-skill check does not stop at its first failing command")
+	}
+	if !strings.Contains(guard.Run, "go run ./"+checkerDir+" ||") {
+		t.Errorf("the nightly served-skill check does not run ./%s", checkerDir)
+	}
+	// The release step's skip is for tags older than the checker. Here it
+	// would turn a moved or deleted checker into a green run.
+	if strings.Contains(guard.Run, "exit 0") {
+		t.Error("the nightly served-skill check can skip itself")
+	}
+}
+
 // TestCLIReleaseDraftAwareStepsExecuteBothStates runs the checked-in shell,
 // not a duplicate implementation. A valid JSON false must remain a successful
 // lookup so an already-public release can take its intended no-op path.
