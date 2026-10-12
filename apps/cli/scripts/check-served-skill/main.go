@@ -36,7 +36,7 @@ const (
 
 	// userAgent names these requests in the server's log, and keeps them
 	// from being turned away as an unnamed program's.
-	userAgent = "qurl-release-check/1"
+	userAgent = "qurl-served-skill-check/1"
 )
 
 // errRefused is an answer that the next attempt would get again.

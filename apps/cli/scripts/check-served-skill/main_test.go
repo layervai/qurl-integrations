@@ -146,7 +146,7 @@ func TestCheckNamesItselfAndAsksForTheFileAsItIsNow(t *testing.T) {
 	if err := check(context.Background(), http.DefaultClient, server.URL, 1, 0); err != nil {
 		t.Fatalf("check = %v, want no error", err)
 	}
-	if got := agent.Load(); got != "qurl-release-check/1" {
+	if got := agent.Load(); got != "qurl-served-skill-check/1" {
 		t.Errorf("User-Agent = %q", got)
 	}
 	if got := cache.Load(); got != "no-cache" {
