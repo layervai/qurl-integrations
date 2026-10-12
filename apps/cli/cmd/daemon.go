@@ -251,15 +251,9 @@ commands then reload this daemon and never install a background job.`,
 			if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
 				return err
 			}
-			expected, err := connectordaemon.JobVersion(opts.version, opts.resolvedShareGroupMode)
+			jobVersion, err := admitDaemonJobVersion(cmd.Context(), opts, jobVersion)
 			if err != nil {
 				return err
-			}
-			if jobVersion != "" && jobVersion != expected {
-				return fmt.Errorf("share daemon job version %q does not match binary %q", jobVersion, expected)
-			}
-			if jobVersion == "" {
-				jobVersion = expected
 			}
 			hubBootstrap, hasHubOverride, err := exactDaemonHubOverride(hubHost, hubPort, hubServerPublicKeyB64)
 			if err != nil {
@@ -311,6 +305,61 @@ commands then reload this daemon and never install a background job.`,
 	}
 	cmd.AddCommand(run, validateTestCRID, daemonRetargetLocalCmd(opts))
 	return cmd
+}
+
+// daemonJobRefusalHold is how long a natively supervised daemon that refuses
+// its job stays alive before it exits. Every native manager restarts a failed
+// job about ten seconds later, so an immediate exit is a restart loop that
+// only another qurl command ends; holding bounds it to one start, and one log
+// line, per hold. The hold is finite so a later binary that accepts the job
+// still gets its turn without a command.
+const daemonJobRefusalHold = time.Hour
+
+var waitDaemonJobRefusal = func(ctx context.Context, hold time.Duration) {
+	timer := time.NewTimer(hold)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
+// admitDaemonJobVersion decides whether this binary may run with the
+// arguments of the job that started it, and returns the job version the daemon
+// reports over IPC.
+//
+// A job from another release with the same argument contract and mode runs:
+// a package upgrade replaces the binary but not the job, and refusing it would
+// keep every desired-on share down until some later command rewrites the job.
+// The daemon keeps reporting the job's own version, so that command's ensure
+// step still sees a stale definition and replaces it.
+//
+// A job for another argument contract or mode is still refused, because its
+// arguments would start the daemon wrongly. Under native supervision the
+// refusal holds before it exits; see daemonJobRefusalHold.
+func admitDaemonJobVersion(ctx context.Context, opts *globalOpts, jobVersion string) (string, error) {
+	match, expected, err := connectordaemon.MatchJobVersion(jobVersion, opts.version, opts.resolvedShareGroupMode)
+	if err != nil {
+		return "", err
+	}
+	if jobVersion == "" {
+		return expected, nil
+	}
+	switch match {
+	case connectordaemon.JobVersionCurrent:
+		return jobVersion, nil
+	case connectordaemon.JobVersionStaleBinary:
+		slog.WarnContext(ctx, "share daemon job was installed by another qURL version; running it until the next qurl command replaces it",
+			"job_version", jobVersion, "binary_job_version", expected)
+		return jobVersion, nil
+	case connectordaemon.JobVersionIncompatible:
+	}
+	if opts.resolvedSupervision == connectorstate.RuntimeSupervisionNative {
+		slog.ErrorContext(ctx, "share daemon job cannot run with this qURL version; the next qurl start, restart or publish replaces it",
+			"job_version", jobVersion, "binary_job_version", expected, "retry_in", daemonJobRefusalHold)
+		waitDaemonJobRefusal(ctx, daemonJobRefusalHold)
+	}
+	return "", fmt.Errorf("share daemon job version %q does not match binary %q", jobVersion, expected)
 }
 
 func requireTestResourceIdentity(cridValue, resourceID string) error {

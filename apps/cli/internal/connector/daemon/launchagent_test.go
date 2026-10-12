@@ -752,3 +752,56 @@ func TestSessionGroupsDocMatchesTheJobProtocolVersion(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchJobVersionDecisionTable pins which started jobs a binary may run.
+// Only a job that differs in the binary-version part runs under another
+// release: a package upgrade replaces the binary and leaves the job behind.
+// The protocol part and the mode part stay refusals, because those decide what
+// the job's arguments mean.
+func TestMatchJobVersionDecisionTable(t *testing.T) {
+	proto := daemonJobProtocolVersion
+	for _, tc := range []struct {
+		name, job, binary string
+		mode              GroupMode
+		want              JobVersionMatch
+	}{
+		{"same job", proto + "/3.4.1", "3.4.1", GroupModeSingle, JobVersionCurrent},
+		{"same job per-share", proto + "/3.4.1/per-share", "3.4.1", GroupModePerShare, JobVersionCurrent},
+		{"older binary wrote the job", proto + "/3.2.0", "3.4.1", GroupModeSingle, JobVersionStaleBinary},
+		{"newer binary wrote the job", proto + "/3.5.0", "3.4.1", GroupModeSingle, JobVersionStaleBinary},
+		{"older binary wrote the per-share job", proto + "/3.2.0/per-share", "3.4.1", GroupModePerShare, JobVersionStaleBinary},
+		{"another protocol", "4/3.4.1", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"another protocol and binary", "4/3.2.0", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"protocol with the same prefix", proto + "0/3.4.1", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"per-share job, single daemon", proto + "/3.4.1/per-share", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"stale per-share job, single daemon", proto + "/3.2.0/per-share", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"single job, per-share daemon", proto + "/3.4.1", "3.4.1", GroupModePerShare, JobVersionIncompatible},
+		{"stale single job, per-share daemon", proto + "/3.2.0", "3.4.1", GroupModePerShare, JobVersionIncompatible},
+		{"unknown trailing part", proto + "/3.2.0/other/per-share", "3.4.1", GroupModePerShare, JobVersionIncompatible},
+		{"no binary version", proto + "/", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"no binary version per-share", proto + "//per-share", "3.4.1", GroupModePerShare, JobVersionIncompatible},
+		{"padded binary version", proto + "/ 3.2.0", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"no protocol", "3.2.0", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"empty", "", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, expected, err := MatchJobVersion(tc.job, tc.binary, tc.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := JobVersion(tc.binary, tc.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want || expected != want {
+				t.Fatalf("MatchJobVersion(%q) = %d, %q; want %d, %q", tc.job, got, expected, tc.want, want)
+			}
+		})
+	}
+	if _, _, err := MatchJobVersion(proto+"/3.4.1", "3.4.1", ""); err == nil {
+		t.Fatal("an unresolved group mode matched a job")
+	}
+	if _, _, err := MatchJobVersion(proto+"/3.4.1", " ", GroupModeSingle); err == nil {
+		t.Fatal("an empty binary version matched a job")
+	}
+}

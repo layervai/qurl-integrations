@@ -321,6 +321,50 @@ func JobVersion(binaryVersion string, mode GroupMode) (string, error) {
 	return version, nil
 }
 
+// JobVersionMatch classifies the job version a service manager started the
+// daemon with against the job version of the binary that is running.
+type JobVersionMatch int
+
+const (
+	// JobVersionIncompatible is a job written for another argument contract or
+	// another session group mode. Its arguments must not run this binary.
+	JobVersionIncompatible JobVersionMatch = iota
+	// JobVersionCurrent is the job this binary would install.
+	JobVersionCurrent
+	// JobVersionStaleBinary is a job another qurl release installed with the
+	// same argument contract and mode. A package manager replaced the binary
+	// under it; its arguments mean the same thing to this binary.
+	JobVersionStaleBinary
+)
+
+// MatchJobVersion compares a started job's version with the one this binary
+// and mode produce, and returns the latter. Only the binary-version part may
+// differ for JobVersionStaleBinary: the protocol part is the argument contract
+// and the mode part selects how the daemon groups sessions, so a difference in
+// either stays a refusal.
+func MatchJobVersion(jobVersion, binaryVersion string, mode GroupMode) (match JobVersionMatch, expected string, err error) {
+	expected, err = JobVersion(binaryVersion, mode)
+	if err != nil {
+		return JobVersionIncompatible, "", err
+	}
+	if jobVersion == expected {
+		return JobVersionCurrent, expected, nil
+	}
+	suffix := ""
+	if mode != DefaultGroupMode {
+		suffix = "/" + string(mode)
+	}
+	installed, ok := strings.CutPrefix(jobVersion, daemonJobProtocolVersion+"/")
+	if ok {
+		installed, ok = strings.CutSuffix(installed, suffix)
+	}
+	// A remaining separator is a mode (or a shape) this binary did not ask for.
+	if !ok || installed == "" || installed != strings.TrimSpace(installed) || strings.Contains(installed, "/") {
+		return JobVersionIncompatible, expected, nil
+	}
+	return JobVersionStaleBinary, expected, nil
+}
+
 // ReloadIfRunning reconciles an existing daemon without starting one.
 func (c *JobController) ReloadIfRunning(ctx context.Context) (bool, error) {
 	return c.IPC.ReloadIfRunning(ctx)
