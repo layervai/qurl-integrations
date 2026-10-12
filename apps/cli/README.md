@@ -1767,3 +1767,28 @@ their expiry and revocation rules.
 A device key is for a recipient who runs the qURL CLI. For people who do not,
 turn on access requests and approve each person by the code they give you:
 see [qurl requests, approve and deny](#qurl-requests-approve-and-deny).
+
+### CRID preview metadata
+
+Each CRID has its own optional description and up to four media items. Description
+is public preview text, separate from private owner notes. Media needs a verified
+publisher. Use the same registered device identity as other publisher commands:
+
+```sh
+qurl preview get "$CRID"
+qurl preview set "$CRID" --description "A guide to our API"
+qurl preview upload "$CRID" ./demo.gif --alt "The API in use"
+qurl preview upload "$CRID" ./new-demo.mp4 --alt "Updated demo" --replace "$MEDIA_ID"
+qurl preview remove "$CRID" "$MEDIA_ID"
+qurl preview clear "$CRID"
+```
+
+`clear` removes description and media and cancels pending uploads. Upload streams
+directly to private storage without the API credential. Processing is asynchronous;
+read `preview get` again to check it. A failed replacement keeps the current item.
+Limits: description 500 characters; still images 10 MB; GIF/video 25 MB and 15
+seconds. GIFs become silent video clips. Viewers load one small still first, with
+video only after Play. Use `-o json` for structured revision, media and job state.
+A revision conflict never retries automatically. The API owns verification and
+all limits. Supervisors may also GET/PATCH `/v1/resources/{id}/preview` and POST
+`/v1/resources/{id}/preview/uploads` through the existing `qurl request` command.

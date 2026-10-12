@@ -371,6 +371,7 @@ const (
 // can emit, for the CLI-wide jargon gate.
 func CustomerMessages() []string {
 	return []string{
+		msgPreviewIncomplete, msgPreviewDescription, msgPreviewMedia, msgPreviewUpload,
 		errorPrefix,
 		msgLinksUnavailable,
 		msgConnectorStopped,
