@@ -215,6 +215,7 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 	assertSandboxListRow(t, binary, cliEnv, stateDir, local, initial.ServingEpoch)
 	assertExternalSandboxRoute(t, binary, cliEnv, cridValue, marker, 2*time.Minute)
 	assertSandboxRemoteURLDeviceJourney(t, binary, cliEnv, stateDir)
+	assertSandboxAnonymousPublicJourney(t, binary, cliEnv, stateDir)
 
 	stopped := externalSandboxLifecycle(t, binary, cliEnv, "stop", cridValue)
 	if err := validateSandboxSharingTransition(stopped, "off", "stopped", initial.ServingEpoch); err != nil {
