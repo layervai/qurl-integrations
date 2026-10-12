@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
@@ -80,6 +81,12 @@ func TestConsumerAccessRevocationDoesNotClaimPendingCleanupComplete(t *testing.T
 func TestConsumerAccessRejectsBadDecisionsBeforeRequest(t *testing.T) {
 	srv := apitest.NewServer(t)
 	for _, args := range [][]string{
+		{"configure", srv.Key.CRID, "--mode", "contract", "--contract", "   ", "--version", "0"},
+		{"approve", srv.Key.CRID, "new", "--version", "0"},
+		{"approve", srv.Key.CRID, "new", "--version", "0", "--credential-kind", "unknown", "--credential-id", "id", "--credential-key", "key"},
+		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--entitlement", "receipt"},
+		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--expires-at", "2027-01-01T00:00:00Z"},
+		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--credential-id", "id"},
 		{"invite", srv.Key.CRID},
 		{"invite", srv.Key.CRID, "--email", "ana@example.com", "--version", "1"},
 		{"approve", srv.Key.CRID, "not-a-listed-id", "--version", "1"},
@@ -93,5 +100,44 @@ func TestConsumerAccessRejectsBadDecisionsBeforeRequest(t *testing.T) {
 	}
 	if len(srv.Requests()) != 0 {
 		t.Fatal("invalid decision reached API")
+	}
+}
+
+func TestConsumerAccessApprovalInputs(t *testing.T) {
+	for _, input := range []consumerAccessInput{
+		{action: consumerApprove, decision: "new", kind: "device", credentialID: "agent-consumer01", key: "public-key"},
+		{action: consumerApprove, decision: strings.Repeat("a", 64), entitlement: "receipt", expiry: "2027-01-01T00:00:00Z"},
+		{action: consumerApprove, decision: strings.Repeat("a", 64)},
+	} {
+		if err := validateConsumerFields(&input); err != nil {
+			t.Fatalf("valid approval rejected: %v", err)
+		}
+		if input.expiry != "" && input.expiresAt == nil {
+			t.Fatal("contract expiry was not parsed")
+		}
+	}
+	for _, input := range []consumerAccessInput{
+		{action: consumerApprove, decision: "new", kind: "device", credentialID: "id", key: "key", entitlement: "receipt", expiry: "2027-01-01T00:00:00Z"},
+		{action: consumerApprove, decision: "new", kind: "device", credentialID: strings.Repeat("a", 172), key: "key"},
+		{action: consumerApprove, decision: "new", kind: "device", credentialID: "id", key: strings.Repeat("a", 257)},
+		{action: consumerApprove, decision: strings.Repeat("a", 64), entitlement: "receipt", expiry: "invalid"},
+	} {
+		if err := validateConsumerFields(&input); err == nil {
+			t.Fatal("invalid approval accepted")
+		}
+	}
+}
+
+func TestPublishConsumerPolicyRejectsInvalidFlags(t *testing.T) {
+	for _, input := range []struct {
+		mode, contract string
+		public         bool
+	}{
+		{"", "receipt", false}, {"review", "", true}, {"contract", "   ", false}, {"contract", strings.Repeat("a", 129), false}, {"review", "   ", false},
+	} {
+		access := &qurlapi.PublishOptions{Public: input.public}
+		if err := setPublishConsumerPolicy(access, input.mode, input.contract); err == nil || access.ConsumerAccess != nil {
+			t.Fatal("invalid publish policy accepted")
+		}
 	}
 }

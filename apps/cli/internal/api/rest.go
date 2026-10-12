@@ -280,8 +280,8 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if err != nil {
 		return nil, err
 	}
-	if !consumerPolicyConfirmed(opts.ConsumerAccess, published.ConsumerAccess, published.FoundExisting) {
-		return nil, fmt.Errorf("%w: API did not confirm the requested private access policy", qurl.ErrInvalidAPIResponse)
+	if err := confirmPublishConsumerPolicy(opts.ConsumerAccess, published); err != nil {
+		return nil, err
 	}
 	// The row must say which privacy the resource has, and it must be the one
 	// asked for. A row that omits it is not read as either: a service that
@@ -1195,13 +1195,18 @@ func validateConsumerPolicy(policy *qurl.ConsumerAccessPolicy) error {
 	if policy.Version != 1 {
 		return qurl.ErrInvalidResourceRequest
 	}
-	switch policy.Mode {
+	return ValidateConsumerPolicyFields(policy.Mode, policy.ContractID)
+}
+
+// ValidateConsumerPolicyFields checks the shared publish and configure inputs.
+func ValidateConsumerPolicyFields(mode, contract string) error {
+	switch mode {
 	case "keys", "invite_only", "email_capture", "review":
-		if policy.ContractID != "" {
+		if contract != "" {
 			return qurl.ErrInvalidResourceRequest
 		}
 	case "contract":
-		if strings.TrimSpace(policy.ContractID) == "" || len(policy.ContractID) > 128 {
+		if strings.TrimSpace(contract) == "" || len(contract) > 128 {
 			return qurl.ErrInvalidResourceRequest
 		}
 	default:
@@ -1226,4 +1231,14 @@ func consumerPolicyConfirmed(requested, received *qurl.ConsumerAccessPolicy, fou
 	}
 	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID &&
 		(received.Version == requested.Version || (foundExisting != nil && *foundExisting && received.Version > requested.Version && received.Version < 1<<53))
+}
+
+func confirmPublishConsumerPolicy(requested *qurl.ConsumerAccessPolicy, published *Published) error {
+	if consumerPolicyConfirmed(requested, published.ConsumerAccess, published.FoundExisting) {
+		return nil
+	}
+	if published.FoundExisting != nil && *published.FoundExisting {
+		return fmt.Errorf("%w: the existing resource has a different private access policy; check `qurl status <CRID>` and use `qurl access configure` to change it", qurl.ErrInvalidAPIResponse)
+	}
+	return fmt.Errorf("%w: API did not confirm the requested private access policy; the resource may exist; check `qurl list` before you retry", qurl.ErrInvalidAPIResponse)
 }

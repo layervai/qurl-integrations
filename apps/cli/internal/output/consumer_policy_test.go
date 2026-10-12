@@ -3,6 +3,7 @@ package output
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -54,5 +55,50 @@ func TestConsumerPolicyReceiptsKeepConfirmedModeVersionAndAddress(t *testing.T) 
 	}
 	if !bytes.Contains(out.Bytes(), []byte(accessAddress)) {
 		t.Fatal("text publish lost consumer address")
+	}
+}
+
+func TestConsumerManagementQuietListsDecisionIDs(t *testing.T) {
+	for _, action := range []string{"list_invitations", "list_grants"} {
+		var out, stderr bytes.Buffer
+		result := &qurlapi.ConsumerManagementResult{Action: action, CRID: accessCRID}
+		if action == "list_invitations" {
+			result.Invitations = []qurl.ConsumerInvitation{{ID: "decision"}}
+		} else {
+			result.Grants = []qurl.ConsumerGrant{{ID: "decision"}}
+		}
+		if err := newTestPrinter(&out, &stderr, FormatText, true, false, false).ConsumerManagement(result); err != nil {
+			t.Fatal(err)
+		}
+		if out.String() != "decision\n" {
+			t.Fatalf("quiet list=%q", out.String())
+		}
+	}
+}
+
+func TestConsumerPolicyTextStatusAndPublish(t *testing.T) {
+	policy := &qurl.ConsumerAccessPolicy{Mode: "email_capture", Version: 3}
+	private := true
+	var out, stderr bytes.Buffer
+	p := newTestPrinter(&out, &stderr, FormatText, false, false, false)
+	if err := p.ResourceStatus(&qurlapi.ResourceSummary{CRID: accessCRID, Private: &private, ConsumerAccess: policy}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "email_capture (version 3)") {
+		t.Fatalf("status=%q", out.String())
+	}
+	out.Reset()
+	if err := p.List(&qurlapi.ResourcePage{Items: []qurlapi.ResourceSummary{{CRID: accessCRID, ConsumerAccess: policy}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "email_capture (version 3)") {
+		t.Fatalf("list=%q", out.String())
+	}
+	out.Reset()
+	if err := p.Publish(&qurlapi.Published{CRID: accessCRID, Private: &private, ConsumerAccess: policy}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), msgPublishPrivate) || !strings.Contains(out.String(), "publisher's access policy") {
+		t.Fatalf("publish=%q", out.String())
 	}
 }

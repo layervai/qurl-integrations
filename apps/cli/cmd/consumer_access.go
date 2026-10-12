@@ -156,7 +156,7 @@ func validateConsumerFields(input *consumerAccessInput) error {
 	if input.action == consumerInvite && input.email == "" {
 		return exitcode.UsageError(errors.New("--email is required"))
 	}
-	if len(input.email) > 320 || len(input.cursor) > 4096 || len(input.contract) > 128 || len(input.entitlement) > 256 {
+	if len(input.email) > 320 || len(input.cursor) > 4096 || len(input.contract) > 128 || len(input.entitlement) > 256 || len(input.credentialID) > 171 || len(input.key) > 256 {
 		return exitcode.UsageError(errors.New("access input is too long"))
 	}
 	if input.expiry != "" {
@@ -166,8 +166,26 @@ func validateConsumerFields(input *consumerAccessInput) error {
 		}
 		input.expiresAt = &parsed
 	}
-	if input.action == consumerConfigure && (!slices.Contains([]string{"keys", "invite_only", "email_capture", "review", consumerContract}, input.mode) || ((input.mode == consumerContract) != (input.contract != ""))) {
+	if input.action == consumerConfigure && qurlapi.ValidateConsumerPolicyFields(input.mode, input.contract) != nil {
 		return exitcode.UsageError(errors.New("choose a valid --mode and a --contract only for contract mode"))
+	}
+	if input.action == consumerApprove {
+		return validateConsumerApproval(input)
+	}
+	return nil
+}
+
+func validateConsumerApproval(input *consumerAccessInput) error {
+	newKey := input.decision == "new"
+	hasCredential := input.kind != "" || input.credentialID != "" || input.key != ""
+	if newKey && (!slices.Contains([]string{"passkey", "device"}, input.kind) || input.credentialID == "" || input.key == "") {
+		return exitcode.UsageError(errors.New("a key opt-in requires --credential-kind passkey or device, --credential-id and --credential-key"))
+	}
+	if !newKey && hasCredential {
+		return exitcode.UsageError(errors.New("credential flags apply only to decision-id new"))
+	}
+	if (input.entitlement != "") != (input.expiry != "") || (newKey && (input.entitlement != "" || input.expiry != "")) {
+		return exitcode.UsageError(errors.New("contract approval requires --entitlement and --expires-at together, without a key opt-in"))
 	}
 	return nil
 }

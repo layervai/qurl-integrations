@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -836,14 +835,8 @@ func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract str
 	if access.Public || access.AllowRequests || len(access.AllowedDeviceKeys) != 0 {
 		return exitcode.UsageError(errors.New("--access cannot be combined with --public, --allow-requests or --allow-device-key"))
 	}
-	if !slices.Contains([]string{"keys", "invite_only", "email_capture", "review", consumerContract}, mode) {
-		return exitcode.UsageError(errors.New("--access must be keys, invite_only, email_capture, review or contract"))
-	}
-	if (mode == consumerContract) != (strings.TrimSpace(contract) != "") {
-		return exitcode.UsageError(errors.New("--contract is required only with --access contract"))
-	}
-	if len(contract) > 128 {
-		return exitcode.UsageError(errors.New("--contract must have at most 128 characters"))
+	if qurlapi.ValidateConsumerPolicyFields(mode, contract) != nil {
+		return exitcode.UsageError(errors.New("--access must be keys, invite_only, email_capture, review or contract; --contract is required only for contract mode and must have at most 128 characters"))
 	}
 	access.ConsumerAccess = &qurl.ConsumerAccessPolicy{Mode: mode, Version: 1, ContractID: contract}
 	return nil

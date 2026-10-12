@@ -353,6 +353,9 @@ func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSu
 	if resource.Private != nil {
 		ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
 	}
+	if resource.ConsumerAccess != nil {
+		ew.printf("%s\t%s (version %d)\n", p.bold("Policy:"), resource.ConsumerAccess.Mode, resource.ConsumerAccess.Version)
+	}
 	if grants && resource.AccessRequests != nil {
 		state := msgStateOff
 		if *resource.AccessRequests {
@@ -406,6 +409,9 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 		access := msgPublishPublic
 		if *res.Private {
 			access = msgPublishPrivate
+			if res.ConsumerAccess != nil {
+				access = "private — consumers must meet the publisher's access policy"
+			}
 		}
 		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
 	}
@@ -632,7 +638,18 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 	ew := &errWriter{w: tw}
 	// Headers stay uncolored: tabwriter counts ANSI escape bytes as cell
 	// width, so styled headers would skew every column under them.
-	ew.printf("CRID\tTARGET\tDESIRED\tOBSERVED\tCREATED\tEXPIRES\tPRIVATE\n")
+	hasPolicy := false
+	for i := range page.Items {
+		if page.Items[i].ConsumerAccess != nil {
+			hasPolicy = true
+			break
+		}
+	}
+	header := "CRID\tTARGET\tDESIRED\tOBSERVED\tCREATED\tEXPIRES\tPRIVATE"
+	if hasPolicy {
+		header += "\tPOLICY"
+	}
+	ew.printf("%s\n", header)
 	for i := range page.Items {
 		item := &page.Items[i]
 		desired, observed := "-", item.Status
@@ -647,13 +664,21 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 		if item.Private != nil {
 			privacy = strconv.FormatBool(*item.Private)
 		}
-		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\t%s",
 			item.CRID,
 			item.TargetURL,
 			desired,
 			observed,
 			p.listCreated(item.CreatedAt),
 			p.listExpires(item.ExpiresAt), privacy)
+		if hasPolicy {
+			policy := "-"
+			if item.ConsumerAccess != nil {
+				policy = fmt.Sprintf("%s (version %d)", item.ConsumerAccess.Mode, item.ConsumerAccess.Version)
+			}
+			ew.printf("\t%s", policy)
+		}
+		ew.printf("\n")
 	}
 	if err := ew.flush(tw); err != nil {
 		return err

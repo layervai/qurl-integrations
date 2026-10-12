@@ -109,3 +109,21 @@ func TestPublishKeepsLaterPolicyOnlyForConfirmedExistingResource(t *testing.T) {
 		})
 	}
 }
+
+func TestUnconfirmedConsumerPolicyExplainsRecovery(t *testing.T) {
+	requested := &qurl.ConsumerAccessPolicy{Mode: "review", Version: 1}
+	for _, existing := range []bool{false, true} {
+		published := &Published{FoundExisting: &existing, ConsumerAccess: &qurl.ConsumerAccessPolicy{Mode: "invite_only", Version: 1}}
+		err := confirmPublishConsumerPolicy(requested, published)
+		if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+			t.Fatalf("error=%v", err)
+		}
+		hint := "qurl list"
+		if existing {
+			hint = "qurl access configure"
+		}
+		if !strings.Contains(err.Error(), hint) {
+			t.Fatalf("missing recovery hint: %v", err)
+		}
+	}
+}

@@ -19,11 +19,9 @@ type ConsumerManagementClient interface {
 	UpdateConsumerAccess(context.Context, string, int64, qurl.ConsumerAccessPolicy) error
 }
 
-type consumerManagement struct{ ConsumerManagementClient }
-
 // ConsumerManagement exposes the scoped owner API with the configured transport.
 func (c *client) ConsumerManagement() ConsumerManagementClient {
-	return consumerManagement{c.sdk}
+	return c.sdk
 }
 
 // ConsumerManagementResult contains owner receipts, never invitation links or codes.
