@@ -2269,9 +2269,11 @@ func TestServedSkillRunsDailyWithoutGating(t *testing.T) {
 	// is held to not using the key: on the job as on the step, it would end
 	// a failing run as a success and the notifier would stay quiet. The same
 	// goes for `defaults`, which could give the step a shell that swallows a
-	// failure without the step saying so. Only a key is matched, so a
-	// comment may still name either.
-	if key := regexp.MustCompile(`(?m)^\s*(continue-on-error|defaults)\s*:`).FindSubmatch(readWorkflowBytes(t, servedSkillWorkflow)); key != nil {
+	// failure without the step saying so. Comment lines are dropped first,
+	// so a comment may name either, and the key is then matched anywhere on
+	// a line, so a `{key: value}` mapping does not get past.
+	uncommented := regexp.MustCompile(`(?m)^\s*#.*$`).ReplaceAll(readWorkflowBytes(t, servedSkillWorkflow), nil)
+	if key := regexp.MustCompile(`\b(continue-on-error|defaults)\s*:`).FindSubmatch(uncommented); key != nil {
 		t.Errorf("%s uses %s, which can let a failing check end green", servedSkillWorkflow, key[1])
 	}
 

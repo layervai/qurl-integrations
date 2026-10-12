@@ -52,12 +52,13 @@ jobs:
           cache: false
 
       # The checker's own output, above the annotation, says which it was:
-      # a skill that is too old, or one it could not read.
+      # a skill that is too old, or one it could not read. The step's cap is
+      # the one meant to stop a hung fetch; the job's covers the setup steps.
       - name: Verify the served agent skill is new enough
         timeout-minutes: 5
         run: |
           set -euo pipefail
           go run ./apps/cli/scripts/check-served-skill || {
-            echo "::error::the served agent skill is older than this tree's CLI needs, or the check could not read it or could not run; see the step log. If it is too old on main, the next CLI release fails on the same check until a newer skill is served." >&2
+            echo "::error::the served agent skill check failed; the step log says why. If the skill is too old on main, the next CLI release fails on the same check." >&2
             exit 1
           }
