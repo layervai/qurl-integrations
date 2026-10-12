@@ -336,7 +336,9 @@ var waitDaemonJobRefusal = func(ctx context.Context, hold time.Duration) {
 //
 // A job for another argument contract or mode is still refused, because its
 // arguments would start the daemon wrongly. Under native supervision the
-// refusal holds before it exits; see daemonJobRefusalHold.
+// refusal holds before it exits; see daemonJobRefusalHold. The hold ends when
+// ctx does: root.go cancels the command context on an interrupt or SIGTERM,
+// which is how a service manager stops the job it is replacing.
 func admitDaemonJobVersion(ctx context.Context, opts *globalOpts, jobVersion string) (string, error) {
 	match, expected, err := connectordaemon.MatchJobVersion(jobVersion, opts.version, opts.resolvedShareGroupMode)
 	if err != nil {

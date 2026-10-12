@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -124,7 +125,7 @@ func TestDaemonRunRejectsAJobVersionForAnotherMode(t *testing.T) {
 	if protocol.code != 1 || !strings.Contains(protocol.stderr.String(), `does not match binary "5/test"`) {
 		t.Fatalf("daemon accepted a job for another protocol: exit %d stderr %q", protocol.code, protocol.stderr.String())
 	}
-	if len(*holds) != 3 || (*holds)[0] != daemonJobRefusalHold || (*holds)[1] != daemonJobRefusalHold || (*holds)[2] != daemonJobRefusalHold {
+	if !slices.Equal(*holds, []time.Duration{daemonJobRefusalHold, daemonJobRefusalHold, daemonJobRefusalHold}) {
 		t.Fatalf("refusal holds = %v, want one %s hold per refused start", *holds, daemonJobRefusalHold)
 	}
 }

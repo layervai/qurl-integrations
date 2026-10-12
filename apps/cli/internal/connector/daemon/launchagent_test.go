@@ -805,3 +805,45 @@ func TestMatchJobVersionDecisionTable(t *testing.T) {
 		t.Fatal("an empty binary version matched a job")
 	}
 }
+
+// TestJobArgumentsAreTiedToTheJobProtocolVersion pins the argument names the
+// job passes for the current protocol version. A binary runs a job another
+// release installed when the protocol matches, so a release that adds, removes
+// or renames an argument without a new protocol version would hand its job to
+// a binary that reads it differently, or that fails on an unknown flag before
+// the refusal hold. Change this list only together with
+// daemonJobProtocolVersion.
+func TestJobArgumentsAreTiedToTheJobProtocolVersion(t *testing.T) {
+	const pinnedProtocol = "5"
+	pinned := []string{
+		"--endpoint", "daemon", "run", "--state-dir", "--runtime-dir", "--job-version", "--share-group-mode",
+		"--hub-host", "--hub-port", "--hub-server-public-key-b64", "--supervision",
+	}
+	dir := t.TempDir()
+	stdout, stderr := filepath.Join(dir, "logs", "share-daemon.log"), filepath.Join(dir, "logs", "share-daemon.err.log")
+	for i, argument := range daemonJobLogArguments(stdout, stderr) {
+		if i%2 == 0 {
+			pinned = append(pinned, argument)
+		}
+	}
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller.InvocationPath = filepath.Join(dir, "bin", "qurl")
+	hub, err := testHubResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := controller.jobDefinition(hub, pinnedProtocol+"/2.4.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, argument := range job.Arguments {
+		if strings.HasPrefix(argument, "--") || argument == "daemon" || argument == "run" {
+			names = append(names, argument)
+		}
+	}
+	if daemonJobProtocolVersion != pinnedProtocol || !slices.Equal(names, pinned) {
+		t.Fatalf("job protocol %q passes %q; protocol %q is pinned to %q: a changed argument list needs a new protocol version, then update this test",
+			daemonJobProtocolVersion, names, pinnedProtocol, pinned)
+	}
+}
