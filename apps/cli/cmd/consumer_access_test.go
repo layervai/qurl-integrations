@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/layervai/qurl-go/qurl"
+
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
@@ -139,5 +141,39 @@ func TestPublishConsumerPolicyRejectsInvalidFlags(t *testing.T) {
 		if err := setPublishConsumerPolicy(access, input.mode, input.contract); err == nil || access.ConsumerAccess != nil {
 			t.Fatal("invalid publish policy accepted")
 		}
+	}
+}
+
+func TestConsumerAccessApprovalRequestBodies(t *testing.T) {
+	for _, key := range []bool{false, true} {
+		t.Run(map[bool]string{false: "contract", true: "key"}[key], func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			id, version := strings.Repeat("a", 64), "1"
+			flags := []string{"--entitlement", "receipt", "--expires-at", "2027-01-01T00:00:00Z"}
+			if key {
+				id, version = "new", "0"
+				flags = []string{"--credential-kind", "device", "--credential-id", "agent-consumer01", "--credential-key", "public-key"}
+			}
+			srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/consumer-grants/"+id+"/approve", func(w http.ResponseWriter, r *http.Request) {
+				var body qurl.ConsumerGrantApproval
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				if key {
+					if body.ExpectedVersion != 0 || body.CredentialKind != "device" || body.CredentialID != "agent-consumer01" || body.CredentialPublicKey != "public-key" || body.EntitlementID != "" || body.ExpiresAt != nil {
+						t.Fatalf("key body=%+v", body)
+					}
+				} else if body.ExpectedVersion != 1 || body.EntitlementID != "receipt" || body.ExpiresAt == nil || body.ExpiresAt.Format("2006-01-02T15:04:05Z07:00") != "2027-01-01T00:00:00Z" || body.CredentialKind != "" || body.CredentialID != "" || body.CredentialPublicKey != "" {
+					t.Fatalf("contract body=%+v", body)
+				}
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"id": strings.Repeat("a", 64), "status": "active", "version": 2}, nil)
+			})
+			args := make([]string, 0, 10+len(flags))
+			args = append(args, "--endpoint", srv.URL, "access", "approve", srv.Key.CRID, id, "--version", version, "-o", "json")
+			result := runCLI(t, &runOpts{args: append(args, flags...)})
+			if result.code != 0 || len(srv.Requests()) != 1 {
+				t.Fatalf("exit=%d error=%s", result.code, result.stderr.String())
+			}
+		})
 	}
 }

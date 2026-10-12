@@ -26,8 +26,8 @@ type publishJSON struct {
 	KeptPublic bool `json:"kept_public,omitempty"`
 	// AccessRequests is present when the service's answer said whether people
 	// can ask for access. ResourceURL is the resource's address on the link
-	// site, present only when access requests are on and this install knows
-	// that site.
+	// site for private access requests or a consumer policy, when this install
+	// knows that site.
 	AccessRequests *bool      `json:"access_requests,omitempty"`
 	ResourceURL    string     `json:"resource_url,omitempty"`
 	CRID           string     `json:"crid,omitempty"`
@@ -471,9 +471,9 @@ func acceptsRequests(res *qurlapi.Published) bool {
 }
 
 // requestAddress is the address a publisher sends to people: the resource's
-// address on the link site, and only for a resource that accepts requests.
+// address on the link site for a private resource with requests or a consumer policy.
 func requestAddress(res *qurlapi.Published) string {
-	if !acceptsRequests(res) && res.ConsumerAccess == nil {
+	if !saidPrivate(res.Private) || (!acceptsRequests(res) && res.ConsumerAccess == nil) {
 		return ""
 	}
 	return res.LinkSiteURL

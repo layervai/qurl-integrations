@@ -164,6 +164,7 @@ func validateConsumerFields(input *consumerAccessInput) error {
 		if err != nil {
 			return exitcode.UsageError(errors.New("--expires-at must be an RFC 3339 time"))
 		}
+		// Exact receipt retries can recover a pending notification after expiry.
 		input.expiresAt = &parsed
 	}
 	if input.action == consumerConfigure && qurlapi.ValidateConsumerPolicyFields(input.mode, input.contract) != nil {
@@ -209,6 +210,7 @@ func executeConsumerAction(ctx context.Context, owner qurlapi.ConsumerManagement
 	case consumerConfigure:
 		policy := qurl.ConsumerAccessPolicy{Mode: input.mode, Version: input.version + 1, ContractID: input.contract}
 		err = owner.UpdateConsumerAccess(ctx, crid, input.version, policy)
+		// The SDK checks the returned CRID, policy and version before success.
 		result.Policy = &policy
 	case consumerListInvitations:
 		var page *qurl.ConsumerPage[qurl.ConsumerInvitation]

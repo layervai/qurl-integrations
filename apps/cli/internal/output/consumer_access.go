@@ -67,13 +67,13 @@ func (p *Printer) ConsumerManagement(result *qurlapi.ConsumerManagementResult) e
 
 // Explicit output fields prevent SDK additions from exposing invitation secrets.
 type consumerInvitationJSON struct {
-	ID             string    `json:"id"`
-	Email          string    `json:"email"`
-	Status         string    `json:"status"`
-	Delivery       string    `json:"delivery"`
-	Version        int64     `json:"version"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	SessionCleanup string    `json:"session_cleanup,omitempty"`
+	ID             string     `json:"id"`
+	Email          string     `json:"email"`
+	Status         string     `json:"status"`
+	Delivery       string     `json:"delivery"`
+	Version        int64      `json:"version"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	SessionCleanup string     `json:"session_cleanup,omitempty"`
 }
 
 type consumerGrantJSON struct {
@@ -94,7 +94,11 @@ func invitationDocument(value *qurl.ConsumerInvitation) *consumerInvitationJSON 
 	if value == nil {
 		return nil
 	}
-	return &consumerInvitationJSON{ID: value.ID, Email: value.Email, Status: value.Status, Delivery: value.Delivery, Version: value.Version, ExpiresAt: value.ExpiresAt, SessionCleanup: value.SessionCleanup}
+	var expiry *time.Time
+	if !value.ExpiresAt.IsZero() {
+		expiry = &value.ExpiresAt
+	}
+	return &consumerInvitationJSON{ID: value.ID, Email: value.Email, Status: value.Status, Delivery: value.Delivery, Version: value.Version, ExpiresAt: expiry, SessionCleanup: value.SessionCleanup}
 }
 
 func grantDocument(value *qurl.ConsumerGrant) *consumerGrantJSON {
@@ -111,15 +115,23 @@ func consumerManagementDocument(result *qurlapi.ConsumerManagementResult) any {
 		Policy      *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
 		Invitation  *consumerInvitationJSON    `json:"invitation,omitempty"`
 		Grant       *consumerGrantJSON         `json:"grant,omitempty"`
-		Invitations []*consumerInvitationJSON  `json:"invitations,omitempty"`
-		Grants      []*consumerGrantJSON       `json:"grants,omitempty"`
+		Invitations *[]*consumerInvitationJSON `json:"invitations,omitempty"`
+		Grants      *[]*consumerGrantJSON      `json:"grants,omitempty"`
 		NextCursor  string                     `json:"next_cursor,omitempty"`
 	}{Action: result.Action, CRID: result.CRID, Policy: result.Policy, Invitation: invitationDocument(result.Invitation), Grant: grantDocument(result.Grant), NextCursor: result.NextCursor}
-	for i := range result.Invitations {
-		out.Invitations = append(out.Invitations, invitationDocument(&result.Invitations[i]))
+	if result.Action == "list_invitations" || len(result.Invitations) > 0 {
+		values := make([]*consumerInvitationJSON, 0, len(result.Invitations))
+		for i := range result.Invitations {
+			values = append(values, invitationDocument(&result.Invitations[i]))
+		}
+		out.Invitations = &values
 	}
-	for i := range result.Grants {
-		out.Grants = append(out.Grants, grantDocument(&result.Grants[i]))
+	if result.Action == "list_grants" || len(result.Grants) > 0 {
+		values := make([]*consumerGrantJSON, 0, len(result.Grants))
+		for i := range result.Grants {
+			values = append(values, grantDocument(&result.Grants[i]))
+		}
+		out.Grants = &values
 	}
 	return out
 }

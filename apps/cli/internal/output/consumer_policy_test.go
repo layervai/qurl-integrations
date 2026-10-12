@@ -102,3 +102,28 @@ func TestConsumerPolicyTextStatusAndPublish(t *testing.T) {
 		t.Fatalf("publish=%q", out.String())
 	}
 }
+
+func TestConsumerManagementJSONEmptyListsAndUnknownExpiry(t *testing.T) {
+	for _, action := range []string{"list_invitations", "list_grants"} {
+		var out, stderr bytes.Buffer
+		if err := newTestPrinter(&out, &stderr, FormatJSON, false, false, false).ConsumerManagement(&qurlapi.ConsumerManagementResult{Action: action, CRID: accessCRID}); err != nil {
+			t.Fatal(err)
+		}
+		var receipt map[string]any
+		if err := json.Unmarshal(out.Bytes(), &receipt); err != nil {
+			t.Fatal(err)
+		}
+		field := strings.TrimPrefix(action, "list_")
+		items, ok := receipt[field].([]any)
+		if !ok || len(items) != 0 {
+			t.Fatalf("empty list=%s", out.String())
+		}
+	}
+	var out, stderr bytes.Buffer
+	if err := newTestPrinter(&out, &stderr, FormatJSON, false, false, false).ConsumerManagement(&qurlapi.ConsumerManagementResult{Action: "revoke_invitation", CRID: accessCRID, Invitation: &qurl.ConsumerInvitation{ID: "decision", Status: "revoked", Version: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "expires_at") || strings.Contains(out.String(), "0001-") {
+		t.Fatalf("invented expiry=%s", out.String())
+	}
+}
