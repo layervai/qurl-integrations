@@ -142,6 +142,12 @@ homebrew_casks:
       - manpages/qurl-account-recover.1
       - manpages/qurl-login.1
       - manpages/qurl-publish.1
+      - manpages/qurl-preview.1
+      - manpages/qurl-preview-get.1
+      - manpages/qurl-preview-set.1
+      - manpages/qurl-preview-upload.1
+      - manpages/qurl-preview-remove.1
+      - manpages/qurl-preview-clear.1
       - manpages/qurl-publisher-clear.1
       - manpages/qurl-publisher-set.1
       - manpages/qurl-publisher.1
