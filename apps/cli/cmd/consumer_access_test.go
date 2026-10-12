@@ -85,6 +85,7 @@ func TestConsumerAccessRejectsBadDecisionsBeforeRequest(t *testing.T) {
 	for _, args := range [][]string{
 		{"configure", srv.Key.CRID, "--mode", "contract", "--contract", "   ", "--version", "0"},
 		{"approve", srv.Key.CRID, "new", "--version", "0"},
+		{"approve", srv.Key.CRID, "new", "--version", "1", "--credential-kind", "device", "--credential-id", "agent-consumer01", "--credential-key", "public-key"},
 		{"approve", srv.Key.CRID, "new", "--version", "0", "--credential-kind", "unknown", "--credential-id", "id", "--credential-key", "key"},
 		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--entitlement", "receipt"},
 		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--expires-at", "2027-01-01T00:00:00Z"},
@@ -188,5 +189,18 @@ func TestConsumerAccessApprovalRequestBodies(t *testing.T) {
 				t.Fatalf("exit=%d error=%s", result.code, result.stderr.String())
 			}
 		})
+	}
+}
+
+func TestPublishRejectsExplicitEmptyContractBeforeRequest(t *testing.T) {
+	srv := apitest.NewServer(t)
+	for _, contract := range []string{"", "   "} {
+		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/report", "--contract=" + contract}})
+		if result.code != 2 || !strings.Contains(result.stderr.String(), "--contract requires") {
+			t.Fatalf("contract=%q exit=%d error=%s", contract, result.code, result.stderr.String())
+		}
+	}
+	if len(srv.Requests()) != 0 {
+		t.Fatal("empty contract reached API")
 	}
 }

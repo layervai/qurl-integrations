@@ -24,14 +24,14 @@ func (c *client) ConsumerManagement() ConsumerManagementClient {
 	return c.sdk
 }
 
-// ConsumerManagementResult contains owner receipts, never invitation links or codes.
+// ConsumerManagementResult is internal; output uses explicit fields to omit secrets.
 type ConsumerManagementResult struct {
-	Action      string                     `json:"action"`
-	CRID        string                     `json:"crid"`
-	Policy      *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
-	Invitation  *qurl.ConsumerInvitation   `json:"invitation,omitempty"`
-	Grant       *qurl.ConsumerGrant        `json:"grant,omitempty"`
-	Invitations []qurl.ConsumerInvitation  `json:"invitations,omitempty"`
-	Grants      []qurl.ConsumerGrant       `json:"grants,omitempty"`
-	NextCursor  string                     `json:"next_cursor,omitempty"`
+	Action      string
+	CRID        string
+	Policy      *qurl.ConsumerAccessPolicy
+	Invitation  *qurl.ConsumerInvitation
+	Grant       *qurl.ConsumerGrant
+	Invitations []qurl.ConsumerInvitation
+	Grants      []qurl.ConsumerGrant
+	NextCursor  string
 }

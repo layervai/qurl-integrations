@@ -127,3 +127,21 @@ func TestConsumerManagementJSONEmptyListsAndUnknownExpiry(t *testing.T) {
 		t.Fatalf("invented expiry=%s", out.String())
 	}
 }
+
+func TestConsumerManagementQuietReceiptAndPaging(t *testing.T) {
+	var out, stderr bytes.Buffer
+	printer := newTestPrinter(&out, &stderr, FormatText, true, false, false)
+	if err := printer.ConsumerManagement(&qurlapi.ConsumerManagementResult{Action: "invite", CRID: accessCRID, Invitation: &qurl.ConsumerInvitation{ID: "invite-id"}}); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "invite-id\n" {
+		t.Fatalf("quiet receipt = %q", out.String())
+	}
+	out.Reset()
+	if err := printer.ConsumerManagement(&qurlapi.ConsumerManagementResult{Action: "list_grants", CRID: accessCRID, NextCursor: "next-page"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "--cursor next-page") {
+		t.Fatal("quiet listing lost the next page")
+	}
+}

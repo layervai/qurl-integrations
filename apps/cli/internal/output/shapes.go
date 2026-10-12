@@ -7,8 +7,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/layervai/qurl-go/qurl"
-
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
 
@@ -17,8 +15,8 @@ import (
 // cannot silently change the CLI's output.
 
 type publishJSON struct {
-	ConsumerAccess *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
-	Private        *bool                      `json:"private,omitempty"`
+	ConsumerAccess *consumerAccessJSON `json:"consumer_access,omitempty"`
+	Private        *bool               `json:"private,omitempty"`
 	// KeptPublic is true, and otherwise absent, when the target was already
 	// published as public and a publish that named no privacy kept it. It
 	// tells that case from --public on an existing resource, which has the
@@ -62,11 +60,11 @@ type shareLinkJSON struct {
 // (the text table deliberately omits them — see List). A sweeper identifying
 // throwaway rows by the label their publisher gave them reads this document.
 type listItemJSON struct {
-	ConsumerAccess    *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
-	AllowedDeviceKeys []string                   `json:"allowed_device_keys"`
-	Private           *bool                      `json:"private,omitempty"`
-	CRID              string                     `json:"crid,omitempty"`
-	ResourceID        string                     `json:"resource_id"`
+	ConsumerAccess    *consumerAccessJSON `json:"consumer_access,omitempty"`
+	AllowedDeviceKeys []string            `json:"allowed_device_keys"`
+	Private           *bool               `json:"private,omitempty"`
+	CRID              string              `json:"crid,omitempty"`
+	ResourceID        string              `json:"resource_id"`
 	// TargetURL is the owner-visible URL for URL resources and the target
 	// from this machine's local registry for tunnel resources when present.
 	TargetURL    string               `json:"target_url,omitempty"`
@@ -145,9 +143,9 @@ type SharingInspection struct {
 }
 
 type resourceStatusJSON struct {
-	ConsumerAccess    *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
-	AllowedDeviceKeys []string                   `json:"allowed_device_keys"`
-	Private           *bool                      `json:"private,omitempty"`
+	ConsumerAccess    *consumerAccessJSON `json:"consumer_access,omitempty"`
+	AllowedDeviceKeys []string            `json:"allowed_device_keys"`
+	Private           *bool               `json:"private,omitempty"`
 	// Description and tags are intentionally absent: status is the compact
 	// lifecycle view, while list is the metadata inventory surface.
 	CRID       string        `json:"crid,omitempty"`
@@ -195,7 +193,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
-			ConsumerAccess: res.ConsumerAccess,
+			ConsumerAccess: policyDocument(res.ConsumerAccess),
 			Private:        res.Private,
 			KeptPublic:     res.KeptPublic,
 			AccessRequests: res.AccessRequests,
@@ -321,7 +319,7 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(resourceStatusJSON{
-			ConsumerAccess:    resource.ConsumerAccess,
+			ConsumerAccess:    policyDocument(resource.ConsumerAccess),
 			AllowedDeviceKeys: append([]string{}, resource.AllowedDeviceKeys...),
 			Private:           resource.Private,
 			CRID:              resource.CRID, ResourceID: resource.ResourceID,
@@ -592,7 +590,7 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 				servingEpoch = &epoch
 			}
 			out.Resources = append(out.Resources, listItemJSON{
-				ConsumerAccess:    item.ConsumerAccess,
+				ConsumerAccess:    policyDocument(item.ConsumerAccess),
 				AllowedDeviceKeys: append([]string{}, item.AllowedDeviceKeys...),
 				CRID:              item.CRID,
 				ResourceID:        item.ResourceID,

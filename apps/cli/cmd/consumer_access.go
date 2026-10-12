@@ -110,8 +110,10 @@ const (
 	consumerVersion          = "version"
 	consumerCursor           = "cursor"
 	consumerContract         = "contract"
+	consumerNewKey           = "new"
 )
 
+// TODO(upstream-contract): Keep decision identifiers and the new sentinel in sync with qurl-service.
 var consumerDecisionID = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type consumerAccessInput struct {
@@ -138,9 +140,12 @@ func validateConsumerDecision(input *consumerAccessInput) error {
 	if needsDecision != (input.decision != "") {
 		return exitcode.UsageError(errors.New("a decision id is required only for decision actions"))
 	}
-	newKey := input.action == consumerApprove && input.decision == "new"
+	newKey := input.action == consumerApprove && input.decision == consumerNewKey
 	if needsDecision && !consumerDecisionID.MatchString(input.decision) && !newKey {
 		return exitcode.UsageError(errors.New("use a decision id from a listing, or new for a key opt-in"))
+	}
+	if newKey && input.version != 0 {
+		return exitcode.UsageError(errors.New("a new key opt-in requires --version 0"))
 	}
 	minimum := int64(1)
 	if newKey || input.action == consumerConfigure {
@@ -156,6 +161,7 @@ func validateConsumerFields(input *consumerAccessInput) error {
 	if input.action == consumerInvite && input.email == "" {
 		return exitcode.UsageError(errors.New("--email is required"))
 	}
+	// TODO(upstream-contract): Keep consumer input bounds in sync with qurl-service.
 	if len(input.email) > 320 || len(input.cursor) > 4096 || len(input.contract) > 128 || len(input.entitlement) > 256 || len(input.credentialID) > 171 || len(input.key) > 256 {
 		return exitcode.UsageError(errors.New("access input is too long"))
 	}
@@ -177,7 +183,7 @@ func validateConsumerFields(input *consumerAccessInput) error {
 }
 
 func validateConsumerApproval(input *consumerAccessInput) error {
-	newKey := input.decision == "new"
+	newKey := input.decision == consumerNewKey
 	hasCredential := input.kind != "" || input.credentialID != "" || input.key != ""
 	if newKey && (!slices.Contains([]string{"passkey", "device"}, input.kind) || input.credentialID == "" || input.key == "") {
 		return exitcode.UsageError(errors.New("a key opt-in requires --credential-kind passkey or device, --credential-id and --credential-key"))

@@ -9,39 +9,75 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
 
+const (
+	consumerActionListGrants      = "list_grants"
+	consumerActionListInvitations = "list_invitations"
+)
+
 // ConsumerManagement renders the decision receipt without claiming pending cleanup succeeded.
 func (p *Printer) ConsumerManagement(result *qurlapi.ConsumerManagementResult) error {
 	if p.format == FormatJSON {
 		return p.writeJSON(consumerManagementDocument(result))
 	}
 	if p.quiet {
-		if result.Action == "list_invitations" || result.Action == "list_grants" {
-			ew := &errWriter{w: p.out}
-			for _, invitation := range result.Invitations {
-				ew.printf("%s\n", invitation.ID)
-			}
-			for i := range result.Grants {
-				ew.printf("%s\n", result.Grants[i].ID)
-			}
-			return ew.flush(nil)
-		}
-		_, err := fmt.Fprintln(p.out, result.CRID)
-		return err
+		return p.consumerManagementQuiet(result)
 	}
+	return p.consumerManagementText(result)
+}
+
+func (p *Printer) consumerManagementQuiet(result *qurlapi.ConsumerManagementResult) error {
+	if result.Action == consumerActionListInvitations || result.Action == consumerActionListGrants {
+		ew := &errWriter{w: p.out}
+		for _, invitation := range result.Invitations {
+			ew.printf("%s\n", invitation.ID)
+		}
+		for i := range result.Grants {
+			ew.printf("%s\n", result.Grants[i].ID)
+		}
+		if result.NextCursor != "" {
+			p.notefMore(result.NextCursor)
+		}
+		return ew.flush(nil)
+	}
+	id := result.CRID
+	if result.Invitation != nil {
+		id = result.Invitation.ID
+	} else if result.Grant != nil {
+		id = result.Grant.ID
+	}
+	_, err := fmt.Fprintln(p.out, id)
+	return err
+}
+
+func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResult) error {
 	if _, err := fmt.Fprintf(p.out, "Resource: %s\nAction: %s\n", result.CRID, result.Action); err != nil {
 		return err
 	}
 	if result.Policy != nil {
-		_, err := fmt.Fprintf(p.out, "Access: private (%s)\nVersion: %d\n", result.Policy.Mode, result.Policy.Version)
+		policy := result.Policy.Mode
+		if result.Policy.ContractID != "" {
+			policy += " " + result.Policy.ContractID
+		}
+		_, err := fmt.Fprintf(p.out, "Access: private (%s)\nVersion: %d\n", policy, result.Policy.Version)
 		return err
 	}
 	if result.Invitation != nil {
-		_, err := fmt.Fprintf(p.out, "Invitation: %s\nEmail: %q\nStatus: %s\nVersion: %d\nDelivery: %s\nConnection cleanup: %s\n", result.Invitation.ID, result.Invitation.Email, result.Invitation.Status, result.Invitation.Version, result.Invitation.Delivery, result.Invitation.SessionCleanup)
-		return err
+		value := result.Invitation
+		ew := &errWriter{w: p.out}
+		ew.printf("Invitation: %s\nEmail: %q\nStatus: %s\nVersion: %d\nDelivery: %s\n", value.ID, value.Email, value.Status, value.Version, value.Delivery)
+		if value.SessionCleanup != "" {
+			ew.printf("Connection cleanup: %s\n", value.SessionCleanup)
+		}
+		return ew.flush(nil)
 	}
 	if result.Grant != nil {
-		_, err := fmt.Fprintf(p.out, "Consumer: %s\nStatus: %s\nVersion: %d\nConnection cleanup: %s\n", result.Grant.ID, result.Grant.Status, result.Grant.Version, result.Grant.SessionCleanup)
-		return err
+		value := result.Grant
+		ew := &errWriter{w: p.out}
+		ew.printf("Consumer: %s\nStatus: %s\nVersion: %d\n", value.ID, value.Status, value.Version)
+		if value.SessionCleanup != "" {
+			ew.printf("Connection cleanup: %s\n", value.SessionCleanup)
+		}
+		return ew.flush(nil)
 	}
 	for _, invitation := range result.Invitations {
 		if _, err := fmt.Fprintf(p.out, "%s  %s  version %d  %q\n", invitation.ID, invitation.Status, invitation.Version, invitation.Email); err != nil {
@@ -59,7 +95,14 @@ func (p *Printer) ConsumerManagement(result *qurlapi.ConsumerManagementResult) e
 		}
 	}
 	if result.NextCursor != "" {
-		_, err := fmt.Fprintf(p.out, "Next page: %q\n", result.NextCursor)
+		p.notefMore(result.NextCursor)
+	}
+	if result.Action == consumerActionListInvitations && len(result.Invitations) == 0 {
+		_, err := fmt.Fprintln(p.out, "No invitations.")
+		return err
+	}
+	if result.Action == consumerActionListGrants && len(result.Grants) == 0 {
+		_, err := fmt.Fprintln(p.out, "No grants.")
 		return err
 	}
 	return nil
@@ -112,21 +155,21 @@ func consumerManagementDocument(result *qurlapi.ConsumerManagementResult) any {
 	out := struct {
 		Action      string                     `json:"action"`
 		CRID        string                     `json:"crid"`
-		Policy      *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+		Policy      *consumerAccessJSON        `json:"consumer_access,omitempty"`
 		Invitation  *consumerInvitationJSON    `json:"invitation,omitempty"`
 		Grant       *consumerGrantJSON         `json:"grant,omitempty"`
 		Invitations *[]*consumerInvitationJSON `json:"invitations,omitempty"`
 		Grants      *[]*consumerGrantJSON      `json:"grants,omitempty"`
 		NextCursor  string                     `json:"next_cursor,omitempty"`
-	}{Action: result.Action, CRID: result.CRID, Policy: result.Policy, Invitation: invitationDocument(result.Invitation), Grant: grantDocument(result.Grant), NextCursor: result.NextCursor}
-	if result.Action == "list_invitations" || len(result.Invitations) > 0 {
+	}{Action: result.Action, CRID: result.CRID, Policy: policyDocument(result.Policy), Invitation: invitationDocument(result.Invitation), Grant: grantDocument(result.Grant), NextCursor: result.NextCursor}
+	if result.Action == consumerActionListInvitations || len(result.Invitations) > 0 {
 		values := make([]*consumerInvitationJSON, 0, len(result.Invitations))
 		for i := range result.Invitations {
 			values = append(values, invitationDocument(&result.Invitations[i]))
 		}
 		out.Invitations = &values
 	}
-	if result.Action == "list_grants" || len(result.Grants) > 0 {
+	if result.Action == consumerActionListGrants || len(result.Grants) > 0 {
 		values := make([]*consumerGrantJSON, 0, len(result.Grants))
 		for i := range result.Grants {
 			values = append(values, grantDocument(&result.Grants[i]))
@@ -134,4 +177,17 @@ func consumerManagementDocument(result *qurlapi.ConsumerManagementResult) any {
 		out.Grants = &values
 	}
 	return out
+}
+
+type consumerAccessJSON struct {
+	Mode       string `json:"mode"`
+	Version    int64  `json:"version"`
+	ContractID string `json:"contract_id,omitempty"`
+}
+
+func policyDocument(policy *qurl.ConsumerAccessPolicy) *consumerAccessJSON {
+	if policy == nil {
+		return nil
+	}
+	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID}
 }

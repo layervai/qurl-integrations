@@ -407,6 +407,7 @@ func TestGrantsNeverReadsAMissingListAsNobody(t *testing.T) {
 			} else {
 				mustEmptyStdout(t, res)
 			}
+			// An opaque CRID can contain a forbidden status word by chance.
 			statusText := strings.ReplaceAll(res.stdout.String()+res.stderr.String(), srv.Key.CRID, "")
 			for _, never := range []string{"This service does not show", "Nothing more can be learned", "Approved people", "none"} {
 				if strings.Contains(statusText, never) {

@@ -206,7 +206,7 @@ type envelopeMeta struct {
 	FoundExisting *bool  `json:"found_existing"`
 }
 
-// TODO(upstream-contract): privacy and tunnel find-or-create fields mirror
+// TODO(upstream-contract): consumer_access, privacy, and tunnel find-or-create fields mirror
 // the service's create-resource request; privacy is immutable after creation.
 type publishRequest struct {
 	ConsumerAccess *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
@@ -1199,6 +1199,7 @@ func validateConsumerPolicy(policy *qurl.ConsumerAccessPolicy) error {
 }
 
 // ValidateConsumerPolicyFields checks the shared publish and configure inputs.
+// TODO(upstream-contract): Keep modes and contract limits in sync with qurl-service.
 func ValidateConsumerPolicyFields(mode, contract string) error {
 	switch mode {
 	case "keys", "invite_only", "email_capture", "review":

@@ -102,9 +102,6 @@ owns the share and turns it off when it exits.`,
   qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Flags().Changed("access") && strings.TrimSpace(consumerMode) == "" {
-				return exitcode.UsageError(errors.New("--access requires a private access mode"))
-			}
 			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
 				return exitcode.UsageError(err)
 			}
@@ -210,6 +207,11 @@ func publishAccessFlags(cmd *cobra.Command) []string {
 // public resource, and a private one must never be the silent answer to that,
 // nor a public one to anything but --public.
 func validatePublishAccessFlags(cmd *cobra.Command, public, private, allowRequests bool, allowedDeviceKeys []string) error {
+	for _, name := range []string{"access", "contract"} {
+		if cmd.Flags().Changed(name) && strings.TrimSpace(cmd.Flags().Lookup(name).Value.String()) == "" {
+			return fmt.Errorf("--%s requires a non-empty value", name)
+		}
+	}
 	if cmd.Flags().Changed("private") {
 		if public {
 			return errors.New(msgPublicAndPrivate)
