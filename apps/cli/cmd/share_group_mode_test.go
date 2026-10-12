@@ -149,6 +149,30 @@ func TestDaemonRunHoldsAJobItCannotParse(t *testing.T) {
 	}
 }
 
+// TestDaemonJobLogPathsAreReadFromUnparsedArguments pins that the job's log
+// paths are found wherever they sit: flag parsing stops at the first argument
+// it cannot read, and the job passes its log paths after everything else.
+func TestDaemonJobLogPathsAreReadFromUnparsedArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		arguments      []string
+		stdout, stderr string
+	}{
+		{"none", []string{"daemon", "run", "--job-version", "6/later"}, "", ""},
+		{"after an unknown flag", []string{"daemon", "run", "--later", "v", "--job-stdout-log", "out", "--job-stderr-log", "err"}, "out", "err"},
+		{"equals form", []string{"--job-stdout-log=out", "--job-stderr-log=err"}, "out", "err"},
+		{"one only", []string{"--job-stderr-log", "err"}, "", "err"},
+		{"name without a value", []string{"--job-stdout-log"}, "", ""},
+		{"after the terminator", []string{"--", "--job-stdout-log", "out"}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if stdout, stderr := daemonJobLogPaths(tc.arguments); stdout != tc.stdout || stderr != tc.stderr {
+				t.Fatalf("daemonJobLogPaths = %q, %q; want %q, %q", stdout, stderr, tc.stdout, tc.stderr)
+			}
+		})
+	}
+}
+
 // TestDaemonRunAcceptsAJobFromAnotherBinaryVersion covers a package upgrade:
 // the binary is replaced and the job that starts it still carries the earlier
 // version. The daemon must get past the job check instead of exiting, and it

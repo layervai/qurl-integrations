@@ -290,7 +290,7 @@ commands then reload this daemon and never install a background job.`,
 	run.Flags().IntVar(&hubPort, "hub-port", 0, "pinned share-daemon Hub port")
 	run.Flags().StringVar(&hubServerPublicKeyB64, "hub-server-public-key-b64", "", "pinned share-daemon Hub server public key")
 	run.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
-		holdDaemonJobFlagError(cmd, err)
+		holdDaemonJobFlagError(cmd, opts, err)
 		return exitcode.UsageError(err)
 	})
 	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log", "runtime-dir"} {
@@ -328,6 +328,29 @@ var waitDaemonJobRefusal = func(ctx context.Context, hold time.Duration) {
 	}
 }
 
+// daemonJobArguments returns the process arguments. Flag parsing stops at the
+// first argument it cannot read, so the job's log paths, which the job passes
+// last, are read from here when parsing fails.
+var daemonJobArguments = func() []string { return os.Args[1:] }
+
+// daemonJobLogPaths finds the job's log paths in unparsed arguments. It reads
+// both spellings pflag accepts and stops at the argument terminator.
+func daemonJobLogPaths(arguments []string) (stdoutPath, stderrPath string) {
+	for index, argument := range arguments {
+		if argument == "--" {
+			break
+		}
+		for name, path := range map[string]*string{"--job-stdout-log": &stdoutPath, "--job-stderr-log": &stderrPath} {
+			if value, ok := strings.CutPrefix(argument, name+"="); ok {
+				*path = value
+			} else if argument == name && index+1 < len(arguments) {
+				*path = arguments[index+1]
+			}
+		}
+	}
+	return stdoutPath, stderrPath
+}
+
 // holdDaemonJobFlagError applies the refusal hold to a job whose arguments
 // this binary cannot parse: a job from a release with a later argument
 // contract, started after a downgrade. Flag parsing fails before the job
@@ -335,11 +358,20 @@ var waitDaemonJobRefusal = func(ctx context.Context, hold time.Duration) {
 // every ten seconds too. Only a service-manager job passes --job-version, so a
 // mistyped flag on a hand-run daemon still fails at once. Supervision is not
 // resolved this early; the job always pins native.
-func holdDaemonJobFlagError(cmd *cobra.Command, flagErr error) {
+//
+// The failure also comes before root.go attaches the job's own log files,
+// which is the only durable output a Windows job has. Attach them here first,
+// or the refusal and the hour it holds would leave no trace there.
+func holdDaemonJobFlagError(cmd *cobra.Command, opts *globalOpts, flagErr error) {
 	if !cmd.Flags().Changed("job-version") {
 		return
 	}
 	ctx := cmd.Context()
+	if stdoutPath, stderrPath := daemonJobLogPaths(daemonJobArguments()); stdoutPath != "" || stderrPath != "" {
+		if err := redirectDaemonJobOutput(stdoutPath, stderrPath, opts.streams); err != nil {
+			slog.WarnContext(ctx, "share daemon job log files could not be attached", "error", err.Error())
+		}
+	}
 	slog.ErrorContext(ctx, "share daemon job passes arguments this qURL version cannot read; the next qurl start, restart or publish replaces it",
 		"error", flagErr.Error(), "retry_in", daemonJobRefusalHold)
 	waitDaemonJobRefusal(ctx, daemonJobRefusalHold)
