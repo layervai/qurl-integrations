@@ -24,6 +24,8 @@ import (
 
 func publishCmd(opts *globalOpts) *cobra.Command {
 	var (
+		consumerMode      string
+		contractID        string
 		description       string
 		tags              []string
 		alias             string
@@ -110,6 +112,10 @@ owns the share and turns it off when it exits.`,
 				Public: public, AllowedDeviceKeys: allowedDeviceKeys, AllowRequests: allowRequests,
 				KeepExistingPublic: len(named) == 0, NamedAccessFlags: named,
 			}
+			if err := setPublishConsumerPolicy(&access, consumerMode, contractID); err != nil {
+				return err
+			}
+
 			target, err := classifyPublishTarget(args[0])
 			if err != nil {
 				return err
@@ -148,6 +154,8 @@ owns the share and turns it off when it exits.`,
 		},
 	}
 
+	cmd.Flags().StringVar(&consumerMode, "access", "", "private access mode: keys, invite_only, email_capture, review or contract")
+	cmd.Flags().StringVar(&contractID, "contract", "", "publisher contract identifier for contract access")
 	cmd.Flags().BoolVar(&public, "public", false, "let anyone who has the CRID open the resource (default: private, only you and the devices you allow)")
 	// --private was how a private resource was published while public was the
 	// default. Private is the default now, so the flag changes nothing. It is
@@ -178,7 +186,7 @@ owns the share and turns it off when it exits.`,
 // resource.
 func publishAccessFlags(cmd *cobra.Command) []string {
 	var named []string
-	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests"} {
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", "access", "contract"} {
 		flag := cmd.Flags().Lookup(name)
 		if flag == nil || !flag.Changed {
 			continue
@@ -199,6 +207,11 @@ func publishAccessFlags(cmd *cobra.Command) []string {
 // public resource, and a private one must never be the silent answer to that,
 // nor a public one to anything but --public.
 func validatePublishAccessFlags(cmd *cobra.Command, public, private, allowRequests bool, allowedDeviceKeys []string) error {
+	for _, name := range []string{"access", "contract"} {
+		if cmd.Flags().Changed(name) && strings.TrimSpace(cmd.Flags().Lookup(name).Value.String()) == "" {
+			return fmt.Errorf("--%s requires a non-empty value", name)
+		}
+	}
 	if cmd.Flags().Changed("private") {
 		if public {
 			return errors.New(msgPublicAndPrivate)
@@ -508,6 +521,7 @@ func prepareLocalPublishResource(
 	if resolved == nil || resolved.Resource == nil || precreated.CRID != resolved.Resource.CRID || precreated.ResourceID != resolved.Resource.ResourcePublicKey {
 		return nil, "", fmt.Errorf("%w: the resource created for this app does not match the Connector resource; check your published resources with `qurl list` before retrying", qurl.ErrInvalidAPIResponse)
 	}
+	resolved.ConsumerAccess = precreated.ConsumerAccess
 	resolved.Private = precreated.Private
 	resolved.AccessRequests = precreated.AccessRequests
 	resolved.AccessRequestsTurnedOn = precreated.AccessRequestsTurnedOn
@@ -740,7 +754,7 @@ func withoutExpectedDaemonCancellation(err error) error {
 func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource, local *connectorstate.LocalShare, sharing *qurlapi.Sharing) error {
 	published := &qurlapi.Published{
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
-		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private,
+		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private, ConsumerAccess: resolved.ConsumerAccess,
 		AccessRequests: resolved.AccessRequests, AccessRequestsTurnedOn: resolved.AccessRequestsTurnedOn,
 		KeptPublic: resolved.KeptPublic, LinkSiteURL: opts.resourceAddress(local.CRID),
 	}
@@ -813,5 +827,22 @@ func validateDeviceKeys(flag string, keys []string) error {
 		}
 		seen[key] = true
 	}
+	return nil
+}
+
+func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract string) error {
+	if mode == "" {
+		if contract != "" {
+			return exitcode.UsageError(errors.New("--contract requires --access contract"))
+		}
+		return nil
+	}
+	if access.Public || access.AllowRequests || len(access.AllowedDeviceKeys) != 0 {
+		return exitcode.UsageError(errors.New("--access cannot be combined with --public, --allow-requests or --allow-device-key"))
+	}
+	if qurlapi.ValidateConsumerPolicyFields(mode, contract) != nil {
+		return exitcode.UsageError(errors.New("--access must be keys, invite_only, email_capture, review or contract; --contract is required only for contract mode and must have at most 128 characters"))
+	}
+	access.ConsumerAccess = &qurl.ConsumerAccessPolicy{Mode: mode, Version: 1, ContractID: contract}
 	return nil
 }

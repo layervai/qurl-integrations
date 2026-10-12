@@ -30,19 +30,20 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
-	AllowedDeviceKeys []string     `json:"allowed_device_keys"`
-	Private           *bool        `json:"private"`
-	ResourceID        string       `json:"resource_id"`
-	CRID              string       `json:"crid"`
-	TargetURL         string       `json:"target_url"`
-	Type              string       `json:"type"`
-	Status            string       `json:"status"`
-	DesiredState      DesiredState `json:"desired_state"`
-	ServingEpoch      uint64       `json:"serving_epoch"`
-	Description       string       `json:"description"`
-	Tags              []string     `json:"tags"`
-	CreatedAt         *time.Time   `json:"created_at"`
-	ExpiresAt         *time.Time   `json:"expires_at"`
+	ConsumerAccess    *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	AllowedDeviceKeys []string                   `json:"allowed_device_keys"`
+	Private           *bool                      `json:"private"`
+	ResourceID        string                     `json:"resource_id"`
+	CRID              string                     `json:"crid"`
+	TargetURL         string                     `json:"target_url"`
+	Type              string                     `json:"type"`
+	Status            string                     `json:"status"`
+	DesiredState      DesiredState               `json:"desired_state"`
+	ServingEpoch      uint64                     `json:"serving_epoch"`
+	Description       string                     `json:"description"`
+	Tags              []string                   `json:"tags"`
+	CreatedAt         *time.Time                 `json:"created_at"`
+	ExpiresAt         *time.Time                 `json:"expires_at"`
 	// AccessRequests is nil when the row has no such member, which is how a
 	// service from before access requests answers. AllowedPasskeys are the
 	// people the publisher approved. The service sends the member on every
@@ -205,9 +206,10 @@ type envelopeMeta struct {
 	FoundExisting *bool  `json:"found_existing"`
 }
 
-// TODO(upstream-contract): privacy and tunnel find-or-create fields mirror
+// TODO(upstream-contract): consumer_access, privacy, and tunnel find-or-create fields mirror
 // the service's create-resource request; privacy is immutable after creation.
 type publishRequest struct {
+	ConsumerAccess *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
 	// Private is stated in every create request but one. What an absent
 	// field means for a new resource is the service's choice and has changed:
 	// a newer service reads it as private, an older one as public. The one
@@ -238,8 +240,13 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 			return nil, err
 		}
 	}
+	if err := validatePublishConsumerPolicy(&opts); err != nil {
+		return nil, err
+	}
+
 	wantPrivate := !opts.Public
 	body := publishRequest{
+		ConsumerAccess:    opts.ConsumerAccess,
 		Private:           &wantPrivate,
 		AllowedDeviceKeys: opts.AllowedDeviceKeys,
 		AccessRequests:    opts.AllowRequests,
@@ -271,6 +278,9 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	}
 	published, allowedDeviceKeys, err := publishedFromReply(reply)
 	if err != nil {
+		return nil, err
+	}
+	if err := confirmPublishConsumerPolicy(opts.ConsumerAccess, published); err != nil {
 		return nil, err
 	}
 	// The row must say which privacy the resource has, and it must be the one
@@ -340,6 +350,7 @@ func publishedFromReply(reply *restReply) (*Published, []string, error) {
 		return nil, nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
 	}
 	return &Published{
+		ConsumerAccess: env.Data.ConsumerAccess,
 		AccessRequests: env.Data.AccessRequests,
 		Private:        env.Data.Private,
 		CRID:           env.Data.CRID,
@@ -360,7 +371,7 @@ func publishedFromReply(reply *restReply) (*Published, []string, error) {
 // a device list or asks for access requests named a private resource, so it
 // never keeps a public one, whatever the caller set.
 func mayKeepExistingPublic(opts *PublishOptions, refusal error) bool {
-	if !opts.KeepExistingPublic || opts.Public || len(opts.AllowedDeviceKeys) > 0 || opts.AllowRequests {
+	if !opts.KeepExistingPublic || opts.ConsumerAccess != nil || opts.Public || len(opts.AllowedDeviceKeys) > 0 || opts.AllowRequests {
 		return false
 	}
 	var conflict *PublishAccessConflictError
@@ -703,7 +714,7 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		return nil, err
 	}
 	return &ResourceSummary{
-		AccessRequests:    row.AccessRequests,
+		ConsumerAccess: row.ConsumerAccess, AccessRequests: row.AccessRequests,
 		AllowedPasskeys:   people,
 		AllowedDeviceKeys: row.AllowedDeviceKeys,
 		Private:           row.Private,
@@ -1178,4 +1189,57 @@ func (c *client) EditDeviceGrants(ctx context.Context, id string, add, remove []
 		}
 	}
 	return summarizeResourceRow(&env.Data, "device grants")
+}
+
+func validateConsumerPolicy(policy *qurl.ConsumerAccessPolicy) error {
+	if policy.Version != 1 {
+		return qurl.ErrInvalidResourceRequest
+	}
+	return ValidateConsumerPolicyFields(policy.Mode, policy.ContractID)
+}
+
+// ValidateConsumerPolicyFields checks the shared publish and configure inputs.
+// TODO(upstream-contract): Keep modes and contract limits in sync with qurl-service.
+func ValidateConsumerPolicyFields(mode, contract string) error {
+	switch mode {
+	case "keys", "invite_only", "email_capture", "review":
+		if contract != "" {
+			return qurl.ErrInvalidResourceRequest
+		}
+	case "contract":
+		if strings.TrimSpace(contract) == "" || strings.TrimSpace(contract) != contract || len(contract) > 128 {
+			return qurl.ErrInvalidResourceRequest
+		}
+	default:
+		return qurl.ErrInvalidResourceRequest
+	}
+	return nil
+}
+
+func validatePublishConsumerPolicy(opts *PublishOptions) error {
+	if opts.ConsumerAccess == nil {
+		return nil
+	}
+	if opts.Public || opts.AllowRequests || len(opts.AllowedDeviceKeys) != 0 || validateConsumerPolicy(opts.ConsumerAccess) != nil {
+		return fmt.Errorf("%w: invalid private access policy", qurl.ErrInvalidResourceRequest)
+	}
+	return nil
+}
+
+func consumerPolicyConfirmed(requested, received *qurl.ConsumerAccessPolicy, foundExisting *bool) bool {
+	if requested == nil {
+		return true
+	}
+	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID &&
+		(received.Version == requested.Version || (foundExisting != nil && *foundExisting && received.Version > requested.Version && received.Version < 1<<53))
+}
+
+func confirmPublishConsumerPolicy(requested *qurl.ConsumerAccessPolicy, published *Published) error {
+	if consumerPolicyConfirmed(requested, published.ConsumerAccess, published.FoundExisting) {
+		return nil
+	}
+	if published.FoundExisting != nil && *published.FoundExisting {
+		return fmt.Errorf("%w: the existing resource has a different private access policy; check `qurl status <CRID>` and use `qurl access configure` to change it", ErrPublishAccessConflict)
+	}
+	return fmt.Errorf("%w: API did not confirm the requested private access policy; the resource may exist; check `qurl list` before you retry", qurl.ErrInvalidAPIResponse)
 }
