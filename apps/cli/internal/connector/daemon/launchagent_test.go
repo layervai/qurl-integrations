@@ -811,8 +811,10 @@ func TestMatchJobVersionDecisionTable(t *testing.T) {
 // release installed when the protocol matches, so a release that adds, removes
 // or renames an argument without a new protocol version would hand its job to
 // a binary that reads it differently, or that fails on an unknown flag before
-// the refusal hold. Change this list only together with
-// daemonJobProtocolVersion.
+// its job version is read. The order is pinned too: --job-version comes
+// before anything a later protocol may add. Change this list only together
+// with daemonJobProtocolVersion. The test sees names only; a changed meaning
+// of an argument's value needs a new protocol version just the same.
 func TestJobArgumentsAreTiedToTheJobProtocolVersion(t *testing.T) {
 	const pinnedProtocol = "5"
 	pinned := []string{
@@ -820,11 +822,8 @@ func TestJobArgumentsAreTiedToTheJobProtocolVersion(t *testing.T) {
 		"--hub-host", "--hub-port", "--hub-server-public-key-b64", "--supervision",
 	}
 	dir := t.TempDir()
-	stdout, stderr := filepath.Join(dir, "logs", "share-daemon.log"), filepath.Join(dir, "logs", "share-daemon.err.log")
-	for i, argument := range daemonJobLogArguments(stdout, stderr) {
-		if i%2 == 0 {
-			pinned = append(pinned, argument)
-		}
+	if len(daemonJobLogArguments("out", "err")) != 0 {
+		pinned = append(pinned, "--job-stdout-log", "--job-stderr-log")
 	}
 	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.InvocationPath = filepath.Join(dir, "bin", "qurl")

@@ -130,6 +130,25 @@ func TestDaemonRunRejectsAJobVersionForAnotherMode(t *testing.T) {
 	}
 }
 
+// TestDaemonRunHoldsAJobItCannotParse covers a downgrade across an argument
+// change: flag parsing fails before the job version is compared, and that
+// start must hold like any other refused job. A hand-run daemon with a
+// mistyped flag passes no job version and fails at once.
+func TestDaemonRunHoldsAJobItCannotParse(t *testing.T) {
+	holds := stubDaemonJobRefusalHold(t)
+	job := runCLI(t, &runOpts{args: []string{"daemon", "run", "--job-version", "6/later", "--added-by-a-later-release", "value"}})
+	if job.code != 2 || !strings.Contains(job.stderr.String(), "unknown flag: --added-by-a-later-release") {
+		t.Fatalf("unparsable job = exit %d stderr %q, want a usage error", job.code, job.stderr.String())
+	}
+	if !slices.Equal(*holds, []time.Duration{daemonJobRefusalHold}) {
+		t.Fatalf("unparsable job holds = %v, want one %s hold", *holds, daemonJobRefusalHold)
+	}
+	hand := runCLI(t, &runOpts{args: []string{"daemon", "run", "--not-a-flag"}})
+	if hand.code != 2 || len(*holds) != 1 {
+		t.Fatalf("hand-run flag typo = exit %d holds %v, want an immediate usage error", hand.code, *holds)
+	}
+}
+
 // TestDaemonRunAcceptsAJobFromAnotherBinaryVersion covers a package upgrade:
 // the binary is replaced and the job that starts it still carries the earlier
 // version. The daemon must get past the job check instead of exiting, and it

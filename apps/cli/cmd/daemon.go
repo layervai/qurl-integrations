@@ -289,6 +289,10 @@ commands then reload this daemon and never install a background job.`,
 	run.Flags().StringVar(&hubHost, "hub-host", "", "pinned share-daemon Hub host")
 	run.Flags().IntVar(&hubPort, "hub-port", 0, "pinned share-daemon Hub port")
 	run.Flags().StringVar(&hubServerPublicKeyB64, "hub-server-public-key-b64", "", "pinned share-daemon Hub server public key")
+	run.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		holdDaemonJobFlagError(cmd, err)
+		return exitcode.UsageError(err)
+	})
 	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log", "runtime-dir"} {
 		_ = run.Flags().MarkHidden(name)
 	}
@@ -322,6 +326,23 @@ var waitDaemonJobRefusal = func(ctx context.Context, hold time.Duration) {
 	case <-ctx.Done():
 	case <-timer.C:
 	}
+}
+
+// holdDaemonJobFlagError applies the refusal hold to a job whose arguments
+// this binary cannot parse: a job from a release with a later argument
+// contract, started after a downgrade. Flag parsing fails before the job
+// version is compared, and without the hold the manager restarts that start
+// every ten seconds too. Only a service-manager job passes --job-version, so a
+// mistyped flag on a hand-run daemon still fails at once. Supervision is not
+// resolved this early; the job always pins native.
+func holdDaemonJobFlagError(cmd *cobra.Command, flagErr error) {
+	if !cmd.Flags().Changed("job-version") {
+		return
+	}
+	ctx := cmd.Context()
+	slog.ErrorContext(ctx, "share daemon job passes arguments this qURL version cannot read; the next qurl start, restart or publish replaces it",
+		"error", flagErr.Error(), "retry_in", daemonJobRefusalHold)
+	waitDaemonJobRefusal(ctx, daemonJobRefusalHold)
 }
 
 // admitDaemonJobVersion decides whether this binary may run with the

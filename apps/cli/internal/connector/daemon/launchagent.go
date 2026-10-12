@@ -34,6 +34,14 @@ var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervi
 // release-please cuts apps/cli, which this branch does not control, and a
 // resident 4-shape daemon on a matching binary version would otherwise be
 // reloaded rather than replaced.
+//
+// A daemon runs a job another release installed when this value and the mode
+// match (MatchJobVersion), so a change to an argument's name, order or meaning
+// without a new value is no longer refused by the other release. A new value
+// has a cost of its own: a package upgrade across it leaves the daemon
+// refusing its job, and desired-on shares down, until the next qurl command
+// replaces the job. A release that increments it should keep reading the
+// previous shape where it can.
 const daemonJobProtocolVersion = "5"
 
 // TODO(upstream-contract): relocating the socket relies on
@@ -246,6 +254,9 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 	stdoutPath := filepath.Join(c.LogDir, "share-daemon.log")
 	stderrPath := filepath.Join(c.LogDir, "share-daemon.err.log")
 	arguments := make([]string, 0, 20)
+	// --job-version stays ahead of any argument a later contract adds: a binary
+	// that cannot parse a later argument holds its exit only once it has read
+	// the job version (holdDaemonJobFlagError in cmd).
 	arguments = append(arguments,
 		"--endpoint", c.Endpoint,
 		"daemon", "run", "--state-dir", c.StateDir, "--runtime-dir", c.RuntimeDir, "--job-version", jobVersion,
@@ -361,6 +372,8 @@ func MatchJobVersion(jobVersion, binaryVersion string, mode GroupMode) (match Jo
 		installed, ok = strings.CutSuffix(installed, suffix)
 	}
 	// A remaining separator is a mode (or a shape) this binary did not ask for.
+	// Release versions never contain one; a build whose version does is only
+	// ever its own exact match.
 	if !ok || installed == "" || installed != strings.TrimSpace(installed) || strings.Contains(installed, "/") {
 		return JobVersionIncompatible, expected, nil
 	}
