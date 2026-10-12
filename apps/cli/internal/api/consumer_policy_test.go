@@ -115,7 +115,11 @@ func TestUnconfirmedConsumerPolicyExplainsRecovery(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		published := &Published{FoundExisting: &existing, ConsumerAccess: &qurl.ConsumerAccessPolicy{Mode: "invite_only", Version: 1}}
 		err := confirmPublishConsumerPolicy(requested, published)
-		if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		wantError := qurl.ErrInvalidAPIResponse
+		if existing {
+			wantError = ErrPublishAccessConflict
+		}
+		if !errors.Is(err, wantError) {
 			t.Fatalf("error=%v", err)
 		}
 		hint := "qurl list"
@@ -125,5 +129,15 @@ func TestUnconfirmedConsumerPolicyExplainsRecovery(t *testing.T) {
 		if !strings.Contains(err.Error(), hint) {
 			t.Fatalf("missing recovery hint: %v", err)
 		}
+	}
+}
+
+func TestExistingConsumerPolicyMismatchIsAConflict(t *testing.T) {
+	existing := true
+	requested := &qurl.ConsumerAccessPolicy{Mode: "contract", Version: 1, ContractID: "expected-contract"}
+	actual := &Published{FoundExisting: &existing, ConsumerAccess: &qurl.ConsumerAccessPolicy{Mode: "contract", Version: 1, ContractID: "different-contract"}}
+	err := confirmPublishConsumerPolicy(requested, actual)
+	if !errors.Is(err, ErrPublishAccessConflict) || errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("existing policy mismatch = %v", err)
 	}
 }

@@ -216,7 +216,7 @@ func executeConsumerAction(ctx context.Context, owner qurlapi.ConsumerManagement
 	case consumerConfigure:
 		policy := qurl.ConsumerAccessPolicy{Mode: input.mode, Version: input.version + 1, ContractID: input.contract}
 		err = owner.UpdateConsumerAccess(ctx, crid, input.version, policy)
-		// The SDK checks the returned CRID, policy and version before success.
+		// TODO(upstream-contract): The SDK must confirm CRID, policy, and version before success.
 		result.Policy = &policy
 	case consumerListInvitations:
 		var page *qurl.ConsumerPage[qurl.ConsumerInvitation]

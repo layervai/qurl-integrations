@@ -145,3 +145,23 @@ func TestConsumerManagementQuietReceiptAndPaging(t *testing.T) {
 		t.Fatal("quiet listing lost the next page")
 	}
 }
+
+func TestConsumerPolicyOverridesLegacyRequestGuidance(t *testing.T) {
+	private, requests := true, true
+	var out, stderr bytes.Buffer
+	resource := &qurlapi.Published{CRID: accessCRID, Private: &private, AccessRequests: &requests, ConsumerAccess: &qurl.ConsumerAccessPolicy{Mode: "review", Version: 1}, LinkSiteURL: accessAddress}
+	if err := newTestPrinter(&out, &stderr, FormatText, false, false, false).Publish(resource); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out.String(), accessAddress) != 1 || strings.Contains(out.String()+stderr.String(), "qurl approve") {
+		t.Fatalf("consumer policy got legacy request guidance: %s %s", out.String(), stderr.String())
+	}
+	out.Reset()
+	stderr.Reset()
+	if err := newTestPrinter(&out, &stderr, FormatText, false, false, false).ConsumerManagement(&qurlapi.ConsumerManagementResult{Action: consumerActionListGrants, CRID: accessCRID, NextCursor: "next-page"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "No grants.") || !strings.Contains(stderr.String(), "next-page") {
+		t.Fatal("empty non-final page was reported as an empty grant list")
+	}
+}

@@ -1239,7 +1239,7 @@ func confirmPublishConsumerPolicy(requested *qurl.ConsumerAccessPolicy, publishe
 		return nil
 	}
 	if published.FoundExisting != nil && *published.FoundExisting {
-		return fmt.Errorf("%w: the existing resource has a different private access policy; check `qurl status <CRID>` and use `qurl access configure` to change it", qurl.ErrInvalidAPIResponse)
+		return fmt.Errorf("%w: the existing resource has a different private access policy; check `qurl status <CRID>` and use `qurl access configure` to change it", ErrPublishAccessConflict)
 	}
 	return fmt.Errorf("%w: API did not confirm the requested private access policy; the resource may exist; check `qurl list` before you retry", qurl.ErrInvalidAPIResponse)
 }

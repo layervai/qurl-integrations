@@ -97,11 +97,11 @@ func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResul
 	if result.NextCursor != "" {
 		p.notefMore(result.NextCursor)
 	}
-	if result.Action == consumerActionListInvitations && len(result.Invitations) == 0 {
+	if result.NextCursor == "" && result.Action == consumerActionListInvitations && len(result.Invitations) == 0 {
 		_, err := fmt.Fprintln(p.out, "No invitations.")
 		return err
 	}
-	if result.Action == consumerActionListGrants && len(result.Grants) == 0 {
+	if result.NextCursor == "" && result.Action == consumerActionListGrants && len(result.Grants) == 0 {
 		_, err := fmt.Fprintln(p.out, "No grants.")
 		return err
 	}

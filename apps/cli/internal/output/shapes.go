@@ -465,7 +465,7 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 // Both are needed for what follows from it: the guidance that says the
 // resource's address is safe to send to anyone, and that address.
 func acceptsRequests(res *qurlapi.Published) bool {
-	return res.AccessRequests != nil && *res.AccessRequests && saidPrivate(res.Private)
+	return res.ConsumerAccess == nil && res.AccessRequests != nil && *res.AccessRequests && saidPrivate(res.Private)
 }
 
 // requestAddress is the address a publisher sends to people: the resource's
