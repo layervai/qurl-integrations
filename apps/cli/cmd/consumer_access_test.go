@@ -36,6 +36,31 @@ func TestConsumerAccessConfiguresFirstPolicyWithVersionZero(t *testing.T) {
 	}
 }
 
+func TestConsumerAccessConfigureRejectsUnconfirmedPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name, mode string
+		version    int64
+	}{
+		{"different_mode", "invite_only", 1},
+		{"different_version", "review", 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
+					"private": true, "type": "url", "status": "active",
+					"consumer_access": qurl.ConsumerAccessPolicy{Mode: test.mode, Version: test.version},
+				}, nil)
+			})
+			result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "access", "configure", srv.Key.CRID, "--mode", "review", "--version", "0", "-o", "json"}})
+			if result.code == 0 || result.stdout.Len() != 0 {
+				t.Fatalf("unconfirmed policy reported success: exit=%d output=%s", result.code, result.stdout.String())
+			}
+		})
+	}
+}
+
 func TestConsumerAccessInvitationFiltersSecrets(t *testing.T) {
 	srv := apitest.NewServer(t)
 	id := strings.Repeat("a", 64)
