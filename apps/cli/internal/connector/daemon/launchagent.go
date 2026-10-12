@@ -333,7 +333,9 @@ const (
 	JobVersionCurrent
 	// JobVersionStaleBinary is a job another qurl release installed with the
 	// same argument contract and mode. A package manager replaced the binary
-	// under it; its arguments mean the same thing to this binary.
+	// under it; its arguments mean the same thing to this binary. This holds
+	// in both directions, an upgrade and a downgrade, and only because every
+	// change to the job's arguments increments daemonJobProtocolVersion.
 	JobVersionStaleBinary
 )
 

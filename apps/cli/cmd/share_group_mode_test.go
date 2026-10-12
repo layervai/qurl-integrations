@@ -88,6 +88,23 @@ func stubDaemonJobRefusalHold(t *testing.T) *[]time.Duration {
 	return &holds
 }
 
+// TestDaemonJobRefusalHoldEndsWhenTheDaemonIsStopped pins that a held refusal
+// does not delay a job replacement: the manager's stop cancels the context.
+func TestDaemonJobRefusalHoldEndsWhenTheDaemonIsStopped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		waitDaemonJobRefusal(ctx, daemonJobRefusalHold)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("refusal hold outlived its canceled context")
+	}
+}
+
 // TestDaemonRunRejectsAJobVersionForAnotherMode pins that the resident
 // daemon's job version is mode-bearing: a job installed for one mode cannot
 // start the daemon in another, so a definition change is always a restart in

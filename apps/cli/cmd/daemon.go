@@ -353,6 +353,7 @@ func admitDaemonJobVersion(ctx context.Context, opts *globalOpts, jobVersion str
 			"job_version", jobVersion, "binary_job_version", expected)
 		return jobVersion, nil
 	case connectordaemon.JobVersionIncompatible:
+		// Refused below.
 	}
 	if opts.resolvedSupervision == connectorstate.RuntimeSupervisionNative {
 		slog.ErrorContext(ctx, "share daemon job cannot run with this qURL version; the next qurl start, restart or publish replaces it",
