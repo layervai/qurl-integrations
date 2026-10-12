@@ -29,7 +29,10 @@ import (
 //
 // TODO(upstream-contract): the skill served at SourceURL must carry
 // `metadata.version` of at least this value, in the form Version reads.
-// Nothing in this repository fails when it does not.
+// A release is held to it: scripts/check-served-skill reads the served file
+// before the release is built, and fails the release when it is too old.
+// Nothing fails earlier than that, so a change that raises this still passes
+// its own checks.
 const MinVersion = 1
 
 // SourceURL is where the current skill is served.
@@ -89,11 +92,8 @@ func FindOutdated(home, goos string) (Copy, bool) {
 	}
 	for _, folder := range agentFolders {
 		location := path.Join(folder, skillFile)
-		head, err := readHead(filepath.Join(home, filepath.FromSlash(location)))
-		if err != nil {
-			continue
-		}
-		if Version(head) >= MinVersion {
+		version, err := savedVersion(filepath.Join(home, filepath.FromSlash(location)))
+		if err != nil || version >= MinVersion {
 			continue
 		}
 		return describe(home, location, goos), true
@@ -136,25 +136,37 @@ func windowsQuoted(full string) string {
 	return `"` + full + `"`
 }
 
-// readHead returns the first headLimit bytes of a regular file. It asks what
+// savedVersion returns the version a regular file carries. It asks what
 // the name is before it opens it: opening a named pipe would wait for a
 // writer, and a version check must never wait. A file that is swapped for a
 // pipe between the two calls would still be opened; in a person's own home
 // directory that is left as it is.
-func readHead(name string) ([]byte, error) {
+func savedVersion(name string) (int, error) {
 	info, err := os.Stat(name)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, errors.New("not a regular file")
+		return 0, errors.New("not a regular file")
 	}
 	file, err := os.Open(name) // #nosec G304 -- a fixed location under the user's home directory, read only
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer func() { _ = file.Close() }()
-	return io.ReadAll(io.LimitReader(file, headLimit))
+	return ReadVersion(file)
+}
+
+// ReadVersion returns the version of the skill file that r holds, reading
+// no more than headLimit of it. A saved copy is read through it, and so is
+// a file that is not a saved copy, such as the one served at SourceURL: a
+// version that stands further in counts as none for both.
+func ReadVersion(r io.Reader) (int, error) {
+	head, err := io.ReadAll(io.LimitReader(r, headLimit))
+	if err != nil {
+		return 0, err
+	}
+	return Version(head), nil
 }
 
 // Version returns the version a skill file carries, or 0 when it carries
