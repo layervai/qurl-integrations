@@ -1861,6 +1861,98 @@ func TestReleasePleaseVerifiesTheCLIReleaseWasCreated(t *testing.T) {
 	})
 }
 
+// TestCLIReleasePrunesSupersededDraftsOnlyAfterPublication pins the job that
+// deletes the empty draft releases a published CLI release has superseded.
+// Deleting a release cannot be undone, so the job may start only after
+// publication succeeded, must run the reviewed script from the workflow's own
+// commit and not the copy in the tag being published, and must hold nothing
+// beyond the one permission that deleting a release needs. Nothing may need
+// it: a failed cleanup must not hold back the Homebrew tap.
+func TestCLIReleasePrunesSupersededDraftsOnlyAfterPublication(t *testing.T) {
+	t.Parallel()
+
+	const (
+		jobID  = "prune-superseded-cli-drafts"
+		script = "scripts/prune-superseded-cli-drafts.sh"
+	)
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	job := workflow.Jobs[jobID]
+	if job == nil {
+		t.Fatalf("%s is missing the %s job", releasePleaseWorkflow, jobID)
+	}
+	if needs := parseWorkflowNeeds(t, jobID, job.Needs); !slices.Equal(needs, []string{"publish-cli-release", "cli-release-gate"}) {
+		t.Errorf("%s needs = %v, want publish-cli-release and cli-release-gate", jobID, needs)
+	}
+	// Compared whole, not by fragment: an added `|| always()` would keep every
+	// fragment and still let the job delete releases after a failed publication.
+	const wantIf = "!cancelled() && needs.publish-cli-release.result == 'success' && needs.cli-release-gate.outputs.required == 'true'" //nolint:misspell // GitHub expression function spelling.
+	if got := strings.Join(strings.Fields(job.If), " "); got != wantIf {
+		t.Errorf("%s if = %q, want exactly %q", jobID, got, wantIf)
+	}
+	assertJobPermissions(t, jobID, job.Permissions, map[string]string{"contents": "write"})
+	assertExecutableRepoScript(t, script)
+
+	// The branch guard is the only protection if the workflow is dispatched
+	// from another ref, so it must be the first step, ahead of the checkout.
+	const branchGuard = `[ "$GITHUB_REF" = refs/heads/main ] || {`
+	if len(job.Steps) == 0 || !strings.Contains(job.Steps[0].Run, branchGuard) || !strings.Contains(job.Steps[0].Run, "exit 1") {
+		t.Errorf("%s does not start by refusing every ref but refs/heads/main", jobID)
+	}
+
+	checkouts, prunes := 0, 0
+	for index := range job.Steps {
+		current := &job.Steps[index]
+		switch {
+		case strings.HasPrefix(current.Uses, "actions/checkout@"):
+			checkouts++
+			if ref, pinned := current.With["ref"]; pinned {
+				t.Errorf("%s checks out ref %v; it must run the script from the workflow's own commit", jobID, ref)
+			}
+			if prunes != 0 {
+				t.Errorf("%s checks out after it prunes", jobID)
+			}
+		case strings.Contains(current.Run, script):
+			prunes++
+			if strings.TrimSpace(current.Run) != script {
+				t.Errorf("%s runs %q, want exactly %s", jobID, strings.TrimSpace(current.Run), script)
+			}
+			if got, want := current.Env["CLI_TAG"], "${{ needs.cli-release-gate.outputs.cli_tag }}"; got != want {
+				t.Errorf("%s prunes below CLI_TAG %q, want the gated tag %q", jobID, got, want)
+			}
+			// The job's own token is bounded by the permissions above. Any
+			// other credential here would delete with a reach they do not show.
+			if got, want := current.Env["GH_TOKEN"], "${{ github.token }}"; got != want {
+				t.Errorf("%s deletes with GH_TOKEN %q, want the job token %q", jobID, got, want)
+			}
+		}
+	}
+	if checkouts != 1 || prunes != 1 {
+		t.Errorf("%s has %d checkout and %d prune steps, want one of each", jobID, checkouts, prunes)
+	}
+
+	for otherID, other := range workflow.Jobs {
+		if slices.Contains(parseWorkflowNeeds(t, otherID, other.Needs), jobID) {
+			t.Errorf("%s needs %s; draft cleanup must not gate another job", otherID, jobID)
+		}
+	}
+
+	// Two prune jobs listing the same draft would have the second fail on a
+	// release that is already gone, so the job is serialized across runs.
+	// Read from the raw file: the job struct carries no concurrency field.
+	var raw struct {
+		Jobs map[string]struct {
+			Concurrency map[string]any `yaml:"concurrency"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(readWorkflowBytes(t, releasePleaseWorkflow), &raw); err != nil {
+		t.Fatal(err)
+	}
+	concurrency := raw.Jobs[jobID].Concurrency
+	if concurrency["group"] != jobID || concurrency["cancel-in-progress"] != false {
+		t.Errorf("%s concurrency = %v, want one constant group that never cancels a running prune", jobID, concurrency)
+	}
+}
+
 // TestCLIReleaseUsesAnExactEventDrivenGate keeps publication behind the exact
 // packaged journey without holding a polling runner. The release creator
 // starts the exact main CLI workflow, which signals the SHA-bound continuation
@@ -2066,6 +2158,87 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	}
 
 	assertExecutableRepoScript(t, "scripts/check-exact-cli-release-gate.sh")
+}
+
+// TestCLIReleaseChecksTheServedSkillBeforeBuilding pins the release-time
+// guard on the qURL agent skill. The CLI tells a person with an old saved
+// copy to download the served one, so the release must fail while the served
+// one is still too old, and must fail before GoReleaser uploads anything.
+//
+// The step skips when the tagged source has no checker, for recovery of an
+// older tag. That is safe only while the checker is in the tree, so its
+// place is asserted here: moving or deleting it fails this test rather than
+// turning the skip into the path every release takes.
+func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
+	t.Parallel()
+
+	const (
+		checkerDir = "apps/cli/scripts/check-served-skill"
+		stepName   = "Verify the served agent skill is new enough"
+	)
+	if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(checkerDir), "main.go")); err != nil {
+		t.Fatalf("the served-skill checker is not at %s: %v", checkerDir, err)
+	}
+
+	releaseCLI := readWorkflow(t, releasePleaseWorkflow).Jobs["release-cli"]
+	if releaseCLI == nil {
+		t.Fatal("release-please.yml is missing release-cli")
+	}
+	// The step's script names the tag under `set -u`, on the skip path too,
+	// so the tag has to be in the job's environment.
+	if _, ok := releaseCLI.Env["CLI_TAG"]; !ok {
+		t.Error("release-cli does not set CLI_TAG for the served-skill check, which reads it under `set -u`")
+	}
+	source, toolchain, check, build := -1, -1, -1, -1
+	for index := range releaseCLI.Steps {
+		current := &releaseCLI.Steps[index]
+		switch {
+		// Only what stands before the check counts: a later checkout or
+		// toolchain, for another purpose, says nothing about this step.
+		case check < 0 && strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			source = index
+			// The check must read the minimum of the release being built,
+			// not that of whatever branch a checkout defaults to.
+			if ref := current.With["ref"]; ref != "${{ env.CLI_TAG }}" {
+				t.Errorf("the checkout before the served-skill check has ref %v, want the release tag", ref)
+			}
+		case check < 0 && strings.HasPrefix(current.Uses, "actions/setup-go@"):
+			toolchain = index
+		case current.Name == stepName:
+			check = index
+		case strings.HasPrefix(current.Uses, "goreleaser/goreleaser-action@"):
+			build = index
+		}
+	}
+	if check < 0 || build < 0 {
+		t.Fatalf("release-cli steps: served-skill check at %d, GoReleaser at %d; want both", check, build)
+	}
+	// Before the checkout no checker is on disk, and the step would take
+	// its skip on every release.
+	if source < 0 {
+		t.Errorf("no checkout comes before the served-skill check at step %d", check)
+	}
+	// Without the repository's Go the check would fail for a reason that
+	// has nothing to do with the skill, under an error that names the skill.
+	if toolchain < 0 {
+		t.Errorf("no actions/setup-go comes before the served-skill check at step %d", check)
+	}
+	if check > build {
+		t.Error("the served-skill check runs after GoReleaser has uploaded the release's files")
+	}
+	guard := &releaseCLI.Steps[check]
+	if guard.If != "" || guard.ContinueOnError != nil {
+		t.Errorf("the served-skill check is conditional or allowed to fail: if=%q continue-on-error=%v", guard.If, guard.ContinueOnError)
+	}
+	if !strings.Contains(guard.Run, "set -euo pipefail") {
+		t.Error("the served-skill check does not stop at its first failing command")
+	}
+	if !strings.Contains(guard.Run, "go run ./"+checkerDir+" ||") {
+		t.Errorf("the served-skill check does not run ./%s", checkerDir)
+	}
+	if !strings.Contains(guard.Run, "[[ ! -d "+checkerDir+" ]]") {
+		t.Errorf("the served-skill check's skip is not keyed on %s, the directory this test holds in place", checkerDir)
+	}
 }
 
 // TestCLIReleaseDraftAwareStepsExecuteBothStates runs the checked-in shell,

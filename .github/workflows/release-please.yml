@@ -10,9 +10,22 @@ name: Release Please
 #      The pinned action bundles release-please 17.6.0, whose linked-versions
 #      plugin adds a synthetic commit when one linked component has no changes.
 #   2. CLI releases additionally run GoReleaser to attach binaries and build
-#      deb/rpm packages. The workflow verifies every artifact, audits and
+#      deb/rpm packages. Before it builds, the workflow checks that the qURL
+#      agent skill served to users is at least the version the tagged CLI
+#      asks for (apps/cli/scripts/check-served-skill): the CLI tells a person
+#      with an older saved copy to download the served one, so a release
+#      that ships ahead of its skill leaves that note in place for good.
+#      After the build the workflow verifies every artifact, audits and
 #      installs the exact staged Homebrew cask, publishes the release, and
 #      only then updates the Homebrew tap.
+#   3. Once a CLI release is public, the empty draft releases of lower CLI
+#      versions are deleted and their tags kept
+#      (scripts/prune-superseded-cli-drafts.sh). A version whose gate failed
+#      and was replaced by the next one would otherwise stay listed as a
+#      draft indefinitely. This treats every lower version as superseded,
+#      which holds only while CLI versions are released from main in
+#      ascending order: narrow that script's rule before adding a
+#      maintenance line, or it deletes the line's drafts.
 #
 # GoReleaser runs as a dependent job here — NOT as a tag-triggered workflow —
 # because release-please tags with the workflow's GITHUB_TOKEN, and GitHub
@@ -450,6 +463,31 @@ jobs:
             exit "$test_status"
           fi
           printf 'mode=%s\n' "$mode" >>"$GITHUB_OUTPUT"
+
+      # The tagged CLI prints a note for a saved copy of the agent skill that
+      # is below its minimum version, and the note's command downloads the
+      # served skill. This holds the ship order: skill first, then the CLI
+      # that needs it. It runs before GoReleaser so a failure uploads
+      # nothing; serve the newer skill, then use "Re-run failed jobs". The
+      # check asks a cache to revalidate its copy but does not depend on it:
+      # if the run still reads the old skill, so do users, and it is right
+      # to wait and run again.
+      #
+      # The one skip is for a recovery dispatch of a tag from before the
+      # checker existed. internal/ciworkflows pins that the checker is in the
+      # tree, so the skip cannot become the path every release takes.
+      - name: Verify the served agent skill is new enough
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          if [[ ! -d apps/cli/scripts/check-served-skill ]]; then
+            echo "::notice::${CLI_TAG} predates the served-skill check; skipping"
+            exit 0
+          fi
+          go run ./apps/cli/scripts/check-served-skill || {
+            echo "::error::the served agent skill is older than ${CLI_TAG} needs, or the check could not read it or could not run; see the step log" >&2
+            exit 1
+          }
 
       # release.mode keep-existing (pinned in .goreleaser.yml): GoReleaser
       # uploads artifacts to the release release-please just created and
@@ -1145,3 +1183,59 @@ jobs:
             '{message:$message,content:$content,sha:$sha,branch:$branch}' |
             gh api --method PUT "repos/${tap_repo}/contents/${cask_path}" --input - |
             jq -e '.commit.sha | test("^[0-9a-f]{40}$")' >/dev/null
+
+  # A version whose customer journey fails is usually not repaired: the fix
+  # lands, release-please cuts the next version, and that one is published
+  # instead. The earlier draft then stays in the release list, empty, beside
+  # the version that replaced it. Once this release is public, remove the
+  # empty draft CLI releases below it; their tags stay, because the changelog
+  # links every version to its tag. scripts/prune-superseded-cli-drafts.sh
+  # states the exact rules and refuses on any doubt.
+  #
+  # A separate job on purpose. It checks out the workflow's own commit, so the
+  # script that deletes is the reviewed one on main and not the copy in the
+  # tag being published, which is absent from every tag older than this job.
+  # Nothing needs it, so a failure here turns the run red without holding back
+  # the Homebrew tap.
+  #
+  # The concurrency group above is per tag and source, so the run of a lower
+  # version is not serialized against this one. The script therefore leaves
+  # the draft of a version tagged within the last day, whose first run may
+  # still be active, for the next publication to remove. A run resumed later
+  # than that is not covered and fails at its own draft check.
+  prune-superseded-cli-drafts:
+    name: Remove superseded CLI drafts
+    needs: [publish-cli-release, cli-release-gate]
+    if: >-
+      !cancelled() && needs.publish-cli-release.result == 'success' &&
+      needs.cli-release-gate.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Two publications that finish close together would otherwise both list
+    # the same draft, and the second deletion would fail on a release that is
+    # already gone. Queued, the second run lists what the first one left.
+    # GitHub keeps one pending job per group, so a third would cancel the
+    # second; the drafts it would have removed wait for the next publication.
+    concurrency:
+      group: prune-superseded-cli-drafts
+      cancel-in-progress: false
+    permissions:
+      # Deleting a release, and listing drafts at all, requires write access.
+      contents: write
+    steps:
+      - name: Require the canonical release branch
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || {
+            echo "::error::CLI draft pruning must run from refs/heads/main, got ${GITHUB_REF}" >&2
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Delete the empty draft releases this release superseded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+        run: scripts/prune-superseded-cli-drafts.sh
