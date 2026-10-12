@@ -31,9 +31,9 @@ import (
 // `metadata.version` of at least this value, in the form Version reads.
 // A release is held to it: scripts/check-served-skill reads the served file
 // before the release is built, and fails the release when it is too old.
-// Nothing fails before a change that raises this merges, so the change still
-// passes its own checks; a daily workflow runs the same check against main
-// and reports a failure there without blocking anything.
+// A change that raises this still passes its own PR checks. After it
+// merges, a daily workflow runs the same check against main and reports a
+// failure without blocking anything.
 const MinVersion = 1
 
 // SourceURL is where the current skill is served.

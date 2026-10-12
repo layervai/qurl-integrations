@@ -85,7 +85,7 @@ func check(ctx context.Context, client *http.Client, url string, minimum int, wa
 	if served == 0 {
 		found = "no version the CLI can read"
 	}
-	return fmt.Errorf("the skill served at %s carries %s, and this release needs version %d or later: "+
+	return fmt.Errorf("the skill served at %s carries %s, and this CLI needs version %d or later: "+
 		"a person who follows the CLI's note would download a copy that is still too old, and the note would never clear. "+
 		"Serve the skill with `metadata.version` of at least %d there first, then run this again",
 		url, found, minimum, minimum)

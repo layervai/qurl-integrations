@@ -2267,8 +2267,9 @@ func TestServedSkillRunsDailyWithoutGating(t *testing.T) {
 	}
 	// githubJob does not read a job's continue-on-error, so the whole file
 	// is held to not using the key: on the job as on the step, it would end
-	// a failing run as a success and the notifier would stay quiet.
-	if strings.Contains(string(readWorkflowBytes(t, servedSkillWorkflow)), "continue-on-error") {
+	// a failing run as a success and the notifier would stay quiet. Only the
+	// key is matched, so a comment may still name it.
+	if regexp.MustCompile(`(?m)^\s*continue-on-error\s*:`).Match(readWorkflowBytes(t, servedSkillWorkflow)) {
 		t.Errorf("%s uses continue-on-error, which lets a failing check end green", servedSkillWorkflow)
 	}
 

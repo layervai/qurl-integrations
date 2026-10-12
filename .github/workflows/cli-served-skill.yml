@@ -43,8 +43,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # No module cache: the checker imports only the standard library, and
-      # this job must not be the one that saves the shared cache nearly empty.
+      # No module cache: the checker and the one package it imports use only
+      # the standard library, and this job must not be the one that saves the
+      # shared cache nearly empty.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod

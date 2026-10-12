@@ -64,7 +64,7 @@ func TestCheck(t *testing.T) {
 	}{
 		{"the oldest version the release works with passes", []func(http.ResponseWriter){body(versioned(minimum))}, "", 1},
 		{"a newer version passes", []func(http.ResponseWriter){body(versioned(minimum + 1))}, "", 1},
-		{"an older version fails, and is not fetched again", []func(http.ResponseWriter){body(versioned(minimum - 1))}, "carries version 2, and this release needs version 3 or later", 1},
+		{"an older version fails, and is not fetched again", []func(http.ResponseWriter){body(versioned(minimum - 1))}, "carries version 2, and this CLI needs version 3 or later", 1},
 		{"no version fails", []func(http.ResponseWriter){body(skill(""))}, "carries no version the CLI can read", 1},
 		{
 			"an error page that holds a version is not a skill",
