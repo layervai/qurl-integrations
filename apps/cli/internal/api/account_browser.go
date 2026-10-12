@@ -148,7 +148,7 @@ func accountCallbackHandler(state string, codes chan<- string) http.Handler {
 
 func validateAccountEndpoint(endpoint string) error {
 	base, err := url.Parse(endpoint)
-	if err != nil || base.Host == "" || (base.Scheme != previewHTTPScheme && (base.Scheme != "http" || (base.Hostname() != "localhost" && !net.ParseIP(base.Hostname()).IsLoopback()))) {
+	if err != nil || base.Host == "" || (base.Scheme != schemeHTTPS && (base.Scheme != "http" || (base.Hostname() != "localhost" && !net.ParseIP(base.Hostname()).IsLoopback()))) {
 		return ErrAccountEndpoint
 	}
 	return nil

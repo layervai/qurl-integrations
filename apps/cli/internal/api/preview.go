@@ -14,8 +14,6 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
-const previewHTTPScheme = "https"
-
 // Preview is the CLI-owned public metadata shape. SDK additions never enter JSON output automatically.
 type Preview struct {
 	Revision    int64           `json:"revision"`
@@ -123,7 +121,7 @@ func (c *client) UploadPreview(ctx context.Context, id, path, alt, replaceID str
 }
 func sendPreviewFile(ctx context.Context, transport qurl.HTTPDoer, form *qurl.PreviewUploadForm, source io.Reader, size int64) error {
 	target, err := url.Parse(form.URL)
-	if err != nil || target.Scheme != previewHTTPScheme || target.Host == "" || target.User != nil || target.Fragment != "" {
+	if err != nil || target.Scheme != schemeHTTPS || target.Host == "" || target.User != nil || target.Fragment != "" {
 		return errors.New("invalid preview upload address")
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, form.URL, io.LimitReader(source, size))
