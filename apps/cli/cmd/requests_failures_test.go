@@ -407,8 +407,9 @@ func TestGrantsNeverReadsAMissingListAsNobody(t *testing.T) {
 			} else {
 				mustEmptyStdout(t, res)
 			}
+			statusText := strings.ReplaceAll(res.stdout.String()+res.stderr.String(), srv.Key.CRID, "")
 			for _, never := range []string{"This service does not show", "Nothing more can be learned", "Approved people", "none"} {
-				if strings.Contains(res.stdout.String()+res.stderr.String(), never) {
+				if strings.Contains(statusText, never) {
 					t.Errorf("the output has %q:\n%s%s", never, res.stdout.String(), res.stderr.String())
 				}
 			}
