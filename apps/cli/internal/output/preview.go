@@ -1,20 +1,24 @@
 package output
 
 import (
+	"errors"
 	"fmt"
 
-	"github.com/layervai/qurl-go/qurl"
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
 
 // Preview quotes publisher text so controls cannot reach the terminal.
-func (p *Printer) Preview(preview *qurl.ResourcePreview) error {
+func (p *Printer) Preview(preview *qurlapi.Preview) error {
 	if preview == nil {
-		return qurl.ErrInvalidAPIResponse
+		return errors.New("missing preview response")
 	}
 	if p.format == FormatJSON {
 		return p.writeJSON(preview)
 	}
 	if p.quiet {
+		if preview.Description == "" {
+			return nil
+		}
 		_, err := fmt.Fprintf(p.out, "%q\n", preview.Description)
 		return err
 	}

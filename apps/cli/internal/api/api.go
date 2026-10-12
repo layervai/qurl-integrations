@@ -26,6 +26,9 @@ import (
 
 // Client is what commands program against.
 type Client interface {
+	Preview(context.Context, string) (*Preview, error)
+	UpdatePreview(context.Context, string, PreviewPatch) (*Preview, error)
+	UploadPreview(context.Context, string, string, string, string) (*Preview, error)
 	// LinkAccount uses the device credential and a separate browser account token.
 	LinkAccount(ctx context.Context, accountToken, ownerID string) error
 	// MintConnectorEnrollmentToken creates a short-lived, one-shot credential

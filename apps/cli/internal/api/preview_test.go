@@ -2,9 +2,11 @@ package qurlapi
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -50,5 +52,16 @@ func TestPreviewUploadRefusesRedirectAndStopsShortSource(t *testing.T) {
 	}
 	if err := sendPreviewFile(context.Background(), client, form, strings.NewReader("x"), 4); err == nil {
 		t.Fatal("accepted incomplete file")
+	}
+}
+
+type previewErrorDoer struct{ err error }
+
+func (d previewErrorDoer) Do(*http.Request) (*http.Response, error) { return nil, d.err }
+func TestPreviewUploadKeepsCancellationWithoutSignedURL(t *testing.T) {
+	signed := "https://storage.test/file?signature=secret"
+	err := sendPreviewFile(context.Background(), previewErrorDoer{&url.Error{Op: "Put", URL: signed, Err: context.Canceled}}, &qurl.PreviewUploadForm{URL: signed}, strings.NewReader("x"), 1)
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "signature") || strings.Contains(err.Error(), "secret") {
+		t.Fatal(err)
 	}
 }

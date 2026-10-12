@@ -3,10 +3,10 @@ package main
 import (
 	"errors"
 
-	"github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func previewCmd(opts *globalOpts) *cobra.Command {
@@ -16,7 +16,7 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		preview, err := qurlapi.Preview(cmd.Context(), client, args[0])
+		preview, err := client.Preview(cmd.Context(), args[0])
 		if err != nil {
 			return err
 		}
@@ -25,17 +25,17 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 	var description string
 	set := &cobra.Command{Use: "set <CRID> --description <text>", Short: "Set an optional description (up to 500 characters)", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if !cmd.Flags().Changed("description") {
-			return errors.New("provide --description; use an empty string to remove it")
+			return exitcode.UsageError(errors.New("provide --description; use an empty string to remove it"))
 		}
 		client, err := opts.newClient(cmd.Context())
 		if err != nil {
 			return err
 		}
-		current, err := qurlapi.Preview(cmd.Context(), client, args[0])
+		current, err := client.Preview(cmd.Context(), args[0])
 		if err != nil {
 			return err
 		}
-		next, err := qurlapi.UpdatePreview(cmd.Context(), client, args[0], qurl.PreviewPatch{Revision: current.Revision, Description: &description})
+		next, err := client.UpdatePreview(cmd.Context(), args[0], qurlapi.PreviewPatch{Revision: current.Revision, Description: &description})
 		if err != nil {
 			return err
 		}
@@ -45,13 +45,13 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 	var alt, replaceID string
 	upload := &cobra.Command{Use: "upload <CRID> <file>", Short: "Upload an image, GIF or short clip (verified publishers only)", Args: exactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
 		if alt == "" {
-			return errors.New("provide --alt to describe the image or clip")
+			return exitcode.UsageError(errors.New("provide --alt to describe the image or clip"))
 		}
 		client, err := opts.newClient(cmd.Context())
 		if err != nil {
 			return err
 		}
-		next, err := qurlapi.UploadPreview(cmd.Context(), client, args[0], args[1], alt, replaceID)
+		next, err := client.UploadPreview(cmd.Context(), args[0], args[1], alt, replaceID)
 		if err != nil {
 			return err
 		}
@@ -66,13 +66,13 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		current, err := qurlapi.Preview(cmd.Context(), client, args[0])
+		current, err := client.Preview(cmd.Context(), args[0])
 		if err != nil {
 			return err
 		}
 		text := ""
 		ids := []string{}
-		next, err := qurlapi.UpdatePreview(cmd.Context(), client, args[0], qurl.PreviewPatch{Revision: current.Revision, Description: &text, MediaIDs: &ids})
+		next, err := client.UpdatePreview(cmd.Context(), args[0], qurlapi.PreviewPatch{Revision: current.Revision, Description: &text, MediaIDs: &ids})
 		if err != nil {
 			return err
 		}
@@ -88,7 +88,7 @@ func previewRemoveCmd(opts *globalOpts) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		current, err := qurlapi.Preview(cmd.Context(), client, args[0])
+		current, err := client.Preview(cmd.Context(), args[0])
 		if err != nil {
 			return err
 		}
@@ -103,9 +103,9 @@ func previewRemoveCmd(opts *globalOpts) *cobra.Command {
 			}
 		}
 		if !found {
-			return errors.New("media ID not found; read qurl preview get first")
+			return exitcode.UsageError(errors.New("media ID not found; read qurl preview get first"))
 		}
-		next, err := qurlapi.UpdatePreview(cmd.Context(), client, args[0], qurl.PreviewPatch{Revision: current.Revision, MediaIDs: &ids})
+		next, err := client.UpdatePreview(cmd.Context(), args[0], qurlapi.PreviewPatch{Revision: current.Revision, MediaIDs: &ids})
 		if err != nil {
 			return err
 		}
