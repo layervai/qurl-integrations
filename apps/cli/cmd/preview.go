@@ -10,6 +10,13 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
+const (
+	msgPreviewDescriptionRequired = "provide --description; use an empty string to remove it"
+	msgPreviewAltRequired         = "provide --alt to describe the image or clip"
+	msgPreviewUploaded            = "File uploaded. Processing keeps current media visible. Check with qurl preview get %s."
+	msgPreviewMediaMissing        = "media ID not found; read qurl preview get first"
+)
+
 func previewCmd(opts *globalOpts) *cobra.Command {
 	root := &cobra.Command{Use: "preview", Short: "Show or edit one CRID's public preview metadata"}
 	get := &cobra.Command{Use: "get <CRID>", Short: "Show description, media and processing state", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -26,7 +33,7 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 	var description string
 	set := &cobra.Command{Use: "set <CRID> --description <text>", Short: "Set an optional description (up to 500 characters)", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if !cmd.Flags().Changed("description") {
-			return exitcode.UsageError(errors.New("provide --description; use an empty string to remove it"))
+			return exitcode.UsageError(errors.New(msgPreviewDescriptionRequired))
 		}
 		client, err := opts.newClient(cmd.Context())
 		if err != nil {
@@ -46,7 +53,7 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 	var alt, replaceID string
 	upload := &cobra.Command{Use: "upload <CRID> <file>", Short: "Upload an image, GIF or short clip (verified publishers only)", Args: exactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
 		if alt == "" {
-			return exitcode.UsageError(errors.New("provide --alt to describe the image or clip"))
+			return exitcode.UsageError(errors.New(msgPreviewAltRequired))
 		}
 		client, err := opts.newClient(cmd.Context())
 		if err != nil {
@@ -61,7 +68,7 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 			return err
 		}
 		if !opts.quiet && opts.resolvedFormat != output.FormatJSON {
-			opts.printer().Notef("File uploaded. Processing keeps current media visible. Check with qurl preview get %s.", args[0])
+			opts.printer().Notef(msgPreviewUploaded, args[0])
 		}
 		return opts.printer().Preview(next)
 	}}
@@ -110,7 +117,7 @@ func previewRemoveCmd(opts *globalOpts) *cobra.Command {
 			}
 		}
 		if !found {
-			return exitcode.UsageError(errors.New("media ID not found; read qurl preview get first"))
+			return exitcode.UsageError(errors.New(msgPreviewMediaMissing))
 		}
 		next, err := client.UpdatePreview(cmd.Context(), args[0], qurlapi.PreviewPatch{Revision: current.Revision, MediaIDs: &ids})
 		if err != nil {

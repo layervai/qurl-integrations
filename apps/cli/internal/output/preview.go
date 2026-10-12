@@ -8,10 +8,17 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
 
+const (
+	msgPreviewIncomplete  = "qURL preview response is incomplete"
+	msgPreviewDescription = "Description: %s\nRevision: %d\n"
+	msgPreviewMedia       = "Media %s (%s): %s\n"
+	msgPreviewUpload      = "Upload %s: %s\n"
+)
+
 // Preview quotes publisher text so controls cannot reach the terminal.
 func (p *Printer) Preview(preview *qurlapi.Preview) error {
 	if preview == nil {
-		return errors.New("missing preview response")
+		return errors.New(msgPreviewIncomplete)
 	}
 	if p.format == FormatJSON {
 		document := struct {
@@ -35,17 +42,17 @@ func (p *Printer) Preview(preview *qurlapi.Preview) error {
 		_, err := fmt.Fprintf(p.out, "%s\n", p.previewText(preview.Description))
 		return err
 	}
-	if _, err := fmt.Fprintf(p.out, "Description: %s\nRevision: %d\n", p.previewText(preview.Description), preview.Revision); err != nil {
+	if _, err := fmt.Fprintf(p.out, msgPreviewDescription, p.previewText(preview.Description), preview.Revision); err != nil {
 		return err
 	}
 	for i := range preview.Media {
 		media := &preview.Media[i]
-		if _, err := fmt.Fprintf(p.out, "Media %s (%s): %s\n", p.previewText(media.ID), p.previewText(media.Kind), p.previewText(media.Alt)); err != nil {
+		if _, err := fmt.Fprintf(p.out, msgPreviewMedia, p.previewText(media.ID), p.previewText(media.Kind), p.previewText(media.Alt)); err != nil {
 			return err
 		}
 	}
 	for _, upload := range preview.Uploads {
-		if _, err := fmt.Fprintf(p.out, "Upload %s: %s\n", p.previewText(upload.ID), p.previewText(upload.Status)); err != nil {
+		if _, err := fmt.Fprintf(p.out, msgPreviewUpload, p.previewText(upload.ID), p.previewText(upload.Status)); err != nil {
 			return err
 		}
 	}

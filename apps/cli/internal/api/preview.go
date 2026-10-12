@@ -14,6 +14,15 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
+const (
+	msgPreviewFileSize        = "preview file must be a nonempty regular file of at most 25 MB"
+	msgPreviewFileType        = "choose a JPEG, PNG, WebP, GIF, MP4 or WebM file"
+	msgPreviewStillSize       = "still images must be at most 10 MB"
+	msgPreviewUploadAddress   = "invalid preview upload address"
+	msgPreviewUploadTransport = "preview upload failed; check preview status before trying again: %w"
+	msgPreviewUploadStatus    = "preview upload failed (HTTP %d); check preview status before trying again"
+)
+
 // Preview is the CLI-owned public metadata shape. SDK additions never enter JSON output automatically.
 type Preview struct {
 	Revision    int64           `json:"revision"`
@@ -87,7 +96,7 @@ func (c *client) UploadPreview(ctx context.Context, id, path, alt, replaceID str
 	}
 	// TODO(upstream-contract): early hints mirror API media types and 10/25 MB limits.
 	if !stat.Mode().IsRegular() || stat.Size() < 1 || stat.Size() > 25_000_000 {
-		return nil, PreviewFileError("preview file must be a nonempty regular file of at most 25 MB")
+		return nil, PreviewFileError(msgPreviewFileSize)
 	}
 	head := make([]byte, 512)
 	count, err := io.ReadFull(file, head)
@@ -98,10 +107,10 @@ func (c *client) UploadPreview(ctx context.Context, id, path, alt, replaceID str
 	switch contentType {
 	case "image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4", "video/webm":
 	default:
-		return nil, PreviewFileError("choose a JPEG, PNG, WebP, GIF, MP4 or WebM file")
+		return nil, PreviewFileError(msgPreviewFileType)
 	}
 	if strings.HasPrefix(contentType, "image/") && contentType != "image/gif" && stat.Size() > 10_000_000 {
-		return nil, PreviewFileError("still images must be at most 10 MB")
+		return nil, PreviewFileError(msgPreviewStillSize)
 	}
 	if _, err = file.Seek(0, io.SeekStart); err != nil {
 		return nil, err
@@ -122,7 +131,7 @@ func (c *client) UploadPreview(ctx context.Context, id, path, alt, replaceID str
 func sendPreviewFile(ctx context.Context, transport qurl.HTTPDoer, form *qurl.PreviewUploadForm, source io.Reader, size int64) error {
 	target, err := url.Parse(form.URL)
 	if err != nil || target.Scheme != schemeHTTPS || target.Host == "" || target.User != nil || target.Fragment != "" {
-		return errors.New("invalid preview upload address")
+		return errors.New(msgPreviewUploadAddress)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, form.URL, io.LimitReader(source, size))
 	if err != nil {
@@ -138,12 +147,12 @@ func sendPreviewFile(ctx context.Context, transport qurl.HTTPDoer, form *qurl.Pr
 		if errors.As(err, &urlError) {
 			err = urlError.Err
 		}
-		return fmt.Errorf("preview upload failed; check preview status before trying again: %w", err)
+		return fmt.Errorf(msgPreviewUploadTransport, err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("preview upload failed (HTTP %d); check preview status before trying again", response.StatusCode)
+		return fmt.Errorf(msgPreviewUploadStatus, response.StatusCode)
 	}
 	return nil
 }
