@@ -86,10 +86,10 @@ checks that the qURL agent skill served to users is at least the version the
 tagged CLI asks for. If that step fails, nothing has been uploaded: serve the
 newer skill, then use **Re-run failed jobs**. A cache in front of the skill
 may keep the old copy for a while, and the step fails until it does not. The
-nightly CLI workflow runs the same check against `main` and reports a failure
-without blocking anything. To see the answer on demand before the tag exists,
-run `go run ./apps/cli/scripts/check-served-skill` on `main` before merging
-the CLI's release PR. The release attaches:
+`cli: Served Skill` workflow runs the same check against `main` every day and
+reports a failure without blocking anything. To see the answer on demand
+before the tag exists, run `go run ./apps/cli/scripts/check-served-skill` on
+`main` before merging the CLI's release PR. The release attaches:
 
 | Asset | What it is |
 |---|---|

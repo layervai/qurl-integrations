@@ -1,0 +1,62 @@
+name: "cli: Served Skill"
+
+# Early warning for the served-skill check that release-please.yml's
+# release-cli job enforces: a CLI release fails while the qURL agent skill
+# served to users is older than the tagged CLI asks for. That gate first
+# speaks at release time. This runs the same checker against main every day,
+# so a served skill that lost its version, or a raised agentskill.MinVersion
+# that has merged, is known before a release goes red on it.
+#
+# It gates nothing: there is no pull_request trigger, so no check here can be
+# required. A scheduled failure on main reaches people through Main CI
+# Notifications (this workflow is registered there; keep the trigger list and
+# case arm in sync when renaming). A manual run reports only on its own run
+# page; from a branch it checks that branch's minimum.
+#
+# It is its own workflow, not a job in cli-nightly.yml, because the notifier
+# reports a workflow run and not a job: a served skill that stays too old for
+# days must not make the nightly's alert, which can mean a broken shipped
+# release, look the same every night.
+on:
+  schedule:
+    # 05:23 UTC — off-peak, offset from the top of the hour to dodge GitHub's
+    # scheduled-load spikes, and clear of the other CLI schedules.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Keyed by ref so a manual run from a branch cannot displace main's
+# scheduled run: GitHub keeps only one pending run per group.
+concurrency:
+  group: cli-served-skill-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: cli-served-skill / check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No module cache: the checker imports only the standard library, and
+      # this job must not be the one that saves the shared cache nearly empty.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The checker's own output, above the annotation, says which it was:
+      # a skill that is too old, or one it could not read.
+      - name: Verify the served agent skill is new enough
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          go run ./apps/cli/scripts/check-served-skill || {
+            echo "::error::the served agent skill is older than this tree's CLI needs, or the check could not read it or could not run; see the step log. If it is too old on main, the next CLI release fails on the same check until a newer skill is served." >&2
+            exit 1
+          }

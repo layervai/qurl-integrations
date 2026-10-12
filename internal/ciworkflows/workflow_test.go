@@ -52,11 +52,18 @@ const (
 	cliReleaseVerifierStepName = "Verify the CLI release was created"
 	cliReleaseVerifierScript   = "scripts/verify-cli-release.sh"
 	checkoutActionPrefix       = "actions/checkout@"
+	setupGoActionPrefix        = "actions/setup-go@"
 	cliWorkflow                = "cli.yml"
 	cliMatrixJobID             = "matrix"
 	cliCustomerArtifactsJobID  = "customer-artifacts"
 
 	workflowContractWorkflow = "workflow-contract.yml"
+
+	// The served-skill check is one program run by one step name in two
+	// workflows: the release, which it gates, and a daily early warning.
+	servedSkillCheckerDir = "apps/cli/scripts/check-served-skill"
+	servedSkillStepName   = "Verify the served agent skill is new enough"
+	servedSkillWorkflow   = "cli-served-skill.yml"
 )
 
 // TestCLICustomerJourneyArtifactsAreExactAndHermetic protects the untrusted
@@ -2172,12 +2179,8 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	t.Parallel()
 
-	const (
-		checkerDir = "apps/cli/scripts/check-served-skill"
-		stepName   = "Verify the served agent skill is new enough"
-	)
-	if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(checkerDir), "main.go")); err != nil {
-		t.Fatalf("the served-skill checker is not at %s: %v", checkerDir, err)
+	if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(servedSkillCheckerDir), "main.go")); err != nil {
+		t.Fatalf("the served-skill checker is not at %s: %v", servedSkillCheckerDir, err)
 	}
 
 	releaseCLI := readWorkflow(t, releasePleaseWorkflow).Jobs["release-cli"]
@@ -2202,9 +2205,9 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 			if ref := current.With["ref"]; ref != "${{ env.CLI_TAG }}" {
 				t.Errorf("the checkout before the served-skill check has ref %v, want the release tag", ref)
 			}
-		case check < 0 && strings.HasPrefix(current.Uses, "actions/setup-go@"):
+		case check < 0 && strings.HasPrefix(current.Uses, setupGoActionPrefix):
 			toolchain = index
-		case current.Name == stepName:
+		case current.Name == servedSkillStepName:
 			check = index
 		case strings.HasPrefix(current.Uses, "goreleaser/goreleaser-action@"):
 			build = index
@@ -2233,88 +2236,78 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	if !strings.Contains(guard.Run, "set -euo pipefail") {
 		t.Error("the served-skill check does not stop at its first failing command")
 	}
-	if !strings.Contains(guard.Run, "go run ./"+checkerDir+" ||") {
-		t.Errorf("the served-skill check does not run ./%s", checkerDir)
+	if !strings.Contains(guard.Run, "go run ./"+servedSkillCheckerDir+" ||") {
+		t.Errorf("the served-skill check does not run ./%s", servedSkillCheckerDir)
 	}
-	if !strings.Contains(guard.Run, "[[ ! -d "+checkerDir+" ]]") {
-		t.Errorf("the served-skill check's skip is not keyed on %s, the directory this test holds in place", checkerDir)
+	if !strings.Contains(guard.Run, "[[ ! -d "+servedSkillCheckerDir+" ]]") {
+		t.Errorf("the served-skill check's skip is not keyed on %s, the directory this test holds in place", servedSkillCheckerDir)
 	}
 }
 
-// TestCLINightlyChecksTheServedSkillWithoutGating pins the early signal for
-// the release-time guard above: the nightly runs the same checker against
-// the branch it was started on, and a failure reaches people through the
-// main-CI notifier rather than through a check that can hold up a merge or
-// a release.
-func TestCLINightlyChecksTheServedSkillWithoutGating(t *testing.T) {
+// TestServedSkillRunsDailyWithoutGating pins the early warning for the
+// release-time guard above: its own workflow runs the same checker on a
+// schedule and on demand, and nothing in it can hold up a merge or a
+// release, or turn a failing check green.
+//
+// That a scheduled failure reaches people is not pinned here.
+// scripts/check-main-ci-notification-payload.sh requires every workflow that
+// runs on main to be in the notifier's trigger list with its own impact arm.
+func TestServedSkillRunsDailyWithoutGating(t *testing.T) {
 	t.Parallel()
 
-	const (
-		nightlyWorkflow = "cli-nightly.yml"
-		checkerDir      = "apps/cli/scripts/check-served-skill"
-		stepName        = "Verify the served agent skill is new enough"
-	)
-	workflow := readWorkflow(t, nightlyWorkflow)
-	triggers := parseWorkflowTriggers(t, nightlyWorkflow, workflow.On)
-	for _, trigger := range []string{"schedule", "workflow_dispatch"} {
-		if _, ok := triggers[trigger]; !ok {
-			t.Errorf("%s has no %s trigger, so the served-skill check loses its nightly or its on-demand run", nightlyWorkflow, trigger)
-		}
+	workflow := readWorkflow(t, servedSkillWorkflow)
+	// Exactly these two: any pull-request or push trigger would let a check
+	// from this workflow be made required.
+	triggers := parseWorkflowTriggers(t, servedSkillWorkflow, workflow.On)
+	if got := slices.Sorted(maps.Keys(triggers)); !slices.Equal(got, []string{"schedule", "workflow_dispatch"}) {
+		t.Errorf("%s triggers = %v, want schedule and workflow_dispatch only", servedSkillWorkflow, got)
 	}
-	// A `required` job would make this package list the nightly among the
-	// workflows that gate a PR. The check is a warning, not a gate.
-	if workflow.Jobs["required"] != nil {
-		t.Errorf("%s has a required job; the served-skill check must not gate", nightlyWorkflow)
+	if schedule, _ := triggers["schedule"].([]any); len(schedule) != 1 {
+		t.Errorf("%s schedule = %v, want one cron entry", servedSkillWorkflow, triggers["schedule"])
 	}
-	// A scheduled failure is seen only if the notifier listens for it.
-	if !strings.Contains(string(readWorkflowBytes(t, "main-ci-notifications.yml")), `- "cli: Nightly"`) {
-		t.Error("main-ci-notifications.yml does not listen for cli: Nightly, so a failed served-skill check tells nobody")
+	// githubJob does not read a job's continue-on-error, so the whole file
+	// is held to not using the key: on the job as on the step, it would end
+	// a failing run as a success and the notifier would stay quiet.
+	if strings.Contains(string(readWorkflowBytes(t, servedSkillWorkflow)), "continue-on-error") {
+		t.Errorf("%s uses continue-on-error, which lets a failing check end green", servedSkillWorkflow)
 	}
 
-	job := workflow.Jobs["served-skill"]
-	if job == nil {
-		t.Fatalf("%s is missing the served-skill job", nightlyWorkflow)
+	job := workflow.Jobs["check"]
+	if job == nil || len(workflow.Jobs) != 1 {
+		t.Fatalf("%s jobs = %v, want only check", servedSkillWorkflow, slices.Sorted(maps.Keys(workflow.Jobs)))
 	}
 	if job.If != "" || job.Needs != nil {
-		t.Errorf("served-skill is conditional or waits on another job: if=%q needs=%v", job.If, job.Needs)
+		t.Errorf("check is conditional or waits on another job: if=%q needs=%v", job.If, job.Needs)
 	}
-	source, toolchain, check := -1, -1, -1
-	for index := range job.Steps {
-		current := &job.Steps[index]
-		switch {
-		case check < 0 && strings.HasPrefix(current.Uses, checkoutActionPrefix):
-			source = index
-			// The default ref is main on a schedule and the chosen branch
-			// on a dispatch. A fixed ref would answer for some other tree.
-			if ref, ok := current.With["ref"]; ok {
-				t.Errorf("the checkout before the nightly served-skill check pins ref %v, want the run's own ref", ref)
-			}
-		case check < 0 && strings.HasPrefix(current.Uses, "actions/setup-go@"):
-			toolchain = index
-		case current.Name == stepName:
-			check = index
-		}
+	if len(job.Steps) != 3 {
+		t.Fatalf("check has %d steps, want checkout, setup-go and the check", len(job.Steps))
 	}
-	if check < 0 {
-		t.Fatalf("served-skill has no step named %q", stepName)
+	source, toolchain, guard := &job.Steps[0], &job.Steps[1], &job.Steps[2]
+	// The default ref is main on a schedule and the chosen branch on a
+	// manual run. Any other input could make this answer for another tree.
+	if !strings.HasPrefix(source.Uses, checkoutActionPrefix) || source.If != "" ||
+		len(source.With) != 1 || source.With["persist-credentials"] != false {
+		t.Errorf("check does not start with a plain checkout of the run's own ref: uses=%q if=%q with=%v", source.Uses, source.If, source.With)
 	}
-	if source < 0 || toolchain < 0 {
-		t.Errorf("served-skill steps before the check: checkout at %d, actions/setup-go at %d; want both", source, toolchain)
+	if !strings.HasPrefix(toolchain.Uses, setupGoActionPrefix) || toolchain.If != "" {
+		t.Errorf("check does not set up the repository's Go before it runs: uses=%q if=%q", toolchain.Uses, toolchain.If)
 	}
-	guard := &job.Steps[check]
-	if guard.If != "" || guard.ContinueOnError != nil {
-		t.Errorf("the nightly served-skill check is conditional or allowed to fail, so it would go green on an old skill: if=%q continue-on-error=%v", guard.If, guard.ContinueOnError)
+	if guard.Name != servedSkillStepName || guard.If != "" || (guard.Shell != "" && guard.Shell != "bash") {
+		t.Errorf("the last step is not an unconditional %q: name=%q if=%q shell=%q", servedSkillStepName, guard.Name, guard.If, guard.Shell)
 	}
-	if !strings.Contains(guard.Run, "set -euo pipefail") {
-		t.Error("the nightly served-skill check does not stop at its first failing command")
+	// The script is held to its shape, not searched for its parts: the
+	// checker is the first thing to run, so nothing can skip it, and the
+	// only way out of its failure is the one `exit 1`. The release step's
+	// skip for a missing checker is for old tags and has no place here.
+	lines := strings.Split(strings.TrimSpace(guard.Run), "\n")
+	for index := range lines {
+		lines[index] = strings.TrimSpace(lines[index])
 	}
-	if !strings.Contains(guard.Run, "go run ./"+checkerDir+" ||") {
-		t.Errorf("the nightly served-skill check does not run ./%s", checkerDir)
-	}
-	// The release step's skip is for tags older than the checker. Here it
-	// would turn a moved or deleted checker into a green run.
-	if strings.Contains(guard.Run, "exit 0") {
-		t.Error("the nightly served-skill check can skip itself")
+	if len(lines) != 5 || lines[0] != "set -euo pipefail" ||
+		lines[1] != "go run ./"+servedSkillCheckerDir+" || {" ||
+		!strings.HasPrefix(lines[2], `echo "::error::`) || !strings.HasSuffix(lines[2], `" >&2`) ||
+		lines[3] != "exit 1" || lines[4] != "}" {
+		t.Errorf("the served-skill step is not: strict mode, the checker, and on its failure one annotation and exit 1:\n%s", guard.Run)
 	}
 }
 

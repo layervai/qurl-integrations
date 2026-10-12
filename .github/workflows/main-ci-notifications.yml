@@ -18,6 +18,7 @@ on:
       - "teams: Build and Test"
       - "cli: Build and Test"
       - "cli: Nightly"
+      - "cli: Served Skill"
       - "origins/s3-static-connector: Build and Publish"
       - "Shared Tests (All Apps)"
       - "e2e: Build and Test"
@@ -194,7 +195,10 @@ jobs:
               fi
               ;;
             "cli: Nightly")
-              impact="The nightly CLI deep pass (fuzz, extended sandbox e2e, GoReleaser snapshot, served agent skill, release smoke) did not complete successfully. If the failing job is *release smoke*, the shipped release customers install today may be broken — its log names the broken chain link (tap, cask, quarantine postflight, binary, release machinery, release assets, signature, manifest, archive, tap pin). If it is *served agent skill*, the next CLI release will fail its served-skill check until a new enough skill is served. Otherwise no artifact is affected. Triage whether this is a real regression or harness flake before the next CLI release."
+              impact="The nightly CLI deep pass (fuzz, extended sandbox e2e, GoReleaser snapshot, release smoke) did not complete successfully. If the failing job is *release smoke*, the shipped release customers install today may be broken — its log names the broken chain link (tap, cask, quarantine postflight, binary, release machinery, release assets, signature, manifest, archive, tap pin). Otherwise no artifact is affected. Triage whether this is a real regression or harness flake before the next CLI release."
+              ;;
+            "cli: Served Skill")
+              impact="The daily check of the qURL agent skill served to users did not complete successfully: the served skill is older than the CLI on main asks for, or the check could not read it — the run log says which. No shipped release is affected. If the skill is too old, the next CLI release fails the same check until a newer skill is served; serve it before merging the CLI's release PR."
               ;;
             "origins/s3-static-connector: Build and Publish")
               impact="Reusable S3 static connector image build or publish did not complete successfully. Website/stats deployments should stay pinned to the prior image digest until this run is repaired."

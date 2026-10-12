@@ -2,11 +2,9 @@ name: "cli: Nightly"
 
 # Deep CLI exercises too slow or too stateful for the per-PR gates in cli.yml
 # — fuzzing and a full GoReleaser snapshot build — plus
-# two no PR can gate at all: a customer-path smoke of the latest SHIPPED
+# one no PR can gate at all: a customer-path smoke of the latest SHIPPED
 # release (PRs validate the tree; the release smoke validates what
-# `brew install layervai/tap/qurl` serves customers today), and an early run
-# of the served-skill check that release-please.yml's release-cli job
-# enforces at release time.
+# `brew install layervai/tap/qurl` serves customers today).
 #
 # Deliberately NO job keyed `required` here: internal/ciworkflows conscripts
 # any workflow with a required aggregate into requiredWorkflowSpecs, and a
@@ -140,42 +138,6 @@ jobs:
           args: release --snapshot --clean --skip=sign
         env:
           QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
-
-  # Early warning for the gate in release-please.yml's release-cli job, which
-  # fails a CLI release while the qURL agent skill served to users is older
-  # than the tagged CLI asks for. That gate first speaks at release time; this
-  # runs the same checker against main every night, so a raised
-  # agentskill.MinVersion, or a served skill that lost its version, is known
-  # before a release goes red on it.
-  #
-  # It blocks nothing: this workflow has no required job, and a failure
-  # surfaces through Main CI Notifications. Nothing users have is affected
-  # by a failure here — a released CLI was held to its own minimum when it
-  # shipped — unless the served skill itself regressed, which the log says.
-  # A manual dispatch from a branch checks that branch's minimum, which is
-  # how to ask the question for a PR that raises it.
-  served-skill:
-    name: cli-nightly / served agent skill
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # No skip for a missing checker, unlike the release step: that skip is
-      # for old tags, and this job only ever reads a current tree.
-      - name: Verify the served agent skill is new enough
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          go run ./apps/cli/scripts/check-served-skill || {
-            echo "::error::the served agent skill is older than this tree's CLI needs, or the check could not read it or could not run; see the step log. The next CLI release fails on the same check until the newer skill is served." >&2
-            exit 1
-          }
 
   # Customer-path smoke of the latest SHIPPED release — the surface neither a
   # PR gate nor the snapshot build can cover, because it validates what is
