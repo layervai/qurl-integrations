@@ -144,6 +144,19 @@ func TestPublishConsumerPolicyRejectsInvalidFlags(t *testing.T) {
 	}
 }
 
+func TestPublishRejectsExplicitEmptyAccessBeforeRequest(t *testing.T) {
+	srv := apitest.NewServer(t)
+	for _, mode := range []string{"", "   "} {
+		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/report", "--access=" + mode}})
+		if result.code != 2 || !strings.Contains(result.stderr.String(), "--access requires") {
+			t.Fatalf("mode=%q exit=%d error=%s", mode, result.code, result.stderr.String())
+		}
+	}
+	if len(srv.Requests()) != 0 {
+		t.Fatal("empty private policy reached API")
+	}
+}
+
 func TestConsumerAccessApprovalRequestBodies(t *testing.T) {
 	for _, key := range []bool{false, true} {
 		t.Run(map[bool]string{false: "contract", true: "key"}[key], func(t *testing.T) {

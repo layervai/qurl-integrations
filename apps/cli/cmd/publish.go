@@ -102,6 +102,9 @@ owns the share and turns it off when it exits.`,
   qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("access") && strings.TrimSpace(consumerMode) == "" {
+				return exitcode.UsageError(errors.New("--access requires a private access mode"))
+			}
 			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
 				return exitcode.UsageError(err)
 			}
