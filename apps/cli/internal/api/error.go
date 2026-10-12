@@ -90,6 +90,7 @@ func (e *Error) ShareNotFound() bool {
 // out of scope: the gate covers what this repo authors.
 func CustomerMessages() []string {
 	return []string{
+		msgPreviewFileSize, msgPreviewFileType, msgPreviewStillSize, msgPreviewUploadAddress, msgPreviewUploadTransport, msgPreviewUploadStatus,
 		errTemplate, msgAccountCallbackInvalid, msgAccountCallbackComplete, msgAccountLoadFailed, msgAccountUnavailable, msgAccountPortBusy, msgAccountBrowserFailed, msgAccountTimedOut, msgAccountCanceled, msgAccountExchangeFailed, msgAccountHTTPSRequired, msgAccountLinkInvalid, msgAccountOwnersInvalid,
 		msgPublishAccessConflict, msgPublishExistingPublic, msgPublishExistingPrivate, msgPublishOtherDevices, msgPublishAccessDiffers,
 		msgPrivateUnconfirmed, msgPublicUnconfirmed, msgUnaskedPublicDeleted, msgUnaskedPublicNotDeleted,

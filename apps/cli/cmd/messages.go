@@ -227,6 +227,7 @@ const (
 // package can emit, for the jargon gate.
 func customerMessages() []string {
 	return []string{
+		msgPreviewDescriptionRequired, msgPreviewAltRequired, msgPreviewUploaded, msgPreviewMediaMissing,
 		msgAccountSetup,
 		msgAccountContinue,
 		msgAccountLinked,

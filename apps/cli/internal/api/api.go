@@ -24,8 +24,13 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
+const schemeHTTPS = "https"
+
 // Client is what commands program against.
 type Client interface {
+	Preview(ctx context.Context, id string) (*Preview, error)
+	UpdatePreview(ctx context.Context, id string, patch PreviewPatch) (*Preview, error)
+	UploadPreview(ctx context.Context, id, path, alt, replaceID string) (*Preview, error)
 	// LinkAccount uses the device credential and a separate browser account token.
 	LinkAccount(ctx context.Context, accountToken, ownerID string) error
 	// MintConnectorEnrollmentToken creates a short-lived, one-shot credential

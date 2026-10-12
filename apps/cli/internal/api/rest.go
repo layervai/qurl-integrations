@@ -584,7 +584,7 @@ func validateTargetURL(target string) error {
 	if err != nil {
 		return fmt.Errorf("%w: target URL: %w", qurl.ErrInvalidResourceRequest, err)
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
+	if u.Scheme != "http" && u.Scheme != schemeHTTPS {
 		return fmt.Errorf("%w: target URL must use http or https", qurl.ErrInvalidResourceRequest)
 	}
 	if u.Host == "" {
