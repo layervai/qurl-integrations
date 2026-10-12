@@ -7,6 +7,7 @@ import (
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func previewCmd(opts *globalOpts) *cobra.Command {
@@ -53,9 +54,15 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 		}
 		next, err := client.UploadPreview(cmd.Context(), args[0], args[1], alt, replaceID)
 		if err != nil {
+			var invalid qurlapi.PreviewFileError
+			if errors.As(err, &invalid) {
+				return exitcode.InvalidInputError(invalid.Error(), err)
+			}
 			return err
 		}
-		opts.printer().Notef("File uploaded. Processing keeps current media visible. Check with qurl preview get %s.", args[0])
+		if !opts.quiet && opts.resolvedFormat != output.FormatJSON {
+			opts.printer().Notef("File uploaded. Processing keeps current media visible. Check with qurl preview get %s.", args[0])
+		}
 		return opts.printer().Preview(next)
 	}}
 	upload.Flags().StringVar(&alt, "alt", "", "description for people who cannot see the image or clip")

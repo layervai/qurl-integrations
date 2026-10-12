@@ -13,7 +13,8 @@ import (
 
 type previewTestClient struct {
 	qurlapi.Client
-	patch *qurlapi.PreviewPatch
+	patch     *qurlapi.PreviewPatch
+	uploadErr error
 }
 
 func (c *previewTestClient) Preview(context.Context, string) (*qurlapi.Preview, error) {
@@ -66,6 +67,38 @@ func TestPreviewCommandsUseLatestRevision(t *testing.T) {
 			}
 			if tc.name == "remove" && (c.patch.MediaIDs == nil || len(*c.patch.MediaIDs) != 1 || (*c.patch.MediaIDs)[0] != "keep") {
 				t.Fatal(c.patch)
+			}
+		})
+	}
+}
+
+func (c *previewTestClient) UploadPreview(context.Context, string, string, string, string) (*qurlapi.Preview, error) {
+	return &qurlapi.Preview{Revision: 8}, c.uploadErr
+}
+func TestPreviewUploadQuietJSONAndInvalidInput(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		quiet  bool
+		format output.Format
+		err    error
+		code   int
+	}{
+		{"quiet", true, output.FormatText, nil, 0},
+		{"json", false, output.FormatJSON, nil, 0},
+		{"invalid file", false, output.FormatJSON, qurlapi.PreviewFileError("invalid file"), exitcode.InvalidInput},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			opts := &globalOpts{registeredClient: &previewTestClient{uploadErr: tc.err}, streams: &output.Streams{Out: &out, Err: &errOut, In: &out}, resolvedFormat: tc.format, quiet: tc.quiet, now: time.Now}
+			cmd := previewCmd(opts)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			cmd.SetArgs([]string{"upload", "crid", "file", "--alt", "image"})
+			if err := cmd.Execute(); exitcode.FromError(err) != tc.code {
+				t.Fatal(err)
+			}
+			if errOut.Len() != 0 {
+				t.Fatal(errOut.String())
 			}
 		})
 	}

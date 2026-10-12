@@ -3,6 +3,7 @@ package output
 import (
 	"errors"
 	"fmt"
+	"strconv"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
@@ -13,28 +14,70 @@ func (p *Printer) Preview(preview *qurlapi.Preview) error {
 		return errors.New("missing preview response")
 	}
 	if p.format == FormatJSON {
-		return p.writeJSON(preview)
+		document := struct {
+			Revision    int64               `json:"revision"`
+			Description escapedJSONString   `json:"description,omitempty"`
+			Media       []previewMediaJSON  `json:"media,omitempty"`
+			Uploads     []previewUploadJSON `json:"uploads,omitempty"`
+		}{Revision: preview.Revision, Description: escapedJSONString(preview.Description)}
+		for _, m := range preview.Media {
+			document.Media = append(document.Media, previewMediaJSON{m.Width, m.Height, escapedJSONString(m.ID), escapedJSONString(m.Kind), escapedJSONString(m.Alt)})
+		}
+		for _, u := range preview.Uploads {
+			document.Uploads = append(document.Uploads, previewUploadJSON{u.ExpiresAt, escapedJSONString(u.ID), escapedJSONString(u.Status), escapedJSONString(u.Alt)})
+		}
+		return p.writeJSON(document)
 	}
 	if p.quiet {
 		if preview.Description == "" {
 			return nil
 		}
-		_, err := fmt.Fprintf(p.out, "%q\n", preview.Description)
+		_, err := fmt.Fprintf(p.out, "%s\n", p.previewText(preview.Description))
 		return err
 	}
-	if _, err := fmt.Fprintf(p.out, "Description: %q\nRevision: %d\n", preview.Description, preview.Revision); err != nil {
+	if _, err := fmt.Fprintf(p.out, "Description: %s\nRevision: %d\n", p.previewText(preview.Description), preview.Revision); err != nil {
 		return err
 	}
 	for i := range preview.Media {
 		media := &preview.Media[i]
-		if _, err := fmt.Fprintf(p.out, "Media %q (%q): %q\n", media.ID, media.Kind, media.Alt); err != nil {
+		if _, err := fmt.Fprintf(p.out, "Media %s (%s): %s\n", p.previewText(media.ID), p.previewText(media.Kind), p.previewText(media.Alt)); err != nil {
 			return err
 		}
 	}
 	for _, upload := range preview.Uploads {
-		if _, err := fmt.Fprintf(p.out, "Upload %q: %q\n", upload.ID, upload.Status); err != nil {
+		if _, err := fmt.Fprintf(p.out, "Upload %s: %s\n", p.previewText(upload.ID), p.previewText(upload.Status)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+type previewMediaJSON struct {
+	Width  int               `json:"width"`
+	Height int               `json:"height"`
+	ID     escapedJSONString `json:"id"`
+	Kind   escapedJSONString `json:"kind"`
+	Alt    escapedJSONString `json:"alt"`
+}
+type previewUploadJSON struct {
+	ExpiresAt int64             `json:"expires_at"`
+	ID        escapedJSONString `json:"id"`
+	Status    escapedJSONString `json:"status"`
+	Alt       escapedJSONString `json:"alt"`
+}
+
+func (p *Printer) previewText(value string) string {
+	runes := []rune(value)
+	cut := len(runes) > 500
+	if cut {
+		value = string(runes[:500])
+	}
+	quoted := strconv.Quote(value)
+	if p.ascii {
+		quoted = strconv.QuoteToASCII(value)
+	}
+	if cut {
+		quoted += p.ellipsis()
+	}
+	return quoted
 }

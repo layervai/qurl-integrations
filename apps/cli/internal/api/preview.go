@@ -87,21 +87,21 @@ func (c *client) UploadPreview(ctx context.Context, id, path, alt, replaceID str
 	}
 	// TODO(upstream-contract): early hints mirror API media types and 10/25 MB limits.
 	if !stat.Mode().IsRegular() || stat.Size() < 1 || stat.Size() > 25_000_000 {
-		return nil, errors.New("preview file must be a nonempty regular file of at most 25 MB")
+		return nil, PreviewFileError("preview file must be a nonempty regular file of at most 25 MB")
 	}
 	head := make([]byte, 512)
-	count, err := file.Read(head)
-	if err != nil && !errors.Is(err, io.EOF) {
+	count, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil, err
 	}
 	contentType := http.DetectContentType(head[:count])
 	switch contentType {
 	case "image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4", "video/webm":
 	default:
-		return nil, errors.New("choose a JPEG, PNG, WebP, GIF, MP4 or WebM file")
+		return nil, PreviewFileError("choose a JPEG, PNG, WebP, GIF, MP4 or WebM file")
 	}
 	if strings.HasPrefix(contentType, "image/") && contentType != "image/gif" && stat.Size() > 10_000_000 {
-		return nil, errors.New("still images must be at most 10 MB")
+		return nil, PreviewFileError("still images must be at most 10 MB")
 	}
 	if _, err = file.Seek(0, io.SeekStart); err != nil {
 		return nil, err
@@ -150,3 +150,8 @@ func sendPreviewFile(ctx context.Context, transport qurl.HTTPDoer, form *qurl.Pr
 func previewUploadHTTPClient() *http.Client {
 	return &http.Client{Timeout: 5 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
+
+// PreviewFileError reports a local file that the upload contract rejects.
+type PreviewFileError string
+
+func (e PreviewFileError) Error() string { return string(e) }

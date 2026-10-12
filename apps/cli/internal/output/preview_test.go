@@ -2,6 +2,7 @@ package output
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -22,5 +23,38 @@ func TestPreviewOutputEscapesTextAndQuietEmpty(t *testing.T) {
 	p = publisherPrinter(&out, &errBuf, FormatText, false, true, false, true)
 	if err := p.Preview(&qurlapi.Preview{}); err != nil || out.Len() != 0 {
 		t.Fatalf("%q %v", out.String(), err)
+	}
+}
+
+func TestPreviewJSONEscapesWithoutChangingValues(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := publisherPrinter(&out, &errBuf, FormatJSON, false, false, false, true)
+	text := "text\u202e\u009b\x1b"
+	value := &qurlapi.Preview{Revision: 9, Description: text, Media: []qurlapi.PreviewMedia{{ID: text, Kind: text, Alt: text, Width: 2, Height: 3}}, Uploads: []qurlapi.PreviewUpload{{ID: text, Status: text, Alt: text, ExpiresAt: 12}}}
+	if err := p.Preview(value); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{"\u202e", "\u009b", "\x1b"} {
+		if strings.Contains(out.String(), raw) {
+			t.Fatalf("raw terminal control: %q", out.String())
+		}
+	}
+	var decoded qurlapi.Preview
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Description != text || decoded.Media[0] != value.Media[0] || decoded.Uploads[0] != value.Uploads[0] || decoded.Revision != 9 {
+		t.Fatal(decoded)
+	}
+}
+func TestPreviewTextUsesASCIIAndBoundsText(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := publisherPrinter(&out, &errBuf, FormatText, false, false, false, true)
+	p.ascii = true
+	if err := p.Preview(&qurlapi.Preview{Description: strings.Repeat("é", 600)}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "é") || strings.Count(out.String(), `\u00e9`) != 500 {
+		t.Fatal(out.String())
 	}
 }

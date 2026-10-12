@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -63,5 +65,34 @@ func TestPreviewUploadKeepsCancellationWithoutSignedURL(t *testing.T) {
 	err := sendPreviewFile(context.Background(), previewErrorDoer{&url.Error{Op: "Put", URL: signed, Err: context.Canceled}}, &qurl.PreviewUploadForm{URL: signed}, strings.NewReader("x"), 1)
 	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "signature") || strings.Contains(err.Error(), "secret") {
 		t.Fatal(err)
+	}
+}
+
+func TestUploadPreviewRejectsInvalidFilesBeforeAPI(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data []byte
+		size int64
+	}{
+		{"empty", nil, 0}, {"wrong type", []byte("plain text"), 0},
+		{"too large", nil, 25_000_001},
+		{"large still", []byte{0x89, 'P', 'N', 'G', 13, 10, 26, 10}, 10_000_001},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "file")
+			if err := os.WriteFile(path, tc.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.size > 0 {
+				if err := os.Truncate(path, tc.size); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := (&client{}).UploadPreview(context.Background(), "crid", path, "alt", "")
+			var invalid PreviewFileError
+			if !errors.As(err, &invalid) {
+				t.Fatalf("error %T: %v", err, err)
+			}
+		})
 	}
 }
