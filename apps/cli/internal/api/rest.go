@@ -1207,7 +1207,7 @@ func ValidateConsumerPolicyFields(mode, contract string) error {
 			return qurl.ErrInvalidResourceRequest
 		}
 	case "contract":
-		if strings.TrimSpace(contract) == "" || len(contract) > 128 {
+		if strings.TrimSpace(contract) == "" || strings.TrimSpace(contract) != contract || len(contract) > 128 {
 			return qurl.ErrInvalidResourceRequest
 		}
 	default:

@@ -141,3 +141,14 @@ func TestExistingConsumerPolicyMismatchIsAConflict(t *testing.T) {
 		t.Fatalf("existing policy mismatch = %v", err)
 	}
 }
+
+func TestConsumerContractRejectsPadding(t *testing.T) {
+	for _, contract := range []string{" acme", "acme ", "\tacme", "acme\n"} {
+		if ValidateConsumerPolicyFields("contract", contract) == nil {
+			t.Fatalf("accepted %q", contract)
+		}
+	}
+	if err := ValidateConsumerPolicyFields("contract", "acme"); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -2,6 +2,7 @@ package output
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -29,10 +30,10 @@ func (p *Printer) consumerManagementQuiet(result *qurlapi.ConsumerManagementResu
 	if result.Action == consumerActionListInvitations || result.Action == consumerActionListGrants {
 		ew := &errWriter{w: p.out}
 		for _, invitation := range result.Invitations {
-			ew.printf("%s\n", invitation.ID)
+			ew.printf("%s\n", consumerTerminalText(invitation.ID))
 		}
 		for i := range result.Grants {
-			ew.printf("%s\n", result.Grants[i].ID)
+			ew.printf("%s\n", consumerTerminalText(result.Grants[i].ID))
 		}
 		if result.NextCursor != "" {
 			p.notefMore(result.NextCursor)
@@ -45,12 +46,12 @@ func (p *Printer) consumerManagementQuiet(result *qurlapi.ConsumerManagementResu
 	} else if result.Grant != nil {
 		id = result.Grant.ID
 	}
-	_, err := fmt.Fprintln(p.out, id)
+	_, err := fmt.Fprintln(p.out, consumerTerminalText(id))
 	return err
 }
 
 func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResult) error {
-	if _, err := fmt.Fprintf(p.out, "Resource: %s\nAction: %s\n", result.CRID, result.Action); err != nil {
+	if _, err := fmt.Fprintf(p.out, "Resource: %s\nAction: %s\n", consumerTerminalText(result.CRID), consumerTerminalText(result.Action)); err != nil {
 		return err
 	}
 	if result.Policy != nil {
@@ -58,29 +59,29 @@ func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResul
 		if result.Policy.ContractID != "" {
 			policy += " " + result.Policy.ContractID
 		}
-		_, err := fmt.Fprintf(p.out, "Access: private (%s)\nVersion: %d\n", policy, result.Policy.Version)
+		_, err := fmt.Fprintf(p.out, "Access: private (%s)\nVersion: %d\n", consumerTerminalText(policy), result.Policy.Version)
 		return err
 	}
 	if result.Invitation != nil {
 		value := result.Invitation
 		ew := &errWriter{w: p.out}
-		ew.printf("Invitation: %s\nEmail: %q\nStatus: %s\nVersion: %d\nDelivery: %s\n", value.ID, value.Email, value.Status, value.Version, value.Delivery)
+		ew.printf("Invitation: %s\nEmail: %q\nStatus: %s\nVersion: %d\nDelivery: %s\n", consumerTerminalText(value.ID), value.Email, consumerTerminalText(value.Status), value.Version, consumerTerminalText(value.Delivery))
 		if value.SessionCleanup != "" {
-			ew.printf("Connection cleanup: %s\n", value.SessionCleanup)
+			ew.printf("Connection cleanup: %s\n", consumerTerminalText(value.SessionCleanup))
 		}
 		return ew.flush(nil)
 	}
 	if result.Grant != nil {
 		value := result.Grant
 		ew := &errWriter{w: p.out}
-		ew.printf("Consumer: %s\nStatus: %s\nVersion: %d\n", value.ID, value.Status, value.Version)
+		ew.printf("Consumer: %s\nStatus: %s\nVersion: %d\n", consumerTerminalText(value.ID), consumerTerminalText(value.Status), value.Version)
 		if value.SessionCleanup != "" {
-			ew.printf("Connection cleanup: %s\n", value.SessionCleanup)
+			ew.printf("Connection cleanup: %s\n", consumerTerminalText(value.SessionCleanup))
 		}
 		return ew.flush(nil)
 	}
 	for _, invitation := range result.Invitations {
-		if _, err := fmt.Fprintf(p.out, "%s  %s  version %d  %q\n", invitation.ID, invitation.Status, invitation.Version, invitation.Email); err != nil {
+		if _, err := fmt.Fprintf(p.out, "%s  %s  version %d  %q\n", consumerTerminalText(invitation.ID), consumerTerminalText(invitation.Status), invitation.Version, invitation.Email); err != nil {
 			return err
 		}
 	}
@@ -90,7 +91,7 @@ func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResul
 		if grant.Email != "" {
 			contact = fmt.Sprintf("  %q", grant.Email)
 		}
-		if _, err := fmt.Fprintf(p.out, "%s  %s  version %d%s\n", grant.ID, grant.Status, grant.Version, contact); err != nil {
+		if _, err := fmt.Fprintf(p.out, "%s  %s  version %d%s\n", consumerTerminalText(grant.ID), consumerTerminalText(grant.Status), grant.Version, contact); err != nil {
 			return err
 		}
 	}
@@ -190,4 +191,9 @@ func policyDocument(policy *qurl.ConsumerAccessPolicy) *consumerAccessJSON {
 		return nil
 	}
 	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID}
+}
+
+func consumerTerminalText(value string) string {
+	quoted := strconv.QuoteToASCII(value)
+	return quoted[1 : len(quoted)-1]
 }

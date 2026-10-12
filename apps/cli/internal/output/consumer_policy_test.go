@@ -165,3 +165,15 @@ func TestConsumerPolicyOverridesLegacyRequestGuidance(t *testing.T) {
 		t.Fatal("empty non-final page was reported as an empty grant list")
 	}
 }
+
+func TestConsumerTerminalTextEscapesControls(t *testing.T) {
+	for _, value := range []string{"\x1b]52;c;data\a", "line\nnext", "\u202ehidden"} {
+		got := consumerTerminalText(value)
+		if strings.ContainsAny(got, "\x1b\a\n\u202e") {
+			t.Fatalf("unsafe output: %q", got)
+		}
+	}
+	if got := consumerTerminalText("decision-123"); got != "decision-123" {
+		t.Fatal(got)
+	}
+}
