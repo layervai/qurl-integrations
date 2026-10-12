@@ -111,8 +111,10 @@ daemon in the new mode, the same path a binary-version change takes.
 A package upgrade replaces the binary without rewriting the job. The upgraded
 daemon still starts from that job when only the version part differs, and the
 next `qurl start`, `restart`, or `publish` replaces the job as above. A job for
-another mode or job protocol version (the leading `5`) is refused; that daemon waits an hour before it
-exits, so the service manager cannot restart it in a loop.
+another mode or another leading protocol number is refused; that daemon waits
+an hour before it exits, so the service manager cannot restart it in a loop.
+The wait covers a job the binary can parse. An older binary started by a newer
+job that passes a flag it does not know still exits at once.
 
 ## Runtime request headers
 
