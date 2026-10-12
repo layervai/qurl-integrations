@@ -32,8 +32,8 @@ import (
 // A release is held to it: scripts/check-served-skill reads the served file
 // before the release is built, and fails the release when it is too old.
 // A change that raises this still passes its own PR checks. After it
-// merges, a daily workflow runs the same check against main and reports a
-// failure without blocking anything.
+// merges, .github/workflows/cli-served-skill.yml runs the same check against
+// main every day and reports a failure without blocking anything.
 const MinVersion = 1
 
 // SourceURL is where the current skill is served.

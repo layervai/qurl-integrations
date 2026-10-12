@@ -27,10 +27,10 @@ on:
 permissions:
   contents: read
 
-# Keyed by ref so a manual run from a branch cannot displace main's
-# scheduled run: GitHub keeps only one pending run per group.
+# Keyed by event and ref so no manual run, from a branch or from main, can
+# displace main's scheduled run: GitHub keeps only one pending run per group.
 concurrency:
-  group: cli-served-skill-${{ github.ref }}
+  group: cli-served-skill-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
