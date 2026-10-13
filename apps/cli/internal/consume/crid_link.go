@@ -27,13 +27,19 @@ import (
 // particular CRID is a second question, which CRIDNotRequestable answers from
 // the request's own error.
 //
-// A registered device can ask in a second way (qurl.RequestCRIDLinkAsDevice).
-// The SDK then follows one rule: a random key first, the device key only
-// after "not found". The first request is the request described above. Only
-// when the service answers it "not found" does the SDK send one second
-// request, under the device key. A private resource can be opened this way by
-// the owner's own device and by a device the owner allowed. The same check
-// says whether this way is offered: both ways use the same settings.
+// A registered device can ask in a second way
+// (qurl.RequestCRIDLinkAsDeviceFromKeySource). The SDK then follows one rule:
+// a random key first, the device key only after "not found". The first
+// request is the request described above. Only when the service answers it
+// "not found" does the SDK send one second request, under the device key. A
+// private resource can be opened this way by the owner's own device and by a
+// device the owner allowed. The same check says whether this way is offered:
+// both ways use the same settings.
+//
+// The device key is not passed to that call. A function that reads it is,
+// and the SDK calls the function only when it sends the second request. So a
+// request that the first answer settles, as for every public resource, does
+// not read the key.
 
 // cridLinkRequestTimeout bounds one call. The SDK sends with a client that
 // has no timeout of its own, so without this bound a service that never
@@ -234,29 +240,41 @@ func (o *AccessOpener) RequestCRIDLink(ctx context.Context, resourceCRID string)
 
 // RequestCRIDLinkAsDevice is RequestCRIDLink for a registered device. It can
 // return a link for a private resource too, when the owner of the resource
-// allowed the device or the device is the owner's own.
-// deviceStaticPrivateKey is the device's 32-byte X25519 static private key.
+// allowed the device or the device is the owner's own. deviceKey returns the
+// device's 32-byte X25519 static private key.
 //
 // The SDK follows one rule: a random key first, the device key only after
 // "not found". So this call sends one request for a public resource, and two
 // for every answer that is "not found". The time limit and the context cover
-// both requests together.
+// both requests together, and the call of deviceKey between them.
+//
+// The SDK calls deviceKey at most once, and only when the first request was
+// answered "not found". For every other answer the key is not read. The SDK
+// calls it on a goroutine of its own, and does not wait for it when the
+// context of the call ends.
 //
 // Everything RequestCRIDLink says about deployment settings, about the answer
-// and about the two failures it reports itself holds here. There is one more
-// answer: a key the SDK cannot use (DeviceKeyRefused). The SDK gives it
-// before it looks at the CRID or at the settings, and nothing was sent.
+// and about the two failures it reports itself holds here. There are two more
+// answers:
 //
-// The key stays the caller's. Neither this function nor the SDK keeps it or
-// wipes it, and neither puts it in an error. The caller must not change or
-// wipe it while the call runs.
-func (o *AccessOpener) RequestCRIDLinkAsDevice(ctx context.Context, deviceStaticPrivateKey []byte, resourceCRID string) (*qurl.CRIDLink, error) {
+//   - deviceKey gave no key the SDK can use (DeviceKeyNotGiven). The first
+//     request was sent and answered "not found", and nothing was sent under a
+//     device key.
+//   - There is no deviceKey at all (DeviceKeyRefused). The SDK gives that
+//     answer before it looks at the CRID or at the settings, and nothing was
+//     sent.
+//
+// A key that deviceKey returns belongs to the SDK. The SDK uses it for the
+// second request and overwrites it with zeros before this call returns. So
+// deviceKey returns a slice that nothing else uses. Neither this function nor
+// the SDK puts the key in an error.
+func (o *AccessOpener) RequestCRIDLinkAsDevice(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error) {
 	return o.requestCRIDLink(ctx, cridLinkCalls{
 		resolved: func(ctx context.Context) (*qurl.CRIDLink, error) {
-			return qurl.RequestCRIDLinkAsDevice(ctx, deviceStaticPrivateKey, resourceCRID)
+			return qurl.RequestCRIDLinkAsDeviceFromKeySource(ctx, deviceKey, resourceCRID)
 		},
 		with: func(ctx context.Context, cfg qurl.Config) (*qurl.CRIDLink, error) {
-			return qurl.RequestCRIDLinkAsDeviceWith(ctx, deviceStaticPrivateKey, resourceCRID, cfg)
+			return qurl.RequestCRIDLinkAsDeviceFromKeySourceWith(ctx, deviceKey, resourceCRID, cfg)
 		},
 	})
 }
@@ -336,20 +354,71 @@ func CRIDNotRequestable(err error) bool {
 	return errors.Is(err, qurl.ErrInvalidResourceRequest)
 }
 
-// DeviceKeyRefused reports whether err says the SDK will not use the device
-// key it was given for a request as a device: the key is not 32 bytes, or it
-// holds only zero bytes, as a wiped key does. The SDK checks the key before
-// it looks at the CRID or at the settings, and nothing was sent.
+// DeviceKeyNotGiven reports whether err says that a request as a device
+// needed the device key, and the function that reads the key gave none the
+// SDK can use: it returned an error, or bytes that are not a key.
+//
+// The SDK asks for the key only after the first request, sent under a random
+// key, was answered "not found". So this answer also says that the first
+// request was sent and answered, and that nothing was sent under a device
+// key. AnswerWithoutDeviceKey returns the answer to that first request.
+//
+// A caller tests for this answer before DeviceKeyRefused and before
+// ClassifyCRIDLinkError. The error can match DeviceKeyRefused too, and the
+// classifier does not know it.
+//
+// TODO(upstream-contract): this is what qurl-go documents for
+// *qurl.DeviceKeySourceError: when it is returned, and that it does not
+// match qurl.ErrCRIDLinkNotFound itself.
+func DeviceKeyNotGiven(err error) bool {
+	var notGiven *qurl.DeviceKeySourceError
+	return errors.As(err, &notGiven)
+}
+
+// AnswerWithoutDeviceKey returns the SDK's answer to the first request of a
+// request as a device that got no device key. err is an error for which
+// DeviceKeyNotGiven is true. The result is what RequestCRIDLink returns for
+// the same CRID: "not found", with the code of the service.
+//
+// A caller that has no device key after all is a machine that asked with the
+// CRID alone, and this answer is its result. It needs no second request. The
+// caller passes the answer to ClassifyCRIDLinkError as it does for a request
+// with only the CRID.
+//
+// It returns nil for any other err, and when the SDK kept no answer. A caller
+// treats nil as no answer at all, and fails closed.
+//
+// TODO(upstream-contract): qurl-go documents that the FirstAnswer field of
+// *qurl.DeviceKeySourceError holds the answer to the first request, and that
+// the answer matches qurl.ErrCRIDLinkNotFound.
+func AnswerWithoutDeviceKey(err error) error {
+	var notGiven *qurl.DeviceKeySourceError
+	if !errors.As(err, &notGiven) {
+		return nil
+	}
+	return notGiven.FirstAnswer
+}
+
+// DeviceKeyRefused reports whether err says the SDK will not make a request
+// as a device with what it was given, and sent nothing: it was given no
+// function to read the device key with. The SDK checks that before it looks
+// at the CRID or at the settings.
 //
 // It says nothing about the CRID. A caller that gets this answer has no
 // usable key, and asks with the CRID alone as a machine with no key does.
 //
-// TODO(upstream-contract): qurl-go returns qurl.ErrInvalidDeviceKey only
-// before it sends anything, and documents that it does not match
-// qurl.ErrInvalidResourceRequest. So a key that cannot be used never reads
+// TODO(upstream-contract): qurl-go documents that qurl.ErrInvalidDeviceKey
+// does not match qurl.ErrInvalidResourceRequest. So this answer never reads
 // as "the SDK will not ask for this CRID" (CRIDNotRequestable). If qurl-go
-// ever makes the two match, or returns this error after it sent a request,
-// this must change with it.
+// ever makes the two match, this must change with it.
+//
+// TODO(upstream-contract): for the call RequestCRIDLinkAsDevice makes,
+// qurl-go returns qurl.ErrInvalidDeviceKey on its own only before it sends
+// anything. It also uses the error as the cause inside a
+// *qurl.DeviceKeySourceError, for a key that was read and cannot be used,
+// and that error comes after a request was sent. So a caller tests
+// DeviceKeyNotGiven first. If qurl-go ever returns the bare error after it
+// sent a request, this must change with it.
 func DeviceKeyRefused(err error) bool {
 	return errors.Is(err, qurl.ErrInvalidDeviceKey)
 }
@@ -462,8 +531,8 @@ func CRIDLinkRefusalCode(err error) (code string, ok bool) {
 // does. The CLI gives the user one piece of advice for both, and --verbose
 // shows the code (CRIDLinkRefusalCode).
 //
-// Callers pass an err for which CRIDNotRequestable and DeviceKeyRefused are
-// both false.
+// Callers pass an err for which CRIDNotRequestable, DeviceKeyNotGiven and
+// DeviceKeyRefused are all false.
 //
 // TODO(upstream-contract): for a call made as a device, qurl-go documents
 // that three answers are not proof of what the service said: a busy service

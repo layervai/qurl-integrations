@@ -24,8 +24,14 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
+const schemeHTTPS = "https"
+
 // Client is what commands program against.
 type Client interface {
+	ConsumerManagement() ConsumerManagementClient
+	Preview(ctx context.Context, id string) (*Preview, error)
+	UpdatePreview(ctx context.Context, id string, patch PreviewPatch) (*Preview, error)
+	UploadPreview(ctx context.Context, id, path, alt, replaceID string) (*Preview, error)
 	// LinkAccount uses the device credential and a separate browser account token.
 	LinkAccount(ctx context.Context, accountToken, ownerID string) error
 	// MintConnectorEnrollmentToken creates a short-lived, one-shot credential
@@ -114,6 +120,7 @@ type AccountClient interface {
 
 // PublishOptions carries creation policy and optional metadata.
 type PublishOptions struct {
+	ConsumerAccess *qurl.ConsumerAccessPolicy
 	// Public asks for a resource that anyone who has its CRID can open. The
 	// zero value asks for a private one, limited to its owner and the devices
 	// in AllowedDeviceKeys. Publish states the choice in its create request
@@ -169,6 +176,7 @@ type ListOptions struct {
 
 // Published is the repo-owned result of Publish.
 type Published struct {
+	ConsumerAccess *qurl.ConsumerAccessPolicy
 	// Private is the privacy the service confirmed. Publish never returns a
 	// result without it. Nil means privacy was not returned or queried, never
 	// public confirmation, and occurs only in a value built elsewhere.
@@ -290,6 +298,7 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
+	ConsumerAccess    *qurl.ConsumerAccessPolicy
 	AllowedDeviceKeys []string
 	Private           *bool
 	CRID              string

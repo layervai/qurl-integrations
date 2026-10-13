@@ -157,6 +157,8 @@ var requestRoutes = map[string][]string{
 	"/v1/me":                             {http.MethodGet},
 	requestResourcesPath:                 {http.MethodGet, http.MethodPost},
 	"/v1/resources/{id}":                 {http.MethodGet, http.MethodPatch, http.MethodDelete},
+	"/v1/resources/{id}/preview":         {http.MethodGet, http.MethodPatch},
+	"/v1/resources/{id}/preview/uploads": {http.MethodPost},
 	"/v1/resources/{id}/sharing":         {http.MethodGet, http.MethodPut},
 	"/v1/resources/{id}/sharing/restart": {http.MethodPost},
 	"/v1/resources/{id}/share":           {http.MethodPost},

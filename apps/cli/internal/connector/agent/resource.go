@@ -20,6 +20,7 @@ const EnvKnockResourceID = "QURL_CONNECTOR_KNOCK_RESOURCE_ID"
 // ResolvedResource carries the selected Connector resource plus the creation
 // provenance authenticated by the assigned cell.
 type ResolvedResource struct {
+	ConsumerAccess *qurl.ConsumerAccessPolicy
 	// Private is the privacy the create request stated and its answer
 	// confirmed. This package never sets it: the Connector resource request
 	// carries no privacy, so the publish command creates the resource first.
