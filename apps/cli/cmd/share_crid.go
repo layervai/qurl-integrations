@@ -51,8 +51,8 @@ page that opens the link, not the content itself — to download the content
 from a script, use ` + "`qurl get <CRID> --file <path>`" + `.
 
 The CLI also shows who published the resource and when it was created. The
-publisher name is self-declared and shown as UNVERIFIED: LayerV has not
-confirmed who the publisher is, so treat the name as a claim, not as proof.
+publisher name is self-declared. It is shown as UNVERIFIED unless LayerV has
+verified the publisher. A name alone does not prove who published it.
 
 When stdout is not a terminal the command prints the bare link on stdout,
 ready to hand out or open, and reports the publisher in one line on stderr.

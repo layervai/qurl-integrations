@@ -959,9 +959,9 @@ https://qurl.link/#…
   Expires in 5m (single use)
 ```
 
-The publisher name is whatever the publisher typed. LayerV has not confirmed
-who they are, so every publisher is `UNVERIFIED` today: treat the name as a
-claim, not as proof. A publisher that set no name shows `no name provided`.
+The publisher name is whatever the publisher typed. Publishers are shown as
+`UNVERIFIED` unless LayerV has verified them. Treat a name alone as a claim,
+not as proof. A publisher that set no name shows `no name provided`.
 The name is always printed in quotes with unusual characters escaped.
 
 When stdout is not a terminal the command prints the bare link on stdout,
@@ -1551,8 +1551,7 @@ Publisher: "Acme Docs" — UNVERIFIED (self-declared name, not confirmed by Laye
 ```
 
 The name is optional and self-declared. Setting one does not confirm who you
-are: LayerV cannot confirm any publisher yet, so every publisher is shown as
-`UNVERIFIED`.
+are. Publishers are shown as `UNVERIFIED` unless LayerV has verified them.
 
 The same name appears on every CRID this device's owner publishes, including
 ones already published, so people can tell those CRIDs come from the same
@@ -1748,8 +1747,8 @@ Where the publisher appears:
 "publisher": { "name": "Acme Docs", "verified": false }
 ```
 
-`verified` is always present and is `false` for every publisher today. `name`
-is omitted when the publisher set none.
+`verified` is always present. It is `true` only when the service confirms
+that LayerV has verified the publisher. `name` is omitted when none is set.
 
 The resource's creation date has two keys. `share` and `get --file` describe
 a minted link, so they name it `resource_created_at`: it is the resource's
