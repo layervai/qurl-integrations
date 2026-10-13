@@ -52,11 +52,18 @@ const (
 	cliReleaseVerifierStepName = "Verify the CLI release was created"
 	cliReleaseVerifierScript   = "scripts/verify-cli-release.sh"
 	checkoutActionPrefix       = "actions/checkout@"
+	setupGoActionPrefix        = "actions/setup-go@"
 	cliWorkflow                = "cli.yml"
 	cliMatrixJobID             = "matrix"
 	cliCustomerArtifactsJobID  = "customer-artifacts"
 
 	workflowContractWorkflow = "workflow-contract.yml"
+
+	// The served-skill check is one program run by one step name in two
+	// workflows: the release, which it gates, and a daily early warning.
+	servedSkillCheckerDir = "apps/cli/scripts/check-served-skill"
+	servedSkillStepName   = "Verify the served agent skill is new enough"
+	servedSkillWorkflow   = "cli-served-skill.yml"
 )
 
 // TestCLICustomerJourneyArtifactsAreExactAndHermetic protects the untrusted
@@ -2172,12 +2179,8 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	t.Parallel()
 
-	const (
-		checkerDir = "apps/cli/scripts/check-served-skill"
-		stepName   = "Verify the served agent skill is new enough"
-	)
-	if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(checkerDir), "main.go")); err != nil {
-		t.Fatalf("the served-skill checker is not at %s: %v", checkerDir, err)
+	if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(servedSkillCheckerDir), "main.go")); err != nil {
+		t.Fatalf("the served-skill checker is not at %s: %v", servedSkillCheckerDir, err)
 	}
 
 	releaseCLI := readWorkflow(t, releasePleaseWorkflow).Jobs["release-cli"]
@@ -2202,9 +2205,9 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 			if ref := current.With["ref"]; ref != "${{ env.CLI_TAG }}" {
 				t.Errorf("the checkout before the served-skill check has ref %v, want the release tag", ref)
 			}
-		case check < 0 && strings.HasPrefix(current.Uses, "actions/setup-go@"):
+		case check < 0 && strings.HasPrefix(current.Uses, setupGoActionPrefix):
 			toolchain = index
-		case current.Name == stepName:
+		case current.Name == servedSkillStepName:
 			check = index
 		case strings.HasPrefix(current.Uses, "goreleaser/goreleaser-action@"):
 			build = index
@@ -2233,11 +2236,83 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	if !strings.Contains(guard.Run, "set -euo pipefail") {
 		t.Error("the served-skill check does not stop at its first failing command")
 	}
-	if !strings.Contains(guard.Run, "go run ./"+checkerDir+" ||") {
-		t.Errorf("the served-skill check does not run ./%s", checkerDir)
+	if !strings.Contains(guard.Run, "go run ./"+servedSkillCheckerDir+" ||") {
+		t.Errorf("the served-skill check does not run ./%s", servedSkillCheckerDir)
 	}
-	if !strings.Contains(guard.Run, "[[ ! -d "+checkerDir+" ]]") {
-		t.Errorf("the served-skill check's skip is not keyed on %s, the directory this test holds in place", checkerDir)
+	if !strings.Contains(guard.Run, "[[ ! -d "+servedSkillCheckerDir+" ]]") {
+		t.Errorf("the served-skill check's skip is not keyed on %s, the directory this test holds in place", servedSkillCheckerDir)
+	}
+}
+
+// TestServedSkillRunsDailyWithoutGating pins the early warning for the
+// release-time guard above: its own workflow runs the same checker on a
+// schedule and on demand, and nothing in it can hold up a merge or a
+// release, or turn a failing check green.
+//
+// That a scheduled failure reaches people is not pinned here.
+// scripts/check-main-ci-notification-payload.sh requires every workflow that
+// runs on main to be in the notifier's trigger list with its own impact arm.
+func TestServedSkillRunsDailyWithoutGating(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, servedSkillWorkflow)
+	// Exactly these two: any pull-request or push trigger would let a check
+	// from this workflow be made required.
+	triggers := parseWorkflowTriggers(t, servedSkillWorkflow, workflow.On)
+	if got := slices.Sorted(maps.Keys(triggers)); !slices.Equal(got, []string{"schedule", "workflow_dispatch"}) {
+		t.Errorf("%s triggers = %v, want schedule and workflow_dispatch only", servedSkillWorkflow, got)
+	}
+	if schedule, _ := triggers["schedule"].([]any); len(schedule) != 1 {
+		t.Errorf("%s schedule = %v, want one cron entry", servedSkillWorkflow, triggers["schedule"])
+	}
+	// githubJob does not read a job's continue-on-error, so the whole file
+	// is held to not using the key: on the job as on the step, it would end
+	// a failing run as a success and the notifier would stay quiet. The same
+	// goes for `defaults`, which could give the step a shell that swallows a
+	// failure without the step saying so. Comment lines are dropped first,
+	// so a comment may name either, and the key is then matched anywhere on
+	// a line, so a `{key: value}` mapping does not get past.
+	uncommented := regexp.MustCompile(`(?m)^\s*#.*$`).ReplaceAll(readWorkflowBytes(t, servedSkillWorkflow), nil)
+	if key := regexp.MustCompile(`\b(continue-on-error|defaults)\s*:`).FindSubmatch(uncommented); key != nil {
+		t.Errorf("%s uses %s, which can let a failing check end green", servedSkillWorkflow, key[1])
+	}
+
+	job := workflow.Jobs["check"]
+	if job == nil || len(workflow.Jobs) != 1 {
+		t.Fatalf("%s jobs = %v, want only check", servedSkillWorkflow, slices.Sorted(maps.Keys(workflow.Jobs)))
+	}
+	if job.If != "" || job.Needs != nil {
+		t.Errorf("check is conditional or waits on another job: if=%q needs=%v", job.If, job.Needs)
+	}
+	if len(job.Steps) != 3 {
+		t.Fatalf("check has %d steps, want checkout, setup-go and the check", len(job.Steps))
+	}
+	source, toolchain, guard := &job.Steps[0], &job.Steps[1], &job.Steps[2]
+	// The default ref is main on a schedule and the chosen branch on a
+	// manual run. Any other input could make this answer for another tree.
+	if !strings.HasPrefix(source.Uses, checkoutActionPrefix) || source.If != "" ||
+		len(source.With) != 1 || source.With["persist-credentials"] != false {
+		t.Errorf("check does not start with a plain checkout of the run's own ref: uses=%q if=%q with=%v", source.Uses, source.If, source.With)
+	}
+	if !strings.HasPrefix(toolchain.Uses, setupGoActionPrefix) || toolchain.If != "" {
+		t.Errorf("check does not set up the repository's Go before it runs: uses=%q if=%q", toolchain.Uses, toolchain.If)
+	}
+	if guard.Name != servedSkillStepName || guard.If != "" || (guard.Shell != "" && guard.Shell != "bash") {
+		t.Errorf("the last step is not an unconditional %q: name=%q if=%q shell=%q", servedSkillStepName, guard.Name, guard.If, guard.Shell)
+	}
+	// The script is held to its shape, not searched for its parts: the
+	// checker is the first thing to run, so nothing can skip it, and the
+	// only way out of its failure is the one `exit 1`. The release step's
+	// skip for a missing checker is for old tags and has no place here.
+	lines := strings.Split(strings.TrimSpace(guard.Run), "\n")
+	for index := range lines {
+		lines[index] = strings.TrimSpace(lines[index])
+	}
+	if len(lines) != 5 || lines[0] != "set -euo pipefail" ||
+		lines[1] != "go run ./"+servedSkillCheckerDir+" || {" ||
+		!strings.HasPrefix(lines[2], `echo "::error::`) || !strings.HasSuffix(lines[2], `" >&2`) ||
+		lines[3] != "exit 1" || lines[4] != "}" {
+		t.Errorf("the served-skill step is not: strict mode, the checker, and on its failure one annotation and exit 1:\n%s", guard.Run)
 	}
 }
 
