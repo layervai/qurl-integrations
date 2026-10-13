@@ -52,7 +52,7 @@ from a script, use ` + "`qurl get <CRID> --file <path>`" + `.
 
 The CLI also shows who published the resource and when it was created. The
 publisher name is self-declared. It is shown as UNVERIFIED unless LayerV has
-verified the publisher. A name alone does not prove who published it.
+verified the publisher. A name alone is not identity verification.
 
 When stdout is not a terminal the command prints the bare link on stdout,
 ready to hand out or open, and reports the publisher in one line on stderr.
