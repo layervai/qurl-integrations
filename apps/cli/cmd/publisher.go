@@ -27,9 +27,8 @@ Anyone who requests a link for one of your CRIDs with "qurl share" or
 "qurl get" is shown who published it: the name you set here, or
 "no name provided" when you set none.
 
-The name is optional and self-declared. LayerV does not check it, and no
-publisher can be confirmed by LayerV yet, so every publisher is shown as
-UNVERIFIED.
+The name is optional and self-declared. Setting it does not verify you.
+Publishers are shown as UNVERIFIED unless LayerV has verified them.
 
 The same name appears on every CRID this device's owner publishes, so people
 can tell those CRIDs come from the same publisher.
@@ -65,8 +64,8 @@ func publisherSetCmd(opts *globalOpts) *cobra.Command {
 		// this text only helps someone pick a name that will be accepted.
 		Long: `Set the publisher name people see with your CRIDs.
 
-The name is self-declared: setting it does not confirm who you are, and it is
-shown as UNVERIFIED to anyone who requests a link for one of your CRIDs.
+The name is self-declared: setting it does not confirm who you are.
+Anyone who requests a link sees UNVERIFIED unless LayerV has verified you.
 
 A name is 1 to 64 characters: letters, digits, single spaces, and common
 punctuation. It cannot spell "verified", "LayerV" or "qURL", even split by
@@ -101,7 +100,8 @@ func publisherClearCmd(opts *globalOpts) *cobra.Command {
 		Use:   "clear",
 		Short: "Remove the publisher name shown with your CRIDs",
 		Long: `Remove the publisher name. People who request a link for one of your
-CRIDs are then shown "no name provided", still marked UNVERIFIED.`,
+CRIDs are then shown "no name provided". Clearing the name does not change
+your verification status; UNVERIFIED publishers remain UNVERIFIED.`,
 		Example: "  qurl publisher clear",
 		Args:    noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
