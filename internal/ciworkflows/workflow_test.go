@@ -1780,6 +1780,9 @@ func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
 // 2026-10-14 that entry made staticcheck report SA5011 at nil checks ending in
 // t.Fatal throughout this package, on every PR that changed a file here, while
 // a fresh cache on the same tree found nothing (#1599, #1600).
+//
+// TODO(upstream-contract): if golangci-lint-action ever keys its cache on the
+// workflow or the arguments too, this skip can be reconsidered.
 func TestWorkflowContractLintsWithoutTheSharedCache(t *testing.T) {
 	t.Parallel()
 
@@ -1787,17 +1790,20 @@ func TestWorkflowContractLintsWithoutTheSharedCache(t *testing.T) {
 	if !ok {
 		t.Fatal("workflow-contract.yml is missing contract job")
 	}
+	found := false
 	for i := range contract.Steps {
 		current := &contract.Steps[i]
 		if !strings.HasPrefix(current.Uses, "golangci/golangci-lint-action@") {
 			continue
 		}
+		found = true
 		if skip, ok := current.With["skip-cache"].(bool); !ok || !skip {
 			t.Errorf("%s must set skip-cache: true, got %#v", current.Name, current.With["skip-cache"])
 		}
-		return
 	}
-	t.Fatal("contract job is missing its golangci-lint step")
+	if !found {
+		t.Fatal("contract job is missing its golangci-lint step")
+	}
 }
 
 // TestReleasePleaseVerifiesTheCLIReleaseWasCreated pins the guard on the one

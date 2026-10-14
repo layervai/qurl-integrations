@@ -73,6 +73,7 @@ jobs:
           # Slack/shared gates verify the root config schema. Repeating that
           # network-dependent fetch here adds flake; the linter still applies it.
           verify: false
+          # TODO(upstream-contract): golangci-lint-action's cache key.
           # Analyse from scratch. The action's cache key is only the OS, a
           # weekly interval and go.mod's hash, so this one-package run
           # restores the entry the repo-wide slack/shared lints save on main.
