@@ -1773,6 +1773,33 @@ func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
 	t.Fatalf("contract job is missing %s step", workflowContractTestName)
 }
 
+// TestWorkflowContractLintsWithoutTheSharedCache keeps this required check's
+// lint independent of what other workflows last wrote. golangci-lint-action
+// keys its cache on the OS, a weekly interval and go.mod's hash only, so this
+// one-package run restores the entry the repo-wide lints save on main. On
+// 2026-10-14 that entry made staticcheck report SA5011 at nil checks ending in
+// t.Fatal throughout this package, on every PR that changed a file here, while
+// a fresh cache on the same tree found nothing (#1599, #1600).
+func TestWorkflowContractLintsWithoutTheSharedCache(t *testing.T) {
+	t.Parallel()
+
+	contract, ok := readWorkflow(t, workflowContractWorkflow).Jobs["contract"]
+	if !ok {
+		t.Fatal("workflow-contract.yml is missing contract job")
+	}
+	for i := range contract.Steps {
+		current := &contract.Steps[i]
+		if !strings.HasPrefix(current.Uses, "golangci/golangci-lint-action@") {
+			continue
+		}
+		if skip, ok := current.With["skip-cache"].(bool); !ok || !skip {
+			t.Errorf("%s must set skip-cache: true, got %#v", current.Name, current.With["skip-cache"])
+		}
+		return
+	}
+	t.Fatal("contract job is missing its golangci-lint step")
+}
+
 // TestReleasePleaseVerifiesTheCLIReleaseWasCreated pins the guard on the one
 // release failure that reports success. release-please matches a merged release
 // PR to a package before building that package's release; a PR body carrying a
