@@ -233,8 +233,20 @@ func TestClaudeCodePluginSkills(t *testing.T) {
 		if !bytes.Contains(body, []byte("`qurl:qurl`")) {
 			t.Errorf("skill %s does not send the agent to the bundled skill, qurl:qurl", name)
 		}
+		// CLIs before 3.4.0 publish a resource that anyone with its address
+		// can open, and 3.4.0 itself was never published: a command that
+		// accepts an older CLI can make a share public that the user was
+		// told is private.
+		if !bytes.Contains(body, []byte("older than "+claudeCodePluginMinCLI)) {
+			t.Errorf("skill %s does not require the qURL CLI %s or newer", name, claudeCodePluginMinCLI)
+		}
 	}
 }
+
+// claudeCodePluginMinCLI is the oldest qURL CLI the plugin's commands accept:
+// the first published release whose publish is private by default and which
+// has `qurl approve`.
+const claudeCodePluginMinCLI = "3.4.1"
 
 // readSkillFrontmatter returns the YAML between the `---` lines that open a
 // SKILL.md. Claude Code reads frontmatter only when the first line is `---`.

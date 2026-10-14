@@ -36,4 +36,5 @@ If the CLI says no pending request has the code (exit code 5), ask for the
 code on the person's screen again; don't try variations. After five wrong
 codes for one resource within an hour the service refuses every code for a
 while (exit code 9): stop and tell the user how long to wait. If `approve` is
-an unknown command, upgrade the CLI as the skill's setup says.
+an unknown command, or `qurl version` is older than 3.4.1, upgrade the CLI as
+the skill's setup says.
