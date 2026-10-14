@@ -32,6 +32,9 @@ func TestPreviewCommandsUseLatestRevision(t *testing.T) {
 		usage bool
 	}{
 		{"clear", []string{"clear", "crid"}, false},
+		{"name only", []string{"set", "crid", "--name", "TipSplit"}, false},
+		{"empty name", []string{"set", "crid", "--name", ""}, false},
+		{"both", []string{"set", "crid", "--name", "TipSplit", "--description", "Tip calculator"}, false},
 		{"empty description", []string{"set", "crid", "--description", ""}, false},
 		{"remove", []string{"remove", "crid", "remove"}, false},
 		{"missing flag", []string{"set", "crid"}, true},
@@ -59,10 +62,22 @@ func TestPreviewCommandsUseLatestRevision(t *testing.T) {
 			if c.patch == nil || c.patch.Revision != 7 {
 				t.Fatalf("patch=%+v", c.patch)
 			}
-			if tc.name == "clear" && (c.patch.Description == nil || *c.patch.Description != "" || c.patch.MediaIDs == nil || len(*c.patch.MediaIDs) != 0) {
+			if tc.name == "clear" && (c.patch.Name == nil || *c.patch.Name != "" || c.patch.Description == nil || *c.patch.Description != "" || c.patch.MediaIDs == nil || len(*c.patch.MediaIDs) != 0) {
 				t.Fatal(c.patch)
 			}
 			if tc.name == "empty description" && (c.patch.Description == nil || *c.patch.Description != "") {
+				t.Fatal(c.patch)
+			}
+			if tc.name == "name only" && (c.patch.Name == nil || *c.patch.Name != "TipSplit" || c.patch.Description != nil || c.patch.MediaIDs != nil) {
+				t.Fatal(c.patch)
+			}
+			if tc.name == "empty name" && (c.patch.Name == nil || *c.patch.Name != "" || c.patch.Description != nil) {
+				t.Fatal(c.patch)
+			}
+			if tc.name == "both" && (c.patch.Name == nil || *c.patch.Name != "TipSplit" || c.patch.Description == nil || *c.patch.Description != "Tip calculator") {
+				t.Fatal(c.patch)
+			}
+			if tc.name == "empty description" && c.patch.Name != nil {
 				t.Fatal(c.patch)
 			}
 			if tc.name == "remove" && (c.patch.MediaIDs == nil || len(*c.patch.MediaIDs) != 1 || (*c.patch.MediaIDs)[0] != "keep") {

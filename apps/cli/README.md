@@ -1816,12 +1816,14 @@ see [qurl requests, approve and deny](#qurl-requests-approve-and-deny).
 ### CRID preview metadata
 
 Each CRID has its own optional description and up to four media items. Description
-is public preview text, separate from private owner notes. Media needs a verified
+is public preview text, separate from private owner notes. The optional app
+name is public, with a limit of 100 characters. Omitted text fields stay
+unchanged; an empty string removes that field. Media needs a verified
 publisher. Use the same registered device identity as other publisher commands:
 
 ```sh
 qurl preview get "$CRID"
-qurl preview set "$CRID" --description "A guide to our API"
+qurl preview set "$CRID" --name "API guide" --description "A guide to our API"
 qurl preview upload "$CRID" ./demo.gif --alt "The API in use"
 qurl preview upload "$CRID" ./new-demo.mp4 --alt "Updated demo" --replace "$MEDIA_ID"
 qurl preview remove "$CRID" "$MEDIA_ID"
