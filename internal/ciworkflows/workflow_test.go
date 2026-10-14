@@ -212,7 +212,6 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if selector == nil {
 		t.Fatal("change detector has no protected customer-journey selector")
-		return // staticcheck SA5011 does not see that Fatal ends the test
 	}
 	if fmt.Sprint(selector.Env["RELEASE_GATE"]) != "${{ inputs.release_source_sha != '' }}" {
 		t.Fatal("release journey selector is not bound to the exact release handoff")
