@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -151,5 +153,90 @@ func TestCheckNamesItselfAndAsksForTheFileAsItIsNow(t *testing.T) {
 	}
 	if got := cache.Load(); got != "no-cache" {
 		t.Errorf("Cache-Control = %q", got)
+	}
+}
+
+// bundledCopy writes content where -bundled would read it.
+func bundledCopy(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "SKILL.md")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestCompare(t *testing.T) {
+	served := versioned(2)
+
+	tests := []struct {
+		name         string
+		local        string
+		answers      []func(http.ResponseWriter)
+		wantErr      string // a part of the error; empty when the copies match
+		wantRequests int32
+	}{
+		{"the same bytes pass", served, []func(http.ResponseWriter){body(served)}, "", 1},
+		{
+			"a copy that differs fails, and says where and how to fix it",
+			versioned(1), []func(http.ResponseWriter){body(served)},
+			"first difference at byte " + strconv.Itoa(strings.Index(served, `"2"`)+1) + "). Copy the served file over it", 1,
+		},
+		{
+			"line endings are bytes too",
+			strings.ReplaceAll(served, "\n", "\r\n"), []func(http.ResponseWriter){body(served)},
+			"first difference at byte 3)", 1,
+		},
+		{
+			"a copy that is the start of the served file fails",
+			served[:len(served)-1], []func(http.ResponseWriter){body(served)},
+			"first difference at byte " + strconv.Itoa(len(served)-1) + ")", 1,
+		},
+		{
+			"an error page that holds the same bytes is not the skill",
+			served, []func(http.ResponseWriter){status(http.StatusNotFound, served)},
+			"the server will not serve the file: it answered 404", 1,
+		},
+		{
+			"a server in trouble is tried again",
+			served, []func(http.ResponseWriter){status(http.StatusBadGateway, ""), body(served)},
+			"", 2,
+		},
+		{
+			"an answer cut off is tried again, and is not a copy that differs",
+			served, []func(http.ResponseWriter){cutOff(served), body(served)},
+			"", 2,
+		},
+		{
+			"a file too long to be the skill fails, and is not fetched again",
+			served, []func(http.ResponseWriter){body(strings.Repeat("x", fileLimit+1))},
+			"too long to be the skill", 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			address, requests := serve(t, tc.answers...)
+			err := compare(context.Background(), http.DefaultClient, address, bundledCopy(t, tc.local), 0)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("compare = %v, want no error", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("compare = %v, want an error holding %q", err, tc.wantErr)
+			}
+			if got := requests.Load(); got != tc.wantRequests {
+				t.Errorf("made %d requests, want %d", got, tc.wantRequests)
+			}
+		})
+	}
+}
+
+func TestCompareReadsTheCopyBeforeItFetches(t *testing.T) {
+	address, requests := serve(t, body(versioned(1)))
+	err := compare(context.Background(), http.DefaultClient, address, filepath.Join(t.TempDir(), "missing.md"), 0)
+	if err == nil || !strings.Contains(err.Error(), "could not read the bundled copy") {
+		t.Errorf("compare = %v, want an error about the bundled copy", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Errorf("made %d requests for a copy that does not exist", got)
 	}
 }
