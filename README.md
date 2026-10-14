@@ -20,11 +20,28 @@ apps/                Per-integration apps (released apps get independent release
   teams/             Microsoft Teams Bot and OAuth integration (TypeScript)
 origins/             Reusable origin images for qURL Connector-protected resources
   s3-static-connector/  Private S3 static site origin behind qURL Connector
+plugins/             Agent plugins
+  claude-code/qurl/  Claude Code plugin: the qURL agent skill plus /qurl:share and /qurl:approve
 shared/              Shared Go libraries used by the Go apps
   client/            qURL API client
   auth/              API key helpers
   observability/     OpenTelemetry setup
 ```
+
+## Claude Code plugin
+
+Share an app running on your machine privately, straight from Claude Code: the
+plugin bundles the qURL agent skill and adds `/qurl:share` and `/qurl:approve`.
+No account, API key or signup is needed. Install it with two commands in a
+Claude Code session:
+
+```text
+/plugin marketplace add layervai/qurl-integrations
+/plugin install qurl@layerv
+```
+
+See [plugins/claude-code/qurl](plugins/claude-code/qurl/README.md) for what it
+adds and how the bundled skill is kept current.
 
 ## SDKs & MCP server (separate repos)
 

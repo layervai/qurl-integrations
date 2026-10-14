@@ -19,6 +19,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 - `apps/edge-extension/` — Edge version and store documents
 - `apps/teams/` — Node.js (TypeScript ESM, `src/*.ts`); Microsoft Teams bot, OAuth start/callback routes, `@microsoft/teams.apps` SDK adapter, and a production HTTP entrypoint (`bin: qurl-teams`)
 - `origins/s3-static-connector/` — reusable private S3 static origin image
+- `plugins/claude-code/qurl/` — Claude Code plugin, listed by the root `.claude-plugin/marketplace.json`; its `skills/qurl/SKILL.md` is a byte-for-byte copy of the served skill (never edit it here), and any change to the plugin raises `version` in its `plugin.json` (see its README)
 - `internal/ciworkflows/` — repo-wide tests for required-check workflow contracts
 - `shared/` — Go packages consumed by every Go app; changes here affect all of them
 - `e2e/` — TypeScript end-to-end tests (Jest)

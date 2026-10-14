@@ -1,0 +1,16 @@
+{
+  "name": "layerv",
+  "description": "LayerV's Claude Code plugins.",
+  "owner": {
+    "name": "LayerV",
+    "url": "https://layerv.ai"
+  },
+  "plugins": [
+    {
+      "name": "qurl",
+      "source": "./plugins/claude-code/qurl",
+      "description": "Share an app running on your machine privately with qURL: no deploy, no account, no API key.",
+      "category": "productivity"
+    }
+  ]
+}

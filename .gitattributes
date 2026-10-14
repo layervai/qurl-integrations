@@ -5,3 +5,6 @@
 # `-text` opts these paths out of all line-ending conversion everywhere.
 **/testdata/** -text
 *.golden -text
+# The Claude Code plugin ships the served qURL skill byte for byte; a daily
+# check compares the two, so no checkout may convert its line endings.
+plugins/claude-code/qurl/skills/qurl/SKILL.md -text
