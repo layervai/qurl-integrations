@@ -67,6 +67,8 @@ jobs:
 
       # Test first so a linter failure cannot hide the contract result.
       - name: Lint workflow contract
+        if: ${{ !cancelled() }}
+        continue-on-error: true
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2
@@ -74,3 +76,26 @@ jobs:
           # network-dependent fetch here adds flake; the linter still applies it.
           verify: false
           args: --timeout=5m ./internal/ciworkflows/...
+
+      - name: Repro diagnostics
+        if: ${{ !cancelled() }}
+        run: |
+          set -x
+          which -a golangci-lint || true; ls ~/golangci-lint-*/ || true
+          L=$(ls ~/golangci-lint-*/golangci-lint | head -1)
+          $L cache status || true
+          ls -la ~/.cache/golangci-lint | head; cat ~/.cache/golangci-lint/trim.txt || true; date -u
+          find ~/.cache/golangci-lint -type f | wc -l
+          tar -C ~/.cache -czf /tmp/lintcache.tgz golangci-lint
+          echo '### same restored cache, second run'
+          $L run --timeout=5m ./internal/ciworkflows/... ; echo "exit=$?"
+          echo '### fresh cache'
+          GOLANGCI_LINT_CACHE=/tmp/fresh-lint-cache $L run --timeout=5m ./internal/ciworkflows/... ; echo "exit=$?"
+
+      - name: Upload restored cache
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lintcache
+          path: /tmp/lintcache.tgz
+          retention-days: 1
