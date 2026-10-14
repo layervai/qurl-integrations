@@ -2,6 +2,7 @@ package qurlapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/layervai/qurl-go/qurl"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
 func TestPreviewUploadStreamsExactLengthWithoutAPICredential(t *testing.T) {
@@ -94,5 +97,33 @@ func TestUploadPreviewRejectsInvalidFilesBeforeAPI(t *testing.T) {
 				t.Fatalf("error %T: %v", err, err)
 			}
 		})
+	}
+}
+
+func TestPreviewNameWireAndProjection(t *testing.T) {
+	srv := apitest.NewServer(t)
+	path := "/v1/resources/" + srv.Key.CRID + "/preview"
+	srv.Script(http.MethodGet, path, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"revision":4,"name":"TipSplit","description":"Keep this"}`)
+	})
+	srv.Script(http.MethodPatch, path, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 2 || body["revision"] != float64(4) || body["name"] != "Renamed" {
+			t.Errorf("patch=%v", body)
+		}
+		_, _ = io.WriteString(w, `{"revision":5,"name":"Renamed","description":"Keep this"}`)
+	})
+	c := newRegisteredTestClient(t, srv)
+	p, err := c.Preview(t.Context(), srv.Key.CRID)
+	if err != nil || p.Name != "TipSplit" {
+		t.Fatalf("preview=%+v err=%v", p, err)
+	}
+	name := "Renamed"
+	p, err = c.UpdatePreview(t.Context(), srv.Key.CRID, PreviewPatch{Revision: p.Revision, Name: &name})
+	if err != nil || p.Name != name || p.Description != "Keep this" {
+		t.Fatalf("preview=%+v err=%v", p, err)
 	}
 }

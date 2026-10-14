@@ -26,6 +26,7 @@ const (
 // Preview is the CLI-owned public metadata shape. SDK additions never enter JSON output automatically.
 type Preview struct {
 	Revision    int64           `json:"revision"`
+	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Media       []PreviewMedia  `json:"media,omitempty"`
 	Uploads     []PreviewUpload `json:"uploads,omitempty"`
@@ -51,6 +52,7 @@ type PreviewUpload struct {
 // PreviewPatch preserves omitted fields and uses the latest revision.
 type PreviewPatch struct {
 	Revision    int64
+	Name        *string
 	Description *string
 	MediaIDs    *[]string
 }
@@ -59,7 +61,7 @@ func mapPreview(value *qurl.ResourcePreview) *Preview {
 	if value == nil {
 		return nil
 	}
-	result := &Preview{Revision: value.Revision, Description: value.Description}
+	result := &Preview{Revision: value.Revision, Name: value.Name, Description: value.Description}
 	for i := range value.Media {
 		m := &value.Media[i]
 		result.Media = append(result.Media, PreviewMedia{ID: m.ID, Kind: m.Kind, Alt: m.Alt, Width: m.Width, Height: m.Height})
@@ -78,7 +80,7 @@ func (c *client) Preview(ctx context.Context, id string) (*Preview, error) {
 
 // UpdatePreview applies the caller's latest revision; it never retries a conflict.
 func (c *client) UpdatePreview(ctx context.Context, id string, patch PreviewPatch) (*Preview, error) {
-	result, err := c.sdk.UpdatePreview(ctx, id, qurl.PreviewPatch{Revision: patch.Revision, Description: patch.Description, MediaIDs: patch.MediaIDs})
+	result, err := c.sdk.UpdatePreview(ctx, id, qurl.PreviewPatch{Revision: patch.Revision, Name: patch.Name, Description: patch.Description, MediaIDs: patch.MediaIDs})
 	return mapPreview(result), mapError(err)
 }
 

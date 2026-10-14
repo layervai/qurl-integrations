@@ -1816,21 +1816,26 @@ see [qurl requests, approve and deny](#qurl-requests-approve-and-deny).
 ### CRID preview metadata
 
 Each CRID has its own optional description and up to four media items. Description
-is public preview text, separate from private owner notes. Media needs a verified
+is public preview text, separate from private owner notes. The optional app
+name is public, with a limit of 100 characters. Omitted text fields stay
+unchanged; an empty string removes that field. Media needs a verified
 publisher. Use the same registered device identity as other publisher commands:
 
 ```sh
 qurl preview get "$CRID"
-qurl preview set "$CRID" --description "A guide to our API"
+qurl preview set "$CRID" --name "API guide" --description "A guide to our API"
 qurl preview upload "$CRID" ./demo.gif --alt "The API in use"
 qurl preview upload "$CRID" ./new-demo.mp4 --alt "Updated demo" --replace "$MEDIA_ID"
 qurl preview remove "$CRID" "$MEDIA_ID"
 qurl preview clear "$CRID"
 ```
 
-`clear` removes description and media and cancels pending uploads. Upload streams
+`clear` removes name, description and media and cancels pending uploads. Upload streams
 directly to private storage without the API credential. Processing is asynchronous;
 read `preview get` again to check it. A failed replacement keeps the current item.
+
+In text mode, `--quiet` keeps its existing description-only output; use
+`-o json` to read the name in scripts.
 Limits: description 500 characters; still images 10 MB; GIF/video 25 MB and 15
 seconds. GIFs become silent video clips. Viewers load one small still first, with
 video only after Play. Use `-o json` for structured revision, media and job state.
