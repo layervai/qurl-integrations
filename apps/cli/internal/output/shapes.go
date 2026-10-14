@@ -15,7 +15,8 @@ import (
 // cannot silently change the CLI's output.
 
 type publishJSON struct {
-	Private *bool `json:"private,omitempty"`
+	ConsumerAccess *consumerAccessJSON `json:"consumer_access,omitempty"`
+	Private        *bool               `json:"private,omitempty"`
 	// KeptPublic is true, and otherwise absent, when the target was already
 	// published as public and a publish that named no privacy kept it. It
 	// tells that case from --public on an existing resource, which has the
@@ -23,8 +24,8 @@ type publishJSON struct {
 	KeptPublic bool `json:"kept_public,omitempty"`
 	// AccessRequests is present when the service's answer said whether people
 	// can ask for access. ResourceURL is the resource's address on the link
-	// site, present only when access requests are on and this install knows
-	// that site.
+	// site for private access requests or a consumer policy, when this install
+	// knows that site.
 	AccessRequests *bool      `json:"access_requests,omitempty"`
 	ResourceURL    string     `json:"resource_url,omitempty"`
 	CRID           string     `json:"crid,omitempty"`
@@ -59,10 +60,11 @@ type shareLinkJSON struct {
 // (the text table deliberately omits them — see List). A sweeper identifying
 // throwaway rows by the label their publisher gave them reads this document.
 type listItemJSON struct {
-	AllowedDeviceKeys []string `json:"allowed_device_keys"`
-	Private           *bool    `json:"private,omitempty"`
-	CRID              string   `json:"crid,omitempty"`
-	ResourceID        string   `json:"resource_id"`
+	ConsumerAccess    *consumerAccessJSON `json:"consumer_access,omitempty"`
+	AllowedDeviceKeys []string            `json:"allowed_device_keys"`
+	Private           *bool               `json:"private,omitempty"`
+	CRID              string              `json:"crid,omitempty"`
+	ResourceID        string              `json:"resource_id"`
 	// TargetURL is the owner-visible URL for URL resources and the target
 	// from this machine's local registry for tunnel resources when present.
 	TargetURL    string               `json:"target_url,omitempty"`
@@ -141,8 +143,9 @@ type SharingInspection struct {
 }
 
 type resourceStatusJSON struct {
-	AllowedDeviceKeys []string `json:"allowed_device_keys"`
-	Private           *bool    `json:"private,omitempty"`
+	ConsumerAccess    *consumerAccessJSON `json:"consumer_access,omitempty"`
+	AllowedDeviceKeys []string            `json:"allowed_device_keys"`
+	Private           *bool               `json:"private,omitempty"`
 	// Description and tags are intentionally absent: status is the compact
 	// lifecycle view, while list is the metadata inventory surface.
 	CRID       string        `json:"crid,omitempty"`
@@ -190,6 +193,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
+			ConsumerAccess: policyDocument(res.ConsumerAccess),
 			Private:        res.Private,
 			KeptPublic:     res.KeptPublic,
 			AccessRequests: res.AccessRequests,
@@ -315,6 +319,7 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(resourceStatusJSON{
+			ConsumerAccess:    policyDocument(resource.ConsumerAccess),
 			AllowedDeviceKeys: append([]string{}, resource.AllowedDeviceKeys...),
 			Private:           resource.Private,
 			CRID:              resource.CRID, ResourceID: resource.ResourceID,
@@ -345,6 +350,9 @@ func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSu
 	ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
 	if resource.Private != nil {
 		ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
+	}
+	if resource.ConsumerAccess != nil {
+		ew.printf("%s\t%s (version %d)\n", p.bold("Policy:"), resource.ConsumerAccess.Mode, resource.ConsumerAccess.Version)
 	}
 	if grants && resource.AccessRequests != nil {
 		state := msgStateOff
@@ -399,8 +407,17 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 		access := msgPublishPublic
 		if *res.Private {
 			access = msgPublishPrivate
+			if res.ConsumerAccess != nil {
+				access = "private — consumers must meet the publisher's access policy"
+			}
 		}
 		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
+	}
+	if res.ConsumerAccess != nil {
+		twe.printf("  %s\t%s (version %d)\n", p.bold("Policy:"), res.ConsumerAccess.Mode, res.ConsumerAccess.Version)
+		if address := requestAddress(res); address != "" {
+			twe.printf("  %s\t%s\n", p.bold("Address:"), address)
+		}
 	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)
@@ -448,13 +465,13 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 // Both are needed for what follows from it: the guidance that says the
 // resource's address is safe to send to anyone, and that address.
 func acceptsRequests(res *qurlapi.Published) bool {
-	return res.AccessRequests != nil && *res.AccessRequests && saidPrivate(res.Private)
+	return res.ConsumerAccess == nil && res.AccessRequests != nil && *res.AccessRequests && saidPrivate(res.Private)
 }
 
 // requestAddress is the address a publisher sends to people: the resource's
-// address on the link site, and only for a resource that accepts requests.
+// address on the link site for a private resource with requests or a consumer policy.
 func requestAddress(res *qurlapi.Published) string {
-	if !acceptsRequests(res) {
+	if !saidPrivate(res.Private) || (!acceptsRequests(res) && res.ConsumerAccess == nil) {
 		return ""
 	}
 	return res.LinkSiteURL
@@ -573,6 +590,7 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 				servingEpoch = &epoch
 			}
 			out.Resources = append(out.Resources, listItemJSON{
+				ConsumerAccess:    policyDocument(item.ConsumerAccess),
 				AllowedDeviceKeys: append([]string{}, item.AllowedDeviceKeys...),
 				CRID:              item.CRID,
 				ResourceID:        item.ResourceID,
@@ -618,7 +636,18 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 	ew := &errWriter{w: tw}
 	// Headers stay uncolored: tabwriter counts ANSI escape bytes as cell
 	// width, so styled headers would skew every column under them.
-	ew.printf("CRID\tTARGET\tDESIRED\tOBSERVED\tCREATED\tEXPIRES\tPRIVATE\n")
+	hasPolicy := false
+	for i := range page.Items {
+		if page.Items[i].ConsumerAccess != nil {
+			hasPolicy = true
+			break
+		}
+	}
+	header := "CRID\tTARGET\tDESIRED\tOBSERVED\tCREATED\tEXPIRES\tPRIVATE"
+	if hasPolicy {
+		header += "\tPOLICY"
+	}
+	ew.printf("%s\n", header)
 	for i := range page.Items {
 		item := &page.Items[i]
 		desired, observed := "-", item.Status
@@ -633,13 +662,21 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 		if item.Private != nil {
 			privacy = strconv.FormatBool(*item.Private)
 		}
-		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\t%s",
 			item.CRID,
 			item.TargetURL,
 			desired,
 			observed,
 			p.listCreated(item.CreatedAt),
 			p.listExpires(item.ExpiresAt), privacy)
+		if hasPolicy {
+			policy := "-"
+			if item.ConsumerAccess != nil {
+				policy = fmt.Sprintf("%s (version %d)", item.ConsumerAccess.Mode, item.ConsumerAccess.Version)
+			}
+			ew.printf("\t%s", policy)
+		}
+		ew.printf("\n")
 	}
 	if err := ew.flush(tw); err != nil {
 		return err

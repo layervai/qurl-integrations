@@ -197,6 +197,7 @@ func TestRequestRouteAllowlistMirrorsSDK(t *testing.T) {
 		{http.MethodPost, "/v1/account/link"}, {http.MethodPost, "/v1/qurls"},
 		{http.MethodGet, "/v1/resources"}, {http.MethodPost, "/v1/resources"}, {http.MethodGet, "/v1/me"},
 		{http.MethodGet, "/v1/resources/r_1"}, {http.MethodPatch, "/v1/resources/r_1"}, {http.MethodDelete, "/v1/resources/r_1"},
+		{http.MethodGet, "/v1/resources/r_1/preview"}, {http.MethodPatch, "/v1/resources/r_1/preview"}, {http.MethodPost, "/v1/resources/r_1/preview/uploads"},
 		{http.MethodGet, "/v1/resources/r_1/sharing"}, {http.MethodPut, "/v1/resources/r_1/sharing"},
 		{http.MethodPost, "/v1/resources/r_1/share"}, {http.MethodGet, "/v1/resources/r_1/qurls"}, {http.MethodPost, "/v1/resources/r_1/qurls"},
 		{http.MethodGet, "/v1/resources/r_1/sessions"}, {http.MethodDelete, "/v1/resources/r_1/sessions"},

@@ -90,6 +90,9 @@ var (
 // is actually public first, because naming a private one here silently
 // disarms the check rather than failing it.
 var sanitizePublicLayerVRepos = map[string]bool{
+	// The qURL agent plugins, public by design (checked 2026-10-14).
+	"claude-plugins":         true,
+	"codex-plugins":          true,
 	"frp":                    true,
 	"homebrew-tap":           true,
 	"ops-routines-workflows": true,

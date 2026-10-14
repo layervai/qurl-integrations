@@ -34,6 +34,14 @@ var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervi
 // release-please cuts apps/cli, which this branch does not control, and a
 // resident 4-shape daemon on a matching binary version would otherwise be
 // reloaded rather than replaced.
+//
+// A daemon runs a job another release installed when this value and the mode
+// match (MatchJobVersion), so a change to an argument's name, order or meaning
+// without a new value is no longer refused by the other release. A new value
+// has a cost of its own: a package upgrade across it leaves the daemon
+// refusing its job, and desired-on shares down, until the next qurl command
+// replaces the job. A release that increments it should keep reading the
+// previous shape where it can.
 const daemonJobProtocolVersion = "5"
 
 // TODO(upstream-contract): relocating the socket relies on
@@ -246,6 +254,9 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 	stdoutPath := filepath.Join(c.LogDir, "share-daemon.log")
 	stderrPath := filepath.Join(c.LogDir, "share-daemon.err.log")
 	arguments := make([]string, 0, 20)
+	// --job-version stays ahead of any argument a later contract adds: a binary
+	// that cannot parse a later argument holds its exit only once it has read
+	// the job version (holdDaemonJobFlagError in cmd).
 	arguments = append(arguments,
 		"--endpoint", c.Endpoint,
 		"daemon", "run", "--state-dir", c.StateDir, "--runtime-dir", c.RuntimeDir, "--job-version", jobVersion,
@@ -319,6 +330,54 @@ func JobVersion(binaryVersion string, mode GroupMode) (string, error) {
 		version += "/" + string(mode)
 	}
 	return version, nil
+}
+
+// JobVersionMatch classifies the job version a service manager started the
+// daemon with against the job version of the binary that is running.
+type JobVersionMatch int
+
+const (
+	// JobVersionIncompatible is a job written for another argument contract or
+	// another session group mode. Its arguments must not run this binary.
+	JobVersionIncompatible JobVersionMatch = iota
+	// JobVersionCurrent is the job this binary would install.
+	JobVersionCurrent
+	// JobVersionStaleBinary is a job another qurl release installed with the
+	// same argument contract and mode. A package manager replaced the binary
+	// under it; its arguments mean the same thing to this binary. This holds
+	// in both directions, an upgrade and a downgrade, and only because every
+	// change to the job's arguments increments daemonJobProtocolVersion.
+	JobVersionStaleBinary
+)
+
+// MatchJobVersion compares a started job's version with the one this binary
+// and mode produce, and returns the latter. Only the binary-version part may
+// differ for JobVersionStaleBinary: the protocol part is the argument contract
+// and the mode part selects how the daemon groups sessions, so a difference in
+// either stays a refusal.
+func MatchJobVersion(jobVersion, binaryVersion string, mode GroupMode) (match JobVersionMatch, expected string, err error) {
+	expected, err = JobVersion(binaryVersion, mode)
+	if err != nil {
+		return JobVersionIncompatible, "", err
+	}
+	if jobVersion == expected {
+		return JobVersionCurrent, expected, nil
+	}
+	suffix := ""
+	if mode != DefaultGroupMode {
+		suffix = "/" + string(mode)
+	}
+	installed, ok := strings.CutPrefix(jobVersion, daemonJobProtocolVersion+"/")
+	if ok {
+		installed, ok = strings.CutSuffix(installed, suffix)
+	}
+	// A remaining separator is a mode (or a shape) this binary did not ask for.
+	// Release versions never contain one; a build whose version does is only
+	// ever its own exact match.
+	if !ok || installed == "" || installed != strings.TrimSpace(installed) || strings.Contains(installed, "/") {
+		return JobVersionIncompatible, expected, nil
+	}
+	return JobVersionStaleBinary, expected, nil
 }
 
 // ReloadIfRunning reconciles an existing daemon without starting one.
