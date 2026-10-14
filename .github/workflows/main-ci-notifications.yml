@@ -19,7 +19,6 @@ on:
       - "cli: Build and Test"
       - "cli: Nightly"
       - "cli: Served Skill"
-      - "claude-code-plugin: Bundled Skill"
       - "origins/s3-static-connector: Build and Publish"
       - "Shared Tests (All Apps)"
       - "e2e: Build and Test"
@@ -200,9 +199,6 @@ jobs:
               ;;
             "cli: Served Skill")
               impact="The daily check of the qURL agent skill served to users did not complete successfully: the served skill is older than the CLI on main asks for, or the check could not read it — the run log says which. No shipped release is affected. If the skill is too old, the next CLI release fails the same check until a newer skill is served; serve it before merging the CLI's release PR."
-              ;;
-            "claude-code-plugin: Bundled Skill")
-              impact="The daily check that the Claude Code plugin's copy of the qURL agent skill is the skill served to users did not complete successfully: the copy differs, or the check could not read the served skill — the run log says which. People who install the plugin get the copy, so until it is updated they get an older skill. Copy the served skill into the plugin and raise the plugin's version, as plugins/claude-code/qurl/README.md says."
               ;;
             "origins/s3-static-connector: Build and Publish")
               impact="Reusable S3 static connector image build or publish did not complete successfully. Website/stats deployments should stay pinned to the prior image digest until this run is repaired."

@@ -110,16 +110,6 @@ trust root is the independent keyless signature on the exact recorded digest
 plus a signed manifest that binds that index to both platforms' BuildKit
 provenance and SPDX statements by content digest.
 
-## Claude Code plugin
-
-The Claude Code plugin in `plugins/claude-code/qurl` has no release track: people
-install it from `main` through `.claude-plugin/marketplace.json`, and Claude Code
-installs a new copy only when `version` in the plugin's `plugin.json` changes.
-Raise it in every PR that changes the plugin's files. Its bundled agent skill is
-a byte-for-byte copy of the served one; the `claude-code-plugin: Bundled Skill`
-workflow fails every day while it is not. The steps to update it are in
-[the plugin's README](plugins/claude-code/qurl/README.md#keeping-the-bundled-skill-current-maintainers).
-
 ## Verify a release
 
 Requires [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)

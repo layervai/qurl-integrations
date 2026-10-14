@@ -13,8 +13,8 @@
 // this tree that fetches the skill: the CLI itself never does.
 //
 // With -bundled it checks something else, and not the version: that a copy
-// of the skill kept in this tree, such as the one the Claude Code plugin
-// ships, is the served file byte for byte. That copy is installed as it is,
+// of the skill (a plugin's bundled copy, say) is the served file byte for
+// byte. That copy is installed as it is,
 // so a copy that differs is a skill no one serves.
 package main
 
