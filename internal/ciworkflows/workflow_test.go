@@ -82,6 +82,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	for name, wantDisplayName := range wantGateNames {
 		if workflow.Jobs[name] == nil {
 			t.Fatalf("%s is missing %q", cliWorkflow, name)
+			return
 		}
 		if workflow.Jobs[name].Name != wantDisplayName {
 			t.Errorf("%s display name = %q, want %q", name, workflow.Jobs[name].Name, wantDisplayName)
@@ -90,6 +91,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	for _, name := range []string{"notify-soak-success", "notify-soak-manual-failure", "signal-cli-release"} {
 		if workflow.Jobs[name] == nil {
 			t.Fatalf("%s is missing %q", cliWorkflow, name)
+			return
 		}
 	}
 
@@ -212,7 +214,6 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if selector == nil {
 		t.Fatal("change detector has no protected customer-journey selector")
-		return // staticcheck SA5011 does not see that Fatal ends the test
 	}
 	if fmt.Sprint(selector.Env["RELEASE_GATE"]) != "${{ inputs.release_source_sha != '' }}" {
 		t.Fatal("release journey selector is not bound to the exact release handoff")
@@ -406,6 +407,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if posixMint == nil || windowsMint == nil {
 		t.Fatalf("journey does not have exact POSIX and Windows mint steps: posix=%#v windows=%#v", posixMint, windowsMint)
+		return
 	}
 	if posixFence == nil ||
 		!strings.Contains(posixFence.Run, "deadline=$((SECONDS + 15))") ||
@@ -445,6 +447,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if windowsSelect == nil {
 		t.Fatal("Windows journey selector is missing")
+		return
 	}
 	if !strings.Contains(windowsSelect.Run, `"-test.list=$listPattern"`) ||
 		strings.Contains(windowsSelect.Run, "& $harness -test.list") {
@@ -513,6 +516,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if cleanupRun == nil {
 		t.Fatal("terminal cleanup step is missing")
+		return
 	}
 	if fmt.Sprint(cleanupRun.Env["JOURNEY_RUN_ATTEMPT"]) != "${{ github.run_attempt }}" {
 		t.Errorf("terminal cleanup does not reconcile only the current journey attempt: %#v", cleanupRun)
@@ -675,6 +679,7 @@ func TestCLISoakWatchdogOwnsScheduledFreshness(t *testing.T) {
 	workflow := readWorkflow(t, watchdogWorkflow)
 	if len(workflow.Jobs) != 2 || workflow.Jobs["freshness"] == nil || workflow.Jobs["notify-stale"] == nil {
 		t.Fatalf("CLI soak watchdog jobs = %v, want freshness and notify-stale", slices.Sorted(maps.Keys(workflow.Jobs)))
+		return
 	}
 	raw := string(readWorkflowBytes(t, watchdogWorkflow))
 	if strings.Contains(raw, "workflow_dispatch:") {
@@ -876,6 +881,7 @@ exit "$failed"
 			job := workflow.Jobs[subject.jobID]
 			if job == nil {
 				t.Fatalf("%s is missing job %q", subject.name, subject.jobID)
+				return
 			}
 			var cleanup *step
 			for index := range job.Steps {
@@ -886,6 +892,7 @@ exit "$failed"
 			}
 			if cleanup == nil {
 				t.Fatalf("%s is missing step %q", subject.name, subject.stepName)
+				return
 			}
 
 			tests := []struct {
@@ -998,6 +1005,7 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 	cleanup := workflow.Jobs["cleanup"]
 	if resolve == nil || cleanup == nil {
 		t.Fatal("cancellation cleanup workflow is incomplete")
+		return
 	}
 
 	var resolverStep *step
@@ -1887,6 +1895,7 @@ func TestCLIReleasePrunesSupersededDraftsOnlyAfterPublication(t *testing.T) {
 	job := workflow.Jobs[jobID]
 	if job == nil {
 		t.Fatalf("%s is missing the %s job", releasePleaseWorkflow, jobID)
+		return
 	}
 	if needs := parseWorkflowNeeds(t, jobID, job.Needs); !slices.Equal(needs, []string{"publish-cli-release", "cli-release-gate"}) {
 		t.Errorf("%s needs = %v, want publish-cli-release and cli-release-gate", jobID, needs)
@@ -2013,6 +2022,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	} {
 		if steps[name] == nil {
 			t.Fatalf("cli-release-gate is missing %q", name)
+			return
 		}
 	}
 	verify := steps["Check the exact packaged customer-journey gate once"]
@@ -2054,6 +2064,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	releasePlease := workflow.Jobs[releasePleaseJobID]
 	if releasePlease == nil {
 		t.Fatal("release-please.yml is missing release-please")
+		return
 	}
 	if needs := parseWorkflowNeeds(t, releasePleaseJobID, releasePlease.Needs); len(needs) != 0 {
 		t.Errorf("release-please PR maintenance is coupled to %v", needs)
@@ -2061,6 +2072,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	signal := workflow.Jobs["signal-cli-release"]
 	if signal == nil {
 		t.Fatal("release workflow is missing its narrow exact-source signal job")
+		return
 	}
 	assertJobPermissions(t, "signal-cli-release", signal.Permissions, map[string]string{
 		"actions": "write", "contents": "read",
@@ -2082,6 +2094,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	releaseCLI := workflow.Jobs["release-cli"]
 	if releaseCLI == nil {
 		t.Fatal("release-please.yml is missing release-cli")
+		return
 	}
 	if needs := parseWorkflowNeeds(t, "release-cli", releaseCLI.Needs); !slices.Equal(needs, []string{"cli-release-gate"}) {
 		t.Errorf("release-cli.needs = %v, want only cli-release-gate", needs)
@@ -2187,6 +2200,7 @@ func TestCLIReleaseChecksTheServedSkillBeforeBuilding(t *testing.T) {
 	releaseCLI := readWorkflow(t, releasePleaseWorkflow).Jobs["release-cli"]
 	if releaseCLI == nil {
 		t.Fatal("release-please.yml is missing release-cli")
+		return
 	}
 	// The step's script names the tag under `set -u`, on the skip path too,
 	// so the tag has to be in the job's environment.
@@ -2501,6 +2515,7 @@ exit 2
 		} {
 			if got := runStep(t, sourceSelectorRun, true, sourceSHA, overrides); got.err == nil {
 				t.Fatalf("release source selector accepted unsafe handoff: %#v", overrides)
+				return
 			}
 		}
 	})
@@ -2612,6 +2627,7 @@ exit 2
 			got := runStep(t, subject.script, true, wrongTarget)
 			if got.err == nil {
 				t.Fatal("workflow step accepted a draft whose target differs from its exact tag commit")
+				return
 			}
 			for _, required := range []string{"::error::Draft CLI release target mismatch", "observed " + wrongTarget, "expected exact", sourceSHA} {
 				if !strings.Contains(got.output, required) {
@@ -2623,6 +2639,7 @@ exit 2
 			got := runStep(t, subject.script, true, sourceSHA, map[string]string{"STUB_TAG": "v9.9.9"})
 			if got.err == nil {
 				t.Fatal("workflow step accepted release metadata for a different tag")
+				return
 			}
 			for _, required := range []string{"::error::CLI release tag mismatch", "v9.9.9", cliTag} {
 				if !strings.Contains(got.output, required) {
@@ -2634,6 +2651,7 @@ exit 2
 			got := runStep(t, subject.script, true, sourceSHA, map[string]string{"STUB_DRAFT": "null"})
 			if got.err == nil {
 				t.Fatal("workflow step accepted a nonboolean release draft state")
+				return
 			}
 			if !strings.Contains(got.output, "::error::CLI release metadata has no exact draft state") {
 				t.Errorf("release-state failure = %q, want exact draft-state error", got.output)
@@ -2695,6 +2713,7 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	stageName := "Stage the Homebrew validation bundle"
 	if releaseSteps[validateName] == nil || releaseSteps[stageName] == nil {
 		t.Fatal("release-cli does not validate and stage the generated cask")
+		return
 	}
 	for _, fragment := range []string{
 		"generated=dist/homebrew/Casks/qurl.rb",
@@ -2721,6 +2740,7 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	upload := validatorSteps["Upload the audited and installed cask"]
 	if audit == nil || upload == nil {
 		t.Fatal("macOS Homebrew validator does not audit, install, and emit one cask")
+		return
 	}
 	for _, fragment := range []string{
 		`brew style --fix "$cask"`,
@@ -4021,6 +4041,7 @@ func TestEdgePackageRequiresSharedSourceChecks(t *testing.T) {
 	job := workflow.Jobs["package-edge"]
 	if job == nil {
 		t.Fatal("chrome-extension.yml is missing package-edge")
+		return
 	}
 	needs := stringSet(parseWorkflowNeeds(t, "package-edge", job.Needs))
 	if !needs[changesJobID] || !needs["build-chrome"] {
@@ -4177,6 +4198,7 @@ func TestRequiredWorkflowVerifierScripts(t *testing.T) {
 			})
 			if err == nil {
 				t.Fatalf("detector failure verifier succeeded, want failure\noutput:\n%s", output)
+				return
 			}
 			if !strings.Contains(output, spec.detectChangesName+" concluded failure") {
 				t.Fatalf("detector failure output = %q, want %q", output, spec.detectChangesName+" concluded failure")
@@ -4189,6 +4211,7 @@ func TestRequiredWorkflowVerifierScripts(t *testing.T) {
 			})
 			if err == nil {
 				t.Fatalf("unexpected output verifier succeeded, want failure\noutput:\n%s", output)
+				return
 			}
 			if !strings.Contains(output, "unexpected "+spec.changeOutput+" output: <empty>") {
 				t.Fatalf("unexpected output message = %q, want unexpected %s output", output, spec.changeOutput)
@@ -4203,6 +4226,7 @@ func TestRequiredWorkflowVerifierScripts(t *testing.T) {
 			})
 			if err == nil {
 				t.Fatalf("skipped gate verifier succeeded, want failure\noutput:\n%s", output)
+				return
 			}
 			wantGateOutput := workflow.Jobs[skippedGate].Name + " concluded skipped"
 			if !strings.Contains(output, wantGateOutput) {

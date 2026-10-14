@@ -256,6 +256,7 @@ func TestClaudeReviewEligibilityFailsClosedOnAnUnreadablePullRequest(t *testing.
 			run := runClaudeReviewStep(t, script, env)
 			if run.err == nil {
 				t.Fatalf("eligibility step succeeded on %s, want failure\noutput:\n%s", tc.name, run.combined)
+				return
 			}
 			if !strings.Contains(run.combined, "::error title=Claude review eligibility is undecidable::") {
 				t.Errorf("output = %q, want the undecidable-eligibility annotation", run.combined)
@@ -562,6 +563,7 @@ func TestClaudeReviewGateRefusesAnEmptyPass(t *testing.T) {
 
 			if run.err == nil {
 				t.Fatalf("gate passed, want failure — this is an empty pass on a required check\noutput:\n%s", run.combined)
+				return
 			}
 			if !strings.Contains(run.combined, "::error title=Claude review check has no basis::") {
 				t.Errorf("output = %q, want the no-basis annotation", run.combined)
