@@ -1832,7 +1832,8 @@ qurl preview clear "$CRID"
 
 `clear` removes description and media and cancels pending uploads. Upload streams
 directly to private storage without the API credential. Processing is asynchronous;
-read `preview get` again to check it. A failed replacement keeps the current item.
+read `preview get` again to check it. In text mode, `--quiet` keeps its existing
+description-only output; use `-o json` to read the name in scripts. A failed replacement keeps the current item.
 Limits: description 500 characters; still images 10 MB; GIF/video 25 MB and 15
 seconds. GIFs become silent video clips. Viewers load one small still first, with
 video only after Play. Use `-o json` for structured revision, media and job state.

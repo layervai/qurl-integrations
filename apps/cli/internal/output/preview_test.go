@@ -16,8 +16,12 @@ func TestPreviewOutputEscapesTextAndQuietEmpty(t *testing.T) {
 	if err := p.Preview(value); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out.String(), "\x1b") || !strings.Contains(out.String(), `guide\x1b[2K`) {
+	if strings.Contains(out.String(), "\x1b") || !strings.Contains(out.String(), `guide\x1b[2K`) || !strings.Contains(out.String(), `Name: "app\x1b[2K"`) {
 		t.Fatal(out.String())
+	}
+	out.Reset()
+	if err := p.Preview(&qurlapi.Preview{Description: "only"}); err != nil || strings.Contains(out.String(), "Name:") {
+		t.Fatalf("output=%q err=%v", out.String(), err)
 	}
 	out.Reset()
 	p = publisherPrinter(&out, &errBuf, FormatText, false, true, false, true)

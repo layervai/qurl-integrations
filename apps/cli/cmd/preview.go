@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	msgPreviewDescriptionRequired = "provide --name or --description; use an empty string to remove it"
-	msgPreviewAltRequired         = "provide --alt to describe the image or clip"
-	msgPreviewUploaded            = "File uploaded. Processing keeps current media visible. Check with qurl preview get %s."
-	msgPreviewMediaMissing        = "media ID not found; read qurl preview get first"
+	msgPreviewFieldRequired = "provide --name or --description; use an empty string to remove it"
+	msgPreviewAltRequired   = "provide --alt to describe the image or clip"
+	msgPreviewUploaded      = "File uploaded. Processing keeps current media visible. Check with qurl preview get %s."
+	msgPreviewMediaMissing  = "media ID not found; read qurl preview get first"
 )
 
 func previewCmd(opts *globalOpts) *cobra.Command {
@@ -113,7 +113,7 @@ func previewSetCmd(opts *globalOpts) *cobra.Command {
 	var name, description string
 	set := &cobra.Command{Use: "set <CRID>", Short: "Set a public name (up to 100 characters) or description (up to 500 characters)", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if !cmd.Flags().Changed("name") && !cmd.Flags().Changed("description") {
-			return exitcode.UsageError(errors.New(msgPreviewDescriptionRequired))
+			return exitcode.UsageError(errors.New(msgPreviewFieldRequired))
 		}
 		client, err := opts.newClient(cmd.Context())
 		if err != nil {

@@ -9,6 +9,7 @@ import (
 )
 
 const (
+	msgPreviewName        = "Name: %s\n"
 	msgPreviewIncomplete  = "qURL preview response is incomplete"
 	msgPreviewDescription = "Description: %s\nRevision: %d\n"
 	msgPreviewMedia       = "Media %s (%s): %s\n"
@@ -44,7 +45,7 @@ func (p *Printer) Preview(preview *qurlapi.Preview) error {
 		return err
 	}
 	if preview.Name != "" {
-		if _, err := fmt.Fprintf(p.out, "Name: %s\n", p.previewText(preview.Name)); err != nil {
+		if _, err := fmt.Fprintf(p.out, msgPreviewName, p.previewText(preview.Name)); err != nil {
 			return err
 		}
 	}
