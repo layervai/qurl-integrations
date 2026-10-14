@@ -13,6 +13,7 @@ func TestTeamsDockerGateBuildsAndSmokesTheProductionImage(t *testing.T) {
 	job := workflow.Jobs["docker-check"]
 	if job == nil {
 		t.Fatal("Teams CI must build and smoke the production image")
+		return // staticcheck SA5011 does not see that Fatal ends the test
 	}
 	if job.If != "needs.changes.outputs.teams == 'true'" {
 		t.Errorf("Teams image gate condition = %q", job.If)
@@ -34,7 +35,6 @@ func TestTeamsDockerGateBuildsAndSmokesTheProductionImage(t *testing.T) {
 	}
 	if build == nil {
 		t.Fatal("Teams image gate must build the app-owned Dockerfile")
-		return
 	}
 	for key, want := range map[string]any{
 		"context": "apps/teams", "file": "apps/teams/Dockerfile",

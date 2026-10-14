@@ -237,7 +237,6 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 		const explicitAudit = "node scripts/audit-production-dependencies.js"
 		if audit == nil {
 			t.Fatalf("%s is missing the %q step", spec.path, discordAuditStepName)
-			return
 		}
 		auditFields := strings.Fields(audit.Run)
 		if len(auditFields) < 2 || auditFields[0] != "node" || auditFields[1] != "scripts/audit-production-dependencies.js" {
@@ -316,6 +315,7 @@ func TestDiscordAuditRetryBudgetFitsStepTimeout(t *testing.T) {
 	job := workflow.Jobs["build-and-test"]
 	if job == nil {
 		t.Fatalf("%s is missing build-and-test job", spec.path)
+		return // staticcheck SA5011 does not see that Fatal ends the test
 	}
 	var timeoutMinutes int
 	foundAuditStep := false

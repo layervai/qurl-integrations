@@ -153,7 +153,6 @@ func TestReviewedArtifactNamespaceDoesNotPermitRepositoryReferences(t *testing.T
 			match := sanitizeLayerVRepo.FindStringSubmatchIndex(test.text)
 			if match == nil {
 				t.Fatalf("test input did not match repository scanner: %q", test.text)
-				return
 			}
 			repo := strings.ToLower(test.text[match[2]:match[3]])
 			if got := sanitizeReviewedArtifactNamespace(test.text, match[0], repo); got != test.want {

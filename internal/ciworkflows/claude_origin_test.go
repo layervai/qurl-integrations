@@ -93,7 +93,6 @@ func TestClaudeActionOriginPatternFailsClosedWithoutARunnerHost(t *testing.T) {
 					"https://x-access-token:t@github.com/layervai/qurl-integrations.git")
 				if err == nil {
 					t.Fatalf("server URL %q was accepted: %s", serverURL, output)
-					return
 				}
 				if !strings.Contains(output, "origin comparison targets are unavailable") {
 					t.Fatalf("server URL %q: got %q, want the fail-closed error", serverURL, output)
