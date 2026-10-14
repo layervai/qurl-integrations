@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// Throwaway: reproduce the Workflow Contract lint-cache failure. Do not merge.
 func TestTeamsDockerGateBuildsAndSmokesTheProductionImage(t *testing.T) {
 	t.Parallel()
 
