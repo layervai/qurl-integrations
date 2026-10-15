@@ -43,9 +43,14 @@ device gets "not found".
 Where the deployment offers it, a public resource can also be fetched on any
 machine with only its CRID: no account and no setup. The deployment this
 release ships does not offer it yet. Where it is offered, get asks for a link
-with the CRID alone when this device cannot share the resource, and a machine
-with no device identity creates none. The three most common answers when no
-link is given:
+this way first. On Linux and macOS a device that has an identity asks as this
+device, so it can also get a link this way for a private resource it is
+allowed to open. On other systems it asks with the CRID alone. A machine that
+has an account key in its environment and no device identity yet asks first
+too, with the CRID alone. Only when no link is given do these mint a share
+link. On a machine with no device identity and no account key the answer is
+final, and that machine creates no device identity. The three most common
+answers when no link is given:
 
   - "not found" (exit code 5): the CRID is mistyped, the resource was
     removed, or it is not open to this machine.
@@ -134,24 +139,24 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}
 	}
 
-	// mint requests a share link and verifies it; every path below — the
-	// browser launch, the download, and the mid-download retry — goes
-	// through it, so nothing ever acts on an unverified answer. links
-	// decides where each link of this run comes from; what happens to a
-	// link afterwards does not depend on that.
+	// mint gets a link and verifies it; every path below — the browser
+	// launch, the download, and the mid-download retry — goes through it, so
+	// nothing ever acts on an unverified answer. links decides where each
+	// link of this run comes from: the share request or the link request.
+	// What happens to a link afterwards does not depend on that.
 	var shareLink *qurlapi.ShareLink
 	links := opts.linkSourceForGet(assessment, qurlapi.ShareOptions{SessionDurationSeconds: int(flags.sessionDuration / time.Second)})
 	noteSessionDuration := sessionDurationNoteOnce(printer, flags.sessionDuration)
 	mint := func(ctx context.Context) (string, error) {
-		result, byCRIDAlone, err := links.next(ctx)
+		result, origin, err := links.next(ctx)
 		if err != nil {
 			return "", err
 		}
 		if err := opts.verifyLink(ctx, result.QURL, assessment.Input); err != nil {
 			return "", err
 		}
-		links.verified(byCRIDAlone)
-		noteSessionDuration(byCRIDAlone)
+		links.verified(origin)
+		noteSessionDuration(origin.byLinkRequest())
 		shareLink = result
 		return result.QURL, nil
 	}

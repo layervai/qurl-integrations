@@ -173,6 +173,13 @@ shared/              Shared Go libraries used by the Go apps
   observability/     OpenTelemetry setup
 ```
 
+## Claude Code and Codex plugins
+
+The qURL plugins live in their own repositories:
+[layervai/claude-plugins](https://github.com/layervai/claude-plugins) for Claude
+Code and [layervai/codex-plugins](https://github.com/layervai/codex-plugins) for
+OpenAI Codex. Each bundles the qURL agent skill; none needs an account.
+
 ## SDKs & MCP server (separate repos)
 
 Language SDKs and the qURL MCP server live in standalone repositories:

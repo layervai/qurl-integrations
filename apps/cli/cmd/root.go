@@ -23,6 +23,7 @@ import (
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/agentskill"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
@@ -64,8 +65,13 @@ type globalOpts struct {
 	version string
 
 	// Injected process context; tests override via root options.
-	streams      *output.Streams
-	lookupEnv    func(string) (string, bool)
+	streams   *output.Streams
+	lookupEnv func(string) (string, bool)
+	// userHomeDir is the home directory where noteOutdatedSkill looks for a
+	// saved copy of the qURL agent skill. Nil means the CLI does not look,
+	// and newRoot leaves it nil: only Main sets it, so no test reads the
+	// home directory of the person who runs the suite.
+	userHomeDir  func() (string, error)
 	configDir    string
 	now          func() time.Time
 	sleep        func(time.Duration)
@@ -88,9 +94,9 @@ type globalOpts struct {
 	// cridLinkOffered reports whether this machine can ask for a link with
 	// only a CRID at all: offered, not offered (false and no error), or set
 	// up wrongly (an error). It needs no CRID, sends nothing and creates
-	// nothing. Only `qurl get` calls it, before requestCRIDLink. Tests always
-	// inject (the harness answers "not offered", as the shipped deployment
-	// does).
+	// nothing. Only `qurl get` calls it, before requestCRIDLink and
+	// requestCRIDLinkAsDevice. Tests always inject (the harness answers "not
+	// offered", as the shipped deployment does).
 	cridLinkOffered func() (bool, error)
 	// requestCRIDLink asks the service for a link with only a CRID, through
 	// the SDK, and returns the SDK's answer unchanged. It uses no device
@@ -99,6 +105,31 @@ type globalOpts struct {
 	// harness fails a test that reaches it without an answer), so no hermetic
 	// test sends a real request.
 	requestCRIDLink func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
+	// requestCRIDLinkAsDevice asks the service for a link as this registered
+	// device, through the SDK, and returns the SDK's answer unchanged. The SDK
+	// sends a first request under a random key. Only when that one is
+	// answered "not found" does it call deviceKey, once, and send a second
+	// request under the key deviceKey returned. That key is then the SDK's:
+	// the SDK wipes it. Only `qurl get` calls this, after cridLinkOffered said
+	// the request is offered. Tests always inject (the harness fails a test
+	// that reaches it without an answer), so no hermetic test sends a real
+	// request.
+	requestCRIDLinkAsDevice func(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error)
+	// readDeviceKey returns this device's static private key for
+	// requestCRIDLinkAsDevice, or no key and one fixed word for the reason.
+	// It only reads the device state: it creates nothing, changes nothing,
+	// takes no lock and sends nothing. Only `qurl get` uses it, and only
+	// where the request is offered. It is not called before the request: the
+	// SDK calls it, through deviceKeyOnDemand, when it needs the key. Nil is
+	// the production reader, which is safe in a hermetic test: it reads a
+	// file in the test's own state directory.
+	readDeviceKey func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey)
+	// linkTimeoutBeforeShare is the time limit of a link request that is
+	// followed by a share request when it gives no link. Zero means
+	// cridLinkTimeoutBeforeShare, and production leaves it zero. A test sets
+	// a short limit, so it can let the limit run out without a wait of ten
+	// seconds.
+	linkTimeoutBeforeShare time.Duration
 	// linkSite returns the origin of the site where a person opens a resource
 	// in a browser with only its CRID, or the empty string when this install
 	// does not know it for its deployment. It reads settings only: it sends
@@ -184,7 +215,7 @@ type registeredNativeRuntime interface {
 func Main(version string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	root, opts := newRoot(version, output.Detect())
+	root, opts := newRoot(version, output.Detect(), lookForSavedSkill)
 	return run(ctx, root, opts)
 }
 
@@ -200,6 +231,10 @@ func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 	// example a failed compensation after the job install) is not a reason to
 	// hide the local remedy.
 	err := root.ExecuteContext(ctx)
+	if err == nil && versionFlagGiven(root) {
+		// cobra answers --version itself, before any command runs.
+		opts.noteOutdatedSkill()
+	}
 	if apiErr := (*qurlapi.Error)(nil); !errors.As(err, &apiErr) || !connectorstate.MentionsUnsafeDirectory(apiErr.Error()) {
 		err = connectorstate.ExplainUnsafeDirectory(err)
 	}
@@ -308,6 +343,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		publishCmd(opts),
 		shareCmd(opts),
 		grantsCmd(opts),
+		consumerAccessCmd(opts),
 		requestsCmd(opts),
 		approveCmd(opts),
 		denyCmd(opts),
@@ -323,8 +359,9 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		loginCmd(opts),
 		whoamiCmd(opts),
 		publisherCmd(opts),
+		previewCmd(opts),
 		requestCmd(opts),
-		versionCmd(version),
+		versionCmd(opts),
 		completionCmd(),
 		docsCmd(),
 	)
@@ -346,8 +383,10 @@ func (o *globalOpts) nativeShareDaemon(stateDir, logDir string) (shareDaemonCont
 
 // applyLinkDefaults wires the link operations the SDK performs to one opener
 // over this invocation's environment: verifying a link, asking the platform
-// for access to one, and asking for one with only a CRID, which has a check
-// of its own for whether it can be asked here at all.
+// for access to one, and asking for one with only a CRID or as this device,
+// which has a check of its own for whether it can be asked here at all. It
+// also wires the read of the device key that the request as this device
+// takes.
 func (o *globalOpts) applyLinkDefaults() {
 	opener := &consume.AccessOpener{LookupEnv: o.lookupEnv}
 	if o.verifyLink == nil {
@@ -361,6 +400,12 @@ func (o *globalOpts) applyLinkDefaults() {
 	}
 	if o.requestCRIDLink == nil {
 		o.requestCRIDLink = opener.RequestCRIDLink
+	}
+	if o.requestCRIDLinkAsDevice == nil {
+		o.requestCRIDLinkAsDevice = opener.RequestCRIDLinkAsDevice
+	}
+	if o.readDeviceKey == nil {
+		o.readDeviceKey = o.readDeviceStaticPrivateKey
 	}
 	if o.linkSite == nil {
 		o.linkSite = opener.LinkSite
@@ -699,6 +744,38 @@ func bindRegisteredDeviceOwner(
 		}
 	}
 	return nil
+}
+
+// lookForSavedSkill is the root option of the real process: it lets
+// noteOutdatedSkill look under the user's home directory.
+func lookForSavedSkill(o *globalOpts) { o.userHomeDir = os.UserHomeDir }
+
+// versionFlagGiven reports whether the invocation was `qurl --version`. The
+// value is compared too, so `--version=false` is not taken for it.
+func versionFlagGiven(root *cobra.Command) bool {
+	flag := root.Flags().Lookup("version")
+	return flag != nil && flag.Changed && flag.Value.String() == "true"
+}
+
+// noteOutdatedSkill says, in one note on stderr, that a copy of the qURL
+// agent skill saved on this machine is older than this release works with,
+// and gives the command that replaces it. A coding agent reads its saved
+// copy in every session and nothing else tells it the copy is old. The
+// commands that say it are the ones the skill has an agent run: `qurl
+// --version`, `qurl version` and `qurl publish`. It only reads files: it
+// sends nothing, never fails a command, and says nothing when no copy is
+// saved or under --quiet. Stdout is never written.
+func (o *globalOpts) noteOutdatedSkill() {
+	if o.quiet || o.userHomeDir == nil || o.streams == nil || o.streams.Err == nil {
+		return
+	}
+	home, err := o.userHomeDir()
+	if err != nil {
+		return
+	}
+	if saved, found := agentskill.FindOutdated(home, runtime.GOOS); found {
+		o.printer().Notef(msgSavedSkillOutdated, saved.Path, saved.ReplaceCommand)
+	}
 }
 
 // noteTPMSealing tells the user, before any state is written, that a new

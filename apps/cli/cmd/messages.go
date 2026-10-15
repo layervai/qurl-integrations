@@ -18,6 +18,13 @@ const (
 	// verify against; same fail-closed contract as msgVerifyMismatch.
 	msgVerifyMissing = "the service's answer carried no CRID to verify against, so the link was discarded and nothing was printed. Try again; if it keeps happening, contact qURL support"
 
+	// msgSavedSkillOutdated is the stderr note for a copy of the qURL agent
+	// skill, saved by a coding agent, that is older than this release works
+	// with. The first %s is where the copy is and the second is the one
+	// command that replaces it. It states what is so and leaves the choice
+	// to run the command with the reader.
+	msgSavedSkillOutdated = "The qURL skill saved at %s is older than this release of the qURL CLI works with. To replace it, run:\n  %s"
+
 	// msgNeedsYes is the non-interactive guard for destructive commands.
 	msgNeedsYes = "confirmation required: re-run with --yes (interactive confirmation needs a terminal)"
 
@@ -77,6 +84,46 @@ const (
 	// which class it was, and on a device with an identity it is the share
 	// request's own answer, which says nothing about this request at all.
 	msgCRIDLinkNotSent = "> CRID link request not sent, the SDK will not ask for this CRID: %s"
+
+	// msgCRIDLinkAsDevice is the --verbose diagnostic for a link request in
+	// which the SDK asked this device for its key: the first request was
+	// answered "not found". It states the rule the SDK follows, so nobody
+	// reads the line as "the device key was sent". The line is not written
+	// when the SDK did not ask for the key, and not when the read gave none.
+	msgCRIDLinkAsDevice = "> CRID link request as this device: a random key first, the device key only after \"not found\""
+
+	// msgCRIDLinkKeyNotNeeded is the --verbose diagnostic for a link request
+	// of a device with an identity that the first request settled: with a
+	// link, with a refusal other than "not found", or with no answer. That
+	// request goes under a random key, and the SDK did not ask for the device
+	// key. The line does not say "as this device": nothing was read, so it is
+	// not known whether this machine has a device key. A machine with only an
+	// account key has none.
+	//
+	// It says "not asked for", and not "not read": when the request ends at
+	// the moment of a "not found", the SDK can start the read after it has
+	// already returned, and this line is written before that.
+	msgCRIDLinkKeyNotNeeded = "> CRID link request under a random key, the device key was not asked for: it is asked for only after \"not found\""
+
+	// msgCRIDLinkNoUsableDeviceKey is the --verbose diagnostic for a request
+	// that was answered "not found" under a random key and could not be made
+	// again as this device, because there was no device key to make it with.
+	// %s is one fixed word for the reason, from connectorstate.NoDeviceKey:
+	// the key could not be read, or it was read and is not a key
+	// ("invalid_key"). So the line does not say that nothing was read. It
+	// never carries a path, an error text or any part of a key.
+	//
+	// No two of these lines start the same way: a test finds each line by
+	// its start (TestGetSaysHowItAskedForALinkOnlyWithVerbose).
+	msgCRIDLinkNoUsableDeviceKey = "> CRID link request not made as this device, no usable device key: %s"
+
+	// msgCRIDLinkAsDeviceRefused is the --verbose diagnostic for a request as
+	// this device that the SDK refused before it sent anything, because it
+	// was given no function to read the device key with. get always gives it
+	// one, so the line shows a fault in the CLI itself. It is not a fault of
+	// the device key, which was not read, or of the CRID. The device then
+	// asked with the CRID alone.
+	msgCRIDLinkAsDeviceRefused = "> CRID link request with the CRID alone, the request as this device was refused before it was sent: the SDK got no way to read the device key"
 
 	// msgShareNeedsDevice frames a failure to open this device's identity on
 	// the share path, which share and get both take. The cause follows it
@@ -180,6 +227,7 @@ const (
 // package can emit, for the jargon gate.
 func customerMessages() []string {
 	return []string{
+		msgPreviewFieldRequired, msgPreviewAltRequired, msgPreviewUploaded, msgPreviewMediaMissing,
 		msgAccountSetup,
 		msgAccountContinue,
 		msgAccountLinked,
@@ -198,6 +246,7 @@ func customerMessages() []string {
 		msgAccountOwnerDenied,
 		msgVerifyMismatch,
 		msgVerifyMissing,
+		msgSavedSkillOutdated,
 		msgNeedsYes,
 		msgDeleteCanceled,
 		msgTTLClamped,

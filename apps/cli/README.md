@@ -478,6 +478,7 @@ than switching in place.
 | `qurl publish <target-url>` | Publish a remote URL or serve a loopback HTTP app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |
+| `qurl access <action> <CRID> [<decision-id>]` | Manage private consumer policies, invitations, and grants |
 | `qurl requests [<CRID>]` | List access requests, or turn them on or off for a private resource |
 | `qurl approve <CRID> <code>` | Approve one person's request for access to a private resource |
 | `qurl deny <CRID> <device id>` | Refuse one person's request for access to a private resource |
@@ -752,6 +753,50 @@ immediate revocation. See
 |--------|--------------|
 | `http://127.0.0.1:3000` | qURL starts the background share, waits for serving, prints its CRID, and exits |
 | `https://api.example.com/reports` | qURL registers the remote URL, prints its CRID, and exits |
+
+#### Private consumer policies
+
+On a deployment that supports consumer policies, choose private access with
+`--access invite_only`, `email_capture`, `review`, `keys`, or `contract`.
+Contract mode also needs `--contract <identifier>`. These flags cannot be
+combined with `--public`, legacy access requests, or legacy device allowlists.
+The reply must confirm `private: true` and the requested `consumer_access` policy.
+
+For a share controlled only by the publisher:
+
+```bash
+qurl publish http://127.0.0.1:3000 --access invite_only -o json
+qurl access invite <CRID> --email ana@example.com -o json
+qurl access list_invitations <CRID> -o json
+```
+
+An accepted email delivery is not proof that the recipient has enrolled.
+The recipient must verify mailbox control and bind a credential. Invite-only
+resources do not accept access requests from other consumers.
+
+For review, list grants and approve only the verified mailbox that the
+publisher authorized, using the returned decision ID and version:
+
+```bash
+qurl access list_grants <CRID> -o json
+qurl access approve <CRID> <decision-id> --version <version> -o json
+qurl access revoke_grant <CRID> <decision-id> --version <current-version> -o json
+```
+
+Email capture and review disclose the consumer's verified email to the
+publisher; they are not anonymous access. Mailbox verification does not prove
+legal identity. Contract grants use an opaque consumer reference. Approve
+contract access only from a trusted publisher backend receipt and expiration;
+these commands do not verify payment with a payment processor.
+The publisher backend can subscribe to `consumer.subscribed` webhooks.
+If its notification is pending, repeat the same receipt, expiry and version.
+
+`qurl access --help` lists all owner actions. Changes require the current
+version. If session removal is pending, retry the exact removal and version;
+report it as complete only when `session_cleanup` is `complete`. A policy
+change uses `access configure` with the current policy version. If that update
+returns a pending-session error, retry the same update. Do not invent a newer
+version or fall back to public or legacy access.
 
 #### Local apps
 
@@ -1197,15 +1242,54 @@ downloads — nothing is ever acted on unverified:
 Where the deployment offers it, a public resource can also be fetched on any
 machine with only its CRID: no account and no setup. The deployment this
 release ships does not offer it yet. Where it is offered, `get` asks for a
-link with the CRID alone when this device cannot share the resource, and a
-machine with no device identity creates none. The three most common answers
-when no link is given:
+link this way first. On Linux and macOS a device that has an identity asks as
+this device, so it can also get a link this way for a private resource it is
+allowed to open. On other systems it asks with the CRID alone. A machine that
+has an account key in its environment and no device identity yet asks first
+too, with the CRID alone. Only when no link is given do these mint a share
+link. On a machine with no device identity and no account key the answer is
+final, and that machine creates no device identity. The three most common
+answers when no link is given:
 
 | Answer | Exit code | What it means |
 |--------|-----------|---------------|
 | not found | 5 | The CRID is mistyped, the resource was removed, or it is not open to this machine. |
 | can't give a link right now | 11 | Nothing is wrong with the CRID. Try again later. |
 | too many requests | 9 | Wait, then try again. |
+
+Asking for a link this way has a cost. The service limits these requests for
+each source address, so machines that reach the service from one shared
+address use the same limit.
+
+- A machine with no device identity and no account key sends one request for
+  each link.
+- A device that has an identity sends one request for a public resource. For
+  any other CRID it sends up to two on Linux and macOS: when the first answer
+  is "not found", it asks once more as this device. On other systems it sends
+  one.
+- A machine that has an account key and no device identity yet sends one
+  request for each link before it mints a share link, and that request counts
+  in the limit. For a resource it may share, that is one request more than it
+  sent before `get` asked this way first.
+- A download whose link expired before any content arrived asks again in the
+  same way.
+
+Asking first also costs time when the service does not answer. A device that
+has an identity, and a machine that has an account key, wait up to 10 seconds
+for the answer before they mint a share link. If no answer came in that time,
+and the attempt to mint a share link ends in "not found", `get` asks once more
+with the CRID alone and waits longer for that answer, as it did before it
+asked this way first. So a slow service does not cost a link. That request
+counts in the limit too.
+
+When the limit is reached, a device that has an identity mints a share link,
+as it does for every answer that is not a link, and so does a machine that has
+an account key. That gives a link when this device may share the resource.
+When it may not, the answer is "too many requests", as it is on a machine with
+no device identity and no account key. Wait, then try again.
+
+With `--session-duration`, `get` mints the share link first, as it did before,
+because only a share link can carry that lifetime.
 
 | Flag | Description |
 |------|-------------|
@@ -1507,6 +1591,15 @@ and its shape is a stable contract, so scripts may parse it
 configuration, credentials, or network: a broken config file can never
 brick shell startup or a version check.
 
+A coding agent that uses qURL keeps a copy of the qURL agent skill in its
+skills folder (`~/.claude/skills/qurl/SKILL.md` for Claude Code) and reads
+that copy in every session, so the copy never updates by itself. When a
+saved copy is older than the release works with, `qurl version`,
+`qurl --version`, and `qurl publish` say so in one note on stderr, with the
+command that replaces it. Stdout is unchanged, `--quiet` leaves the note
+out, and nothing is said when no copy is saved. The CLI only reads the file:
+it downloads nothing and changes nothing.
+
 There is also a hidden maintenance command, `qurl docs [man|markdown] -d
 <dir>`, which generates the man pages and markdown docs from the command
 tree itself; release packaging runs it to produce the man pages shipped
@@ -1719,3 +1812,33 @@ their expiry and revocation rules.
 A device key is for a recipient who runs the qURL CLI. For people who do not,
 turn on access requests and approve each person by the code they give you:
 see [qurl requests, approve and deny](#qurl-requests-approve-and-deny).
+
+### CRID preview metadata
+
+Each CRID has its own optional description and up to four media items. Description
+is public preview text, separate from private owner notes. The optional app
+name is public, with a limit of 100 characters. Omitted text fields stay
+unchanged; an empty string removes that field. Media needs a verified
+publisher. Use the same registered device identity as other publisher commands:
+
+```sh
+qurl preview get "$CRID"
+qurl preview set "$CRID" --name "API guide" --description "A guide to our API"
+qurl preview upload "$CRID" ./demo.gif --alt "The API in use"
+qurl preview upload "$CRID" ./new-demo.mp4 --alt "Updated demo" --replace "$MEDIA_ID"
+qurl preview remove "$CRID" "$MEDIA_ID"
+qurl preview clear "$CRID"
+```
+
+`clear` removes name, description and media and cancels pending uploads. Upload streams
+directly to private storage without the API credential. Processing is asynchronous;
+read `preview get` again to check it. A failed replacement keeps the current item.
+
+In text mode, `--quiet` keeps its existing description-only output; use
+`-o json` to read the name in scripts.
+Limits: description 500 characters; still images 10 MB; GIF/video 25 MB and 15
+seconds. GIFs become silent video clips. Viewers load one small still first, with
+video only after Play. Use `-o json` for structured revision, media and job state.
+A revision conflict never retries automatically. The API owns verification and
+all limits. Supervisors may also GET/PATCH `/v1/resources/{id}/preview` and POST
+`/v1/resources/{id}/preview/uploads` through the existing `qurl request` command.

@@ -73,6 +73,13 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-verify-cli-release.sh
 
+      # The pruner deletes draft releases, which cannot be undone, and runs
+      # only after a CLI release is published. Its selection rules and its
+      # refusals are exercised here because nothing else runs it before then.
+      - name: Test superseded CLI draft pruner
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-prune-superseded-cli-drafts.sh
+
       - name: Test macOS CLI egress lifecycle
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-cli-macos-egress.sh
