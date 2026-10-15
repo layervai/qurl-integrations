@@ -88,6 +88,18 @@ jobs:
             exit 1
           fi
 
+      # The repository also carries <component>-v* tags. Name the latest CLI
+      # v* tag so the snapshot version always counts from a CLI release, as
+      # release-please.yml pins GORELEASER_CURRENT_TAG for a release.
+      - name: Find the last CLI release tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::no CLI release tag before this commit"; exit 1; }
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+
       - name: Build the candidate
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
@@ -95,7 +107,10 @@ jobs:
           args: release --snapshot --clean --skip=sign
         env:
           QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
+          GORELEASER_CURRENT_TAG: ${{ steps.tag.outputs.tag }}
 
+      # Only that the binary is a stamped snapshot and starts. Which features
+      # it has is for the tester to check.
       - name: Check the candidate runs
         id: check
         shell: bash
@@ -110,11 +125,7 @@ jobs:
           version_line=$("$bin_dir/qurl" version)
           echo "$version_line"
           [[ "$version_line" =~ ^qurl\ version\ [0-9]+\.[0-9]+\.[0-9]+-SNAPSHOT-[0-9a-f]+\ \(linux/amd64\)$ ]] || { echo "::error::candidate version is not a stamped snapshot version"; exit 1; }
-          "$bin_dir/qurl" access --help >/dev/null
-          # No pipe into grep: grep -q exiting early would SIGPIPE qurl under
-          # pipefail and fail this step for the wrong reason.
-          publish_help=$("$bin_dir/qurl" publish --help)
-          grep -q -- '--access' <<<"$publish_help" || { echo "::error::candidate has no publish --access"; exit 1; }
+          "$bin_dir/qurl" --help >/dev/null
           echo "version_line=$version_line" >>"$GITHUB_OUTPUT"
 
       - name: Keep the candidate for 7 days

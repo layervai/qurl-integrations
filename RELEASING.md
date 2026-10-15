@@ -57,6 +57,9 @@ which the run summary names:
 gh workflow run cli-candidate.yml -R layervai/qurl-integrations --ref <branch>
 ```
 
+The branch must contain `.github/workflows/cli-candidate.yml`; merge `main`
+into an older branch first.
+
 It runs GoReleaser in snapshot mode and keeps the archives and
 `checksums.txt` as a run artifact for 7 days. It creates no tag, no GitHub
 Release and no Homebrew cask, and holds only `contents: read`, so
