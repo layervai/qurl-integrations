@@ -152,3 +152,28 @@ func TestConsumerContractRejectsPadding(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestConsumerManagementMapsAPIErrors keeps qurl access on the CLI's exit
+// codes: without mapError a 409 or 503 from these routes exits 1, and the
+// access help and agent instructions tell callers to act on 7 and 11.
+func TestConsumerManagementMapsAPIErrors(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusConflict, "consumer_access_conflict", "Consumer access changed", "read its current version and retry")
+	})
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/invitations", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "unavailable", "Unavailable", "try again")
+	})
+	owner := newTestClient(t, srv, nil).ConsumerManagement()
+
+	err := owner.UpdateConsumerAccess(t.Context(), srv.Key.CRID, 1, qurl.ConsumerAccessPolicy{Mode: "review", Version: 2})
+	var conflict *Error
+	if !errors.As(err, &conflict) || conflict.StatusCode != http.StatusConflict {
+		t.Fatalf("configure error = %v, want *Error with status 409", err)
+	}
+	_, err = owner.InviteConsumer(t.Context(), srv.Key.CRID, "ana@example.com")
+	var unavailable *Error
+	if !errors.As(err, &unavailable) || unavailable.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("invite error = %v, want *Error with status 503", err)
+	}
+}
