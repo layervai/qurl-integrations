@@ -798,6 +798,13 @@ change uses `access configure` with the current policy version. If that update
 returns a pending-session error, retry the same update. Do not invent a newer
 version or fall back to public or legacy access.
 
+When consumer access is enabled, the hosted preview card always offers
+**Email me an access link** as a backup to passkeys. Publishers cannot disable
+this option. The recipient verifies the mailbox and consents to disclose it to
+the publisher. Invitations, approval, entitlement, expiry, and revocation still
+apply. Email-backed grants are separate from passkey-backed grants; first use
+must pass the mode's normal checks. Later email logins reuse the email grant.
+
 #### Local apps
 
 ```bash
@@ -1842,8 +1849,3 @@ video only after Play. Use `-o json` for structured revision, media and job stat
 A revision conflict never retries automatically. The API owns verification and
 all limits. Supervisors may also GET/PATCH `/v1/resources/{id}/preview` and POST
 `/v1/resources/{id}/preview/uploads` through the existing `qurl request` command.
-
-Email access is always available as a backup to passkeys. The recipient selects
-**Email me an access link** and verifies the mailbox. Publishers cannot disable
-this option, and no CLI flag is needed. Invitations, publisher approval, contract
-entitlement, expiry, and revocation still apply.
