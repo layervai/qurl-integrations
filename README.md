@@ -2,8 +2,10 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Use [qURL™](https://layerv.ai/qurl/) to share local web apps, private resources,
-and uploaded files through temporary access links. This repository contains
+Use [qURL™ by LayerV](https://layerv.ai/qurl/) to share localhost web apps,
+private APIs, and files through expiring access links. Share a development
+preview, an internal dashboard, or a document with a teammate or AI agent.
+This repository contains
 LayerV's CLI, Slack and Discord integrations, browser extensions for Gmail,
 and Microsoft Teams integration source.
 
@@ -29,6 +31,129 @@ protected resources. Start with the guide for the task you want to complete:
 The CLI guide documents local publishing and sharing. Each integration guide
 lists its own setup requirements. Teams deployment is managed outside this
 repository; the presence of its source does not establish a public rollout.
+
+[Localhost quickstart](#share-a-localhost-web-app) ·
+[File sharing](#share-files-and-documents) · [ngrok comparison](#qurl-and-ngrok-for-localhost-sharing) ·
+[Sharing questions](#localhost-and-file-sharing-questions) ·
+[Product overview](https://layerv.ai/qurl/) · [Private links](https://qurl.link/)
+
+## Share a localhost web app
+
+For example, let a teammate review a preview running on your laptop without
+deploying a staging server. Your app stays on your machine; the CLI runs the
+Connector that carries access to it.
+
+1. Install the CLI. On macOS with Homebrew:
+
+   ```bash
+   brew install layervai/tap/qurl
+   qurl version
+   ```
+
+   See the [CLI setup guide](apps/cli/README.md#authentication) for the
+   authentication and deployment requirements of your installation, and
+   [other installation options](apps/cli/README.md#install) for Linux or Windows.
+
+2. Keep your existing app running on port 3000. To try a simple file-based
+   preview, run this from a directory containing only files you intend to share:
+
+   ```bash
+   python3 -m http.server 3000 --bind 127.0.0.1
+   ```
+
+3. In a second terminal, publish that local HTTP service:
+
+   ```bash
+   qurl publish http://127.0.0.1:3000
+   ```
+
+4. Replace `REPLACE_WITH_CRID` with the resource identifier printed after the
+   route is ready. Create a link with a requested five-minute access window:
+
+   ```bash
+   qurl share REPLACE_WITH_CRID --ttl 5m --session-duration 5m
+   ```
+
+   Send the returned full qURL link privately. A browser recipient opens the
+   link; your app's own login still applies. The service can shorten the
+   requested lifetime. Keep the app, publishing host, and background daemon
+   available while the recipient uses it.
+
+The CRID identifies the resource; the minted link grants access. CRID-based
+link requests also depend on resource privacy and device grants. Read
+[private CRIDs](apps/cli/README.md#private-crids) before handing a CRID to
+someone else's CLI or agent.
+
+When the preview is over, stop serving it:
+
+```bash
+qurl stop REPLACE_WITH_CRID
+```
+
+`stop` pauses serving without retiring the resource. See the
+[command reference](apps/cli/README.md#commands) for restarting, deleting,
+and managing individual links.
+
+## Share files and documents
+
+Choose a file workflow that matches where the file lives and how it should
+reach the recipient:
+
+| Use case | Workflow |
+| --- | --- |
+| Review files in a local preview directory | Serve a dedicated directory with a local HTTP server, publish its root address with the CLI, and share the access link. Recipients can reach the files that server exposes. |
+| Send an uploaded document from Gmail | Use the [browser extension](apps/chrome-extension/README.md#quickstart) to upload selected files and insert expiring links into a compose draft. |
+| Send separate file links to Discord recipients | Use [`/qurl send`](apps/discord/README.md#commands); the configured bot delivers recipient links by DM. |
+| Let an AI agent share a selected PDF or image | Use the [MCP upload tools](https://github.com/layervai/qurl-mcp#upload-tools), with their supported file types, transport modes, and expiry limits. |
+
+A localhost file server and an uploaded file are different resource lifecycles.
+Local serving needs the host to remain available. Uploads use their configured
+file service. Opening or testing a single-use link can consume it; create a
+fresh recipient link when needed. Use each integration's guide for its actual
+revocation support and file-size limits.
+
+## qURL and ngrok for localhost sharing
+
+Both tools can connect an app on your machine to remote users without inbound
+port forwarding. The sharing workflow and access model are the useful points
+to compare:
+
+| Question | qURL local sharing | ngrok's documented localhost workflow |
+| --- | --- | --- |
+| What do I send? | An expiring access link for a published resource. | A public endpoint URL, which can be secured with Traffic Policy. |
+| How is access controlled? | Resource identity, signed access grants, and the resource's link and session rules. The app can keep its own login. | Endpoint policies such as OAuth, OIDC, Basic Auth, and IP restrictions. |
+| Does the origin need inbound port forwarding? | No; the Connector connects outbound. | No; the agent establishes an outbound tunnel. |
+
+For private previews and temporary access to an internal app, qURL centers the
+workflow on issuing access to a resource. ngrok also documents public endpoint
+delivery, request inspection, and replay. Choose based on the access and
+testing workflow you need. See [ngrok's localhost guide](https://ngrok.com/use-cases/share-localhost),
+[ngrok security](https://ngrok.com/security), and the
+[LayerV sharing FAQ](https://layerv.ai/faq/).
+
+## Localhost and file-sharing questions
+
+### Does sharing move my app to LayerV?
+
+No. In the local workflow, the app runs on your host and the CLI's embedded
+Connector carries access traffic. A sleeping laptop or stopped app cannot
+serve the preview.
+
+### Does a qURL make an existing public URL private?
+
+Creating a qURL adds an access path. Close or restrict any separate public
+route if access should be available only through qURL.
+
+### Does the link's expiry end an open session?
+
+Link expiry limits new redemption. An already admitted session has its own
+lifetime. The quickstart requests both limits; the service enforces them.
+
+### Is every link single-use, and does it replace application login?
+
+Use limits depend on the link and issuing workflow. A link is an access
+credential, so share it privately. It does not replace your app's login or
+prove a recipient's identity merely because you sent it to a named person.
 
 ## Structure
 
