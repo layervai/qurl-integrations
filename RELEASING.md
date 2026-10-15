@@ -61,10 +61,10 @@ The branch must contain `.github/workflows/cli-candidate.yml`; merge `main`
 into an older branch first.
 
 It runs GoReleaser in snapshot mode and keeps the archives and
-`checksums.txt` as a run artifact for 7 days. It creates no tag, no GitHub
-Release and no Homebrew cask, and holds only `contents: read`, so
+`checksums.txt` as a run artifact for 7 days. It creates no tag and no GitHub
+Release, publishes no Homebrew cask, and holds only `contents: read`, so
 `brew upgrade` and `install.sh` never see it. The candidate is unsigned and
-its version is `<last release>-SNAPSHOT-<commit>`. The run summary has the
+its version is `<last release reachable from the branch>-SNAPSHOT-<commit>`. The run summary has the
 download command. Run the unpacked `qurl` by its path, and point it at sandbox
 with `QURL_ENDPOINT`, `QURL_DEPLOYMENT` and the all-or-none
 `QURL_CONNECTOR_HUB_HOST`, `QURL_CONNECTOR_HUB_PORT` and

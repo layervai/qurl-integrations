@@ -6,7 +6,8 @@ name: "cli: Candidate Build"
 # need reaches production, without cutting a release.
 #
 # It cannot reach customers. It runs GoReleaser in snapshot mode, which never
-# creates a tag, a GitHub Release, or a Homebrew cask, and the job holds
+# creates a tag or a GitHub Release and publishes no Homebrew cask (the cask
+# file it writes stays in dist/ on the runner), and the job holds
 # `contents: read` only, so it has no token that can write to this repository
 # or the tap. `scripts/install.sh` and `brew upgrade` see only published
 # releases. The artifact is not a release: it is unsigned (`--skip=sign`, as
@@ -19,6 +20,12 @@ name: "cli: Candidate Build"
 #
 # Dispatch only: no schedule and no pull-request trigger, so it gates
 # nothing and has no entry in main-ci-notifications.yml.
+#
+# It runs whatever code is on the dispatched branch, so only public material
+# may reach this job: today the production Hub pin, a public key.
+# TestCLICandidateCannotReachCustomers in internal/ciworkflows holds the
+# trigger, the read-only permissions, the snapshot arguments, the checkout
+# credentials and that secret list.
 on:
   workflow_dispatch:
 
@@ -96,8 +103,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::no CLI release tag before this commit"; exit 1; }
+          tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null) || { echo "::error::no v* tag is reachable from this commit"; exit 1; }
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::the nearest v* tag '$tag' is not a plain CLI release tag"; exit 1; }
           echo "tag=$tag" >>"$GITHUB_OUTPUT"
 
       - name: Build the candidate
@@ -114,6 +121,8 @@ jobs:
       - name: Check the candidate runs
         id: check
         shell: bash
+        env:
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
         run: |
           set -euo pipefail
           archive=$(find dist -maxdepth 1 -name 'qurl_*_linux_amd64.tar.gz' -print)
@@ -126,6 +135,10 @@ jobs:
           echo "$version_line"
           [[ "$version_line" =~ ^qurl\ version\ [0-9]+\.[0-9]+\.[0-9]+-SNAPSHOT-[0-9a-f]+\ \(linux/amd64\)$ ]] || { echo "::error::candidate version is not a stamped snapshot version"; exit 1; }
           "$bin_dir/qurl" --help >/dev/null
+          # The pin must be in the binary, not only in the build's settings:
+          # an -X path that no longer names the variable builds a dark binary
+          # without an error.
+          LC_ALL=C grep -q -a -F -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$bin_dir/qurl" || { echo "::error::the candidate binary does not carry the production Hub pin"; exit 1; }
           echo "version_line=$version_line" >>"$GITHUB_OUTPUT"
 
       - name: Keep the candidate for 7 days
@@ -157,7 +170,7 @@ jobs:
             echo
             echo '```bash'
             echo "gh run download $RUN_ID -R $REPO -n qurl-cli-candidate-$SOURCE_SHA -D qurl-candidate"
-            echo 'cd qurl-candidate && shasum -a 256 -c checksums.txt --ignore-missing'
+            echo 'cd qurl-candidate && shasum -a 256 -c checksums.txt --ignore-missing   # Linux: sha256sum -c checksums.txt --ignore-missing'
             echo '```'
             echo
             echo "\`checksums.txt\` also lists the deb, rpm and SBOM files, which are not kept here; \`--ignore-missing\` skips them."
