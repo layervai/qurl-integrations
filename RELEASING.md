@@ -50,10 +50,11 @@ image, trust-posture, and signature checks pass.
 
 When a CLI change needs platform features that are in sandbox but not yet in
 production, keep the release PR open and test a candidate instead. Dispatch
-`cli: Candidate Build` on the commit to test:
+`cli: Candidate Build` on a branch; it builds that branch's latest commit,
+which the run summary names:
 
 ```bash
-gh workflow run cli-candidate.yml -R layervai/qurl-integrations --ref main
+gh workflow run cli-candidate.yml -R layervai/qurl-integrations --ref <branch>
 ```
 
 It runs GoReleaser in snapshot mode and keeps the archives and

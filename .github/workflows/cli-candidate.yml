@@ -56,7 +56,38 @@ jobs:
 
       # The production Hub key is a public key. Pinning it makes the candidate
       # the same binary a release would build; sandbox overrides it at run
-      # time with the QURL_CONNECTOR_HUB_* triple.
+      # time with the QURL_CONNECTOR_HUB_* triple. .goreleaser.yml requires
+      # TestReleaseHubPinEnvironment to pass before a release build. Unlike
+      # cli-nightly.yml, which accepts a dark build, a candidate stands in for
+      # a release, so a missing or skipped pin fails here.
+      - name: Verify the production NHP Hub trust pin
+        env:
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" || -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
+            echo "::error::the production Hub pin secrets are not available to this run; a candidate must carry the release pin"
+            exit 1
+          fi
+          test_name=TestReleaseHubPinEnvironment
+          test_pattern='^TestReleaseHubPinEnvironment$'
+          actual_test="$(go test ./apps/cli/internal/connector/hub -list "$test_pattern" | sed -n '/^Test/p')"
+          if [[ "$actual_test" != "$test_name" ]]; then
+            echo "::error::exact production Hub-pin test declaration is missing or ambiguous"
+            exit 1
+          fi
+          events=$(mktemp)
+          trap 'rm -f "$events"' EXIT
+          test_status=0
+          go test ./apps/cli/internal/connector/hub -run "$test_pattern" -count=1 -json >"$events" || test_status=$?
+          jq -j 'select(.Output != null) | .Output' "$events"
+          passed="$(jq -r --arg test "$test_name" 'select(.Action == "pass" and .Test == $test) | .Test' "$events")"
+          if (( test_status != 0 )) || [[ "$passed" != "$test_name" ]]; then
+            echo "::error::the production Hub-pin test must report one PASS"
+            exit 1
+          fi
+
       - name: Build the candidate
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
@@ -66,6 +97,7 @@ jobs:
           QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
 
       - name: Check the candidate runs
+        id: check
         shell: bash
         run: |
           set -euo pipefail
@@ -77,10 +109,13 @@ jobs:
           mkdir -p "$HOME"
           version_line=$("$bin_dir/qurl" version)
           echo "$version_line"
-          grep -q -- '-SNAPSHOT-' <<<"$version_line" || { echo "::error::candidate version is not a snapshot version"; exit 1; }
+          [[ "$version_line" =~ ^qurl\ version\ [0-9]+\.[0-9]+\.[0-9]+-SNAPSHOT-[0-9a-f]+\ \(linux/amd64\)$ ]] || { echo "::error::candidate version is not a stamped snapshot version"; exit 1; }
           "$bin_dir/qurl" access --help >/dev/null
-          "$bin_dir/qurl" publish --help | grep -q -- '--access' || { echo "::error::candidate has no publish --access"; exit 1; }
-          echo "VERSION_LINE=$version_line" >>"$GITHUB_ENV"
+          # No pipe into grep: grep -q exiting early would SIGPIPE qurl under
+          # pipefail and fail this step for the wrong reason.
+          publish_help=$("$bin_dir/qurl" publish --help)
+          grep -q -- '--access' <<<"$publish_help" || { echo "::error::candidate has no publish --access"; exit 1; }
+          echo "version_line=$version_line" >>"$GITHUB_OUTPUT"
 
       - name: Keep the candidate for 7 days
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -92,10 +127,13 @@ jobs:
             dist/checksums.txt
           if-no-files-found: error
           retention-days: 7
+          # A re-run of this job replaces the artifact of the same name.
+          overwrite: true
 
       - name: Say how to use it
         shell: bash
         env:
+          VERSION_LINE: ${{ steps.check.outputs.version_line }}
           SOURCE_SHA: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
           REPO: ${{ github.repository }}
@@ -110,6 +148,8 @@ jobs:
             echo "gh run download $RUN_ID -R $REPO -n qurl-cli-candidate-$SOURCE_SHA -D qurl-candidate"
             echo 'cd qurl-candidate && shasum -a 256 -c checksums.txt --ignore-missing'
             echo '```'
+            echo
+            echo "\`checksums.txt\` also lists the deb, rpm and SBOM files, which are not kept here; \`--ignore-missing\` skips them."
             echo
             echo "Unpack the archive for your platform and run that \`qurl\` by its path; don't replace the installed one."
             echo "Against sandbox, set \`QURL_ENDPOINT\`, \`QURL_DEPLOYMENT\` and the all-or-none"
