@@ -24,8 +24,10 @@ name: "cli: Candidate Build"
 # It runs whatever code is on the dispatched branch, so only public material
 # may reach this job: today the production Hub pin, a public key.
 # TestCLICandidateCannotReachCustomers in internal/ciworkflows holds the
-# trigger, the read-only permissions, the snapshot arguments, the checkout
-# credentials and that secret list.
+# reviewed copy on main to the trigger, the read-only permissions, the
+# snapshot arguments, the checkout credentials and that secret list. A
+# dispatch runs the dispatched branch's own copy of this file, so the test
+# guards what is merged, not every run.
 on:
   workflow_dispatch:
 

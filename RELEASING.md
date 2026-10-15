@@ -58,7 +58,9 @@ gh workflow run cli-candidate.yml -R layervai/qurl-integrations --ref <branch>
 ```
 
 The branch must contain `.github/workflows/cli-candidate.yml`; merge `main`
-into an older branch first.
+into an older branch first. A dispatch runs the branch's own copy of that
+file. Runs on one branch queue one at a time, and a third dispatch while one
+runs and one waits replaces the waiting one.
 
 It runs GoReleaser in snapshot mode and keeps the archives and
 `checksums.txt` as a run artifact for 7 days. It creates no tag and no GitHub

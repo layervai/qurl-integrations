@@ -21,7 +21,8 @@ const (
 // can read but never write, builds in snapshot mode, and sees no secret but
 // the production Hub pin, which is public key material. The job runs
 // whatever code is on the dispatched branch, so any other secret here would
-// reach unreviewed code.
+// reach unreviewed code. A dispatch runs the branch's own copy of the
+// workflow: this test guards the reviewed copy, not every run.
 func TestCLICandidateCannotReachCustomers(t *testing.T) {
 	t.Parallel()
 
