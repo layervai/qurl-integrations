@@ -410,8 +410,8 @@ jobs:
       # sbom-action v0.24.0's bundled default is syft v1.42.3 — pinning it as
       # an input keeps a future action bump from silently changing the SBOM
       # generator, and surfaces the tool bump as a one-line reviewable diff.
-      # Keep in lockstep with cli-nightly.yml's copy (the snapshot exercises
-      # the same SBOM path).
+      # Keep in lockstep with the copies in cli-nightly.yml and
+      # cli-candidate.yml (their snapshots exercise the same SBOM path).
       - name: Install syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
