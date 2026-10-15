@@ -24,7 +24,6 @@ import (
 
 func publishCmd(opts *globalOpts) *cobra.Command {
 	var (
-		emailFallback     bool
 		consumerMode      string
 		contractID        string
 		description       string
@@ -113,7 +112,7 @@ owns the share and turns it off when it exits.`,
 				Public: public, AllowedDeviceKeys: allowedDeviceKeys, AllowRequests: allowRequests,
 				KeepExistingPublic: len(named) == 0, NamedAccessFlags: named,
 			}
-			if err := setPublishConsumerPolicy(&access, consumerMode, contractID, emailFallback); err != nil {
+			if err := setPublishConsumerPolicy(&access, consumerMode, contractID); err != nil {
 				return err
 			}
 
@@ -155,7 +154,6 @@ owns the share and turns it off when it exits.`,
 		},
 	}
 
-	cmd.Flags().BoolVar(&emailFallback, consumerEmailFallback, false, "permit email links instead of passkeys; requires --access")
 	cmd.Flags().StringVar(&consumerMode, "access", "", "private access mode: keys, invite_only, email_capture, review or contract")
 	cmd.Flags().StringVar(&contractID, "contract", "", "publisher contract identifier for contract access")
 	cmd.Flags().BoolVar(&public, "public", false, "let anyone who has the CRID open the resource (default: private, only you and the devices you allow)")
@@ -188,7 +186,7 @@ owns the share and turns it off when it exits.`,
 // resource.
 func publishAccessFlags(cmd *cobra.Command) []string {
 	var named []string
-	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", "access", "contract", consumerEmailFallback} {
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", "access", "contract"} {
 		flag := cmd.Flags().Lookup(name)
 		if flag == nil || !flag.Changed {
 			continue
@@ -832,11 +830,8 @@ func validateDeviceKeys(flag string, keys []string) error {
 	return nil
 }
 
-func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract string, emailFallback bool) error {
+func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract string) error {
 	if mode == "" {
-		if emailFallback {
-			return exitcode.UsageError(errors.New("--email-fallback requires --access"))
-		}
 		if contract != "" {
 			return exitcode.UsageError(errors.New("--contract requires --access contract"))
 		}
@@ -848,6 +843,6 @@ func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract str
 	if qurlapi.ValidateConsumerPolicyFields(mode, contract) != nil {
 		return exitcode.UsageError(errors.New("--access must be keys, invite_only, email_capture, review or contract; --contract is required only for contract mode and must have at most 128 characters"))
 	}
-	access.ConsumerAccess = &qurl.ConsumerAccessPolicy{Mode: mode, Version: 1, ContractID: contract, EmailFallback: emailFallback}
+	access.ConsumerAccess = &qurl.ConsumerAccessPolicy{Mode: mode, Version: 1, ContractID: contract}
 	return nil
 }

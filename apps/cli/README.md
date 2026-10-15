@@ -1843,15 +1843,7 @@ A revision conflict never retries automatically. The API owns verification and
 all limits. Supervisors may also GET/PATCH `/v1/resources/{id}/preview` and POST
 `/v1/resources/{id}/preview/uploads` through the existing `qurl request` command.
 
-To permit email access without a passkey, use `--email-fallback` with an explicit
-private `--access` policy, for example:
-
-```sh
-qurl publish http://localhost:3000 --access review --email-fallback
-qurl access configure <CRID> --mode review --version <current-version> --email-fallback
-```
-
-Email has lower assurance than a passkey. The recipient still needs the invitation,
-review approval, or contract entitlement required by the policy. Omitting the flag
-from `access configure` disables fallback. A forwarded, unused email link can be
-claimed by its holder.
+Email access is always available as a backup to passkeys. The recipient selects
+**Email me an access link** and verifies the mailbox. Publishers cannot disable
+this option, and no CLI flag is needed. Invitations, publisher approval, contract
+entitlement, expiry, and revocation still apply.
