@@ -152,3 +152,89 @@ func TestConsumerContractRejectsPadding(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestConsumerManagementMapsAPIErrors keeps qurl access on the CLI's exit
+// codes: without mapError a 409 or 503 from these routes exits 1, and the
+// access help and agent instructions tell callers to act on 7 and 11.
+func TestConsumerManagementMapsAPIErrors(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusConflict, "consumer_access_conflict", "Consumer access changed", "read its current version and retry")
+	})
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/invitations", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "unavailable", "Unavailable", "try again")
+	})
+	owner := newTestClient(t, srv, nil).ConsumerManagement()
+
+	err := owner.UpdateConsumerAccess(t.Context(), srv.Key.CRID, 1, qurl.ConsumerAccessPolicy{Mode: "review", Version: 2})
+	var conflict *Error
+	if !errors.As(err, &conflict) || conflict.StatusCode != http.StatusConflict {
+		t.Fatalf("configure error = %v, want *Error with status 409", err)
+	}
+	_, err = owner.InviteConsumer(t.Context(), srv.Key.CRID, "ana@example.com")
+	var unavailable *Error
+	if !errors.As(err, &unavailable) || unavailable.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("invite error = %v, want *Error with status 503", err)
+	}
+}
+
+// TestEveryConsumerManagementMethodMapsAPIErrors answers each owner route
+// with a 409 problem. A method that returns the SDK error without mapError
+// fails here, which the compiler cannot catch.
+func TestEveryConsumerManagementMethodMapsAPIErrors(t *testing.T) {
+	srv := apitest.NewServer(t)
+	owner := newTestClient(t, srv, nil).ConsumerManagement()
+	crid := srv.Key.CRID
+	id := strings.Repeat("a", 64)
+	base := "/v1/resources/" + crid
+	conflict := func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusConflict, "conflict", "Conflict", "read the current version")
+	}
+	for _, route := range [][2]string{
+		{http.MethodPost, base + "/invitations"},
+		{http.MethodGet, base + "/invitations"},
+		{http.MethodPost, base + "/invitations/" + id + "/resend"},
+		{http.MethodDelete, base + "/invitations/" + id},
+		{http.MethodGet, base + "/consumer-grants"},
+		{http.MethodPost, base + "/consumer-grants/" + id + "/approve"},
+		{http.MethodPost, base + "/consumer-grants/" + id + "/deny"},
+		{http.MethodDelete, base + "/consumer-grants/" + id},
+		{http.MethodPatch, base},
+	} {
+		srv.Script(route[0], route[1], conflict)
+	}
+	calls := map[string]func() error{
+		"InviteConsumer": func() error { _, err := owner.InviteConsumer(t.Context(), crid, "ana@example.com"); return err },
+		"ListConsumerInvitations": func() error {
+			_, err := owner.ListConsumerInvitations(t.Context(), crid, "")
+			return err
+		},
+		"ResendConsumerInvitation": func() error {
+			_, err := owner.ResendConsumerInvitation(t.Context(), crid, id, 1)
+			return err
+		},
+		"RevokeConsumerInvitation": func() error {
+			_, err := owner.RevokeConsumerInvitation(t.Context(), crid, id, 1)
+			return err
+		},
+		"ListConsumerGrants": func() error { _, err := owner.ListConsumerGrants(t.Context(), crid, ""); return err },
+		"ApproveConsumerGrant": func() error {
+			_, err := owner.ApproveConsumerGrant(t.Context(), crid, id, qurl.ConsumerGrantApproval{ExpectedVersion: 1})
+			return err
+		},
+		"DenyConsumerGrant":   func() error { _, err := owner.DenyConsumerGrant(t.Context(), crid, id, 1); return err },
+		"RevokeConsumerGrant": func() error { _, err := owner.RevokeConsumerGrant(t.Context(), crid, id, 1); return err },
+		"UpdateConsumerAccess": func() error {
+			return owner.UpdateConsumerAccess(t.Context(), crid, 1, qurl.ConsumerAccessPolicy{Mode: "review", Version: 2})
+		},
+	}
+	if len(calls) != 9 {
+		t.Fatalf("calls %d methods, want all 9 of ConsumerManagementClient", len(calls))
+	}
+	for name, call := range calls {
+		var apiErr *Error
+		if err := call(); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
+			t.Errorf("%s error = %v (%T), want *Error with status 409", name, err, err)
+		}
+	}
+}
