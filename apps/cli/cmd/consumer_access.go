@@ -19,11 +19,11 @@ import (
 func consumerAccessCmd(opts *globalOpts) *cobra.Command {
 	var email, mode, contract, cursor, kind, credentialID, key, entitlement, expiry string
 	var version int64
-	var yes bool
+	var yes, emailFallback bool
 	allowed := map[string][]string{
 		consumerInvite: {"email"}, consumerListInvitations: {consumerCursor}, consumerListGrants: {consumerCursor},
 		consumerResend: {consumerVersion}, consumerRevokeInvitation: {consumerVersion}, consumerDeny: {consumerVersion}, consumerRevokeGrant: {consumerVersion},
-		consumerConfigure: {"mode", consumerContract, consumerVersion},
+		consumerConfigure: {"mode", consumerContract, consumerVersion, consumerEmailFallback},
 		consumerApprove:   {consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at"},
 	}
 	cmd := &cobra.Command{
@@ -47,7 +47,7 @@ Use --access when you publish to choose the initial policy.`,
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			input := consumerAccessInput{action: args[0], email: email, mode: mode, contract: contract, cursor: cursor, version: version, kind: kind, credentialID: credentialID, key: key, entitlement: entitlement, expiry: expiry}
+			input := consumerAccessInput{emailFallback: emailFallback, action: args[0], email: email, mode: mode, contract: contract, cursor: cursor, version: version, kind: kind, credentialID: credentialID, key: key, entitlement: entitlement, expiry: expiry}
 			if len(args) == 3 {
 				input.decision = args[2]
 			}
@@ -84,6 +84,7 @@ Use --access when you publish to choose the initial policy.`,
 		},
 	}
 	cmd.Flags().StringVar(&email, "email", "", "email address for an invitation")
+	cmd.Flags().BoolVar(&emailFallback, consumerEmailFallback, false, "permit email links instead of passkeys; email has lower assurance")
 	cmd.Flags().StringVar(&mode, "mode", "", "private access policy")
 	cmd.Flags().StringVar(&contract, consumerContract, "", "publisher contract identifier")
 	cmd.Flags().StringVar(&cursor, consumerCursor, "", "next page cursor from a listing")
@@ -98,6 +99,7 @@ Use --access when you publish to choose the initial policy.`,
 }
 
 const (
+	consumerEmailFallback    = "email-fallback"
 	consumerInvite           = "invite"
 	consumerListInvitations  = "list_invitations"
 	consumerListGrants       = "list_grants"
@@ -117,6 +119,7 @@ const (
 var consumerDecisionID = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type consumerAccessInput struct {
+	emailFallback                                                                                 bool
 	action, decision, email, mode, contract, cursor, kind, credentialID, key, entitlement, expiry string
 	version                                                                                       int64
 	expiresAt                                                                                     *time.Time
@@ -127,7 +130,7 @@ func validateConsumerActionFlags(cmd *cobra.Command, action string, allowed map[
 	if !ok {
 		return exitcode.UsageError(errors.New("unknown access action"))
 	}
-	for _, name := range []string{"email", "mode", consumerContract, consumerCursor, consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at"} {
+	for _, name := range []string{consumerEmailFallback, "email", "mode", consumerContract, consumerCursor, consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at"} {
 		if cmd.Flags().Changed(name) && !slices.Contains(flags, name) {
 			return exitcode.UsageError(fmt.Errorf("--%s does not apply to %s", name, action))
 		}
@@ -214,7 +217,7 @@ func executeConsumerAction(ctx context.Context, owner qurlapi.ConsumerManagement
 	case consumerRevokeGrant:
 		result.Grant, err = owner.RevokeConsumerGrant(ctx, crid, input.decision, input.version)
 	case consumerConfigure:
-		policy := qurl.ConsumerAccessPolicy{Mode: input.mode, Version: input.version + 1, ContractID: input.contract}
+		policy := qurl.ConsumerAccessPolicy{EmailFallback: input.emailFallback, Mode: input.mode, Version: input.version + 1, ContractID: input.contract}
 		err = owner.UpdateConsumerAccess(ctx, crid, input.version, policy)
 		// TODO(upstream-contract): The SDK must confirm CRID, policy, and version before success.
 		result.Policy = &policy

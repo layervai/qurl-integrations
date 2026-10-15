@@ -1842,3 +1842,16 @@ video only after Play. Use `-o json` for structured revision, media and job stat
 A revision conflict never retries automatically. The API owns verification and
 all limits. Supervisors may also GET/PATCH `/v1/resources/{id}/preview` and POST
 `/v1/resources/{id}/preview/uploads` through the existing `qurl request` command.
+
+To permit email access without a passkey, use `--email-fallback` with an explicit
+private `--access` policy, for example:
+
+```sh
+qurl publish http://localhost:3000 --access review --email-fallback
+qurl access configure <CRID> --mode review --version <current-version> --email-fallback
+```
+
+Email has lower assurance than a passkey. The recipient still needs the invitation,
+review approval, or contract entitlement required by the policy. Omitting the flag
+from `access configure` disables fallback. A forwarded, unused email link can be
+claimed by its holder.

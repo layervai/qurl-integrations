@@ -1230,7 +1230,7 @@ func consumerPolicyConfirmed(requested, received *qurl.ConsumerAccessPolicy, fou
 	if requested == nil {
 		return true
 	}
-	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID &&
+	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID && received.EmailFallback == requested.EmailFallback &&
 		(received.Version == requested.Version || (foundExisting != nil && *foundExisting && received.Version > requested.Version && received.Version < 1<<53))
 }
 
