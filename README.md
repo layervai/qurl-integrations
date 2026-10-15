@@ -33,7 +33,7 @@ lists its own setup requirements. Teams deployment is managed outside this
 repository; the presence of its source does not establish a public rollout.
 
 [Localhost quickstart](#share-a-localhost-web-app) ·
-[File sharing](#share-files-and-documents) · [ngrok comparison](#qurl-and-ngrok-for-localhost-sharing) ·
+[File sharing](#share-files-and-documents) · [Sharing comparison](#choose-how-to-share-an-app-or-file) ·
 [Sharing questions](#localhost-and-file-sharing-questions) ·
 [Product overview](https://layerv.ai/qurl/) · [Private links](https://qurl.link/)
 
@@ -112,7 +112,21 @@ file service. Opening or testing a single-use link can consume it; create a
 fresh recipient link when needed. Use each integration's guide for its actual
 revocation support and file-size limits.
 
-## qURL and ngrok for localhost sharing
+## Choose how to share an app or file
+
+A live preview, an internal API, and an uploaded report have different sharing requirements. Start with where the content should run and how the recipient should be authorized. qURL can connect these workflows through resource access links, while the publishing and file-upload components have their own setup and lifecycle.
+
+| Approach | Where the app or content lives | Recipient access | Useful when |
+| --- | --- | --- | --- |
+| qURL local publishing | Your running app or HTTP file server, reached through the CLI's embedded Connector. | An issued access link, the resource's policy, and any app login. | A reviewer or agent needs temporary access to a particular local resource. |
+| ngrok | Your running service behind an agent endpoint. | An endpoint URL with your configured Traffic Policy and app authentication. | You want a localhost endpoint for preview or integration testing. |
+| Cloudflare Tunnel + Access | Your running origin connected through `cloudflared`. | The application's configured Access policies. | You want to manage application access through identities and groups. |
+| Tailscale Serve | A service or files on a device in your tailnet. | Tailnet connectivity and access rules. | Your collaborators already use the private network. |
+| S3 presigned URL | An object stored in an S3 bucket. | A signed URL for an operation, subject to its expiry and AWS policies. | Your artifact is in object storage and needs temporary download access. |
+| Google Drive | A document or file stored in Drive. | Its configured viewer, commenter, editor, or link permissions. | Review and collaboration should continue through hosted document storage. |
+| Vercel preview | A deployed application in a Preview environment. | A deployment URL and its configured protection. | Reviewers need a hosted build independent of your development machine. |
+
+### qURL and ngrok for localhost sharing
 
 Both tools can connect an app on your machine to remote users without inbound
 port forwarding. The sharing workflow and access model are the useful points
@@ -130,6 +144,28 @@ delivery, request inspection, and replay. Choose based on the access and
 testing workflow you need. See [ngrok's localhost guide](https://ngrok.com/use-cases/share-localhost),
 [ngrok security](https://ngrok.com/security), and the
 [LayerV sharing FAQ](https://layerv.ai/faq/).
+
+### Should I share the running app or deploy a preview?
+
+For a teammate reviewing the app currently running on your laptop, qURL's [localhost quickstart](#share-a-localhost-web-app) publishes that service and then issues its access link. The app, host, and serving runtime must remain available. ngrok also connects to a running origin; using an outbound tunnel does not make either workflow a hosted deployment.
+
+A [Vercel Preview deployment](https://vercel.com/docs/deployments/environments) gives reviewers a hosted version of the application. That is a useful choice when review should continue after your laptop goes offline or when you want to inspect a deployed build. It requires the application and environment to be configured for deployment. Use local sharing when the running development instance is the thing to review; use a hosted preview when a deployed version is the thing to review. Both need appropriate access controls.
+
+### Should access follow an application identity or a private network?
+
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/) connects an origin outward without requiring a publicly routable origin IP. [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/choose-application-type/) adds application policies, including identity-provider groups and session controls. For an internal dashboard managed through an organization's identity system, that application-access model can be a good fit. Outbound origin connectivity is shared by Cloudflare Tunnel and qURL; it is not a unique reason to choose qURL.
+
+[Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve) makes a service or files available within a tailnet, under its access rules. That fits collaborators who already have private-network connectivity. [Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel) has a different audience: it makes the configured service reachable from the public internet. Check which mode you are choosing before treating a Tailscale URL as private.
+
+With qURL, the CLI publishes an individual resource and issues access under its resource, link, and session policies. A browser recipient uses the returned link without installing a qURL SDK. The full link is an access credential; sending it to a named person or setting a label does not authenticate that person's identity. Retain the app's login where identity matters. Choose based on whether your workflow needs resource access links, identity-managed application access, or existing private-network membership.
+
+### Should a file stay on the local host or be uploaded?
+
+A qURL link to a local HTTP directory lets recipients read what that server exposes while the host remains available. It is useful for reviewing a current local output or static preview. Use a dedicated directory and the [file-sharing workflow](#share-files-and-documents). For selected PDF or image uploads, the [MCP tools](https://github.com/layervai/qurl-mcp#let-an-ai-agent-share-a-pdf-or-image) use a configured upload service; its format, expiry, and revocation limits differ from local serving. The SDK's link-issuing calls alone do not upload a file.
+
+An [S3 presigned URL](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html) also provides temporary bearer access, scoped to an object and operation. For a download, the object must be in S3; your local machine does not serve that download. Its validity depends on the signing credentials and applicable policies. S3 checks expiry when a request starts, so a download already in progress can continue after URL expiry. Similarly, qURL link redemption and an admitted session have separate lifetimes. Expiring links are not an exclusive qURL capability, and expiry should not be described as erasing a downloaded copy.
+
+[Google Drive sharing](https://support.google.com/drive/answer/2494822?hl=en) is useful when the document belongs in hosted storage with viewer, commenter, or editor permissions. Eligible work or school accounts can also set access expiration. Choose Drive for that document-sharing workflow, an S3 URL for an object-storage download, or qURL for access to a running resource or a supported qURL upload integration. These choices put the content in different places; wrapping a separate public URL does not restrict its original access path.
 
 ## Localhost and file-sharing questions
 
