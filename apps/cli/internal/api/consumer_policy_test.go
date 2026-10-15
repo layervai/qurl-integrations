@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -228,8 +229,8 @@ func TestEveryConsumerManagementMethodMapsAPIErrors(t *testing.T) {
 			return owner.UpdateConsumerAccess(t.Context(), crid, 1, qurl.ConsumerAccessPolicy{Mode: "review", Version: 2})
 		},
 	}
-	if len(calls) != 9 {
-		t.Fatalf("calls %d methods, want all 9 of ConsumerManagementClient", len(calls))
+	if want := reflect.TypeFor[ConsumerManagementClient]().NumMethod(); len(calls) != want {
+		t.Fatalf("calls %d methods, want all %d of ConsumerManagementClient", len(calls), want)
 	}
 	for name, call := range calls {
 		var apiErr *Error
