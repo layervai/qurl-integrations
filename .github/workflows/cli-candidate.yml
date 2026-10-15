@@ -1,0 +1,118 @@
+name: "cli: Candidate Build"
+
+# Builds the CLI exactly as a release would, from the commit this run is
+# dispatched on, and keeps the binaries as a short-lived run artifact. It is
+# for testing unreleased CLI changes against sandbox before the platform they
+# need reaches production, without cutting a release.
+#
+# It cannot reach customers. It runs GoReleaser in snapshot mode, which never
+# creates a tag, a GitHub Release, or a Homebrew cask, and the job holds
+# `contents: read` only, so it has no token that can write to this repository
+# or the tap. `scripts/install.sh` and `brew upgrade` see only published
+# releases. The artifact is not a release: it is unsigned (`--skip=sign`, as
+# in cli-nightly.yml), carries a `-SNAPSHOT-<commit>` version, and expires
+# after 7 days.
+#
+# This repository is public, so anyone signed in to GitHub can download the
+# artifact. It holds nothing that is not already public on the dispatched
+# commit, and no sandbox settings: testers bring those (see the run summary).
+#
+# Dispatch only: no schedule and no pull-request trigger, so it gates
+# nothing and has no entry in main-ci-notifications.yml.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    name: cli-candidate / build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # GoReleaser derives snapshot versions from tag history and refuses
+          # shallow clones.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Same pin and version as cli-nightly.yml and release-please.yml, so the
+      # candidate runs the release's SBOM step too.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          syft-version: 'v1.42.3'
+
+      # The production Hub key is a public key. Pinning it makes the candidate
+      # the same binary a release would build; sandbox overrides it at run
+      # time with the QURL_CONNECTOR_HUB_* triple.
+      - name: Build the candidate
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=sign
+        env:
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
+
+      - name: Check the candidate runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(find dist -maxdepth 1 -name 'qurl_*_linux_amd64.tar.gz' -print)
+          [[ $(wc -l <<<"$archive") -eq 1 && -n "$archive" ]] || { echo "::error::expected exactly one linux amd64 archive in dist"; exit 1; }
+          bin_dir=$(mktemp -d)
+          tar -xzf "$archive" -C "$bin_dir" qurl
+          export HOME="$bin_dir/home"
+          mkdir -p "$HOME"
+          version_line=$("$bin_dir/qurl" version)
+          echo "$version_line"
+          grep -q -- '-SNAPSHOT-' <<<"$version_line" || { echo "::error::candidate version is not a snapshot version"; exit 1; }
+          "$bin_dir/qurl" access --help >/dev/null
+          "$bin_dir/qurl" publish --help | grep -q -- '--access' || { echo "::error::candidate has no publish --access"; exit 1; }
+          echo "VERSION_LINE=$version_line" >>"$GITHUB_ENV"
+
+      - name: Keep the candidate for 7 days
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qurl-cli-candidate-${{ github.sha }}
+          path: |
+            dist/qurl_*.tar.gz
+            dist/qurl_*.zip
+            dist/checksums.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Say how to use it
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## CLI candidate"
+            echo
+            echo "\`$VERSION_LINE\` from \`$SOURCE_SHA\`. Not a release: unsigned, not installable with brew or install.sh, expires in 7 days."
+            echo
+            echo '```bash'
+            echo "gh run download $RUN_ID -R $REPO -n qurl-cli-candidate-$SOURCE_SHA -D qurl-candidate"
+            echo 'cd qurl-candidate && shasum -a 256 -c checksums.txt --ignore-missing'
+            echo '```'
+            echo
+            echo "Unpack the archive for your platform and run that \`qurl\` by its path; don't replace the installed one."
+            echo "Against sandbox, set \`QURL_ENDPOINT\`, \`QURL_DEPLOYMENT\` and the all-or-none"
+            echo "\`QURL_CONNECTOR_HUB_HOST\`, \`QURL_CONNECTOR_HUB_PORT\`, \`QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64\` triple"
+            echo "to the sandbox values the CLI customer journey uses. With none of them set, the candidate talks to production."
+          } >>"$GITHUB_STEP_SUMMARY"

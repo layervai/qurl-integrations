@@ -46,6 +46,27 @@ embed development or test trust data. The GitHub Release stays draft and the
 Homebrew tap stays on its prior version until all customer-journey, artifact,
 image, trust-posture, and signature checks pass.
 
+## Test an unreleased CLI without releasing it
+
+When a CLI change needs platform features that are in sandbox but not yet in
+production, keep the release PR open and test a candidate instead. Dispatch
+`cli: Candidate Build` on the commit to test:
+
+```bash
+gh workflow run cli-candidate.yml -R layervai/qurl-integrations --ref main
+```
+
+It runs GoReleaser in snapshot mode and keeps the archives and
+`checksums.txt` as a run artifact for 7 days. It creates no tag, no GitHub
+Release and no Homebrew cask, and holds only `contents: read`, so
+`brew upgrade` and `install.sh` never see it. The candidate is unsigned and
+its version is `<last release>-SNAPSHOT-<commit>`. The run summary has the
+download command. Run the unpacked `qurl` by its path, and point it at sandbox
+with `QURL_ENDPOINT`, `QURL_DEPLOYMENT` and the all-or-none
+`QURL_CONNECTOR_HUB_HOST`, `QURL_CONNECTOR_HUB_PORT` and
+`QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64` triple. Without them it uses
+production. Release once production has the platform the change needs.
+
 ## Production default activation after v2.5.0
 
 v2.5.0 was intentionally published without a production Hub pin. Do not replace
