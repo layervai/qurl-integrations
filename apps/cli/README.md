@@ -798,12 +798,15 @@ change uses `access configure` with the current policy version. If that update
 returns a pending-session error, retry the same update. Do not invent a newer
 version or fall back to public or legacy access.
 
+<!-- TODO(upstream-contract): email backup follows qurl-service consumer access. -->
 When consumer access is enabled, the hosted preview card always offers
 **Email me an access link** as a backup to passkeys. Publishers cannot disable
 this option. The recipient verifies the mailbox and consents to disclose it to
 the publisher. Invitations, approval, entitlement, expiry, and revocation still
 apply. Email-backed grants are separate from passkey-backed grants; first use
-must pass the mode's normal checks. Later email logins reuse the email grant.
+must pass the configured invitation, approval, or entitlement checks. Revoke
+each grant separately. Later email logins reuse the email grant. Contract grant
+replies still omit email.
 
 #### Local apps
 
