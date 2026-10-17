@@ -1,5 +1,24 @@
 # Changelog
 
+## [3.6.0](https://github.com/layervai/qurl-integrations/compare/v3.5.0...v3.6.0) (2026-10-17)
+
+
+### Features
+
+* **cli:** add commands for per-CRID preview metadata ([#1587](https://github.com/layervai/qurl-integrations/issues/1587)) ([0c07054](https://github.com/layervai/qurl-integrations/commit/0c07054af9653f5f992490c72941f1c05534bf04))
+* **cli:** publish and manage private consumer access ([#1586](https://github.com/layervai/qurl-integrations/issues/1586)) ([d7373c3](https://github.com/layervai/qurl-integrations/commit/d7373c3ffcba91d610bf64f2a435dcec50cf2020))
+* **cli:** say when a saved copy of the qURL agent skill is too old ([#1582](https://github.com/layervai/qurl-integrations/issues/1582)) ([3e79d0e](https://github.com/layervai/qurl-integrations/commit/3e79d0edece0b215dc403ff04ca52aae5edcc874))
+* **cli:** set a public name for each CRID ([#1598](https://github.com/layervai/qurl-integrations/issues/1598)) ([ffeb4a3](https://github.com/layervai/qurl-integrations/commit/ffeb4a380fa433370cec2e3284dafd27d92b6e65))
+
+
+### Bug Fixes
+
+* **ci:** prove exact CLI candidates against production before release ([#1607](https://github.com/layervai/qurl-integrations/issues/1607)) ([edd3e76](https://github.com/layervai/qurl-integrations/commit/edd3e760e3ce13b520539dfc1c9dc4c77b6b8feb))
+* **cli:** get reads the device key only when the link request sends it ([#1583](https://github.com/layervai/qurl-integrations/issues/1583)) ([af0b4db](https://github.com/layervai/qurl-integrations/commit/af0b4db14cdd91ec85237b84cb457cf4fe87c85f))
+* **cli:** keep the share daemon running after a package upgrade ([#1591](https://github.com/layervai/qurl-integrations/issues/1591)) ([31e5159](https://github.com/layervai/qurl-integrations/commit/31e5159d36635b11e33aff37ade089193a1fef21))
+* **cli:** log a Windows daemon job that cannot be parsed ([#1592](https://github.com/layervai/qurl-integrations/issues/1592)) ([57e8f53](https://github.com/layervai/qurl-integrations/commit/57e8f53b12f1ff6c0ad6fd31b0359d438b29018c))
+* **cli:** qurl access exits with the code its failure means ([#1603](https://github.com/layervai/qurl-integrations/issues/1603)) ([7ab4382](https://github.com/layervai/qurl-integrations/commit/7ab43825ee4714ce563f2fb6a077d2fce94bf1fe))
+
 ## [3.5.0](https://github.com/layervai/qurl-integrations/compare/v3.4.1...v3.5.0) (2026-10-09)
 
 
