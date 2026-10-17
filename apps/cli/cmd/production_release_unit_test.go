@@ -28,7 +28,7 @@ func TestProductionProofCommandEnvironment(t *testing.T) {
 	}
 }
 
-func TestProductionProofPreservesAPIRejection(t *testing.T) {
+func TestProductionProofPreservesCLIErrorExit(t *testing.T) {
 	_, code := productionCommand(t, os.Args[0], map[string]string{"PROOF_FIXTURE": "reject"}, "", "-test.run=^TestProductionProofCommandFixture$")
 	if code != 8 {
 		t.Fatalf("production HTTP 400 became exit %d, want 8", code)

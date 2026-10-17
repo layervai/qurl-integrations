@@ -61,7 +61,8 @@ def stage(args):
     binary.chmod(0o700)
     # No rebuild, deployment override, or trust-root injection is permitted.
     result = subprocess.run([str(binary), "version"], capture_output=True, check=True, timeout=30)
-    if result.stdout.decode().split()[2] != args.tag:
+    version = result.stdout.decode().split()
+    if version != ["qurl", "version", args.tag[1:], f"({system}/{machine})"]:
         raise ValueError("candidate binary has the wrong release version")
     receipt = {
         "endpoint": ENDPOINT, "source_sha": args.source_sha, "tag": args.tag,

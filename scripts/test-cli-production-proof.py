@@ -112,7 +112,7 @@ class ProductionEvidenceTest(unittest.TestCase):
         with patch.object(proof.platform, "system", return_value="Linux"), \
                 patch.object(proof.platform, "machine", return_value="x86_64"), \
                 patch.dict(os.environ, GITHUB_ENV=str(self.directory / "environment")), \
-                patch.object(proof.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"qurl version v3.5.0\n")):
+                patch.object(proof.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"qurl version 3.5.0 (linux/amd64)\n")):
             proof.stage(self.args)
             self.assertEqual((self.directory / "qurl").read_bytes(), b"exact candidate bytes")
             self.args.output = self.directory / "recorded"
@@ -120,7 +120,7 @@ class ProductionEvidenceTest(unittest.TestCase):
             self.assertTrue((self.args.output / "linux.json").is_file())
         with patch.object(proof.platform, "system", return_value="Linux"), \
                 patch.object(proof.platform, "machine", return_value="x86_64"), \
-                patch.object(proof.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"qurl version v3.4.1\n")):
+                patch.object(proof.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"qurl version 3.4.1 (linux/amd64)\n")):
             with self.assertRaises(ValueError): proof.stage(self.args)
 
     def test_checksum_paths_cannot_escape_on_either_platform(self):

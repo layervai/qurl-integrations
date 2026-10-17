@@ -22,9 +22,15 @@ func TestCLIPublicationRequiresExactProductionProof(t *testing.T) {
 			t.Fatalf("publication must require successful %s, including recovery dispatches", gate)
 		}
 	}
-	verified := false
+	verified, checkedOut := false, false
 	for _, current := range publisher.Steps {
+		if strings.HasPrefix(current.Uses, checkoutActionPrefix) {
+			checkedOut = true
+		}
 		if strings.Contains(current.Run, "verify-production-proof.py\" verify") {
+			if !checkedOut {
+				t.Fatal("production proof verification requires the checked-out trusted guard")
+			}
 			if current.If != "" || current.ContinueOnError != nil {
 				t.Fatal("production evidence verification cannot be optional")
 			}

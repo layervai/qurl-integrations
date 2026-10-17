@@ -69,6 +69,8 @@ continuation dispatch, or dispatch it again with the same exact tag and source
 inputs. A failed-jobs-only retry cannot reuse evidence from an earlier attempt.
 All continuations for one tag are serialized, including operator recovery, so
 one build cannot replace the release assets while another run tests them.
+GitHub retains only one pending continuation per tag; a newer queued dispatch
+replaces an older pending dispatch, while the active run continues.
 
 The `cli-production` environment admits only `main` and has no approval rule.
 It needs its own production CI owner and the `QURL_JOURNEY_API_KEY` and
