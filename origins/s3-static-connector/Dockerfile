@@ -3,7 +3,7 @@
 # Stage 1: pinned Envoy (Ubuntu base, BoringSSL). We copy only the
 # /usr/local/bin/envoy binary out, so base-image bumps must keep the runtime
 # behavior contract green on both arches to catch glibc/library drift.
-FROM envoyproxy/envoy:v1.39.1@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4 AS envoy
+FROM envoyproxy/envoy:v1.39.3@sha256:dd85940439de19a0b6ae8419610363ea0ad351d9a994ea007161c206ec1e1865 AS envoy
 
 # Stage 2: pinned nginx-unprivileged (Debian bookworm / glibc) runtime base.
 FROM nginxinc/nginx-unprivileged:1.31.3@sha256:79f1cd903210f98ffc1c8b5e08e90e650d2fadaa9f516a0866197471cb5f75b5
