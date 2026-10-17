@@ -170,12 +170,13 @@ sys.exit(int(os.environ.get("MOCK_STATUS", "0")))
                     self.assertEqual(len(calls), 2)
                     specs = [args[i+1] for args in calls for i, value in enumerate(args) if value == "--run-spec"]
                     self.assertEqual(set(specs), {
-                        f"123{index}:{attempt}:{lane}:host:full"
+                        f"123{index}:{attempt}:{lane}:host:production"
                         for index, lane in enumerate(("linux", "macos", "windows"), 1)
                         for attempt in range(1, 6)
                     })
                     for args in calls:
                         self.assertEqual(args[args.index("--qurl-endpoint")+1], proof.ENDPOINT)
+                        self.assertEqual(args[args.index("--operation-budget-seconds")+1], "900")
                         self.assertFalse(pathlib.Path(args[args.index("--api-key-file")+1]).exists())
 
 

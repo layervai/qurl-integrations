@@ -1968,7 +1968,28 @@ def test_revoke_recovers_key_without_recorded_id() -> None:
 
 
 
+def test_production_cleanup_uses_exact_connectors_without_owner_resource_scan() -> None:
+    run = credentials.RunCleanup("1232", "1", "macos", "host", "production")
+    assert credentials.cleanup_labels(run) == ("smoke", "failure")
+    assert credentials.RUN_SPEC.fullmatch("1232:1:macos:host:production")
+    with mock.patch.object(credentials, "paged_rows", return_value=[]) as rows:
+        inventory = credentials.reconciliation_inventory(
+            "https://production.example", "parent", include_resources=False
+        )
+    assert rows.call_count == 1
+    assert rows.call_args.args[2] == "/v1/api-keys"
+    assert inventory.resources == () and inventory.resource_failure is None
+    with (
+        mock.patch.object(credentials, "retry_assignment_retire") as retire,
+        mock.patch.object(credentials, "retry_connector_resource_delete", return_value=False) as delete,
+    ):
+        credentials.reconcile_run(run, ("https://production.example", "parent"), inventory)
+    assert retire.call_count == 2
+    assert {call.args[2] for call in delete.call_args_list} == credentials.run_connector_ids(run)
+
+
 def main() -> None:
+    test_production_cleanup_uses_exact_connectors_without_owner_resource_scan()
     test_child_lifetime_response_fails_closed()
     test_child_creation_timestamp_and_clock_bound()
     test_revoke_recovers_key_without_recorded_id()

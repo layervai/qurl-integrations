@@ -13,7 +13,7 @@ specs=()
 for ((attempt = 1; attempt <= $2; attempt++)); do
   for lane in linux macos windows; do
     case "$lane" in linux) suffix=1 ;; macos) suffix=2 ;; windows) suffix=3 ;; esac
-    specs+=(--run-spec "$1$suffix:$attempt:$lane:host:full")
+    specs+=(--run-spec "$1$suffix:$attempt:$lane:host:production")
   done
 done
 status=0
@@ -21,6 +21,7 @@ status=0
 for ((offset = 0; offset < ${#specs[@]}; offset += 24)); do
   python3 scripts/qurl-cli-ci-credentials.py reconcile-batch \
     --qurl-endpoint https://api.layerv.ai --api-key-file "$work/key" \
-    --owner-id "$QURL_PRODUCTION_OWNER_ID" "${specs[@]:offset:24}" || status=1
+    --owner-id "$QURL_PRODUCTION_OWNER_ID" --operation-budget-seconds 900 \
+    "${specs[@]:offset:24}" || status=1
 done
 exit "$status"
