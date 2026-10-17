@@ -39,3 +39,18 @@ credentials forever. Rotate the automation key at least every 90 days: create
 a replacement under the same owner, update both protected environments, verify
 setup and cleanup, then revoke the old key. For suspected compromise, revoke
 it immediately and revoke its remaining children through account management.
+
+## Protected macOS network
+
+The hosted macOS runner needs `QURL_JOURNEY_WIREGUARD_CONFIG` in the
+`cli-customer-journey` environment. GitHub's Mac network can otherwise use different
+public IPs for native UDP admission and TCP traffic. The sandbox CI gateway makes
+both protocols use one IP; `/32` admission and the customer tests are unchanged.
+
+The setup step consumes the configuration and removes its private key from the
+configuration file after installation. Cleanup removes the runner's tunnel
+interface and routes; the gateway peer remains configured.
+The workflow serializes only the macOS lane because the gateway has one peer.
+The CI operator provisions the gateway and installs the protected environment
+secret before enabling this lane. Update that secret whenever the gateway keys
+change; never copy the configuration into logs, source files, or artifacts.

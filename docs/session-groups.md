@@ -108,6 +108,15 @@ its job was installed for. Changing the mode is therefore a job-definition
 change: the next `qurl start`, `restart`, or `publish` replaces the resident
 daemon in the new mode, the same path a binary-version change takes.
 
+A package upgrade replaces the binary without rewriting the job. The upgraded
+daemon still starts from that job when only the version part differs, and the
+next `qurl start`, `restart`, or `publish` replaces the job as above. A job for
+another mode or another leading protocol number is refused; that daemon waits
+an hour before it exits, so the service manager cannot restart it in a loop.
+The same wait applies to a job whose flags the binary cannot read, which an
+older binary meets after a downgrade. While a daemon waits, its shares are
+down: the next `qurl start`, `restart`, or `publish` replaces the job.
+
 ## Runtime request headers
 
 The default daemon supports header-bearing routes over verified TLS using

@@ -24,6 +24,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		`"restartPolicy": {`,
 		`"restartAttemptPeriod": 60`,
 		"warm-start revision",
+		"maximumPercent 100 and minimumHealthyPercent 0",
 		"Store the enrollment token from the separate DM",
 		"message intentionally does not contain the token",
 		testTunnelImageRef,

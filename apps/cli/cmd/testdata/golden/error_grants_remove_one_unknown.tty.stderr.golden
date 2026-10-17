@@ -1,0 +1,3 @@
+[31m[1mError:[0m no approved person has the device id qrst-uvwx-yz67-abcd on this resource, so nothing was removed. abcd-efgh-2345-mnop still has access.
+
+  [2mRun `qurl grants qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q` to see who has access now.[0m

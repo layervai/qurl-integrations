@@ -316,6 +316,16 @@ func TestManagementMutationsDeclareExplicitNoReplay(t *testing.T) {
 			_, err := c.Delete(context.Background(), apitest.FixedResourceKey(t).CRID)
 			return err
 		}},
+		{name: "replace device grants", call: func(t *testing.T, c Client) error {
+			t.Helper()
+			_, err := c.SetDeviceGrants(context.Background(), apitest.FixedResourceKey(t).CRID, nil)
+			return err
+		}},
+		{name: "edit device grants", call: func(t *testing.T, c Client) error {
+			t.Helper()
+			_, err := c.EditDeviceGrants(context.Background(), apitest.FixedResourceKey(t).CRID, []string{"added-key"}, []string{"removed-key"})
+			return err
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			attempts := 0
@@ -357,7 +367,7 @@ func TestSharingResponseInvariants(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			row := valid
 			mutate(&row)
-			if err := validateSharingRow(row); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+			if err := validateSharingRow(&row); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
 				t.Fatalf("validateSharingRow(%+v) error = %v", row, err)
 			}
 		})
@@ -990,9 +1000,40 @@ func TestBodySnippetIsBoundedValidUTF8(t *testing.T) {
 	}
 }
 
+// TestMeFixtureStillSendsKeyPrefix pins the premise of the whoami goldens:
+// the mock /v1/me still sends key_prefix, as the platform does, so a golden
+// without it proves the CLI drops it. Deleting the fixture field as dead data
+// would otherwise leave the goldens green with no guard behind them.
+func TestMeFixtureStillSendsKeyPrefix(t *testing.T) {
+	srv := apitest.NewServer(t)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/v1/me", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer lv_test_fixture_prefix_guard")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var env struct {
+		Data struct {
+			APIKey struct {
+				KeyPrefix string `json:"key_prefix"`
+			} `json:"api_key"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Data.APIKey.KeyPrefix != "lv_test_fixt" {
+		t.Fatalf("mock /v1/me key_prefix = %q, want the bearer's first 12 chars", env.Data.APIKey.KeyPrefix)
+	}
+}
+
 // TestMeParsesIdentityEnvelope pins the GET /v1/me success contract: the
-// envelope decodes into the repo-owned Identity, key_prefix echoes the
-// presented credential, and the CLI headers ride the same shared transport.
+// envelope decodes into the repo-owned Identity and the CLI headers ride the
+// same shared transport.
 func TestMeParsesIdentityEnvelope(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newTestClient(t, srv, nil)
@@ -1012,9 +1053,6 @@ func TestMeParsesIdentityEnvelope(t *testing.T) {
 	}
 	if want := []string{"qurl:read", "qurl:resolve", "qurl:write"}; !slices.Equal(id.Key.Scopes, want) {
 		t.Errorf("scopes = %v, want the platform's alphabetical %v", id.Key.Scopes, want)
-	}
-	if id.Key.KeyPrefix != "lv_test_apit" {
-		t.Errorf("key_prefix = %q, want the presented key's first 12 chars", id.Key.KeyPrefix)
 	}
 	if id.Key.ExpiresAt != nil {
 		t.Errorf("non-expiring fixture must project a nil expiry, got %v", id.Key.ExpiresAt)
@@ -1145,5 +1183,578 @@ func TestNewRejectsEmptyBaseURL(t *testing.T) {
 	_, err := New(&Config{APIKey: "lv_test_apitestingvalue123456789"})
 	if !errors.Is(err, qurl.ErrInvalidClientConfig) {
 		t.Errorf("err = %v, want ErrInvalidClientConfig", err)
+	}
+}
+
+// TestShareAlwaysCarriesACredential pins the client seam under share. This
+// package builds a client two ways, New from an account key and NewRegistered
+// from device state, and neither returns one without a usable credential, so
+// nothing here can send a share request without one. A client that either
+// does build sends its credential with the share request.
+func TestShareAlwaysCarriesACredential(t *testing.T) {
+	srv := apitest.NewServer(t)
+
+	for _, key := range []string{"", "   "} {
+		if client, err := New(&Config{BaseURL: srv.URL, APIKey: key, Version: "test"}); client != nil || !errors.Is(err, qurl.ErrInvalidClientConfig) {
+			t.Fatalf("New with credential %q = %v, %v; want ErrInvalidClientConfig", key, client, err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		state func() *qurl.AgentState
+	}{
+		{"no device state", func() *qurl.AgentState { return nil }},
+		{"no device credential", func() *qurl.AgentState {
+			state := registeredAPIState(t)
+			state.DeviceAPIKey = ""
+			return state
+		}},
+		{"blank device credential", func() *qurl.AgentState {
+			state := registeredAPIState(t)
+			state.DeviceAPIKey = "   "
+			return state
+		}},
+	} {
+		client, err := NewRegistered(context.Background(), &Config{
+			BaseURL: srv.URL, Version: "test", HTTPClient: srv.Client(),
+		}, &registeredAPIStateStore{state: tc.state()})
+		if client != nil || err == nil {
+			t.Fatalf("NewRegistered with %s = %v, %v; want no client", tc.name, client, err)
+		}
+	}
+	if got := len(srv.Requests()); got != 0 {
+		t.Fatalf("refusing to build a client sent %d requests, want none", got)
+	}
+
+	for _, built := range []struct {
+		name   string
+		client Client
+		want   string
+	}{
+		{"account key", newTestClient(t, srv, nil), "Bearer lv_test_apitestingvalue123456789"},
+		{"device state", newRegisteredTestClient(t, srv), "Bearer " + registeredAPIState(t).DeviceAPIKey},
+	} {
+		if _, err := built.client.Share(context.Background(), srv.Key.CRID, ShareOptions{}); err != nil {
+			t.Fatalf("Share with a client built from %s: %v", built.name, err)
+		}
+		requests := srv.Requests()
+		last := requests[len(requests)-1]
+		if last.Path != "/v1/resources/"+srv.Key.CRID+"/share" || last.Header.Get("Authorization") != built.want {
+			t.Fatalf("share from a client built from %s = %s %s with %d Authorization bytes, want its own credential",
+				built.name, last.Method, last.Path, len(last.Header.Get("Authorization")))
+		}
+	}
+	if got := len(srv.Requests()); got != 2 {
+		t.Fatalf("requests = %d, want exactly the two share requests", got)
+	}
+}
+
+// TestShareMarksOnlyItsOwnNotFound pins which errors carry share's not-found
+// marker: a 404 from the share operator, whatever its problem code, and
+// nothing else. The owner-truthful answers share can also give keep their own
+// codes, and another route's 404 keeps the guidance every route shares.
+func TestShareMarksOnlyItsOwnNotFound(t *testing.T) {
+	srv := apitest.NewServer(t)
+	shareRoute := "/v1/resources/" + srv.Key.CRID + "/share"
+	client := newTestClient(t, srv, nil)
+
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+		status  int
+		want    bool
+	}{
+		{"share not-found code", apitest.HandlerNotFound404(t, "resource_not_found"), http.StatusNotFound, true},
+		{"generic not-found code", apitest.HandlerNotFound404(t, "not_found"), http.StatusNotFound, true},
+		{"no problem body", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }, http.StatusNotFound, true},
+		{"deleted by its owner", apitest.HandlerRevoked400(t), http.StatusBadRequest, false},
+		{"retired", apitest.HandlerTombstoned410(t), http.StatusGone, false},
+		{"missing scope", apitest.HandlerInsufficientScope403(t), http.StatusForbidden, false},
+		{"stopped", apitest.HandlerConnectorStopped503(t), http.StatusServiceUnavailable, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv.Script(http.MethodPost, shareRoute, tc.handler)
+			_, err := client.Share(context.Background(), srv.Key.CRID, ShareOptions{})
+			var apiErr *Error
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != tc.status {
+				t.Fatalf("Share error = %v, want a typed HTTP %d", err, tc.status)
+			}
+			if got := apiErr.ShareNotFound(); got != tc.want {
+				t.Fatalf("ShareNotFound() = %t for HTTP %d %q, want %t", got, apiErr.StatusCode, apiErr.Code, tc.want)
+			}
+		})
+	}
+
+	t.Run("another route", func(t *testing.T) {
+		srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", apitest.HandlerNotFound404(t, "not_found"))
+		_, err := client.Sharing(context.Background(), srv.Key.CRID)
+		var apiErr *Error
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+			t.Fatalf("Sharing error = %v, want a typed HTTP 404", err)
+		}
+		if apiErr.ShareNotFound() {
+			t.Fatal("a 404 from a route other than share carries share's not-found marker")
+		}
+	})
+
+	if (*Error)(nil).ShareNotFound() {
+		t.Fatal("a nil error reports share's not-found marker")
+	}
+}
+
+// TestPublishStatesPrivacyInEveryCreateRequest pins the wire rule behind the
+// private default: the create request always carries the private member, for
+// a private resource and for a public one, for a URL and for a Connector. A
+// request that left it out would get whatever the service does by default,
+// and an older service makes a public resource.
+func TestPublishStatesPrivacyInEveryCreateRequest(t *testing.T) {
+	for _, connectorID := range []string{"", "stated-connector"} {
+		for _, public := range []bool{false, true} {
+			t.Run(fmt.Sprintf("connector=%q/public=%t", connectorID, public), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				var sent map[string]json.RawMessage
+				srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+					if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+						t.Error(err)
+					}
+					apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": !public}, nil)
+				})
+				target := "https://example.com"
+				if connectorID != "" {
+					target = ""
+				}
+				result, err := newTestClient(t, srv, nil).Publish(t.Context(), target, PublishOptions{Public: public, ConnectorID: connectorID})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "true"
+				if public {
+					want = "false"
+				}
+				stated, present := sent["private"]
+				if !present || string(stated) != want {
+					t.Fatalf("create request stated private = %q (present %t), want %s; body members %v", stated, present, want, sent)
+				}
+				if result.Private == nil || *result.Private == public {
+					t.Fatalf("result privacy = %v, want the confirmed %t", result.Private, !public)
+				}
+			})
+		}
+	}
+}
+
+func TestPublishSendsTheFirstDeviceList(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Private bool     `json:"private"`
+			Allowed []string `json:"allowed_device_keys"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if !body.Private || !slices.Equal(body.Allowed, []string{"recipient-public-key"}) {
+			t.Errorf("privacy lost: %+v", body)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "allowed_device_keys": body.Allowed}, nil)
+	})
+	if _, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com", PublishOptions{AllowedDeviceKeys: []string{"recipient-public-key"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPublishRequiresTheAnswerToConfirmPrivacy pins the check on the create
+// answer, in both directions: the row must carry the privacy that was asked
+// for. A row with the other privacy, and a row that does not say, both fail
+// with no result, so no caller can print a CRID for them.
+func TestPublishRequiresTheAnswerToConfirmPrivacy(t *testing.T) {
+	for _, connectorID := range []string{"", "confirmed-connector"} {
+		for _, public := range []bool{false, true} {
+			for _, answered := range []any{nil, false, true} {
+				t.Run(fmt.Sprintf("connector=%q/public=%t/answered=%v", connectorID, public, answered), func(t *testing.T) {
+					srv := apitest.NewServer(t)
+					srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+						data := map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID}
+						if answered != nil {
+							data["private"] = answered
+						}
+						apitest.WriteEnvelope(t, w, http.StatusCreated, data, map[string]any{"found_existing": true})
+					})
+					target := "https://example.com"
+					if connectorID != "" {
+						target = ""
+					}
+					result, err := newTestClient(t, srv, nil).Publish(t.Context(), target, PublishOptions{Public: public, ConnectorID: connectorID})
+					if answered == !public {
+						if err != nil || result.Private == nil || *result.Private == public {
+							t.Fatalf("confirmed publish: result %+v, error %v", result, err)
+						}
+						return
+					}
+					if !errors.Is(err, qurl.ErrInvalidAPIResponse) || result != nil {
+						t.Fatalf("unconfirmed publish returned %+v, error %v; want no result and an invalid-response error", result, err)
+					}
+					want := msgPrivateUnconfirmed
+					if public {
+						want = msgPublicUnconfirmed
+					}
+					var shown interface{ UserMessage() string }
+					if !errors.As(err, &shown) || shown.UserMessage() != want || err.Error() != want {
+						t.Fatalf("unconfirmed publish error = %q, want the message %q", err, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestPublishDoesNotDependOnTheServiceDefault runs the same two publishes
+// against a service whose default is private and one whose default is public.
+// Each gets the privacy it asked for from both, because the request states
+// it. If the request left the field out, one of the four would get the other
+// privacy and fail the confirmation.
+func TestPublishDoesNotDependOnTheServiceDefault(t *testing.T) {
+	for _, publicByDefault := range []bool{false, true} {
+		for _, public := range []bool{false, true} {
+			t.Run(fmt.Sprintf("service_default_public=%t/public=%t", publicByDefault, public), func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				if publicByDefault {
+					srv.PlayPublicByDefault()
+				}
+				result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{Public: public})
+				if err != nil {
+					t.Fatalf("Publish: %v", err)
+				}
+				if result.Private == nil || *result.Private == public {
+					t.Fatalf("result privacy = %v, want %t", result.Private, !public)
+				}
+			})
+		}
+	}
+}
+
+// TestPublishAccessConflict pins how a publish refused because the target is
+// already published with other access settings is recognized, and what the
+// conflict then says. The privacy-mismatch code means the existing resource
+// has the other privacy, and the device-list code means its list is another
+// one. The detail an older service sends covers both and says neither, so it
+// names nothing, whatever the request carried. Any other refusal stays the
+// plain service problem, including an invalid-input answer with some other
+// wording about device keys: only the older text is ever matched.
+func TestPublishAccessConflict(t *testing.T) {
+	const key = "recipient-public-key"
+	for _, test := range []struct {
+		name   string
+		status int
+		code   string
+		detail string
+		opts   PublishOptions
+		want   ExistingAccess
+		plain  bool
+	}{
+		{name: "code, private asked", status: 400, code: apitest.CodePrivacyMismatch, detail: "d", want: ExistingAccessPublic},
+		{name: "code, public asked", status: 400, code: apitest.CodePrivacyMismatch, detail: "d", opts: PublishOptions{Public: true}, want: ExistingAccessPrivate},
+		{name: "code, with a device list", status: 400, code: apitest.CodePrivacyMismatch, detail: "d", opts: PublishOptions{AllowedDeviceKeys: []string{key}}, want: ExistingAccessPublic},
+		{name: "code in another case", status: 400, code: "PRIVACY_MISMATCH", detail: "d", want: ExistingAccessPublic},
+		{name: "device code", status: 400, code: apitest.CodeDeviceKeysMismatch, detail: "d", opts: PublishOptions{AllowedDeviceKeys: []string{key}}, want: ExistingAccessOtherDevices},
+		{name: "device code in another case", status: 400, code: "Device_Keys_Mismatch", detail: "d", opts: PublishOptions{AllowedDeviceKeys: []string{key}}, want: ExistingAccessOtherDevices},
+		{name: "device code with the older detail", status: 400, code: apitest.CodeDeviceKeysMismatch, detail: apitest.LegacyAccessSettingsDetail, opts: PublishOptions{AllowedDeviceKeys: []string{key}}, want: ExistingAccessOtherDevices},
+		{name: "older detail, private asked", status: 400, code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail, want: ExistingAccessUnknown},
+		{name: "older detail, public asked", status: 400, code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail, opts: PublishOptions{Public: true}, want: ExistingAccessUnknown},
+		{name: "older detail, with a device list", status: 400, code: "invalid_input", detail: apitest.LegacyAccessSettingsDetail, opts: PublishOptions{AllowedDeviceKeys: []string{key}}, want: ExistingAccessUnknown},
+		{name: "another invalid input", status: 400, code: "invalid_input", detail: "target_url is not allowed", plain: true},
+		{name: "another wording about device keys", status: 400, code: "invalid_input", detail: "allowed_device_keys differ from the device keys this resource has", opts: PublishOptions{AllowedDeviceKeys: []string{key}}, plain: true},
+		{name: "the code on another status", status: 409, code: apitest.CodePrivacyMismatch, detail: "d", plain: true},
+		{name: "the device code on another status", status: 409, code: apitest.CodeDeviceKeysMismatch, detail: "d", plain: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteProblem(t, w, test.status, test.code, "Refused", test.detail)
+			})
+			result, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", test.opts)
+			if err == nil || result != nil {
+				t.Fatalf("refused publish returned %+v, error %v", result, err)
+			}
+			var problem *Error
+			if !errors.As(err, &problem) || problem.StatusCode != test.status || problem.RequestID != "req_test" {
+				t.Fatalf("the service problem is not in the chain with its request id: %v", err)
+			}
+			var conflict *PublishAccessConflictError
+			if test.plain {
+				if errors.As(err, &conflict) || errors.Is(err, ErrPublishAccessConflict) {
+					t.Fatalf("an unrelated refusal was read as an access conflict: %v", err)
+				}
+				return
+			}
+			if !errors.As(err, &conflict) || !errors.Is(err, ErrPublishAccessConflict) {
+				t.Fatalf("error = %v, want an access conflict", err)
+			}
+			if conflict.Existing != test.want {
+				t.Fatalf("existing access = %d, want %d", conflict.Existing, test.want)
+			}
+		})
+	}
+}
+
+// TestPublishAccessConflictSaysWhatExists pins the four sentences, each to
+// its case, so a refusal can never be shown with another one's text.
+func TestPublishAccessConflictSaysWhatExists(t *testing.T) {
+	for existing, want := range map[ExistingAccess]string{
+		ExistingAccessPublic:       msgPublishExistingPublic,
+		ExistingAccessPrivate:      msgPublishExistingPrivate,
+		ExistingAccessOtherDevices: msgPublishOtherDevices,
+		ExistingAccessUnknown:      msgPublishAccessDiffers,
+		ExistingAccess(99):         msgPublishAccessDiffers,
+	} {
+		if got := (&PublishAccessConflictError{Existing: existing}).Error(); got != want {
+			t.Errorf("existing %d: message %q, want %q", existing, got, want)
+		}
+	}
+	if !strings.Contains(msgPublishExistingPublic, "as public") || !strings.Contains(msgPublishExistingPrivate, "as private") {
+		t.Fatal("the two definite messages do not name the privacy that exists")
+	}
+	// The other two say nothing definite about privacy: the service did not.
+	for _, message := range []string{msgPublishOtherDevices, msgPublishAccessDiffers} {
+		if strings.Contains(message, "as public") || strings.Contains(message, "as private") {
+			t.Fatalf("a message for a conflict that does not name the privacy states one: %q", message)
+		}
+	}
+	if !errors.Is(&PublishAccessConflictError{}, ErrPublishAccessConflict) {
+		t.Fatal("a conflict without a service problem does not match its sentinel")
+	}
+}
+
+func TestDeviceGrantsRequireConfirmation(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPatch} {
+		srv := apitest.NewServer(t)
+		path := "/v1/resources"
+		if method == http.MethodPatch {
+			path += "/" + srv.Key.CRID
+		}
+		srv.Script(method, path, func(w http.ResponseWriter, _ *http.Request) {
+			status := http.StatusOK
+			if method == http.MethodPost {
+				status = http.StatusCreated
+			}
+			apitest.WriteEnvelope(t, w, status, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "type": "url", "status": "active", "allowed_device_keys": []string{}}, nil)
+		})
+		client := newTestClient(t, srv, nil)
+		var err error
+		if method == http.MethodPost {
+			_, err = client.Publish(t.Context(), "https://example.com", PublishOptions{AllowedDeviceKeys: []string{"requested-key"}})
+		} else {
+			_, err = client.SetDeviceGrants(t.Context(), srv.Key.CRID, []string{"requested-key"})
+		}
+		if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+			t.Fatalf("missing grants accepted for %s: %v", method, err)
+		}
+	}
+}
+
+// TestDeviceGrantRequestsTrimAndEscapeTheIdentifier pins that the two grant
+// changes build their path as every other request here does: the identifier
+// is trimmed and escaped, and an empty one is refused before any request.
+func TestDeviceGrantRequestsTrimAndEscapeTheIdentifier(t *testing.T) {
+	calls := map[string]func(Client, string) error{
+		"set": func(client Client, id string) error {
+			_, err := client.SetDeviceGrants(t.Context(), id, []string{"a"})
+			return err
+		},
+		"edit": func(client Client, id string) error {
+			_, err := client.EditDeviceGrants(t.Context(), id, []string{"a"}, nil)
+			return err
+		},
+	}
+	for name, call := range calls {
+		srv := apitest.NewServer(t)
+		if err := call(newTestClient(t, srv, nil), "  "+srv.Key.CRID+"\n"); err != nil {
+			t.Fatalf("%s with a padded identifier: %v", name, err)
+		}
+		if lines := sentRequests(srv); !slices.Equal(lines, []string{"PATCH /v1/resources/" + srv.Key.CRID}) {
+			t.Fatalf("%s: requests = %v, want one change to the trimmed identifier", name, lines)
+		}
+
+		for _, id := range []string{"", "   ", "a/b", "a b", "a%2Fb", "../" + srv.Key.CRID, srv.Key.CRID + "?x=1"} {
+			srv := apitest.NewServer(t)
+			err := call(newTestClient(t, srv, nil), id)
+			if err == nil || len(srv.Requests()) != 0 {
+				t.Fatalf("%s with identifier %q: error %v after %d requests, want a refusal before any request", name, id, err, len(srv.Requests()))
+			}
+			if strings.TrimSpace(id) == "" && !errors.Is(err, qurl.ErrInvalidResourceRequest) {
+				t.Fatalf("%s with an empty identifier: error = %v, want an invalid request", name, err)
+			}
+		}
+	}
+}
+
+// TestEditDeviceGrantsSendsOnlyTheEdit pins the wire shape of a change to
+// single device keys: one PATCH with the keys to add and the keys to remove.
+// It never carries allowed_device_keys, the member that replaces the complete
+// list, and it omits an empty side instead of sending an empty array.
+func TestEditDeviceGrantsSendsOnlyTheEdit(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		add, remove []string
+		want        string
+	}{
+		{name: "add", add: []string{"a", "b"}, want: `{"allowed_device_keys_add":["a","b"]}`},
+		{name: "remove", remove: []string{"c"}, want: `{"allowed_device_keys_remove":["c"]}`},
+		{name: "both", add: []string{"a"}, remove: []string{"c"}, want: `{"allowed_device_keys_add":["a"],"allowed_device_keys_remove":["c"]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.SetResourceAccess(true, "c", "d")
+			resource, err := newTestClient(t, srv, nil).EditDeviceGrants(t.Context(), srv.Key.CRID, test.add, test.remove)
+			if err != nil {
+				t.Fatalf("EditDeviceGrants: %v", err)
+			}
+			requests := srv.Requests()
+			if len(requests) != 1 || requests[0].Method != http.MethodPatch || requests[0].Path != "/v1/resources/"+srv.Key.CRID {
+				t.Fatalf("requests = %+v, want one PATCH of the resource", requests)
+			}
+			if got := string(requests[0].Body); got != test.want {
+				t.Fatalf("body = %s, want %s", got, test.want)
+			}
+			if requests[0].Header.Get("Authorization") == "" {
+				t.Fatal("the grant change carries no credential")
+			}
+			for _, key := range test.add {
+				if !slices.Contains(resource.AllowedDeviceKeys, key) {
+					t.Fatalf("resulting list %v lacks the added key %q", resource.AllowedDeviceKeys, key)
+				}
+			}
+			for _, key := range test.remove {
+				if slices.Contains(resource.AllowedDeviceKeys, key) {
+					t.Fatalf("resulting list %v still has the removed key %q", resource.AllowedDeviceKeys, key)
+				}
+			}
+			if !slices.Contains(resource.AllowedDeviceKeys, "d") {
+				t.Fatalf("a key the change did not name was lost: %v", resource.AllowedDeviceKeys)
+			}
+		})
+	}
+}
+
+// TestEditDeviceGrantsRequiresTheAnswerToShowTheChange pins the check on the
+// answer: every added key on the returned list, no removed key on it. An
+// older service that ignores the request and returns the list as it was
+// fails that check, with the message that says what is known.
+func TestEditDeviceGrantsRequiresTheAnswerToShowTheChange(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		add, remove []string
+		answered    []string
+		wantErr     bool
+	}{
+		{name: "added", add: []string{"a"}, answered: []string{"x", "a"}},
+		{name: "removed", remove: []string{"x"}, answered: []string{"a"}},
+		{name: "both", add: []string{"a"}, remove: []string{"x"}, answered: []string{"a"}},
+		{name: "removed to an empty list", remove: []string{"x"}},
+		{name: "list unchanged after add", add: []string{"a"}, answered: []string{"x"}, wantErr: true},
+		{name: "list unchanged after remove", remove: []string{"x"}, answered: []string{"x"}, wantErr: true},
+		{name: "second added key missing", add: []string{"a", "b"}, answered: []string{"a"}, wantErr: true},
+		{name: "added but not removed", add: []string{"a"}, remove: []string{"x"}, answered: []string{"x", "a"}, wantErr: true},
+		{name: "removed but not added", add: []string{"a"}, remove: []string{"x"}, wantErr: true},
+		{name: "no list after add", add: []string{"a"}, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				data := map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "type": "url", "status": "active"}
+				if test.answered != nil {
+					data["allowed_device_keys"] = test.answered
+				}
+				apitest.WriteEnvelope(t, w, http.StatusOK, data, nil)
+			})
+			resource, err := newTestClient(t, srv, nil).EditDeviceGrants(t.Context(), srv.Key.CRID, test.add, test.remove)
+			if !test.wantErr {
+				if err != nil || !slices.Equal(resource.AllowedDeviceKeys, test.answered) {
+					t.Fatalf("EditDeviceGrants = %+v, %v; want the answered list %v", resource, err, test.answered)
+				}
+				return
+			}
+			if !errors.Is(err, qurl.ErrInvalidAPIResponse) || resource != nil {
+				t.Fatalf("an answer that does not show the change returned %+v, %v", resource, err)
+			}
+			var shown interface{ UserMessage() string }
+			if !errors.As(err, &shown) || shown.UserMessage() != msgGrantEditUnconfirmed || err.Error() != msgGrantEditUnconfirmed {
+				t.Fatalf("error = %q, want the unconfirmed-change message", err)
+			}
+		})
+	}
+
+	// The older service itself: it ignores the edit and answers 200.
+	srv := apitest.NewServer(t)
+	srv.SetResourceAccess(true, "x")
+	srv.PlayNoSingleGrantEdits()
+	if _, err := newTestClient(t, srv, nil).EditDeviceGrants(t.Context(), srv.Key.CRID, []string{"a"}, nil); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("an ignored edit was reported as made: %v", err)
+	}
+}
+
+// TestEditDeviceGrantsRefusesAnEditThatCannotBeOne pins the local refusals:
+// nothing to change, and one key on both sides. Neither sends a request.
+func TestEditDeviceGrantsRefusesAnEditThatCannotBeOne(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client := newTestClient(t, srv, nil)
+	for name, edit := range map[string][2][]string{
+		"nothing":             {nil, nil},
+		"empty lists":         {{}, {}},
+		"a key on both sides": {{"a", "b"}, {"b"}},
+	} {
+		if _, err := client.EditDeviceGrants(t.Context(), srv.Key.CRID, edit[0], edit[1]); !errors.Is(err, qurl.ErrInvalidResourceRequest) {
+			t.Errorf("%s: error = %v, want an invalid-request refusal", name, err)
+		}
+	}
+	if got := len(srv.Requests()); got != 0 {
+		t.Fatalf("a refused edit sent %d requests", got)
+	}
+}
+
+// TestEditDeviceGrantsShowsTheServiceRefusal pins that a refused edit is the
+// service's problem, not a result.
+func TestEditDeviceGrantsShowsTheServiceRefusal(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", "at most 256 allowed device keys")
+	})
+	resource, err := newTestClient(t, srv, nil).EditDeviceGrants(t.Context(), srv.Key.CRID, []string{"a"}, nil)
+	var problem *Error
+	if resource != nil || !errors.As(err, &problem) || problem.StatusCode != http.StatusBadRequest || problem.Detail != "at most 256 allowed device keys" {
+		t.Fatalf("refused edit = %+v, %v", resource, err)
+	}
+}
+
+// TestEditDeviceGrantsThatLostToOtherWritersIsNotRetried pins what the client
+// does with the 503 the service answers when a grant edit lost every attempt
+// against other changes: it returns the problem with its Retry-After and
+// sends nothing more, with an account key and with a device credential.
+func TestEditDeviceGrantsThatLostToOtherWritersIsNotRetried(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		open func(*testing.T, *apitest.Server, *[]time.Duration) Client
+	}{
+		{name: "account", open: newTestClient},
+		{name: "registered", open: func(t *testing.T, srv *apitest.Server, _ *[]time.Duration) Client {
+			return newRegisteredTestClient(t, srv)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.ScriptRepeat(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, maxAttempts, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", "1")
+				apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "nothing was changed; send the request again")
+			})
+			var sleeps []time.Duration
+			resource, err := test.open(t, srv, &sleeps).EditDeviceGrants(t.Context(), srv.Key.CRID, []string{"a"}, []string{"b"})
+			var problem *Error
+			if resource != nil || !errors.As(err, &problem) || problem.StatusCode != http.StatusServiceUnavailable || problem.Code != "service_unavailable" || problem.RetryAfter != 1 {
+				t.Fatalf("EditDeviceGrants = %+v, %v; want the 503 problem with its Retry-After", resource, err)
+			}
+			if got := len(srv.Requests()); got != 1 || len(sleeps) != 0 {
+				t.Fatalf("the edit was sent %d times with %d waits, want once and no wait", got, len(sleeps))
+			}
+		})
 	}
 }

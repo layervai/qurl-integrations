@@ -67,6 +67,11 @@ func EnsureIPCDir(dir string) error {
 	return validateUnixIPCParent(filepath.Join(dir, SocketFile))
 }
 
+// ValidateOwnerOnlyParent requires path's parent to be a non-symlink directory
+// owned by the current user with mode 0700, the boundary private Unix origins
+// are documented to bind inside.
+func ValidateOwnerOnlyParent(path string) error { return validateUnixIPCParent(path) }
+
 func validateUnixIPCParent(path string) error {
 	dir := filepath.Dir(path)
 	info, err := os.Lstat(dir)

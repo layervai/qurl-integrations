@@ -129,5 +129,15 @@ func CustomerMessages() []string {
 		MsgLinkVerification,
 		MsgAccessDenied,
 		MsgAccessBusy,
+		MsgCRIDNotFound,
+		MsgCRIDLinkUnavailable,
+		MsgCRIDLinkNoAnswer,
+		MsgCRIDLinkRateLimited,
+		MsgCRIDPublisherOffline,
+		MsgCRIDResourceClosed,
+		MsgCRIDLinkRequestRejected,
+		MsgCRIDLinkRefused,
+		msgCRIDLinkEntryUnusable,
+		msgCRIDLinkClientNeedsSettings,
 	}
 }

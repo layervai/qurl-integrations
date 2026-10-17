@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,75 @@ func downloadServer(t *testing.T) *apitest.Server {
 }
 
 func handlerGone(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusGone) }
+
+func TestGetSessionDurationOnInitialAndRenewedLink(t *testing.T) {
+	for _, duration := range []string{"", "5m"} {
+		t.Run("duration="+duration, func(t *testing.T) {
+			srv := downloadServer(t)
+			var mints atomic.Int32
+			mint := func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]string
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode share request: %v", err)
+				}
+				got, present := body["session_duration"]
+				if (duration == "" && present) || (duration != "" && (!present || got != "5m")) {
+					t.Errorf("share body = %v for --session-duration %q", body, duration)
+				}
+				mints.Add(1)
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+					"qurl": srv.URL + apitest.DownloadPath, "crid": srv.Key.CRID,
+					"type": "qv2", "expires_in_seconds": 300,
+				}, nil)
+			}
+			srv.Script(http.MethodPost, shareRoute(srv), mint, func(w http.ResponseWriter, r *http.Request) { mint(w, r) })
+			srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
+			args := []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", "-"}
+			if duration != "" {
+				args = append(args, "--session-duration", duration)
+			}
+			res := runCLI(t, &runOpts{args: args})
+			if res.code != 0 || mints.Load() != 2 || res.stdout.String() != apitest.DefaultDownloadPayload {
+				t.Fatalf("get exit=%d mints=%d payload=%q stderr=%s", res.code, mints.Load(), res.stdout.String(), res.stderr.String())
+			}
+		})
+	}
+}
+
+func TestInvalidSessionDurationDoesNotContactAPI(t *testing.T) {
+	for _, command := range []string{"get", "share"} {
+		for _, duration := range []string{"-1s", "500ms", "1500ms"} {
+			t.Run(command+"/"+duration, func(t *testing.T) {
+				srv := downloadServer(t)
+				res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, command, srv.Key.CRID, "--session-duration", duration}})
+				if res.code != exitcode.Usage || len(srv.Requests()) != 0 {
+					t.Fatalf("invalid session duration exit=%d requests=%d stderr=%s", res.code, len(srv.Requests()), res.stderr.String())
+				}
+			})
+		}
+	}
+}
+
+func TestShareSessionDurationIndependentOfTTL(t *testing.T) {
+	srv := downloadServer(t)
+	srv.Script(http.MethodPost, shareRoute(srv), func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode share request: %v", err)
+		}
+		if body["session_duration"] != "5m" || body["ttl_seconds"] != float64(3600) {
+			t.Errorf("share request = %v", body)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+			"qurl": srv.URL + apitest.DownloadPath, "crid": srv.Key.CRID,
+			"type": "qv2", "expires_in_seconds": 3600,
+		}, nil)
+	})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID, "--ttl", "1h", "--session-duration", "5m"}})
+	if res.code != 0 {
+		t.Fatalf("share exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+}
 
 func TestGetDownloadEndToEnd(t *testing.T) {
 	srv := downloadServer(t)
@@ -71,10 +141,10 @@ func TestGetDownloadEndToEnd(t *testing.T) {
 	if requests[1].Method != http.MethodGet || requests[1].Path != apitest.DownloadPath {
 		t.Errorf("second request = %s %s, want the download GET", requests[1].Method, requests[1].Path)
 	}
-	// The API credential authenticates the share and must never follow
-	// the minted link to the download host.
-	if auth := requests[0].Header.Get("Authorization"); auth == "" {
-		t.Error("share request lost its Authorization header")
+	// The credential authenticates the share and must never follow the
+	// minted link to the download host.
+	if auth := requests[0].Header.Get("Authorization"); auth != "Bearer "+testAPIKey {
+		t.Errorf("share request Authorization is not the configured credential (%d bytes)", len(auth))
 	}
 	if auth := requests[1].Header.Get("Authorization"); auth != "" {
 		t.Errorf("download request carried Authorization (%d bytes); the key must never reach the link host", len(auth))
@@ -381,11 +451,23 @@ func TestGetFileDashBinaryCleanStdout(t *testing.T) {
 	if !bytes.Equal(res.stdout.Bytes(), payload) {
 		t.Errorf("stdout = %q, want the exact payload bytes", res.stdout.Bytes())
 	}
-	if res.stderr.Len() != 0 {
-		t.Errorf("--file - must not decorate any stream, stderr = %q", res.stderr.String())
+	// stdout is the payload and nothing else. The publisher of the content is
+	// the one thing stderr carries, as a single line.
+	const wantNotice = "Warning: UNVERIFIED publisher \"Acme Docs\" (self-declared name, not confirmed by LayerV). Created 2026-03-01.\n"
+	if got := res.stderr.String(); got != wantNotice {
+		t.Errorf("--file - stderr = %q, want only the publisher notice %q", got, wantNotice)
 	}
 	if len(browser.opened) != 0 {
 		t.Errorf("--file - launched a browser: %q", browser.opened)
+	}
+
+	// --quiet means the primary value only: the bytes, and a silent stderr.
+	quiet := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "--quiet", "get", srv.Key.CRID, "--file", "-"},
+	})
+	if quiet.code != 0 || !bytes.Equal(quiet.stdout.Bytes(), payload) || quiet.stderr.Len() != 0 {
+		t.Errorf("--quiet --file -: exit=%d stdout=%q stderr=%q; want the payload and nothing else",
+			quiet.code, quiet.stdout.Bytes(), quiet.stderr.String())
 	}
 }
 

@@ -24,15 +24,24 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
+const schemeHTTPS = "https"
+
 // Client is what commands program against.
 type Client interface {
+	ConsumerManagement() ConsumerManagementClient
+	Preview(ctx context.Context, id string) (*Preview, error)
+	UpdatePreview(ctx context.Context, id string, patch PreviewPatch) (*Preview, error)
+	UploadPreview(ctx context.Context, id, path, alt, replaceID string) (*Preview, error)
+	// LinkAccount uses the device credential and a separate browser account token.
+	LinkAccount(ctx context.Context, accountToken, ownerID string) error
 	// MintConnectorEnrollmentToken creates a short-lived, one-shot credential
 	// bound to exactly one Connector. The caller supplies the idempotency key
 	// so a higher-level enrollment attempt can recover an ambiguous response
 	// without minting a second credential.
 	MintConnectorEnrollmentToken(ctx context.Context, opts MintConnectorEnrollmentTokenOptions) (*ConnectorEnrollmentToken, error)
 	// Publish registers targetURL as a protected resource and returns its
-	// identity, CRID included when the service mints one.
+	// identity, CRID included when the service mints one. The resource is
+	// private unless opts.Public is set.
 	Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error)
 	// Share mints a short-lived share link for the resource identified by
 	// id, which must be a CRID.
@@ -43,6 +52,40 @@ type Client interface {
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
 	// Resource returns one owner-visible resource by CRID or public resource ID.
 	Resource(ctx context.Context, id string) (*ResourceSummary, error)
+	// SetDeviceGrants replaces the complete private-resource device grant
+	// list. The CLI calls it only with an empty list, to clear the grants; a
+	// single device is allowed or removed with EditDeviceGrants.
+	SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error)
+	// EditDeviceGrants adds and removes single device keys in one request,
+	// which the service applies as one change, and returns the resource with
+	// its complete resulting list. A key that is already on the list, or
+	// already off it, is left as it is. What it guarantees about the other
+	// grants is the shape of its request, which never carries the whole list
+	// and so cannot replace it; what it checks in the answer is the keys it
+	// named, not that the keys it did not name are still there.
+	EditDeviceGrants(ctx context.Context, id string, add, remove []string) (*ResourceSummary, error)
+	// SetAccessRequests turns access requests on or off for an existing
+	// private resource and returns the resource as the service confirmed it.
+	SetAccessRequests(ctx context.Context, id string, on bool) (*ResourceSummary, error)
+	// AccessRequests lists the pending access requests of one resource, or of
+	// all of the owner's resources when id is empty. A listing says who
+	// asked and when, and never the code of a request.
+	AccessRequests(ctx context.Context, id string) (*AccessRequestList, error)
+	// ApproveAccessRequest approves the pending request that has this code
+	// and returns the person who now has access. A request is approved by
+	// its code and by nothing else.
+	ApproveAccessRequest(ctx context.Context, id, code string) (*AllowedPasskey, error)
+	// DenyAccessRequest removes one pending request, named by the device id
+	// it came from, which a listing shows, or by its code. The person gets
+	// no access.
+	DenyAccessRequest(ctx context.Context, id, request string) error
+	// RemoveAllowedPasskeys takes away the access of approved people, named
+	// by device id, and returns the resource as it reads afterwards. Every
+	// device id is checked against the list before any access is taken
+	// away, so one that is not on it is an error and removes nothing. A
+	// removal that stops part way is a PasskeyRemovalError, which says what
+	// happened to each device id.
+	RemoveAllowedPasskeys(ctx context.Context, id string, deviceIDs []string) (*ResourceSummary, error)
 	// Sharing returns the durable desired state and current platform-observed
 	// connection state of one tunnel resource. It is the connector sharing
 	// state, not the Share operator above.
@@ -59,6 +102,12 @@ type Client interface {
 	// platform contract (no repository reads server-side), so login can
 	// validate keys with it and whoami can call it freely.
 	Me(ctx context.Context) (*Identity, error)
+	// Publisher returns the publisher profile of the owner behind the
+	// configured credential.
+	Publisher(ctx context.Context) (*Publisher, error)
+	// SetPublisherName sets that owner's self-declared publisher name; an
+	// empty name removes it.
+	SetPublisherName(ctx context.Context, name string) (*Publisher, error)
 }
 
 // AccountClient adds the one account-authorized bootstrap operation. The CLI
@@ -69,8 +118,39 @@ type AccountClient interface {
 	MintAgentEnrollmentToken(ctx context.Context, opts MintAgentEnrollmentTokenOptions) (*AgentEnrollmentToken, error)
 }
 
-// PublishOptions carries the optional publish metadata.
+// PublishOptions carries creation policy and optional metadata.
 type PublishOptions struct {
+	ConsumerAccess *qurl.ConsumerAccessPolicy
+	// Public asks for a resource that anyone who has its CRID can open. The
+	// zero value asks for a private one, limited to its owner and the devices
+	// in AllowedDeviceKeys. Publish states the choice in its create request
+	// and requires the answer to confirm it, so no caller depends on what a
+	// service does when the field is absent. KeepExistingPublic is the one
+	// case with a second create that does not state it.
+	Public bool
+	// AllowedDeviceKeys is the first list of devices allowed on a private
+	// resource. It has no meaning for a public one.
+	AllowedDeviceKeys []string
+	// AllowRequests lets people ask the publisher for access to the new
+	// private resource. Publish requires the answer to confirm it. It has no
+	// meaning for a public resource, which the service refuses to combine
+	// with it.
+	AllowRequests bool
+	// KeepExistingPublic says that the publisher named no privacy at all, so
+	// the request asks for a private resource only because that is the
+	// default. If the target is then already published as public, Publish
+	// keeps using that resource instead of failing, and marks the result
+	// KeptPublic. A caller sets it only when nothing on its command line
+	// said who may open the resource. It has no effect together with Public,
+	// AllowedDeviceKeys or AllowRequests.
+	KeepExistingPublic bool
+	// NamedAccessFlags are the flags on the caller's command line that said
+	// who may open the resource, as they were written. Publish sends nothing
+	// of them. They are carried into a conflict, so that its next step can
+	// name the flag to leave out instead of a command line that cannot work.
+	NamedAccessFlags []string
+	// ConnectorID selects a tunnel resource instead of a URL.
+	ConnectorID string
 	Description string
 	Tags        []string
 	Alias       string
@@ -81,6 +161,8 @@ type ShareOptions struct {
 	// TTLSeconds asks for the minted link's lifetime; 0 leaves the server
 	// default in effect. The server may clamp the value it grants.
 	TTLSeconds int
+	// SessionDurationSeconds bounds an admitted session independently of link TTL.
+	SessionDurationSeconds int
 }
 
 // ListOptions carries the optional list parameters; zero values are omitted
@@ -94,6 +176,11 @@ type ListOptions struct {
 
 // Published is the repo-owned result of Publish.
 type Published struct {
+	ConsumerAccess *qurl.ConsumerAccessPolicy
+	// Private is the privacy the service confirmed. Publish never returns a
+	// result without it. Nil means privacy was not returned or queried, never
+	// public confirmation, and occurs only in a value built elsewhere.
+	Private    *bool
 	CRID       string
 	ResourceID string
 	TargetURL  string
@@ -105,6 +192,69 @@ type Published struct {
 	// as can happen when local enrollment reconciles an uncertain create by
 	// reading the resource back.
 	FoundExisting *bool
+	// Publisher is what recipients are shown as this resource's publisher.
+	Publisher Publisher
+	// AccessRequests is whether people can ask for access to the resource, as
+	// the service's answer said; nil when it did not say.
+	AccessRequests *bool
+	// AccessRequestsTurnedOn reports that the target was already published
+	// with access requests off, and that this publish turned them on.
+	AccessRequestsTurnedOn bool
+	// KeptPublic reports that the target was already published as public and
+	// that this publish, which named no privacy, kept using that resource.
+	// Private is then false, and the caller warns the publisher.
+	KeptPublic bool
+	// LinkSiteURL is the resource's address on the link site, where a person
+	// with no CLI opens it. The service does not send it: the command sets it
+	// when this install knows that site for its deployment.
+	LinkSiteURL string
+}
+
+// AllowedPasskey is one person the publisher approved for a private resource.
+// The person is known by the device they asked from.
+type AllowedPasskey struct {
+	// DeviceID names the person's device in the form xxxx-xxxx-xxxx-xxxx. It
+	// is derived from the device's public key, and it is what a publisher
+	// passes to take the access away.
+	DeviceID string
+	// Name is what the person typed when they asked. It proves nothing about
+	// who they are.
+	Name string
+	// ApprovedAt is when the publisher approved the request; nil when the
+	// service did not say.
+	ApprovedAt *time.Time
+}
+
+// AccessRequest is one pending request for access to a private resource.
+//
+// It has no code, on purpose. The six-digit code of a request is shown on the
+// screen that asked and nowhere else, and approving by that code is what ties
+// an approval to that screen. Who is at the screen is for the publisher to
+// know: they approve a code only when the person they mean to let in gave it
+// to them. A listing that carried the codes would let a publisher, or an
+// agent working for one, approve from the list: approval by name with one
+// more step. So the type that every listing is made of cannot hold one, and
+// nothing that renders a listing can print one.
+type AccessRequest struct {
+	// Name is what the requester typed. Anyone can type any name.
+	Name string
+	// DeviceID names the device the request came from.
+	DeviceID string
+	// RequestedAt and ExpiresAt are nil when the service did not say.
+	RequestedAt *time.Time
+	ExpiresAt   *time.Time
+	// CRID and ResourceID name the resource the request is for.
+	CRID       string
+	ResourceID string
+}
+
+// AccessRequestList is one listing of pending requests.
+type AccessRequestList struct {
+	Requests []AccessRequest
+	// HasMore reports that the service said the listing may be incomplete.
+	// It bounds the listing of all of an owner's resources; the listing of
+	// one resource is how to see everything that resource has.
+	HasMore bool
 }
 
 // DeleteResult reports a completed (idempotent) delete.
@@ -122,6 +272,12 @@ type ShareLink struct {
 	ExpiresAt        time.Time
 	ExpiresInSeconds int
 	SingleUse        bool
+	// ResourceCreatedAt is when the resource behind the CRID was created -
+	// not when this link was minted; nil when the service did not say.
+	ResourceCreatedAt *time.Time
+	// Publisher is the service's description of who published the resource.
+	// It is not covered by CRID or link verification.
+	Publisher Publisher
 }
 
 // ResourcePage is one page of List results. HasMore — not NextCursor — is
@@ -142,17 +298,28 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
-	CRID         string
-	ResourceID   string
-	TargetURL    string
-	Type         string
-	Status       string
-	DesiredState DesiredState
-	ServingEpoch uint64
-	Description  string
-	Tags         []string
-	CreatedAt    *time.Time
-	ExpiresAt    *time.Time
+	ConsumerAccess    *qurl.ConsumerAccessPolicy
+	AllowedDeviceKeys []string
+	Private           *bool
+	CRID              string
+	ResourceID        string
+	TargetURL         string
+	Type              string
+	Status            string
+	DesiredState      DesiredState
+	ServingEpoch      uint64
+	Description       string
+	Tags              []string
+	CreatedAt         *time.Time
+	ExpiresAt         *time.Time
+	Publisher         Publisher
+	// AccessRequests is whether people can ask for access to the resource;
+	// nil when the service's row does not say, as a service from before
+	// access requests never does.
+	AccessRequests *bool
+	// AllowedPasskeys are the people the publisher approved. An empty list
+	// means the service said nobody is; nil means it did not say.
+	AllowedPasskeys []AllowedPasskey
 }
 
 // DesiredState is the durable customer intent for a tunnel resource.
@@ -185,10 +352,16 @@ type Sharing struct {
 	DesiredState    DesiredState
 	ServingEpoch    uint64
 	ConnectionState ConnectionState
+	// CreatedAt is when the resource was created; nil when the service did
+	// not say.
+	CreatedAt *time.Time
+	Publisher Publisher
 }
 
 // Config configures New. Zero hooks get production defaults.
 type Config struct {
+	// OwnerID selects a linked namespace for a signed-in account.
+	OwnerID string
 	// BaseURL is the qURL API origin (no trailing slash required).
 	BaseURL string
 	// APIKey is the bearer credential. Never logged; see Redact.
@@ -203,6 +376,9 @@ type Config struct {
 	Sleep func(time.Duration)
 	// NewRequestID mints the X-Request-Id value; nil means a random one.
 	NewRequestID func() string
+	// Now is the clock; nil means time.Now. Publish reads it to tell a
+	// resource this command made from one that existed before it.
+	Now func() time.Time
 	// HTTPClient is the underlying HTTP client. Nil, or an injected client with
 	// Timeout zero, gets a 30-second bound for each HTTP attempt. A nonzero
 	// timeout is preserved. A retryable logical request can span multiple
@@ -217,6 +393,16 @@ type client struct {
 	registeredDoer qurl.HTTPDoer
 	baseURL        string
 	authorize      func(context.Context, *http.Request) error
+	// now is Config.Now, or time.Now.
+	now func() time.Time
+}
+
+// clock returns the configured clock, or the wall clock.
+func clock(cfg *Config) func() time.Time {
+	if cfg.Now != nil {
+		return cfg.Now
+	}
+	return time.Now
 }
 
 // registeredClient exposes exactly Client. The concrete implementation also
@@ -249,6 +435,7 @@ func New(cfg *Config) (AccountClient, error) {
 		transport: tr,
 		baseURL:   trimBaseURL(cfg.BaseURL),
 		authorize: provider.Authorize,
+		now:       clock(cfg),
 	}, nil
 }
 
@@ -283,7 +470,7 @@ func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore)
 	}
 	core := &client{
 		sdk: sdk, transport: tr, registeredDoer: doer,
-		baseURL: trimBaseURL(cfg.BaseURL),
+		baseURL: trimBaseURL(cfg.BaseURL), now: clock(cfg),
 	}
 	return &registeredClient{Client: core}, nil
 }
@@ -291,21 +478,46 @@ func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore)
 // Share delegates to the SDK's CRID-based ShareResource.
 func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*ShareLink, error) {
 	var sdkOpts *qurl.ShareResourceOptions
-	if opts.TTLSeconds > 0 {
-		sdkOpts = &qurl.ShareResourceOptions{TTL: time.Duration(opts.TTLSeconds) * time.Second}
+	if opts.TTLSeconds != 0 || opts.SessionDurationSeconds != 0 {
+		sdkOpts = &qurl.ShareResourceOptions{
+			TTL:             time.Duration(opts.TTLSeconds) * time.Second,
+			SessionDuration: time.Duration(opts.SessionDurationSeconds) * time.Second,
+		}
 	}
 	access, err := c.sdk.ShareResource(ctx, id, sdkOpts)
 	if err != nil {
-		return nil, mapError(err)
+		return nil, mapShareError(err)
 	}
-	return &ShareLink{
+	link := &ShareLink{
 		QURL:             access.Link,
 		CRID:             access.CRID,
 		Type:             access.Type,
 		ExpiresAt:        access.ExpiresAt,
 		ExpiresInSeconds: access.ExpiresInSeconds,
 		SingleUse:        access.SingleUse,
-	}, nil
+		// Field by field, never a type conversion: an SDK field added later
+		// must not reach the CLI's publisher rendering unreviewed. The
+		// fail-closed decode for this path lives in qurl-go, which owns the
+		// share answer; publisherWire covers the reads this repo decodes.
+		Publisher: Publisher{Name: access.Publisher.Name, Verified: access.Publisher.Verified},
+	}
+	if access.ResourceCreatedAt != nil && !access.ResourceCreatedAt.IsZero() {
+		createdAt := *access.ResourceCreatedAt
+		link.ResourceCreatedAt = &createdAt
+	}
+	return link, nil
+}
+
+// mapShareError is mapError for the share operator. It marks a not-found
+// answer as share's own, so the customer rendering can say what that answer
+// may mean for a CRID instead of repeating the guidance other routes get.
+func mapShareError(err error) error {
+	mapped := mapError(err)
+	var apiErr *Error
+	if errors.As(mapped, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		apiErr.shareNotFound = true
+	}
+	return mapped
 }
 
 // mapError converts a wire failure into this package's typed *Error while

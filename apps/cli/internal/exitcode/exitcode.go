@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"strings"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
 
@@ -51,7 +52,8 @@ const (
 	NotFound = 5
 	// Forbidden: the credential lacks permission (HTTP 403).
 	Forbidden = 6
-	// Conflict: the request conflicts with current state (HTTP 409).
+	// Conflict: the request conflicts with current state (HTTP 409, and a
+	// publish whose target is already published with other access settings).
 	Conflict = 7
 	// InvalidInput: an operand or request the service (or the local gate,
 	// for inputs that can never be valid) rejected as invalid.
@@ -63,7 +65,9 @@ const (
 	// outside its contract.
 	ServerError = 10
 	// Unavailable: the service cannot be reached or is not serving this
-	// surface (HTTP 503, network failures, timeouts).
+	// surface (HTTP 503, network failures, timeouts, a service that does not
+	// offer access requests yet), or the local TPM that protects device state
+	// is not responding.
 	Unavailable = 11
 	// VerificationFailed: the response failed CRID-anchored verification.
 	// Nothing was emitted; treat as tampering, not transience.
@@ -169,7 +173,15 @@ func FromError(err error) int {
 		return Interrupted
 	case errors.Is(err, context.DeadlineExceeded):
 		return Unavailable
-	case errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled):
+	case errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled),
+		// The local TPM exists but did not answer (busy, starting, timed out).
+		// Open wraps this in ErrAgentStateEnvelope, whose Config row would tell
+		// a script its setup is wrong; retrying is the remedy. It is checked
+		// ahead of the host and qurl-go rows on purpose: a chain that also
+		// carries one of those still exits retryable, because no setup change
+		// can help until the TPM answers. It stays behind context.Canceled: a
+		// TPM call the user interrupted is an interrupt (130).
+		errors.Is(err, connectoragentstate.ErrTPMNotResponding):
 		return Unavailable
 	case errors.Is(err, qurl.ErrNoCRID), errors.Is(err, qurl.ErrCRIDMismatch):
 		return VerificationFailed
@@ -194,7 +206,9 @@ func FromError(err error) int {
 		errors.Is(err, qurl.ErrInsecureCredentialStatePermissions):
 		return Auth
 	case errors.Is(err, qurl.ErrInvalidResourceRequest),
-		errors.Is(err, qurl.ErrInvalidPortalRequest):
+		errors.Is(err, qurl.ErrInvalidPortalRequest),
+		// A publisher name the service refused, or one that can never be valid.
+		errors.Is(err, qurl.ErrInvalidPublisherName):
 		return InvalidInput
 	case errors.Is(err, qurl.ErrInvalidAPIResponse):
 		return ServerError
@@ -208,21 +222,54 @@ func FromError(err error) int {
 		// every failure, including ones qurl-go classifies itself - a loose
 		// directory mode is Auth on the plaintext branch and must stay Auth on
 		// the sealed one. Reaching here means nothing more specific matched, so
-		// the cause is what the sentinel names: the envelope does not match the
-		// selected key provider, whose remedy is LAYERV_KEY_PROVIDER /
-		// LAYERV_LOCAL_KEY_FD or a different state directory, never the command
-		// line.
+		// the cause is what the sentinel names: the envelope cannot be opened as
+		// selected, whose remedy is LAYERV_KEY_PROVIDER / LAYERV_LOCAL_KEY_FD or
+		// the state directory (including moving aside TPM-sealed state this TPM
+		// can no longer open), never the command line.
 		return Config
 	default:
 		return General
 	}
 }
 
+// hostConditionCode maps local host conditions ahead of every sentinel
+// family (below only the CLI-typed wrappers and the early transient rows in
+// FromError), matching output.RenderError, which renders them ahead of the
+// connector taxonomy: their chains still carry whatever the connector
+// wrapped, and the exit code agrees with the message. The one deliberate
+// exception is a chain that also carries ErrTPMNotResponding: it exits
+// Unavailable even where the message names the host condition, because no
+// host change helps until the TPM answers. qurl-go's own permission refusals
+// never become ErrUnsafeDirectory (ExplainUnsafeDirectory leaves them as they
+// are), so a loose credential state mode stays Auth.
+func hostConditionCode(err error) (int, bool) {
+	switch {
+	case errors.Is(err, state.ErrUnsafeDirectory):
+		// The remedy is a local directory mode or state location: the
+		// configuration row.
+		return Config, true
+	case errors.Is(err, connectordaemon.ErrUserServiceManagerUnavailable):
+		// Like ErrRuntimeSupervision, the remedy is the supervision mode
+		// (--foreground or --supervision external), not the command's operands.
+		return Config, true
+	default:
+		return 0, false
+	}
+}
+
 // cliSentinelCode maps the CLI's own sentinel families — operand
 // assessment, credentials, configuration, and the consume layer — onto
 // their exit codes.
-func cliSentinelCode(err error) (int, bool) {
+func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the closed CLI sentinel-to-exit-code mapping in one boundary.
+	// Host conditions precede every sentinel family; see hostConditionCode.
+	if code, ok := hostConditionCode(err); ok {
+		return code, true
+	}
 	switch {
+	case errors.Is(err, qurlapi.ErrAccountPort), errors.Is(err, qurlapi.ErrAccountEndpoint):
+		return Config, true
+	case errors.Is(err, qurlapi.ErrAccountDenied):
+		return Auth, true
 	case errors.Is(err, cridux.ErrTestIDOnProduction):
 		return Usage, true
 	case errors.Is(err, cridux.ErrUnusableID):
@@ -238,11 +285,33 @@ func cliSentinelCode(err error) (int, bool) {
 		// the HTTP 409 row describes, and --force is the caller's explicit
 		// resolution. (Not InvalidInput: the path is a perfectly good path.)
 		return Conflict, true
+	case errors.Is(err, qurlapi.ErrPublishAccessConflict):
+		// The service answers this with HTTP 400, which the status table would
+		// read as invalid input. Nothing in the request is invalid: the target
+		// is already published with the other privacy, and privacy cannot
+		// change after creation. A request that conflicts with state which
+		// already exists is the Conflict row, as for ErrFileExists above.
+		return Conflict, true
+	case errors.Is(err, qurlapi.ErrApprovedPersonNotFound):
+		// A removal named a device id that no approved person has. The read
+		// of the list that showed it answered 200, so no status says it: the
+		// thing the command named is not there, which is the NotFound row.
+		return NotFound, true
+	case errors.Is(err, qurlapi.ErrAccessRequestsUnsupported):
+		// The service has no access requests: their routes are missing, or
+		// its answer does not have the setting. Nothing about the command is
+		// wrong and no retyping helps. A service that is not serving this
+		// surface is the Unavailable row, as it is for a deployment that does
+		// not serve temporary access links. The route that told the client
+		// answers 404, so this is checked before the status table, which
+		// would call it not found.
+		return Unavailable, true
 	case errors.Is(err, consume.ErrLinkExpired):
 		// Expiry that survived the one automatic refresh joins the
 		// platform's gone family: the link no longer leads to content.
 		return NotFound, true
-	case errors.Is(err, consume.ErrLinkUnavailable):
+	case errors.Is(err, consume.ErrLinkUnavailable), errors.Is(err, qurlapi.ErrAccountLoad),
+		errors.Is(err, qurlapi.ErrAccountUnavailable), errors.Is(err, qurlapi.ErrAccountExchange):
 		// The URL-bearing request or transport cause is intentionally removed,
 		// but this remains a retryable reachability failure.
 		return Unavailable, true
@@ -275,6 +344,29 @@ func cliSentinelCode(err error) (int, bool) {
 		// The platform asked the caller to come back later: not serving
 		// this request now — the Unavailable row.
 		return Unavailable, true
+	case errors.Is(err, consume.ErrCRIDNotFound), errors.Is(err, consume.ErrCRIDResourceClosed):
+		// A link asked for with only a CRID. The one not-found answer, with or
+		// without a device identity (ErrCRIDNotFoundNoDevice matches
+		// ErrCRIDNotFound), and a closed resource join the platform's gone
+		// family: the CRID does not lead to content.
+		return NotFound, true
+	case errors.Is(err, consume.ErrCRIDLinkUnavailable),
+		errors.Is(err, consume.ErrCRIDLinkNoAnswer),
+		errors.Is(err, consume.ErrCRIDPublisherOffline):
+		// Not serving this request now, or not reachable: waiting is the
+		// remedy. ErrCRIDLinkUnavailable is also what a refusal code outside
+		// the request's own set becomes (consume.ClassifyCRIDLinkError), so
+		// that answer exits with this code too.
+		return Unavailable, true
+	case errors.Is(err, consume.ErrCRIDLinkRateLimited):
+		return RateLimited, true
+	case errors.Is(err, consume.ErrCRIDLinkRequestRejected):
+		// The service rejected the request itself as invalid.
+		return InvalidInput, true
+	case errors.Is(err, consume.ErrCRIDLinkRefused):
+		// An answer that failed its check is discarded like any link that
+		// fails CRID verification: nothing was opened, nothing was emitted.
+		return VerificationFailed, true
 	case errors.Is(err, auth.ErrNoCredential), errors.Is(err, auth.ErrInvalidKey):
 		return Auth, true
 	case errors.Is(err, auth.ErrDeviceEnrollmentScope):

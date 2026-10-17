@@ -2168,6 +2168,60 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
 });
 
 describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, primary site)', () => {
+  it('primary site never logs apiDetail for quota_exceeded or an unmarked apiCode', async () => {
+    for (const fields of [
+      { apiCode: 'quota_exceeded', apiDetail: 'RAW-UNREDACTED-BODY' },
+      { apiCode: 'qurl_creation_failed', apiDetail: 'RAW-UNREDACTED-BODY', status: 400 },
+    ]) {
+      logger.error.mockClear();
+      mockDownloadAndUpload.mockRejectedValueOnce(Object.assign(new Error('upload failed'), fields));
+      await executeSendPipeline(makeInteraction(), makePipelineParams());
+      const call = logger.error.mock.calls.find(c => c[0] === 'Failed to prepare QURL links');
+      expect(call[1]).not.toHaveProperty('apiDetail');
+      expect(JSON.stringify(logger.error.mock.calls)).not.toContain('RAW-UNREDACTED-BODY');
+    }
+  });
+
+  // Seam test: drive the REAL connector upload (only fetch is faked) so the
+  // typed apiCode is proven to survive from connector.js into the audit
+  // reason. The two unit tests sit on either side of this boundary; a wrapper
+  // that dropped unknown apiCodes would leave both green and this one red.
+  it('file send: connector create-failed upload reaches the audit as upstream_create_failed', async () => {
+    const realConnector = jest.requireActual('../src/connector');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => '8' }, arrayBuffer: async () => new ArrayBuffer(8) })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          hash: 'h1',
+          resource_url: 'https://connector.test.local/resources/h1',
+          error: 'qURL creation failed: qURL API error (400): request body has unknown field "description"',
+        }),
+      });
+    mockDownloadAndUpload.mockImplementationOnce((...args) => realConnector.downloadAndUpload(...args));
+    try {
+      await executeSendPipeline(makeInteraction(), makePipelineParams());
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      kind: 'file',
+      reason: 'upstream_create_failed',
+      api_code: 'qurl_creation_failed',
+      status_code: 400,
+    }));
+    expect(logger.error).toHaveBeenCalledWith('Failed to prepare QURL links', expect.objectContaining({
+      apiCode: 'qurl_creation_failed',
+      status: 400,
+      apiDetail: expect.stringContaining('unknown field'),
+    }));
+  });
+
   it('file send: mint failure emits kind=file with the classified reason + status', async () => {
     const interaction = makeInteraction();
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });

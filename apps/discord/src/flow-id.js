@@ -1,5 +1,5 @@
 // flow-id — canonical parse/build for the shard-aware composite key
-// used by `flow_state.flow_id` (see qurl-integrations-infra
+// used by `flow_state.flow_id` (see the infrastructure repository
 // modules/qurl-bot-ddb flow_state table).
 //
 // Format: `<shard_id>#<guild_id>#<channel_id>#<user_id>`

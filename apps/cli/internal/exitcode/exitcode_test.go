@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
 
@@ -36,23 +37,48 @@ var cliSentinels = map[string]struct {
 	err  error
 	code int
 }{
-	"auth.ErrNoCredential":          {auth.ErrNoCredential, Auth},
-	"auth.ErrInvalidKey":            {auth.ErrInvalidKey, Auth},
-	"auth.ErrDeviceEnrollmentScope": {auth.ErrDeviceEnrollmentScope, Auth},
-	"auth.ErrEnrollmentTokenFile":   {auth.ErrEnrollmentTokenFile, Auth},
-	"auth.ErrCredentialConflict":    {auth.ErrCredentialConflict, Conflict},
-	"auth.ErrDeviceAccountConflict": {auth.ErrDeviceAccountConflict, Conflict},
-	"config.ErrInvalidProfileName":  {config.ErrInvalidProfileName, Config},
-	"config.ErrConfigFile":          {config.ErrConfigFile, Config},
-	"config.ErrSecretInConfig":      {config.ErrSecretInConfig, Config},
-	"cridux.ErrUnusableID":          {cridux.ErrUnusableID, InvalidInput},
-	"cridux.ErrTestIDOnProduction":  {cridux.ErrTestIDOnProduction, Usage},
-	"consume.ErrPipedNeedsFile":     {consume.ErrPipedNeedsFile, Usage},
-	"consume.ErrFileExists":         {consume.ErrFileExists, Conflict},
-	"consume.ErrLinkExpired":        {consume.ErrLinkExpired, NotFound},
-	"consume.ErrLinkUnavailable":    {consume.ErrLinkUnavailable, Unavailable},
-	"consume.ErrLinkFetch":          {consume.ErrLinkFetch, ServerError},
-	"consume.ErrUnopenableLink":     {consume.ErrUnopenableLink, ServerError},
+	"qurlapi.ErrAccountLoad":            {qurlapi.ErrAccountLoad, Unavailable},
+	"qurlapi.ErrAccountUnavailable":     {qurlapi.ErrAccountUnavailable, Unavailable},
+	"qurlapi.ErrAccountExchange":        {qurlapi.ErrAccountExchange, Unavailable},
+	"qurlapi.ErrAccountPort":            {qurlapi.ErrAccountPort, Config},
+	"qurlapi.ErrAccountEndpoint":        {qurlapi.ErrAccountEndpoint, Config},
+	"qurlapi.ErrAccountDenied":          {qurlapi.ErrAccountDenied, Auth},
+	"qurlapi.ErrPublishAccessConflict":  {qurlapi.ErrPublishAccessConflict, Conflict},
+	"auth.ErrAccountRecoveryState":      {auth.ErrAccountRecoveryState, Auth},
+	"auth.ErrAnonymousRecovery":         {auth.ErrAnonymousRecovery, Auth},
+	"auth.ErrExternalDeviceMissing":     {auth.ErrExternalDeviceMissing, Auth},
+	"auth.ErrExternalAnonymousRecovery": {auth.ErrExternalAnonymousRecovery, Auth},
+	"auth.ErrNoCredential":              {auth.ErrNoCredential, Auth},
+	"auth.ErrInvalidKey":                {auth.ErrInvalidKey, Auth},
+	"auth.ErrDeviceEnrollmentScope":     {auth.ErrDeviceEnrollmentScope, Auth},
+	"auth.ErrEnrollmentTokenFile":       {auth.ErrEnrollmentTokenFile, Auth},
+	"auth.ErrCredentialConflict":        {auth.ErrCredentialConflict, Conflict},
+	"auth.ErrDeviceAccountConflict":     {auth.ErrDeviceAccountConflict, Conflict},
+	"config.ErrInvalidProfileName":      {config.ErrInvalidProfileName, Config},
+	"config.ErrConfigFile":              {config.ErrConfigFile, Config},
+	"config.ErrSecretInConfig":          {config.ErrSecretInConfig, Config},
+	"cridux.ErrUnusableID":              {cridux.ErrUnusableID, InvalidInput},
+	"cridux.ErrTestIDOnProduction":      {cridux.ErrTestIDOnProduction, Usage},
+	"consume.ErrPipedNeedsFile":         {consume.ErrPipedNeedsFile, Usage},
+	"consume.ErrFileExists":             {consume.ErrFileExists, Conflict},
+	"consume.ErrLinkExpired":            {consume.ErrLinkExpired, NotFound},
+	"consume.ErrLinkUnavailable":        {consume.ErrLinkUnavailable, Unavailable},
+	"consume.ErrLinkFetch":              {consume.ErrLinkFetch, ServerError},
+	"consume.ErrUnopenableLink":         {consume.ErrUnopenableLink, ServerError},
+
+	// A link asked for with only a CRID. Not found is one answer whatever the
+	// cause and whatever the device; a closed resource joins the gone family;
+	// "not now" and "no answer" are Unavailable; an answer that failed its
+	// check shares CRID verification's fail-closed row.
+	"consume.ErrCRIDNotFound":            {consume.ErrCRIDNotFound, NotFound},
+	"consume.ErrCRIDNotFoundNoDevice":    {consume.ErrCRIDNotFoundNoDevice, NotFound},
+	"consume.ErrCRIDResourceClosed":      {consume.ErrCRIDResourceClosed, NotFound},
+	"consume.ErrCRIDLinkUnavailable":     {consume.ErrCRIDLinkUnavailable, Unavailable},
+	"consume.ErrCRIDLinkNoAnswer":        {consume.ErrCRIDLinkNoAnswer, Unavailable},
+	"consume.ErrCRIDPublisherOffline":    {consume.ErrCRIDPublisherOffline, Unavailable},
+	"consume.ErrCRIDLinkRateLimited":     {consume.ErrCRIDLinkRateLimited, RateLimited},
+	"consume.ErrCRIDLinkRequestRejected": {consume.ErrCRIDLinkRequestRejected, InvalidInput},
+	"consume.ErrCRIDLinkRefused":         {consume.ErrCRIDLinkRefused, VerificationFailed},
 
 	// Platform access flow (direct downloads through the SDK opener). The
 	// two settings sentinels share the Hub triple's Config row; the local
@@ -67,12 +93,18 @@ var cliSentinels = map[string]struct {
 	"daemon.ErrAlreadyRunning":          {connectordaemon.ErrAlreadyRunning, Conflict},
 	"daemon.ErrDirectEgressRequired":    {connectordaemon.ErrDirectEgressRequired, Config},
 	"daemon.ErrResourceGone":            {connectordaemon.ErrResourceGone, NotFound},
+	// No systemd user manager is remedied by the supervision mode, the same
+	// remedy class as ErrRuntimeSupervision.
+	"daemon.ErrUserServiceManagerUnavailable": {connectordaemon.ErrUserServiceManagerUnavailable, Config},
 	// An externally supervised daemon that is absent is the Unavailable row:
 	// the command and operand are valid, the local service is not serving,
 	// and the supervisor (not qurl) is what brings it back.
 	"daemon.ErrExternalDaemonNotRunning": {connectordaemon.ErrExternalDaemonNotRunning, Unavailable},
 	"state.ErrNoDefaultStateDir":         {state.ErrNoDefaultStateDir, Config},
 	"state.ErrAgentStateEnvelope":        {state.ErrAgentStateEnvelope, Config},
+	// A directory other users can write to is remedied by its mode or by the
+	// state location: configuration, not the command line.
+	"state.ErrUnsafeDirectory": {state.ErrUnsafeDirectory, Config},
 	// A supervision mismatch is remedied by the --supervision setting, the
 	// same remedy class as the Hub triple: configuration, not the command line.
 	"state.ErrRuntimeSupervision":           {state.ErrRuntimeSupervision, Config},
@@ -89,6 +121,14 @@ var cliSentinels = map[string]struct {
 	// even though it lives in the environment.
 	"hub.ErrConfig":           {hub.ErrConfig, Config},
 	"sessionconfig.ErrConfig": {sessionconfig.ErrConfig, Config},
+
+	// A service that does not offer access requests is not serving that
+	// surface: the Unavailable row, whether a missing route or an answer
+	// without the setting showed it.
+	"qurlapi.ErrAccessRequestsUnsupported": {qurlapi.ErrAccessRequestsUnsupported, Unavailable},
+
+	// A device id that no approved person has is a thing that is not there.
+	"qurlapi.ErrApprovedPersonNotFound": {qurlapi.ErrApprovedPersonNotFound, NotFound},
 }
 
 // sdkSentinels pins the mapping for every qurl-go sentinel the CLI can
@@ -103,6 +143,7 @@ var sdkSentinels = map[string]struct {
 	"qurl.ErrInvalidClientConfig":                 {qurl.ErrInvalidClientConfig, Config},
 	"qurl.ErrInvalidResourceRequest":              {qurl.ErrInvalidResourceRequest, InvalidInput},
 	"qurl.ErrInvalidPortalRequest":                {qurl.ErrInvalidPortalRequest, InvalidInput},
+	"qurl.ErrInvalidPublisherName":                {qurl.ErrInvalidPublisherName, InvalidInput},
 	"qurl.ErrInvalidAPIResponse":                  {qurl.ErrInvalidAPIResponse, ServerError},
 	"qurl.ErrCredentialStateNotFound":             {qurl.ErrCredentialStateNotFound, Auth},
 	"qurl.ErrInsecureCredentialStatePermissions":  {qurl.ErrInsecureCredentialStatePermissions, Auth},
@@ -184,6 +225,11 @@ var sdkSentinels = map[string]struct {
 	"qurl.ErrConnectorResourceRateLimited":           {qurl.ErrConnectorResourceRateLimited, RateLimited},
 	"qurl.ErrConnectorResourceRequestRejected":       {qurl.ErrConnectorResourceRequestRejected, InvalidInput},
 	"qurl.ErrInvalidNativeConnectorResourceResponse": {qurl.ErrInvalidNativeConnectorResourceResponse, ServerError},
+
+	// The device credential may be used on a fixed list of routes. A request
+	// outside it is refused before it is sent: a capability this build does
+	// not have, the General row.
+	"qurl.ErrRegisteredAgentResourceRequestDenied": {qurl.ErrRegisteredAgentResourceRequestDenied, General},
 }
 
 // TestSentinelMapping asserts every defined sentinel — CLI and SDK — maps to
@@ -423,6 +469,8 @@ func TestSealedOpenKeepsTheCauseQurlGoClassifies(t *testing.T) {
 		"state not found":      {qurl.ErrCredentialStateNotFound, Auth},
 		"setup lock":           {qurl.ErrAgentSetupLock, General},
 		"envelope mismatch":    {nil, Config},
+		"TPM not responding":   {fmt.Errorf("%w: operation abandoned: %w", connectoragentstate.ErrTPMNotResponding, context.DeadlineExceeded), Unavailable},
+		"TPM busy at create":   {fmt.Errorf("%w; retry, or set LAYERV_KEY_PROVIDER=file", connectoragentstate.ErrTPMNotResponding), Unavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := fmt.Errorf("%w: initialize sealed agent state", state.ErrAgentStateEnvelope)
@@ -433,5 +481,31 @@ func TestSealedOpenKeepsTheCauseQurlGoClassifies(t *testing.T) {
 				t.Fatalf("FromError = %d, want %d", got, test.want)
 			}
 		})
+	}
+}
+
+// TestHostConditionsWinOverWrappedSentinels pins that the exit code agrees
+// with the rendering, which puts host conditions first: a chain that also
+// carries a CLI, resource, or connector sentinel still exits Config.
+func TestHostConditionsWinOverWrappedSentinels(t *testing.T) {
+	for _, inner := range []error{config.ErrConfigFile, state.ErrConnectorResourceState, connectordaemon.ErrAlreadyRunning} {
+		unsafeDir := &state.UnsafeDirectoryError{Dir: "/home/agent/.local", Mode: 0o775, Err: fmt.Errorf("open: %w", inner)}
+		noManager := fmt.Errorf("%w: %w", connectordaemon.ErrUserServiceManagerUnavailable, inner)
+		for _, err := range []error{unsafeDir, noManager} {
+			if got := FromError(err); got != Config {
+				t.Errorf("FromError(%v) = %d, want Config", err, got)
+			}
+		}
+	}
+}
+
+// TestTPMNotRespondingOutranksAHostCondition pins the deliberate exception in
+// hostConditionCode: a chain carrying both a host condition and a TPM that is
+// not responding exits retryable.
+func TestTPMNotRespondingOutranksAHostCondition(t *testing.T) {
+	unsafeDir := &state.UnsafeDirectoryError{Dir: "/home/agent/.local", Mode: 0o775, Err: errors.New("open")}
+	err := errors.Join(unsafeDir, fmt.Errorf("%w: busy", connectoragentstate.ErrTPMNotResponding))
+	if got := FromError(err); got != Unavailable {
+		t.Fatalf("FromError(unsafe directory + TPM not responding) = %d, want Unavailable", got)
 	}
 }

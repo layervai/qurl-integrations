@@ -112,7 +112,7 @@ func (h *Handler) persistAssistantContext(ctx context.Context, log *slog.Logger,
 	}
 	key := agentThreadKey(at.ChannelID, at.ThreadTS)
 	if err := h.cfg.AgentStore.PutThreadContext(ctx, teamID, key, at.Context.ChannelID); err != nil {
-		log.Warn("agent: persist assistant pane context failed", "error", err)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "agent: persist assistant pane context failed", "error", err)
 	}
 }
 

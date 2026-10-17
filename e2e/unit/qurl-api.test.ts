@@ -458,3 +458,24 @@ test('getResourceStatus does not opt in, so it ignores Retry-After', async () =>
   fetchMock.mockResolvedValueOnce(jsonResponse({ links: [{ qurl_link: link.qurl_link }] }));
   await expect(qurl.mintConnectorView('https://upload.example.com', 'source', apiKey, { expiresAt: link.expires_at })).rejects.toThrow('incomplete child identity');
  });
+
+test('child cleanup resolves its shared parent and deletes only the exact child', async () => {
+  fetchMock.mockResolvedValueOnce(jsonResponse({ data: { resource_id: publicResourceId, status: 'active' } }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }));
+  await qurl.revokeChild(mintUrl, apiKey, qurlId);
+  expect(fetchMock.mock.calls[0][0]).toBe(`${mintUrl}/${qurlId}`);
+  expect(String(fetchMock.mock.calls[1][0])).toBe(`https://api.example.com/v1/resources/${encodeURIComponent(publicResourceId)}/qurls/${qurlId}`);
+  expect(fetchMock.mock.calls[1][1].method).toBe('DELETE');
+});
+
+test.each([403, 404])('child cleanup fails closed on parent lookup %s without a delete', async (status) => {
+  fetchMock.mockResolvedValueOnce(jsonResponse({}, status));
+  await expect(qurl.revokeChild(mintUrl, apiKey, qurlId)).rejects.toThrow(`qURL lookup failed: ${status}`);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+test('child cleanup reports a refused delete', async () => {
+  fetchMock.mockResolvedValueOnce(jsonResponse({ resource_id: publicResourceId, status: 'active' }))
+    .mockResolvedValueOnce(new Response(null, { status: 403 }));
+  await expect(qurl.revokeChild(mintUrl, apiKey, qurlId)).rejects.toThrow('revocation: 403');
+});

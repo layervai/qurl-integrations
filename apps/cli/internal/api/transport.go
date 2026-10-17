@@ -34,6 +34,7 @@ const (
 // allowlisted read-like request or when the caller supplied an Idempotency-Key.
 // A 503 requires the key. It implements qurl.HTTPDoer.
 type transport struct {
+	ownerID      string
 	next         *http.Client
 	userAgent    string
 	newRequestID func() string
@@ -68,6 +69,7 @@ func newTransport(cfg *Config) *transport {
 		newRequestID = randomRequestID
 	}
 	return &transport{
+		ownerID:      cfg.OwnerID,
 		next:         httpClient,
 		userAgent:    "qurl-cli/" + cfg.Version,
 		newRequestID: newRequestID,
@@ -114,6 +116,9 @@ func (t *transport) DoOnce(req *http.Request) (*http.Response, error) {
 
 func (t *transport) do(req *http.Request, allowRetry bool) (*http.Response, error) {
 	request := req.Clone(req.Context())
+	if t.ownerID != "" {
+		request.Header.Set("X-QURL-Owner", t.ownerID)
+	}
 	request.Header.Set("User-Agent", t.userAgent)
 	request.Header.Set("X-Request-Id", t.newRequestID())
 

@@ -5,12 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
@@ -62,13 +64,7 @@ scripts and pipelines must pass --yes.`,
 			}
 			result, err := client.Delete(cmd.Context(), assessment.Input)
 			if err != nil {
-				// A revoke may commit before protection cleanup returns 503. Only
-				// authoritative read-back permits withdrawing the local route; the
-				// original error still requires the caller to retry protection proof.
-				resource, readErr := client.Resource(cmd.Context(), assessment.Input)
-				if readErr == nil && resource != nil && resource.Status == "revoked" {
-					return errors.Join(err, cleanupDeletedLocalShare(cmd.Context(), opts, assessment.Input))
-				}
+				cleanupAfterDeleteFailure(cmd.Context(), opts, client, assessment.Input, err)
 				return err
 			}
 			if result.AlreadyGone {
@@ -92,6 +88,25 @@ scripts and pipelines must pass --yes.`,
 	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
 	return cmd
+}
+
+// cleanupAfterDeleteFailure withdraws a confirmed revoked route without
+// replacing the original error: protection still needs the caller to retry.
+func cleanupAfterDeleteFailure(ctx context.Context, opts *globalOpts, client qurlapi.Client, id string, deleteErr error) {
+	var apiErr *qurlapi.Error
+	if ctx.Err() != nil || !errors.As(deleteErr, &apiErr) || apiErr.StatusCode < http.StatusInternalServerError {
+		return
+	}
+	// A server failure can follow a committed revoke. Client failures need
+	// no extra request; a server failure alone is not proof of the commit.
+	resource, readErr := client.Resource(ctx, id)
+	// TODO(upstream-contract): only qurl-service's revoked status confirms the commit.
+	if readErr != nil || resource == nil || resource.Status != "revoked" {
+		return
+	}
+	if cleanupErr := cleanupDeletedLocalShare(ctx, opts, id); cleanupErr != nil {
+		opts.printer().Warnf("Revocation is committed, but local sharing cleanup did not finish: %v", cleanupErr)
+	}
 }
 
 // cleanupDeletedLocalShare converges local desired state after the service has

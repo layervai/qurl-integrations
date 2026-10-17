@@ -190,7 +190,7 @@ async function getIdentity(apiKey, guildId) {
   // Unlike makeClient, there is deliberately NO `apiKey || config.QURL_API_KEY`
   // fallback: a guild status check must validate the guild's own stored key,
   // never the bot's, or a guild with no key would read as configured.
-  // TODO(upstream-contract): qurl-integrations-infra's Discord dependency-auth
+  // TODO(upstream-contract): the infra repo's Discord dependency-auth
   // metric filter pages on every event and does not filter by path. Do not emit
   // that service-outage signal for this user-initiated validation: a rejected
   // tenant key is an expected status result. The command handler records a

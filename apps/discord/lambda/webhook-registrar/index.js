@@ -38,16 +38,16 @@
 //
 // Invocation flow: with a matching subscription, a valid SSM secret is reused
 // while a missing or unrecognized value rotates; with no match, a new secret
-// is created. In qurl-integrations-infra, the HTTP receiver ECS service depends
+// is created. In the infrastructure repository, the HTTP receiver ECS service depends
 // on `aws_lambda_invocation.webhook_registrar`; its task definition resolves
 // QURL_WEBHOOK_SECRET from SSM at task launch, so an apply writes any new value
 // before replacement tasks start. A manual invocation only forces rotation
 // after the operator first clears or reseeds SSM; invalid legacy state and
 // dedupe recovery can also rotate. Whenever it creates/rotates, immediately
 // force a new ECS deployment after it succeeds.
-// TODO(upstream-contract): qurl-integrations-infra/qurl-bot-discord/terraform/http_rehome_v2.tf
+// TODO(upstream-contract): the infra repo's qurl-bot-discord/terraform/http_rehome_v2.tf
 //
-// IAM scope (set in qurl-integrations-infra):
+// IAM scope (set in the infrastructure repository):
 //   - ssm:GetParameter on the QURL_API_KEY + QURL_WEBHOOK_SECRET paths
 //   - ssm:PutParameter on the QURL_WEBHOOK_SECRET path
 //   - logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents
@@ -222,7 +222,7 @@ exports.handler = async (event, context) => {
   // Read the qurl-service API key from SSM by name — keeps the value
   // out of Terraform state, Lambda env, and invocation logs. The
   // Lambda's IAM role has GetParameter on this specific parameter
-  // (scoped in qurl-integrations-infra).
+  // (scoped in the infrastructure repository).
   const apiKey = await readSsmSecureString({ ssmClient, name: input.apiKeySsmParamName });
   if (!apiKey) {
     // Falsy catches both `null` (ParameterNotFound mapped) and `''`
@@ -237,10 +237,10 @@ exports.handler = async (event, context) => {
   // so ensureWebhookSubscription creates or rotates as appropriate. On
   // subsequent invocations the SSM value is the previously-persisted
   // server-issued secret, which the registrar reuses if the sub matches.
-  // qurl-integrations-infra orders the HTTP receiver service after the
+  // The infrastructure repository orders the HTTP receiver service after the
   // synchronous Lambda invocation, so tasks resolve this parameter only
   // after any created/rotated value has been strictly persisted below.
-  // TODO(upstream-contract): qurl-integrations-infra/qurl-bot-discord/terraform/http_rehome_v2.tf
+  // TODO(upstream-contract): the infra repo's qurl-bot-discord/terraform/http_rehome_v2.tf
   // Preserve the server's signing key bytes, including outer whitespace.
   const initialSecret = await readSsmSecureString({ ssmClient, name: input.ssmParamName });
 

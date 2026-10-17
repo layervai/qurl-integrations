@@ -73,4 +73,16 @@ jobs:
           # Slack/shared gates verify the root config schema. Repeating that
           # network-dependent fetch here adds flake; the linter still applies it.
           verify: false
+          # TODO(upstream-contract): golangci-lint-action's cache key.
+          # Analyse from scratch. The action's cache key is only the OS, a
+          # weekly interval and go.mod's hash, so this one-package run
+          # restores the entry the repo-wide slack/shared lints save on main.
+          # On 2026-10-14 that entry made staticcheck report SA5011 at every
+          # `if x == nil { t.Fatal(...) }` in this package, on any PR that
+          # changed a file here (#1599, reproduced by #1600), while a fresh
+          # cache on the same tree reported 0 issues. One package lints in
+          # seconds without it, and a required check must not depend on what
+          # another workflow last wrote. TestWorkflowContractLintsWithoutTheSharedCache
+          # keeps it.
+          skip-cache: true
           args: --timeout=5m ./internal/ciworkflows/...

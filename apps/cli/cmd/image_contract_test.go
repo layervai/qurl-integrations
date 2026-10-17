@@ -171,6 +171,7 @@ func TestActiveSourcesDoNotReferenceLegacyConnectorArtifacts(t *testing.T) {
 			}
 			return nil
 		}
+		// Unit tests may name retired artifacts to assert that they are rejected.
 		if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, ".test.ts") || strings.HasSuffix(path, ".golden") {
 			return nil
 		}
@@ -282,6 +283,7 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 		"TestReadSandboxSecretFileFailsClosed",
 		"TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding",
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
+		"TestSandboxDaemonExitWaitIsBounded",
 		"TestSandboxDeletedCommandDiagnosticWithholdsChildOutput",
 		"TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey",
 		"TestSandboxFailureDiagnosticExtractionIsClosed",
@@ -296,6 +298,7 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 		"TestSandboxGrantedRouteProbeRejectsMissingAuthorization",
 		"TestSandboxGrantedRouteReadiness",
 		"TestSandboxHarnessPassesInlineAPIKeyToExactBinary",
+		"TestSandboxInspectionDocReadsEveryInspectKey",
 		"TestSandboxLocalStateReasonDoesNotForwardHostileLogText",
 		"TestSandboxLocalStateReasonIsClosedAndUsesLatestCause",
 		"TestSandboxNamespaceIsCanonicalAndSeparated",
@@ -305,8 +308,12 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 		"TestSandboxResourceCleanupIsSafeBeforePublish",
 		"TestSandboxRunIdentityBindsOnlyImmutableHardenedImage",
 		"TestSandboxShareCommandDiagnosticWithholdsChildOutput",
+		"TestSandboxShareRowWaitNamesWhyItGaveUp",
 		"TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure",
+		"TestSandboxStateWaitReportsLastAnswerAsClosedTokens",
 		"TestSandboxStoppedRouteRefusalMatchesQuietGet",
+		"TestSandboxTempDirRemovalReport",
+		"TestSandboxUserJobWait",
 		"TestValidateSandboxCLIBinary",
 		"TestValidateSandboxDeviceIdentity",
 		"TestValidateSandboxRouteFence",

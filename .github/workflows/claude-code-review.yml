@@ -265,7 +265,7 @@ jobs:
         # `is_error: true` fail instead of producing a false-green review
         # check. Moving the pin forward keeps that guarantee; do not pin below
         # that floor.
-        uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c # v1.0.193
+        uses: anthropics/claude-code-action@12dd8d74c712f5f3669365b2369b558c495b1104 # v1.0.238
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
@@ -323,13 +323,13 @@ jobs:
             anything yourself: this workflow publishes that final message
             verbatim as this run's pull-request comment.
 
-          # Nothing enforces model lockstep; keep --model identical to
-          # claude.yml's and change both in the same pull request.
+          # Nothing enforces model lockstep; keep --model and --effort identical
+          # to claude.yml's and change both in the same pull request.
           # Use the action's GitHub MCP subprocess for reads only. It receives
           # the repository token but not the Anthropic key. Local, network,
           # delegation, and GitHub write tools stay denied: the publish step
           # below emits the review, so Claude needs no comment tool at all.
-          claude_args: '--model claude-opus-5 --disallowed-tools "Bash,Read,Glob,Grep,LS,Task,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,mcp__github__create_or_update_file,mcp__github__push_files,mcp__github__delete_file,mcp__github__add_issue_comment" --allowed-tools "mcp__github__get_pull_request,mcp__github__get_pull_request_diff,mcp__github__get_pull_request_files,mcp__github__get_pull_request_review_comments,mcp__github__get_pull_request_reviews,mcp__github__get_pull_request_status,mcp__github__get_file_contents,mcp__github__search_code,mcp__github__get_issue,mcp__github__get_issue_comments,mcp__github__search_issues,mcp__github__search_pull_requests,mcp__github__list_issues,mcp__github__list_pull_requests"'
+          claude_args: '--model claude-opus-5-5 --effort medium --disallowed-tools "Bash,Read,Glob,Grep,LS,Task,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,mcp__github__create_or_update_file,mcp__github__push_files,mcp__github__delete_file,mcp__github__add_issue_comment" --allowed-tools "mcp__github__get_pull_request,mcp__github__get_pull_request_diff,mcp__github__get_pull_request_files,mcp__github__get_pull_request_review_comments,mcp__github__get_pull_request_reviews,mcp__github__get_pull_request_status,mcp__github__get_file_contents,mcp__github__search_code,mcp__github__get_issue,mcp__github__get_issue_comments,mcp__github__search_issues,mcp__github__search_pull_requests,mcp__github__list_issues,mcp__github__list_pull_requests"'
 
       - name: Report unfinished Claude review
         # Whichever way the review ended, the verification step below is skipped
@@ -432,10 +432,22 @@ jobs:
           # Match the remote structurally, not by token value: claude.yml omits
           # github_token so the action embeds its own GitHub App token, which
           # this step never sees. Userinfo must be x-access-token plus a single
-          # opaque secret containing no "@" or "/", so a crafted host cannot be
+          # opaque secret of URL-unreserved characters or percent-escapes, so a crafted
+          # host cannot be
           # smuggled through the credential field.
-          origin_host="${GITHUB_SERVER_URL#https://}"
-          action_origin_re="^https://x-access-token:[^@/]+@${origin_host//./\\.}/${GITHUB_REPOSITORY//./\\.}\\.git$"
+          # The secret is held to an allowlist rather than "anything but @ and
+          # /": a URL client ends the host at "#", "?" or "\" as well, so
+          # https://x-access-token:80#@<host>/<repo>.git would match a looser
+          # pattern while git connects to a host named x-access-token. The
+          # runner-provided host is checked too, so an empty or malformed
+          # GITHUB_SERVER_URL fails closed instead of loosening the pattern.
+          origin_host="${GITHUB_SERVER_URL:-}"
+          origin_host="${origin_host#https://}"
+          if [[ ! "${origin_host}" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ || -z "${GITHUB_REPOSITORY:-}" ]]; then
+            echo "::error::Runner-provided origin comparison targets are unavailable; failing closed."
+            exit 1
+          fi
+          action_origin_re="^https://x-access-token:[A-Za-z0-9._~%-]+@${origin_host//./\\.}/${GITHUB_REPOSITORY//./\\.}\\.git$"
           mapfile -t origin_urls < <(git remote get-url --all origin 2>/dev/null)
           mapfile -t origin_push_urls < <(git remote get-url --push --all origin 2>/dev/null)
           origin_fetch="${origin_urls[0]-}"
@@ -443,9 +455,9 @@ jobs:
           if (( ${#origin_urls[@]} != 1 || ${#origin_push_urls[@]} != 1 )) ||
              [[ "${origin_fetch}" != "${origin_push}" ]] ||
              [[ "${origin_fetch}" != "${LOCAL_ORIGIN}" && ! "${origin_fetch}" =~ ${action_origin_re} ]]; then
-            # Redact any embedded credential before logging.
+            # Never print either URL: a hostile one can carry the token
+            # anywhere, not only in userinfo.
             echo "::error::Claude changed the credential-free review origin; failing closed."
-            echo "::error::origin fetch=${origin_fetch//:*@/:***@} push=${origin_push//:*@/:***@}"
             exit 1
           fi
           # Drop the action's credentialed remote before anything downstream can

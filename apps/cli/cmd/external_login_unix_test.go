@@ -117,7 +117,7 @@ func TestExternalLoginEnrollsFreshNamespaceFromTheTokenFile(t *testing.T) {
 	}
 	// This is a negative-space check, not sealing coverage: the harness injects
 	// the environment through opts.lookupEnv, while state.Open and
-	// SealedProviderSelected read the process environment so they agree with
+	// SelectedKeyProvider read the process environment so they agree with
 	// what qurl-connector will see. The sealed branch is therefore never taken
 	// here and the fake runtime writes no state at all. Real sealing is covered
 	// by the state package's t.Setenv tests.
@@ -192,6 +192,26 @@ func TestExternalLoginWarmRunNeverReadsTheTokenFile(t *testing.T) {
 	requests := srv.Requests()
 	if len(requests) != 1 || requests[0].Header.Get("Authorization") != "Bearer "+state.DeviceAPIKey {
 		t.Fatalf("warm external login requests = %+v, want one device-authenticated request", requests)
+	}
+}
+
+// TestOpenNativeExternalRegisteredClientKeepsHandedOffStore pins that the
+// external-supervision open keeps the store it handed off, so whoami can read
+// the device public key without another Handoff.
+func TestOpenNativeExternalRegisteredClientKeepsHandedOffStore(t *testing.T) {
+	srv := apitest.NewServer(t)
+	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+	opts := bootstrapGlobalOpts(t, srv.URL, runtime)
+	stateDir, err := opts.resolveShareStateDir("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := opts.openNativeExternalRegisteredClient(context.Background(), stateDir, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = opts.closeAPIClient() }()
+	if opts.nativeStateStore != runtime.store {
+		t.Fatalf("external open kept store %v, want the handed-off %v", opts.nativeStateStore, runtime.store)
 	}
 }
 

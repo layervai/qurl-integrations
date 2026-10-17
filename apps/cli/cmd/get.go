@@ -17,9 +17,10 @@ import (
 
 // getFlags carries get's flag values into the run helpers.
 type getFlags struct {
-	file  string
-	force bool
-	yes   bool
+	file            string
+	force           bool
+	yes             bool
+	sessionDuration time.Duration
 }
 
 // getCmd is the Phase-1 consume command: mint a share link for a CRID,
@@ -35,19 +36,47 @@ func getCmd(opts *globalOpts) *cobra.Command {
 		Short: "Fetch what a CRID points to",
 		Long: `Fetch the content behind a CRID.
 
+get uses this device's identity. It works on the resource owner's devices
+and, for a private resource, on the devices the publisher allowed; any other
+device gets "not found".
+
+Where the deployment offers it, a public resource can also be fetched on any
+machine with only its CRID: no account and no setup. The deployment this
+release ships does not offer it yet. Where it is offered, get asks for a link
+this way first. On Linux and macOS a device that has an identity asks as this
+device, so it can also get a link this way for a private resource it is
+allowed to open. On other systems it asks with the CRID alone. A machine that
+has an account key in its environment and no device identity yet asks first
+too, with the CRID alone. Only when no link is given do these mint a share
+link. On a machine with no device identity and no account key the answer is
+final, and that machine creates no device identity. The three most common
+answers when no link is given:
+
+  - "not found" (exit code 5): the CRID is mistyped, the resource was
+    removed, or it is not open to this machine.
+  - "can't give a link right now" (exit code 11): nothing is wrong with the
+    CRID. Try again later.
+  - "too many requests" (exit code 9): wait, then try again.
+
 get mints a fresh share link exactly like ` + "`qurl share`" + ` and verifies it
 against the CRID you asked for — a mismatch is discarded and the command
 exits with code 12 before anything happens. Only a verified link is ever
 acted on:
 
-  - On a terminal, get opens the link in your browser (set QURL_BROWSER or
-    BROWSER to choose which one).
+  - On a terminal, get prints the link with the resource's publisher and
+    creation date, then opens it in your browser (set QURL_BROWSER or BROWSER
+    to choose which one).
   - With --file <path> it downloads to that path instead. The download is
     atomic: bytes arrive in <path>.part, which becomes <path> only when the
     download completes. Existing files are never replaced unless --force is
     given. If a granted link is not ready, the CLI retries that same grant
     briefly. It requests one fresh link only after the grant expires.
   - With --file - the raw bytes stream to stdout, clean for piping.
+
+With --file, the publisher and creation date are reported on stderr before
+the content is fetched. A publisher name is self-declared and shown as
+UNVERIFIED: LayerV has not confirmed who the publisher is. --quiet omits that
+report.
 
 When stdout is not a terminal, get never opens a browser: pass --file, or
 use ` + "`qurl share`" + ` if you only need the link.`,
@@ -77,6 +106,7 @@ use ` + "`qurl share`" + ` if you only need the link.`,
 
 	cmd.Flags().StringVar(&flags.file, "file", "", "download to this path instead of opening a browser (\"-\" = raw bytes to stdout)")
 	cmd.Flags().BoolVar(&flags.force, "force", false, "allow --file to replace an existing file")
+	cmd.Flags().DurationVar(&flags.sessionDuration, "session-duration", 0, "session lifetime after access starts, e.g. 5m or 1h (default: service policy)")
 	cmd.Flags().BoolVar(&flags.yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
 	return cmd
@@ -85,6 +115,9 @@ use ` + "`qurl share`" + ` if you only need the link.`,
 // runGet applies the CRID guards, decides the action locally, and acts on a
 // verified answer only.
 func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlags) error {
+	if flags.sessionDuration != 0 && (flags.sessionDuration < 0 || flags.sessionDuration%time.Second != 0) {
+		return exitcode.UsageError(fmt.Errorf("--session-duration %s must be a positive whole number of seconds", flags.sessionDuration))
+	}
 	assessment, err := cridux.Assess(operand)
 	if err != nil {
 		return err
@@ -106,22 +139,24 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}
 	}
 
-	client, err := opts.newClient(ctx)
-	if err != nil {
-		return err
-	}
-	// mint requests a share link and verifies it; every path below — the
-	// browser launch, the download, and the mid-download retry — goes
-	// through it, so nothing ever acts on an unverified answer.
+	// mint gets a link and verifies it; every path below — the browser
+	// launch, the download, and the mid-download retry — goes through it, so
+	// nothing ever acts on an unverified answer. links decides where each
+	// link of this run comes from: the share request or the link request.
+	// What happens to a link afterwards does not depend on that.
 	var shareLink *qurlapi.ShareLink
+	links := opts.linkSourceForGet(assessment, qurlapi.ShareOptions{SessionDurationSeconds: int(flags.sessionDuration / time.Second)})
+	noteSessionDuration := sessionDurationNoteOnce(printer, flags.sessionDuration)
 	mint := func(ctx context.Context) (string, error) {
-		result, err := client.Share(ctx, assessment.Input, qurlapi.ShareOptions{})
-		if err := verifyShareLink(assessment, result, err); err != nil {
+		result, origin, err := links.next(ctx)
+		if err != nil {
 			return "", err
 		}
 		if err := opts.verifyLink(ctx, result.QURL, assessment.Input); err != nil {
 			return "", err
 		}
+		links.verified(origin)
+		noteSessionDuration(origin.byLinkRequest())
 		shareLink = result
 		return result.QURL, nil
 	}
@@ -151,6 +186,9 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}, nil
 	}
 
+	// Both download modes say who published the content before fetching it.
+	announced := announcePublisherOnce(printer, fetchTarget, func() *qurlapi.ShareLink { return shareLink })
+
 	switch action {
 	case consume.ActionOpenBrowser:
 		if _, err := mint(ctx); err != nil {
@@ -158,24 +196,47 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}
 		return openInBrowser(ctx, opts, printer, shareLink)
 	case consume.ActionStreamStdout:
-		downloader := &consume.Downloader{MintTarget: fetchTarget}
+		downloader := &consume.Downloader{MintTarget: announced}
 		_, err := downloader.StreamTo(ctx, opts.streams.Out)
 		return err
 	case consume.ActionSaveFile:
-		downloader := &consume.Downloader{MintTarget: fetchTarget}
+		downloader := &consume.Downloader{MintTarget: announced}
 		n, err := downloader.SaveTo(ctx, flags.file, flags.force)
 		if err != nil {
 			return err
 		}
-		return printer.Downloaded(shareLink.CRID, flags.file, n)
+		return printer.Downloaded(shareLink, flags.file, n)
 	default:
 		return fmt.Errorf("unhandled action %d", action)
 	}
 }
 
-// openInBrowser prints the verified link, then launches the browser at it.
-// Data first: with the link on stdout, a failed launch still leaves the
-// user something to act on.
+// announcePublisherOnce wraps the download target source for both --file
+// modes. The publisher goes to stderr once, after the first verified answer
+// and before any content is fetched, so the reader sees UNVERIFIED before the
+// download rather than after it. A link refreshed mid-download names the same
+// resource and stays silent. The Downloader calls MintTarget sequentially,
+// never concurrently, so the flag needs no lock.
+func announcePublisherOnce(
+	printer *output.Printer,
+	fetch func(context.Context) (consume.DownloadTarget, error),
+	minted func() *qurlapi.ShareLink,
+) func(context.Context) (consume.DownloadTarget, error) {
+	announced := false
+	return func(ctx context.Context) (consume.DownloadTarget, error) {
+		target, err := fetch(ctx)
+		if err == nil && !announced {
+			announced = true
+			printer.PublisherNotice(minted())
+		}
+		return target, err
+	}
+}
+
+// openInBrowser prints the verified link with its publisher and creation
+// date, then launches the browser at it. Data first: the reader sees who
+// published the resource before the browser opens, and with the link on
+// stdout a failed launch still leaves the user something to act on.
 func openInBrowser(ctx context.Context, opts *globalOpts, printer *output.Printer, link *qurlapi.ShareLink) error {
 	if err := printer.ShareLink(link); err != nil {
 		return err

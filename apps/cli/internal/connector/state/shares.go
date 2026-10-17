@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -66,15 +67,19 @@ type LocalShare struct {
 	TargetURL          string    `json:"target_url" yaml:"target_url"`
 	LocalIP            string    `json:"local_ip" yaml:"local_ip"`
 	LocalPort          int       `json:"local_port" yaml:"local_port"`
+	LocalSocketPath    string    `json:"local_socket_path,omitempty" yaml:"local_socket_path,omitempty"`
 	DesiredState       string    `json:"desired_state" yaml:"desired_state"`
 	ServingEpoch       uint64    `json:"serving_epoch" yaml:"serving_epoch"`
 	UpdatedAt          time.Time `json:"updated_at" yaml:"-"`
 }
 
 type localSharesState struct {
-	Version int                   `json:"version"`
-	OwnerID string                `json:"owner_id,omitempty"`
-	Shares  map[string]LocalShare `json:"shares"`
+	// PrivateOriginPrefix is set by external conversion even with no shares.
+	// Old strict decoders then refuse writes; current writers keep this prefix Unix-only.
+	PrivateOriginPrefix string                `json:"private_origin_prefix,omitempty"`
+	Version             int                   `json:"version"`
+	OwnerID             string                `json:"owner_id,omitempty"`
+	Shares              map[string]LocalShare `json:"shares"`
 }
 
 // LocalShareRegistry is a crash-safe owner-only registry rooted beside the
@@ -175,7 +180,7 @@ func (r *LocalShareRegistry) Put(ctx context.Context, candidate *LocalShare) err
 			if share.ServingEpoch == existing.ServingEpoch && share.DesiredState != existing.DesiredState {
 				return fmt.Errorf("refuse contradictory desired state %q at serving epoch %d", share.DesiredState, share.ServingEpoch)
 			}
-			targetChanged := share.TargetURL != existing.TargetURL || share.LocalIP != existing.LocalIP || share.LocalPort != existing.LocalPort
+			targetChanged := share.Target() != existing.Target()
 			if targetChanged && share.ServingEpoch == existing.ServingEpoch {
 				return fmt.Errorf("refuse local target change without a newer serving epoch than %d", existing.ServingEpoch)
 			}
@@ -226,17 +231,41 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 }
 
 // LocalTarget is one loopback destination, already classified by the caller.
-// Retarget takes the three fields rather than re-deriving the address from
+// Retarget takes the transport fields rather than re-deriving the address from
 // the URL: the caller holds them, and re-parsing would swallow the errors
 // that say what is actually wrong. validateLocalShare still cross-checks them
 // against the URL, so a caller outside this package cannot store a mismatch.
 type LocalTarget struct {
-	URL  string
-	IP   string
-	Port int
+	URL        string
+	IP         string
+	Port       int
+	SocketPath string
 }
 
-// Retarget moves one row to a new loopback target under the newer serving
+// Target returns the complete local transport destination.
+func (s *LocalShare) Target() LocalTarget {
+	return LocalTarget{URL: s.TargetURL, IP: s.LocalIP, Port: s.LocalPort, SocketPath: s.LocalSocketPath}
+}
+
+// ValidateTarget rejects a forbidden transport before callers change cloud
+// sharing. Writes also enforce the policy under the registry lock.
+func (r *LocalShareRegistry) ValidateTarget(ctx context.Context, connectorID string, target LocalTarget) error {
+	state, unlock, err := r.loadLocked(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unlock() }()
+	return validatePrivateOriginTarget(state.PrivateOriginPrefix, connectorID, target)
+}
+
+func validatePrivateOriginTarget(prefix, connectorID string, target LocalTarget) error {
+	if prefix != "" && strings.HasPrefix(connectorID, prefix) && target.SocketPath == "" {
+		return errors.New("private origin shares require Unix transport")
+	}
+	return nil
+}
+
+// Retarget moves one row to a new local target under the newer serving
 // epoch the platform returned when the share was restarted. The target and
 // epoch land in one write, so no durable row ever pairs the old target with
 // the new epoch or the new target with the old one. A restart is
@@ -261,7 +290,7 @@ func (r *LocalShareRegistry) Retarget(ctx context.Context, id string, target Loc
 		if epoch <= share.ServingEpoch {
 			return fmt.Errorf("refuse local target change without a newer serving epoch than %d", share.ServingEpoch)
 		}
-		share.TargetURL, share.LocalIP, share.LocalPort = target.URL, target.IP, target.Port
+		share.TargetURL, share.LocalIP, share.LocalPort, share.LocalSocketPath = target.URL, target.IP, target.Port, target.SocketPath
 		share.DesiredState = desiredStateOn
 		share.ServingEpoch = epoch
 		share.UpdatedAt = time.Now().UTC()
@@ -276,6 +305,92 @@ func (r *LocalShareRegistry) Retarget(ctx context.Context, id string, target Loc
 		return nil, err
 	}
 	return &updated, nil
+}
+
+// AcquireDaemonLease excludes another daemon or offline target conversion for
+// this state namespace, even when its IPC socket has been removed or relocated.
+func AcquireDaemonLease(ctx context.Context, dir string) (func() error, error) {
+	return AcquireDaemonLeaseWithin(ctx, dir, 100*time.Millisecond)
+}
+
+// AcquireDaemonLeaseWithin is AcquireDaemonLease with a caller-chosen wait, so
+// an externally supervised daemon can outlast an overlapping predecessor that
+// is still draining during a rolling deploy.
+func AcquireDaemonLeaseWithin(ctx context.Context, dir string, wait time.Duration) (func() error, error) {
+	if err := EnsureDirMode(dir); err != nil {
+		return nil, err
+	}
+	bounded, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	unlock, err := acquireNamedStateLock(bounded, dir, "daemon.lock")
+	if err != nil {
+		return nil, fmt.Errorf("cannot obtain exclusive daemon ownership: %w", err)
+	}
+	return unlock, nil
+}
+
+// ValidateLocalRetargetSelector rejects malformed caller selectors before I/O.
+func ValidateLocalRetargetSelector(owner, prefix string) error {
+	if owner == "" || prefix == "" || !strings.HasSuffix(prefix, "-") || validateConnectorID(prefix+"x") != nil {
+		return errors.New("local target selector requires an owner and a valid connector ID prefix ending in a hyphen")
+	}
+	return nil
+}
+
+// RetargetStoppedToUnix excludes lease-aware daemons while changing local targets.
+// Callers must also reserve the configured IPC endpoint to exclude older daemons,
+// as daemon retarget-local does. External supervisors preserve resource authority, desired
+// state and serving epochs; ordinary live Retarget still requires a newer epoch.
+// Only the target grammar is checked: the origin directory may not exist yet,
+// so its owner-only parent is enforced when publish or restart preflights it
+// and by the daemon before each route reaches the Connector.
+func (r *LocalShareRegistry) RetargetStoppedToUnix(ctx context.Context, owner, prefix, origin string) (changed int, retErr error) {
+	target, err := ParseUnixTarget(origin)
+	if err != nil {
+		return 0, err
+	}
+	if err := ValidateLocalRetargetSelector(owner, prefix); err != nil {
+		return 0, err
+	}
+	if err := RequireRuntimeSupervision(r.dir, RuntimeSupervisionExternal); err != nil {
+		return 0, err
+	}
+	unlock, err := AcquireDaemonLease(ctx, r.dir)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
+	err = r.update(ctx, func(state *localSharesState) error {
+		if owner == "" || state.OwnerID != owner {
+			return errors.New("local target conversion account owner does not match")
+		}
+		if state.PrivateOriginPrefix != "" && state.PrivateOriginPrefix != prefix {
+			return errors.New("local target conversion prefix differs from the private origin namespace")
+		}
+		marked := state.PrivateOriginPrefix != ""
+		state.PrivateOriginPrefix = prefix
+		for key := range state.Shares {
+			share := state.Shares[key]
+			if !strings.HasPrefix(share.ConnectorID, prefix) || share.Target() == target {
+				continue
+			}
+			share.TargetURL, share.LocalIP, share.LocalPort, share.LocalSocketPath = target.URL, "", 0, target.SocketPath
+			share.UpdatedAt = time.Now().UTC()
+			if err := validateLocalShare(&share); err != nil {
+				return err
+			}
+			state.Shares[key] = share
+			changed++
+		}
+		if changed == 0 && marked {
+			return errLocalShareUnchanged
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return changed, nil
 }
 
 // DisableAtCurrentEpoch records a fail-closed local stop without rotating the
@@ -524,6 +639,11 @@ func validateLocalSharesState(state localSharesState) error {
 	if len(state.Shares) > 0 && state.OwnerID == "" {
 		return errors.New("local share registry with shares has no account owner")
 	}
+	if state.PrivateOriginPrefix != "" {
+		if err := ValidateLocalRetargetSelector(state.OwnerID, state.PrivateOriginPrefix); err != nil {
+			return err
+		}
+	}
 	crids := map[string]string{}
 	connectorIDs := map[string]string{}
 	for key := range state.Shares {
@@ -533,6 +653,9 @@ func validateLocalSharesState(state localSharesState) error {
 		}
 		if err := validateLocalShare(&share); err != nil {
 			return fmt.Errorf("local share %q: %w", key, err)
+		}
+		if err := validatePrivateOriginTarget(state.PrivateOriginPrefix, share.ConnectorID, share.Target()); err != nil {
+			return err
 		}
 		if owner, ok := crids[share.CRID]; ok {
 			return fmt.Errorf("local shares %q and %q have the same CRID", owner, key)
@@ -606,7 +729,39 @@ func validateLocalShareIdentity(share *LocalShare) error {
 	return nil
 }
 
+// TODO(upstream-contract): keep this conservative sun_path cap aligned with
+// Connector LocalHTTPRoute (macOS104 bytes including terminator, Linux108).
+const maxPrivateSocketPathBytes = 100
+
+// ParseUnixTarget validates the local-only Unix HTTP origin grammar. Paths are
+// deliberately excluded from errors because callers may log validation failures.
+func ParseUnixTarget(raw string) (LocalTarget, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || runtime.GOOS == "windows" || parsed.Scheme != "http+unix" || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || strings.Contains(raw, "#") {
+		return LocalTarget{}, errors.New("local Unix target must be an absolute socket URL without authority, query or fragment on a supported platform")
+	}
+	socket := parsed.Path
+	if !filepath.IsAbs(socket) || socket == "/" || filepath.Clean(socket) != socket || len(socket) > maxPrivateSocketPathBytes || strings.ContainsAny(socket, "\x00\r\n") {
+		return LocalTarget{}, errors.New("local Unix socket path is invalid")
+	}
+	canonical := (&url.URL{Scheme: "http+unix", Path: socket}).String()
+	if canonical != raw {
+		return LocalTarget{}, errors.New("local Unix socket URL must use canonical path encoding")
+	}
+	return LocalTarget{URL: canonical, SocketPath: socket}, nil
+}
+
 func validateLocalShareTarget(share *LocalShare) error {
+	if strings.HasPrefix(share.TargetURL, "http+unix:") || share.LocalSocketPath != "" {
+		target, err := ParseUnixTarget(share.TargetURL)
+		if err != nil {
+			return err
+		}
+		if share.LocalIP != "" || share.LocalPort != 0 || share.LocalSocketPath != target.SocketPath {
+			return errors.New("local Unix target must match its recorded socket and exclude TCP")
+		}
+		return nil
+	}
 	parsed, err := url.Parse(share.TargetURL)
 	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New("local share target must be a plain loopback HTTP origin")

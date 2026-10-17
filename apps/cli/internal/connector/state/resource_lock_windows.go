@@ -17,10 +17,14 @@ import (
 const connectorResourcesLockRetry = 25 * time.Millisecond
 
 func acquireConnectorResourcesLock(ctx context.Context, dir string) (func() error, error) {
+	return acquireNamedStateLock(ctx, dir, connectorResourcesLock)
+}
+
+func acquireNamedStateLock(ctx context.Context, dir, name string) (func() error, error) {
 	if ctx == nil {
 		return nil, errors.New("connector resource lock context is nil")
 	}
-	path := filepath.Join(dir, connectorResourcesLock)
+	path := filepath.Join(dir, name)
 	_, sd, err := currentWindowsConnectorSecurity()
 	if err != nil {
 		return nil, err

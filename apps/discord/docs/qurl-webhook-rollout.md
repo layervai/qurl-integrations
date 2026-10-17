@@ -45,7 +45,7 @@ itself fails), no in-app coordination needed.
 
 ## Deploy flow
 
-Terraform-side ordering (config lives in `qurl-integrations-infra`):
+Terraform-side ordering (config lives in the infrastructure repository):
 
 1. Apply the `qurl-views` DDB table and Terraform's `QURL_WEBHOOK_SECRET`
    SecureString seeded with `PLACEHOLDER`. The registrar replaces that public

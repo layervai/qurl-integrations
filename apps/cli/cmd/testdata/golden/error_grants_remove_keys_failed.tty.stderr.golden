@@ -1,0 +1,7 @@
+[31m[1mError:[0m access was taken away from abcd-efgh-2345-mnop. Then the change to the public keys failed.
+
+  the resource is being changed; try again
+
+  [2mRun `qurl grants qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q` to see who has access now.[0m
+  [2mTo make the change to the public keys, run: qurl grants qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q --add cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA=[0m
+  [2mRequest ID: req_test[0m

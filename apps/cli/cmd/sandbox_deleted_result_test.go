@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -29,6 +30,20 @@ func validateSandboxDeletedCommandResult(name string, gotCode int, stdout, stder
 	)
 }
 
+// sandboxSharePublisherNotice is the exact shape of the one line a piped
+// `qurl share` writes to stderr: the publisher notice, always UNVERIFIED
+// because no publisher can be verified, with an optional creation date. The
+// name is the publisher's quoted, escaped text; a sandbox running a service
+// that predates publisher metadata reports no name and no date.
+var sandboxSharePublisherNotice = regexp.MustCompile(
+	`^Warning: UNVERIFIED publisher(?:, no name provided \(not confirmed by LayerV\)| "(?:[^"\\[:cntrl:]]|\\.)*" \(self-declared name, not confirmed by LayerV\))\.(?: Created [0-9]{4}-[0-9]{2}-[0-9]{2}\.)?\n$`,
+)
+
+// validateSandboxShareCommandResult holds the piped share contract: stdout is
+// exactly one HTTPS link, and stderr is exactly the publisher notice. Any
+// other stderr - an environment-guard warning, a clamp note, a second line -
+// still fails. Like the deleted-result validator, the diagnostic reports only
+// lengths and fixed booleans.
 func validateSandboxShareCommandResult(name string, gotCode int, stdout, stderr string) (string, error) {
 	if gotCode != 0 {
 		return "", fmt.Errorf("%s = exit code %d, stdout %d bytes, stderr %d bytes; private details withheld", name, gotCode, len(stdout), len(stderr))
@@ -41,8 +56,9 @@ func validateSandboxShareCommandResult(name string, gotCode int, stdout, stderr 
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return "", fmt.Errorf("%s returned a non-HTTPS access link; private details withheld", name)
 	}
-	if stderr != "" {
-		return "", fmt.Errorf("%s wrote %d stderr bytes; private details withheld", name, len(stderr))
+	if !sandboxSharePublisherNotice.MatchString(stderr) {
+		return "", fmt.Errorf("%s wrote %d stderr bytes that are not exactly the UNVERIFIED publisher notice (contains UNVERIFIED: %t); private details withheld",
+			name, len(stderr), strings.Contains(stderr, "UNVERIFIED"))
 	}
 	return link, nil
 }
@@ -68,10 +84,21 @@ func TestSandboxDeletedCommandDiagnosticWithholdsChildOutput(t *testing.T) {
 }
 
 func TestSandboxShareCommandDiagnosticWithholdsChildOutput(t *testing.T) {
-	const validLink = "https://access.invalid/open#qv3.valid-secret"
-	link, err := validateSandboxShareCommandResult("share", 0, validLink+"\n", "")
-	if err != nil || link != validLink {
-		t.Fatalf("valid share = link length %d, error %v", len(link), err)
+	const (
+		validLink   = "https://access.invalid/open#qv3.valid-secret"
+		namedNotice = "Warning: UNVERIFIED publisher \"Acme Docs\" (self-declared name, not confirmed by LayerV). Created 2026-03-01.\n"
+	)
+	for name, notice := range map[string]string{
+		"named with date":      namedNotice,
+		"named without date":   "Warning: UNVERIFIED publisher \"Acme Docs\" (self-declared name, not confirmed by LayerV).\n",
+		"unnamed with date":    "Warning: UNVERIFIED publisher, no name provided (not confirmed by LayerV). Created 2026-03-01.\n",
+		"unnamed without date": "Warning: UNVERIFIED publisher, no name provided (not confirmed by LayerV).\n",
+		"escaped name":         "Warning: UNVERIFIED publisher \"Acme \\\"Docs\\\" \\u202e\" (self-declared name, not confirmed by LayerV).\n",
+	} {
+		link, err := validateSandboxShareCommandResult("share", 0, validLink+"\n", notice)
+		if err != nil || link != validLink {
+			t.Fatalf("%s: valid share = link length %d, error %v", name, len(link), err)
+		}
 	}
 	for name, test := range map[string]struct {
 		code   int
@@ -84,6 +111,37 @@ func TestSandboxShareCommandDiagnosticWithholdsChildOutput(t *testing.T) {
 		"unexpected stderr": {
 			stdout: validLink + "\n",
 			stderr: "stderr-secret",
+		},
+		// The notice is required: a piped share that says nothing about the
+		// publisher has lost the UNVERIFIED warning.
+		"missing notice": {stdout: validLink + "\n"},
+		"second line": {
+			stdout: validLink + "\n",
+			stderr: namedNotice + "Warning: stderr-secret\n",
+		},
+		"leading line": {
+			stdout: validLink + "\n",
+			stderr: "Warning: stderr-secret\n" + namedNotice,
+		},
+		"unterminated": {
+			stdout: validLink + "\n",
+			stderr: strings.TrimSuffix(namedNotice, "\n"),
+		},
+		"lowercase status": {
+			stdout: validLink + "\n",
+			stderr: "Warning: unverified publisher \"stderr-secret\" (self-declared name, not confirmed by LayerV).\n",
+		},
+		"verified publisher": {
+			stdout: validLink + "\n",
+			stderr: "Publisher \"stderr-secret\" (verified by LayerV).\n",
+		},
+		"name breaks out of its quotes": {
+			stdout: validLink + "\n",
+			stderr: "Warning: UNVERIFIED publisher \"Acme\" stderr-secret \"x\" (self-declared name, not confirmed by LayerV).\n",
+		},
+		"raw control character in the name": {
+			stdout: validLink + "\n",
+			stderr: "Warning: UNVERIFIED publisher \"stderr-secret\x1b[0m\" (self-declared name, not confirmed by LayerV).\n",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

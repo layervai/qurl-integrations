@@ -107,7 +107,7 @@ func TestReadRuntimeSupervisionTreatsAbsenceAsNative(t *testing.T) {
 		t.Fatalf("RequireRuntimeSupervision(native): %v", err)
 	}
 	err = RequireRuntimeSupervision(dir, RuntimeSupervisionExternal)
-	const wantMessage = `runtime supervision is "native", not "external"; enroll a dedicated empty state directory first with qurl login --enrollment-token-file <path> --supervision external`
+	const wantMessage = `runtime supervision is "native", not "external"; enroll a dedicated empty state directory first with qurl login --anonymous --supervision external or qurl login --enrollment-token-file <path> --supervision external`
 	if !errors.Is(err, ErrRuntimeSupervision) || err.Error() != wantMessage {
 		t.Fatalf("absent namespace against external policy = %v, want ErrRuntimeSupervision with %q", err, wantMessage)
 	}

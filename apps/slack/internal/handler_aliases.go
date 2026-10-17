@@ -72,7 +72,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	}
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, userID, teamID)
 	if err != nil {
-		log.Warn("aliases: rate-limit check failed", "error", err, "team_id", teamID, "user_id", userID)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "aliases: rate-limit check failed", "error", err, "team_id", teamID, "user_id", userID)
 		_ = h.postResponse(log, responseURL, ":warning: "+rateLimitErrorMessage(err))
 		return
 	}
@@ -88,7 +88,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		// serviceUnreachableMessage. Auth-class failures land on the
 		// same generic path because the operator-facing detail is in
 		// the slog line, not the wire reply.
-		log.Warn("aliases: GetChannelPolicy failed", "error", err, "team_id", teamID, "channel_id", channelID)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "aliases: GetChannelPolicy failed", "error", err, "team_id", teamID, "channel_id", channelID)
 		_ = h.postResponse(log, responseURL, ":warning: "+serviceUnreachableMessage)
 		return
 	}

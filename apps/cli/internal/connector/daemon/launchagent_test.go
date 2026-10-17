@@ -752,3 +752,97 @@ func TestSessionGroupsDocMatchesTheJobProtocolVersion(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchJobVersionDecisionTable pins which started jobs a binary may run.
+// Only a job that differs in the binary-version part runs under another
+// release: a package upgrade replaces the binary and leaves the job behind.
+// The protocol part and the mode part stay refusals, because those decide what
+// the job's arguments mean.
+func TestMatchJobVersionDecisionTable(t *testing.T) {
+	proto := daemonJobProtocolVersion
+	for _, tc := range []struct {
+		name, job, binary string
+		mode              GroupMode
+		want              JobVersionMatch
+	}{
+		{"same job", proto + "/3.4.1", "3.4.1", GroupModeSingle, JobVersionCurrent},
+		{"same job per-share", proto + "/3.4.1/per-share", "3.4.1", GroupModePerShare, JobVersionCurrent},
+		{"older binary wrote the job", proto + "/3.2.0", "3.4.1", GroupModeSingle, JobVersionStaleBinary},
+		{"newer binary wrote the job", proto + "/3.5.0", "3.4.1", GroupModeSingle, JobVersionStaleBinary},
+		{"older binary wrote the per-share job", proto + "/3.2.0/per-share", "3.4.1", GroupModePerShare, JobVersionStaleBinary},
+		{"another protocol", "4/3.4.1", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"another protocol and binary", "4/3.2.0", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"protocol with the same prefix", proto + "0/3.4.1", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"per-share job, single daemon", proto + "/3.4.1/per-share", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"stale per-share job, single daemon", proto + "/3.2.0/per-share", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"single job, per-share daemon", proto + "/3.4.1", "3.4.1", GroupModePerShare, JobVersionIncompatible},
+		{"stale single job, per-share daemon", proto + "/3.2.0", "3.4.1", GroupModePerShare, JobVersionIncompatible},
+		{"unknown trailing part", proto + "/3.2.0/other/per-share", "3.4.1", GroupModePerShare, JobVersionIncompatible},
+		{"no binary version", proto + "/", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"no binary version per-share", proto + "//per-share", "3.4.1", GroupModePerShare, JobVersionIncompatible},
+		{"padded binary version", proto + "/ 3.2.0", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"no protocol", "3.2.0", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+		{"empty", "", "3.4.1", GroupModeSingle, JobVersionIncompatible},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, expected, err := MatchJobVersion(tc.job, tc.binary, tc.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := JobVersion(tc.binary, tc.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want || expected != want {
+				t.Fatalf("MatchJobVersion(%q) = %d, %q; want %d, %q", tc.job, got, expected, tc.want, want)
+			}
+		})
+	}
+	if _, _, err := MatchJobVersion(proto+"/3.4.1", "3.4.1", ""); err == nil {
+		t.Fatal("an unresolved group mode matched a job")
+	}
+	if _, _, err := MatchJobVersion(proto+"/3.4.1", " ", GroupModeSingle); err == nil {
+		t.Fatal("an empty binary version matched a job")
+	}
+}
+
+// TestJobArgumentsAreTiedToTheJobProtocolVersion pins the argument names the
+// job passes for the current protocol version. A binary runs a job another
+// release installed when the protocol matches, so a release that adds, removes
+// or renames an argument without a new protocol version would hand its job to
+// a binary that reads it differently, or that fails on an unknown flag before
+// its job version is read. The order is pinned too: --job-version comes
+// before anything a later protocol may add. Change this list only together
+// with daemonJobProtocolVersion. The test sees names only; a changed meaning
+// of an argument's value needs a new protocol version just the same.
+func TestJobArgumentsAreTiedToTheJobProtocolVersion(t *testing.T) {
+	const pinnedProtocol = "5"
+	pinned := []string{
+		"--endpoint", "daemon", "run", "--state-dir", "--runtime-dir", "--job-version", "--share-group-mode",
+		"--hub-host", "--hub-port", "--hub-server-public-key-b64", "--supervision",
+	}
+	dir := t.TempDir()
+	if len(daemonJobLogArguments("out", "err")) != 0 {
+		pinned = append(pinned, "--job-stdout-log", "--job-stderr-log")
+	}
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller.InvocationPath = filepath.Join(dir, "bin", "qurl")
+	hub, err := testHubResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := controller.jobDefinition(hub, pinnedProtocol+"/2.4.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, argument := range job.Arguments {
+		if strings.HasPrefix(argument, "--") || argument == "daemon" || argument == "run" {
+			names = append(names, argument)
+		}
+	}
+	if daemonJobProtocolVersion != pinnedProtocol || !slices.Equal(names, pinned) {
+		t.Fatalf("job protocol %q passes %q; protocol %q is pinned to %q: a changed argument list needs a new protocol version, then update this test",
+			daemonJobProtocolVersion, names, pinnedProtocol, pinned)
+	}
+}

@@ -32,7 +32,7 @@ export interface LinkAccessResult {
  * real regression is legible, not a bare "expected undefined to be truthy".
  *
  * The HTTP call goes through fetchWithTransientRetry (bounded retry on transient
- * connector-stack statuses; see its header + qurl-integrations-infra#1085) —
+ * connector-stack statuses; see its header + infra repo #1085) —
  * distinct from the app-level 429 (HTTP 200 + `error`) loop below. */
 export async function uploadFile(
   uploadUrl: string,
@@ -412,6 +412,26 @@ async function getQurlResource(
   const resource = parseBareOrEnveloped(body, (value) => parseResourceStatus(value, id));
   if (!resource) throw new Error(`qURL lookup returned an invalid resource shape for ${id}`);
   return resource;
+}
+
+/** Revoke only a child minted by this test, never its shared tunnel parent.
+ * TODO(upstream-contract): GET /v1/qurls/{child} returns its canonical parent;
+ * child DELETE enforces that parent binding and repeated revocation succeeds.
+ * This confirms API revocation, not native session CLOSED. */
+export async function revokeChild(managementUrl: string, apiKey: string, qurlId: string): Promise<void> {
+  if (!/^q_[a-zA-Z0-9]+$/.test(qurlId)) throw new TypeError('Child cleanup requires a qurl_id');
+  const parent = await getQurlResource(managementUrl, apiKey, qurlId);
+  if (!parent.resource_id) throw new Error('Child cleanup requires a canonical parent');
+  const url = new URL(managementUrl);
+  url.pathname = `/v1/resources/${encodeURIComponent(parent.resource_id)}/qurls/${encodeURIComponent(qurlId)}`;
+  const res = await fetchWithTransientRetry(url, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  await res.body?.cancel().catch(() => {});
+  if (res.status !== 204) {
+    throw Object.assign(new Error(`Child cleanup did not confirm revocation: ${res.status}`), { status: res.status });
+  }
 }
 
 /** Get one qURL token's status from its parent resource response. The id must

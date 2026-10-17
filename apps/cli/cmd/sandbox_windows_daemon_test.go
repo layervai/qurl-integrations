@@ -687,8 +687,8 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 	if err := json.Unmarshal([]byte(published.stdout), &resource); err != nil {
 		t.Fatalf("decode Windows remote publish output: %v", err)
 	}
-	if resource.CRID == "" || resource.ResourceID == "" || resource.TargetURL != canonicalTarget || resource.FoundExisting {
-		t.Fatalf("Windows remote publish = %+v, want one new URL resource", resource)
+	if resource.CRID == "" || resource.ResourceID == "" || resource.TargetURL != canonicalTarget || resource.FoundExisting || !resource.confirmedPrivate() {
+		t.Fatalf("Windows remote publish = %+v (private confirmed: %t), want one new private URL resource", resource, resource.confirmedPrivate())
 	}
 	deleted := false
 	t.Cleanup(func() {
@@ -714,7 +714,7 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 		}
 	}
 	assertWindowsSandboxListContains(t, binary, env, resource.CRID)
-	shared := runWindowsSandboxCLI(t, binary, env, "share", resource.CRID)
+	shared := runWindowsSandboxCLI(t, binary, env, "share", resource.CRID, "--session-duration", "5m")
 	if _, err := validateSandboxShareCommandResult(
 		"Windows remote share",
 		windowsSandboxExitCode(shared.err),
@@ -724,7 +724,7 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 		t.Fatal(err)
 	}
 	destination := filepath.Join(t.TempDir(), "remote-payload")
-	downloaded := runWindowsSandboxCLI(t, binary, env, "get", resource.CRID, "--file", destination)
+	downloaded := runWindowsSandboxCLI(t, binary, env, "get", resource.CRID, "--file", destination, "--session-duration", "5m")
 	if downloaded.err != nil {
 		t.Fatalf("Windows remote get: %v; stderr %q", downloaded.err, downloaded.stderr)
 	}

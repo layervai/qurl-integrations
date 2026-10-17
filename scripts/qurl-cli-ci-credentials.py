@@ -21,6 +21,20 @@ from typing import Any
 
 
 MAX_RESPONSE = 64 * 1024
+# A response that lists resources or API keys is a page of whole rows, and it
+# has a bound of its own. A resource row carries lists: up to 256 device keys
+# and the people its owner approved. So one row can be tens of kilobytes, and a
+# page of INVENTORY_PAGE_SIZE rows a few megabytes. With MAX_RESPONSE as the
+# bound for a page, the cleanup inventory failed as soon as 100 ordinary rows
+# of the CI owner came to more than 64 KiB (66,609 bytes on 2026-10-09, after
+# the service added two members to every row), and every journey cleanup with
+# it. The bound stays: a page is read into memory before it is parsed. What
+# one inventory holds in all is bounded by INVENTORY_MAX_ROWS rows of that
+# size: about 160 MiB of response bytes at the worst, and more once parsed.
+# It is no longer bounded by pages of 64 KiB.
+# TODO(upstream-contract): 8 MiB is 100 rows of about 80 KiB, above what the
+# service's limits on those lists allow today. Recalibrate it with them.
+INVENTORY_MAX_RESPONSE = 8 * 1024 * 1024
 # Conservative setup budget; the three-hour journey lifetime floor is stronger.
 CREATE_PAIR_BUDGET_SECONDS = 15 * 60
 # Validate the requested credential lifetime; workflow timeouts bound execution.
@@ -189,6 +203,7 @@ def request(
     body: bytes | None = None,
     content_type: str | None = None,
     extra_headers: dict[str, str] | None = None,
+    max_response: int = MAX_RESPONSE,
 ) -> tuple[int, bytes]:
     headers = {"Accept": "application/json"}
     if bearer:
@@ -205,10 +220,10 @@ def request(
     except (OSError, urllib.error.URLError) as exc:
         raise CredentialError("credential HTTP request failed") from exc
     try:
-        raw = response.read(MAX_RESPONSE + 1)
+        raw = response.read(max_response + 1)
     finally:
         response.close()
-    if len(raw) > MAX_RESPONSE:
+    if len(raw) > max_response:
         raise CredentialError("credential HTTP response exceeds its size limit")
     return response.status, raw
 
@@ -238,6 +253,8 @@ def qurl_json(
     path: str,
     body: dict[str, Any] | None = None,
     extra_headers: dict[str, str] | None = None,
+    *,
+    max_response: int = MAX_RESPONSE,
 ) -> tuple[int, dict[str, Any]]:
     encoded = None
     content_type = None
@@ -253,6 +270,7 @@ def qurl_json(
         body=encoded,
         content_type=content_type,
         extra_headers=extra_headers,
+        max_response=max_response,
     )
     return status, json_object(raw, "qURL API response") if raw else {}
 
@@ -363,8 +381,14 @@ def retry_connector_resource_delete(
     for attempt in range(MAX_ATTEMPTS):
         try:
             query = urllib.parse.urlencode({"slug": connector_id})
+            # The answer is a list of whole resource rows, like an inventory
+            # page, so it has that bound.
             status, response = qurl_json(
-                endpoint, automation_key, "GET", "/v1/resources?" + query
+                endpoint,
+                automation_key,
+                "GET",
+                "/v1/resources?" + query,
+                max_response=INVENTORY_MAX_RESPONSE,
             )
         except CredentialError as exc:
             last_error = exc
@@ -441,7 +465,11 @@ def paged_rows(
         if cursor:
             query["cursor"] = cursor
         status, response = qurl_json(
-            endpoint, automation_key, "GET", path + "?" + urllib.parse.urlencode(query)
+            endpoint,
+            automation_key,
+            "GET",
+            path + "?" + urllib.parse.urlencode(query),
+            max_response=INVENTORY_MAX_RESPONSE,
         )
         pages += 1
         if time.monotonic() >= deadline:

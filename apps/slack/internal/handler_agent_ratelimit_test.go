@@ -142,8 +142,8 @@ func TestAgentTurnLimit_FailsOpenOnCounterError(t *testing.T) {
 }
 
 func TestAgentTurnLimit_FailOpenLogContract(t *testing.T) {
-	// qurl-integrations-infra#1065 filters this exact msg key/value for the
-	// fail-open path introduced by qurl-integrations-infra#1055.
+	// infra repo #1065 filters this exact msg key/value for the
+	// fail-open path introduced by infra repo #1055.
 	const infraFilterFailOpenMsg = "agent: turn-rate counter failed; allowing turn (fail-open)"
 
 	if agentTurnRateCounterFailOpenMsg != infraFilterFailOpenMsg {
@@ -168,8 +168,8 @@ func TestAgentTurnLimit_FailOpenLogContract(t *testing.T) {
 	if rec["msg"] != infraFilterFailOpenMsg {
 		t.Fatalf("msg = %v, want %q", rec["msg"], infraFilterFailOpenMsg)
 	}
-	if rec["level"] != "WARN" {
-		t.Fatalf("level = %v, want WARN", rec["level"])
+	if rec["level"] != "ERROR" {
+		t.Fatalf("level = %v, want ERROR for typed DDB failure", rec["level"])
 	}
 	if rec["scope"] != "team" {
 		t.Fatalf("scope = %v, want team", rec["scope"])

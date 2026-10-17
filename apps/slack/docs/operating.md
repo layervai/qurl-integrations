@@ -1024,7 +1024,7 @@ that accidentally carried a numeric value.
 | `SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_TEAM_ID` | Validation | Recipient team id for optional streaming validation. |
 | `SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_USER_ID` | Validation | Recipient user id for optional streaming validation. |
 | `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.ai`) |
-| `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
+| `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by the infrastructure repository) |
 | `WORKSPACE_STATE_KMS_KEY_ARN` | Yes | KMS CMK ARN used to envelope-encrypt workspace API keys and Slack bot tokens |
 | `AUTH0_DOMAIN` | OAuth | Auth0 tenant FQDN, e.g. `layerv.us.auth0.com`. Scheme prefix and trailing slash are stripped at config-load. |
 | `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the Secure Access Agent |

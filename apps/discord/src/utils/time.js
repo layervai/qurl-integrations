@@ -178,7 +178,7 @@ function formatSelfDestructSegment(seconds) {
 //
 // Mirrors qurl-s3-connector's `sessionDurationFor()` (Go) so the
 // upload-time and mint-time wire mappings stay in lockstep. If one
-// changes, the other must too — fenced by qurl-integrations-infra
+// changes, the other must too — fenced by the infrastructure repository
 // PR #764 + this PR landing as a coordinated pair.
 function formatSessionDurationSeconds(seconds) {
   if (!isPositiveFinite(seconds)) return null;

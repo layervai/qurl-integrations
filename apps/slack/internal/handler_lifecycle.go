@@ -574,7 +574,7 @@ func retryLifecyclePurge(ctx context.Context, log *slog.Logger, op string, purge
 			return
 		}
 		if attempt == lifecyclePurgeRetryAttempts {
-			// Keep cleanup_action_required stable: qurl-integrations-infra#1284
+			// Keep cleanup_action_required stable: infra repo #1284
 			// tracks the CloudWatch alarm that should page on this field.
 			log.Error(op+": exhausted retries; manual cleanup may be required",
 				"attempts", attempt,
@@ -623,12 +623,11 @@ func lifecyclePurgeErrorIsNonRetryable(err error) bool {
 		}
 		return true
 	}
+	if storeErr, ok := err.(*slackdata.Error); ok { //nolint:errorlint // Inspect this node; errors.As can hide retryable siblings in a wrapped join.
+		return storeErr.StatusCode == http.StatusBadRequest || storeErr.StatusCode == http.StatusInternalServerError
+	}
 	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
 		return lifecyclePurgeErrorIsNonRetryable(wrapped.Unwrap())
-	}
-	var storeErr *slackdata.Error
-	if errors.As(err, &storeErr) {
-		return storeErr.StatusCode == http.StatusBadRequest || storeErr.StatusCode == http.StatusInternalServerError
 	}
 	return false
 }

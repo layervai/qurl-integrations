@@ -11,7 +11,7 @@
 // Schemas mirror the live shape `ddb-store.js` expects — keys, GSIs,
 // and TTL attributes. `qurl_sends`, `qurl_send_configs` and
 // `guild_configs` match the `modules/qurl-bot-ddb/main.tf` definitions
-// in `qurl-integrations-infra`; `qurl_views` is inferred from
+// in the infrastructure repository; `qurl_views` is inferred from
 // `ddb-store.js` call sites (key + TTL usage).
 //
 // SCOPE: this provisioner covers the Store-contract tables only (those
