@@ -223,7 +223,7 @@ jobs:
       - name: golangci-lint tagged journey tests
         run: |
           command -v golangci-lint
-          golangci-lint run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/...
+          golangci-lint run --build-tags=clisandbox,clisoak,cliproduction --timeout=5m ./apps/cli/...
 
   test:
     name: cli / test
@@ -693,6 +693,10 @@ jobs:
       - name: Run tests
         shell: bash
         run: go test -count=1 ./apps/cli/...
+
+      - name: Test production proof validation without network access
+        shell: bash
+        run: go test -tags=clisandbox,cliproduction -count=1 -run '^TestProductionProof' ./apps/cli/cmd
 
   customer-artifacts:
     name: cli / customer journey artifacts

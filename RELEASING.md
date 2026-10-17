@@ -46,21 +46,43 @@ embed development or test trust data. The GitHub Release stays draft and the
 Homebrew tap stays on its prior version until all customer-journey, artifact,
 image, trust-posture, and signature checks pass.
 
-## Required production release approval
+## Required production proof
 
-CLI publication uses the `cli-production` GitHub environment. Only
-`justin-layerv` may approve each publication run. The environment admits only
-the `main` branch and disables administrator bypass. The publication job checks
-the live protection policy before it promotes an image or publishes a release;
-a missing environment or removed protection fails the job. Recovery dispatches
-and reruns use the same protected job. Homebrew publication depends on it.
+After building the draft release, the workflow runs its exact packaged binary
+against `https://api.layerv.ai` on Linux, macOS, and Windows. It creates a fresh
+device identity and new local resources. Public and private publication, exact
+backend content, private-access denial, resource reuse, stop/start/restart,
+deletion, and independent credential/resource cleanup must pass. The candidate
+uses its built-in production trust settings. Tests cannot skip or substitute a
+sandbox endpoint or a rebuilt CI binary.
 
-Before approval, review the exact CLI tag and commit, the deployed production
-API version, and production customer-journey results for that candidate. The
-required API changes must already be deployed. A merged service PR, sandbox
-journey, dark Hub pin, or green artifact checks do not prove production
-compatibility. Keep the release draft until that evidence is available.
-Agents must never approve or bypass this environment on the user's behalf.
+Publication requires all three platform results and cleanup to succeed. It
+then checks SHA-256 receipts against the current draft archives and checksums.
+Receipts must name this source commit, release tag, and workflow run, and must
+come from the same attempt and be at most one hour old. Missing, stale, failed, or changed evidence blocks
+both public image promotion and GitHub publication. Homebrew depends on that
+publication. Recovery dispatches use the same gates. Cancellation also starts
+an independent trusted cleanup workflow.
+
+If a publication fails or its proof expires, rerun the whole release
+continuation dispatch, or dispatch it again with the same exact tag and source
+inputs. A failed-jobs-only retry cannot reuse evidence from an earlier attempt.
+All continuations for one tag are serialized, including operator recovery, so
+one build cannot replace the release assets while another run tests them.
+
+The `cli-production` environment admits only `main` and has no approval rule.
+It needs its own production CI owner and the `QURL_JOURNEY_API_KEY` and
+`QURL_JOURNEY_OWNER_ID` environment secrets, with the scopes and isolation in
+[CLI automation credentials](docs/ci-api-keys.md). Missing configuration blocks
+release; sandbox credentials must never be copied into it. The parent key is
+used only by trusted setup and cleanup. Customer processes receive disposable
+keys with no key-management authority.
+
+This is proof of the listed production journeys on each native runner, not
+proof of every CLI command or every platform architecture. API-dependent
+features need their own production assertions before they can be treated as
+verified. All six release archives are bound to the proven checksum set;
+the existing package checks also remain required.
 
 ## Test an unreleased CLI without releasing it
 

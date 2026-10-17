@@ -108,7 +108,7 @@ on:
 # cancel-in-progress is false; a later main push must not replace a ready
 # release continuation before it starts.
 concurrency:
-  group: ${{ github.event_name == 'push' && 'release-please-maintenance' || format('release-please-continuation-{0}-{1}', inputs.cli_tag, inputs.source_sha || 'operator') }}
+  group: ${{ github.event_name == 'push' && 'release-please-maintenance' || format('release-please-continuation-{0}', inputs.cli_tag) }}
   cancel-in-progress: false
 
 permissions: {}
@@ -1007,15 +1007,156 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Windows release archive does not expose $command" }
           }
 
+  production-proof:
+    name: Prove the packaged CLI against production
+    needs: [release-cli, cli-release-gate]
+    if: >-
+      !cancelled() && needs.release-cli.result == 'success' &&
+      needs.cli-release-gate.outputs.required == 'true'
+    environment: cli-production
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: linux
+            lane_id: 1
+            os: ubuntu-latest
+            archive: linux_*.tar.gz
+          - lane: macos
+            lane_id: 2
+            os: macos-latest
+            archive: darwin_*.tar.gz
+          - lane: windows
+            lane_id: 3
+            os: windows-latest
+            archive: windows_*.zip
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: read
+    env:
+      CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+      SOURCE_SHA: ${{ needs.cli-release-gate.outputs.source_sha }}
+      QURL_SHARING_RUN_ID: ${{ format('{0}{1}', github.run_id, matrix.lane_id) }}
+      QURL_SHARING_RUN_ATTEMPT: ${{ github.run_attempt }}
+      QURL_SHARING_RUNTIME: host
+      QURL_PRODUCTION_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
+      PRODUCTION_PYTHON: ${{ matrix.lane == 'windows' && 'python' || 'python3' }}
+    steps:
+      # The harness is trusted main code; the customer binary comes only from
+      # the exact draft release. Never rebuild a substitute for this proof.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download the exact draft release candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE_SUFFIX: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/commits/$CLI_TAG" --jq .sha)" == "$SOURCE_SHA" ]]
+          mkdir "$RUNNER_TEMP/production-candidate"
+          gh release download "$CLI_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern checksums.txt --pattern "qurl_${CLI_TAG#v}_${ARCHIVE_SUFFIX}" \
+            --dir "$RUNNER_TEMP/production-candidate"
+          "$PRODUCTION_PYTHON" scripts/cli-production-proof.py stage --directory "$RUNNER_TEMP/production-candidate" \
+            --tag "$CLI_TAG" --source-sha "$SOURCE_SHA" --lane '${{ matrix.lane }}'
+      - name: Start the Linux user service manager
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >>"$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >>"$GITHUB_ENV"
+      - name: Compile the production journey harness
+        run: go test -c -trimpath -tags=clisandbox,cliproduction -o "$RUNNER_TEMP/production-journey.test.exe" ./apps/cli/cmd
+      - name: Mint disposable production credentials
+        env:
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$AUTOMATION_API_KEY" && -n "$QURL_PRODUCTION_OWNER_ID" ]]
+          authority=$(mktemp -d)
+          trap 'rm -rf "$authority"' EXIT
+          (umask 077; printf %s "$AUTOMATION_API_KEY" >"$authority/key")
+          unset AUTOMATION_API_KEY
+          mkdir -m 0700 "$RUNNER_TEMP/production-keys"
+          "$PRODUCTION_PYTHON" scripts/qurl-cli-ci-credentials.py create-pair \
+            --qurl-endpoint https://api.layerv.ai --api-key-file "$authority/key" \
+            --owner-id "$QURL_PRODUCTION_OWNER_ID" \
+            --primary-output-dir "$RUNNER_TEMP/production-keys/primary" \
+            --failure-output-dir "$RUNNER_TEMP/production-keys/failure" \
+            --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" --lane '${{ matrix.lane }}'
+          # Only this disposable key reaches customer code, never the parent.
+          echo "QURL_API_KEY_FILE=$RUNNER_TEMP/production-keys/primary/api-key" >>"$GITHUB_ENV"
+      - name: Require the real production journey to pass without skips
+        env:
+          QURL_PRODUCTION_PROOF: enabled
+        run: |
+          set -euo pipefail
+          harness="$RUNNER_TEMP/production-journey.test.exe"
+          test_name=TestProductionReleaseJourney
+          [[ "$("$harness" -test.list "^$test_name$")" == "$test_name" ]]
+          status=0
+          "$harness" -test.v -test.count=1 -test.run "^$test_name$" >"$RUNNER_TEMP/production-proof.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/production-proof.log"
+          [[ "$status" == 0 ]]
+          [[ "$(awk '$0 ~ /^--- PASS: TestProductionReleaseJourney / { n++ } END { print n+0 }' "$RUNNER_TEMP/production-proof.log")" == 1 ]]
+          if grep -q -- '--- SKIP:' "$RUNNER_TEMP/production-proof.log"; then
+            echo '::error::production proof skipped an assertion' >&2
+            exit 1
+          fi
+          "$PRODUCTION_PYTHON" scripts/cli-production-proof.py record --directory "$RUNNER_TEMP/production-candidate" \
+            --output "$RUNNER_TEMP/production-receipt"
+      - name: Upload the exact production evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-production-proof-${{ needs.cli-release-gate.outputs.source_sha }}-${{ github.run_attempt }}-${{ matrix.lane }}
+          path: ${{ runner.temp }}/production-receipt/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove local disposable credentials
+        if: always()
+        run: scripts/remove-sensitive-tree.sh "$RUNNER_TEMP/production-keys"
+
+  production-cleanup:
+    name: Verify production fixture cleanup
+    needs: [production-proof, cli-release-gate]
+    if: always() && needs.cli-release-gate.outputs.required == 'true'
+    environment: cli-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reconcile every production fixture and credential
+        env:
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
+          QURL_PRODUCTION_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
+        run: scripts/cleanup-cli-production-proof.sh '${{ github.run_id }}' '${{ github.run_attempt }}'
+
   publish-cli-release:
     name: Publish the verified CLI release
-    # Passing sandbox checks never authorizes a production CLI release.
-    environment: cli-production
-    needs: [release-cli, validate-homebrew-cask, validate-windows-release-archive, cli-release-gate]
+    needs: [release-cli, validate-homebrew-cask, validate-windows-release-archive, cli-release-gate, production-proof, production-cleanup]
     if: >-
       !cancelled() && needs.release-cli.result == 'success' &&
       needs.validate-homebrew-cask.result == 'success' &&
       needs.validate-windows-release-archive.result == 'success' &&
+      needs.production-proof.result == 'success' && needs.production-cleanup.result == 'success' &&
       needs.cli-release-gate.outputs.required == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1027,6 +1168,7 @@ jobs:
       CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
       QURL_IMAGE_DIGEST: ${{ needs.release-cli.outputs.qurl_image_digest }}
       QURL_IMAGE_ALREADY_TAGGED: ${{ needs.release-cli.outputs.qurl_image_already_tagged }}
+      SOURCE_SHA: ${{ needs.cli-release-gate.outputs.source_sha }}
     steps:
       - name: Require the canonical release branch
         run: |
@@ -1049,10 +1191,30 @@ jobs:
             exit 1
           }
 
-      - name: Verify the production approval protection
+      - name: Download the production proof receipts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: cli-production-proof-${{ needs.cli-release-gate.outputs.source_sha }}-${{ github.run_attempt }}-*
+          path: ${{ runner.temp }}/production-proof
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Verify fresh production proof before any publication
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/check-cli-production-protection.sh
+          SOURCE_SHA: ${{ needs.cli-release-gate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/production-publication"
+          gh release download "$CLI_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern checksums.txt --pattern 'qurl_*_linux_*.tar.gz' \
+            --pattern 'qurl_*_darwin_*.tar.gz' --pattern 'qurl_*_windows_*.zip' \
+            --dir "$RUNNER_TEMP/production-publication"
+          # Use the guard from this trusted workflow revision, including when
+          # a recovery dispatch tests an older candidate tag.
+          git show "$GITHUB_SHA:scripts/cli-production-proof.py" >"$RUNNER_TEMP/verify-production-proof.py"
+          python3 "$RUNNER_TEMP/verify-production-proof.py" verify --directory "$RUNNER_TEMP/production-publication" \
+            --receipts "$RUNNER_TEMP/production-proof" --tag "$CLI_TAG" --source-sha "$SOURCE_SHA"
 
       - name: Set up Docker Buildx for image publication
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -1108,6 +1270,8 @@ jobs:
             "$candidate" >/dev/null
           printf '%s\n' "$candidate" > dist/qurl-image.txt
           gh release upload "$CLI_TAG" dist/qurl-image.txt dist/qurl-image-buildkit-manifest.json --clobber
+          python3 "$RUNNER_TEMP/verify-production-proof.py" verify --directory "$RUNNER_TEMP/production-publication" \
+            --receipts "$RUNNER_TEMP/production-proof" --tag "$CLI_TAG" --source-sha "$SOURCE_SHA"
           if [ "$IMAGE_ALREADY_TAGGED" != true ]; then
             docker buildx imagetools create --tag "$tagged" "$candidate"
           fi
@@ -1128,6 +1292,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          python3 "$RUNNER_TEMP/verify-production-proof.py" verify --directory "$RUNNER_TEMP/production-publication" \
+            --receipts "$RUNNER_TEMP/production-proof" --tag "$CLI_TAG" --source-sha "$SOURCE_SHA"
           gh release edit "$CLI_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --verify-tag
           is_draft="$(gh release view "$CLI_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
           [ "$is_draft" = false ] || {

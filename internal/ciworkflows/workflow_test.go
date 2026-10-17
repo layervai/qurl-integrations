@@ -2010,7 +2010,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &releaseConcurrency); err != nil {
 		t.Fatalf("decode release concurrency: %v", err)
 	}
-	wantConcurrency := "${{ github.event_name == 'push' && 'release-please-maintenance' || format('release-please-continuation-{0}-{1}', inputs.cli_tag, inputs.source_sha || 'operator') }}"
+	wantConcurrency := "${{ github.event_name == 'push' && 'release-please-maintenance' || format('release-please-continuation-{0}', inputs.cli_tag) }}"
 	if releaseConcurrency.Concurrency.Group != wantConcurrency || releaseConcurrency.Concurrency.CancelInProgress == nil ||
 		*releaseConcurrency.Concurrency.CancelInProgress {
 		t.Errorf("release concurrency = %#v, want separate non-canceling maintenance and exact continuation groups",
