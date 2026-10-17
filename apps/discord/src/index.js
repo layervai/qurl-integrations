@@ -1,5 +1,6 @@
 const config = require('./config');
 const logger = require('./logger');
+const { startMintFailureCanary } = require('./mint-failure-canary');
 const { isPositiveFinite } = require('./utils/time');
 const { client, GATEWAY_INTENTS_BITFIELD, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
@@ -638,6 +639,7 @@ process.on('uncaughtException', error => {
 let httpServer = null;
 let gatewayHeartbeatTimer = null;
 let activeGuildCountTimer = null;
+let mintFailureCanaryTimer = null;
 let isShuttingDown = false;
 
 async function gracefulShutdownTeardown({
@@ -645,6 +647,8 @@ async function gracefulShutdownTeardown({
   awaitConnectionWatchdog = true,
   awaitGatewayLeader = true,
 } = {}) {
+  clearInterval(mintFailureCanaryTimer);
+  mintFailureCanaryTimer = null;
   // Wait for in-flight HTTP requests to drain — server.close() is async,
   // and process.exit() called immediately after would truncate an OAuth
   // callback mid-flight, leaving the admin's /qurl setup without a
@@ -1117,6 +1121,12 @@ async function start() {
       // teardown that's already in flight).
       httpServer = null;
       gracefulShutdown(1);
+    });
+  }
+
+  if (!isShuttingDown) {
+    mintFailureCanaryTimer = startMintFailureCanary({
+      enabled: config.MINT_FAILURE_CANARY_ENABLED, endpoint: config.QURL_ENDPOINT,
     });
   }
 

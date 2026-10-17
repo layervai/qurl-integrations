@@ -507,6 +507,8 @@ module.exports = {
     minPositive: true, strictInteger: true, max: 1000,
   }),
 
+  MINT_FAILURE_CANARY_ENABLED: process.env.MINT_FAILURE_CANARY_ENABLED === 'true',
+
   // qURL. In production we fall back to the real endpoints; in dev we fall
   // back to localhost so a missing .env file doesn't silently hit prod APIs.
   //
