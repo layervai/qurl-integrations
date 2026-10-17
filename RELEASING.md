@@ -46,6 +46,22 @@ embed development or test trust data. The GitHub Release stays draft and the
 Homebrew tap stays on its prior version until all customer-journey, artifact,
 image, trust-posture, and signature checks pass.
 
+## Required production release approval
+
+CLI publication uses the `cli-production` GitHub environment. Only
+`justin-layerv` may approve each publication run. The environment admits only
+the `main` branch and disables administrator bypass. The publication job checks
+the live protection policy before it promotes an image or publishes a release;
+a missing environment or removed protection fails the job. Recovery dispatches
+and reruns use the same protected job. Homebrew publication depends on it.
+
+Before approval, review the exact CLI tag and commit, the deployed production
+API version, and production customer-journey results for that candidate. The
+required API changes must already be deployed. A merged service PR, sandbox
+journey, dark Hub pin, or green artifact checks do not prove production
+compatibility. Keep the release draft until that evidence is available.
+Agents must never approve or bypass this environment on the user's behalf.
+
 ## Test an unreleased CLI without releasing it
 
 When a CLI change needs platform features that are in sandbox but not yet in

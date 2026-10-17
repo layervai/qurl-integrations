@@ -1009,6 +1009,8 @@ jobs:
 
   publish-cli-release:
     name: Publish the verified CLI release
+    # Passing sandbox checks never authorizes a production CLI release.
+    environment: cli-production
     needs: [release-cli, validate-homebrew-cask, validate-windows-release-archive, cli-release-gate]
     if: >-
       !cancelled() && needs.release-cli.result == 'success' &&
@@ -1046,6 +1048,11 @@ jobs:
             echo "::error::release tag does not match the exact source that passed the CLI customer journey" >&2
             exit 1
           }
+
+      - name: Verify the production approval protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-cli-production-protection.sh
 
       - name: Set up Docker Buildx for image publication
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
