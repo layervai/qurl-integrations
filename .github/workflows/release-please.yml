@@ -809,6 +809,20 @@ jobs:
           compression-level: 0
           retention-days: 1
 
+      # These are the same packaged bytes uploaded to the draft. The proof
+      # job needs no draft-release token; publication compares both copies.
+      - name: Stage the production candidate bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-production-candidate-${{ needs.cli-release-gate.outputs.source_sha }}-${{ github.run_attempt }}
+          path: |
+            dist/checksums.txt
+            dist/qurl_*.tar.gz
+            dist/qurl_*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
       - name: Post recovery instructions on failure
         if: failure()
         run: |
@@ -1057,17 +1071,15 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Download the exact draft release candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARCHIVE_SUFFIX: ${{ matrix.archive }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cli-production-candidate-${{ needs.cli-release-gate.outputs.source_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/production-candidate
+          digest-mismatch: error
+      - name: Stage the native production candidate
         run: |
           set -euo pipefail
           [[ "$GITHUB_REF" == refs/heads/main ]]
-          [[ "$(gh api "repos/$GITHUB_REPOSITORY/commits/$CLI_TAG" --jq .sha)" == "$SOURCE_SHA" ]]
-          mkdir "$RUNNER_TEMP/production-candidate"
-          gh release download "$CLI_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern checksums.txt --pattern "qurl_${CLI_TAG#v}_${ARCHIVE_SUFFIX}" \
-            --dir "$RUNNER_TEMP/production-candidate"
           "$PRODUCTION_PYTHON" scripts/cli-production-proof.py stage --directory "$RUNNER_TEMP/production-candidate" \
             --tag "$CLI_TAG" --source-sha "$SOURCE_SHA" --lane '${{ matrix.lane }}'
       - name: Start the Linux user service manager

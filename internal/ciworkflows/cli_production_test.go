@@ -60,9 +60,20 @@ func TestCLIPublicationRequiresExactProductionProof(t *testing.T) {
 	if journey.If != "" || journey.ContinueOnError != nil {
 		t.Fatal("production journey is optional")
 	}
-	download := steps["Download the exact draft release candidate"].Run
-	if !strings.Contains(download, "gh release download") || !strings.Contains(download, `== "$SOURCE_SHA"`) {
-		t.Fatal("production must use the packaged draft at the gated source")
+	download := steps["Download the exact draft release candidate"]
+	if !strings.Contains(download.Uses, "actions/download-artifact@") ||
+		!strings.Contains(download.With["name"].(string), "needs.cli-release-gate.outputs.source_sha") ||
+		!strings.Contains(download.With["name"].(string), "github.run_attempt") {
+		t.Fatal("production must use the exact packaged candidate from this attempt")
+	}
+	staged := false
+	for _, current := range workflow.Jobs["release-cli"].Steps {
+		if current.Name == "Stage the production candidate bundle" {
+			staged = strings.Contains(current.Uses, "actions/upload-artifact@") && current.With["name"] == download.With["name"] && strings.Contains(current.With["path"].(string), "dist/checksums.txt") && strings.Contains(current.With["path"].(string), "dist/qurl_*.tar.gz") && strings.Contains(current.With["path"].(string), "dist/qurl_*.zip")
+		}
+	}
+	if !staged {
+		t.Fatal("release build must stage every archive and checksum for production proof")
 	}
 	cleanup := workflow.Jobs["production-cleanup"]
 	if !strings.Contains(cleanup.If, "always()") {
