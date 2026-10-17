@@ -27,9 +27,9 @@ Anyone who requests a link for one of your CRIDs with "qurl share" or
 "qurl get" is shown who published it: the name you set here, or
 "no name provided" when you set none.
 
-The name is optional and self-declared. LayerV does not check it, and no
-publisher can be confirmed by LayerV yet, so every publisher is shown as
-UNVERIFIED.
+The name is optional and self-declared. Setting it does not verify you.
+The CLI shows "verified by LayerV" only when the service reports that status;
+otherwise it shows UNVERIFIED.
 
 The same name appears on every CRID this device's owner publishes, so people
 can tell those CRIDs come from the same publisher.
@@ -65,8 +65,9 @@ func publisherSetCmd(opts *globalOpts) *cobra.Command {
 		// this text only helps someone pick a name that will be accepted.
 		Long: `Set the publisher name people see with your CRIDs.
 
-The name is self-declared: setting it does not confirm who you are, and it is
-shown as UNVERIFIED to anyone who requests a link for one of your CRIDs.
+The name is self-declared: setting it does not confirm who you are or request
+verification. The service decides the verification status shown with your name:
+"verified by LayerV" when it reports verification, and UNVERIFIED otherwise.
 
 A name is 1 to 64 characters: letters, digits, single spaces, and common
 punctuation. It cannot spell "verified", "LayerV" or "qURL", even split by
