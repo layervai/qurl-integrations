@@ -1,0 +1,35 @@
+name: CLI production proof cleanup
+
+on:
+  workflow_run:
+    workflows: [Release Please]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    # A completed dispatch may have lost its runner before in-workflow cleanup.
+    # Source run code and artifacts are never downloaded or executed here.
+    if: >-
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.conclusion != 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.repository.full_name == github.repository &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    environment: cli-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reconcile interrupted production fixtures
+        env:
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
+          QURL_PRODUCTION_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: scripts/cleanup-cli-production-proof.sh "$SOURCE_RUN_ID" "$SOURCE_RUN_ATTEMPT"
