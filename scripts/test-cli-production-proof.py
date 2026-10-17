@@ -92,7 +92,8 @@ class ProductionEvidenceTest(unittest.TestCase):
 
     def test_changed_checksums_block(self):
         path = self.directory / "checksums.txt"
-        path.write_bytes(path.read_bytes() + b"\n")
+        path.write_text("".join(reversed(path.read_text().splitlines(keepends=True))))
+        proof.checksums(self.directory)
         with self.assertRaises(ValueError): proof.verify(self.args)
 
     def test_record_rejects_changed_executable(self):
@@ -111,9 +112,12 @@ class ProductionEvidenceTest(unittest.TestCase):
         self.args.lane = "linux"
         with patch.object(proof.platform, "system", return_value="Linux"), \
                 patch.object(proof.platform, "machine", return_value="x86_64"), \
-                patch.dict(os.environ, GITHUB_ENV=str(self.directory / "environment")), \
-                patch.object(proof.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"qurl version 3.5.0 (linux/amd64)\n")):
+                patch.dict(os.environ, GITHUB_ENV=str(self.directory / "environment"), GH_TOKEN="must-not-reach-candidate", QURL_API_KEY="must-not-reach-candidate"), \
+                patch.object(proof.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"qurl version 3.5.0 (linux/amd64)\n")) as run:
             proof.stage(self.args)
+            self.assertNotIn("GH_TOKEN", run.call_args.kwargs["env"])
+            self.assertNotIn("QURL_API_KEY", run.call_args.kwargs["env"])
+            self.assertLessEqual(set(run.call_args.kwargs["env"]), {"PATH", "SystemRoot", "TEMP", "TMP", "HOME"})
             self.assertEqual((self.directory / "qurl").read_bytes(), b"exact candidate bytes")
             self.args.output = self.directory / "recorded"
             proof.record(self.args)

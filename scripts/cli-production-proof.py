@@ -60,7 +60,8 @@ def stage(args):
     binary.write_bytes(payload)
     binary.chmod(0o700)
     # No rebuild, deployment override, or trust-root injection is permitted.
-    result = subprocess.run([str(binary), "version"], capture_output=True, check=True, timeout=30)
+    env = {key: os.environ[key] for key in ("PATH", "SystemRoot", "TEMP", "TMP", "HOME") if key in os.environ}
+    result = subprocess.run([str(binary), "version"], env=env, capture_output=True, check=True, timeout=30)
     version = result.stdout.decode().split()
     if version != ["qurl", "version", args.tag[1:], f"({system}/{machine})"]:
         raise ValueError("candidate binary has the wrong release version")
