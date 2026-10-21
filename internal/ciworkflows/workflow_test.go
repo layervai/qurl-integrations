@@ -152,7 +152,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &cliConcurrency); err != nil {
 		t.Fatalf("decode CLI concurrency: %v", err)
 	}
-	wantConcurrency := "${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_source_sha != '' && format('release-{0}', inputs.release_source_sha) || contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && 'soak' || 'ci' }}"
+	wantConcurrency := "${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_source_sha != '' && format('release-{0}', inputs.release_source_sha) || contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && format('soak-{0}', github.sha) || 'ci' }}"
 	if cliConcurrency.Concurrency.Group != wantConcurrency {
 		t.Errorf("CLI concurrency group = %q, want separate main-CI and soak groups %q",
 			cliConcurrency.Concurrency.Group, wantConcurrency)

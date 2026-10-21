@@ -54,3 +54,17 @@ The workflow serializes only the macOS lane because the gateway has one peer.
 The CI operator provisions the gateway and installs the protected environment
 secret before enabling this lane. Update that secret whenever the gateway keys
 change; never copy the configuration into logs, source files, or artifacts.
+
+## Anonymous public CRID fixture
+
+Set `QURL_JOURNEY_CELL0_PUBLIC_KEY_B64` in `cli-customer-journey` to the
+canonical standard-base64 cell0 public key from sandbox's
+`/sandbox/nhp/qurl-link/browser-config` (`serverStaticPubB64`). Refresh it when
+that cell identity changes. This is a published cell key, not a credential.
+The anonymous probe adds that cell and the existing protected relay URL to its
+own deployment file; it preserves the pinned issuer and carries no publisher
+credential. The publisher's fragment-only settings stay unchanged.
+
+Operator soaks use a separate concurrency group for each exact source commit.
+Every source still runs all customer lanes and the full 80-minute soak; the
+single protected macOS peer keeps its existing serialization.
