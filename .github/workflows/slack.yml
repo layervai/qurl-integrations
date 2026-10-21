@@ -93,6 +93,7 @@ jobs:
         with:
           version: v2.12.2
           verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
+          skip-cache: true # Keep analysis from other package selections out of this lane.
           args: --timeout=5m
 
   test:

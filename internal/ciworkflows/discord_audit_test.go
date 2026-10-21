@@ -315,7 +315,6 @@ func TestDiscordAuditRetryBudgetFitsStepTimeout(t *testing.T) {
 	job := workflow.Jobs["build-and-test"]
 	if job == nil {
 		t.Fatalf("%s is missing build-and-test job", spec.path)
-		return
 	}
 	var timeoutMinutes int
 	foundAuditStep := false

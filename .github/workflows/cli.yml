@@ -203,6 +203,7 @@ jobs:
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
           verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
+          skip-cache: true # Keep analysis from other package selections out of this lane.
           args: --timeout=5m ./apps/cli/...
 
       - name: Verify installed golangci-lint version
