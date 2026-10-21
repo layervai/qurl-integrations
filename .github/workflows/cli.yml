@@ -34,9 +34,10 @@ permissions:
 concurrency:
   # The long soak must not occupy main CI's concurrency slot. GitHub permits
   # only one pending run per group, even when cancel-in-progress is false. An
-  # exact release handoff gets its own SHA group so an operator soak cannot
-  # replace it while it is pending.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_source_sha != '' && format('release-{0}', inputs.release_source_sha) || contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && 'soak' || 'ci' }}
+  # exact release handoff and each operator source get their own SHA group.
+  # A fixture repair can qualify while the previous source completes its soak.
+  # The protected macOS peer remains serialized by the journey job.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_source_sha != '' && format('release-{0}', inputs.release_source_sha) || contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && format('soak-{0}', github.sha) || 'ci' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -800,6 +801,7 @@ jobs:
       QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
       QURL_JOURNEY_QV2_ISSUER_KEY: ${{ secrets.QURL_JOURNEY_QV2_ISSUER_KEY }}
       QURL_JOURNEY_QV2_RELAY_URL: ${{ secrets.QURL_JOURNEY_QV2_RELAY_URL }}
+      QURL_SANDBOX_CRID_CELL_PUBLIC_KEY_B64: ${{ secrets.QURL_JOURNEY_CELL0_PUBLIC_KEY_B64 }}
       QURL_JOURNEY_HUB_HOST: ${{ secrets.QURL_JOURNEY_HUB_HOST }}
       QURL_JOURNEY_HUB_PORT: ${{ secrets.QURL_JOURNEY_HUB_PORT }}
       QURL_JOURNEY_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}

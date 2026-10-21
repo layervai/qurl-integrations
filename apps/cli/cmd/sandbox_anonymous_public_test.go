@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-go/qurl"
+
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 )
@@ -47,9 +49,25 @@ func assertSandboxAnonymousPublicJourney(t *testing.T, binary string, publisherE
 	if err != nil {
 		t.Fatalf("resolve anonymous consumer state directory: %v", err)
 	}
+	publisherDeployment, err := qurl.LoadDeployment(publisherEnv["QURL_DEPLOYMENT"])
+	if err != nil {
+		t.Fatal("publisher deployment settings are invalid")
+	}
+	anonymousDeployment, err := anonymousPublicDeployment(publisherDeployment, os.Getenv("QURL_SANDBOX_CRID_CELL_PUBLIC_KEY_B64"), os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deploymentJSON, err := json.Marshal(anonymousDeployment)
+	if err != nil {
+		t.Fatal("anonymous deployment encoding failed")
+	}
+	deploymentPath := filepath.Join(t.TempDir(), "anonymous-deployment.json")
+	if err := os.WriteFile(deploymentPath, deploymentJSON, 0o600); err != nil {
+		t.Fatal("anonymous deployment could not be saved")
+	}
 	consumerEnv := map[string]string{
 		"QURL_ENDPOINT":        publisherEnv["QURL_ENDPOINT"],
-		"QURL_DEPLOYMENT":      publisherEnv["QURL_DEPLOYMENT"],
+		"QURL_DEPLOYMENT":      deploymentPath,
 		hub.EnvHost:            publisherEnv[hub.EnvHost],
 		hub.EnvPort:            publisherEnv[hub.EnvPort],
 		hub.EnvServerPublicKey: publisherEnv[hub.EnvServerPublicKey],
