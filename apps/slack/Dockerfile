@@ -4,11 +4,11 @@
 # ignore list (default frontend reads only `<context>/.dockerignore`,
 # which is the wrong place for a multi-app monorepo).
 
-# Bumped 1.26.6 → 1.26.9 for the standard-library fixes caught by govulncheck;
-# go.mod requires go 1.26.9. SHA-pinned to the multi-arch index digest, same as
+# Bumped 1.26.9 → 1.26.10 for the standard-library fixes caught by govulncheck;
+# go.mod requires go 1.26.10. SHA-pinned to the multi-arch index digest, same as
 # the rest of the repo's base images — GOTOOLCHAIN stays the image default
 # `local`, so there's no unpinned build-time toolchain fetch.
-FROM golang:1.26.9-alpine@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0 AS build
+FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS build
 
 WORKDIR /src
 
