@@ -445,6 +445,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if windowsSelect == nil {
 		t.Fatal("Windows journey selector is missing")
+		return
 	}
 	if !strings.Contains(windowsSelect.Run, `"-test.list=$listPattern"`) ||
 		strings.Contains(windowsSelect.Run, "& $harness -test.list") {
@@ -513,6 +514,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if cleanupRun == nil {
 		t.Fatal("terminal cleanup step is missing")
+		return
 	}
 	if fmt.Sprint(cleanupRun.Env["JOURNEY_RUN_ATTEMPT"]) != "${{ github.run_attempt }}" {
 		t.Errorf("terminal cleanup does not reconcile only the current journey attempt: %#v", cleanupRun)
@@ -998,6 +1000,7 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 	cleanup := workflow.Jobs["cleanup"]
 	if resolve == nil || cleanup == nil {
 		t.Fatal("cancellation cleanup workflow is incomplete")
+		return
 	}
 
 	var resolverStep *step
