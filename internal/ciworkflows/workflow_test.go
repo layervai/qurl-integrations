@@ -1773,8 +1773,8 @@ func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
 	t.Fatalf("contract job is missing %s step", workflowContractTestName)
 }
 
-// TestWorkflowContractLintsWithoutTheSharedCache keeps this required check's
-// lint independent of what other workflows last wrote. golangci-lint-action
+// TestWorkflowLintsWithoutTheSharedCache keeps each lint lane independent
+// of what other workflows last wrote. golangci-lint-action
 // keys its cache on the OS, a weekly interval and go.mod's hash only, so this
 // one-package run restores the entry the repo-wide lints save on main. On
 // 2026-10-14 that entry made staticcheck report SA5011 at nil checks ending in
@@ -1783,26 +1783,26 @@ func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
 //
 // TODO(upstream-contract): if golangci-lint-action ever keys its cache on the
 // workflow or the arguments too, this skip can be reconsidered.
-func TestWorkflowContractLintsWithoutTheSharedCache(t *testing.T) {
+func TestWorkflowLintsWithoutTheSharedCache(t *testing.T) {
 	t.Parallel()
 
-	contract, ok := readWorkflow(t, workflowContractWorkflow).Jobs["contract"]
-	if !ok {
-		t.Fatal("workflow-contract.yml is missing contract job")
-	}
-	found := false
-	for i := range contract.Steps {
-		current := &contract.Steps[i]
-		if !strings.HasPrefix(current.Uses, "golangci/golangci-lint-action@") {
-			continue
+	for _, filename := range []string{workflowContractWorkflow, "shared-test.yml", "slack.yml", "cli.yml"} {
+		workflow := readWorkflow(t, filename)
+		found := false
+		for _, job := range workflow.Jobs {
+			for _, current := range job.Steps {
+				if !strings.HasPrefix(current.Uses, "golangci/golangci-lint-action@") {
+					continue
+				}
+				found = true
+				if skip, ok := current.With["skip-cache"].(bool); !ok || !skip {
+					t.Errorf("%s %s must set skip-cache: true, got %#v", filename, current.Name, current.With["skip-cache"])
+				}
+			}
 		}
-		found = true
-		if skip, ok := current.With["skip-cache"].(bool); !ok || !skip {
-			t.Errorf("%s must set skip-cache: true, got %#v", current.Name, current.With["skip-cache"])
+		if !found {
+			t.Fatalf("%s is missing its golangci-lint step", filename)
 		}
-	}
-	if !found {
-		t.Fatal("contract job is missing its golangci-lint step")
 	}
 }
 

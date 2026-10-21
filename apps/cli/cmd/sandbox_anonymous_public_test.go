@@ -42,7 +42,10 @@ func assertSandboxAnonymousPublicJourney(t *testing.T, binary string, publisherE
 		t.Fatal("publish did not confirm public access")
 	}
 	// A closed environment and empty state prevent accidental publisher authentication.
-	consumerState := t.TempDir()
+	consumerState, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve anonymous consumer state directory: %v", err)
+	}
 	consumerEnv := map[string]string{
 		"QURL_ENDPOINT":   publisherEnv["QURL_ENDPOINT"],
 		"QURL_DEPLOYMENT": publisherEnv["QURL_DEPLOYMENT"],
@@ -67,7 +70,11 @@ func assertSandboxAnonymousPublicJourney(t *testing.T, binary string, publisherE
 	}
 	deleted = true
 	deniedDestination := filepath.Join(t.TempDir(), "deleted-content")
-	denied := runSandboxLocalCLI(t, binary, consumerEnv, t.TempDir(), "get", resource.CRID, "--file", deniedDestination, "--session-duration", "5m")
+	deniedState, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve deleted-resource consumer state directory: %v", err)
+	}
+	denied := runSandboxLocalCLI(t, binary, consumerEnv, deniedState, "get", resource.CRID, "--file", deniedDestination, "--session-duration", "5m")
 	if denied.code != 5 {
 		t.Fatalf("deleted public CRID exit = %d, want not found: %s", denied.code, denied.stderr.String())
 	}
