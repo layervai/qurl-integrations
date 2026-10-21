@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 )
 
 func assertSandboxAnonymousPublicJourney(t *testing.T, binary string, publisherEnv map[string]string, publisherState string) {
@@ -41,15 +42,18 @@ func assertSandboxAnonymousPublicJourney(t *testing.T, binary string, publisherE
 	if resource.Private == nil || *resource.Private {
 		t.Fatal("publish did not confirm public access")
 	}
-	// A closed environment and empty state prevent accidental publisher authentication.
+	// Keep the public Hub bootstrap in sandbox without carrying publisher credentials.
 	consumerState, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("resolve anonymous consumer state directory: %v", err)
 	}
 	consumerEnv := map[string]string{
-		"QURL_ENDPOINT":   publisherEnv["QURL_ENDPOINT"],
-		"QURL_DEPLOYMENT": publisherEnv["QURL_DEPLOYMENT"],
-		"HOME":            t.TempDir(),
+		"QURL_ENDPOINT":        publisherEnv["QURL_ENDPOINT"],
+		"QURL_DEPLOYMENT":      publisherEnv["QURL_DEPLOYMENT"],
+		hub.EnvHost:            publisherEnv[hub.EnvHost],
+		hub.EnvPort:            publisherEnv[hub.EnvPort],
+		hub.EnvServerPublicKey: publisherEnv[hub.EnvServerPublicKey],
+		"HOME":                 t.TempDir(),
 	}
 	destination := filepath.Join(t.TempDir(), "anonymous-content")
 	fetched := runSandboxLocalCLI(t, binary, consumerEnv, consumerState, "get", resource.CRID, "--file", destination, "--session-duration", "5m")
