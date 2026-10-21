@@ -79,7 +79,7 @@ already published as a private resource, --allow-requests turns access
 requests on for that resource.
 
 Where the deployment offers it, a public resource can also be opened by anyone
-who has its CRID. The deployment this release ships does not offer it yet.
+who has its CRID.
 Privacy is set at creation and cannot be changed later. Publishing a target
 again reuses its resource, with the privacy it has.
 
