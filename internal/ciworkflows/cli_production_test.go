@@ -96,3 +96,37 @@ func TestCLIPublicationRequiresExactProductionProof(t *testing.T) {
 		t.Fatal("production proof must target production and never skip")
 	}
 }
+
+func TestCLIProductionCredentialsUseNativeWindowsPermissionsAndCleanup(t *testing.T) {
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	steps := map[string]step{}
+	for _, current := range workflow.Jobs["production-proof"].Steps {
+		steps[current.Name] = current
+	}
+	for _, name := range []string{"Mint disposable production credentials", "Remove local disposable credentials"} {
+		if !strings.Contains(steps[name].If, "runner.os != 'Windows'") {
+			t.Fatalf("POSIX credential operations must exclude Windows: %s", name)
+		}
+	}
+	mint := steps["Mint disposable Windows production credentials"]
+	if mint.If != "runner.os == 'Windows'" || mint.Shell != "pwsh" || mint.ContinueOnError != nil {
+		t.Fatal("Windows credentials require a mandatory native PowerShell step")
+	}
+	for _, required := range []string{"icacls.exe", "/inheritance:r", "/grant:r", "Remove-Item Env:AUTOMATION_API_KEY", "create-pair", "--qurl-endpoint https://api.layerv.ai", "--run-id $env:QURL_SHARING_RUN_ID", "--run-attempt $env:QURL_SHARING_RUN_ATTEMPT", "finally {", "Test-Path -LiteralPath $authority"} {
+		if !strings.Contains(mint.Run, required) {
+			t.Errorf("Windows production credentials lack %q", required)
+		}
+	}
+	if strings.Index(mint.Run, "icacls.exe") > strings.Index(mint.Run, "WriteAllText") {
+		t.Fatal("Windows directory ACL must be restricted before the parent key is written")
+	}
+	cleanup := steps["Remove local Windows production credentials"]
+	if cleanup.If != "always() && runner.os == 'Windows'" || cleanup.Shell != "pwsh" || cleanup.ContinueOnError != nil {
+		t.Fatal("Windows production credential cleanup must always run and fail closed")
+	}
+	for _, required := range []string{"@('production-authority', 'production-keys')", "Join-Path $env:RUNNER_TEMP $name", "Remove-Item -LiteralPath $path -Recurse -Force", "throw 'local production credentials remain"} {
+		if !strings.Contains(cleanup.Run, required) {
+			t.Errorf("Windows production cleanup lacks %q", required)
+		}
+	}
+}
