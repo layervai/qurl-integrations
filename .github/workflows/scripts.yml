@@ -77,6 +77,10 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: python3 scripts/test-cli-production-proof.py
 
+      - name: Test owner-scoped CLI image recovery
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 scripts/test-cli360-image-recovery.py
+
       # The pruner deletes draft releases, which cannot be undone, and runs
       # only after a CLI release is published. Its selection rules and its
       # refusals are exercised here because nothing else runs it before then.
