@@ -1187,6 +1187,8 @@ jobs:
             # raw helper file intact for the credential helper's exact-byte contract.
             $readerKey = Join-Path $keys 'primary/api-key-env'
             [IO.File]::WriteAllText($readerKey, [IO.File]::ReadAllText((Join-Path $keys 'primary/api-key')) + "`n")
+            & icacls.exe $readerKey /setowner $env:USERNAME | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'could not set production API-key file owner' }
             & icacls.exe $readerKey /inheritance:r /grant:r "${env:USERNAME}:(F)" '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'could not restrict production API-key file' }
             "QURL_API_KEY_FILE=$readerKey" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
