@@ -77,6 +77,17 @@ func TestProductionProofFailureClassNeverReturnsSensitiveOutput(t *testing.T) {
 		{consume.MsgCRIDResourceClosed, "crid_resource_closed"},
 		{consume.MsgCRIDLinkRequestRejected, "crid_link_request_rejected"},
 		{consume.MsgCRIDLinkRefused, "crid_link_refused"},
+		{"qURL could not start this Connector's device enrollment because the CLI's local enrollment settings are invalid.", "enrollment_config"},
+		{"This Connector's device enrollment did not finish before its safe retry period ended.", "enrollment_unavailable"},
+		{"The qURL platform could not verify this Connector during device enrollment.", "enrollment_identity"},
+		{"The qURL platform refused this Connector's device enrollment request.", "enrollment_request_rejected"},
+		{"The qURL platform and this CLI did not agree on this Connector's device enrollment, so qURL stopped safely.", "enrollment_mismatch"},
+		{"qURL could not safely save this Connector's device enrollment state on this machine, so it stopped.", "enrollment_persistence"},
+		{"The qURL platform isn't accepting new Connector enrollments here right now.", "enrollment_disabled"},
+		{"qurl: platform denied access (errCode=", "platform_denied"},
+		{"Access is denied.", "os_access_denied"},
+		{"The system cannot find the file specified.", "os_file_missing"},
+		{"context deadline exceeded", "native_deadline"},
 		{"unrecognized private failure", "unclassified"},
 	} {
 		if got := productionFailureClass([]byte(hostile + test.message + hostile)); got != test.want {
