@@ -127,8 +127,9 @@ revoked state. For a local app, it reports durable desired state separately from
 the platform's observed Connector state and serving epoch.
 
 Both views show the publisher that people who request a link are shown, and
-when the resource was created. A publisher name is self-declared and marked
-UNVERIFIED; change it with "qurl publisher set <name>".`
+when the resource was created. A publisher name is self-declared; the status
+is UNVERIFIED unless LayerV has verified the publisher. Change the name with
+"qurl publisher set <name>".`
 	if inspect {
 		long += "\n\nInspect also reports redacted daemon, retry, transition, and local target health diagnostics."
 	}
