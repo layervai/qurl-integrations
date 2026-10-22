@@ -1,12 +1,5 @@
 # Changelog
 
-## [0.6.2](https://github.com/layervai/qurl-integrations/compare/slack-v0.6.1...slack-v0.6.2) (2026-10-22)
-
-
-### Bug Fixes
-
-* patch Go security and align sandbox fixtures ([#1611](https://github.com/layervai/qurl-integrations/issues/1611)) ([05ea8df](https://github.com/layervai/qurl-integrations/commit/05ea8df07d58362bdecf5260ca5981f4936e4622))
-
 ## [0.6.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.6.0...slack-v0.6.1) (2026-10-09)
 
 

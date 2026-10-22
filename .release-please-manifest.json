@@ -1,5 +1,5 @@
 {
-  "apps/slack": "0.6.2",
+  "apps/slack": "0.6.1",
   "apps/discord": "0.2.8",
   "apps/chrome-extension": "1.1.0",
   "apps/edge-extension": "1.1.0",
