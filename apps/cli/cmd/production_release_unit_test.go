@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 )
 
 func TestProductionProofCommandEnvironment(t *testing.T) {
@@ -58,4 +60,25 @@ func TestProductionProofCommandFixture(t *testing.T) {
 		os.Exit(2)
 	}
 	os.Exit(0)
+}
+
+func TestProductionProofFailureClassNeverReturnsSensitiveOutput(t *testing.T) {
+	hostile := "lv_live_" + strings.Repeat("private", 10) + " https://qurl.link/private-bearer \n-----BEGIN PRIVATE KEY-----\nprivate-material"
+	for _, test := range []struct{ message, want string }{
+		{consume.MsgCRIDNotFound, "crid_not_found"},
+		{consume.MsgCRIDLinkUnavailable, "crid_link_unavailable"},
+		{consume.MsgCRIDLinkNoAnswer, "crid_link_no_answer"},
+		{consume.MsgAccessBusy, "access_busy"},
+		{consume.MsgLinkUnavailable, "download_host_unavailable"},
+		{consume.MsgCRIDLinkRateLimited, "crid_link_rate_limited"},
+		{consume.MsgCRIDPublisherOffline, "crid_publisher_offline"},
+		{consume.MsgCRIDResourceClosed, "crid_resource_closed"},
+		{consume.MsgCRIDLinkRequestRejected, "crid_link_request_rejected"},
+		{consume.MsgCRIDLinkRefused, "crid_link_refused"},
+		{"unrecognized private failure", "unclassified"},
+	} {
+		if got := productionFailureClass([]byte(hostile + test.message + hostile)); got != test.want {
+			t.Fatal("failure classifier returned unexpected or sensitive output")
+		}
+	}
 }
