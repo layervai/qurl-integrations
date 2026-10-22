@@ -1527,10 +1527,25 @@ jobs:
             --certificate-identity 'https://github.com/layervai/qurl-integrations/.github/workflows/release-please.yml@refs/heads/main' \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com "$RUNNER_TEMP/image-native-manifest/checksums.txt"
           candidate="$IMAGE_NAME@$IMAGE_DIGEST"
+          image_name="$IMAGE_NAME"
+          index_json=$(docker buildx imagetools inspect "$candidate" --raw)
           [[ -n "$HUB_SHA256" ]]
           for platform in linux/amd64 linux/arm64; do
-            [[ "$(docker run --rm --platform "$platform" "$candidate" version | awk '{print $3}')" == v3.6.0 ]]
-            [[ "$(docker run --rm --platform "$platform" "$candidate" version --verify-release-native-trust)" == "$HUB_SHA256" ]]
+            os="${platform%/*}"
+            architecture="${platform#*/}"
+            platform_digest="$(jq -er \
+              --arg os "$os" --arg architecture "$architecture" '
+                [.manifests[] | select(
+                  .platform.os == $os and
+                  .platform.architecture == $architecture
+                )] |
+                if length == 1 then .[0].digest
+                else error("expected exactly one platform manifest")
+                end
+              ' <<<"$index_json")"
+            platform_candidate="${image_name}@${platform_digest}"
+            [[ "$(docker run --rm --platform "$platform" "$platform_candidate" version | awk '{print $3}')" == v3.6.0 ]]
+            [[ "$(docker run --rm --platform "$platform" "$platform_candidate" version --verify-release-native-trust)" == "$HUB_SHA256" ]]
           done
           QURL_EXPECTED_VCS_REVISION="$SOURCE_SHA" \
           QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations \
