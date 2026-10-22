@@ -91,6 +91,12 @@ on:
         required: false
         default: false
         type: boolean
+      production_proof_platform:
+        description: "Public-proof platform selection; ordinary releases always test all platforms"
+        required: false
+        default: all
+        type: choice
+        options: [all, windows]
       cli_tag:
         description: "Existing bare CLI release tag (e.g. v0.2.0) to build and attach assets for"
         required: true
@@ -1079,19 +1085,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - lane: linux
-            lane_id: 1
-            os: ubuntu-latest
-            archive: linux_*.tar.gz
-          - lane: macos
-            lane_id: 2
-            os: macos-latest
-            archive: darwin_*.tar.gz
-          - lane: windows
-            lane_id: 3
-            os: windows-latest
-            archive: windows_*.zip
+        # A platform probe can inspect public bytes; normal publication still needs all three receipts.
+        include: ${{ fromJSON(inputs.production_proof_only && inputs.production_proof_platform == 'windows' && '[{"lane":"windows","lane_id":3,"os":"windows-latest","archive":"windows_*.zip"}]' || '[{"lane":"linux","lane_id":1,"os":"ubuntu-latest","archive":"linux_*.tar.gz"},{"lane":"macos","lane_id":2,"os":"macos-latest","archive":"darwin_*.tar.gz"},{"lane":"windows","lane_id":3,"os":"windows-latest","archive":"windows_*.zip"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:

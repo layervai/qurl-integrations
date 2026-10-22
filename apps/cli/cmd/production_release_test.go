@@ -183,9 +183,44 @@ func productionCredential(t *testing.T) string {
 	}
 	key, source, err := auth.Resolve(os.LookupEnv)
 	if err != nil || source != auth.SourceEnvironmentFile {
-		t.Fatal("production proof requires one protected Windows API-key file")
+		t.Fatalf("production proof requires one protected Windows API-key file: %s", productionCredentialFailureClass(err, source))
 	}
 	return key
+}
+
+// Classify only fixed reader failures; a hostile path or key must stay private.
+func productionCredentialFailureClass(err error, source auth.Source) string {
+	if errors.Is(err, auth.ErrCredentialConflict) {
+		return "credential_conflict"
+	}
+	if errors.Is(err, auth.ErrNoCredential) {
+		return "credential_missing"
+	}
+	if err == nil {
+		if source != auth.SourceEnvironmentFile {
+			return "credential_not_file"
+		}
+		return "none"
+	}
+	for _, known := range []struct{ message, class string }{
+		{"must name one exact absolute private file", "file_path"},
+		{"not one bounded owner-private regular file", "file_metadata"},
+		{"not owned by the current user", "file_owner"},
+		{"ACL must be protected from inheritance", "file_acl_inheritance"},
+		{"DACL grants another principal access", "file_acl_principal"},
+		{"unsafe ownership or link authority", "file_authority"},
+		{"cannot open QURL_API_KEY_FILE without following links", "file_open"},
+		{"changed while opening", "file_changed_on_open"},
+		{"changed while reading", "file_changed_on_read"},
+		{"exact key bytes plus one LF or CRLF", "file_line_format"},
+		{"cannot read exact bounded", "file_read"},
+		{"does not look like a qURL API key", "key_shape"},
+	} {
+		if strings.Contains(err.Error(), known.message) {
+			return known.class
+		}
+	}
+	return "reader_unclassified"
 }
 
 func productionDecode(t *testing.T, raw []byte, target any) {

@@ -1,8 +1,10 @@
 package ciworkflows
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -187,5 +189,34 @@ func TestWindowsProductionProofUsesProtectedCustomerReader(t *testing.T) {
 		if !strings.Contains(mint.Run, required) {
 			t.Fatalf("Windows proof reader file lacks %s", required)
 		}
+	}
+}
+
+func TestWindowsPublicProofSelectionPreservesNormalThreePlatforms(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", releasePleaseWorkflow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pattern := `include: \$\{\{ fromJSON\(inputs.production_proof_only && inputs.production_proof_platform == 'windows' && '([^']+)' \|\| '([^']+)'\) \}\}`
+	match := regexp.MustCompile(pattern).FindStringSubmatch(string(raw))
+	if len(match) != 3 {
+		t.Fatal("Windows selection must be restricted to public-proof mode")
+	}
+	type lane struct {
+		Lane    string `json:"lane"`
+		ID      int    `json:"lane_id"`
+		OS      string `json:"os"`
+		Archive string `json:"archive"`
+	}
+	var windows, normal []lane
+	if json.Unmarshal([]byte(match[1]), &windows) != nil || json.Unmarshal([]byte(match[2]), &normal) != nil {
+		t.Fatal("invalid proof matrix JSON")
+	}
+	want := []lane{{"linux", 1, "ubuntu-latest", "linux_*.tar.gz"}, {"macos", 2, "macos-latest", "darwin_*.tar.gz"}, {"windows", 3, "windows-latest", "windows_*.zip"}}
+	if !slices.Equal(normal, want) || !slices.Equal(windows, want[2:]) {
+		t.Fatal("normal release must retain all3 exact lanes; Windows probe must select only Windows")
+	}
+	if !strings.Contains(string(raw), "default: all\n        type: choice\n        options: [all, windows]") {
+		t.Fatal("public proof must default to all platforms")
 	}
 }
