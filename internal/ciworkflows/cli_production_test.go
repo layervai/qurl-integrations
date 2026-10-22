@@ -159,6 +159,20 @@ func TestCLI360ImageRecoveryCannotRebuildOrChangeNativeRelease(t *testing.T) {
 			t.Errorf("image recovery lacks %q", required)
 		}
 	}
+	var canonicalSmoke string
+	for _, current := range workflow.Jobs["release-cli"].Steps {
+		if current.Name == "Smoke both qurl image platforms" {
+			canonicalSmoke = current.Run
+		}
+	}
+	lookupStart := strings.Index(canonicalSmoke, `os="${platform%/*}"`)
+	lookupEnd := strings.Index(canonicalSmoke, `binary="$image_work`)
+	if lookupStart < 0 || lookupEnd <= lookupStart || !strings.Contains(text, canonicalSmoke[lookupStart:lookupEnd]) {
+		t.Fatal("recovery must reuse the canonical exact-cardinality child-manifest lookup")
+	}
+	if strings.Contains(text, `--platform "$platform" "$candidate"`) || strings.Count(text, `--platform "$platform" "$platform_candidate"`) != 2 {
+		t.Fatal("both version and trust checks must execute each unique platform child, not the index")
+	}
 	if strings.Contains(text, "|| true") || !strings.Contains(text, `cat "$RUNNER_TEMP/image-tag-error" >&2`) {
 		t.Fatal("unknown registry failures must not be treated as an absent image tag")
 	}
