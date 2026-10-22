@@ -29,20 +29,6 @@ if [[ -z "${GH_TOKEN:-}" || ! "$source_sha" =~ ^[0-9a-f]{40}$ ||
   exit 1
 fi
 
-# shortcut: this owner-authorized build exception expires at 02:00 UTC; remove after v3.6.0 publication.
-functional_deferred=${QURL_CLI_360_BUILD_WITH_DEFERRED_RESTART:-false}
-if [[ "$functional_deferred" != false && "$functional_deferred" != true ]]; then
-  echo "::error::invalid functional deferral" >&2; exit 1
-fi
-if [[ "$functional_deferred" == true ]] && {
-  [[ "$source_sha" != dab9399a9297ac80ac9302dd8c9814d5f5ece4f2 || "$source_tag" != v3.6.0 ||
-     "$run_id" != 39843464917 || "$run_attempt" != 3 || "$journey_count" != 3 ||
-     "${GITHUB_ACTOR:-}" != justin-layerv ]] ||
-  [[ "$(date -u +%Y%m%d%H%M%S)" -ge 20261023020000 ]];
-}; then
-  echo "::error::functional deferral is not authorized for this release, actor, or time" >&2; exit 1
-fi
-
 gh_stderr=$(mktemp)
 trap 'rm -f "$gh_stderr"' EXIT
 
@@ -148,7 +134,11 @@ for ((attempt = 10#$run_attempt; attempt >= 1; attempt--)); do
       any(.[]; .total_count != $total or (.jobs | type) != "array") or
       ([.[].jobs[]] | length) != $total
     then error("CLI job data is malformed or truncated")
-    else [.[].jobs[] | select(.name | startswith("cli / ")) |
+    else [.[].jobs[] | select(
+      .name == "cli / required" or
+      .name == "cli / customer journey cleanup" or
+      .name == "cli / customer journey" or
+      (.name | startswith("cli / customer journey ("))) |
       . + {qurl_run_attempt:$attempt}]
     end |
     if length != (unique_by(.name) | length)
@@ -204,21 +194,7 @@ if ! jq -e 'all(.required[], .journeys[], .cleanup[]; .status == "completed")' \
   exit 1
 fi
 
-if [[ "$functional_deferred" == true ]]; then
-  # Failed functional jobs remain failed; cleanup and every build/security check must pass.
-  jq -e '
-    all(.cleanup[]; .conclusion == "success") and .cleanup[0].id == 120078913143 and
-    all(.required[], .journeys[]; .conclusion == "failure") and
-    ([.journeys[].id] | sort) == ([120076142493,120076142516,120076142983] | sort)
-  ' <<<"$gates" >/dev/null || { echo "::error::deferral does not match the retained failed proof and successful cleanup" >&2; exit 1; }
-  jq -e '
-    . as $jobs |
-    ["cli / customer journey artifacts", "cli / matrix (ubuntu-latest)",
-     "cli / matrix (macos-latest)", "cli / matrix (windows-latest)", "cli / test",
-     "cli / lint", "cli / govulncheck", "cli / goreleaser check", "cli / image smoke"] |
-    all(.[]; $jobs[.].status == "completed" and $jobs[.].conclusion == "success")
-  ' <<<"$latest_jobs" >/dev/null || { echo "::error::a required build/security check did not pass" >&2; exit 1; }
-elif ! jq -e 'all(.required[], .journeys[], .cleanup[]; .conclusion == "success")' \
+if ! jq -e 'all(.required[], .journeys[], .cleanup[]; .conclusion == "success")' \
   <<<"$gates" >/dev/null; then
   failed=$(jq -r '
     [.required[], .journeys[], .cleanup[] |
@@ -230,5 +206,4 @@ elif ! jq -e 'all(.required[], .journeys[], .cleanup[]; .conclusion == "success"
 fi
 
 jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" --arg url "$run_url" \
-  --argjson functional_deferred "$functional_deferred" \
-  '{run_id:$run_id,run_attempt:$run_attempt,url:$url,journey_url:$url,functional_deferred:$functional_deferred}'
+  '{run_id:$run_id,run_attempt:$run_attempt,url:$url,journey_url:$url}'
