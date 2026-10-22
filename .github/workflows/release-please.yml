@@ -1099,6 +1099,7 @@ jobs:
       - name: Compile the production journey harness
         run: go test -c -trimpath -tags=clisandbox,cliproduction -o "$RUNNER_TEMP/production-journey.test.exe" ./apps/cli/cmd
       - name: Mint disposable production credentials
+        if: runner.os != 'Windows'
         env:
           AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
         run: |
@@ -1117,6 +1118,38 @@ jobs:
             --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" --lane '${{ matrix.lane }}'
           # Only this disposable key reaches customer code, never the parent.
           echo "QURL_API_KEY_FILE=$RUNNER_TEMP/production-keys/primary/api-key" >>"$GITHUB_ENV"
+      - name: Mint disposable Windows production credentials
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:AUTOMATION_API_KEY) -or [string]::IsNullOrWhiteSpace($env:QURL_PRODUCTION_OWNER_ID)) { throw 'production credential authority is missing' }
+          $authority = Join-Path $env:RUNNER_TEMP 'production-authority'
+          $keys = Join-Path $env:RUNNER_TEMP 'production-keys'
+          try {
+            foreach ($path in @($authority, $keys)) {
+              New-Item -ItemType Directory -Path $path -ErrorAction Stop | Out-Null
+              & icacls.exe $path /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)(F)" '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw 'could not restrict production credential directory' }
+            }
+            $keyFile = Join-Path $authority 'key'
+            [IO.File]::WriteAllText($keyFile, $env:AUTOMATION_API_KEY)
+            Remove-Item Env:AUTOMATION_API_KEY -ErrorAction SilentlyContinue
+            python scripts/qurl-cli-ci-credentials.py create-pair `
+              --qurl-endpoint https://api.layerv.ai --api-key-file $keyFile `
+              --owner-id $env:QURL_PRODUCTION_OWNER_ID `
+              --primary-output-dir (Join-Path $keys 'primary') `
+              --failure-output-dir (Join-Path $keys 'failure') `
+              --run-id $env:QURL_SHARING_RUN_ID --run-attempt $env:QURL_SHARING_RUN_ATTEMPT --lane windows
+            if ($LASTEXITCODE -ne 0) { throw 'production credential creation failed' }
+            "QURL_API_KEY_FILE=$(Join-Path $keys 'primary/api-key')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } finally {
+            Remove-Item Env:AUTOMATION_API_KEY -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $authority) { Remove-Item -LiteralPath $authority -Recurse -Force }
+            if (Test-Path -LiteralPath $authority) { throw 'production authority remains on the runner' }
+          }
+
       - name: Require the real production journey to pass without skips
         env:
           QURL_PRODUCTION_PROOF: enabled
@@ -1144,8 +1177,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Remove local disposable credentials
-        if: always()
+        if: always() && runner.os != 'Windows'
         run: scripts/remove-sensitive-tree.sh "$RUNNER_TEMP/production-keys"
+      - name: Remove local Windows production credentials
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($name in @('production-authority', 'production-keys')) {
+            $path = Join-Path $env:RUNNER_TEMP $name
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+            if (Test-Path -LiteralPath $path) { throw 'local production credentials remain on the runner' }
+          }
 
   production-cleanup:
     name: Verify production fixture cleanup
