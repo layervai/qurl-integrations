@@ -64,7 +64,7 @@ RUN_AGENT_ID = re.compile(
 )
 RUN_SPEC = re.compile(
     r"([1-9][0-9]{0,18}):([1-9][0-9]{0,18}):"
-    r"(linux|macos|windows):(host|hardened_container):(full|soak)\Z"
+    r"(linux|macos|windows):(host|hardened_container):(full|soak|production)\Z"
 )
 MAX_RECONCILE_RUNS = 12
 MAX_ATTEMPTS = 3
@@ -632,6 +632,8 @@ def run_connector_ids(args: RunCleanup) -> set[str]:
 def cleanup_labels(args: RunCleanup) -> tuple[str, ...]:
     if args.profile == "full":
         return ("smoke", "crid", "sibling-a", "sibling-b", "failure")
+    if args.profile == "production":
+        return ("smoke", "failure")
     if args.profile == "soak":
         return ("soak",)
     raise CredentialError("journey cleanup profile is invalid")
@@ -650,7 +652,7 @@ def cleanup_label_codes(args: RunCleanup) -> tuple[str, ...]:
 
 
 def reconciliation_inventory(
-    endpoint: str, automation_key: str
+    endpoint: str, automation_key: str, *, include_resources: bool = True
 ) -> ReconciliationInventory:
     """Load one bounded snapshot without suppressing either inventory attempt."""
     inventory_deadline = time.monotonic() + RECONCILE_INVENTORY_BUDGET_SECONDS
@@ -677,6 +679,11 @@ def reconciliation_inventory(
         credential_failure = "credential_inventory_bound"
     except (CredentialError, OSError, UnicodeError):
         credential_failure = "credential_inventory"
+
+    # Production proof creates only deterministic Connector resources. Exact
+    # slug lookups below clean those without scanning unrelated owner rows.
+    if not include_resources:
+        return ReconciliationInventory(credential_rows, credential_failure, (), None)
 
     resource_rows: tuple[dict[str, Any], ...] | None = None
     resource_failure: str | None = None
@@ -848,7 +855,10 @@ def reconcile_batch(args: argparse.Namespace) -> None:
     endpoint, automation_key, _ = authenticated_owner(
         args, args.operation_budget_seconds
     )
-    inventory = reconciliation_inventory(endpoint, automation_key)
+    inventory = reconciliation_inventory(
+        endpoint, automation_key,
+        include_resources=any(run.profile != "production" for run in parsed),
+    )
     failures = 0
     for run in parsed:
         try:

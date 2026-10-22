@@ -920,6 +920,9 @@ func TestPublisherHelpNeedsNoAccount(t *testing.T) {
 		if !strings.Contains(help, "UNVERIFIED") {
 			t.Errorf("%q help does not say publishers are UNVERIFIED:\n%s", args, help)
 		}
+		if args[1] != "clear" && (!strings.Contains(help, "verified by LayerV") || !strings.Contains(help, "service")) {
+			t.Errorf("%q help does not explain service-reported verification:\n%s", args, help)
+		}
 	}
 	help := runCLI(t, &runOpts{args: []string{"publisher", "--help"}}).stdout.String()
 	for _, want := range []string{"optional", "self-declared", "requests a link", "set", "clear"} {

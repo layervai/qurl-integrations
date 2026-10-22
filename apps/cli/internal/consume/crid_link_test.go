@@ -143,31 +143,18 @@ func mustBeCRIDLinkSetupError(t *testing.T, what string, err error) {
 	}
 }
 
-// TestRequestCRIDLinkUnderTheShippedDeploymentIsNotMade pins the default every
-// user has today: with no deployment file, the SDK's own settings name no
-// place to send the request. So the request is not offered, and one that is
-// made anyway is not sent.
-//
-// TODO(upstream-contract): this is a fact about the deployment qurl-go ships.
-// When a qurl-go release names an endpoint there, this test fails on the
-// version bump. That is the moment `qurl get` starts to behave differently for
-// every user, so the bump needs that decision, not an edit here.
-//
-// The context is already canceled, so even a release that does name an
-// endpoint could not send a request from this test.
-func TestRequestCRIDLinkUnderTheShippedDeploymentIsNotMade(t *testing.T) {
+// An already canceled context prevents this production-default test sending packets.
+func TestRequestCRIDLinkUnderTheShippedDeployment(t *testing.T) {
 	t.Setenv(qurl.EnvDeploymentPath, "")
 	opener := &AccessOpener{LookupEnv: envMap(nil)}
-
-	if offered, err := opener.CRIDLinkOffered(); offered || err != nil {
-		t.Fatalf("CRIDLinkOffered under the shipped deployment = %t, %v; want not offered and no error", offered, err)
+	if offered, err := opener.CRIDLinkOffered(); !offered || err != nil {
+		t.Fatalf("CRIDLinkOffered = %t, %v; want production defaults", offered, err)
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	link, err := opener.RequestCRIDLink(ctx, apitest.GenerateResourceKey(t).CRID)
-	if link != nil || !errors.Is(err, qurl.ErrCRIDLinkNotConfigured) || errors.Is(err, qurl.ErrCRIDLinkMisconfigured) {
-		t.Fatalf("RequestCRIDLink under the shipped deployment = %v, %v; want no link and the SDK's answer for a deployment that names no endpoint", link, err)
+	if link != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("RequestCRIDLink = %v, %v; want canceled", link, err)
 	}
 }
 
@@ -216,8 +203,8 @@ func TestRequestCRIDLinkRefusesAnHTTPClientWithNoSettingsFile(t *testing.T) {
 
 	// With no client set, the same opener asks the SDK as before.
 	_, err := (&AccessOpener{LookupEnv: envMap(nil)}).RequestCRIDLink(ctx, crid)
-	if !errors.Is(err, qurl.ErrCRIDLinkNotConfigured) {
-		t.Fatalf("RequestCRIDLink with no client set = %v, want the SDK's answer for a deployment that names no endpoint", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RequestCRIDLink with no client set = %v, want canceled production request", err)
 	}
 }
 
@@ -225,8 +212,7 @@ func TestRequestCRIDLinkRefusesAnHTTPClientWithNoSettingsFile(t *testing.T) {
 // real SDK call with settings from QURL_DEPLOYMENT, for the three things a
 // file can say about the request.
 //
-// A file that names no endpoint does not offer the request, like the shipped
-// deployment. A file that names one that cannot be used is a setup fault,
+// A file that names no endpoint does not offer the request. A file that names one that cannot be used is a setup fault,
 // and it is reported as one: it must not read as "not offered", or a mistake
 // in the file would go unnoticed. A file that names a usable one offers the
 // request, and exactly one request is sent, to that endpoint, with a
@@ -238,7 +224,7 @@ func TestCRIDLinkOfferedFromADeploymentFile(t *testing.T) {
 	t.Parallel()
 	crid := apitest.GenerateResourceKey(t).CRID
 
-	t.Run("not offered/no endpoint, like the shipped deployment", func(t *testing.T) {
+	t.Run("not offered/no endpoint", func(t *testing.T) {
 		t.Parallel()
 		settings := newLinkDeployment(t)
 		settings.d.CRIDLink, settings.d.RelayAllowlist = nil, nil
@@ -406,7 +392,7 @@ func TestRequestCRIDLinkIsNotMadeForACRIDTheSDKCannotCheck(t *testing.T) {
 		opener  *AccessOpener
 		offered bool
 	}{
-		"shipped deployment":          {&AccessOpener{LookupEnv: envMap(nil)}, false},
+		"shipped deployment":          {&AccessOpener{LookupEnv: envMap(nil)}, true},
 		"file that names an endpoint": {newLinkDeployment(t).opener(doer), true},
 		"file that names no endpoint": {noEndpoint.opener(doer), false},
 	} {

@@ -46,10 +46,8 @@ func siteOpener(t *testing.T, origin string) *AccessOpener {
 	return &AccessOpener{LookupEnv: envMap(map[string]string{qurl.EnvDeploymentPath: writeDeployment(t, string(raw))})}
 }
 
-// TestLinkSiteIsOnlyWhatTheSettingsName pins where the link site comes from:
-// the origin the deployment settings name, and nothing else. Without settings
-// that name one, and for an origin that is not a bare HTTPS origin, the
-// answer is "not known". No host is ever made up.
+// Custom settings supply their own link site or fail closed. Without a custom
+// file, the SDK supplies the production origin. No host is invented here.
 func TestLinkSiteIsOnlyWhatTheSettingsName(t *testing.T) {
 	t.Setenv(qurl.EnvDeploymentPath, "")
 	for name, test := range map[string]struct {
@@ -79,6 +77,12 @@ func TestLinkSiteIsOnlyWhatTheSettingsName(t *testing.T) {
 		"no environment":   {},
 		"no settings file": {LookupEnv: envMap(nil)},
 		"a blank path":     {LookupEnv: envMap(map[string]string{qurl.EnvDeploymentPath: "  "})},
+	} {
+		if got := opener.LinkSite(); got != "https://qurl.link" {
+			t.Errorf("%s: LinkSite() = %q, want production origin", name, got)
+		}
+	}
+	for name, opener := range map[string]*AccessOpener{
 		"a missing file":   {LookupEnv: envMap(map[string]string{qurl.EnvDeploymentPath: t.TempDir() + "/none.json"})},
 		"a malformed file": {LookupEnv: envMap(map[string]string{qurl.EnvDeploymentPath: writeDeployment(t, "not json")})},
 	} {

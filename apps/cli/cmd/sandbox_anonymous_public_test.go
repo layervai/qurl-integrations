@@ -12,7 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-go/qurl"
+
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 )
 
 func assertSandboxAnonymousPublicJourney(t *testing.T, binary string, publisherEnv map[string]string, publisherState string) {
@@ -41,12 +44,34 @@ func assertSandboxAnonymousPublicJourney(t *testing.T, binary string, publisherE
 	if resource.Private == nil || *resource.Private {
 		t.Fatal("publish did not confirm public access")
 	}
-	// A closed environment and empty state prevent accidental publisher authentication.
-	consumerState := t.TempDir()
+	// Keep the public Hub bootstrap in sandbox without carrying publisher credentials.
+	consumerState, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve anonymous consumer state directory: %v", err)
+	}
+	publisherDeployment, err := qurl.LoadDeployment(publisherEnv["QURL_DEPLOYMENT"])
+	if err != nil {
+		t.Fatal("publisher deployment settings are invalid")
+	}
+	anonymousDeployment, err := anonymousPublicDeployment(publisherDeployment, os.Getenv("QURL_SANDBOX_CRID_CELL_PUBLIC_KEY_B64"), os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deploymentJSON, err := json.Marshal(anonymousDeployment)
+	if err != nil {
+		t.Fatal("anonymous deployment encoding failed")
+	}
+	deploymentPath := filepath.Join(t.TempDir(), "anonymous-deployment.json")
+	if err := os.WriteFile(deploymentPath, deploymentJSON, 0o600); err != nil {
+		t.Fatal("anonymous deployment could not be saved")
+	}
 	consumerEnv := map[string]string{
-		"QURL_ENDPOINT":   publisherEnv["QURL_ENDPOINT"],
-		"QURL_DEPLOYMENT": publisherEnv["QURL_DEPLOYMENT"],
-		"HOME":            t.TempDir(),
+		"QURL_ENDPOINT":        publisherEnv["QURL_ENDPOINT"],
+		"QURL_DEPLOYMENT":      deploymentPath,
+		hub.EnvHost:            publisherEnv[hub.EnvHost],
+		hub.EnvPort:            publisherEnv[hub.EnvPort],
+		hub.EnvServerPublicKey: publisherEnv[hub.EnvServerPublicKey],
+		"HOME":                 t.TempDir(),
 	}
 	destination := filepath.Join(t.TempDir(), "anonymous-content")
 	fetched := runSandboxLocalCLI(t, binary, consumerEnv, consumerState, "get", resource.CRID, "--file", destination, "--session-duration", "5m")
@@ -67,7 +92,11 @@ func assertSandboxAnonymousPublicJourney(t *testing.T, binary string, publisherE
 	}
 	deleted = true
 	deniedDestination := filepath.Join(t.TempDir(), "deleted-content")
-	denied := runSandboxLocalCLI(t, binary, consumerEnv, t.TempDir(), "get", resource.CRID, "--file", deniedDestination, "--session-duration", "5m")
+	deniedState, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve deleted-resource consumer state directory: %v", err)
+	}
+	denied := runSandboxLocalCLI(t, binary, consumerEnv, deniedState, "get", resource.CRID, "--file", deniedDestination, "--session-duration", "5m")
 	if denied.code != 5 {
 		t.Fatalf("deleted public CRID exit = %d, want not found: %s", denied.code, denied.stderr.String())
 	}

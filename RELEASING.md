@@ -46,6 +46,46 @@ embed development or test trust data. The GitHub Release stays draft and the
 Homebrew tap stays on its prior version until all customer-journey, artifact,
 image, trust-posture, and signature checks pass.
 
+## Required production proof
+
+After building the draft release, the workflow runs its exact packaged binary
+against `https://api.layerv.ai` on Linux, macOS, and Windows. It creates a fresh
+device identity and new local resources. Public and private publication, exact
+backend content, private-access denial, resource reuse, stop/start/restart,
+deletion, and independent credential/resource cleanup must pass. The candidate
+uses its built-in production trust settings. Tests cannot skip or substitute a
+sandbox endpoint or a rebuilt CI binary.
+
+Publication requires all three platform results and cleanup to succeed. It
+then checks SHA-256 receipts against the current draft archives and checksums.
+Receipts must name this source commit, release tag, and workflow run, and must
+come from the same attempt and be at most one hour old. Missing, stale, failed, or changed evidence blocks
+both public image promotion and GitHub publication. Homebrew depends on that
+publication. Recovery dispatches use the same gates. Cancellation also starts
+an independent trusted cleanup workflow.
+
+If a publication fails or its proof expires, rerun the whole release
+continuation dispatch, or dispatch it again with the same exact tag and source
+inputs. A failed-jobs-only retry cannot reuse evidence from an earlier attempt.
+All continuations for one tag are serialized, including operator recovery, so
+one build cannot replace the release assets while another run tests them.
+GitHub retains only one pending continuation per tag; a newer queued dispatch
+replaces an older pending dispatch, while the active run continues.
+
+The `cli-production` environment admits only `main` and has no approval rule.
+It needs its own production CI owner and the `QURL_JOURNEY_API_KEY` and
+`QURL_JOURNEY_OWNER_ID` environment secrets, with the scopes and isolation in
+[CLI automation credentials](docs/ci-api-keys.md). Missing configuration blocks
+release; sandbox credentials must never be copied into it. The parent key is
+used only by trusted setup and cleanup. Customer processes receive disposable
+keys with no key-management authority.
+
+This is proof of the listed production journeys on each native runner, not
+proof of every CLI command or every platform architecture. API-dependent
+features need their own production assertions before they can be treated as
+verified. All six release archives are bound to the proven checksum set;
+the existing package checks also remain required.
+
 ## Test an unreleased CLI without releasing it
 
 When a CLI change needs platform features that are in sandbox but not yet in

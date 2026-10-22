@@ -34,9 +34,10 @@ permissions:
 concurrency:
   # The long soak must not occupy main CI's concurrency slot. GitHub permits
   # only one pending run per group, even when cancel-in-progress is false. An
-  # exact release handoff gets its own SHA group so an operator soak cannot
-  # replace it while it is pending.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_source_sha != '' && format('release-{0}', inputs.release_source_sha) || contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && 'soak' || 'ci' }}
+  # exact release handoff and each operator source get their own SHA group.
+  # A fixture repair can qualify while the previous source completes its soak.
+  # The protected macOS peer remains serialized by the journey job.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_source_sha != '' && format('release-{0}', inputs.release_source_sha) || contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && format('soak-{0}', github.sha) || 'ci' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -203,6 +204,7 @@ jobs:
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
           verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
+          skip-cache: true # Keep analysis from other package selections out of this lane.
           args: --timeout=5m ./apps/cli/...
 
       - name: Verify installed golangci-lint version
@@ -223,7 +225,7 @@ jobs:
       - name: golangci-lint tagged journey tests
         run: |
           command -v golangci-lint
-          golangci-lint run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/...
+          golangci-lint run --build-tags=clisandbox,clisoak,cliproduction --timeout=5m ./apps/cli/...
 
   test:
     name: cli / test
@@ -694,6 +696,10 @@ jobs:
         shell: bash
         run: go test -count=1 ./apps/cli/...
 
+      - name: Test production proof validation without network access
+        shell: bash
+        run: go test -tags=clisandbox,cliproduction -count=1 -run '^TestProductionProof' ./apps/cli/cmd
+
   customer-artifacts:
     name: cli / customer journey artifacts
     runs-on: ubuntu-latest
@@ -795,6 +801,7 @@ jobs:
       QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
       QURL_JOURNEY_QV2_ISSUER_KEY: ${{ secrets.QURL_JOURNEY_QV2_ISSUER_KEY }}
       QURL_JOURNEY_QV2_RELAY_URL: ${{ secrets.QURL_JOURNEY_QV2_RELAY_URL }}
+      QURL_SANDBOX_CRID_CELL_PUBLIC_KEY_B64: ${{ secrets.QURL_JOURNEY_CELL0_PUBLIC_KEY_B64 }}
       QURL_JOURNEY_HUB_HOST: ${{ secrets.QURL_JOURNEY_HUB_HOST }}
       QURL_JOURNEY_HUB_PORT: ${{ secrets.QURL_JOURNEY_HUB_PORT }}
       QURL_JOURNEY_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}
@@ -1290,7 +1297,7 @@ jobs:
 
       - name: Build two-platform scratch qurl image
         id: image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: apps/cli/Dockerfile
