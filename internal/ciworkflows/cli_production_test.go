@@ -171,3 +171,21 @@ func TestPublicCLIProofCannotBuildOrPublish(t *testing.T) {
 		t.Fatal("reuse the production matrix only after signed public archive validation")
 	}
 }
+
+func TestWindowsProductionProofUsesProtectedCustomerReader(t *testing.T) {
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	steps := map[string]step{}
+	for _, current := range workflow.Jobs["production-proof"].Steps {
+		steps[current.Name] = current
+	}
+	reader := steps["Verify the Windows production credential reader"]
+	if reader.If != "runner.os == 'Windows'" || !strings.Contains(reader.Run, "TestProductionProofWindowsCredentialFile") {
+		t.Fatal("Windows reader must execute its native ACL regression")
+	}
+	mint := steps["Mint disposable Windows production credentials"]
+	for _, required := range []string{"icacls.exe $readerKey /inheritance:r /grant:r", "primary/api-key-env", "[IO.File]::WriteAllText($readerKey", " + \"`n\"", "QURL_API_KEY_FILE=$readerKey"} {
+		if !strings.Contains(mint.Run, required) {
+			t.Fatalf("Windows proof reader file lacks %s", required)
+		}
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,8 +22,10 @@ import (
 
 	connectorservice "github.com/layervai/qurl-connector/pkg/service"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 )
 
 const productionProofEndpoint = "https://api.layerv.ai"
@@ -52,7 +55,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 	if !filepath.IsAbs(binary) {
 		t.Fatal("production proof requires the exact unpacked release binary")
 	}
-	key := sandboxSecret(t, "QURL_API_KEY")
+	key := productionCredential(t)
 	owner := os.Getenv("QURL_PRODUCTION_OWNER_ID")
 	if key == "" || owner == "" {
 		t.Fatal("production proof requires disposable credentials and their expected owner")
@@ -171,6 +174,20 @@ func TestProductionReleaseJourney(t *testing.T) {
 	}
 }
 
+// The Windows sandbox helper deliberately has no file reader. Reuse the
+// customer reader so production proof retains its Windows ACL and link fences.
+func productionCredential(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return sandboxSecret(t, "QURL_API_KEY")
+	}
+	key, source, err := auth.Resolve(os.LookupEnv)
+	if err != nil || source != auth.SourceEnvironmentFile {
+		t.Fatal("production proof requires one protected Windows API-key file")
+	}
+	return key
+}
+
 func productionDecode(t *testing.T, raw []byte, target any) {
 	t.Helper()
 	if err := json.Unmarshal(raw, target); err != nil {
@@ -202,6 +219,7 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
+		t.Logf("production candidate failure class: %s", productionFailureClass(exit.Stderr))
 		if status := regexp.MustCompile(`HTTP \d{3}`).Find(exit.Stderr); len(status) > 0 {
 			t.Logf("production API rejected %s: %s", args[0], status)
 		}
@@ -209,6 +227,27 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	}
 	t.Fatal("production candidate could not start")
 	return nil, -1
+}
+
+// Emit only a fixed class, never the stderr beside a public error message.
+func productionFailureClass(stderr []byte) string {
+	for _, known := range []struct{ message, class string }{
+		{consume.MsgCRIDNotFound, "crid_not_found"},
+		{consume.MsgCRIDLinkUnavailable, "crid_link_unavailable"},
+		{consume.MsgCRIDLinkNoAnswer, "crid_link_no_answer"},
+		{consume.MsgAccessBusy, "access_busy"},
+		{consume.MsgLinkUnavailable, "download_host_unavailable"},
+		{consume.MsgCRIDLinkRateLimited, "crid_link_rate_limited"},
+		{consume.MsgCRIDPublisherOffline, "crid_publisher_offline"},
+		{consume.MsgCRIDResourceClosed, "crid_resource_closed"},
+		{consume.MsgCRIDLinkRequestRejected, "crid_link_request_rejected"},
+		{consume.MsgCRIDLinkRefused, "crid_link_refused"},
+	} {
+		if strings.Contains(string(stderr), known.message) {
+			return known.class
+		}
+	}
+	return "unclassified"
 }
 
 func productionSharing(t *testing.T, binary string, env map[string]string, command string, resource productionPublishDoc) uint64 {
