@@ -130,3 +130,42 @@ func TestCLIProductionCredentialsUseNativeWindowsPermissionsAndCleanup(t *testin
 		}
 	}
 }
+
+func TestCLI360ImageRecoveryCannotRebuildOrChangeNativeRelease(t *testing.T) {
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	recovery := workflow.Jobs["recover-cli360-image"]
+	if recovery == nil || recovery.If != "github.event_name == 'workflow_dispatch' && inputs.promote_built_cli_360_image" {
+		t.Fatal("image-only recovery must require its explicit dispatch")
+	}
+	assertJobPermissions(t, "recover-cli360-image", recovery.Permissions, map[string]string{"actions": "read", "contents": "write", "packages": "write", "id-token": "write"})
+	if !strings.Contains(workflow.Jobs["cli-release-gate"].If, "!inputs.promote_built_cli_360_image") {
+		t.Fatal("image-only dispatch must not start the normal release build")
+	}
+	var operations strings.Builder
+	for _, current := range recovery.Steps {
+		operations.WriteString(current.Run)
+		if strings.HasPrefix(current.Uses, checkoutActionPrefix) && current.With["persist-credentials"] != false {
+			t.Fatal("image recovery checkout must not retain write credentials")
+		}
+	}
+	text := operations.String()
+	for _, forbidden := range []string{"goreleaser", "docker buildx build", "gh release edit", "--draft=false", "--clobber"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("image-only recovery contains a native publication or rebuild: %s", forbidden)
+		}
+	}
+	for _, required := range []string{"check-cli360-image-recovery.py", "cosign verify-blob", "version --verify-release-native-trust", "extract-qurl-image-attestations.sh", "QURL_EXPECTED_VCS_REVISION", "https://github.com/layervai/qurl-integrations/actions/runs/39854001197/attempts/1", "cosign sign --yes", "cosign attest --yes", "cosign verify-attestation", "release-please.yml@refs/heads/main", "docker buildx imagetools create", `== "$IMAGE_DIGEST"`} {
+		if !strings.Contains(text, required) {
+			t.Errorf("image recovery lacks %q", required)
+		}
+	}
+	if strings.Contains(text, "|| true") || !strings.Contains(text, `cat "$RUNNER_TEMP/image-tag-error" >&2`) {
+		t.Fatal("unknown registry failures must not be treated as an absent image tag")
+	}
+	if strings.Count(text, "gh release upload") != 1 || !strings.Contains(text, "for file in qurl-image.txt qurl-image-buildkit-manifest.json; do") || !strings.Contains(text, `gh release upload "$CLI_TAG" "$RUNNER_TEMP/image-proof/$file"`) || !strings.Contains(text, `cmp "$RUNNER_TEMP/image-proof/$file"`) {
+		t.Fatal("only the two exact immutable image proof assets may be added or compared, never replaced")
+	}
+	if strings.Count(text, "python3 scripts/check-cli360-image-recovery.py") != 2 {
+		t.Fatal("owner and exact evidence must be checked before verification and again before promotion")
+	}
+}
