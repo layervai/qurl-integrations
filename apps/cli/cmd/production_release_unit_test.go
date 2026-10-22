@@ -4,12 +4,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 )
 
@@ -80,5 +82,31 @@ func TestProductionProofFailureClassNeverReturnsSensitiveOutput(t *testing.T) {
 		if got := productionFailureClass([]byte(hostile + test.message + hostile)); got != test.want {
 			t.Fatal("failure classifier returned unexpected or sensitive output")
 		}
+	}
+}
+
+func TestProductionProofCredentialFailureClassIsPrivate(t *testing.T) {
+	hostile := "C:\\private-path\\lv_live_" + strings.Repeat("private", 10) + "\n-----BEGIN PRIVATE KEY-----\nprivate-material"
+	for _, test := range []struct{ message, want string }{
+		{"must name one exact absolute private file", "file_path"},
+		{"not one bounded owner-private regular file", "file_metadata"},
+		{"not owned by the current user", "file_owner"},
+		{"ACL must be protected from inheritance", "file_acl_inheritance"},
+		{"DACL grants another principal access", "file_acl_principal"},
+		{"unsafe ownership or link authority", "file_authority"},
+		{"cannot open QURL_API_KEY_FILE without following links", "file_open"},
+		{"changed while opening", "file_changed_on_open"},
+		{"changed while reading", "file_changed_on_read"},
+		{"exact key bytes plus one LF or CRLF", "file_line_format"},
+		{"cannot read exact bounded", "file_read"},
+		{"does not look like a qURL API key", "key_shape"},
+		{"unknown private failure", "reader_unclassified"},
+	} {
+		if got := productionCredentialFailureClass(errors.New(hostile+test.message+hostile), ""); got != test.want {
+			t.Fatal("credential classifier returned unexpected or sensitive output")
+		}
+	}
+	if productionCredentialFailureClass(nil, auth.SourceEnvironmentFile) != "none" || productionCredentialFailureClass(nil, auth.SourceEnvironment) != "credential_not_file" || productionCredentialFailureClass(auth.ErrNoCredential, "") != "credential_missing" || productionCredentialFailureClass(auth.ErrCredentialConflict, "") != "credential_conflict" {
+		t.Fatal("credential source classification changed")
 	}
 }
