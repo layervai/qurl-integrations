@@ -23,6 +23,9 @@ type goldenCase struct {
 	wantCode int
 	// stdin is piped input (login's key); empty means an empty pipe.
 	stdin string
+	// linkSite is the origin this install knows as its link site; empty
+	// means it knows none, as with the deployment a release ships.
+	linkSite string
 	// chdirTemp runs the variant in a fresh temp working directory, so
 	// cases whose output embeds a relative --file path stay deterministic
 	// and leave nothing behind in the repo tree.
@@ -36,6 +39,16 @@ type goldenCase struct {
 }
 
 func goldenVariants() []string { return []string{"tty", "plain", "json"} }
+
+// goldenDevicePublicKey and goldenSecondDevicePublicKey are well-formed
+// device public keys for the cases that name one. No device holds them.
+const (
+	goldenDevicePublicKey       = "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="
+	goldenSecondDevicePublicKey = "cXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXE="
+	// goldenThirdDevice is a device id for the cases that need a third
+	// approved person. No device has it.
+	goldenThirdDevice = "keep-keep-keep-keep"
+)
 
 // TestGoldens pins the rendered bytes of every implemented command across
 // TTY, plain, and JSON projections, for success and error anatomies alike.
@@ -70,10 +83,722 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
-			name:         "share",
-			args:         func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
+			// --public: the Access row says so in plain words and the JSON
+			// document says private: false. Nothing else differs.
+			name: "publish_public",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--public"}
+			},
 			variants:     goldenVariants(),
 			stdoutGolden: true,
+		},
+		{
+			// The target is already published as public, as a release that
+			// published as public by default left it, and this publish names
+			// no privacy: the resource is kept, the Access row says public,
+			// and the document warns that it stays public.
+			name: "publish_kept_public",
+			args: func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			prepare: func(srv *apitest.Server) {
+				srv.SetResourceAccess(false)
+				srv.SetPublishFoundExisting(true)
+			},
+			variants:     []string{"tty", "plain"},
+			stdoutGolden: true,
+		},
+		{
+			// The script-facing form of the same publish: the JSON document
+			// says private: false, kept_public: true and found_existing:
+			// true, and the warning is on stderr.
+			name: "publish_kept_public_script",
+			args: func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			prepare: func(srv *apitest.Server) {
+				srv.SetResourceAccess(false)
+				srv.SetPublishFoundExisting(true)
+			},
+			variants:     []string{"json"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// The target is already published as public and this publish
+			// names devices to allow, which only a private resource has:
+			// exit 7, what exists, and the two things the publisher can do.
+			// Nothing on stdout.
+			name: "error_publish_existing_public",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-device-key", goldenDevicePublicKey}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.SetResourceAccess(false)
+				srv.SetPublishFoundExisting(true)
+			},
+			variants:     []string{"tty", "plain"},
+			wantCode:     7,
+			stderrGolden: true,
+		},
+		{
+			// The target is already published as private with another list
+			// of allowed devices: exit 7, and the commands that change it.
+			name: "error_publish_other_devices",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-device-key", goldenDevicePublicKey}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.SetResourceAccess(true, goldenSecondDevicePublicKey)
+				srv.SetPublishFoundExisting(true)
+			},
+			variants:     []string{"plain"},
+			wantCode:     7,
+			stderrGolden: true,
+		},
+		{
+			// The other direction: --public for a target that is private.
+			name: "error_publish_existing_private",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--public"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
+			variants:     []string{"plain"},
+			wantCode:     7,
+			stderrGolden: true,
+		},
+		{
+			// An older service refuses a different device list with the answer
+			// it gives a privacy difference, so the message claims neither.
+			name: "error_publish_access_differs",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-device-key", goldenDevicePublicKey}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.PlayPublicByDefault()
+				srv.SetPublishFoundExisting(true)
+			},
+			variants:     []string{"plain"},
+			wantCode:     7,
+			stderrGolden: true,
+		},
+		{
+			// The create answer does not say the resource is private: exit 10,
+			// no CRID anywhere, and what the publisher should check.
+			name: "error_publish_unconfirmed",
+			args: func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			prepare: func(srv *apitest.Server) {
+				srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+						"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "status": "active",
+					}, nil)
+				})
+			},
+			variants:     []string{"plain"},
+			wantCode:     10,
+			stderrGolden: true,
+		},
+		{
+			// With no flag, grants prints the resource with its current list.
+			name:         "grants",
+			args:         func(srv *apitest.Server) []string { return []string{"grants", srv.Key.CRID} },
+			prepare:      func(srv *apitest.Server) { srv.SetResourceAccess(true, goldenDevicePublicKey) },
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// Adding one device prints the complete list that results.
+			name: "grants_add",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--add", goldenSecondDevicePublicKey}
+			},
+			prepare:      func(srv *apitest.Server) { srv.SetResourceAccess(true, goldenDevicePublicKey) },
+			variants:     []string{"plain", "json"},
+			stdoutGolden: true,
+		},
+		{
+			// On a public resource the list is shown and a note says that it
+			// has no effect.
+			name:         "grants_public",
+			args:         func(srv *apitest.Server) []string { return []string{"grants", srv.Key.CRID} },
+			prepare:      func(srv *apitest.Server) { srv.SetResourceAccess(false) },
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// A service from before single grants answers with the list as it
+			// was: exit 10 and nothing on stdout.
+			name: "error_grants_unconfirmed",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--add", goldenDevicePublicKey}
+			},
+			prepare:      func(srv *apitest.Server) { srv.PlayNoSingleGrantEdits() },
+			variants:     []string{"plain"},
+			wantCode:     10,
+			stderrGolden: true,
+		},
+		{
+			// The flag that replaced the complete list is a usage error that
+			// names --add.
+			name: "error_grants_replace_flag",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--allow-device-key", goldenDevicePublicKey}
+			},
+			variants:     []string{"plain"},
+			wantCode:     2,
+			stderrGolden: true,
+		},
+		{
+			// Publishing with access requests on, on an install that knows
+			// its link site: the document says what to send to people and
+			// what happens next, before the CRID line.
+			name: "publish_requests",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			linkSite:     testLinkSite,
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// The same on an install that does not know its link site: the
+			// CRID is what to send, and no address is named.
+			name: "publish_requests_no_site",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			variants:     []string{"plain", "json"},
+			stdoutGolden: true,
+		},
+		{
+			// The target is already published as a private resource with
+			// access requests off: the publish turns them on, and the
+			// document says so in one line before what to send to people.
+			name: "publish_requests_existing",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
+			linkSite:     testLinkSite,
+			variants:     []string{"tty", "plain"},
+			stdoutGolden: true,
+		},
+		{
+			// The JSON document keeps its shape; the one line is on stderr.
+			name: "publish_requests_existing",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
+			linkSite:     testLinkSite,
+			variants:     []string{"json"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// The same target, and the change that turns access requests on
+			// is refused for now: the failure's own exit code, what exists,
+			// why, and the command that tries again with the CRID in it.
+			name: "error_publish_requests_not_turned_on",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.SetPublishFoundExisting(true)
+				srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+				})
+			},
+			linkSite:     testLinkSite,
+			variants:     []string{"tty", "plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
+			// A service without access requests that refuses the setting it
+			// does not know: exit 11, the message every access-request
+			// command gives there, and that nothing was published.
+			name: "error_publish_requests_refused",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.PlayStrictWithoutAccessRequests() },
+			variants:     []string{"plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
+			// The same service, asked to turn access requests on for a
+			// resource.
+			name: "error_requests_on_refused",
+			args: func(srv *apitest.Server) []string {
+				return []string{"requests", srv.Key.CRID, "--on"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.PlayStrictWithoutAccessRequests() },
+			variants:     []string{"plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
+			// A service from before access requests: exit 11 and no CRID.
+			name: "error_publish_requests_unsupported",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--allow-requests"}
+			},
+			prepare:      func(srv *apitest.Server) { srv.PlayNoAccessRequests() },
+			variants:     []string{"plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
+			// The pending requests of every resource, with no code, ending
+			// with the line on how a person is let in.
+			name:         "requests",
+			args:         func(*apitest.Server) []string { return []string{"requests"} },
+			prepare:      twoRequests,
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// The same listing from a service that says there may be more
+			// requests than it sent: a line after the rows that says what to
+			// do, and has_more in the document.
+			name: "requests_more",
+			args: func(*apitest.Server) []string { return []string{"requests"} },
+			prepare: func(srv *apitest.Server) {
+				twoRequests(srv)
+				srv.SetAccessRequestsHasMore(true)
+			},
+			variants:     []string{"plain", "json"},
+			stdoutGolden: true,
+		},
+		{
+			name:         "requests_one",
+			args:         func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID} },
+			prepare:      twoRequests,
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+		},
+		{
+			// Nothing pending: a note on stderr and nothing on stdout.
+			name:         "requests_none",
+			args:         func(*apitest.Server) []string { return []string{"requests"} },
+			variants:     []string{"plain"},
+			stderrGolden: true,
+		},
+		{
+			name:         "requests_on",
+			args:         func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--on"} },
+			linkSite:     testLinkSite,
+			variants:     []string{"plain", "json"},
+			stdoutGolden: true,
+		},
+		{
+			// A service that turned access requests on for a public
+			// resource: no guidance and no address, and a message that says
+			// the resource is public. Exit 10.
+			name: "error_requests_on_public",
+			args: func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--on"} },
+			prepare: func(srv *apitest.Server) {
+				srv.SetResourceAccess(false)
+				srv.AcceptAccessRequestsOnPublic()
+			},
+			linkSite:     testLinkSite,
+			variants:     []string{"plain"},
+			wantCode:     10,
+			stderrGolden: true,
+		},
+		{
+			name: "requests_off",
+			args: func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--off"} },
+			prepare: func(srv *apitest.Server) {
+				srv.SetAccessRequests(true)
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, otherRequester)
+			},
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+		},
+		{
+			name:         "error_requests_unsupported",
+			args:         func(*apitest.Server) []string { return []string{"requests"} },
+			prepare:      func(srv *apitest.Server) { srv.PlayNoAccessRequests() },
+			variants:     []string{"plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
+			// An approval: who now has access, and the command that takes it
+			// away again.
+			name:         "approve",
+			args:         func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, "482 913"} },
+			prepare:      twoRequests,
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// A code that is not pending for the resource: exit 5 and a
+			// message about the code.
+			name:         "error_approve_not_pending",
+			args:         func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, "000000"} },
+			prepare:      twoRequests,
+			variants:     []string{"plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// The service's limit on wrong codes: its own sentence, how
+			// long to wait, and what to do. Exit 9, and the right code is
+			// refused too.
+			name: "error_approve_too_many_codes",
+			args: func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, "482 913"} },
+			prepare: func(srv *apitest.Server) {
+				twoRequests(srv)
+				srv.ReachWrongCodeLimit()
+			},
+			variants:     []string{"tty", "plain"},
+			wantCode:     9,
+			stderrGolden: true,
+		},
+		{
+			// A value that can never be a code: exit 8 before any request.
+			name:         "error_approve_code",
+			args:         func(srv *apitest.Server) []string { return []string{"approve", srv.Key.CRID, "Ana Lopez"} },
+			variants:     []string{"plain"},
+			wantCode:     8,
+			stderrGolden: true,
+		},
+		{
+			// A denial by the device id the listing shows.
+			name:         "deny",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requesterDevice} },
+			prepare:      twoRequests,
+			variants:     []string{"tty", "plain"},
+			stderrGolden: true,
+		},
+		{
+			name:         "deny",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, requesterDevice} },
+			prepare:      twoRequests,
+			variants:     []string{"json"},
+			stdoutGolden: true,
+		},
+		{
+			// A denial by a code its publisher was given.
+			name:         "deny_code",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, "482913"} },
+			prepare:      twoRequests,
+			variants:     []string{"plain"},
+			stderrGolden: true,
+		},
+		{
+			name:         "deny_code",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, "482913"} },
+			prepare:      twoRequests,
+			variants:     []string{"json"},
+			stdoutGolden: true,
+		},
+		{
+			// A device id with no pending request: exit 5 and a message
+			// about the device id.
+			name:         "error_deny_not_pending",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, goldenThirdDevice} },
+			prepare:      twoRequests,
+			variants:     []string{"plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// A value that is neither a device id nor a code: exit 8 before
+			// any request.
+			name:         "error_deny_request",
+			args:         func(srv *apitest.Server) []string { return []string{"deny", srv.Key.CRID, "Ana Lopez"} },
+			variants:     []string{"plain"},
+			wantCode:     8,
+			stderrGolden: true,
+		},
+		{
+			// grants with approved people beside the device keys.
+			name: "grants_people",
+			args: func(srv *apitest.Server) []string { return []string{"grants", srv.Key.CRID} },
+			prepare: func(srv *apitest.Server) {
+				srv.SetResourceAccess(true, goldenDevicePublicKey)
+				srv.SetAccessRequests(true)
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, "")
+			},
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// Removing a device id that is not on the list: exit 5, and the
+			// message says that nothing was removed.
+			name: "error_grants_remove_unknown",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", otherDevice}
+			},
+			prepare:      func(srv *apitest.Server) { srv.AddApprovedPerson(requesterDevice, requesterName) },
+			variants:     []string{"plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// Two device ids, the second not on the list. The list is read
+			// before any access is taken away, so nothing was removed, and
+			// the message says who still has access.
+			name: "error_grants_remove_one_unknown",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}
+			},
+			prepare:      func(srv *apitest.Server) { srv.AddApprovedPerson(requesterDevice, requesterName) },
+			variants:     []string{"tty", "plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// The same in JSON mode: the outcome is also a document, with
+			// every device id in one of its three arrays.
+			name: "error_grants_remove_one_unknown_script",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}
+			},
+			prepare:      func(srv *apitest.Server) { srv.AddApprovedPerson(requesterDevice, requesterName) },
+			variants:     []string{"json"},
+			wantCode:     5,
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// A person is gone by the time they are removed, after another
+			// was removed: the message says from whom access was taken away,
+			// who was not found and who still has access.
+			name: "error_grants_remove_part_way",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice, "--remove", goldenThirdDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, otherRequester)
+				srv.AddApprovedPerson(goldenThirdDevice, "")
+				srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID+"/allowed-passkeys/"+otherDevice, func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusNotFound, "not_found", "Not Found", "no such approved person")
+				})
+			},
+			variants:     []string{"plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// The script-facing form of the same outcome.
+			name: "error_grants_remove_part_way_script",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice, "--remove", goldenThirdDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, otherRequester)
+				srv.AddApprovedPerson(goldenThirdDevice, "")
+				srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID+"/allowed-passkeys/"+otherDevice, func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusNotFound, "not_found", "Not Found", "no such approved person")
+				})
+			},
+			variants:     []string{"json"},
+			wantCode:     5,
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// A resource whose answer has no list of approved people: the
+			// row says "not said", never "none", and the document has no
+			// approved_people member.
+			name: "grants_people_not_said",
+			args: func(srv *apitest.Server) []string { return []string{"grants", srv.Key.CRID} },
+			prepare: func(srv *apitest.Server) {
+				srv.SetResourceAccess(true, goldenDevicePublicKey)
+				srv.SetAccessRequests(true)
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.OmitApprovedPeople()
+			},
+			variants:     []string{"plain", "json"},
+			stdoutGolden: true,
+		},
+		{
+			// A removal on that service: each removal was answered as made,
+			// and no list confirms it. Exit 10, and no lists are printed.
+			name: "error_grants_remove_not_confirmed",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.OmitApprovedPeople()
+			},
+			variants:     []string{"tty", "plain"},
+			wantCode:     10,
+			stderrGolden: true,
+		},
+		{
+			// The script-facing form of the same outcome.
+			name: "error_grants_remove_not_confirmed_script",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.OmitApprovedPeople()
+			},
+			variants:     []string{"json"},
+			wantCode:     10,
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// The service answers a removal as made, and its list still
+			// shows the person: who lost access, and who still has it.
+			name: "error_grants_remove_still_listed",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, otherRequester)
+				srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID+"/allowed-passkeys/"+otherDevice, func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusNoContent)
+				})
+			},
+			variants:     []string{"plain"},
+			wantCode:     10,
+			stderrGolden: true,
+		},
+		{
+			// The script-facing form of the same outcome.
+			name: "error_grants_remove_still_listed_script",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--remove", otherDevice}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.AddApprovedPerson(otherDevice, otherRequester)
+				srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID+"/allowed-passkeys/"+otherDevice, func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusNoContent)
+				})
+			},
+			variants:     []string{"json"},
+			wantCode:     10,
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// Every person is removed, and then the change to the public
+			// keys fails: who lost access, why the key change failed, and
+			// the command that makes the key change alone.
+			name: "error_grants_remove_keys_failed",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--add", goldenDevicePublicKey}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+				})
+			},
+			variants:     []string{"tty", "plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
+			// The script-facing form of the same outcome.
+			name: "error_grants_remove_keys_failed_script",
+			args: func(srv *apitest.Server) []string {
+				return []string{"grants", srv.Key.CRID, "--remove", requesterDevice, "--add", goldenDevicePublicKey}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.AddApprovedPerson(requesterDevice, requesterName)
+				srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "the resource is being changed; try again")
+				})
+			},
+			variants:     []string{"json"},
+			wantCode:     11,
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// A terminal gets the publisher and creation date with the link on
+			// stdout; JSON carries them in the document. Neither writes stderr.
+			name:         "share",
+			args:         func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
+			variants:     []string{"tty", "json"},
+			stdoutGolden: true,
+		},
+		{
+			// Piped: stdout stays exactly the bare link, and the publisher is
+			// one notice line on stderr.
+			name:         "share",
+			args:         func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// The publisher set no name: the fixed text stands in for it, and
+			// the status word is unchanged.
+			name:         "share_unnamed",
+			args:         func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
+			prepare:      func(srv *apitest.Server) { srv.SetPublisherName("") },
+			variants:     []string{"tty", "json"},
+			stdoutGolden: true,
+		},
+		{
+			name:         "share_unnamed",
+			args:         func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
+			prepare:      func(srv *apitest.Server) { srv.SetPublisherName("") },
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// status on a URL resource: the sharing-state read answers that
+			// this is not a Connector, then the resource detail carries the
+			// publisher and creation date.
+			name:         "status_url",
+			args:         func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			name:         "publisher",
+			args:         func(*apitest.Server) []string { return []string{"publisher"} },
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			// Setting a name prints the row recipients will see; the
+			// confirmation is a status note on stderr.
+			name:         "publisher_set",
+			args:         func(*apitest.Server) []string { return []string{"publisher", "set", "Northwind Labs"} },
+			variants:     []string{"tty", "plain"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			name:         "publisher_set",
+			args:         func(*apitest.Server) []string { return []string{"publisher", "set", "Northwind Labs"} },
+			variants:     []string{"json"},
+			stdoutGolden: true,
+		},
+		{
+			name:         "publisher_clear",
+			args:         func(*apitest.Server) []string { return []string{"publisher", "clear"} },
+			variants:     []string{"plain"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// The service refuses a name: exit 8 with its reason, and the
+			// name itself is not echoed.
+			name:         "error_publisher_name",
+			args:         func(*apitest.Server) []string { return []string{"publisher", "set", "Acme Verified"} },
+			variants:     []string{"plain"},
+			wantCode:     8,
+			stderrGolden: true,
 		},
 		{
 			name:         "list",
@@ -94,11 +819,27 @@ func TestGoldens(t *testing.T) {
 			stdoutGolden: true,
 		},
 		{
-			name: "error_notfound",
+			// The share operator's not-found, which share and get both get,
+			// has its own hint: a 404 for a CRID also covers a device that is
+			// not allowed.
+			name: "error_share_notfound",
 			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
 				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/share",
 					apitest.HandlerNotFound404(t, "resource_not_found"))
+			},
+			variants:     []string{"tty", "plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+		{
+			// Every other route's not-found keeps the hint they all share.
+			// status stands in for them here.
+			name: "error_notfound",
+			args: func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
+			prepare: func(srv *apitest.Server) {
+				srv.Script(http.MethodGet, "/v1/resources/"+key.CRID+"/sharing",
+					apitest.HandlerNotFound404(t, "not_found"))
 			},
 			variants:     []string{"tty", "plain"},
 			wantCode:     5,
@@ -348,9 +1089,10 @@ func TestGoldens(t *testing.T) {
 					env = tc.env(srv)
 				}
 				o := &runOpts{
-					args: append([]string{"--endpoint", srv.URL}, args...),
-					env:  env,
-					tty:  variant == "tty",
+					args:     append([]string{"--endpoint", srv.URL}, args...),
+					env:      env,
+					tty:      variant == "tty",
+					linkSite: tc.linkSite,
 				}
 				if tc.stdin != "" {
 					o.stdin = strings.NewReader(tc.stdin)

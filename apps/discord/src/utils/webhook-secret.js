@@ -27,7 +27,7 @@ const SERVER_SECRET_EXPECTED_FORMAT = `${SERVER_SECRET_PREFIX} prefix with at le
 //
 // TODO(infra-sentinel-sync): the literal "PLACEHOLDER" is also the seed
 // value for the `aws_ssm_parameter` resources in
-// qurl-integrations-infra/qurl-bot-discord/terraform (search that repo for
+// the infra repo's qurl-bot-discord/terraform (search that repo for
 // `value = "PLACEHOLDER"`). If infra ever renames the sentinel (e.g.,
 // "REPLACE_ME"), update here in lockstep — otherwise both checks silently
 // regress to "non-empty value passes" and the original incident class

@@ -60,7 +60,7 @@ import (
 const kmsWorkspaceAADKey = "workspace_id"
 
 // Attribute names on the `workspace_state` DDB table. Mirrored on the
-// qurl-integrations-infra side in the TF for the table schema; changing
+// infrastructure repository side in the TF for the table schema; changing
 // these here means a coordinated TF change.
 const (
 	attrTeamID           = "team_id"
@@ -115,7 +115,7 @@ const (
 )
 
 // Env var names — operator-set via the Fargate task definition (the
-// qurl-integrations-infra TF wires these from module.runtime.environment).
+// infra repo's TF wires these from module.runtime.environment).
 const (
 	// EnvWorkspaceStateTable holds the DDB table name (operator-set;
 	// no default fallback to avoid the "ships pointing at the wrong

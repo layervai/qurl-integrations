@@ -46,6 +46,73 @@ embed development or test trust data. The GitHub Release stays draft and the
 Homebrew tap stays on its prior version until all customer-journey, artifact,
 image, trust-posture, and signature checks pass.
 
+## Required production proof
+
+After building the draft release, the workflow runs its exact packaged binary
+against `https://api.layerv.ai` on Linux, macOS, and Windows. It creates a fresh
+device identity and new local resources. Public and private publication, exact
+backend content, private-access denial, resource reuse, stop/start/restart,
+deletion, and independent credential/resource cleanup must pass. The candidate
+uses its built-in production trust settings. Tests cannot skip or substitute a
+sandbox endpoint or a rebuilt CI binary.
+
+Publication requires all three platform results and cleanup to succeed. It
+then checks SHA-256 receipts against the current draft archives and checksums.
+Receipts must name this source commit, release tag, and workflow run, and must
+come from the same attempt and be at most one hour old. Missing, stale, failed, or changed evidence blocks
+both public image promotion and GitHub publication. Homebrew depends on that
+publication. Recovery dispatches use the same gates. Cancellation also starts
+an independent trusted cleanup workflow.
+
+If a publication fails or its proof expires, rerun the whole release
+continuation dispatch, or dispatch it again with the same exact tag and source
+inputs. A failed-jobs-only retry cannot reuse evidence from an earlier attempt.
+All continuations for one tag are serialized, including operator recovery, so
+one build cannot replace the release assets while another run tests them.
+GitHub retains only one pending continuation per tag; a newer queued dispatch
+replaces an older pending dispatch, while the active run continues.
+
+The `cli-production` environment admits only `main` and has no approval rule.
+It needs its own production CI owner and the `QURL_JOURNEY_API_KEY` and
+`QURL_JOURNEY_OWNER_ID` environment secrets, with the scopes and isolation in
+[CLI automation credentials](docs/ci-api-keys.md). Missing configuration blocks
+release; sandbox credentials must never be copied into it. The parent key is
+used only by trusted setup and cleanup. Customer processes receive disposable
+keys with no key-management authority.
+
+This is proof of the listed production journeys on each native runner, not
+proof of every CLI command or every platform architecture. API-dependent
+features need their own production assertions before they can be treated as
+verified. All six release archives are bound to the proven checksum set;
+the existing package checks also remain required.
+
+## Test an unreleased CLI without releasing it
+
+When a CLI change needs platform features that are in sandbox but not yet in
+production, keep the release PR open and test a candidate instead. Dispatch
+`cli: Candidate Build` on a branch; it builds that branch's latest commit,
+which the run summary names:
+
+```bash
+gh workflow run cli-candidate.yml -R layervai/qurl-integrations --ref <branch>
+```
+
+The branch must contain `.github/workflows/cli-candidate.yml`; merge `main`
+into an older branch first. A dispatch runs the branch's own copy of that
+file. Runs on one branch queue one at a time, and a third dispatch while one
+runs and one waits replaces the waiting one.
+
+It runs GoReleaser in snapshot mode and keeps the archives and
+`checksums.txt` as a run artifact for 7 days. It creates no tag and no GitHub
+Release, publishes no Homebrew cask, and holds only `contents: read`, so
+`brew upgrade` and `install.sh` never see it. The candidate is unsigned and
+its version is `<last release reachable from the branch>-SNAPSHOT-<commit>`. The run summary has the
+download command. Run the unpacked `qurl` by its path, and point it at sandbox
+with `QURL_ENDPOINT`, `QURL_DEPLOYMENT` and the all-or-none
+`QURL_CONNECTOR_HUB_HOST`, `QURL_CONNECTOR_HUB_PORT` and
+`QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64` triple. Without them it uses
+production. Release once production has the platform the change needs.
+
 ## Production default activation after v2.5.0
 
 v2.5.0 was intentionally published without a production Hub pin. Do not replace
@@ -81,7 +148,15 @@ Before cutting the next CLI patch release:
 
 Merging the CLI's release-please PR tags `vX.Y.Z` and creates a draft GitHub
 Release. The `release-cli` job runs GoReleaser, verifies the result, publishes
-the GitHub Release, and then updates Homebrew. The release attaches:
+the GitHub Release, and then updates Homebrew. Before GoReleaser, the job
+checks that the qURL agent skill served to users is at least the version the
+tagged CLI asks for. If that step fails, nothing has been uploaded: serve the
+newer skill, then use **Re-run failed jobs**. A cache in front of the skill
+may keep the old copy for a while, and the step fails until it does not. The
+`cli: Served Skill` workflow runs the same check against `main` every day and
+reports a failure without blocking anything. To see the answer on demand
+before the tag exists, run `go run ./apps/cli/scripts/check-served-skill` on
+`main` before merging the CLI's release PR. The release attaches:
 
 | Asset | What it is |
 |---|---|

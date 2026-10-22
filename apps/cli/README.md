@@ -6,10 +6,11 @@ Publish an app running on your machine with one command:
 qurl publish http://127.0.0.1:3000
 ```
 
-qURL™ gives the app a permanent **CRID** you can safely paste into chat,
-documentation, or an agent prompt. A CRID identifies the protected resource;
-it does not grant access. Authorized users turn it into a short-lived access
-link only when they need one.
+qURL™ gives the app a permanent **CRID** you can give to recipients in chat,
+documentation, or an agent prompt. `qurl share` and `qurl get` turn a CRID
+into a short-lived access link using this device's identity. They work on the
+resource owner's devices and, for a private resource, on the devices the
+publisher allowed; any other device gets "not found".
 
 [Publish localhost in 60 seconds](#publish-localhost-in-60-seconds) ·
 [Command reference](#commands) · [Scripting](#scripting-contract)
@@ -67,6 +68,7 @@ When the route is ready, qURL prints:
 Published
 
   Target:  http://127.0.0.1:3000
+  Access:  private — only you and the people you allow can open it
   Status:  serving
 
 CRID: <CRID>
@@ -85,11 +87,16 @@ debugging. When another program owns the daemon process, run it with
 
 ### 3. Open or share it
 
-The CRID is safe to share. An authorized user can open the app with:
+`qurl get` uses this device's identity. On the machine that published the app,
+open it with:
 
 ```bash
 qurl get <CRID>
 ```
+
+The app is private: your own devices can open it, and no other device can
+until you allow it. To allow another device, or to publish a public resource
+instead, see [Private CRIDs](#private-crids).
 
 Your app still listens only on your machine. The CLI connects outward to qURL;
 you do not need public DNS, a public IP, or custom Connector configuration.
@@ -119,9 +126,29 @@ brew install layervai/tap/qurl
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
 
+**Install script** (macOS / Linux, no Homebrew or `sudo` needed):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/layervai/qurl-integrations/main/scripts/install.sh | sh
+```
+
+The script verifies the download against the release's `checksums.txt`.
+It installs to `/usr/local/bin` when that is writable and otherwise to
+`~/.local/bin`, printing a `PATH` hint if needed. It never runs `sudo`, so it
+also works unattended for coding agents and CI. Set `INSTALL_DIR` to choose
+the directory, or run the script with `sudo` for a system-wide install.
+
 The CLI supports remote and local background qURL commands on macOS, Windows,
-and Linux. Linux uses the native systemd user manager and reports a clear error
-when that manager is unavailable.
+and Linux. Linux uses the native systemd user manager. Containers and sandboxes
+often run without one; there, `qurl publish` says so and points to
+`qurl publish <url> --foreground` or `qurl daemon run --supervision external`.
+
+qURL refuses to keep its state or run its background job under a directory
+other users can write to. With `umask 002` (the Ubuntu and Fedora default), a
+`~/.local` or `~/bin` created by another tool can end up mode `0775`; the error
+names the directory. Run `chmod go-w <directory>`, or set
+`QURL_CONNECTOR_STATE_DIR` (or `XDG_STATE_HOME`) to a directory you own that
+other users can't write to.
 
 **Debian / RPM** — download the `.deb` or `.rpm` for your architecture from
 the [latest release](https://github.com/layervai/qurl-integrations/releases)
@@ -234,8 +261,60 @@ copy individual bindings or pending requests into the new state.
 All commands that open device state, including `list`, `whoami`, and `get`, must
 use the state's supervision mode. For an externally supervised namespace, set
 `QURL_DAEMON_SUPERVISION=external` or pass `--supervision external`. A fresh
-externally supervised namespace must first use the existing enrollment-token
-login flow.
+externally supervised namespace must first enroll with `login --anonymous` or
+the enrollment-token login flow. Both require the sealed key-provider settings
+below and preserve an existing external identity.
+
+For account-free enrollment, invoke `qurl login --anonymous --supervision external
+-o json` with the same sealed key provider and inherited descriptor. This form
+refuses account API-key environment variables and `--enrollment-token-file`.
+Its JSON result contains `owner_id`, `auth_type`, `device_key_id` when available,
+and `device_enrolled: true`. Retain the complete state namespace and wrapping
+key across launches; failure never authorizes deleting or replacing them.
+
+Supervisors can use `qurl request METHOD /v1/... --supervision external -o json`
+for the registered device's existing resource operations. It requires the same
+sealed key provider as enrollment and refuses natively supervised namespaces and
+account API-key configuration, so it never enrolls or recovers a device
+implicitly. For POST, PUT and PATCH, pipe an optional JSON body through stdin;
+when there is no body, redirect stdin from the null device (`/dev/null`, or
+`NUL` on Windows) rather than closing it, because a closed stdin is a read
+error. The CLI sets no timeout, so impose a deadline on the process; it covers
+both the stdin read and the HTTP call. GET and DELETE never read stdin. Responses have
+`{status, headers, body}`; headers contain only `content-type`, `retry-after`
+and `x-request-id`. Empty responses use `body: null`; non-JSON responses use a
+string. HTTP failures also return this envelope with exit zero; local and
+transport failures exit nonzero. Requests make one attempt. When retrying a
+mutation, pass the same `--idempotency-key` (32–256 ASCII letters, digits,
+hyphens or underscores; never on GET); it protects only routes where the qURL
+service implements idempotency. Bodies are limited to 1 MiB including
+surrounding whitespace. Absolute URLs and routes outside the registered-device
+allowlist (mirrored locally from the SDK) are refused. Queries are supported
+only for `GET /v1/resources` and `GET /v1/resources/{id}/qurls`; the CLI and the
+SDK both reject queries on other routes. Response bodies also have a 1 MiB cap;
+exceeding it returns a nonzero exit. Responses can carry capability material
+such as newly minted qURL links; do not log stdout durably.
+
+The allowed routes are `GET /v1/me`, `POST /v1/account/link`, `POST /v1/qurls`,
+`GET` and `POST /v1/resources`, and for one resource: `GET`, `PATCH` and
+`DELETE /v1/resources/{id}`; `GET` and `PUT .../sharing`;
+`POST .../sharing/restart`; `POST .../share`; `GET` and `POST .../qurls`;
+`PATCH` and `DELETE .../qurls/{id}`; `GET` and `DELETE .../sessions`; and
+`DELETE .../sessions/{id}`. These operations require matching service-side
+device authorization. The bridge only forwards the HTTP call: it does not
+update this machine's share registry or reload the daemon, so use `qurl start`,
+`qurl stop`, `qurl restart` and `qurl delete` for resources shared from this
+machine rather than the `sharing` and resource `DELETE` routes. Sessions are
+unpaginated, so a session list larger than the 1 MiB response cap fails; terminate all sessions to recover. API key
+creation, account owner enumeration, billing, quota and usage are refused. So
+are the routes for access requests and approved people: use `qurl requests`,
+`qurl approve`, `qurl deny` and `qurl grants` for those.
+
+For example, account linking uses `POST /v1/account/link` with
+`{"account_token":"<account access token>"}` on stdin. Keep that token out of
+argv, environment variables, logs and durable files. The device credential
+stays inside the CLI. Before recording success, verify the returned `owner_id`
+matches this device and `account_id` matches the intended account.
 
 A program that runs the daemon itself (see
 [External supervision](#external-supervision)) never hands qurl an account API
@@ -267,11 +346,13 @@ appears in arguments, the environment, or a file. Every `qurl` process the
 supervisor runs against that state directory — `daemon run` and the lifecycle
 commands included — inherits the same two settings, each with a descriptor of
 its own. The sealed envelope (`agent_state.sealed.json`) and the plaintext one
-(`agent_state.json`) never share a directory: with the provider set, a
-directory that already holds plaintext state is refused, and without it, a
-directory that holds a sealed envelope is refused with the two variable names
-to set. Omitting the provider is an error for token-file login; plaintext
-state remains available to native account-key enrollment. Switching providers
+(`agent_state.json`) never share a directory. With a sealing provider set
+(anything but `file`), a directory that already holds plaintext state is
+refused. Without it, a
+directory sealed by `local-key` is refused, and the error names the
+variable to set. Omitting the provider is an error for token-file login. Native
+account-key enrollment uses the default [key storage](#key-storage): sealed to
+the TPM where one is usable, otherwise plaintext. Switching providers
 is therefore a fresh namespace, not an in-place migration. There is no flag for the provider; the supervisor that owns the key
 sets the environment. The token-file reader and the inherited-descriptor key
 transport are available on macOS and Linux.
@@ -325,24 +406,70 @@ production settings are included in releases; environment-only, with no profile 
 CLI at a plain-`http` endpoint on a non-local address warns that the key
 would travel unencrypted; loopback endpoints are exempt.
 
-`LAYERV_KEY_PROVIDER` seals the local agent state under a key provider
-instead of the plaintext default (`file`); with `local-key`, the 32-byte
-wrapping key arrives on the inherited descriptor named by
-`LAYERV_LOCAL_KEY_FD`, on macOS and Linux. There is deliberately no flag: the
-supervisor that owns the key (for example qURL Desktop) sets the environment.
-A sealed namespace requires `--supervision external`: the background job
-`qurl` installs under native supervision carries no environment and cannot
-inherit a key descriptor. Every command that checks the namespace's
-supervision policy - `publish`, `start`, `stop`, `restart`, `delete`, `login`
-and `daemon run` - therefore refuses a sealed namespace under native
-supervision (exit code 3), not only the ones that would install a job.
-Read-only commands do not run that check and open the sealed envelope
-normally.
+### Key storage
 
-A state directory holds exactly one
-envelope, so qurl refuses to open a sealed directory without these variables,
-or a plaintext one with them (also exit code 3); use a different state
-directory rather than switching in place.
+The local agent state holds this device's credential and identity. When a new
+state directory is created on a machine with a TPM 2.0 that `qurl` can use,
+that state is sealed to the TPM (`agent_state.sealed.json`). Everywhere else,
+the state is a plaintext owner-only file (`agent_state.json`). "Usable" means
+the Linux kernel resource manager `/dev/tpmrm0`, which usually requires
+membership in the `tss` group, or TPM Base Services on Windows. macOS has no
+TPM. The check is made by the process that creates the directory, with that
+process's groups: `qurl` run under `sudo -u`, in a container, or from a
+session without `tss` creates plaintext state even where an interactive shell
+would seal it. A TPM that is present but not responding (busy, starting, or
+timing out) fails with exit code 11 instead of falling back to plaintext,
+because the choice is permanent; retry, or set `LAYERV_KEY_PROVIDER=file`.
+
+A TPM-sealed directory needs no environment to reopen, so the natively
+supervised background job serves it as usual. It opens only on this machine's
+TPM as it was when the state was sealed. A backup restored onto other
+hardware, a VM clone or image, a TPM clear, or another system later taking
+ownership of the TPM (most commonly Windows on a dual-boot machine) leaves it
+unreadable, and the error says which. The recovery is to move the state
+directory aside and enroll again, which creates a new device identity.
+<!-- TODO(upstream-contract): "the error says which" relies on qurl-connector
+pkg/agentstate's TPM unseal diagnostics. -->
+
+Under native supervision `qurl` prints a one-time notice on stderr just
+before it seals a new directory to the TPM. With `--quiet`, or under an
+external supervisor (which normally sets the provider itself), the same
+permanent choice is made without it; `qurl whoami` shows the result.
+
+The background job must be able to reach the TPM too. On Linux a systemd user
+manager keeps the groups it started with, so after adding yourself to `tss`,
+log out fully (or reboot) before the first `qurl publish`; otherwise a
+foreground command can seal state that the background job, still without
+`tss`, cannot open. Its error then names the TPM.
+
+Existing directories keep the
+envelope they were created with and are never migrated in place. `qurl
+whoami` shows which one this device uses (`Key storage:`, or `key_storage`
+with `-o json`).
+
+`LAYERV_KEY_PROVIDER` overrides that choice when a directory is created.
+`file` keeps it plaintext even where a TPM is available, and `tpm` requires
+the TPM: without a usable one it exits 3, and with one that is not responding
+it exits 11. The other providers seal the state under a key held elsewhere. With
+`local-key`, the 32-byte wrapping key arrives on the inherited descriptor
+named by `LAYERV_LOCAL_KEY_FD`, on macOS and Linux. There is deliberately no
+flag: the supervisor that owns the key (for example qURL Desktop) sets the
+environment. A namespace sealed by such a provider requires `--supervision
+external`, because the background job `qurl` installs under native
+supervision carries no environment and cannot inherit a key descriptor. Every
+command that checks the namespace's supervision policy (`publish`, `start`,
+`stop`, `restart`, `delete`, `login` and `daemon run`) therefore refuses that
+namespace under native supervision with exit code 3, not only the commands
+that would install a job. Read-only commands do not run that check and open
+the sealed envelope normally.
+
+A state directory holds exactly one envelope. `qurl` refuses a directory
+sealed by an environment provider when that provider's variables are missing.
+It also refuses a directory whose envelope conflicts with
+`LAYERV_KEY_PROVIDER`: a plaintext directory with a sealing provider set, or a
+sealed directory with `file` set. `file` over a plaintext directory is the
+ordinary case and opens normally. Both refusals exit with code 3. Use a different state directory rather
+than switching in place.
 
 ## Commands
 
@@ -350,6 +477,11 @@ directory rather than switching in place.
 |---------|-------------|
 | `qurl publish <target-url>` | Publish a remote URL or serve a local app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
+| `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |
+| `qurl access <action> <CRID> [<decision-id>]` | Manage private consumer policies, invitations, and grants |
+| `qurl requests [<CRID>]` | List access requests, or turn them on or off for a private resource |
+| `qurl approve <CRID> <code>` | Approve one person's request for access to a private resource |
+| `qurl deny <CRID> <device id>` | Refuse one person's request for access to a private resource |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
 | `qurl start <CRID>` | Turn on a previously published local share |
@@ -361,8 +493,10 @@ directory rather than switching in place.
 | `qurl delete <CRID>` | Delete a published resource |
 | `qurl account setup` | Link this device to an account for recovery and other devices |
 | `qurl account recover` | Restore account resource access on a new device |
-| `qurl login` | Enroll this device with a one-time account key, or from a supervisor's enrollment token file |
+| `qurl login` | Enroll this device with a one-time account key, from a supervisor's enrollment token file, or anonymously for a supervisor |
 | `qurl whoami` | Show which account this registered device belongs to |
+| `qurl publisher` | Show the publisher name shown with your CRIDs; `set <name>` and `clear` change it |
+| `qurl request METHOD PATH` | Make a device-authorized JSON request for a supervising app (see [Supervised installs](#supervised-installs)) |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
 
@@ -409,7 +543,8 @@ directory with the same setting (flag `--supervision`, environment
 `QURL_DAEMON_SUPERVISION`, config key `daemon_supervision`):
 
 Use a dedicated, fresh state directory rather than the native default. Enroll
-with the one-shot token file described in [Supervised installs](#supervised-installs),
+without an account using `qurl login --anonymous --supervision external -o json`,
+or use the one-shot token file described in [Supervised installs](#supervised-installs),
 then start the daemon. For each command below, the supervising process must
 attach a fresh inherited key descriptor and set `LAYERV_KEY_PROVIDER` and
 `LAYERV_LOCAL_KEY_FD` as described above. Exporting a descriptor number alone
@@ -430,7 +565,7 @@ directory to return to native supervision instead of deleting a marker beside du
 
 External supervision changes three things:
 
-- Token-file login (or the first external daemon invocation) marks the
+- Anonymous or token-file login marks the
   state directory as externally supervised (`runtime_mode.json`). It accepts
   only a directory that holds no natively managed state, and the mark is
   permanent. Starting the daemon before enrollment exits nonzero with
@@ -488,8 +623,9 @@ and conversion. An owner-bound profile with no file shares is a valid empty set.
 On Unix, the origin must be bound inside an owner-only (0700) directory controlled by
 the supervisor, with ancestors other users cannot replace; do not use a socket
 directly under a shared temporary directory. The supervisor owns the ancestor
-boundary; before dialing, the CLI also refuses a Unix socket whose parent is not
-an owned `0700` directory. On Windows,
+boundary; publish, restart, and the daemon refuse a socket whose parent is not
+an owned `0700` directory. The daemon withholds only that share and retries
+after backoff. On Windows,
 the CLI verifies the connected pipe's owner SID matches the current user before
 sending bytes. The supervisor must require the per-launch proxy token on every
 request, including local preview, and rotate the nonce when starting a new origin.
@@ -631,6 +767,60 @@ immediate revocation. See
 | `http://127.0.0.1:3000` | qURL starts the background share, waits for serving, prints its CRID, and exits |
 | `https://api.example.com/reports` | qURL registers the remote URL, prints its CRID, and exits |
 
+#### Private consumer policies
+
+On a deployment that supports consumer policies, choose private access with
+`--access invite_only`, `email_capture`, `review`, `keys`, or `contract`.
+Contract mode also needs `--contract <identifier>`. These flags cannot be
+combined with `--public`, legacy access requests, or legacy device allowlists.
+The reply must confirm `private: true` and the requested `consumer_access` policy.
+
+For a share controlled only by the publisher:
+
+```bash
+qurl publish http://127.0.0.1:3000 --access invite_only -o json
+qurl access invite <CRID> --email ana@example.com -o json
+qurl access list_invitations <CRID> -o json
+```
+
+An accepted email delivery is not proof that the recipient has enrolled.
+The recipient must verify mailbox control and bind a credential. Invite-only
+resources do not accept access requests from other consumers.
+
+For review, list grants and approve only the verified mailbox that the
+publisher authorized, using the returned decision ID and version:
+
+```bash
+qurl access list_grants <CRID> -o json
+qurl access approve <CRID> <decision-id> --version <version> -o json
+qurl access revoke_grant <CRID> <decision-id> --version <current-version> -o json
+```
+
+Email capture and review disclose the consumer's verified email to the
+publisher; they are not anonymous access. Mailbox verification does not prove
+legal identity. Contract grants use an opaque consumer reference. Approve
+contract access only from a trusted publisher backend receipt and expiration;
+these commands do not verify payment with a payment processor.
+The publisher backend can subscribe to `consumer.subscribed` webhooks.
+If its notification is pending, repeat the same receipt, expiry and version.
+
+`qurl access --help` lists all owner actions. Changes require the current
+version. If session removal is pending, retry the exact removal and version;
+report it as complete only when `session_cleanup` is `complete`. A policy
+change uses `access configure` with the current policy version. If that update
+returns a pending-session error, retry the same update. Do not invent a newer
+version or fall back to public or legacy access.
+
+<!-- TODO(upstream-contract): email backup follows qurl-service consumer access. -->
+When consumer access is enabled, the hosted preview card always offers
+**Email me an access link** as a backup to passkeys. Publishers cannot disable
+this option. The recipient verifies the mailbox and consents to disclose it to
+the publisher. Invitations, approval, entitlement, expiry, and revocation still
+apply. Email-backed grants are separate from passkey-backed grants; first use
+must pass the configured invitation, approval, or entitlement checks. Revoke
+each grant separately. Later email logins reuse the email grant. Contract grant
+replies still omit email.
+
 #### Local apps
 
 ```bash
@@ -671,6 +861,9 @@ credential or making a network request.
 
 | Flag | Description |
 |------|-------------|
+| `--public` | Let anyone who has the CRID open the resource. Without it the resource is private |
+| `--allow-device-key <public-key>` | Allow a recipient's device to open the private resource (repeatable) |
+| `--allow-requests` | Let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you |
 | `--description <text>` | Human-readable description stored with the resource |
 | `--tag <tag>` | Tag stored with the resource (repeatable) |
 | `--alias <name>` | Memorable handle stored with the resource |
@@ -679,6 +872,57 @@ credential or making a network request.
 Description, tags, and alias apply only to remote resources. `--id` applies
 only to a local publish. Mixing those options fails loudly instead of being
 silently ignored.
+
+#### Private or public
+
+A resource is private unless you publish it with `--public`, for a local app
+and for a remote URL alike. The text output says which it is in one row, and
+`-o json` says it as `private`:
+
+```text
+  Access:  private — only you and the people you allow can open it
+  Access:  public — anyone who has the CRID can open it
+```
+
+Privacy is set when a resource is first published and cannot be changed
+afterwards. Publishing a target again reuses its resource, with the privacy it
+has. A flag that asks for what that resource is not is refused with exit code
+7 and prints nothing on stdout: `--allow-device-key` or `--allow-requests` for
+a target that is published as public, `--public` for one that is private, and
+`--allow-device-key` with a list other than the one the resource has. The
+message says what to do: publish without that flag, change the allowed devices
+with `qurl grants`, or delete the resource with `qurl delete <CRID>` and
+publish again to get a new resource and a new CRID. `--allow-device-key` and
+`--allow-requests` cannot be combined with `--public`. See
+[Private CRIDs](#private-crids) for who can open each kind.
+
+With `--allow-requests`, the output also says what to send to people who have
+no qURL CLI and what happens next. See
+[qurl requests, approve and deny](#qurl-requests-approve-and-deny).
+
+`--allow-requests` also works for a target that is already published as a
+private resource: the command turns access requests on for the resource it
+finds, and says so in one line ("This target was already published. Access
+requests are now on for it."), in the document in text mode and on stderr with
+`-o json` and `--quiet`. If they cannot be turned on, the resource stays as it
+was, private, and the command fails with the reason and the command that tries
+again, `qurl requests <CRID> --on`, with the resource's CRID in it. For a
+target that is already published as public it is the exit code 7 above.
+
+**If you published with an earlier release.** Releases from before private
+became the default published a public resource unless you asked for a private
+one, and those resources are still public. `qurl publish` for such a target
+with no privacy flag keeps working: it returns the existing resource, shows
+the public `Access:` row, and warns you.
+
+```text
+Warning: this target was published as public before, and it stays public: anyone who has the CRID can open it. To make it private, delete it with `qurl delete <CRID>` and publish again; the new resource gets a new CRID.
+```
+
+The warning is part of the text output, and goes to stderr with `-o json` and
+`--quiet`; JSON says `private: false` and `kept_public: true`. The resource
+stays as it is until you delete it. A publish never turns a public resource
+private, and it never makes a new public resource unless you pass `--public`.
 
 In either mode, the CRID is last and alone on its line; `--quiet` prints only
 the CRID. Publishing the same target again does not create a duplicate while
@@ -722,11 +966,38 @@ identity. Use the share's existing `--id` when publishing it again by ID.
 ### qurl share
 
 `qurl share <CRID>` mints a short-lived share link for the resource the
-CRID names. A CRID is safe to paste anywhere — it grants nothing by
-itself; the share link is what turns it into access, so treat the link as
-a secret. The link expires on its own; share again whenever you need a
-fresh one. When stdout is not a terminal the command prints the bare link
-and nothing else, ready to hand out or open.
+CRID names. Treat the minted link as a secret: it is a bearer credential.
+The command uses this device's identity. It works on the resource owner's
+devices and, for a private resource, on the devices the publisher allowed;
+any other device gets "not found".
+The link expires on its own; share again whenever you need a fresh one.
+
+`share` also tells you who published the resource and when it was created:
+
+```text
+https://qurl.link/#…
+
+  Publisher: "Acme Docs" — UNVERIFIED (self-declared name, not confirmed by LayerV)
+  Created:   2026-03-01 (1d ago)
+  Expires in 5m (single use)
+```
+
+The publisher name is whatever the publisher typed. A publisher is
+`verified by LayerV` only when the service reports it as verified; otherwise it is
+`UNVERIFIED`, and its name is a claim, not proof. A publisher that set no
+name shows `no name provided`.
+The name is always printed in quotes with unusual characters escaped.
+
+When stdout is not a terminal the command prints the bare link on stdout,
+ready to hand out or open, and one notice on stderr:
+
+```text
+Warning: UNVERIFIED publisher "Acme Docs" (self-declared name, not confirmed by LayerV). Created 2026-03-01.
+```
+
+`--quiet` prints only the link and no notice. `-o json` puts
+`resource_created_at` and `publisher` in the document and prints no notice.
+That date is when the resource was created, not when the link was minted.
 
 The link opens in a browser. Passing it to a tool like curl fetches the
 page that opens the link, not the content itself — to download content
@@ -746,13 +1017,240 @@ Before anything is printed, the CLI verifies the signed link against
 the CRID you asked for; a mismatched answer is discarded and the command
 exits with code 12 without printing a link.
 
+### qurl grants
+
+`qurl grants <CRID>` shows who can open a private resource besides its owner,
+and changes that for the resource owner. There are two lists: the public keys
+of the devices you allowed, and the people you approved after they asked for
+access. With no flag it prints the resource with both lists and says whether
+people can still ask; `-o json` has them as `allowed_device_keys`,
+`approved_people` and `access_requests`.
+
+The service sends the list of approved people with every resource, as an
+empty list when nobody is approved. When an answer has no list at all, the
+command says `not said` where the count would be, and never `none`: the
+service did not say who is approved, which is not the same as nobody.
+`-o json` then has no `approved_people` member.
+
+```bash
+qurl grants <CRID>
+qurl grants <CRID> --add <public-key>
+qurl grants <CRID> --add <public-key> --remove <other-public-key>
+qurl grants <CRID> --remove <device id>
+qurl grants <CRID> --clear
+```
+
+| Flag | Description |
+|------|-------------|
+| `--add <public-key>` | Allow a device (repeatable) |
+| `--remove <public-key>` | Take a device off the list (repeatable) |
+| `--remove <device id>` | Take an approved person's access away; the id has the form `xxxx-xxxx-xxxx-xxxx` (repeatable) |
+| `--clear` | Take every public key off the list; approved people stay |
+| `--yes` | Proceed without confirmation when a change is sent for a test CRID to production. Reading the list never needs it |
+
+`--add` and `--remove` can be used in one command, which is applied as one
+change. A public key that is already on the list, or already off it, is left
+as it is, so a command can be repeated safely. Every change prints the
+complete lists that result. The same public key cannot be given to both
+flags, and `--clear` cannot be combined with either.
+
+An approved person is shown with the name they typed, in quotes, the id of
+their device, and when you approved them. The name proves nothing about who
+they are. `--remove <device id>` takes that person's access away, for at most
+256 people in one command.
+
+The command reads the list first and checks every device id against it before
+it takes any access away. A device id that is not on the list is an error
+(exit code 5) and removes nothing, wherever it stands among the others, so a
+mistyped id is never mistaken for access taken away. Then each person is
+removed with a change of their own, before any change to public keys in the
+same command.
+
+From the first person removed on, every failure says exactly what happened:
+from whom access was taken away, what failed, and who still has access as far
+as the command knows. That holds for a removal that fails or finds nobody, for
+a list that cannot be read again after the removals, and for a list that still
+shows a person the service said it removed. Access that was taken away never
+reads as "nothing was removed". A failure that says none of this came before
+any access was taken away. `qurl grants <CRID>` shows who has access now.
+
+A removal is reported as done only when the list the service sends afterwards
+confirms it. The service sends the list of approved people with every
+resource, as an empty list when nobody is approved. An answer without the list
+means that the service did not say who is approved, and it is never read as
+"nobody has access". After a removal, such an answer confirms nothing, and the
+command says that the service answered each removal as made and that the
+removal is not confirmed (exit code 10). It prints no lists. What it says next
+depends on the answer the service gave before the removals. If the list was
+there then, one answer left it out: the removal is not confirmed yet, and
+`qurl grants <CRID>` shows who has access now. If the list was missing then
+too, this service does not show who has access, so the removal cannot be
+confirmed from here, and `qurl grants <CRID>` does not show it either.
+
+The same holds when a command that also names public keys removes every person
+and then fails to change the keys, or stops before it gets to them. The
+command says from whom access was taken away, what failed and why, and the
+command that makes the change to the public keys alone. Run that command to
+finish: the first one, run again, would stop at the device ids that are
+already off the list.
+
+A list holds at most 256 devices. `--add` and `--remove` each take at most 256
+public keys in one command, which is checked before anything is sent. The
+limit on the list that results is the service's: it refuses a change that
+would leave more than 256 devices, and the list stays as it was.
+
+The command checks the service's answer before it reports a change: every
+added key must be on the returned list, and no removed key may be. That check
+covers the keys the command named, not the rest of the list. What keeps the
+other grants in place is the request itself, which carries only the keys to
+add and to remove and never the whole list, so it cannot replace it. An answer
+that does not show the change fails the check with exit code 10 and nothing
+on stdout. A service that cannot add or remove single grants yet answers that
+way; `qurl grants <CRID>` then shows the list as it is.
+
+When several changes to one resource arrive together, the service can answer
+that this one lost to the others (exit code 11). Nothing was changed, and the
+command does not send it again on its own: run it again.
+
+Earlier releases replaced the complete list with
+`qurl grants <CRID> --allow-device-key <public-key>`. That form is removed and
+is now a usage error that names `--add`, so the command no longer sends a
+list that replaces the grants it did not name. `qurl publish
+--allow-device-key` still sets the first list when you publish.
+
+### qurl requests, approve and deny
+
+These commands share a private resource with people who have no qURL CLI.
+`qurl request`, without the s, is another command: it makes one request for a
+supervising app (see [Supervised installs](#supervised-installs)). Each of the
+two names the other in its usage error.
+
+1. Turn access requests on: publish with `--allow-requests`, whether or not
+   the target is already published as a private resource, or run
+   `qurl requests <CRID> --on`. The output says what to send to people: the
+   resource's address, when this install knows the web address for its
+   deployment, and otherwise the CRID.
+2. A person opens it in a browser, sees who published the resource, and asks
+   for access. They are shown a six-digit code and give it to you.
+3. `qurl requests` lists who asked: the name each person typed and the id of
+   their device. It never shows a code. When the person you mean to let in
+   gives you their code, approve it with `qurl approve <CRID> <code>`. Refuse
+   a request with `qurl deny <CRID> <device id>`.
+
+The address and the CRID are safe to send to anyone: a private resource opens
+only for you and the people you allow.
+
+**Approve a code only when the person you mean to let in gave it to you
+themselves, in a way you know it is them:** in person, on a call, or in a
+conversation you already have with them. Anyone who has the address or the
+CRID can ask for access and send you a code. A code shows only that it came
+from the screen that asked, not who is at that screen. The name on a request
+is typed by whoever asked and proves nothing: anyone can type any name. A
+message that gives a name and a code tells you no more about who sent it than
+the name alone.
+
+The code is shown only to the person who asked. No qURL command shows it, in
+any output mode. If a listing showed the codes, you, or an agent that runs
+these commands for you, could approve straight from the list, and all the list
+knows about a person is the name they typed. An agent that runs these commands
+for you must approve only codes you passed on to it.
+
+```bash
+qurl publish https://wiki.example.com/team --allow-requests
+qurl requests                    # pending requests of all your resources
+qurl requests <CRID>             # pending requests of one resource
+qurl requests <CRID> --on        # let people ask; prints what to send them
+qurl requests <CRID> --off       # stop new requests
+qurl approve <CRID> 123456       # the code they gave you; also 123 456 and 123-456
+qurl deny <CRID> <device id>     # the device id from the listing
+qurl grants <CRID>               # who has access now
+qurl grants <CRID> --remove <device id>
+```
+
+A listing shows, for each request, the name in quotes, the id of the person's
+device, how long ago they asked, and when the request expires; the listing of
+all resources also shows the CRID. It shows no code. It ends with one line
+that says how a person is let in. In the listing of one resource, that line
+has the resource's CRID in the command, where the sample below has `<CRID>`.
+
+```text
+NAME         DEVICE ID            REQUESTED  EXPIRES
+"Ana Lopez"  abcd-efgh-2345-mnop  2m ago     in 58m
+
+To let one of these people in, ask them for the six-digit code on their screen and run `qurl approve <CRID> <code>`; a name can be typed by anyone, and a code shows only that it came from the screen that asked, so approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them (in person, on a call, or in a conversation you already have with them).
+```
+
+The listing of all your resources is bounded, and it has no next page: the
+service takes no cursor for it, so the command has none to pass. When there
+may be more requests than it shows, it says so after the rows, and `-o json`
+has `has_more: true`. List one resource with `qurl requests <CRID>` to see all
+the requests for that resource. The listing of one resource holds at most 20
+requests.
+
+`qurl requests <CRID> --on` prints what to send to people only when the
+service's answer says that the resource is private. If the answer says that
+the resource is public, or does not say, the command fails (exit code 10) and
+prints no address: access requests are for a private resource, and a public
+one opens for anyone who has the CRID.
+
+`qurl approve` prints who now has access and the command that takes it away
+again. `qurl deny` removes the request and gives no access. It takes the
+device id the listing shows, in the form `xxxx-xxxx-xxxx-xxxx`. It also takes
+a six-digit code in the same place, for a request whose code you were given
+and want to refuse. A code that is not pending counts toward the service's
+limit on wrong codes: after 5 wrong codes for one resource within an hour, it
+refuses every code for that resource for a time, in `qurl approve` too. A
+denial by device id never counts, and is the usual way to refuse a request. A
+request that is neither approved nor denied gives no access and expires by
+itself. `--off` stops new requests and says how many approved people still
+have access.
+
+| Command | Flag | Description |
+|---------|------|-------------|
+| `requests` | `--on` | Let people ask for access to this private resource |
+| `requests` | `--off` | Stop new requests for access to this resource |
+| `requests --on`, `requests --off`, `approve`, `deny` | `--yes` | Proceed without confirmation when a change is sent for a test CRID to production. Listing requests never needs it |
+
+A code that is not pending for the resource is exit code 5. The message says
+that it may have expired, or been approved or denied already, and says nothing
+about which codes are pending. A device id with no pending request gets the
+same answer from `qurl deny`. A value that can never be a code, or for
+`qurl deny` neither a device id nor a code, is refused before any request
+(exit code 8). Access requests can be turned on only for a private resource.
+
+The service limits wrong codes. After 5 wrong codes for one resource within an
+hour, it answers `qurl approve`, and `qurl deny` with a code, with "too many
+requests" (exit code 9) for a time, whatever the code, a right one included.
+The command shows the service's message and how long to wait, and does not try
+again by itself: another attempt could be one more wrong code. Ask the person
+for the code on their screen. `qurl deny` with a device id is not limited.
+
+With `--verbose`, the request line of an approval, and of a denial with a
+code, shows `******` in place of the code. A device id is shown as it is.
+
+A service that does not offer access requests yet answers every one of these
+commands with "this service does not offer access requests yet" and exit code
+11, never with a success, and prints nothing on stdout. That holds whichever
+way such a service treats the setting it does not know: `requests <CRID> --on`
+and `--off` get that message when it ignores the setting, and when it refuses
+the request.
+
+For `publish --allow-requests` the message also says what became of the
+publish, and prints no CRID in either case. A service that ignores the setting
+published the resource as private, without access requests: run the command
+again without `--allow-requests` to see its CRID. A service that refuses the
+setting published nothing: run the command again without `--allow-requests` to
+publish the resource as private.
+
 ### qurl get
 
-`qurl get <CRID>` mints a share link exactly like `qurl share`, verifies
-it, then opens or downloads — nothing is ever acted on unverified:
+`qurl get <CRID>` mints a share link exactly like `qurl share`, with this
+device's identity and the same access rule, verifies it, then opens or
+downloads — nothing is ever acted on unverified:
 
-- **On a terminal**, get prints the link, then opens it in your browser
-  (set `QURL_BROWSER` or `BROWSER` to choose which one).
+- **On a terminal**, get prints the link with the publisher and creation
+  date, exactly as `qurl share` does, then opens it in your browser (set
+  `QURL_BROWSER` or `BROWSER` to choose which one).
 - **With `--file <path>`** it downloads to that path instead. For links
   that need a browser to open, get asks the qURL platform for direct
   access and downloads the granted content — it never saves the
@@ -765,6 +1263,58 @@ it, then opens or downloads — nothing is ever acted on unverified:
   gate pipelines on the exit status, since a mid-stream failure leaves
   already-written bytes behind.
 
+Where the deployment offers it, a public resource can also be fetched on any
+machine with only its CRID: no account and no setup. The deployment this
+release ships does not offer it yet. Where it is offered, `get` asks for a
+link this way first. On Linux and macOS a device that has an identity asks as
+this device, so it can also get a link this way for a private resource it is
+allowed to open. On other systems it asks with the CRID alone. A machine that
+has an account key in its environment and no device identity yet asks first
+too, with the CRID alone. Only when no link is given do these mint a share
+link. On a machine with no device identity and no account key the answer is
+final, and that machine creates no device identity. The three most common
+answers when no link is given:
+
+| Answer | Exit code | What it means |
+|--------|-----------|---------------|
+| not found | 5 | The CRID is mistyped, the resource was removed, or it is not open to this machine. |
+| can't give a link right now | 11 | Nothing is wrong with the CRID. Try again later. |
+| too many requests | 9 | Wait, then try again. |
+
+Asking for a link this way has a cost. The service limits these requests for
+each source address, so machines that reach the service from one shared
+address use the same limit.
+
+- A machine with no device identity and no account key sends one request for
+  each link.
+- A device that has an identity sends one request for a public resource. For
+  any other CRID it sends up to two on Linux and macOS: when the first answer
+  is "not found", it asks once more as this device. On other systems it sends
+  one.
+- A machine that has an account key and no device identity yet sends one
+  request for each link before it mints a share link, and that request counts
+  in the limit. For a resource it may share, that is one request more than it
+  sent before `get` asked this way first.
+- A download whose link expired before any content arrived asks again in the
+  same way.
+
+Asking first also costs time when the service does not answer. A device that
+has an identity, and a machine that has an account key, wait up to 10 seconds
+for the answer before they mint a share link. If no answer came in that time,
+and the attempt to mint a share link ends in "not found", `get` asks once more
+with the CRID alone and waits longer for that answer, as it did before it
+asked this way first. So a slow service does not cost a link. That request
+counts in the limit too.
+
+When the limit is reached, a device that has an identity mints a share link,
+as it does for every answer that is not a link, and so does a machine that has
+an account key. That gives a link when this device may share the resource.
+When it may not, the answer is "too many requests", as it is on a machine with
+no device identity and no account key. Wait, then try again.
+
+With `--session-duration`, `get` mints the share link first, as it did before,
+because only a share link can carry that lifetime.
+
 | Flag | Description |
 |------|-------------|
 | `--file <path>` | Download to this path instead of opening a browser (`-` = raw bytes to stdout) |
@@ -772,10 +1322,18 @@ it, then opens or downloads — nothing is ever acted on unverified:
 | `--session-duration <duration>` | Lifetime of each admitted session, e.g. `5m` or `1h`. Zero or omission uses the service default. The service enforces resource limits. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
+With `--file`, the publisher notice goes to stderr before the content is
+fetched, so you see it before the download: ahead of the saved message for
+`--file <path>`, and ahead of the bytes for `--file -`. `--quiet` omits it.
+The publisher is `UNVERIFIED`, so decide whether to use the content on what
+you know about the CRID's source, not on the name.
+
 When stdout is not a terminal, get never opens a browser: pass `--file`,
 or use `qurl share` if you only need the link. With `-o json`, get is a
 machine asking for data, so browser mode and `--file -` are refused
-loudly; `--file <path> -o json` downloads and emits the outcome document.
+loudly; `--file <path> -o json` downloads and emits the outcome document,
+which includes `resource_created_at` (the resource's creation date, not the
+link's) and `publisher`.
 
 Releases include the production settings used by `share` and `get` to verify
 the signed link and its CRID. Production needs no deployment file. For sandbox
@@ -867,7 +1425,11 @@ requires the saved local target to be reachable. `restart` re-registers just
 that share on the Connector session under a fresh serving epoch, so a stale
 session cannot keep serving it; the other shares are not disturbed. `status`
 and `inspect` use the same authoritative view. Both work for remote resources
-and include the local target only when this machine owns one.
+and include the local target only when this machine owns one. Both also show
+the `Publisher` and `Created` rows that people who request a link are shown;
+`qurl grants` prints the same rows. `start`, `stop`, and `restart` report the
+change and print no publisher rows. All five return `publisher` and
+`created_at` in `-o json`.
 
 `restart --target <origin>` additionally moves the share to a different
 loopback origin on this machine, keeping its CRID and links; see
@@ -962,7 +1524,12 @@ durable. A headless `qurl daemon run` reads the same setting, or takes
 prompt — never as an argument — validates it, enrolls the registered device,
 checks that the device belongs to the same account, and discards the account
 key. `qurl whoami` checks the registered device and shows its account identity
-only, with no plan or usage data. `--quiet` prints just the owner id.
+and the device's public key (`device_public_key_b64` in `-o json`), plus which
+[key storage](#key-storage) protects local state (`key_storage`), with no plan
+or usage data. It never shows the device's private key or any part of an API
+key secret: since 3.2.0 it no longer prints the key prefix (`lv_live_…`), and
+`-o json` no longer has `api_key.key_prefix`; use `api_key.key_id` to identify
+the key. `--quiet` prints just the owner id.
 
 ```bash
 op read op://team/qurl/key | qurl login
@@ -991,6 +1558,40 @@ namespace with a fresh token. Login JSON includes
 `owner_id`, `auth_type`, `device_enrolled`, and `device_key_id` when the
 service supplies a key ID.
 
+### qurl publisher
+
+`qurl publisher` shows the publisher profile people see with your CRIDs.
+Anyone who requests a link with `qurl share` or `qurl get` is shown the name
+you set here, or `no name provided` when you set none.
+
+```bash
+qurl publisher                    # show the current profile
+qurl publisher set "Acme Docs"    # set or replace the name
+qurl publisher clear              # remove the name
+```
+
+```text
+Publisher: "Acme Docs" — UNVERIFIED (self-declared name, not confirmed by LayerV)
+```
+
+The name is optional and self-declared. Setting one does not confirm who you
+are or request verification. The service decides the verification status;
+the CLI shows a publisher as `verified by LayerV` only when the service reports it.
+
+The same name appears on every CRID this device's owner publishes, including
+ones already published, so people can tell those CRIDs come from the same
+publisher.
+
+<!-- TODO(upstream-contract): qurl-service owns the publisher naming rules. -->
+A name is 1 to 64 characters: letters, digits, single spaces, and common
+punctuation. It cannot spell "verified", "LayerV" or "qURL", even split by
+spaces or punctuation. The service checks the name; a refused name exits
+with code 8 and the reason on stderr.
+
+`-o json` prints `{"publisher": {"name": "...", "verified": false}}`, with
+`name` omitted when none is set. `--quiet` prints only the name, with any
+non-printing characters escaped, and nothing when none is set.
+
 ### qurl completion
 
 `qurl completion <shell>` writes a completion script to stdout for
@@ -1014,6 +1615,15 @@ and its shape is a stable contract, so scripts may parse it
 configuration, credentials, or network: a broken config file can never
 brick shell startup or a version check.
 
+A coding agent that uses qURL keeps a copy of the qURL agent skill in its
+skills folder (`~/.claude/skills/qurl/SKILL.md` for Claude Code) and reads
+that copy in every session, so the copy never updates by itself. When a
+saved copy is older than the release works with, `qurl version`,
+`qurl --version`, and `qurl publish` say so in one note on stderr, with the
+command that replaces it. Stdout is unchanged, `--quiet` leaves the note
+out, and nothing is said when no copy is saved. The CLI only reads the file:
+it downloads nothing and changes nothing.
+
 There is also a hidden maintenance command, `qurl docs [man|markdown] -d
 <dir>`, which generates the man pages and markdown docs from the command
 tree itself; release packaging runs it to produce the man pages shipped
@@ -1034,15 +1644,78 @@ in every archive.
 ## Scripting contract
 
 - **stdout carries data, stderr carries everything else.** `qurl share`
-  piped into another command prints the bare link and nothing more;
-  notes, warnings, and confirmation prompts go to stderr.
+  piped into another command prints the bare link and nothing more on
+  stdout; notes, warnings, and confirmation prompts go to stderr.
+- **`qurl share` and `qurl get --file` report the publisher on stderr** as
+  one line: `Warning: UNVERIFIED publisher "<name>" (...)`. stdout is
+  unchanged, so `link="$(qurl share <CRID>)"` still captures only the link.
+  Do not parse that line: read `publisher` from `-o json`. Pass `--quiet`
+  when a script requires an empty stderr.
 - **`--quiet` prints only the primary value**, one per line: the CRID for
   `publish`, the link for `share`, full CRIDs for `list`, the
   destination path for a `get --file` download, the owner id for
-  `whoami` and `login`.
+  `whoami` and `login`, the publisher name for `publisher`, the device id
+  for `requests <CRID>`, the CRID and the device id for `requests` with no
+  argument, the device id or the code you gave for `deny`, the CRID for
+  `requests --on` and `--off`, and the device id for `approve`. A listing
+  that may be incomplete says so on stderr.
 - **Verification is built in:** before printing anything, `qurl share`
   and `qurl get` check the service's answer against the CRID you asked
   for and discard mismatches (exit 12).
+
+`publish -o json` always includes `private`: `true` unless the resource was
+published with `--public`, or was already published as public and kept. In
+that second case, a publish with no privacy flag that kept an existing public
+resource, the document also has `kept_public: true`; the member is absent
+otherwise. It is how a script tells that case from `--public` on an existing
+resource, which has the same `private: false` and `found_existing: true`,
+without reading stderr. `--quiet` prints only the CRID in both cases.
+
+`list` and resource status JSON include `private` when known and an
+`allowed_device_keys` array, including `[]` when no devices are allowed. The
+text resource list includes a `PRIVATE` column. Grant changes show the
+resulting complete device list in text and JSON output.
+
+Access requests in `-o json`:
+
+| Command | Members |
+|---------|---------|
+| `publish` | `access_requests` when the service's answer says whether people can ask; `resource_url`, the resource's address for people with no CLI, only when access requests are on and this install knows the web address for its deployment |
+| `requests`, `requests <CRID>` | `requests`: an array, `[]` when there are none, of `name` (omitted when the person typed none), `name_verified` (always `false`), `device_id`, `requested_at`, `expires_at`, `crid`. No member holds a request's code. Beside it, `approval_rule`: always present, one sentence; and `has_more`: always present, `true` when there may be more requests than the listing shows. There is no cursor and no next page |
+| `requests <CRID> --on`, `--off` | `crid`, `access_requests`, and `resource_url` under the same rule as `publish` |
+| `approve` | `crid`, `approved` (`true`), `device_id`, `name`, `name_verified` (always `false`), `approved_at`, and `name_note`: always present, one sentence |
+| `deny` | `crid`, `denied` (`true`), and what you named the request by: `device_id`, or `code` |
+| `grants` | the resource document with `allowed_device_keys`; `approved_people` when the service's answer has the list (an array, `[]` when nobody is approved, of `name`, `name_verified`, `device_id`, `approved_at`); and `access_requests` when the service says. A missing `approved_people` means that the service did not say who is approved, never that nobody is |
+| `grants --remove <device id>` that did not finish | `crid` and three arrays that are always present and together hold every device id the command named: `removed`, `not_found`, `not_removed`. `public_keys_changed` (`false`) when the command also named public keys and stopped before it reached that change, because a removal failed or the removals were not confirmed: the change comes after the removals, so it was not made. A key change that was reached and failed has no such member, and may have changed a key: `public_keys_command` without `public_keys_changed` beside it is that case. `public_keys_command` when every person was removed and the change to the public keys failed or was not reached: the command that makes that change alone |
+
+A requester's `name` is that person's own text, exactly like a publisher's:
+quote or escape it before showing it. It proves nothing about who asked.
+`name_verified` is always present and always `false`.
+
+Two members carry, for a reader of JSON, the sentences the text output has.
+An agent that runs these commands reads JSON, so the rule it must follow is
+in the document it reads:
+
+- `approval_rule`, in both listings: "To let one of these people in, ask them
+  for the six-digit code on their screen and run `qurl approve <CRID> <code>`;
+  a name can be typed by anyone, and a code shows only that it came from the
+  screen that asked, so approve a code only when the person you mean to let in
+  gave it to you themselves, in a way you know it is them (in person, on a
+  call, or in a conversation you already have with them)." It is one member
+  beside `requests`, not one for each request, and it is there for an empty
+  listing too. In the listing of one resource it has that resource's CRID in
+  place of `<CRID>`.
+- `name_note`, in the `approve` document: "The name was typed by the person
+  who asked. Nobody checked it."
+
+A removal that fails is the one failure that writes a document to stdout:
+exit code 5 when a device id was not found, with the message on stderr as in
+text mode. Read `removed` before deciding what to do next: the service
+answered the removal of those people as made, whatever the exit code says. The
+document is written for every failure from the first person removed on; a
+failure with no document came before any access was taken away. When
+`public_keys_command` is present, every person was removed and only the change
+to the public keys is left: running that command finishes the job.
 
 ### Exit codes
 
@@ -1056,13 +1729,13 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 2 | usage | The command line itself was wrong: flags, arguments, or missing confirmation. |
 | 3 | configuration | Settings or profiles are invalid, or this CRID needs a newer CLI. |
 | 4 | authentication | No credential, an implausible credential, or the service rejected the credential. |
-| 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. |
+| 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. `share` and `get` also get this answer on a device that is neither the owner's nor allowed; the service does not say which. Also an access-request code or device id that is not pending for the resource, and a device id that is not among its approved people. |
 | 6 | permission | The credential lacks permission for this operation. |
-| 7 | conflict | The request conflicts with current state — including `--file` refusing to replace an existing destination without `--force`. |
+| 7 | conflict | The request conflicts with current state — including `--file` refusing to replace an existing destination without `--force`, and `publish` with a flag that asks for what the already published resource is not: the other privacy, or another list of allowed devices. |
 | 8 | invalid input | An operand or request rejected as invalid (by the service, or locally for inputs that can never be valid). |
 | 9 | rate limited | Still rate limited after the CLI's bounded automatic retries. |
-| 10 | server error | The service failed or answered outside its contract. |
-| 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts. |
+| 10 | server error | The service failed or answered outside its contract — including a `publish` answer that does not confirm the privacy that was asked for, and a `grants` answer that does not show the change that was asked for. |
+| 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts, and a service that does not offer access requests yet. Also a local TPM that is not responding. |
 | 12 | verification failed | The response failed CRID-anchored verification. Nothing was printed — treat it as tampering, not transience. |
 | 130 | interrupted | The foreground daemon or another command was canceled with Ctrl-C or SIGTERM. |
 
@@ -1070,8 +1743,8 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 
 Every command's `-o json` document uses field names owned by this repo —
 a stable contract independent of upstream renames. Fields that only
-sometimes apply (`found_existing`, `already_gone`) are omitted rather than
-emitted empty. Every resource result requires a verified `crid`.
+sometimes apply (`found_existing`, `kept_public`, `already_gone`) are omitted
+rather than emitted empty. Every resource result requires a verified `crid`.
 
 For `qurl list`, **`has_more` — not `next_cursor` presence — is the
 pagination terminator.** The service legitimately serves short and even
@@ -1083,5 +1756,115 @@ exactly that reason.
 qurl list -o json | jq -r '.resources[].crid'
 ```
 
+Where the publisher appears:
+
+| Command | Text | `-o json` |
+|---------|------|-----------|
+| `share` | `Publisher` and `Created` rows on a terminal; one stderr notice when piped | `publisher`, `resource_created_at` |
+| `get` | Same rows before the browser opens; one stderr notice before a `--file` download | `publisher`, `resource_created_at` (`--file <path>`) |
+| `status`, `inspect`, `grants` | `Publisher` and `Created` rows | `publisher`, `created_at` |
+| `publisher`, `publisher set`, `publisher clear` | `Publisher` row | `publisher` |
+| `publish`, `list` | Not shown | `publisher`, `created_at` |
+| `start`, `stop`, `restart` | Not shown | `publisher`, `created_at` |
+
+```json
+"resource_created_at": "2026-03-01T00:00:00Z",
+"publisher": { "name": "Acme Docs", "verified": false }
+```
+
+`verified` is always present and carries the service's verification status.
+Setting a publisher name cannot set it to `true`. `name` is omitted when the
+publisher set none.
+
+The resource's creation date has two keys. `share` and `get --file` describe
+a minted link, so they name it `resource_created_at`: it is the resource's
+creation date, not the link's. `publish`, `status`, `inspect`, `grants`,
+`start`, `stop`, `restart`, and `list` rows describe the resource itself and
+use `created_at`. Either key is omitted when the service did not report the
+date.
+
+A name is the publisher's own text: quote or escape it before showing it, and
+never show it without its `verified` status. An agent that acts for a person
+must tell that person whether the service reports the publisher as verified
+or unverified.
+
+```bash
+qurl share <CRID> -o json | jq '{link: .qurl, publisher: .publisher}'
+```
+
 Account setup and recovery return `owner_id` and `status` (`linked` or
 `recovered`) with `-o json`. With `--quiet`, they print only the owner ID.
+
+### Private CRIDs
+
+A resource is private unless you publish it with `--public`
+(`qurl publish <target-url> --public`). A private resource is limited to its
+owner and the devices allowed with `--allow-device-key <public-key>`. This
+works for remote URLs and local apps. Earlier releases published a public
+resource unless `--private` was given; that flag is still accepted and asks
+for what a publish does anyway, except that it is refused for a target that is
+already published as public. A resource those releases published is still
+public, and `qurl publish` with no privacy flag keeps it and says so; see
+[Private or public](#private-or-public).
+
+`qurl share <CRID>` and `qurl get <CRID>` use this device's identity, so an
+allowed device needs no LayerV account or browser login. They work on the
+resource owner's devices and, for a private resource, on the devices the
+publisher allowed; any other device gets "not found". To be allowed on a
+private resource, a recipient sends the publisher their device's public key
+from `qurl whoami -o json`.
+
+Where the deployment offers it, a public resource can also be opened by anyone
+who has its CRID. The deployment this release ships does not offer it yet. See
+[`qurl get`](#qurl-get) for how that works.
+
+Read the current list with `qurl grants <CRID>`. With `-o json` it is
+`allowed_device_keys`, an empty array when there are no grants. The publisher
+allows a device, or takes one off the list, without touching the others:
+
+```sh
+qurl grants <CRID> --add <public-key>
+qurl grants <CRID> --remove <public-key>
+qurl grants <CRID> --clear
+```
+
+<!-- TODO(upstream-contract): keep the grant limit and key encoding in sync with qurl-service. -->
+`--clear` removes all device grants. The list accepts up to 256 canonical
+X25519 public keys. Privacy is set at creation; a retry cannot change it.
+Device grants have no effect on a public resource.
+Removing a device stops new link requests. Previously issued links retain
+their expiry and revocation rules.
+
+A device key is for a recipient who runs the qURL CLI. For people who do not,
+turn on access requests and approve each person by the code they give you:
+see [qurl requests, approve and deny](#qurl-requests-approve-and-deny).
+
+### CRID preview metadata
+
+Each CRID has its own optional description and up to four media items. Description
+is public preview text, separate from private owner notes. The optional app
+name is public, with a limit of 100 characters. Omitted text fields stay
+unchanged; an empty string removes that field. Media needs a verified
+publisher. Use the same registered device identity as other publisher commands:
+
+```sh
+qurl preview get "$CRID"
+qurl preview set "$CRID" --name "API guide" --description "A guide to our API"
+qurl preview upload "$CRID" ./demo.gif --alt "The API in use"
+qurl preview upload "$CRID" ./new-demo.mp4 --alt "Updated demo" --replace "$MEDIA_ID"
+qurl preview remove "$CRID" "$MEDIA_ID"
+qurl preview clear "$CRID"
+```
+
+`clear` removes name, description and media and cancels pending uploads. Upload streams
+directly to private storage without the API credential. Processing is asynchronous;
+read `preview get` again to check it. A failed replacement keeps the current item.
+
+In text mode, `--quiet` keeps its existing description-only output; use
+`-o json` to read the name in scripts.
+Limits: description 500 characters; still images 10 MB; GIF/video 25 MB and 15
+seconds. GIFs become silent video clips. Viewers load one small still first, with
+video only after Play. Use `-o json` for structured revision, media and job state.
+A revision conflict never retries automatically. The API owns verification and
+all limits. Supervisors may also GET/PATCH `/v1/resources/{id}/preview` and POST
+`/v1/resources/{id}/preview/uploads` through the existing `qurl request` command.

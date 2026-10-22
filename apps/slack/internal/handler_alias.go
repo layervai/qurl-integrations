@@ -59,7 +59,7 @@ const aliasMaxLen = 64
 // aliasCharsetPattern matches the recognized alias charset: lowercase
 // alnum + dash, with the leading and trailing char alnum. Intentionally
 // permissive on internal `--` runs because qurl-service's own
-// authoritative validator (the sparse GSI key handler from nhp #1825)
+// authoritative validator (the sparse GSI key handler)
 // accepts them; the parser only enforces the leading/trailing rule,
 // which is what surfaces with a friendlier error than punting
 // downstream.

@@ -16,7 +16,7 @@ The handler `require`s shared modules from `../../src/`:
 
 These are NOT installed as `node_modules` dependencies — they live in
 the bot's main `src/` tree. The infra-repo Lambda packaging step
-(`qurl-integrations-infra`) is responsible for bundling them into the
+(the infrastructure repository) is responsible for bundling them into the
 Lambda's deployment artifact along with `@aws-sdk/client-ssm`. Two
 common options:
 

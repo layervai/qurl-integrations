@@ -81,7 +81,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
 			foregroundOwned = false
 			fixture.process.crashAndValidate(t, fixture.key, fixture.cleanupJWT)
-			// TODO(upstream-contract): qRTS currently uses FRP's 90-second stale
+			// TODO(upstream-contract): the tunnel server currently uses FRP's 90-second stale
 			// control cleanup; keep enough margin for detection and observation.
 			crashed := waitSandboxSharingStateAfterCrash(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.local.ResourceID, soakCrashRecoveryTimeout)
 			warmDaemon = startCredentialFreeSandboxDaemon(t, fixture)

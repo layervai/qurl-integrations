@@ -73,7 +73,7 @@ func TestWindowsPipePreflightNeverUsesTCP(t *testing.T) {
 		t.Fatal("missing pipe did not fail closed with redacted error")
 	}
 	target.IP, target.Port = "127.0.0.1", 3000
-	if err := preflightShareTarget(context.Background(), opts, target); err == nil {
+	if err := preflightShareTarget(context.Background(), opts, target); err == nil || err.Error() != "local private target is invalid" {
 		t.Fatal("mixed pipe/TCP accepted")
 	}
 }

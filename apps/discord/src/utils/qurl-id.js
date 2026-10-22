@@ -2,7 +2,7 @@
 
 const { QURL_ACCESS_TOKEN_PREFIX } = require('./resource-id');
 
-// TODO(upstream-contract): qurl-integrations-infra#1551's POST /api/revoke_links
+// TODO(upstream-contract): infra repo #1551's POST /api/revoke_links
 // rejects the whole request with 400 when any qurl_id exceeds 64 characters or
 // uses anything but letters, digits, `_` and `-`. Matching that cap keeps one
 // corrupt stored value from failing every retry of an otherwise valid batch.

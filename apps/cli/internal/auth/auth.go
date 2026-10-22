@@ -34,6 +34,12 @@ var (
 	ErrAccountRecoveryState = fmt.Errorf("%w: account recovery needs new state", ErrNoCredential)
 	// ErrAnonymousRecovery reports missing authority to recover an existing device.
 	ErrAnonymousRecovery = fmt.Errorf("%w: anonymous device recovery needs linked account or saved state", ErrNoCredential)
+	// ErrExternalDeviceMissing reports an externally supervised namespace that
+	// holds no enrolled device and may not use account authority to enroll one.
+	ErrExternalDeviceMissing = fmt.Errorf("%w: externally supervised state has no enrolled device", ErrNoCredential)
+	// ErrExternalAnonymousRecovery is ErrAnonymousRecovery for an externally
+	// supervised device, whose supervisor owns the state and its remedy.
+	ErrExternalAnonymousRecovery = fmt.Errorf("%w: externally supervised", ErrAnonymousRecovery)
 	// ErrInvalidKey reports a configured value that cannot be a qURL API key.
 	ErrInvalidKey = errors.New("cli: the configured value does not look like a qURL API key")
 	// ErrCredentialConflict rejects ambiguous inline and file authority.

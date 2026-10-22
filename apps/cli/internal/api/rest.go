@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -29,17 +30,48 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
-	ResourceID   string       `json:"resource_id"`
-	CRID         string       `json:"crid"`
-	TargetURL    string       `json:"target_url"`
-	Type         string       `json:"type"`
-	Status       string       `json:"status"`
-	DesiredState DesiredState `json:"desired_state"`
-	ServingEpoch uint64       `json:"serving_epoch"`
-	Description  string       `json:"description"`
-	Tags         []string     `json:"tags"`
-	CreatedAt    *time.Time   `json:"created_at"`
-	ExpiresAt    *time.Time   `json:"expires_at"`
+	ConsumerAccess    *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	AllowedDeviceKeys []string                   `json:"allowed_device_keys"`
+	Private           *bool                      `json:"private"`
+	ResourceID        string                     `json:"resource_id"`
+	CRID              string                     `json:"crid"`
+	TargetURL         string                     `json:"target_url"`
+	Type              string                     `json:"type"`
+	Status            string                     `json:"status"`
+	DesiredState      DesiredState               `json:"desired_state"`
+	ServingEpoch      uint64                     `json:"serving_epoch"`
+	Description       string                     `json:"description"`
+	Tags              []string                   `json:"tags"`
+	CreatedAt         *time.Time                 `json:"created_at"`
+	ExpiresAt         *time.Time                 `json:"expires_at"`
+	// AccessRequests is nil when the row has no such member, which is how a
+	// service from before access requests answers. AllowedPasskeys are the
+	// people the publisher approved. The service sends the member on every
+	// resource row, as an empty array when nobody is approved; a row
+	// without it is read as "the service did not say"; see allowedPasskeys.
+	AccessRequests  *bool        `json:"access_requests"`
+	AllowedPasskeys []passkeyRow `json:"allowed_passkeys"`
+	// Publisher is read by UnmarshalJSON, not by the struct decoder, so a
+	// repeated member can be counted; see publisherMember.
+	Publisher publisherWire `json:"-"`
+}
+
+// UnmarshalJSON decodes the row's fields by the usual lax rules, then reads
+// the publisher from the same object on its own terms: a row that repeats the
+// publisher member reads as unnamed and unverified instead of letting the
+// last occurrence win, and no shape of that member fails the row. Each call
+// replaces the whole row from one JSON object, so decoding into a row that
+// was used before leaves nothing of the earlier object behind.
+func (row *resourceRow) UnmarshalJSON(data []byte) error {
+	// resourceFields has the row's fields without this method.
+	type resourceFields resourceRow
+	var fields resourceFields
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	fields.Publisher = publisherMember(data)
+	*row = resourceRow(fields)
+	return nil
 }
 
 type sharingRow struct {
@@ -48,6 +80,14 @@ type sharingRow struct {
 	DesiredState    DesiredState    `json:"desired_state"`
 	ServingEpoch    uint64          `json:"serving_epoch"`
 	ConnectionState ConnectionState `json:"connection_state"`
+	// TODO(upstream-contract): qurl-service adds created_at and publisher to
+	// the Connector sharing-state response. Both are optional here, so an
+	// older service leaves "no date, no name, unverified".
+	CreatedAt *time.Time `json:"created_at"`
+	// Publisher is read by UnmarshalJSON (decodeSharingField), never by the
+	// struct decoder: publisherWire has no decoder of its own, so a tag here
+	// would only look like one. isSharingField names the wire member.
+	Publisher publisherWire `json:"-"`
 }
 
 // UnmarshalJSON requires the serving-epoch lifecycle fence to be present and
@@ -64,7 +104,7 @@ func (row *sharingRow) UnmarshalJSON(data []byte) error {
 	if delim, ok := first.(json.Delim); !ok || delim != '{' {
 		return errors.New("sharing row must be an object")
 	}
-	seen := make(map[string]bool, 5)
+	seen := make(map[string]bool, 7)
 	for decoder.More() {
 		token, err := decoder.Token()
 		if err != nil {
@@ -110,7 +150,7 @@ func (row *sharingRow) UnmarshalJSON(data []byte) error {
 
 func isSharingField(name string) bool {
 	switch name {
-	case "resource_id", "crid", "desired_state", "serving_epoch", "connection_state":
+	case "resource_id", "crid", "desired_state", "serving_epoch", "connection_state", "created_at", fieldPublisher:
 		return true
 	default:
 		return false
@@ -127,6 +167,19 @@ func decodeSharingField(row *sharingRow, name string, raw json.RawMessage) error
 		return json.Unmarshal(raw, &row.DesiredState)
 	case "connection_state":
 		return json.Unmarshal(raw, &row.ConnectionState)
+	case "created_at":
+		// Descriptive metadata must never fail a lifecycle read: a date this
+		// CLI cannot parse is treated as absent.
+		var createdAt *time.Time
+		if json.Unmarshal(raw, &createdAt) == nil {
+			row.CreatedAt = createdAt
+		}
+		return nil
+	case fieldPublisher:
+		// Never an error: a publisher this CLI cannot read is unnamed and
+		// unverified.
+		row.Publisher = parsePublisherWire(raw)
+		return nil
 	case "serving_epoch":
 		encoded := strings.TrimSpace(string(raw))
 		if encoded == "" || strings.IndexFunc(encoded, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
@@ -153,66 +206,383 @@ type envelopeMeta struct {
 	FoundExisting *bool  `json:"found_existing"`
 }
 
-// publishRequest is the pinned publish wire shape: type is required and
-// always "url" for CLI publishes (the tunnel type belongs to the Connector).
+// TODO(upstream-contract): consumer_access, privacy, and tunnel find-or-create fields mirror
+// the service's create-resource request; privacy is immutable after creation.
 type publishRequest struct {
-	Type        string   `json:"type"`
-	TargetURL   string   `json:"target_url"`
-	Description string   `json:"description,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Alias       string   `json:"alias,omitempty"`
+	ConsumerAccess *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	// Private is stated in every create request but one. What an absent
+	// field means for a new resource is the service's choice and has changed:
+	// a newer service reads it as private, an older one as public. The one
+	// request without it is the second create of keepExistingPublic.
+	Private           *bool    `json:"private,omitempty"`
+	AllowedDeviceKeys []string `json:"allowed_device_keys,omitempty"`
+	// AccessRequests is sent only to turn access requests on. Off is the
+	// service's default and is not planned to change, and a service from
+	// before access requests is never sent a member it does not know.
+	AccessRequests bool     `json:"access_requests,omitempty"`
+	Slug           string   `json:"slug,omitempty"`
+	FindOrCreate   bool     `json:"find_or_create,omitempty"`
+	Type           string   `json:"type"`
+	TargetURL      string   `json:"target_url,omitempty"`
+	Description    string   `json:"description,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	Alias          string   `json:"alias,omitempty"`
 }
 
-// Publish registers targetURL as a protected URL resource. This is a direct
-// call rather than the SDK's ProtectURL because the pinned platform contract
-// requires the explicit `type: url` discriminator, which qurl-go v0.8.1 does
-// not send.
+// Publish registers a URL or pre-creates a Connector resource, private unless
+// opts.Public is set. The direct REST call carries fields absent from the
+// pinned SDK.
+//
+//nolint:gocritic // Keep value options in the existing Client contract; this one-shot network operation is not a hot loop.
 func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error) {
-	if err := validateTargetURL(targetURL); err != nil {
+	if opts.ConnectorID == "" || targetURL != "" {
+		if err := validateTargetURL(targetURL); err != nil {
+			return nil, err
+		}
+	}
+	if err := validatePublishConsumerPolicy(&opts); err != nil {
 		return nil, err
 	}
+
+	wantPrivate := !opts.Public
 	body := publishRequest{
-		Type:        "url",
-		TargetURL:   targetURL,
-		Description: opts.Description,
-		Tags:        opts.Tags,
-		Alias:       opts.Alias,
+		ConsumerAccess:    opts.ConsumerAccess,
+		Private:           &wantPrivate,
+		AllowedDeviceKeys: opts.AllowedDeviceKeys,
+		AccessRequests:    opts.AllowRequests,
+		Type:              "url",
+		TargetURL:         targetURL,
+		Description:       opts.Description,
+		Tags:              opts.Tags,
+		Alias:             opts.Alias,
+	}
+	if opts.ConnectorID != "" {
+		body.Type = "tunnel"
+		body.Slug = opts.ConnectorID
+		body.FindOrCreate = true
 	}
 	// Publish has no service idempotency key. A rate-limit response is usually
 	// pre-application, but the client cannot prove that a replay would not mint
 	// a duplicate resource, so it is deliberately single-shot.
+	firstCreateSentAt := c.now()
 	reply, err := c.doRESTOnce(ctx, http.MethodPost, "/v1/resources", body)
 	if err != nil {
 		return nil, err
 	}
 	if reply.status != http.StatusCreated {
-		return nil, reply.problem()
+		refusal := c.publishRefusal(ctx, reply, &opts)
+		if !mayKeepExistingPublic(&opts, refusal) {
+			return nil, refusal
+		}
+		return c.keepExistingPublic(ctx, &body, refusal, firstCreateSentAt)
 	}
+	published, allowedDeviceKeys, err := publishedFromReply(reply)
+	if err != nil {
+		return nil, err
+	}
+	if err := confirmPublishConsumerPolicy(opts.ConsumerAccess, published); err != nil {
+		return nil, err
+	}
+	// The row must say which privacy the resource has, and it must be the one
+	// asked for. A row that omits it is not read as either: a service that
+	// ignored the field may have made the resource with the other privacy.
+	if published.Private == nil || *published.Private != wantPrivate {
+		return nil, &publishPrivacyError{wantPublic: opts.Public}
+	}
+	if len(opts.AllowedDeviceKeys) > 0 && !slices.Equal(slices.Sorted(slices.Values(opts.AllowedDeviceKeys)), slices.Sorted(slices.Values(allowedDeviceKeys))) {
+		// A resource that already existed keeps the list it has: publishing
+		// again never changes it. That is the same conflict the service
+		// reports with its own code, seen here in an answer that accepted
+		// the request instead. Only a resource that was just made with
+		// another list is an answer outside the contract.
+		if published.FoundExisting != nil && *published.FoundExisting {
+			return nil, &PublishAccessConflictError{Existing: ExistingAccessOtherDevices, NamedFlags: opts.NamedAccessFlags}
+		}
+		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
+	}
+	if opts.AllowRequests {
+		if err := c.confirmAccessRequests(ctx, published); err != nil {
+			return nil, err
+		}
+	}
+	return published, nil
+}
+
+// publishRefusal builds the error for a create that the service refused.
+//
+// It is publishProblem's reading of the answer, with one more question for a
+// request that asked for access requests. A service that does not have them
+// and validates request bodies strictly refuses the member it does not know
+// with its generic validation problem, and nothing was created. That is told
+// apart from a real refusal by asking the service, not by reading the
+// problem's words; see refusedForNoAccessRequests. A conflict with a resource
+// that exists is never that case: the service read the request to find it.
+func (c *client) publishRefusal(ctx context.Context, reply *restReply, opts *PublishOptions) error {
+	refusal := publishProblem(reply, opts)
+	if !opts.AllowRequests || errors.Is(refusal, ErrPublishAccessConflict) {
+		return refusal
+	}
+	if c.refusedForNoAccessRequests(ctx, reply) {
+		return &accessRequestsUnsupportedError{detail: msgAccessRequestsCreateRefused}
+	}
+	return refusal
+}
+
+// publishedFromReply decodes a 201 answer to a create request and checks the
+// identity of the resource it names. It returns the row's device list beside
+// the result, which does not carry it. Privacy is returned as the row has it
+// and is the caller's to check.
+func publishedFromReply(reply *restReply) (*Published, []string, error) {
 	var env struct {
 		Data resourceRow  `json:"data"`
 		Meta envelopeMeta `json:"meta"`
 	}
 	if err := json.Unmarshal(reply.body, &env); err != nil {
-		return nil, fmt.Errorf("%w: decode publish response: %w", qurl.ErrInvalidAPIResponse, err)
+		return nil, nil, fmt.Errorf("%w: decode publish response: %w", qurl.ErrInvalidAPIResponse, err)
 	}
 	if strings.TrimSpace(env.Data.ResourceID) == "" {
-		return nil, fmt.Errorf("%w: publish response missing resource_id", qurl.ErrInvalidAPIResponse)
+		return nil, nil, fmt.Errorf("%w: publish response missing resource_id", qurl.ErrInvalidAPIResponse)
 	}
 	if strings.TrimSpace(env.Data.CRID) == "" {
-		return nil, fmt.Errorf("%w: publish response missing crid", qurl.ErrInvalidAPIResponse)
+		return nil, nil, fmt.Errorf("%w: publish response missing crid", qurl.ErrInvalidAPIResponse)
 	}
 	if err := resourceidentity.ValidatePair(env.Data.CRID, env.Data.ResourceID); err != nil {
-		return nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
+		return nil, nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
 	}
 	return &Published{
-		CRID:          env.Data.CRID,
-		ResourceID:    env.Data.ResourceID,
-		TargetURL:     env.Data.TargetURL,
-		Status:        env.Data.Status,
-		CreatedAt:     env.Data.CreatedAt,
-		ExpiresAt:     env.Data.ExpiresAt,
-		FoundExisting: env.Meta.FoundExisting,
-	}, nil
+		ConsumerAccess: env.Data.ConsumerAccess,
+		AccessRequests: env.Data.AccessRequests,
+		Private:        env.Data.Private,
+		CRID:           env.Data.CRID,
+		ResourceID:     env.Data.ResourceID,
+		TargetURL:      env.Data.TargetURL,
+		Status:         env.Data.Status,
+		CreatedAt:      knownTime(env.Data.CreatedAt),
+		ExpiresAt:      knownTime(env.Data.ExpiresAt),
+		FoundExisting:  env.Meta.FoundExisting,
+		Publisher:      env.Data.Publisher.publisher(),
+	}, env.Data.AllowedDeviceKeys, nil
+}
+
+// mayKeepExistingPublic reports whether a refused create is the one a publish
+// answers by keeping the resource that exists: the publisher named no
+// privacy, and the refusal says the target is already published as public, or
+// is the older answer that does not say what differs. A request that carries
+// a device list or asks for access requests named a private resource, so it
+// never keeps a public one, whatever the caller set.
+func mayKeepExistingPublic(opts *PublishOptions, refusal error) bool {
+	if !opts.KeepExistingPublic || opts.ConsumerAccess != nil || opts.Public || len(opts.AllowedDeviceKeys) > 0 || opts.AllowRequests {
+		return false
+	}
+	var conflict *PublishAccessConflictError
+	if !errors.As(refusal, &conflict) {
+		return false
+	}
+	return conflict.Existing == ExistingAccessPublic || conflict.Existing == ExistingAccessUnknown
+}
+
+// createdAtClockTolerance is the room given to the two clocks when the
+// created_at of a resource is compared with this command's own times.
+// created_at is read from the service's clock, and the moments the first
+// create was sent and the last answer arrived from this machine's.
+//
+// The room is small on purpose. It is what a correct pair of clocks needs,
+// and no more: a wider one would let a resource that existed shortly before
+// the command pass as new.
+const createdAtClockTolerance = time.Minute
+
+// madeDuring reports whether createdAt is evidence that a resource was made
+// by the requests this command sent: it is present, not older than the
+// moment the first create was sent, and not later than the moment the answer
+// that carries it arrived, each with the clock tolerance.
+//
+// Both bounds are needed, because a local clock can be wrong either way.
+//
+// A local clock that runs ahead of the service's makes a resource this
+// command made look older than the command. It fails the first bound.
+//
+// A local clock that runs behind makes a resource that was made before the
+// command look newer than the first create, by as much as the clock is
+// behind, and the first bound alone would pass it. It also puts every
+// creation time the service reports into this machine's future. So a
+// creation time later than the answer that carried it fails the second
+// bound: a clock that far off cannot place the creation at all.
+//
+// A wrong clock therefore costs a delete that would have been right, never
+// one that is wrong: the resource is left in place and the publisher is told
+// to look. A delete cannot be undone.
+func madeDuring(createdAt *time.Time, firstCreateSentAt, answerArrivedAt time.Time) bool {
+	if createdAt == nil {
+		return false
+	}
+	earliest := firstCreateSentAt.Add(-createdAtClockTolerance)
+	latest := answerArrivedAt.Add(createdAtClockTolerance)
+	return !createdAt.Before(earliest) && !createdAt.After(latest)
+}
+
+// keepExistingPublic finishes a publish that named no privacy and was refused
+// because the target is already published as public. A person who published a
+// target while public was the default, and publishes it again after an
+// upgrade, never chose a privacy; refusing them on every run would break a
+// command that worked. So the create is sent once more, this time without
+// stating privacy, which makes the service return the resource that exists
+// with the privacy it has.
+//
+// That second request is the only create that leaves privacy to the service,
+// so its answer is held to what was meant. A public resource is accepted
+// only when the answer says it already existed, and the result is marked so
+// the caller warns the publisher. A private resource is what a publish with
+// no flag asks for and is returned as it is. A public resource that was just
+// made is one nobody asked for: an older service makes it when the existing
+// resource went away between the two requests. It is deleted, and the
+// publish fails without naming a CRID.
+//
+// A delete is final: the CRID never comes back. So the command deletes only
+// what two things in the answer say this request made. The answer must say
+// the resource did not exist before, and its creation time must lie between
+// firstCreateSentAt, the moment this command sent its first create, and the
+// moment that answer arrived. An answer that lacks either, or that cannot be
+// read, is not acted on: the publish fails with the unconfirmed-privacy
+// message, which sends the publisher to look at what exists.
+//
+// TODO(upstream-contract): the delete rests on two members of the service's
+// create answer: meta.found_existing is false only for a resource this
+// request made, and data.created_at is the time the resource was made.
+//
+// refusal is the first answer. It is what the publisher is told when the
+// second request is refused for the same kind of reason.
+func (c *client) keepExistingPublic(ctx context.Context, body *publishRequest, refusal error, firstCreateSentAt time.Time) (*Published, error) {
+	again := *body
+	again.Private = nil
+	reply, err := c.doRESTOnce(ctx, http.MethodPost, "/v1/resources", again)
+	if err != nil {
+		return nil, err
+	}
+	answerArrivedAt := c.now()
+	if reply.status != http.StatusCreated {
+		if problem := publishProblem(reply, &PublishOptions{}); !errors.Is(problem, ErrPublishAccessConflict) {
+			return nil, problem
+		}
+		return nil, refusal
+	}
+	published, _, err := publishedFromReply(reply)
+	if err != nil {
+		// The service accepted a create that stated no privacy, and its
+		// answer cannot be read, a creation time that is not a time
+		// included. A resource may exist and nothing says what it is like.
+		return nil, &publishPrivacyError{}
+	}
+	switch {
+	case published.Private == nil:
+		return nil, &publishPrivacyError{}
+	case *published.Private:
+		return published, nil
+	case published.FoundExisting == nil:
+		// A public resource, and the answer does not say whether it existed.
+		// It is not kept, because that was not confirmed, and not deleted,
+		// because it may be the one that was published before.
+		return nil, &publishPrivacyError{}
+	case *published.FoundExisting:
+		published.KeptPublic = true
+		return published, nil
+	case !madeDuring(published.CreatedAt, firstCreateSentAt, answerArrivedAt):
+		// The answer says the resource is new, and its creation time does
+		// not bear that out. It may be the one that was published before,
+		// so it is left alone.
+		return nil, &publishPrivacyError{}
+	}
+	if _, err := c.Delete(ctx, published.CRID); err != nil {
+		return nil, &unaskedPublicError{notDeleted: err}
+	}
+	return nil, &unaskedPublicError{}
+}
+
+// confirmAccessRequests holds a publish that asked for access requests to
+// that: the result says they are on, or the publish fails.
+//
+// A row with no such member is how a service from before access requests
+// answers: it made the resource, private as already confirmed, and ignored
+// the rest. A row that says they are off for a resource that was just made is
+// a service that has them and did not turn them on.
+//
+// A row that says they are off for a resource the create found is the
+// service doing what it does: it changes nothing about a resource that
+// exists. The publisher asked for people to be able to ask for access to
+// this target, so the setting is turned on here with the change
+// `qurl requests --on` makes, and that answer is checked the same way. A
+// failed change leaves the resource as it was, which the create answer
+// confirmed is private. The error therefore names the CRID: the publisher
+// needs it to try again, and nothing about the resource is unknown.
+func (c *client) confirmAccessRequests(ctx context.Context, published *Published) error {
+	switch {
+	case published.AccessRequests == nil:
+		return &accessRequestsUnsupportedError{detail: msgAccessRequestsCreateIgnored}
+	case *published.AccessRequests:
+		return nil
+	case published.FoundExisting == nil || !*published.FoundExisting:
+		return &answerError{message: msgAccessRequestsCreateUnconfirmed}
+	}
+	resource, err := c.SetAccessRequests(ctx, published.CRID, true)
+	var notPrivate *accessRequestsNotPrivateError
+	switch {
+	case errors.As(err, &notPrivate):
+		// The change requires its answer to say that the resource is
+		// private, and this one did not. The create answer said it is, so
+		// the two disagree about who can open the resource. That is the
+		// privacy failure, and it names no CRID.
+		return &publishPrivacyError{}
+	case err != nil:
+		return &AccessRequestsNotTurnedOnError{CRID: published.CRID, cause: err}
+	}
+	published.AccessRequests = resource.AccessRequests
+	published.AccessRequestsTurnedOn = true
+	return nil
+}
+
+// TODO(upstream-contract): the service refuses a publish whose target is
+// already published with the other privacy with HTTP 400 and the code
+// privacy_mismatch, and one whose device list differs from the stored list
+// with HTTP 400 and the code device_keys_mismatch. A service from before
+// those codes answers both with its generic invalid-input problem and this
+// text in the detail. Only that older text is matched; the wording a service
+// with the codes uses is never read.
+const (
+	codePrivacyMismatch        = "privacy_mismatch"
+	codeDeviceKeysMismatch     = "device_keys_mismatch"
+	legacyAccessSettingsDetail = "existing resource access settings differ"
+)
+
+// publishProblem builds the error for a refused publish. A refusal because
+// the target is already published with other access settings becomes a
+// PublishAccessConflictError; every other refusal is the plain problem.
+//
+// The conflict says what the resource that exists is like only when the
+// service said so. The privacy-mismatch code means it has the privacy the
+// request did not state, and the device-list code means its list is another
+// one. The older answer covers both without saying which, so it names
+// neither, whatever the request carried.
+func publishProblem(reply *restReply, opts *PublishOptions) error {
+	problem := reply.problem()
+	var apiErr *Error
+	if !errors.As(problem, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return problem
+	}
+	conflict := func(existing ExistingAccess) error {
+		return &PublishAccessConflictError{Existing: existing, NamedFlags: opts.NamedAccessFlags, problem: apiErr}
+	}
+	if strings.EqualFold(apiErr.Code, codePrivacyMismatch) {
+		if opts.Public {
+			return conflict(ExistingAccessPrivate)
+		}
+		return conflict(ExistingAccessPublic)
+	}
+	if strings.EqualFold(apiErr.Code, codeDeviceKeysMismatch) {
+		return conflict(ExistingAccessOtherDevices)
+	}
+	if strings.Contains(strings.ToLower(apiErr.Detail), legacyAccessSettingsDetail) {
+		return conflict(ExistingAccessUnknown)
+	}
+	return problem
 }
 
 // validateTargetURL applies the SDK's local target rules (http/https, a
@@ -225,7 +595,7 @@ func validateTargetURL(target string) error {
 	if err != nil {
 		return fmt.Errorf("%w: target URL: %w", qurl.ErrInvalidResourceRequest, err)
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
+	if u.Scheme != "http" && u.Scheme != schemeHTTPS {
 		return fmt.Errorf("%w: target URL must use http or https", qurl.ErrInvalidResourceRequest)
 	}
 	if u.Host == "" {
@@ -339,12 +709,32 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 			return nil, fmt.Errorf("%w: desired-on tunnel %s has zero serving_epoch", qurl.ErrInvalidAPIResponse, source)
 		}
 	}
+	people, err := allowedPasskeys(row.AllowedPasskeys, source)
+	if err != nil {
+		return nil, err
+	}
 	return &ResourceSummary{
-		CRID: row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
+		ConsumerAccess: row.ConsumerAccess, AccessRequests: row.AccessRequests,
+		AllowedPasskeys:   people,
+		AllowedDeviceKeys: row.AllowedDeviceKeys,
+		Private:           row.Private,
+		CRID:              row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
 		Type: row.Type, Status: row.Status, DesiredState: row.DesiredState,
 		ServingEpoch: row.ServingEpoch, Description: row.Description, Tags: row.Tags,
-		CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt,
+		CreatedAt: knownTime(row.CreatedAt), ExpiresAt: knownTime(row.ExpiresAt),
+		Publisher: row.Publisher.publisher(),
 	}, nil
+}
+
+// knownTime is a date the service actually gave. The all-zeros timestamp
+// (0001-01-01T00:00:00Z) is how an unset date serializes, so it is treated as
+// absent: no rendering prints year 1 as a creation date, and a resource with
+// no expiry is not listed as expired.
+func knownTime(t *time.Time) *time.Time {
+	if t == nil || t.IsZero() {
+		return nil
+	}
+	return t
 }
 
 // Sharing reads one tunnel resource's durable and observed serving state.
@@ -408,20 +798,22 @@ func (c *client) doSharing(ctx context.Context, method, id string, body any, all
 	if err := json.Unmarshal(reply.body, &env); err != nil {
 		return nil, fmt.Errorf("%w: decode sharing response: %w", qurl.ErrInvalidAPIResponse, err)
 	}
-	if err := validateSharingRow(env.Data); err != nil {
+	if err := validateSharingRow(&env.Data); err != nil {
 		return nil, err
 	}
-	if err := validateSharingIdentity(id, env.Data); err != nil {
+	if err := validateSharingIdentity(id, &env.Data); err != nil {
 		return nil, err
 	}
 	return &Sharing{
 		ResourceID: env.Data.ResourceID, CRID: env.Data.CRID,
 		DesiredState: env.Data.DesiredState, ServingEpoch: env.Data.ServingEpoch,
 		ConnectionState: env.Data.ConnectionState,
+		CreatedAt:       knownTime(env.Data.CreatedAt),
+		Publisher:       env.Data.Publisher.publisher(),
 	}, nil
 }
 
-func validateSharingIdentity(requestID string, row sharingRow) error {
+func validateSharingIdentity(requestID string, row *sharingRow) error {
 	der, err := resourceidentity.ValidateResourceID(row.ResourceID)
 	if err != nil {
 		return fmt.Errorf("%w: sharing response resource identity: %w", qurl.ErrInvalidAPIResponse, err)
@@ -440,7 +832,7 @@ func validateSharingIdentity(requestID string, row sharingRow) error {
 	return nil
 }
 
-func validateSharingRow(row sharingRow) error {
+func validateSharingRow(row *sharingRow) error {
 	if strings.TrimSpace(row.ResourceID) == "" {
 		return fmt.Errorf("%w: sharing response missing resource_id", qurl.ErrInvalidAPIResponse)
 	}
@@ -536,7 +928,15 @@ func (c *client) doRESTWithHeaders(ctx context.Context, method, path string, bod
 
 func (c *client) doRESTRequest(ctx context.Context, method, path string, body any, headers http.Header, allowRetry bool) (*restReply, error) {
 	reqBody := io.Reader(http.NoBody)
-	if body != nil {
+	if raw, ok := body.(json.RawMessage); ok {
+		// Pre-encoded JSON goes out as is: json.Marshal would HTML-escape it
+		// and could grow a capped supervisor body past its limit. An empty
+		// one means no body and no Content-Type.
+		body = nil
+		if len(raw) > 0 {
+			body, reqBody = raw, bytes.NewReader(raw)
+		}
+	} else if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("encode qURL API request: %w", err)
@@ -676,4 +1076,170 @@ func firstNonEmpty(values ...string) string {
 
 func trimBaseURL(base string) string {
 	return strings.TrimRight(base, "/")
+}
+
+// SetDeviceGrants changes grants with one authenticated PATCH. It never retries.
+// TODO(upstream-contract): PATCH returns 200 with a flat data resource row,
+// including type, status, privacy and grants; GET nests its row under resource.
+func (c *client) SetDeviceGrants(ctx context.Context, id string, keys []string) (*ResourceSummary, error) {
+	id, path, err := deviceGrantsPath(id)
+	if err != nil {
+		return nil, err
+	}
+	if keys == nil {
+		keys = []string{}
+	}
+	reply, err := c.doRESTOnce(ctx, http.MethodPatch, path, map[string]any{"allowed_device_keys": keys})
+	if err != nil {
+		return nil, err
+	}
+	if reply.status != http.StatusOK {
+		return nil, reply.problem()
+	}
+	var env struct {
+		Data resourceRow `json:"data"`
+	}
+	if err := json.Unmarshal(reply.body, &env); err != nil {
+		return nil, fmt.Errorf("%w: decode device grants: %w", qurl.ErrInvalidAPIResponse, err)
+	}
+	if err := validateSharingIdentity(id, &sharingRow{CRID: env.Data.CRID, ResourceID: env.Data.ResourceID}); err != nil {
+		return nil, err
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(keys)), slices.Sorted(slices.Values(env.Data.AllowedDeviceKeys))) {
+		return nil, fmt.Errorf("%w: API did not confirm the device grants", qurl.ErrInvalidAPIResponse)
+	}
+	return summarizeResourceRow(&env.Data, "device grants")
+}
+
+// deviceGrantsPath returns the trimmed identifier and the escaped path of the
+// resource a grant change is sent to, as every method here builds its path.
+// The path is also held to the routes a device credential may use, so an
+// identifier that could never name a resource is refused before a request.
+func deviceGrantsPath(id string) (trimmed, path string, err error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", "", fmt.Errorf("%w: resource identifier must not be empty", qurl.ErrInvalidResourceRequest)
+	}
+	path = "/v1/resources/" + url.PathEscape(id)
+	if err := ValidateRequestTarget(http.MethodPatch, path); err != nil {
+		return "", "", err
+	}
+	return id, path, nil
+}
+
+// deviceGrantEdit is the PATCH body that adds and removes single device keys.
+// It never carries allowed_device_keys: that member replaces the whole list.
+//
+// TODO(upstream-contract): the service applies both members as one change,
+// treats a key that is already present or already absent as nothing to do,
+// refuses a key that is in both and a result above 256 keys, and answers
+// with the complete resulting list.
+type deviceGrantEdit struct {
+	Add    []string `json:"allowed_device_keys_add,omitempty"`
+	Remove []string `json:"allowed_device_keys_remove,omitempty"`
+}
+
+// EditDeviceGrants adds and removes single device keys with one authenticated
+// PATCH. It never retries.
+//
+// The answer is checked against the request: every added key must be on the
+// returned list and no removed key may be. The keys the request did not name
+// are not checked. What the client guarantees about them is the shape of the
+// request, which never carries the whole list and so cannot replace it. A
+// service from before these members ignores them and returns the list as it
+// was, with a success status; that answer fails here instead of being
+// reported as a change that was made.
+func (c *client) EditDeviceGrants(ctx context.Context, id string, add, remove []string) (*ResourceSummary, error) {
+	if len(add) == 0 && len(remove) == 0 {
+		return nil, fmt.Errorf("%w: no device key to add or remove", qurl.ErrInvalidResourceRequest)
+	}
+	for _, key := range add {
+		if slices.Contains(remove, key) {
+			return nil, fmt.Errorf("%w: a device key cannot be both added and removed", qurl.ErrInvalidResourceRequest)
+		}
+	}
+	id, path, err := deviceGrantsPath(id)
+	if err != nil {
+		return nil, err
+	}
+	reply, err := c.doRESTOnce(ctx, http.MethodPatch, path, deviceGrantEdit{Add: add, Remove: remove})
+	if err != nil {
+		return nil, err
+	}
+	if reply.status != http.StatusOK {
+		return nil, reply.problem()
+	}
+	var env struct {
+		Data resourceRow `json:"data"`
+	}
+	if err := json.Unmarshal(reply.body, &env); err != nil {
+		return nil, fmt.Errorf("%w: decode device grants: %w", qurl.ErrInvalidAPIResponse, err)
+	}
+	if err := validateSharingIdentity(id, &sharingRow{CRID: env.Data.CRID, ResourceID: env.Data.ResourceID}); err != nil {
+		return nil, err
+	}
+	for _, key := range add {
+		if !slices.Contains(env.Data.AllowedDeviceKeys, key) {
+			return nil, &grantEditError{}
+		}
+	}
+	for _, key := range remove {
+		if slices.Contains(env.Data.AllowedDeviceKeys, key) {
+			return nil, &grantEditError{}
+		}
+	}
+	return summarizeResourceRow(&env.Data, "device grants")
+}
+
+func validateConsumerPolicy(policy *qurl.ConsumerAccessPolicy) error {
+	if policy.Version != 1 {
+		return qurl.ErrInvalidResourceRequest
+	}
+	return ValidateConsumerPolicyFields(policy.Mode, policy.ContractID)
+}
+
+// ValidateConsumerPolicyFields checks the shared publish and configure inputs.
+// TODO(upstream-contract): Keep modes and contract limits in sync with qurl-service.
+func ValidateConsumerPolicyFields(mode, contract string) error {
+	switch mode {
+	case "keys", "invite_only", "email_capture", "review":
+		if contract != "" {
+			return qurl.ErrInvalidResourceRequest
+		}
+	case "contract":
+		if strings.TrimSpace(contract) == "" || strings.TrimSpace(contract) != contract || len(contract) > 128 {
+			return qurl.ErrInvalidResourceRequest
+		}
+	default:
+		return qurl.ErrInvalidResourceRequest
+	}
+	return nil
+}
+
+func validatePublishConsumerPolicy(opts *PublishOptions) error {
+	if opts.ConsumerAccess == nil {
+		return nil
+	}
+	if opts.Public || opts.AllowRequests || len(opts.AllowedDeviceKeys) != 0 || validateConsumerPolicy(opts.ConsumerAccess) != nil {
+		return fmt.Errorf("%w: invalid private access policy", qurl.ErrInvalidResourceRequest)
+	}
+	return nil
+}
+
+func consumerPolicyConfirmed(requested, received *qurl.ConsumerAccessPolicy, foundExisting *bool) bool {
+	if requested == nil {
+		return true
+	}
+	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID &&
+		(received.Version == requested.Version || (foundExisting != nil && *foundExisting && received.Version > requested.Version && received.Version < 1<<53))
+}
+
+func confirmPublishConsumerPolicy(requested *qurl.ConsumerAccessPolicy, published *Published) error {
+	if consumerPolicyConfirmed(requested, published.ConsumerAccess, published.FoundExisting) {
+		return nil
+	}
+	if published.FoundExisting != nil && *published.FoundExisting {
+		return fmt.Errorf("%w: the existing resource has a different private access policy; check `qurl status <CRID>` and use `qurl access configure` to change it", ErrPublishAccessConflict)
+	}
+	return fmt.Errorf("%w: API did not confirm the requested private access policy; the resource may exist; check `qurl list` before you retry", qurl.ErrInvalidAPIResponse)
 }

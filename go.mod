@@ -1,6 +1,6 @@
 module github.com/layervai/qurl-integrations
 
-go 1.26.6
+go 1.26.10
 
 require (
 	github.com/Microsoft/go-winio v0.6.2
@@ -12,16 +12,16 @@ require (
 	github.com/distribution/reference v0.6.0
 	github.com/fatedier/frp v0.71.0
 	github.com/fatedier/golib v0.8.2
-	github.com/layervai/qurl-conformance v0.17.0
-	github.com/layervai/qurl-connector v0.14.1-rc.1.0.20260922181302-11553b74b8cd
-	github.com/layervai/qurl-go v0.19.0
+	github.com/layervai/qurl-conformance v0.17.2
+	github.com/layervai/qurl-connector v0.14.2
+	github.com/layervai/qurl-go v0.26.3
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	golang.org/x/crypto v0.57.0
+	golang.org/x/crypto v0.58.0
 	golang.org/x/mod v0.41.0
-	golang.org/x/sys v0.48.0
-	golang.org/x/term v0.46.0
+	golang.org/x/sys v0.49.0
+	golang.org/x/term v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -61,6 +61,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
+	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.17 // indirect
 	github.com/googleapis/gax-go/v2 v2.24.1 // indirect
@@ -108,13 +109,13 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/telemetry v0.0.0-20260811182544-a038080d80e5 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/telemetry v0.0.0-20260924152758-ed294f943157 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	golang.org/x/tools v0.49.0 // indirect
+	golang.org/x/tools v0.51.0 // indirect
 	golang.org/x/vuln v1.3.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20231211153847-12269c276173 // indirect
@@ -141,4 +142,4 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 // TODO(upstream-contract): keep both replacements aligned with qurl-connector;
 // Go does not inherit dependency replacements. This reviewed FRP revision adds
 // system CA verification and retains the lifecycle fixes and InitialRunID.
-replace github.com/fatedier/frp => github.com/layervai/frp v1.0.5-0.20260922180847-e6700eaef4dd
+replace github.com/fatedier/frp => github.com/layervai/frp v1.0.5-0.20260926021043-5570a4205458

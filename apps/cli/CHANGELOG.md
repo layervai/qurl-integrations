@@ -1,5 +1,103 @@
 # Changelog
 
+## [3.5.0](https://github.com/layervai/qurl-integrations/compare/v3.4.1...v3.5.0) (2026-10-09)
+
+
+### Features
+
+* **cli:** get asks for a CRID link first where the deployment offers it, also on a machine that has only an account key (no change with the deployment this release ships) ([4e5266d](https://github.com/layervai/qurl-integrations/commit/4e5266d00d43e04cad1fb890de970f5badc83ca3))
+
+## [3.4.1](https://github.com/layervai/qurl-integrations/compare/v3.4.0...v3.4.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **cli:** say what a code shows, and from whom to take one ([#1576](https://github.com/layervai/qurl-integrations/issues/1576)) ([105c7aa](https://github.com/layervai/qurl-integrations/commit/105c7aabc4ed84a0ecdf8027585b2afc1f01f556))
+
+## [3.4.0](https://github.com/layervai/qurl-integrations/compare/v3.3.1...v3.4.0) (2026-10-09)
+
+
+### Features
+
+* **cli:** add and remove device grants without replacing the list ([0844a34](https://github.com/layervai/qurl-integrations/commit/0844a34030160e467912d66781998ac6b281eda3))
+* **cli:** let people without the CLI ask for access to a private resource ([fcc9905](https://github.com/layervai/qurl-integrations/commit/fcc9905251753d94c8a6232b629fa4e590cb01ae))
+* **cli:** publish is private unless --public ([0844a34](https://github.com/layervai/qurl-integrations/commit/0844a34030160e467912d66781998ac6b281eda3))
+
+
+### Bug Fixes
+
+* **cli:** say "not said" when the service does not list who has access ([5a591fe](https://github.com/layervai/qurl-integrations/commit/5a591fe2ec115614874ea77f3aeda0ad3eaed1e6))
+* **deps:** build the CLI and Slack images with Go 1.26.9 ([#1574](https://github.com/layervai/qurl-integrations/issues/1574)) ([56ca8ef](https://github.com/layervai/qurl-integrations/commit/56ca8efa35c15e0e229592525d73256afb13786f))
+
+## [3.3.1](https://github.com/layervai/qurl-integrations/compare/v3.3.0...v3.3.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **cli:** the journey reads the publisher and creation date that inspect writes ([#1560](https://github.com/layervai/qurl-integrations/issues/1560)) ([8dd72dd](https://github.com/layervai/qurl-integrations/commit/8dd72dd56145fb9053f522a523cc12658c3cf2a5))
+
+## [3.3.0](https://github.com/layervai/qurl-integrations/compare/v3.2.0...v3.3.0) (2026-10-06)
+
+
+### Features
+
+* **cli:** get opens a public resource with only its CRID ([#1557](https://github.com/layervai/qurl-integrations/issues/1557)) ([902fa8d](https://github.com/layervai/qurl-integrations/commit/902fa8dd27a70ba2c4a44d20423a8cbd73e3e90d))
+* **cli:** seal new local device state to the TPM when one is available; LAYERV_KEY_PROVIDER=file opts out ([63d912b](https://github.com/layervai/qurl-integrations/commit/63d912ba99680d5f813237d430e1474e38a2ec91))
+* **cli:** show a CRID's publisher and creation date ([#1550](https://github.com/layervai/qurl-integrations/issues/1550)) ([b5f959f](https://github.com/layervai/qurl-integrations/commit/b5f959fc0b9934125c7e923baf83c645a6e34462))
+* **cli:** support private device grants ([127fb9e](https://github.com/layervai/qurl-integrations/commit/127fb9e690a78e6b832a2211e3e5cbb1a2b2c01a))
+* **cli:** whoami shows which key storage protects local state ([63d912b](https://github.com/layervai/qurl-integrations/commit/63d912ba99680d5f813237d430e1474e38a2ec91))
+
+
+### Bug Fixes
+
+* **cli:** a TPM that is not responding exits 11 (unavailable) instead of 3 ([63d912b](https://github.com/layervai/qurl-integrations/commit/63d912ba99680d5f813237d430e1474e38a2ec91))
+* **cli:** correct the public-CRID text, and keep a refresh on the request that worked ([#1559](https://github.com/layervai/qurl-integrations/issues/1559)) ([6403197](https://github.com/layervai/qurl-integrations/commit/64031970e84ba26067edaca0853ddefe4b5b8300))
+* **cli:** explain a share or get "not found" result and how a private resource is opened ([e419a20](https://github.com/layervai/qurl-integrations/commit/e419a201e93ce37002ec5209fa6373c8922824a8))
+* **cli:** omit unset creation dates and reword publisher refusals ([#1551](https://github.com/layervai/qurl-integrations/issues/1551)) ([bb2ccef](https://github.com/layervai/qurl-integrations/commit/bb2ccef514d2453907ae8b3cac7145e4308df80f))
+
+## [3.2.0](https://github.com/layervai/qurl-integrations/compare/v3.1.0...v3.2.0) (2026-09-30)
+
+
+### Features
+
+* **cli:** whoami shows the device public key ([03fd58c](https://github.com/layervai/qurl-integrations/commit/03fd58cf4ee0e4cd9e1317af7d593ad142ff5b0c))
+
+
+### Bug Fixes
+
+* **cli:** whoami no longer prints the API key prefix. For -o json consumers: api_key.key_prefix is removed; use api_key.key_id ([03fd58c](https://github.com/layervai/qurl-integrations/commit/03fd58cf4ee0e4cd9e1317af7d593ad142ff5b0c))
+
+## [3.1.0](https://github.com/layervai/qurl-integrations/compare/v3.0.0...v3.1.0) (2026-09-29)
+
+
+### Features
+
+* **cli:** support sealed anonymous enrollment and supervised requests ([#1515](https://github.com/layervai/qurl-integrations/issues/1515)) ([ceb0018](https://github.com/layervai/qurl-integrations/commit/ceb00182fd9e227d07bcc0fb32cad27b9e27b5ad))
+
+
+### Bug Fixes
+
+* **cli:** install without sudo or Homebrew on fresh machines ([#1540](https://github.com/layervai/qurl-integrations/issues/1540)) ([cb4e0fd](https://github.com/layervai/qurl-integrations/commit/cb4e0fd4b55baa16a848bbe3edc3648694413dbf))
+* **cli:** make Linux sandbox and loose-directory errors actionable ([#1541](https://github.com/layervai/qurl-integrations/issues/1541)) ([6b2a74c](https://github.com/layervai/qurl-integrations/commit/6b2a74c6433e7f391b0a9976947acbaa2aaf6031))
+
+## [3.0.0](https://github.com/layervai/qurl-integrations/compare/v2.6.0...v3.0.0) (2026-09-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** All commands that open device state, including list, whoami, and get, require --supervision external or QURL_DAEMON_SUPERVISION=external when the state belongs to an external supervisor. Set the mode before upgrading these installations.
+
+### Features
+
+* **cli:** preserve private file origins through offline conversion ([#1514](https://github.com/layervai/qurl-integrations/issues/1514)) ([096a0df](https://github.com/layervai/qurl-integrations/commit/096a0df6fea1575e298d2bacf1ca736d8d85c5f0))
+* **cli:** publish without signup and add optional account recovery ([#1510](https://github.com/layervai/qurl-integrations/issues/1510)) ([1de5926](https://github.com/layervai/qurl-integrations/commit/1de5926e4fda81ac45c9f7d7f44c3ec9191f90ee))
+
+
+### Bug Fixes
+
+* **cli:** bound remote journey sessions for sandbox drains ([#1524](https://github.com/layervai/qurl-integrations/issues/1524)) ([3ba98c6](https://github.com/layervai/qurl-integrations/commit/3ba98c6a507a621209cab308629b1a104f1b3ada))
+* **cli:** verify tunnel TLS certificates by default ([#1508](https://github.com/layervai/qurl-integrations/issues/1508)) ([59401f0](https://github.com/layervai/qurl-integrations/commit/59401f0bb3a0a3def3b2674fb5a3fccde660f9d0))
+
 ## [2.6.0](https://github.com/layervai/qurl-integrations/compare/v2.5.4...v2.6.0) (2026-09-17)
 
 

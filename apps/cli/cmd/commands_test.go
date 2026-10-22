@@ -75,7 +75,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("root help must show local publish before remote publish:\n%s", rootHelp)
 	}
-	for _, want := range []string{"shareable resource ID", "no access by itself", "qurl get"} {
+	for _, want := range []string{"permanent resource ID", "qurl get"} {
 		if !strings.Contains(rootHelp, want) {
 			t.Errorf("root help missing %q:\n%s", want, rootHelp)
 		}
@@ -91,7 +91,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("publish help must explain the local path first:\n%s", publishHelp)
 	}
-	for _, want := range []string{"On Linux, macOS, and Windows", "background daemon", "--foreground", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
+	for _, want := range []string{"On Linux, macOS, and Windows", "background daemon", "--foreground", "prints the CRID, and exits", "qurl get <CRID>"} {
 		if !strings.Contains(publishHelp, want) {
 			t.Errorf("publish help missing %q:\n%s", want, publishHelp)
 		}
@@ -102,6 +102,167 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	for _, jargon := range []string{"FRP", "proxy registration", "one-shot enrollment", "native device identity"} {
 		if strings.Contains(publishHelp, jargon) {
 			t.Errorf("publish help exposes implementation jargon %q:\n%s", jargon, publishHelp)
+		}
+	}
+}
+
+// TestSharingCopyStatesTheDeviceAccessRule pins the access copy wherever the
+// CLI explains sharing.
+//
+// The rule is about the two commands: share and get use the device's
+// identity, they work on the resource owner's devices and, for a private
+// resource, on the devices the publisher allowed, and any other device gets
+// "not found".
+//
+// Public and private stay distinct, and the default is stated: a resource is
+// private unless published with --public, and a private one is limited to its
+// owner and the allowed devices.
+//
+// Publish help and the README then say what a publisher needs to know about
+// a public resource, each exactly once and in the words get's help uses:
+// where the deployment offers it, anyone who has the CRID can open the
+// resource; and the deployment this release ships does not offer it yet. Both
+// also say that privacy is set at creation.
+//
+// --private was how a private resource was published while public was the
+// default. It is still accepted and changes nothing, so no help surface
+// teaches it: the flag is hidden, and only the README mentions it, once, for
+// a reader who has a command from an earlier release.
+//
+// The sentence about the shipped deployment is true for as long as
+// TestRequestCRIDLinkUnderTheShippedDeploymentIsNotMade passes. A release
+// that ships a deployment which offers the request drops it in publish help,
+// in get's help (TestGetCopyStatesWhatOpensWithOnlyACRID), in the README and
+// in the share not-found hint.
+//
+// The test also keeps two retired statements off every help surface and out
+// of the README: the promise that a public CRID can be shared without an
+// account or login, and the limitation that a CLI release opens a public
+// CRID only on the owner's devices. The CLI can ask for a link with the CRID
+// alone now, so what is missing is a deployment that offers the request.
+func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
+	collapse := func(text string) string { return strings.Join(strings.Fields(text), " ") }
+	help := func(args ...string) string {
+		t.Helper()
+		res := runCLI(t, &runOpts{args: append(args, "--help")})
+		if res.code != 0 {
+			t.Fatalf("qurl %s exit = %d, stderr: %s", strings.Join(args, " "), res.code, res.stderr.String())
+		}
+		return collapse(res.stdout.String())
+	}
+	// Markdown code marks are dropped from the README, so one set of
+	// sentences is compared with both.
+	readme := collapse(strings.ReplaceAll(readCLIREADME(t), "`", ""))
+	publishHelp := help("publish")
+
+	const (
+		scope = "resource owner's devices and, for a private resource, on the devices"
+		rule  = `any other device gets "not found"`
+	)
+	for _, surface := range []struct{ name, text, identity string }{
+		{"qurl --help", help(), "using this device's identity"},
+		{"qurl share --help", help("share"), "share uses this device's identity"},
+		{"qurl get --help", help("get"), "get uses this device's identity"},
+		{"qurl publish --help", publishHelp, "use the identity of the device they run on"},
+		{"README", readme, "using this device's identity"},
+	} {
+		for _, want := range []string{surface.identity, scope, rule} {
+			if !strings.Contains(surface.text, want) {
+				t.Errorf("%s does not state the access rule: missing %q", surface.name, want)
+			}
+		}
+	}
+
+	const (
+		anyone = "Where the deployment offers it, a public resource can also be opened by anyone who has its CRID."
+		notYet = "The deployment this release ships does not offer it yet."
+	)
+	for _, surface := range []struct {
+		name, text string
+		// setAtCreation is how the surface says that privacy cannot change.
+		setAtCreation string
+		// notYetCount is how often the surface says that the shipped
+		// deployment does not offer the request. The README says it here and
+		// in its section about get.
+		notYetCount int
+	}{
+		{"qurl publish --help", publishHelp, "Privacy is set at creation and cannot be changed later.", 1},
+		{"README", readme, "Privacy is set at creation; a retry cannot change it.", 2},
+	} {
+		for _, want := range []string{
+			"A resource is private unless you publish it with --public",
+			"limited to its owner and the devices",
+		} {
+			if !strings.Contains(surface.text, want) {
+				t.Errorf("%s does not state the default and keep public and private distinct: missing %q", surface.name, want)
+			}
+		}
+		for _, want := range []string{anyone + " " + notYet, surface.setAtCreation} {
+			if got := strings.Count(surface.text, want); got != 1 {
+				t.Errorf("%s states %q %d times, want exactly once", surface.name, want, got)
+			}
+		}
+		if got := strings.Count(surface.text, notYet); got != surface.notYetCount {
+			t.Errorf("%s says %d times that the shipped deployment does not offer the request, want %d", surface.name, got, surface.notYetCount)
+		}
+	}
+
+	root, _ := newRoot("test", discardStreams())
+	checked := map[string]string{"README": readme}
+	// The flag is named once, as accepted, with the one thing it still does:
+	// it is a stated choice, so it refuses a target that is published as
+	// public where a publish with no flag keeps it.
+	if got := strings.Count(readme, "--private"); got != 1 || !strings.Contains(readme, "--private was given; that flag is still accepted and asks for what a publish does anyway, except that it is refused for a target that is already published as public") {
+		t.Errorf("README mentions --private %d times; want once, saying that the flag is still accepted and what it still does", got)
+	}
+	for where, text := range visibleSurfaces(root) {
+		if strings.Contains(text, "--private") {
+			t.Errorf("%s teaches --private, which a new publish no longer needs", where)
+		}
+		checked[where] = collapse(text)
+		if where != "qurl publish long" && where != "qurl get long" && strings.Contains(checked[where], notYet) {
+			t.Errorf("%s says that the shipped deployment does not offer the request; among the help surfaces only publish and get say it", where)
+		}
+	}
+	if len(checked) < 2 {
+		t.Fatal("no help surfaces collected; the retired-statement check would be vacuous")
+	}
+	for _, where := range []string{"qurl publish long", "qurl get long"} {
+		if !strings.Contains(checked[where], notYet) {
+			t.Fatalf("%s is not collected under the key the check above exempts", where)
+		}
+	}
+	for where, text := range checked {
+		lower := strings.ToLower(text)
+		for _, retired := range []string{
+			"anyone given a public crid",
+			"need no account or login",
+			"without an account or login",
+			"without a layerv account",
+		} {
+			if strings.Contains(lower, retired) {
+				t.Errorf("%s still promises sharing without the device's identity: found %q", where, retired)
+			}
+		}
+		// Public was the default until private became it.
+		for _, retired := range []string{
+			"a resource is public unless",
+			"publish it with --private",
+			"requires --private",
+		} {
+			if strings.Contains(lower, retired) {
+				t.Errorf("%s still describes public as the default: found %q", where, retired)
+			}
+		}
+		for _, retired := range []string{
+			"a public crid is meant to be opened by anyone who has it",
+			"opens it only on the owner's devices",
+			"from other devices is not available yet",
+			"only on its owner's devices in this release",
+		} {
+			if strings.Contains(lower, retired) {
+				t.Errorf("%s still says a CLI release cannot open a public CRID on other devices: found %q", where, retired)
+			}
 		}
 	}
 }
@@ -187,7 +348,10 @@ func TestREADMEQuickstartOutputMatchesPrinter(t *testing.T) {
 		Out: &stdout,
 		Err: &stderr,
 	}, output.FormatText, false, false, false, nil)
+	// The walkthrough publishes with no flag, so its resource is private.
+	private := true
 	if err := printer.Publish(&qurlapi.Published{
+		Private:   &private,
 		CRID:      "<CRID>",
 		TargetURL: "http://127.0.0.1:3000",
 		Status:    "serving",
@@ -557,7 +721,7 @@ func TestWhoamiListedInHelp(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("help exit = %d", res.code)
 	}
-	for _, name := range []string{"publish", "share", "get", "list", "start", "stop", "restart", "status", "inspect", "daemon", "delete", "login", "whoami", "version", "completion"} {
+	for _, name := range []string{"publish", "share", "get", "list", "start", "stop", "restart", "status", "inspect", "daemon", "delete", "login", "whoami", "publisher", "version", "completion"} {
 		if !strings.Contains(res.stdout.String(), name) {
 			t.Errorf("help does not list %q", name)
 		}

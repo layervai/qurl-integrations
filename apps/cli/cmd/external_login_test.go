@@ -19,37 +19,6 @@ import (
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
-// externalLoginEnv is the supervisor's process contract for an external
-// enrollment: a local-key sealed namespace and no account credential. extra
-// holds key/value pairs layered on top of it.
-func externalLoginEnv(extra ...string) map[string]string {
-	env := map[string]string{
-		connectoragentstate.EnvKeyProvider: connectoragentstate.KeyProviderLocalKey,
-		connectoragentstate.EnvLocalKeyFD:  "3",
-	}
-	for i := 0; i+1 < len(extra); i += 2 {
-		env[extra[i]] = extra[i+1]
-	}
-	return env
-}
-
-// refuseNativeRuntime fails the test if a rejected external login reaches the
-// native runtime at all.
-func refuseNativeRuntime(t *testing.T) func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
-	t.Helper()
-	return func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
-		t.Fatal("rejected external login opened the native runtime")
-		return nil, errors.New("unreachable native runtime")
-	}
-}
-
-func mustNoExternalPolicy(t *testing.T, stateDir string) {
-	t.Helper()
-	if _, err := os.Lstat(filepath.Join(stateDir, connectorstate.RuntimeModeFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("rejected external login established the policy marker: %v", err)
-	}
-}
-
 // TestExternalLoginRequiresExternalSupervision pins the command surface: the
 // token-file form is only meaningful under external supervision, and a
 // mismatch is a usage error that reads neither stdin nor the namespace.
@@ -265,12 +234,12 @@ func TestPlainLoginDoesNotEstablishExternalPolicy(t *testing.T) {
 // TestLoginsProviderGateImpliesTheNamespaceIsSealed closes the seam between
 // login's env check and the sealing decision. login reads
 // LAYERV_KEY_PROVIDER through opts.lookupEnv and checks only the name, while
-// connectorstate.SealedProviderSelected reads the process environment and
-// decides whether Open takes the sealed branch. They coincide in production
+// connectorstate.SelectedKeyProvider reads the process environment the way
+// the connector's resolver does when it picks Open's branch. They coincide in production
 // because newRoot sets lookupEnv = os.LookupEnv, but nothing forced them to
-// agree: a provider name login accepted and SealedProviderSelected treated as
+// agree: a provider name login accepted and SelectedKeyProvider treated as
 // the plaintext default would enroll an external device into a plaintext
-// namespace, which is the divergence sealedProviderSelected's
+// namespace, which is the divergence SelectedKeyProvider's
 // TODO(upstream-contract) warns about.
 func TestLoginsProviderGateImpliesTheNamespaceIsSealed(t *testing.T) {
 	for _, provider := range []string{
@@ -283,11 +252,11 @@ func TestLoginsProviderGateImpliesTheNamespaceIsSealed(t *testing.T) {
 				connectoragentstate.EnvKeyProvider: provider,
 				connectoragentstate.EnvLocalKeyFD:  "3",
 			}
-			if err := requireLocalKeyProvider(func(k string) (string, bool) { v, ok := env[k]; return v, ok }); err != nil {
+			if err := requireLocalKeyProvider(func(k string) (string, bool) { v, ok := env[k]; return v, ok }, "--enrollment-token-file"); err != nil {
 				t.Fatalf("login refused %q: %v", provider, err)
 			}
 			t.Setenv(connectoragentstate.EnvKeyProvider, provider)
-			if !connectorstate.SealedProviderSelected() {
+			if _, sealed := connectorstate.SelectedKeyProvider(); !sealed {
 				t.Fatalf("login accepted %q but the namespace would open plaintext", provider)
 			}
 		})
@@ -297,7 +266,7 @@ func TestLoginsProviderGateImpliesTheNamespaceIsSealed(t *testing.T) {
 		connectoragentstate.EnvKeyProvider: connectoragentstate.KeyProviderFile,
 		connectoragentstate.EnvLocalKeyFD:  "3",
 	}
-	if err := requireLocalKeyProvider(func(k string) (string, bool) { v, ok := env[k]; return v, ok }); err == nil {
+	if err := requireLocalKeyProvider(func(k string) (string, bool) { v, ok := env[k]; return v, ok }, "--enrollment-token-file"); err == nil {
 		t.Fatal("login accepted the plaintext file provider for a token-file enrollment")
 	}
 }

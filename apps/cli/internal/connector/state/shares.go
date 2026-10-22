@@ -343,6 +343,14 @@ func ValidateLocalRetargetSelector(owner, prefix string) error {
 	return nil
 }
 
+// RetargetStoppedToUnix keeps the Unix-only conversion contract.
+func (r *LocalShareRegistry) RetargetStoppedToUnix(ctx context.Context, owner, prefix, origin string) (int, error) {
+	if _, err := ParseUnixTarget(origin); err != nil {
+		return 0, err
+	}
+	return r.RetargetStoppedToPrivate(ctx, owner, prefix, origin)
+}
+
 // RetargetStoppedToPrivate excludes lease-aware daemons while changing local targets.
 // Callers must also reserve the configured IPC endpoint to exclude older daemons,
 // as daemon retarget-local does. External supervisors preserve resource authority, desired

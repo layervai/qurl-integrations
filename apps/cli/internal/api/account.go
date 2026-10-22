@@ -13,6 +13,9 @@ import (
 // TODO(upstream-contract): qurl-service owns the account routes, response shapes,
 // X-QURL-Owner membership rules, and 64 linked-device limit.
 // The access token stays in memory and is never stored in the device state.
+// TODO(upstream-contract): qurl request passes POST /v1/account/link through
+// unvalidated; its help text asks supervisors for this same owner_id and
+// account_id check. Update both together.
 func (c *client) LinkAccount(ctx context.Context, accountToken, ownerID string) error {
 	reply, err := c.doRESTOnce(ctx, http.MethodPost, "/v1/account/link", map[string]string{"account_token": accountToken})
 	if err != nil {

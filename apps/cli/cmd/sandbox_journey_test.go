@@ -62,6 +62,13 @@ import (
 //
 // The commands run through runCLI with the PRODUCTION wiring and no injected
 // seams. The protected workflow requires an exact PASS and rejects SKIP.
+//
+// Privacy: every journey in this suite publishes with no flag, so each
+// resource is private, and every later step (status, inspect, list, share,
+// get, the route probes, stop, start, restart, delete) runs on the device or
+// with the key that published it. That is the owner's own access to a private
+// resource, which is what the journeys hold. No step opens a resource from
+// another device or with the CRID alone, so none needs --public.
 
 // journeyTimeout bounds the whole journey. Every API call also carries the
 // transport's own 30-second HTTP timeout; this outer bound exists so a
@@ -320,6 +327,14 @@ type journeyPublishDoc struct {
 	ResourceID    string `json:"resource_id"`
 	TargetURL     string `json:"target_url"`
 	FoundExisting bool   `json:"found_existing"`
+	// Private is always written: it is the privacy the service confirmed.
+	Private *bool `json:"private"`
+}
+
+// confirmedPrivate reports whether the publish document says the resource is
+// private, which a publish with no flag must make it.
+func (doc journeyPublishDoc) confirmedPrivate() bool {
+	return doc.Private != nil && *doc.Private
 }
 
 type journeyResourceStatusDoc struct {
@@ -330,13 +345,27 @@ type journeyResourceStatusDoc struct {
 	Status     string `json:"status"`
 }
 
+// sandboxInspectionDoc names every key of the sharing document that
+// `qurl inspect -o json` may print for a published local service. The healthy
+// journey decodes into it with unknown keys refused, so a key added to that
+// document has to be added here in the same change;
+// TestSandboxInspectionDocReadsEveryInspectKey holds that. Give the key its
+// rule in assertHealthySandboxInspection too; no test holds that.
 type sandboxInspectionDoc struct {
-	CRID            string     `json:"crid"`
-	ResourceID      string     `json:"resource_id"`
-	TargetURL       string     `json:"target_url"`
-	DesiredState    string     `json:"desired_state"`
-	ConnectionState string     `json:"connection_state"`
-	ServingEpoch    uint64     `json:"serving_epoch"`
+	CRID            string `json:"crid"`
+	ResourceID      string `json:"resource_id"`
+	TargetURL       string `json:"target_url"`
+	DesiredState    string `json:"desired_state"`
+	ConnectionState string `json:"connection_state"`
+	ServingEpoch    uint64 `json:"serving_epoch"`
+	// CreatedAt is absent when the service did not report the date.
+	CreatedAt *time.Time `json:"created_at"`
+	// Publisher is always present. Its name is absent when the publisher set
+	// none; its verified key is always written.
+	Publisher *struct {
+		Name     *string `json:"name"`
+		Verified *bool   `json:"verified"`
+	} `json:"publisher"`
 	DaemonState     *string    `json:"daemon_state"`
 	LastTransition  *time.Time `json:"last_transition"`
 	FailureCategory *string    `json:"failure_category"`
@@ -605,6 +634,15 @@ func assertHealthySandboxInspection(
 	if document.FailureCategory != nil || document.FailureCode != nil || document.NextRetryAt != nil {
 		t.Fatalf("qurl inspect exposed failure or retry details for a healthy share: %+v", document)
 	}
+	// The publisher object and its status are always written, so a script
+	// never reads a missing key as a status. A creation date, when the service
+	// reported one, is a real date.
+	if document.Publisher == nil || document.Publisher.Verified == nil {
+		t.Fatal("qurl inspect wrote no publisher status")
+	}
+	if document.CreatedAt != nil && document.CreatedAt.IsZero() {
+		t.Fatal("qurl inspect wrote a creation date that is the zero time")
+	}
 	for _, secret := range forbidden {
 		if secret != "" && bytes.Contains(raw, []byte(secret)) {
 			t.Fatal("qurl inspect exposed a bearer credential")
@@ -650,6 +688,9 @@ func TestSandboxCRIDJourney(t *testing.T) {
 	}
 	if pub.CRID == "" {
 		t.Fatalf("publish minted no CRID (resource %s); this endpoint cannot carry the CRID journey", pub.ResourceID)
+	}
+	if !pub.confirmedPrivate() {
+		t.Error("publish with no flag did not report a private resource")
 	}
 	// Reclaim the one resource no matter where the journey stops below. The
 	// happy path deletes it first, so this is normally the idempotent no-op.
@@ -798,14 +839,15 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 }
 
 // assertShareJourney shares the CRID and holds the piped contract: with
-// stdout not a terminal the command emits the bare link and nothing else, so
-// `link="$(qurl share <CRID>)"` captures it cleanly (the link opens in a
-// browser — downloading is get's job). Exit 0 here IS the verification
+// stdout not a terminal the command emits the bare link and nothing else on
+// stdout, so `link="$(qurl share <CRID>)"` captures it cleanly (the link opens
+// in a browser — downloading is get's job), and stderr carries exactly the
+// one UNVERIFIED publisher notice. Exit 0 here IS the verification
 // evidence — the CLI discards any answer that fails CRID verification before
 // printing (exit 12), so a printed link is a verified link. It also holds
 // the environment-guard case: the sandbox is the test environment, so its
-// 'q'-prefixed CRID at this non-production endpoint must produce no warning
-// at all.
+// 'q'-prefixed CRID at this non-production endpoint must produce no guard
+// warning — any stderr beyond the publisher notice fails the validator.
 func assertShareJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) string {
 	t.Helper()
 	res := runSandboxCLI(ctx, t, cliEnv, "share", id, "--session-duration", "5m")

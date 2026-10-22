@@ -3,6 +3,7 @@ package output
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"text/tabwriter"
 	"time"
 
@@ -14,16 +15,30 @@ import (
 // cannot silently change the CLI's output.
 
 type publishJSON struct {
-	CRID       string     `json:"crid,omitempty"`
-	ResourceID string     `json:"resource_id"`
-	TargetURL  string     `json:"target_url"`
-	Status     string     `json:"status,omitempty"`
-	CreatedAt  *time.Time `json:"created_at,omitempty"`
-	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	ConsumerAccess *consumerAccessJSON `json:"consumer_access,omitempty"`
+	Private        *bool               `json:"private,omitempty"`
+	// KeptPublic is true, and otherwise absent, when the target was already
+	// published as public and a publish that named no privacy kept it. It
+	// tells that case from --public on an existing resource, which has the
+	// same private: false and found_existing: true, without reading stderr.
+	KeptPublic bool `json:"kept_public,omitempty"`
+	// AccessRequests is present when the service's answer said whether people
+	// can ask for access. ResourceURL is the resource's address on the link
+	// site for private access requests or a consumer policy, when this install
+	// knows that site.
+	AccessRequests *bool      `json:"access_requests,omitempty"`
+	ResourceURL    string     `json:"resource_url,omitempty"`
+	CRID           string     `json:"crid,omitempty"`
+	ResourceID     string     `json:"resource_id"`
+	TargetURL      string     `json:"target_url"`
+	Status         string     `json:"status,omitempty"`
+	CreatedAt      *time.Time `json:"created_at,omitempty"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
 	// FoundExisting mirrors the text-mode already-published note for scripts.
 	// Known remote and local outcomes emit true or false; an uncertain local
 	// reconciliation omits the field rather than claiming a fresh publish.
-	FoundExisting *bool `json:"found_existing,omitempty"`
+	FoundExisting *bool         `json:"found_existing,omitempty"`
+	Publisher     publisherJSON `json:"publisher"`
 }
 
 type shareLinkJSON struct {
@@ -33,6 +48,11 @@ type shareLinkJSON struct {
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
 	ExpiresInSeconds int        `json:"expires_in_seconds,omitempty"`
 	SingleUse        bool       `json:"single_use,omitempty"`
+	// ResourceCreatedAt is when the resource was created. The key names the
+	// resource because every other field here describes the minted link. It
+	// is omitted when the service did not say. Publisher is always present.
+	ResourceCreatedAt *time.Time    `json:"resource_created_at,omitempty"`
+	Publisher         publisherJSON `json:"publisher"`
 }
 
 // listItemJSON is the only projection that carries a row's publish-time
@@ -40,8 +60,11 @@ type shareLinkJSON struct {
 // (the text table deliberately omits them — see List). A sweeper identifying
 // throwaway rows by the label their publisher gave them reads this document.
 type listItemJSON struct {
-	CRID       string `json:"crid,omitempty"`
-	ResourceID string `json:"resource_id"`
+	ConsumerAccess    *consumerAccessJSON `json:"consumer_access,omitempty"`
+	AllowedDeviceKeys []string            `json:"allowed_device_keys"`
+	Private           *bool               `json:"private,omitempty"`
+	CRID              string              `json:"crid,omitempty"`
+	ResourceID        string              `json:"resource_id"`
 	// TargetURL is the owner-visible URL for URL resources and the target
 	// from this machine's local registry for tunnel resources when present.
 	TargetURL    string               `json:"target_url,omitempty"`
@@ -53,6 +76,7 @@ type listItemJSON struct {
 	Tags         []string             `json:"tags,omitempty"`
 	CreatedAt    *time.Time           `json:"created_at,omitempty"`
 	ExpiresAt    *time.Time           `json:"expires_at,omitempty"`
+	Publisher    publisherJSON        `json:"publisher"`
 }
 
 type listJSON struct {
@@ -80,6 +104,17 @@ type sharingJSON struct {
 	DesiredState    qurlapi.DesiredState    `json:"desired_state"`
 	ConnectionState qurlapi.ConnectionState `json:"connection_state"`
 	ServingEpoch    uint64                  `json:"serving_epoch"`
+	CreatedAt       *time.Time              `json:"created_at,omitempty"`
+	Publisher       publisherJSON           `json:"publisher"`
+}
+
+func sharingDocument(target string, state *qurlapi.Sharing) sharingJSON {
+	return sharingJSON{
+		CRID: state.CRID, ResourceID: state.ResourceID, TargetURL: target,
+		DesiredState: state.DesiredState, ConnectionState: state.ConnectionState,
+		ServingEpoch: state.ServingEpoch,
+		CreatedAt:    state.CreatedAt, Publisher: publisherDocument(state.Publisher),
+	}
 }
 
 type sharingInspectionJSON struct {
@@ -108,15 +143,19 @@ type SharingInspection struct {
 }
 
 type resourceStatusJSON struct {
+	ConsumerAccess    *consumerAccessJSON `json:"consumer_access,omitempty"`
+	AllowedDeviceKeys []string            `json:"allowed_device_keys"`
+	Private           *bool               `json:"private,omitempty"`
 	// Description and tags are intentionally absent: status is the compact
 	// lifecycle view, while list is the metadata inventory surface.
-	CRID       string     `json:"crid,omitempty"`
-	ResourceID string     `json:"resource_id"`
-	TargetURL  string     `json:"target_url,omitempty"`
-	Type       string     `json:"type"`
-	Status     string     `json:"status"`
-	CreatedAt  *time.Time `json:"created_at,omitempty"`
-	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	CRID       string        `json:"crid,omitempty"`
+	ResourceID string        `json:"resource_id"`
+	TargetURL  string        `json:"target_url,omitempty"`
+	Type       string        `json:"type"`
+	Status     string        `json:"status"`
+	CreatedAt  *time.Time    `json:"created_at,omitempty"`
+	ExpiresAt  *time.Time    `json:"expires_at,omitempty"`
+	Publisher  publisherJSON `json:"publisher"`
 }
 
 type downloadJSON struct {
@@ -124,28 +163,49 @@ type downloadJSON struct {
 	File string `json:"file"`
 	// Bytes is the payload size actually written.
 	Bytes int64 `json:"bytes"`
+	// ResourceCreatedAt uses the share document's key: the download came
+	// through a minted link, and this is the resource's date, not the link's.
+	ResourceCreatedAt *time.Time    `json:"resource_created_at,omitempty"`
+	Publisher         publisherJSON `json:"publisher"`
 }
 
-// Publish renders a publish result. Text mode prints the CRID last, alone on
-// its line, so it is the easiest thing to select and copy. Publishing an
+// Publish renders a publish result. Text mode says in one row who can open
+// the resource and prints the CRID last, alone on its line, so it is the
+// easiest thing to select and copy; JSON carries the same fact as `private`,
+// and --quiet stays the CRID alone. Publishing an
 // already-published URL returns the existing resource, and the rendering
 // says so: the text document itself carries the story (headline plus note),
 // while --quiet and JSON keep their stdout documents unchanged and note the
 // replay on stderr.
 func (p *Printer) Publish(res *qurlapi.Published) error {
-	if foundExisting(res) && (p.format == FormatJSON || p.quiet) {
-		p.Notef(msgAlreadyPublished)
+	if p.format == FormatJSON || p.quiet {
+		switch {
+		case res.KeptPublic:
+			// The warning says the target was published before, so it takes
+			// the place of the replay note.
+			p.Warnf("%s", keptPublicWarning(res))
+		case res.AccessRequestsTurnedOn:
+			p.Notef(msgPublishRequestsTurnedOn)
+		case foundExisting(res):
+			p.Notef(msgAlreadyPublished)
+		}
 	}
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
-			CRID:          res.CRID,
-			ResourceID:    res.ResourceID,
-			TargetURL:     res.TargetURL,
-			Status:        res.Status,
-			CreatedAt:     res.CreatedAt,
-			ExpiresAt:     res.ExpiresAt,
-			FoundExisting: res.FoundExisting,
+			ConsumerAccess: policyDocument(res.ConsumerAccess),
+			Private:        res.Private,
+			KeptPublic:     res.KeptPublic,
+			AccessRequests: res.AccessRequests,
+			ResourceURL:    requestAddress(res),
+			CRID:           res.CRID,
+			ResourceID:     res.ResourceID,
+			TargetURL:      res.TargetURL,
+			Status:         res.Status,
+			CreatedAt:      res.CreatedAt,
+			ExpiresAt:      res.ExpiresAt,
+			FoundExisting:  res.FoundExisting,
+			Publisher:      publisherDocument(res.Publisher),
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, res.CRID)
@@ -155,17 +215,29 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	}
 }
 
-// Sharing renders one local share's durable and observed lifecycle state.
-// Desired and observed state are separate so an in-progress reconnect never
-// looks stopped or successfully serving.
+// Sharing renders the outcome of a lifecycle change (start, stop, restart):
+// one local share's durable and observed state. Desired and observed state
+// are separate so an in-progress reconnect never looks stopped or
+// successfully serving. The text has no publisher rows: the owner asked to
+// change the share, not to read about it. SharingStatus is the read view.
 func (p *Printer) Sharing(target string, state *qurlapi.Sharing) error {
+	return p.sharing(target, state, false)
+}
+
+// SharingStatus renders the same state for `qurl status`, where the owner
+// asked for details: the text adds the Publisher and Created rows that people
+// who request a link are shown.
+func (p *Printer) SharingStatus(target string, state *qurlapi.Sharing) error {
+	return p.sharing(target, state, true)
+}
+
+// sharing renders both views. The JSON document is one type for every
+// command that returns sharing state, so it always carries publisher and
+// created_at; only the text rows are chosen by publisherRows.
+func (p *Printer) sharing(target string, state *qurlapi.Sharing, publisherRows bool) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(sharingJSON{
-			CRID: state.CRID, ResourceID: state.ResourceID, TargetURL: target,
-			DesiredState: state.DesiredState, ConnectionState: state.ConnectionState,
-			ServingEpoch: state.ServingEpoch,
-		})
+		return p.writeJSON(sharingDocument(target, state))
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, state.CRID)
 		return err
@@ -179,6 +251,9 @@ func (p *Printer) Sharing(target string, state *qurlapi.Sharing) error {
 		ew.printf("%s\t%s\n", p.bold("Desired:"), state.DesiredState)
 		ew.printf("%s\t%s\n", p.bold("Observed:"), state.ConnectionState)
 		ew.printf("%s\t%d\n", p.bold("Serving epoch:"), state.ServingEpoch)
+		if publisherRows {
+			p.publisherRows(ew, state.Publisher, state.CreatedAt)
+		}
 		return ew.flush(tw)
 	}
 }
@@ -196,11 +271,7 @@ func (p *Printer) InspectSharing(inspection *SharingInspection) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(sharingInspectionJSON{
-			sharingJSON: sharingJSON{
-				CRID: state.CRID, ResourceID: state.ResourceID, TargetURL: inspection.TargetURL,
-				DesiredState: state.DesiredState, ConnectionState: state.ConnectionState,
-				ServingEpoch: state.ServingEpoch,
-			},
+			sharingJSON: sharingDocument(inspection.TargetURL, state),
 			DaemonState: inspection.DaemonState, LastTransition: inspection.LastTransition,
 			FailureCategory: inspection.FailureCategory, FailureCode: inspection.FailureCode,
 			RetryAttempt: inspection.RetryAttempt, NextRetryAt: inspection.NextRetryAt,
@@ -219,6 +290,7 @@ func (p *Printer) InspectSharing(inspection *SharingInspection) error {
 		ew.printf("%s\t%s\n", p.bold("Desired:"), state.DesiredState)
 		ew.printf("%s\t%s\n", p.bold("Observed:"), state.ConnectionState)
 		ew.printf("%s\t%d\n", p.bold("Serving epoch:"), state.ServingEpoch)
+		p.publisherRows(ew, state.Publisher, state.CreatedAt)
 		ew.printf("%s\t%s\n", p.bold("Daemon:"), inspection.DaemonState)
 		ew.printf("%s\t%s\n", p.bold("Local target:"), inspection.TargetHealth)
 		if inspection.LastTransition != nil {
@@ -247,9 +319,13 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(resourceStatusJSON{
-			CRID: resource.CRID, ResourceID: resource.ResourceID,
+			ConsumerAccess:    policyDocument(resource.ConsumerAccess),
+			AllowedDeviceKeys: append([]string{}, resource.AllowedDeviceKeys...),
+			Private:           resource.Private,
+			CRID:              resource.CRID, ResourceID: resource.ResourceID,
 			TargetURL: resource.TargetURL, Type: resource.Type, Status: resource.Status,
 			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
+			Publisher: publisherDocument(resource.Publisher),
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, resource.CRID)
@@ -257,19 +333,53 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	default:
 		tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 		ew := &errWriter{w: tw}
-		ew.printf("%s\t%s\n", p.bold("CRID:"), resource.CRID)
-		if resource.TargetURL != "" {
-			ew.printf("%s\t%s\n", p.bold("Target:"), resource.TargetURL)
-		}
-		ew.printf("%s\t%s\n", p.bold("Type:"), resource.Type)
-		ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
-		if resource.CreatedAt != nil {
-			ew.printf("%s\t%s\n", p.bold("Created:"), p.relativeTime(*resource.CreatedAt))
-		}
-		if resource.ExpiresAt != nil {
-			ew.printf("%s\t%s\n", p.bold("Expires:"), p.formatExpiry(*resource.ExpiresAt))
-		}
+		p.resourceStatusRows(ew, resource, false)
 		return ew.flush(tw)
+	}
+}
+
+// resourceStatusRows writes the key/value rows of a resource. grants adds the
+// two rows only `qurl grants` shows: whether people can ask for access, and
+// how many were approved. The status and inspect views stay as they were.
+func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSummary, grants bool) {
+	ew.printf("%s\t%s\n", p.bold("CRID:"), resource.CRID)
+	if resource.TargetURL != "" {
+		ew.printf("%s\t%s\n", p.bold("Target:"), resource.TargetURL)
+	}
+	ew.printf("%s\t%s\n", p.bold("Type:"), resource.Type)
+	ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
+	if resource.Private != nil {
+		ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
+	}
+	if resource.ConsumerAccess != nil {
+		ew.printf("%s\t%s (version %d)\n", p.bold("Policy:"), resource.ConsumerAccess.Mode, resource.ConsumerAccess.Version)
+	}
+	if grants && resource.AccessRequests != nil {
+		state := msgStateOff
+		if *resource.AccessRequests {
+			state = msgStateOn
+		}
+		ew.printf("%s\t%s\n", p.bold(labelAccessRequests), state)
+	}
+	ew.printf("%s\t%v\n", p.bold("Allowed device keys:"), resource.AllowedDeviceKeys)
+	if grants {
+		// The row has three values. A resource with no list at all gets the
+		// words for that, never "none". "none" is what the service said,
+		// with an empty list. Otherwise it is the count.
+		var people string
+		switch {
+		case resource.AllowedPasskeys == nil:
+			people = msgApprovedPeopleNotSaid
+		case len(resource.AllowedPasskeys) == 0:
+			people = msgNoApprovedPeople
+		default:
+			people = strconv.Itoa(len(resource.AllowedPasskeys))
+		}
+		ew.printf("%s\t%s\n", p.bold(labelApprovedPeople), people)
+	}
+	p.publisherRows(ew, resource.Publisher, resource.CreatedAt)
+	if resource.ExpiresAt != nil {
+		ew.printf("%s\t%s\n", p.bold("Expires:"), p.formatExpiry(*resource.ExpiresAt))
 	}
 }
 
@@ -291,6 +401,24 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
+	// A publish result always carries the privacy the service confirmed. The
+	// row is left out only for a value that has none, never guessed.
+	if res.Private != nil {
+		access := msgPublishPublic
+		if *res.Private {
+			access = msgPublishPrivate
+			if res.ConsumerAccess != nil {
+				access = "private — consumers must meet the publisher's access policy"
+			}
+		}
+		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
+	}
+	if res.ConsumerAccess != nil {
+		twe.printf("  %s\t%s (version %d)\n", p.bold("Policy:"), res.ConsumerAccess.Mode, res.ConsumerAccess.Version)
+		if address := requestAddress(res); address != "" {
+			twe.printf("  %s\t%s\n", p.bold("Address:"), address)
+		}
+	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)
 	}
@@ -308,30 +436,89 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	// one actually follows. The combination is unreachable in practice —
 	// found_existing is newer than CRID minting — but the wording is
 	// unconditional, so the guard keeps it from ever contradicting itself.
-	if foundExisting(res) && res.CRID != "" {
+	switch {
+	case res.KeptPublic:
+		// In the document, so it is read with the Access row it explains,
+		// and never dim: a publisher who did not choose public must see it.
+		ew.printf("\n%s %s\n", p.style(ansiBold+ansiYellow, labelWarning), keptPublicWarning(res))
+	case res.AccessRequestsTurnedOn && res.CRID != "":
+		// The publish changed the resource it found, and the one line says
+		// so. The other note's next step, deleting the resource, is not
+		// what this publisher asked about.
+		ew.printf("\n%s\n", p.dim(msgPublishRequestsTurnedOn))
+	case foundExisting(res) && res.CRID != "":
 		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
+	}
+	// With access requests on, the document says what to send to people and
+	// what happens next. It comes before the CRID, which stays last and alone
+	// on its line.
+	if acceptsRequests(res) && res.CRID != "" {
+		ew.printf("\n")
+		p.requestGuidance(ew, res.CRID, requestAddress(res))
 	}
 	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	return ew.flush(nil)
+}
+
+// acceptsRequests reports whether the service confirmed that people can ask
+// for access to the published resource, and that the resource is private.
+// Both are needed for what follows from it: the guidance that says the
+// resource's address is safe to send to anyone, and that address.
+func acceptsRequests(res *qurlapi.Published) bool {
+	return res.ConsumerAccess == nil && res.AccessRequests != nil && *res.AccessRequests && saidPrivate(res.Private)
+}
+
+// requestAddress is the address a publisher sends to people: the resource's
+// address on the link site for a private resource with requests or a consumer policy.
+func requestAddress(res *qurlapi.Published) string {
+	if !saidPrivate(res.Private) || (!acceptsRequests(res) && res.ConsumerAccess == nil) {
+		return ""
+	}
+	return res.LinkSiteURL
+}
+
+// keptPublicWarning is the text of the warning for a kept public resource,
+// the same in every output mode. The warning is shown whenever a resource
+// was kept, so it does not depend on the CRID: the command it names has the
+// resource's CRID in it, and the placeholder if a result ever had none.
+func keptPublicWarning(res *qurlapi.Published) string {
+	id := res.CRID
+	if id == "" {
+		id = placeholderCRID
+	}
+	return fmt.Sprintf(msgPublishKeptPublic, id)
 }
 
 func foundExisting(res *qurlapi.Published) bool {
 	return res.FoundExisting != nil && *res.FoundExisting
 }
 
+// publisherRows writes the `Publisher:` and `Created:` rows of a key/value
+// view. The Created row is omitted when the service gave no date.
+func (p *Printer) publisherRows(ew *errWriter, publisher qurlapi.Publisher, createdAt *time.Time) {
+	ew.printf("%s\t%s\n", p.bold(labelPublisher), p.publisherStatus(publisher))
+	if created := p.createdText(createdAt); created != "" {
+		ew.printf("%s\t%s\n", p.bold(labelCreated), created)
+	}
+}
+
 // ShareLink renders a minted share link. Piped stdout gets the bare link
 // and nothing else, so `link="$(qurl share <CRID>)"` captures it cleanly
 // (the link opens in a browser — fetching it with curl yields the page that
-// opens the link, which is why `qurl get --file` exists); a TTY gets the
-// link plus its expiry on stderr-free stdout decoration.
+// opens the link, which is why `qurl get --file` exists); the publisher and
+// creation date then go to stderr as one notice. A TTY gets the link, who
+// published the resource, when it was created, and the link's expiry as
+// stdout decoration. --quiet prints the link alone.
 func (p *Printer) ShareLink(link *qurlapi.ShareLink) error {
 	if p.format == FormatJSON {
 		out := shareLinkJSON{
-			QURL:             link.QURL,
-			CRID:             link.CRID,
-			Type:             link.Type,
-			ExpiresInSeconds: link.ExpiresInSeconds,
-			SingleUse:        link.SingleUse,
+			QURL:              link.QURL,
+			CRID:              link.CRID,
+			Type:              link.Type,
+			ExpiresInSeconds:  link.ExpiresInSeconds,
+			SingleUse:         link.SingleUse,
+			ResourceCreatedAt: link.ResourceCreatedAt,
+			Publisher:         publisherDocument(link.Publisher),
 		}
 		if !link.ExpiresAt.IsZero() {
 			t := link.ExpiresAt
@@ -340,13 +527,24 @@ func (p *Printer) ShareLink(link *qurlapi.ShareLink) error {
 		return p.writeJSON(out)
 	}
 	if p.quiet || !p.outTTY {
-		_, err := fmt.Fprintln(p.out, link.QURL)
-		return err
+		if _, err := fmt.Fprintln(p.out, link.QURL); err != nil {
+			return err
+		}
+		// Data first: the link is already on stdout when the notice is written.
+		p.PublisherNotice(link)
+		return nil
 	}
 	ew := &errWriter{w: p.out}
-	ew.printf("%s\n", link.QURL)
+	ew.printf("%s\n\n", link.QURL)
+	// Hand-aligned rather than tabwriter: the styled status would count as
+	// cell width. The one and three spaces are tied to the lengths of
+	// labelPublisher and labelCreated; change them together.
+	ew.printf("  %s %s\n", p.bold(labelPublisher), p.publisherStatus(link.Publisher))
+	if created := p.createdText(link.ResourceCreatedAt); created != "" {
+		ew.printf("  %s   %s\n", p.bold(labelCreated), created)
+	}
 	if line := p.shareLinkDetail(link); line != "" {
-		ew.printf("\n%s\n", p.dim("  "+line))
+		ew.printf("%s\n", p.dim("  "+line))
 	}
 	return ew.flush(nil)
 }
@@ -392,17 +590,21 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 				servingEpoch = &epoch
 			}
 			out.Resources = append(out.Resources, listItemJSON{
-				CRID:         item.CRID,
-				ResourceID:   item.ResourceID,
-				TargetURL:    item.TargetURL,
-				Type:         item.Type,
-				Status:       item.Status,
-				DesiredState: item.DesiredState,
-				ServingEpoch: servingEpoch,
-				Description:  item.Description,
-				Tags:         item.Tags,
-				CreatedAt:    item.CreatedAt,
-				ExpiresAt:    item.ExpiresAt,
+				ConsumerAccess:    policyDocument(item.ConsumerAccess),
+				AllowedDeviceKeys: append([]string{}, item.AllowedDeviceKeys...),
+				CRID:              item.CRID,
+				ResourceID:        item.ResourceID,
+				Private:           item.Private,
+				TargetURL:         item.TargetURL,
+				Type:              item.Type,
+				Status:            item.Status,
+				DesiredState:      item.DesiredState,
+				ServingEpoch:      servingEpoch,
+				Description:       item.Description,
+				Tags:              item.Tags,
+				CreatedAt:         item.CreatedAt,
+				ExpiresAt:         item.ExpiresAt,
+				Publisher:         publisherDocument(item.Publisher),
 			})
 		}
 		return p.writeJSON(out)
@@ -434,7 +636,18 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 	ew := &errWriter{w: tw}
 	// Headers stay uncolored: tabwriter counts ANSI escape bytes as cell
 	// width, so styled headers would skew every column under them.
-	ew.printf("CRID\tTARGET\tDESIRED\tOBSERVED\tCREATED\tEXPIRES\n")
+	hasPolicy := false
+	for i := range page.Items {
+		if page.Items[i].ConsumerAccess != nil {
+			hasPolicy = true
+			break
+		}
+	}
+	header := "CRID\tTARGET\tDESIRED\tOBSERVED\tCREATED\tEXPIRES\tPRIVATE"
+	if hasPolicy {
+		header += "\tPOLICY"
+	}
+	ew.printf("%s\n", header)
 	for i := range page.Items {
 		item := &page.Items[i]
 		desired, observed := "-", item.Status
@@ -445,13 +658,25 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 				desired = "unknown"
 			}
 		}
-		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\n",
+		privacy := "-"
+		if item.Private != nil {
+			privacy = strconv.FormatBool(*item.Private)
+		}
+		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\t%s",
 			item.CRID,
 			item.TargetURL,
 			desired,
 			observed,
 			p.listCreated(item.CreatedAt),
-			p.listExpires(item.ExpiresAt))
+			p.listExpires(item.ExpiresAt), privacy)
+		if hasPolicy {
+			policy := "-"
+			if item.ConsumerAccess != nil {
+				policy = fmt.Sprintf("%s (version %d)", item.ConsumerAccess.Mode, item.ConsumerAccess.Version)
+			}
+			ew.printf("\t%s", policy)
+		}
+		ew.printf("\n")
 	}
 	if err := ew.flush(tw); err != nil {
 		return err
@@ -509,14 +734,20 @@ func (p *Printer) Delete(id string, alreadyGone bool) error {
 	}
 }
 
-// Downloaded renders a completed --file download. The file itself is the
-// data, so the text confirmation is a status message for humans and goes to
-// stderr; --quiet echoes the destination path to stdout for pipelines; JSON
-// emits the outcome document.
-func (p *Printer) Downloaded(crid, path string, bytes int64) error {
+// Downloaded renders a completed --file download of the resource link
+// names. The file itself is the data, so the text confirmation is a status
+// message for humans and goes to stderr; --quiet echoes the destination path
+// to stdout for pipelines; JSON emits the outcome document, publisher and
+// creation date included. In text mode the publisher was already announced on
+// stderr before any content was fetched (PublisherNotice), so it is not
+// repeated here.
+func (p *Printer) Downloaded(link *qurlapi.ShareLink, path string, bytes int64) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(downloadJSON{CRID: crid, File: path, Bytes: bytes})
+		return p.writeJSON(downloadJSON{
+			CRID: link.CRID, File: path, Bytes: bytes,
+			ResourceCreatedAt: link.ResourceCreatedAt, Publisher: publisherDocument(link.Publisher),
+		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, path)
 		return err

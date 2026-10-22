@@ -129,7 +129,7 @@ describe('File Revoke', () => {
     // Preserve the 90s upload/browser budget and add one confirmation wait.
   }, 90_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
-  test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
+  test('distinct-per-viewer watermark + DNS-safe route-label SNI on the tunnel', async () => {
     // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
     // each recipient gets their OWN baked `views/<mint-id>` object, so a leak is
     // traceable to the specific recipient.
@@ -194,18 +194,11 @@ describe('File Revoke', () => {
     expect(mintIdB).toMatch(/^[0-9a-f]+$/);
     expect(mintIdA).not.toBe(mintIdB); // ← distinct per-recipient `views/` objects
 
-    // ── `_`-bearing resource-id host resolves over DNS + TLS-SNI ──
-    // Both views are served from the single wildcard `r_<route-label>.qurl.site`
-    // host. The routing label carries `_` (the `r_` prefix); a 200 proves DNS + the
-    // wildcard cert presenting via SNI for an `_`-bearing label end-to-end — the
-    // backstop for the relaxed `view_domain` charset. (Asserted on both resolved
-    // URLs since they share the tunnel host.) NOTE: the live sandbox tunnel host id
-    // contains `_` but no `-`; the `-` half of the charset is not exercised by the
-    // live host — see the PR body.
+    // The service encodes resource IDs as lowercase base32 with an r- prefix.
+    // Both successful views must use that DNS-safe tunnel label through TLS SNI.
     for (const url of [viewA.url, viewB.url]) {
       const host = new URL(url).hostname;
-      expect(host).toMatch(/^r_[a-z0-9_-]+\.qurl\.site/);
-      expect(host).toContain('_'); // the relaxed-charset character, resolving + TLS-valid
+      expect(host).toMatch(/^r-[a-z2-7]+\.qurl\.site(?:\.|$)/);
     }
 
     // Source cleanup only; shared-tunnel children require owner cleanup (#1552).

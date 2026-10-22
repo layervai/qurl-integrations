@@ -10,9 +10,22 @@ name: Release Please
 #      The pinned action bundles release-please 17.6.0, whose linked-versions
 #      plugin adds a synthetic commit when one linked component has no changes.
 #   2. CLI releases additionally run GoReleaser to attach binaries and build
-#      deb/rpm packages. The workflow verifies every artifact, audits and
+#      deb/rpm packages. Before it builds, the workflow checks that the qURL
+#      agent skill served to users is at least the version the tagged CLI
+#      asks for (apps/cli/scripts/check-served-skill): the CLI tells a person
+#      with an older saved copy to download the served one, so a release
+#      that ships ahead of its skill leaves that note in place for good.
+#      After the build the workflow verifies every artifact, audits and
 #      installs the exact staged Homebrew cask, publishes the release, and
 #      only then updates the Homebrew tap.
+#   3. Once a CLI release is public, the empty draft releases of lower CLI
+#      versions are deleted and their tags kept
+#      (scripts/prune-superseded-cli-drafts.sh). A version whose gate failed
+#      and was replaced by the next one would otherwise stay listed as a
+#      draft indefinitely. This treats every lower version as superseded,
+#      which holds only while CLI versions are released from main in
+#      ascending order: narrow that script's rule before adding a
+#      maintenance line, or it deletes the line's drafts.
 #
 # GoReleaser runs as a dependent job here — NOT as a tag-triggered workflow —
 # because release-please tags with the workflow's GITHUB_TOKEN, and GitHub
@@ -34,8 +47,8 @@ name: Release Please
 # for the exact tag, then dispatch this workflow with the tag and exact passing
 # run identity. Asset re-uploads are idempotent
 # (release.replace_existing_artifacts in .goreleaser.yml).
-# The exact release journey includes the scheduled 80-minute soak lane. Expect
-# the draft to remain private for about two hours, including setup and queueing.
+# Exact releases require all three platform lifecycle journeys and cleanup.
+# The 80-minute soak remains in scheduled and explicit operator validation.
 # If the automatic handoff fails, dispatch cli.yml from main with
 # release_source_sha and release_source_tag set to the exact release. After that
 # run passes, dispatch this workflow from main with the tag, source SHA, run ID,
@@ -95,7 +108,7 @@ on:
 # cancel-in-progress is false; a later main push must not replace a ready
 # release continuation before it starts.
 concurrency:
-  group: ${{ github.event_name == 'push' && 'release-please-maintenance' || format('release-please-continuation-{0}-{1}', inputs.cli_tag, inputs.source_sha || 'operator') }}
+  group: ${{ github.event_name == 'push' && 'release-please-maintenance' || format('release-please-continuation-{0}', inputs.cli_tag) }}
   cancel-in-progress: false
 
 permissions: {}
@@ -199,7 +212,7 @@ jobs:
           # Run trusted workflow code from main. The CLI workflow checks out
           # and builds this exact immutable tag after it proves main ancestry.
           # TestCLICustomerJourneyIsConsolidatedAndTrusted pins the display
-          # title, exact gate names, and four-lane release matrix together.
+          # title, exact gate names, and three-lane release matrix together.
           gh workflow run cli.yml --repo "$GITHUB_REPOSITORY" --ref main \
             --field "release_source_sha=$SOURCE_SHA" \
             --field "release_source_tag=$CLI_TAG"
@@ -307,7 +320,7 @@ jobs:
           set -euo pipefail
           selection=$(scripts/check-exact-cli-release-gate.sh \
             '${{ steps.source.outputs.sha }}' '${{ steps.source.outputs.tag }}' \
-            "$CLI_RUN_ID" "$CLI_RUN_ATTEMPT" 4)
+            "$CLI_RUN_ID" "$CLI_RUN_ATTEMPT" 3)
           {
             echo "run_id=$(jq -r .run_id <<<"$selection")"
             echo "run_attempt=$(jq -r .run_attempt <<<"$selection")"
@@ -397,8 +410,8 @@ jobs:
       # sbom-action v0.24.0's bundled default is syft v1.42.3 — pinning it as
       # an input keeps a future action bump from silently changing the SBOM
       # generator, and surfaces the tool bump as a one-line reviewable diff.
-      # Keep in lockstep with cli-nightly.yml's copy (the snapshot exercises
-      # the same SBOM path).
+      # Keep in lockstep with the copies in cli-nightly.yml and
+      # cli-candidate.yml (their snapshots exercise the same SBOM path).
       - name: Install syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
@@ -450,6 +463,31 @@ jobs:
             exit "$test_status"
           fi
           printf 'mode=%s\n' "$mode" >>"$GITHUB_OUTPUT"
+
+      # The tagged CLI prints a note for a saved copy of the agent skill that
+      # is below its minimum version, and the note's command downloads the
+      # served skill. This holds the ship order: skill first, then the CLI
+      # that needs it. It runs before GoReleaser so a failure uploads
+      # nothing; serve the newer skill, then use "Re-run failed jobs". The
+      # check asks a cache to revalidate its copy but does not depend on it:
+      # if the run still reads the old skill, so do users, and it is right
+      # to wait and run again.
+      #
+      # The one skip is for a recovery dispatch of a tag from before the
+      # checker existed. internal/ciworkflows pins that the checker is in the
+      # tree, so the skip cannot become the path every release takes.
+      - name: Verify the served agent skill is new enough
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          if [[ ! -d apps/cli/scripts/check-served-skill ]]; then
+            echo "::notice::${CLI_TAG} predates the served-skill check; skipping"
+            exit 0
+          fi
+          go run ./apps/cli/scripts/check-served-skill || {
+            echo "::error::the served agent skill is older than ${CLI_TAG} needs, or the check could not read it or could not run; see the step log" >&2
+            exit 1
+          }
 
       # release.mode keep-existing (pinned in .goreleaser.yml): GoReleaser
       # uploads artifacts to the release release-please just created and
@@ -583,7 +621,7 @@ jobs:
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -615,7 +653,7 @@ jobs:
       - name: Build qurl image candidate
         id: qurl_image
         if: steps.qurl_existing.outputs.exists != 'true'
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: apps/cli/Dockerfile
@@ -768,6 +806,20 @@ jobs:
             dist/qurl_*_windows_amd64.zip
           if-no-files-found: error
           include-hidden-files: false
+          compression-level: 0
+          retention-days: 1
+
+      # These are the same packaged bytes uploaded to the draft. The proof
+      # job needs no draft-release token; publication compares both copies.
+      - name: Stage the production candidate bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-production-candidate-${{ needs.cli-release-gate.outputs.source_sha }}-${{ github.run_attempt }}
+          path: |
+            dist/checksums.txt
+            dist/qurl_*.tar.gz
+            dist/qurl_*.zip
+          if-no-files-found: error
           compression-level: 0
           retention-days: 1
 
@@ -969,13 +1021,154 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Windows release archive does not expose $command" }
           }
 
+  production-proof:
+    name: Prove the packaged CLI against production
+    needs: [release-cli, cli-release-gate]
+    if: >-
+      !cancelled() && needs.release-cli.result == 'success' &&
+      needs.cli-release-gate.outputs.required == 'true'
+    environment: cli-production
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: linux
+            lane_id: 1
+            os: ubuntu-latest
+            archive: linux_*.tar.gz
+          - lane: macos
+            lane_id: 2
+            os: macos-latest
+            archive: darwin_*.tar.gz
+          - lane: windows
+            lane_id: 3
+            os: windows-latest
+            archive: windows_*.zip
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: read
+    env:
+      CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+      SOURCE_SHA: ${{ needs.cli-release-gate.outputs.source_sha }}
+      QURL_SHARING_RUN_ID: ${{ format('{0}{1}', github.run_id, matrix.lane_id) }}
+      QURL_SHARING_RUN_ATTEMPT: ${{ github.run_attempt }}
+      QURL_SHARING_RUNTIME: host
+      QURL_PRODUCTION_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
+      PRODUCTION_PYTHON: ${{ matrix.lane == 'windows' && 'python' || 'python3' }}
+    steps:
+      # The harness is trusted main code; the customer binary comes only from
+      # the exact draft release. Never rebuild a substitute for this proof.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download the exact draft release candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cli-production-candidate-${{ needs.cli-release-gate.outputs.source_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/production-candidate
+          digest-mismatch: error
+      - name: Stage the native production candidate
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+          "$PRODUCTION_PYTHON" scripts/cli-production-proof.py stage --directory "$RUNNER_TEMP/production-candidate" \
+            --tag "$CLI_TAG" --source-sha "$SOURCE_SHA" --lane '${{ matrix.lane }}'
+      - name: Start the Linux user service manager
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >>"$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >>"$GITHUB_ENV"
+      - name: Compile the production journey harness
+        run: go test -c -trimpath -tags=clisandbox,cliproduction -o "$RUNNER_TEMP/production-journey.test.exe" ./apps/cli/cmd
+      - name: Mint disposable production credentials
+        env:
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$AUTOMATION_API_KEY" && -n "$QURL_PRODUCTION_OWNER_ID" ]]
+          authority=$(mktemp -d)
+          trap 'rm -rf "$authority"' EXIT
+          (umask 077; printf %s "$AUTOMATION_API_KEY" >"$authority/key")
+          unset AUTOMATION_API_KEY
+          mkdir -m 0700 "$RUNNER_TEMP/production-keys"
+          "$PRODUCTION_PYTHON" scripts/qurl-cli-ci-credentials.py create-pair \
+            --qurl-endpoint https://api.layerv.ai --api-key-file "$authority/key" \
+            --owner-id "$QURL_PRODUCTION_OWNER_ID" \
+            --primary-output-dir "$RUNNER_TEMP/production-keys/primary" \
+            --failure-output-dir "$RUNNER_TEMP/production-keys/failure" \
+            --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" --lane '${{ matrix.lane }}'
+          # Only this disposable key reaches customer code, never the parent.
+          echo "QURL_API_KEY_FILE=$RUNNER_TEMP/production-keys/primary/api-key" >>"$GITHUB_ENV"
+      - name: Require the real production journey to pass without skips
+        env:
+          QURL_PRODUCTION_PROOF: enabled
+        run: |
+          set -euo pipefail
+          harness="$RUNNER_TEMP/production-journey.test.exe"
+          test_name=TestProductionReleaseJourney
+          [[ "$("$harness" -test.list "^$test_name$")" == "$test_name" ]]
+          status=0
+          "$harness" -test.v -test.count=1 -test.run "^$test_name$" >"$RUNNER_TEMP/production-proof.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/production-proof.log"
+          [[ "$status" == 0 ]]
+          [[ "$(awk '$0 ~ /^--- PASS: TestProductionReleaseJourney / { n++ } END { print n+0 }' "$RUNNER_TEMP/production-proof.log")" == 1 ]]
+          if grep -q -- '--- SKIP:' "$RUNNER_TEMP/production-proof.log"; then
+            echo '::error::production proof skipped an assertion' >&2
+            exit 1
+          fi
+          "$PRODUCTION_PYTHON" scripts/cli-production-proof.py record --directory "$RUNNER_TEMP/production-candidate" \
+            --output "$RUNNER_TEMP/production-receipt"
+      - name: Upload the exact production evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-production-proof-${{ needs.cli-release-gate.outputs.source_sha }}-${{ github.run_attempt }}-${{ matrix.lane }}
+          path: ${{ runner.temp }}/production-receipt/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove local disposable credentials
+        if: always()
+        run: scripts/remove-sensitive-tree.sh "$RUNNER_TEMP/production-keys"
+
+  production-cleanup:
+    name: Verify production fixture cleanup
+    needs: [production-proof, cli-release-gate]
+    if: always() && needs.cli-release-gate.outputs.required == 'true'
+    environment: cli-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reconcile every production fixture and credential
+        env:
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
+          QURL_PRODUCTION_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
+        run: scripts/cleanup-cli-production-proof.sh '${{ github.run_id }}' '${{ github.run_attempt }}'
+
   publish-cli-release:
     name: Publish the verified CLI release
-    needs: [release-cli, validate-homebrew-cask, validate-windows-release-archive, cli-release-gate]
+    needs: [release-cli, validate-homebrew-cask, validate-windows-release-archive, cli-release-gate, production-proof, production-cleanup]
     if: >-
       !cancelled() && needs.release-cli.result == 'success' &&
       needs.validate-homebrew-cask.result == 'success' &&
       needs.validate-windows-release-archive.result == 'success' &&
+      needs.production-proof.result == 'success' && needs.production-cleanup.result == 'success' &&
       needs.cli-release-gate.outputs.required == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -987,6 +1180,7 @@ jobs:
       CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
       QURL_IMAGE_DIGEST: ${{ needs.release-cli.outputs.qurl_image_digest }}
       QURL_IMAGE_ALREADY_TAGGED: ${{ needs.release-cli.outputs.qurl_image_already_tagged }}
+      SOURCE_SHA: ${{ needs.cli-release-gate.outputs.source_sha }}
     steps:
       - name: Require the canonical release branch
         run: |
@@ -1009,8 +1203,33 @@ jobs:
             exit 1
           }
 
+      - name: Download the production proof receipts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: cli-production-proof-${{ needs.cli-release-gate.outputs.source_sha }}-${{ github.run_attempt }}-*
+          path: ${{ runner.temp }}/production-proof
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Verify fresh production proof before any publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.cli-release-gate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/production-publication"
+          gh release download "$CLI_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern checksums.txt --pattern 'qurl_*_linux_*.tar.gz' \
+            --pattern 'qurl_*_darwin_*.tar.gz' --pattern 'qurl_*_windows_*.zip' \
+            --dir "$RUNNER_TEMP/production-publication"
+          # Use the guard from this trusted workflow revision, including when
+          # a recovery dispatch tests an older candidate tag.
+          git show "$GITHUB_SHA:scripts/cli-production-proof.py" >"$RUNNER_TEMP/verify-production-proof.py"
+          python3 "$RUNNER_TEMP/verify-production-proof.py" verify --directory "$RUNNER_TEMP/production-publication" \
+            --receipts "$RUNNER_TEMP/production-proof" --tag "$CLI_TAG" --source-sha "$SOURCE_SHA"
+
       - name: Set up Docker Buildx for image publication
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR for image publication
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -1063,6 +1282,8 @@ jobs:
             "$candidate" >/dev/null
           printf '%s\n' "$candidate" > dist/qurl-image.txt
           gh release upload "$CLI_TAG" dist/qurl-image.txt dist/qurl-image-buildkit-manifest.json --clobber
+          python3 "$RUNNER_TEMP/verify-production-proof.py" verify --directory "$RUNNER_TEMP/production-publication" \
+            --receipts "$RUNNER_TEMP/production-proof" --tag "$CLI_TAG" --source-sha "$SOURCE_SHA"
           if [ "$IMAGE_ALREADY_TAGGED" != true ]; then
             docker buildx imagetools create --tag "$tagged" "$candidate"
           fi
@@ -1083,6 +1304,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          python3 "$RUNNER_TEMP/verify-production-proof.py" verify --directory "$RUNNER_TEMP/production-publication" \
+            --receipts "$RUNNER_TEMP/production-proof" --tag "$CLI_TAG" --source-sha "$SOURCE_SHA"
           gh release edit "$CLI_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --verify-tag
           is_draft="$(gh release view "$CLI_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
           [ "$is_draft" = false ] || {
@@ -1145,3 +1368,59 @@ jobs:
             '{message:$message,content:$content,sha:$sha,branch:$branch}' |
             gh api --method PUT "repos/${tap_repo}/contents/${cask_path}" --input - |
             jq -e '.commit.sha | test("^[0-9a-f]{40}$")' >/dev/null
+
+  # A version whose customer journey fails is usually not repaired: the fix
+  # lands, release-please cuts the next version, and that one is published
+  # instead. The earlier draft then stays in the release list, empty, beside
+  # the version that replaced it. Once this release is public, remove the
+  # empty draft CLI releases below it; their tags stay, because the changelog
+  # links every version to its tag. scripts/prune-superseded-cli-drafts.sh
+  # states the exact rules and refuses on any doubt.
+  #
+  # A separate job on purpose. It checks out the workflow's own commit, so the
+  # script that deletes is the reviewed one on main and not the copy in the
+  # tag being published, which is absent from every tag older than this job.
+  # Nothing needs it, so a failure here turns the run red without holding back
+  # the Homebrew tap.
+  #
+  # The concurrency group above is per tag and source, so the run of a lower
+  # version is not serialized against this one. The script therefore leaves
+  # the draft of a version tagged within the last day, whose first run may
+  # still be active, for the next publication to remove. A run resumed later
+  # than that is not covered and fails at its own draft check.
+  prune-superseded-cli-drafts:
+    name: Remove superseded CLI drafts
+    needs: [publish-cli-release, cli-release-gate]
+    if: >-
+      !cancelled() && needs.publish-cli-release.result == 'success' &&
+      needs.cli-release-gate.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Two publications that finish close together would otherwise both list
+    # the same draft, and the second deletion would fail on a release that is
+    # already gone. Queued, the second run lists what the first one left.
+    # GitHub keeps one pending job per group, so a third would cancel the
+    # second; the drafts it would have removed wait for the next publication.
+    concurrency:
+      group: prune-superseded-cli-drafts
+      cancel-in-progress: false
+    permissions:
+      # Deleting a release, and listing drafts at all, requires write access.
+      contents: write
+    steps:
+      - name: Require the canonical release branch
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || {
+            echo "::error::CLI draft pruning must run from refs/heads/main, got ${GITHUB_REF}" >&2
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Delete the empty draft releases this release superseded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+        run: scripts/prune-superseded-cli-drafts.sh

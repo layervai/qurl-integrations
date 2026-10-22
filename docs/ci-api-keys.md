@@ -39,3 +39,32 @@ credentials forever. Rotate the automation key at least every 90 days: create
 a replacement under the same owner, update both protected environments, verify
 setup and cleanup, then revoke the old key. For suspected compromise, revoke
 it immediately and revoke its remaining children through account management.
+
+## Protected macOS network
+
+The hosted macOS runner needs `QURL_JOURNEY_WIREGUARD_CONFIG` in the
+`cli-customer-journey` environment. GitHub's Mac network can otherwise use different
+public IPs for native UDP admission and TCP traffic. The sandbox CI gateway makes
+both protocols use one IP; `/32` admission and the customer tests are unchanged.
+
+The setup step consumes the configuration and removes its private key from the
+configuration file after installation. Cleanup removes the runner's tunnel
+interface and routes; the gateway peer remains configured.
+The workflow serializes only the macOS lane because the gateway has one peer.
+The CI operator provisions the gateway and installs the protected environment
+secret before enabling this lane. Update that secret whenever the gateway keys
+change; never copy the configuration into logs, source files, or artifacts.
+
+## Anonymous public CRID fixture
+
+Set `QURL_JOURNEY_CELL0_PUBLIC_KEY_B64` in `cli-customer-journey` to the
+canonical standard-base64 cell0 public key from sandbox's
+`/sandbox/nhp/qurl-link/browser-config` (`serverStaticPubB64`). Refresh it when
+that cell identity changes. This is a published cell key, not a credential.
+The anonymous probe adds that cell and the existing protected relay URL to its
+own deployment file; it preserves the pinned issuer and carries no publisher
+credential. The publisher's fragment-only settings stay unchanged.
+
+Operator soaks use a separate concurrency group for each exact source commit.
+Every source still runs all customer lanes and the full 80-minute soak; the
+single protected macOS peer keeps its existing serialization.

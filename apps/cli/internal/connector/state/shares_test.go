@@ -963,3 +963,25 @@ func TestDaemonLeaseWithinWaitsForReleaseButStaysExclusive(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRetargetStoppedToUnixRejectsPipeWithoutChangingRegistry(t *testing.T) {
+	ctx := context.Background()
+	dir := secureStateTestDir(t)
+	registry, err := openOwnedLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, LocalSharesFile)
+	before, err := os.ReadFile(path) // #nosec G304 -- private test registry fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "http+npipe:///layerv-qurl-file-" + strings.Repeat("a", 64) + "-" + strings.Repeat("b", 32)
+	if _, err := registry.RetargetStoppedToUnix(ctx, "owner-test", "qurl-file-", raw); err == nil {
+		t.Fatal("Unix-only conversion accepted a pipe")
+	}
+	after, err := os.ReadFile(path) // #nosec G304 -- private test registry fixture.
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("rejected Unix conversion changed registry")
+	}
+}

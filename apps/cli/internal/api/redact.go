@@ -10,6 +10,14 @@ import "regexp"
 var (
 	apiKeyPattern = regexp.MustCompile(`lv_(?:live|test)_[A-Za-z0-9_-]+`)
 	bearerPattern = regexp.MustCompile(`(?i)bearer\s+[^\s"']+`)
+	// requestCodePathPattern is the code of an access request where a
+	// request path carries it: the six digits after /access-requests/. The
+	// code gives a person access for as long as their request is pending,
+	// and the publisher typed it, so it is on their command line already.
+	// It must not also be in a diagnostic line, which is what gets pasted
+	// into a chat or a ticket. A device id in the same place is not six
+	// digits and is left as it is: it gives nobody access.
+	requestCodePathPattern = regexp.MustCompile(`(/access-requests/)\d{6}\b`)
 )
 
 // Redact masks credential-shaped substrings in s. Data outputs (the minted
@@ -18,5 +26,6 @@ var (
 // covers the diagnostic surfaces.
 func Redact(s string) string {
 	s = apiKeyPattern.ReplaceAllString(s, "lv_***")
+	s = requestCodePathPattern.ReplaceAllString(s, "${1}******")
 	return bearerPattern.ReplaceAllString(s, "Bearer ***")
 }

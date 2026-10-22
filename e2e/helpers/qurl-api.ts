@@ -32,7 +32,7 @@ export interface LinkAccessResult {
  * real regression is legible, not a bare "expected undefined to be truthy".
  *
  * The HTTP call goes through fetchWithTransientRetry (bounded retry on transient
- * connector-stack statuses; see its header + qurl-integrations-infra#1085) —
+ * connector-stack statuses; see its header + infra repo #1085) —
  * distinct from the app-level 429 (HTTP 200 + `error`) loop below. */
 export async function uploadFile(
   uploadUrl: string,

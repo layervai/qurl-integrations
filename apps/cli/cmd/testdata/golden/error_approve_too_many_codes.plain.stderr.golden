@@ -1,0 +1,7 @@
+Error: Too Many Requests (HTTP 429)
+
+  Too many wrong codes were tried for this resource. Try again later.
+
+  Try again in 1 hour.
+  Ask the person for the code on their screen.
+  Request ID: req_test

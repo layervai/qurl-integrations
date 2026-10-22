@@ -2,7 +2,7 @@
  * Minimal HTTP listener for the gateway-only ECS task. Binds
  * `127.0.0.1:${config.PORT}` (default 3000) and answers `/health`
  * based on the Discord.js client's connected state. The container-
- * level wget probe (re-added in a qurl-integrations-infra follow-up
+ * level wget probe (re-added in an infrastructure repository follow-up
  * to #151) hits this endpoint to detect WebSocket disconnect /
  * event-loop wedge / dispatch deadlock — failure modes the
  * deployment_circuit_breaker can't see because they don't terminate
@@ -132,7 +132,7 @@ function startGatewayHealthServer(isReady, onListenError, port = config.PORT) {
       //
       // Audit-event emit on EVERY 503 (not just on the transition
       // warn above) so the paired CloudWatch metric filter
-      // (qurl-integrations-infra PR #419 — qurl-bot-discord/terraform
+      // (infra repo PR #419 — qurl-bot-discord/terraform
       // monitoring.tf) can count unhealthy responses at probe cadence.
       // A wedge persisting for N probes produces N count events for
       // the alarm, not one transition log.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -1811,8 +1812,9 @@ func TestManagerMoveClearsOldRouteRefusalDuringGroupBackoff(t *testing.T) {
 // A converted row reaches the Connector as an exclusive Unix route while the
 // ordinary app sibling retains its TCP target and resource identity.
 func TestManagerServesConvertedUnixOriginAlongsideTCP(t *testing.T) {
+	socketPath := ownerOnlySocketPath(t)
 	unix := daemonShare("a", 7, "on")
-	unix.TargetURL, unix.LocalIP, unix.LocalPort, unix.LocalSocketPath = "http+unix:///tmp/private.sock", "", 0, "/tmp/private.sock"
+	unix.TargetURL, unix.LocalIP, unix.LocalPort, unix.LocalSocketPath = "http+unix://"+socketPath, "", 0, socketPath
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": unix, "b": daemonShare("b", 1, "on")}}
 	factory := newFakeGroupFactory()
 	manager, _ := newRunningManager(t, registry, factory)
@@ -1836,4 +1838,64 @@ func TestManagerServesConvertedUnixOriginAlongsideTCP(t *testing.T) {
 			t.Fatal("unexpected route")
 		}
 	}
+}
+
+// ownerOnlySocketPath returns a socket path inside a fresh 0700 directory. It
+// lives under /tmp because macOS t.TempDir paths can exceed sun_path.
+func ownerOnlySocketPath(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix origins are unsupported on Windows")
+	}
+	dir, err := os.MkdirTemp("/tmp", "qo-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "f.sock")
+}
+
+// The daemon, not only publish/restart preflight, enforces the owner-only
+// parent: a converted row under a shared-writable directory is withheld on its
+// own backoff while its TCP sibling serves, and is served once the directory
+// is made private.
+func TestManagerWithholdsUnixOriginWithoutOwnerOnlyParent(t *testing.T) {
+	socketPath := ownerOnlySocketPath(t)
+	dir := filepath.Dir(socketPath)
+	if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- deliberately unsafe fixture directory.
+		t.Fatal(err)
+	}
+	unix := daemonShare("a", 7, "on")
+	unix.TargetURL, unix.LocalIP, unix.LocalPort, unix.LocalSocketPath = "http+unix://"+socketPath, "", 0, socketPath
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": unix, "b": daemonShare("b", 1, "on")}}
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return 20 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitServing(t, manager, "b")
+	for _, route := range factory.lastConfig().Routes {
+		if route.RouteID == "connector-a" {
+			t.Fatal("Unix origin under a shared-writable directory reached the Connector")
+		}
+	}
+	got := manager.Diagnostics()["a"]
+	if got.State != diagnosticStateRetrying || got.FailureCategory != diagnosticFailureLocalState {
+		t.Fatalf("withheld Unix origin diagnostic = %+v, want retrying local_state", got)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", got), dir) {
+		t.Fatal("diagnostic disclosed the private origin directory")
+	}
+
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- directories need the owner execute bit.
+		t.Fatal(err)
+	}
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
 }

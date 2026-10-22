@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
@@ -263,6 +265,263 @@ func TestPublishFoundExistingTriState(t *testing.T) {
 	}
 }
 
+// TestPublishSaysWhoCanOpenTheResource pins the one row of the publish
+// document that says which kind of resource was made, in both directions and
+// in plain words, and what the other two outputs do with the same fact: JSON
+// carries it as private, and --quiet stays the CRID alone. A value with no
+// confirmed privacy gets no row and no member; it is never shown as either.
+func TestPublishSaysWhoCanOpenTheResource(t *testing.T) {
+	t.Parallel()
+	yes, no := true, false
+	for _, tc := range []struct {
+		name     string
+		private  *bool
+		wantRow  string
+		wantJSON string
+	}{
+		{name: "private", private: &yes, wantRow: "  Access:  private — only you and the people you allow can open it\n", wantJSON: `"private": true`},
+		{name: "public", private: &no, wantRow: "  Access:  public — anyone who has the CRID can open it\n", wantJSON: `"private": false`},
+		{name: "not confirmed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			published := &qurlapi.Published{Private: tc.private, CRID: "thecrid", ResourceID: "rid", TargetURL: "http://127.0.0.1:3000", Status: "serving"}
+			render := func(format Format, quiet bool) string {
+				t.Helper()
+				var out, errBuf bytes.Buffer
+				if err := newTestPrinter(&out, &errBuf, format, quiet, false, false).Publish(published); err != nil {
+					t.Fatal(err)
+				}
+				if errBuf.Len() != 0 {
+					t.Fatalf("publish wrote to stderr: %q", errBuf.String())
+				}
+				return out.String()
+			}
+			text := render(FormatText, false)
+			want := "Published\n\n  Target:  http://127.0.0.1:3000\n" + tc.wantRow + "  Status:  serving\n\nCRID: thecrid\n"
+			if text != want {
+				t.Fatalf("text = %q, want %q", text, want)
+			}
+			if tc.wantRow == "" && (strings.Contains(text, labelAccess) || strings.Contains(text, "private") || strings.Contains(text, "public")) {
+				t.Fatalf("unconfirmed privacy was shown as one kind: %q", text)
+			}
+			document := render(FormatJSON, false)
+			if tc.wantJSON == "" {
+				if strings.Contains(document, `"private"`) {
+					t.Fatalf("unconfirmed privacy reached the JSON document: %s", document)
+				}
+			} else if !strings.Contains(document, tc.wantJSON) {
+				t.Fatalf("JSON = %s, want %s", document, tc.wantJSON)
+			}
+			if quiet := render(FormatText, true); quiet != "thecrid\n" {
+				t.Fatalf("--quiet = %q, want the CRID alone", quiet)
+			}
+		})
+	}
+	if !strings.HasPrefix(msgPublishPrivate, "private") || !strings.HasPrefix(msgPublishPublic, "public") {
+		t.Fatal("each access row must lead with the word a publisher will look for")
+	}
+}
+
+// TestPublishAccessConflictRendering pins what a publisher reads when the
+// target is already published with other access settings: what exists, the
+// one next step, and the request id. The privacy that exists is named only
+// for the service's privacy code, and the device list only for its device
+// code. The answer of an older service does not say what differs, so it gets
+// the sentence and the hint that name neither, whatever the request carried.
+// The exit code is the Conflict row for every case, and the service's own
+// wording, which is about request fields, never reaches the terminal.
+func TestPublishAccessConflictRendering(t *testing.T) {
+	const (
+		public  = "this target is already published as public, and privacy is fixed when a resource is first published"
+		private = "this target is already published as private, and privacy is fixed when a resource is first published"
+		devices = "this target is already published, and its allowed devices differ from the ones this command named"
+		neither = "this target is already published, and its privacy or its allowed devices differ from what this command asked for"
+	)
+	for _, tc := range []struct {
+		name            string
+		olderService    bool
+		existingPrivate bool
+		existingKeys    []string
+		opts            qurlapi.PublishOptions
+		headline        string
+		hint            string
+	}{
+		{name: "public exists", headline: public, hint: hintPublishExistingPublic},
+		{
+			name: "public exists, a device list named", opts: qurlapi.PublishOptions{AllowedDeviceKeys: []string{"recipient"}, NamedAccessFlags: []string{"--allow-device-key"}},
+			headline: public, hint: fmt.Sprintf(hintPublishExistingPublicWithout, "--allow-device-key"),
+		},
+		{
+			name: "public exists, private named", opts: qurlapi.PublishOptions{NamedAccessFlags: []string{"--private"}},
+			headline: public, hint: fmt.Sprintf(hintPublishExistingPublicWithout, "--private"),
+		},
+		{
+			name: "public exists, two flags named", opts: qurlapi.PublishOptions{NamedAccessFlags: []string{"--private", "--allow-device-key"}},
+			headline: public, hint: fmt.Sprintf(hintPublishExistingPublicWithout, "--private and --allow-device-key"),
+		},
+		// The other hints do not change with the flags: what they say to
+		// leave out is already the flag that was given.
+		{
+			name: "private exists, public named", existingPrivate: true, opts: qurlapi.PublishOptions{Public: true, NamedAccessFlags: []string{"--public"}},
+			headline: private, hint: hintPublishExistingPrivate,
+		},
+		{name: "private exists", existingPrivate: true, opts: qurlapi.PublishOptions{Public: true}, headline: private, hint: hintPublishExistingPrivate},
+		{name: "another device list", existingPrivate: true, existingKeys: []string{"stored"}, opts: qurlapi.PublishOptions{AllowedDeviceKeys: []string{"recipient"}}, headline: devices, hint: hintPublishOtherDevices},
+		{name: "older service, public exists", olderService: true, headline: neither, hint: hintPublishAccessDiffers},
+		{name: "older service, private exists", olderService: true, existingPrivate: true, opts: qurlapi.PublishOptions{Public: true}, headline: neither, hint: hintPublishAccessDiffers},
+		{name: "older service, a device list", olderService: true, opts: qurlapi.PublishOptions{AllowedDeviceKeys: []string{"recipient"}}, headline: neither, hint: hintPublishAccessDiffers},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			if tc.olderService {
+				srv.PlayPublicByDefault()
+			}
+			srv.SetResourceAccess(tc.existingPrivate, tc.existingKeys...)
+			srv.SetPublishFoundExisting(true)
+			client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: "lv_test_logincredential123456789", Version: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, publishErr := client.Publish(context.Background(), "https://example.com/data", tc.opts)
+			if got := exitcode.FromError(publishErr); got != exitcode.Conflict {
+				t.Fatalf("exit code = %d, want %d (error %v)", got, exitcode.Conflict, publishErr)
+			}
+			var buf bytes.Buffer
+			RenderError(&buf, fmt.Errorf("publish: %w", publishErr), false)
+			want := "Error: " + tc.headline + "\n\n  " + tc.hint + "\n  Request ID: req_test\n"
+			if got := buf.String(); got != want {
+				t.Fatalf("rendering = %q, want %q", got, want)
+			}
+		})
+	}
+	for hint, parts := range map[string][]string{
+		hintPublishExistingPublic:  {"run the command again with --public", "delete it with `qurl delete <CRID>`", "`qurl list` shows its CRID", "publish again"},
+		hintPublishExistingPrivate: {"run the command again without --public", "delete it with `qurl delete <CRID>`", "`qurl list` shows its CRID", "publish again"},
+		hintPublishAccessDiffers:   {"privacy is fixed when a resource is first published", "without --allow-device-key", "`qurl grants <CRID> --add <public-key>` or `--remove <public-key>`", "delete the resource and publish again"},
+		hintPublishOtherDevices:    {"does not change the allowed devices of a resource that exists", "without --allow-device-key", "`qurl grants <CRID> --add <public-key>` or `--remove <public-key>`"},
+	} {
+		for _, part := range parts {
+			if !strings.Contains(hint, part) {
+				t.Errorf("hint lost %q: %q", part, hint)
+			}
+		}
+	}
+	// The step that keeps a public resource is --public without the flags
+	// that were given. With them it is a usage error, which is why they are
+	// named.
+	if want := "run the command again with --public and without %s. To make it private instead"; !strings.Contains(hintPublishExistingPublicWithout, want) {
+		t.Errorf("hint lost %q: %q", want, hintPublishExistingPublicWithout)
+	}
+	for want, flags := range map[string][]string{
+		"":                 nil,
+		"--a":              {"--a"},
+		"--a and --b":      {"--a", "--b"},
+		"--a, --b and --c": {"--a", "--b", "--c"},
+	} {
+		if got := flagList(flags); got != want {
+			t.Errorf("flagList(%v) = %q, want %q", flags, got, want)
+		}
+	}
+	// A device list that differs is not about privacy, and its hint does not
+	// send the publisher to change it.
+	if strings.Contains(hintPublishOtherDevices, "--public") || strings.Contains(hintPublishOtherDevices, "delete") {
+		t.Errorf("the device-list hint talks about privacy: %q", hintPublishOtherDevices)
+	}
+}
+
+// TestPublishKeptPublicWarning pins the warning of a publish that named no
+// privacy and kept a target that was already published as public. It cannot
+// be dim or left out: in text mode it is in the document, after the Access
+// row and before the CRID line, which stays last; with JSON and --quiet it is
+// on stderr and the stdout documents keep their shape. It takes the place of
+// the note for a target that was already published, and it names the command
+// that makes the resource private, with the resource's own CRID in it.
+func TestPublishKeptPublicWarning(t *testing.T) {
+	t.Parallel()
+	const keptCRID = "qexamplecridofakeptpublicresource"
+	const warning = "Warning: this target was published as public before, and it stays public: anyone who has the CRID can open it. " +
+		"To make it private, delete it with `qurl delete " + keptCRID + "` and publish again; the new resource gets a new CRID.\n"
+	public, found := false, true
+	kept := func() *qurlapi.Published {
+		return &qurlapi.Published{
+			Private: &public, FoundExisting: &found, KeptPublic: true,
+			CRID: keptCRID, ResourceID: "rid", TargetURL: "https://example.com/data", Status: "active",
+		}
+	}
+	render := func(res *qurlapi.Published, format Format, quiet, color bool) (string, string) {
+		t.Helper()
+		var out, errBuf bytes.Buffer
+		if err := newTestPrinter(&out, &errBuf, format, quiet, color, false).Publish(res); err != nil {
+			t.Fatal(err)
+		}
+		return out.String(), errBuf.String()
+	}
+
+	text, stderr := render(kept(), FormatText, false, false)
+	want := "Already published\n\n" +
+		"  Target:  https://example.com/data\n" +
+		"  Access:  public — anyone who has the CRID can open it\n" +
+		"  Status:  active\n\n" +
+		warning + "\n" +
+		"CRID: " + keptCRID + "\n"
+	if text != want || stderr != "" {
+		t.Fatalf("publish text =\n%s\nstderr %q\nwant\n%s", text, stderr, want)
+	}
+	if strings.Contains(text, msgPublishFoundExisting) {
+		t.Fatalf("the already-published note is shown beside the warning:\n%s", text)
+	}
+	if colored, _ := render(kept(), FormatText, false, true); !strings.Contains(colored, ansiBold+ansiYellow+labelWarning) || strings.Contains(colored, ansiDim+"this target") {
+		t.Fatalf("the warning is not set off in a terminal: %q", colored)
+	}
+
+	document, stderr := render(kept(), FormatJSON, false, false)
+	if !strings.Contains(document, `"private": false`) || !strings.Contains(document, `"found_existing": true`) || strings.Contains(document, "Warning") || stderr != warning {
+		t.Fatalf("publish JSON = %s\nstderr %q, want the warning on stderr alone", document, stderr)
+	}
+	// The document says it too, so a script need not read stderr.
+	if !strings.Contains(document, "\n  \"private\": false,\n  \"kept_public\": true,\n") {
+		t.Fatalf("publish JSON lacks kept_public: true after private: %s", document)
+	}
+	if quiet, stderr := render(kept(), FormatText, true, false); quiet != keptCRID+"\n" || stderr != warning {
+		t.Fatalf("--quiet = %q / %q", quiet, stderr)
+	}
+
+	// A public resource that was not kept this way gets no warning: the
+	// publisher asked for it with --public.
+	asked := kept()
+	asked.KeptPublic = false
+	text, _ = render(asked, FormatText, false, false)
+	_, stderr = render(asked, FormatJSON, false, false)
+	if strings.Contains(text, "Warning") || strings.Contains(stderr, "Warning") || !strings.Contains(text, msgPublishFoundExisting) {
+		t.Fatalf("a public resource that was asked for got the warning:\n%s%s", text, stderr)
+	}
+	if document, _ := render(asked, FormatJSON, false, false); strings.Contains(document, "kept_public") {
+		t.Fatalf("a public resource that was asked for has kept_public: %s", document)
+	}
+
+	// The warning does not depend on the CRID, in any mode: a kept resource
+	// is always warned about. A result with no CRID, which a publish never
+	// returns, would get the same warning with the placeholder in its
+	// command, in the document and on stderr alike.
+	nameless := kept()
+	nameless.CRID = ""
+	const placeholderWarning = "Warning: this target was published as public before, and it stays public: anyone who has the CRID can open it. " +
+		"To make it private, delete it with `qurl delete <CRID>` and publish again; the new resource gets a new CRID.\n"
+	if text, _ := render(nameless, FormatText, false, false); !strings.Contains(text, "\n"+placeholderWarning) {
+		t.Fatalf("text mode dropped the warning for a result with no CRID:\n%s", text)
+	}
+	for _, quiet := range []bool{false, true} {
+		format := FormatJSON
+		if quiet {
+			format = FormatText
+		}
+		if _, stderr := render(nameless, format, quiet, false); stderr != placeholderWarning {
+			t.Fatalf("quiet %t: stderr = %q, want the warning with the placeholder", quiet, stderr)
+		}
+	}
+}
+
 // TestRedactionGrepProof plants a credential in every input a formatter or
 // error rendering touches on the diagnostic surfaces and asserts the secret
 // never reaches the rendered bytes.
@@ -398,6 +657,140 @@ func TestRenderEnrollmentScopeRemedy(t *testing.T) {
 		t.Errorf("generic resource-scope remedy won over enrollment remedy:\n%s", got)
 	}
 }
+
+// TestShareNotFoundRendering pins the not-found guidance for the CRID share
+// operator, which `share` and `get` both go through. Its 404 covers a
+// mistyped CRID, a removed resource, and a device that is not allowed, so the
+// hint names all three and picks none. The remedy is conditional: a grant
+// helps only on a private resource, and a public one opens on other devices
+// only where the deployment offers it, which the deployment a release ships
+// does not do yet. The exit code stays not-found, and a 404 from any other
+// route keeps the hint every route shares.
+func TestShareNotFoundRendering(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client, err := qurlapi.New(&qurlapi.Config{
+		BaseURL: srv.URL,
+		APIKey:  "lv_test_logincredential123456789",
+		Version: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerNotFound404(t, "resource_not_found"))
+	_, shareErr := client.Share(context.Background(), srv.Key.CRID, qurlapi.ShareOptions{})
+	if got := exitcode.FromError(shareErr); got != exitcode.NotFound {
+		t.Fatalf("share not-found exit code = %d, want %d (error %v)", got, exitcode.NotFound, shareErr)
+	}
+	var buf bytes.Buffer
+	RenderError(&buf, shareErr, false)
+	const want = "Error: Not Found (HTTP 404)\n\n  the requested resource does not exist\n\n  " + hintShareNotFound + "\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("share not-found rendering = %q, want %q", got, want)
+	}
+	for _, part := range []string{
+		"the CRID may be mistyped",
+		"the resource may have been removed",
+		"this device may not be allowed to open it",
+		"If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it",
+		sharePublicResourceSentences,
+	} {
+		if !strings.Contains(hintShareNotFound, part) {
+			t.Errorf("share not-found hint lost %q: %q", part, hintShareNotFound)
+		}
+	}
+	// The journeys accept "deleted" only as the answer an owner gets for a
+	// resource they deleted, so the ambiguous hint must never use the word.
+	if strings.Contains(strings.ToLower(buf.String()), "deleted") {
+		t.Errorf("ambiguous share not-found reads like the owner-truthful deleted answer: %q", buf.String())
+	}
+
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", apitest.HandlerNotFound404(t, "not_found"))
+	_, otherErr := client.Sharing(context.Background(), srv.Key.CRID)
+	if got := exitcode.FromError(otherErr); got != exitcode.NotFound {
+		t.Fatalf("other route not-found exit code = %d, want %d (error %v)", got, exitcode.NotFound, otherErr)
+	}
+	buf.Reset()
+	RenderError(&buf, otherErr, false)
+	if got := buf.String(); !strings.Contains(got, hintNotFound) || strings.Contains(got, hintShareNotFound) {
+		t.Errorf("another route's not-found must keep the shared hint, got %q", got)
+	}
+}
+
+// TestCRIDNotFoundRendering pins the not-found answer for a link `qurl get`
+// asked for with only the CRID. The service gives one answer whatever the
+// cause, so the rendering is one headline and one hint that names every cause
+// and picks none. The hint has two forms, chosen by a local fact only: whether
+// this machine has a device identity. A machine without one has no public key
+// to send yet, so its hint says how to get one.
+func TestCRIDNotFoundRendering(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		hint string
+	}{
+		{"device with an identity", consume.ErrCRIDNotFound, hintCRIDNotFound},
+		{"machine with no identity", consume.ErrCRIDNotFoundNoDevice, hintCRIDNotFoundNoDevice},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, err := range []error{tc.err, fmt.Errorf("get: %w", tc.err)} {
+				if got := exitcode.FromError(err); got != exitcode.NotFound {
+					t.Errorf("exit code = %d, want %d", got, exitcode.NotFound)
+				}
+				var buf bytes.Buffer
+				RenderError(&buf, err, false)
+				want := "Error: " + consume.MsgCRIDNotFound + "\n\n  " + tc.hint + "\n"
+				if got := buf.String(); got != want {
+					t.Errorf("rendering = %q, want %q", got, want)
+				}
+			}
+
+			// Every cause the share hint names, and no claim about which.
+			for _, part := range []string{
+				"the CRID may be mistyped",
+				"the resource may have been removed",
+				"this device may not be allowed to open it",
+				"If the resource is private,",
+				"`qurl whoami -o json`",
+			} {
+				if !strings.Contains(tc.hint, part) {
+					t.Errorf("hint lost %q: %q", part, tc.hint)
+				}
+			}
+			// On this path the deployment offers the request and a public
+			// resource can open on other devices, so what the share hint says
+			// about a public resource would be false here. "deleted" is the
+			// answer only an owner gets, as on the share path.
+			for _, wrong := range []string{"only where the deployment offers it", "does not offer it yet", "in this release", "deleted"} {
+				if strings.Contains(tc.hint+consume.MsgCRIDNotFound, wrong) {
+					t.Errorf("hint says %q: %q", wrong, tc.hint)
+				}
+			}
+		})
+	}
+
+	// The two forms differ in the sentence about a private resource and in
+	// nothing else.
+	const withKey = "send the publisher this device's public key from `qurl whoami -o json` so they can allow it."
+	const withoutKey = "the publisher must allow this device, and this device has no identity yet. Run `qurl whoami -o json` to create one, then send the publisher the device public key it shows."
+	if !strings.Contains(hintCRIDNotFound, withKey) || strings.Contains(hintCRIDNotFoundNoDevice, "this device's public key") {
+		t.Errorf("the hints are not matched to their device:\n%q\n%q", hintCRIDNotFound, hintCRIDNotFoundNoDevice)
+	}
+	if got := strings.Replace(hintCRIDNotFound, withKey, withoutKey, 1); got != hintCRIDNotFoundNoDevice {
+		t.Errorf("the no-identity hint = %q, want the other hint with only the private-resource sentence changed: %q", hintCRIDNotFoundNoDevice, got)
+	}
+	// The share hint keeps its own ending: it is what get prints when the
+	// second request cannot be made.
+	if !strings.HasSuffix(hintShareNotFound, sharePublicResourceSentences) {
+		t.Errorf("the share not-found hint changed: %q", hintShareNotFound)
+	}
+}
+
+// sharePublicResourceSentences is how the share not-found hint ends. It says
+// who can open a public resource in the words `qurl get --help`, `qurl
+// publish --help` and the README use, so a reader meets one statement
+// everywhere. The copy tests of package cmd pin those three.
+const sharePublicResourceSentences = "A public resource opens on other devices only where the deployment offers it. The deployment this release ships does not offer it yet."
 
 // TestConnectorAssignmentRenderings is the customer-language contract for
 // qurl-go's enrollment/assignment taxonomy. Every row is asserted twice —
@@ -715,6 +1108,25 @@ func TestConnectorResourceRenderings(t *testing.T) {
 			t.Fatalf("malformed support code reached customer output:\n%s", got)
 		}
 	})
+
+	// The code of a Connector resource answer is one of a closed list of
+	// five-digit codes, so only a value of exactly five digits is printed in
+	// the error message. The bound for the code of a refused link request,
+	// in internal/consume, is looser on purpose; see
+	// connectorResourceCodeDigits.
+	t.Run("support code of another length stays hidden", func(t *testing.T) {
+		for _, code := range []string{"5250", "525000", strings.Repeat("9", 16)} {
+			err := errors.Join(
+				qurl.ErrConnectorResourceUnavailable,
+				&qurl.ConnectorResourceDiscoveryError{Code: code},
+			)
+			var buf bytes.Buffer
+			RenderError(&buf, err, false)
+			if got := buf.String(); strings.Contains(got, code) || strings.Contains(got, labelConnectorErrorCode) {
+				t.Errorf("a support code of %d digits reached customer output:\n%s", len(code), got)
+			}
+		}
+	})
 }
 
 func TestConnectorConnectionConfigRenderingHidesTopology(t *testing.T) {
@@ -847,6 +1259,17 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable,
 		msgConnectorAssignmentInvalid, hintConnectorAssignmentInvalid,
 		msgConnectorAssignmentExpired, hintConnectorAssignmentExpired,
+		labelAccess, msgPublishPrivate, msgPublishPublic,
+		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers,
+		hintAccessRequestsNotTurnedOn, msgPublishRequestsTurnedOn,
+		msgRequestsSendAddress, msgRequestsSendCRID, msgRequestsNextStep, msgRequestsNextStepNoSite,
+		msgRequestsApproveCommand, msgRequestsApproveRule, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,
+		msgRequestsOn, msgRequestsOff, msgRequestsOffOnePerson, msgRequestsOffPeople,
+		msgNoPendingRequests, msgNoPendingRequestsForOne, msgApproveOnlyGivenCodes,
+		msgRequesterNoName, msgRequesterNameUnchecked,
+		msgApproved, msgApprovedCanOpen, msgRemoveCommand, msgDenied,
+		labelName, labelDeviceID, labelApproved, labelAccessRequests, labelApprovedPeople,
+		msgNoApprovedPeople, msgStateOn, msgStateOff, msgRemovePersonHint,
 	}
 	for _, msg := range rendered {
 		if !registered[msg] {
@@ -983,7 +1406,7 @@ func TestListTextOmitsRowMetadata(t *testing.T) {
 	}
 	// tabwriter pads the header into columns, so compare fields.
 	header := strings.Fields(strings.SplitN(got, "\n", 2)[0])
-	if want := []string{"CRID", "TARGET", "DESIRED", "OBSERVED", "CREATED", "EXPIRES"}; !slices.Equal(header, want) {
+	if want := []string{"CRID", "TARGET", "DESIRED", "OBSERVED", "CREATED", "EXPIRES", "PRIVATE"}; !slices.Equal(header, want) {
 		t.Errorf("table header = %v, want %v", header, want)
 	}
 }
@@ -1017,5 +1440,100 @@ func TestValidFormat(t *testing.T) {
 	}
 	if ValidFormat("yaml") || ValidFormat("") {
 		t.Error("unknown formats must not validate")
+	}
+}
+
+// TestNoUserServiceManagerRenderingNamesTheWorkarounds uses the connector's
+// reported executable-search failure from a stock ubuntu:24.04 container. The
+// rejected candidate paths read like a security failure; the rendering must
+// instead say what is missing and name both supervision modes that work.
+func TestNoUserServiceManagerRenderingNamesTheWorkarounds(t *testing.T) {
+	raw := errors.Join(
+		errors.New("validate systemctl candidate /usr/bin/systemctl: statat systemctl: no such file or directory"),
+		errors.New("validate systemctl candidate /bin/systemctl: directory component /bin must not be a symlink"),
+		errors.New("validate systemctl candidate /run/current-system/sw/bin/systemctl: resolve systemctl alias: lstat /run/current-system: no such file or directory"),
+	)
+	err := fmt.Errorf("%w: inspect systemd user job ai.layerv.qurl.share-daemon: resolve trusted systemctl control plane: %w",
+		connectordaemon.ErrUserServiceManagerUnavailable, raw)
+	var buf bytes.Buffer
+	RenderError(&buf, err, false)
+	got := buf.String()
+	for _, want := range []string{
+		msgNoUserServiceManager,
+		"qurl publish <url> --foreground",
+		"qurl daemon run --supervision external",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing user manager rendering lacks %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"symlink", "systemctl candidate", "/run/current-system", "control plane"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("missing user manager rendering kept connector detail %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestUnsafeDirectoryRenderingNamesTheDirectoryAndRemedy(t *testing.T) {
+	// Verbatim from `qurl list` (v3.0.0) on ubuntu:24.04 with a 0775 ~/.local.
+	raw := errors.New("prepare native agent state directory: directory component /home/agent/.local has unsafe mode 0775")
+	tests := []struct {
+		name        string
+		containsDir bool
+		want        []string
+		forbidden   []string
+	}{
+		{
+			name:        "state ancestor",
+			containsDir: true,
+			want: []string{
+				"Other users can write to /home/agent/.local (mode 0775)",
+				"chmod go-w /home/agent/.local",
+				"QURL_CONNECTOR_STATE_DIR", "XDG_STATE_HOME",
+			},
+		},
+		{
+			// The executable's directory is not relocated by a state override,
+			// so that remedy must not be offered for it.
+			name: "executable directory",
+			want: []string{
+				"Other users can write to /home/agent/.local (mode 0775)",
+				"chmod go-w /home/agent/.local",
+			},
+			forbidden: []string{"QURL_CONNECTOR_STATE_DIR", "XDG_STATE_HOME"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// The directory bit proves rendering prints permission bits only.
+			err := &state.UnsafeDirectoryError{Dir: "/home/agent/.local", Mode: os.ModeDir | 0o775, ContainsStateDir: test.containsDir, Err: raw}
+			var buf bytes.Buffer
+			RenderError(&buf, fmt.Errorf("open local shares: %w", err), false)
+			got := buf.String()
+			for _, want := range test.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("unsafe directory rendering lacks %q:\n%s", want, got)
+				}
+			}
+			for _, forbidden := range append(test.forbidden, "unsafe mode", "directory component") {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("unsafe directory rendering kept %q:\n%s", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
+// TestHostConditionsRenderAheadOfJoinedPostures pins the order exitcode uses:
+// a joined connector_stopped or credential posture must not replace the
+// local remedy that decides the exit code.
+func TestHostConditionsRenderAheadOfJoinedPostures(t *testing.T) {
+	local := &state.UnsafeDirectoryError{Dir: "/home/agent/bin", Mode: 0o775, Err: errors.New("directory component /home/agent/bin has unsafe mode 0775")}
+	for _, joined := range []error{&qurlapi.Error{StatusCode: 409, Code: "connector_stopped"}, auth.ErrNoCredential} {
+		var buf bytes.Buffer
+		RenderError(&buf, errors.Join(local, joined), false)
+		if !strings.Contains(buf.String(), "chmod go-w /home/agent/bin") {
+			t.Fatalf("joined %v replaced the local remedy:\n%s", joined, buf.String())
+		}
 	}
 }

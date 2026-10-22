@@ -839,11 +839,15 @@ func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 			if test.command == "restart" {
 				path += "/restart"
 			}
+			// The answers carry the publisher and creation date, as the
+			// service sends them with every sharing state.
 			reply := func(w http.ResponseWriter, _ *http.Request) {
 				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
 					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
 					"desired_state": test.desired, "serving_epoch": test.epoch,
 					"connection_state": test.connection,
+					"created_at":       "2026-03-01T00:00:00Z",
+					"publisher":        map[string]any{"name": apitest.DefaultPublisherName, "verified": false},
 				}, nil)
 			}
 			if test.command != "stop" {
@@ -885,6 +889,14 @@ func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 			for _, want := range []string{srv.Key.CRID, seed.TargetURL, test.desired, test.connection} {
 				if !strings.Contains(res.stdout.String(), want) {
 					t.Errorf("stdout missing %q:\n%s", want, res.stdout.String())
+				}
+			}
+			// A lifecycle change reports the change. The publisher and creation
+			// date belong to the read views (status, inspect), not here.
+			shown := res.stdout.String() + res.stderr.String()
+			for _, unwanted := range []string{"Publisher", "Created", "UNVERIFIED", apitest.DefaultPublisherName} {
+				if strings.Contains(shown, unwanted) {
+					t.Errorf("%s text shows %q:\n%s", test.command, unwanted, shown)
 				}
 			}
 		})
@@ -1948,7 +1960,7 @@ func TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership(t *testing.T) 
 			if res.code == 0 || !strings.Contains(res.stderr.String(), setupErr.Error()) {
 				t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 			}
-			requests := srv.Requests()
+			requests := sharingRequests(t, srv)
 			if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPut || requests[2].Method != http.MethodPut {
 				t.Fatalf("lifecycle requests = %#v, want on then compensating off", requests)
 			}
@@ -1992,7 +2004,10 @@ func TestLocalPublishCompensatesAmbiguousEnableBeforeLocalHandoff(t *testing.T) 
 		env:           map[string]string{"QURL_API_KEY": testAPIKey},
 		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
 		preflightTarget: func(context.Context, string, int) error { return nil },
-		localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+		localResource: func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+			if _, err := resolveID("agent-one"); err != nil {
+				return nil, err
+			}
 			return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
 				ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
 				ConnectorRoutingID: seed.ConnectorRoutingID, KnockResourceID: seed.KnockResourceID,
@@ -2002,7 +2017,7 @@ func TestLocalPublishCompensatesAmbiguousEnableBeforeLocalHandoff(t *testing.T) 
 	if res.code == 0 || !strings.Contains(res.stderr.String(), "ambiguous") {
 		t.Fatalf("ambiguous enable result code=%d stdout=%s stderr=%s", res.code, res.stdout.String(), res.stderr.String())
 	}
-	requests := srv.Requests()
+	requests := sharingRequests(t, srv)
 	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPut || requests[2].Method != http.MethodPut {
 		t.Fatalf("ambiguous enable requests = %#v, want GET, enable PUT, compensating off PUT", requests)
 	}
@@ -2039,7 +2054,10 @@ func TestLocalPublishCompensatesInvalidRestartBeforeLocalHandoff(t *testing.T) {
 		env:           map[string]string{"QURL_API_KEY": testAPIKey},
 		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
 		preflightTarget: func(context.Context, string, int) error { return nil },
-		localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+		localResource: func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+			if _, err := resolveID("agent-one"); err != nil {
+				return nil, err
+			}
 			return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
 				ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
 				ConnectorRoutingID: seed.ConnectorRoutingID, KnockResourceID: seed.KnockResourceID,
@@ -2049,7 +2067,7 @@ func TestLocalPublishCompensatesInvalidRestartBeforeLocalHandoff(t *testing.T) {
 	if res.code == 0 || !strings.Contains(res.stderr.String(), "serving epoch") {
 		t.Fatalf("invalid restart result code=%d stdout=%s stderr=%s", res.code, res.stdout.String(), res.stderr.String())
 	}
-	requests := srv.Requests()
+	requests := sharingRequests(t, srv)
 	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodPut {
 		t.Fatalf("invalid restart requests = %#v, want GET, restart POST, compensating off PUT", requests)
 	}
@@ -2209,7 +2227,10 @@ func TestRepublishPriorOnSetupFailureDoesNotDisableHealthyShare(t *testing.T) {
 				env:           map[string]string{"QURL_API_KEY": testAPIKey},
 				shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
 				preflightTarget: func(context.Context, string, int) error { return nil },
-				localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+				localResource: func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+					if _, err := resolveID("agent-one"); err != nil {
+						return nil, err
+					}
 					return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
 						ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
 						ConnectorRoutingID: seed.ConnectorRoutingID, KnockResourceID: seed.KnockResourceID,
@@ -2219,7 +2240,7 @@ func TestRepublishPriorOnSetupFailureDoesNotDisableHealthyShare(t *testing.T) {
 			if res.code == 0 || !strings.Contains(res.stderr.String(), setupErr.Error()) {
 				t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 			}
-			requests := srv.Requests()
+			requests := sharingRequests(t, srv)
 			if len(requests) != 2 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPut {
 				t.Fatalf("lifecycle requests = %#v, want GET then idempotent PUT with no compensating off", requests)
 			}
@@ -2394,7 +2415,7 @@ func TestPublishNewMachineTakeoverRotatesEpochOnce(t *testing.T) {
 		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 	}
 	posts, puts := 0, 0
-	for _, request := range srv.Requests() {
+	for _, request := range sharingRequests(t, srv) {
 		if request.Method == http.MethodPost {
 			posts++
 		}
@@ -2439,7 +2460,7 @@ func TestPublishRotatesEpochAfterLocalTerminalDisable(t *testing.T) {
 		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 	}
 	posts, puts := 0, 0
-	for _, request := range srv.Requests() {
+	for _, request := range sharingRequests(t, srv) {
 		if request.Method == http.MethodPost {
 			posts++
 		}
@@ -2491,7 +2512,7 @@ func TestPublishTargetChangeReconcilesAmbiguousRestart(t *testing.T) {
 		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 	}
 	posts := 0
-	for _, request := range srv.Requests() {
+	for _, request := range sharingRequests(t, srv) {
 		if request.Method == http.MethodPost {
 			posts++
 		}
@@ -2503,6 +2524,19 @@ func TestPublishTargetChangeReconcilesAmbiguousRestart(t *testing.T) {
 	if err != nil || local.ServingEpoch != 5 || local.TargetURL != "http://127.0.0.1:4000" {
 		t.Fatalf("target-change local state = %+v err=%v", local, err)
 	}
+}
+
+// sharingRequests returns what one local publish sent after its first
+// request. The first is always the create request that states the resource's
+// privacy, and the test fails if it is anything else; the rest are the sharing
+// lifecycle requests these tests count.
+func sharingRequests(t *testing.T, srv *apitest.Server) []apitest.RecordedRequest {
+	t.Helper()
+	requests := srv.Requests()
+	if len(requests) == 0 || requests[0].Method != http.MethodPost || requests[0].Path != "/v1/resources" {
+		t.Fatalf("local publish did not begin with the create request that states privacy: %#v", requests)
+	}
+	return requests[1:]
 }
 
 func sharingResponse(t *testing.T, srv *apitest.Server, desired string, epoch uint64, connection string) http.HandlerFunc {
@@ -2951,6 +2985,17 @@ func runPublishDaemonLifecycle(t *testing.T, external bool) {
 	}
 	srv.ScriptRepeat(http.MethodPut, replacementPath, 2, servingReplacement)
 	srv.ScriptRepeat(http.MethodGet, replacementPath, 3, servingReplacement)
+	// Each publish first creates its resource over the API, with privacy
+	// stated. After the delete the same name makes a new resource; the
+	// repeated publish finds that one.
+	createReplacement := func(found bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+				"resource_id": resourceKey.ResourceID, "crid": resourceKey.CRID, "private": true,
+			}, map[string]any{"found_existing": found})
+		}
+	}
+	srv.Script(http.MethodPost, "/v1/resources", createReplacement(false), createReplacement(true))
 	for range 2 {
 		republished := runCLI(t, &runOpts{
 			args:          []string{"--endpoint", srv.URL, "--quiet", "publish", echo.URL, "--id", connectorID},
@@ -3118,7 +3163,7 @@ func TestForegroundPublishStartupFailureStopsOwnedSharing(t *testing.T) {
 	if res.code == 0 || !strings.Contains(res.stderr.String(), want.Error()) {
 		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 	}
-	requests := srv.Requests()
+	requests := sharingRequests(t, srv)
 	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPut || requests[2].Method != http.MethodPut {
 		t.Fatalf("lifecycle requests = %#v, want GET, on PUT, foreground-owned off PUT", requests)
 	}
@@ -3206,8 +3251,10 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("foreground daemon did not bind IPC")
 	}
+	// The create request that states privacy, then the three sharing requests
+	// that reach serving.
 	deadline := time.Now().Add(2 * time.Second)
-	for len(srv.Requests()) < 3 {
+	for len(srv.Requests()) < 4 {
 		if time.Now().After(deadline) {
 			t.Fatalf("foreground publish did not reach serving; requests=%#v", srv.Requests())
 		}
@@ -3228,7 +3275,7 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 	default:
 		t.Fatal("foreground daemon was not joined before command returned")
 	}
-	requests := srv.Requests()
+	requests := sharingRequests(t, srv)
 	if len(requests) != 4 || requests[3].Method != http.MethodPut {
 		t.Fatalf("lifecycle requests = %#v, want final foreground-owned off PUT", requests)
 	}
@@ -3238,8 +3285,17 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 	}
 }
 
+// resolvedLocalResource answers the Connector resource request with the
+// mock's one resource. Like the production resolver it asks for the Connector
+// ID first: that call is where publish creates the resource over the API with
+// its privacy stated, and a resolver that skips it is refused. found is what
+// that create answer reports, so the mock is told the same.
 func resolvedLocalResource(srv *apitest.Server, found bool) localResourceResolver {
-	return func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+	srv.SetPublishFoundExisting(found)
+	return func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+		if _, err := resolveID("agent-one"); err != nil {
+			return nil, err
+		}
 		return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
 			ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: "local-test",
 			ConnectorRoutingID: "c-" + strings.Repeat("a", 52), KnockResourceID: "q_catalog_key",
@@ -3490,7 +3546,10 @@ func TestRestartWithoutTargetKeepsTodaysOutput(t *testing.T) {
 					"  \"target_url\": \"http://127.0.0.1:3000\",\n" +
 					"  \"desired_state\": \"on\",\n" +
 					"  \"connection_state\": \"serving\",\n" +
-					"  \"serving_epoch\": 5\n" +
+					"  \"serving_epoch\": 5,\n" +
+					"  \"publisher\": {\n" +
+					"    \"verified\": false\n" +
+					"  }\n" +
 					"}\n"
 			}
 			daemon := &recordingShareDaemon{}
@@ -3947,5 +4006,70 @@ func TestRestartRetargetServesNewOriginThroughRealConnector(t *testing.T) {
 	requests := srv.Requests()
 	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodGet {
 		t.Fatalf("unexpected resource creation or API requests: %#v", requests)
+	}
+}
+
+// TestPublishRejectsContradictoryAccessFlagsBeforeAnyRequest pins the usage
+// errors for the flags that say who can open the resource. Each is refused on
+// the command line, for a remote URL and for a local app, before a credential
+// is read or a request is sent.
+func TestPublishRejectsContradictoryAccessFlagsBeforeAnyRequest(t *testing.T) {
+	key := "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="
+	for _, test := range []struct {
+		name  string
+		flags []string
+		want  string
+	}{
+		{name: "a device list on a public resource", flags: []string{"--public", "--allow-device-key", key}, want: msgAllowKeyWithPublic},
+		{name: "private and public", flags: []string{"--private", "--public"}, want: msgPublicAndPrivate},
+		{name: "private=true and public", flags: []string{"--private=true", "--public"}, want: msgPublicAndPrivate},
+		{name: "private=false and public", flags: []string{"--private=false", "--public"}, want: msgPublicAndPrivate},
+		{name: "private=false alone", flags: []string{"--private=false"}, want: msgPrivateFalse},
+		{name: "a value that is not a public key", flags: []string{"--allow-device-key", "invalid"}, want: "--allow-device-key requires unique canonical"},
+		{name: "the hidden flag with a bad list", flags: []string{"--private", "--allow-device-key", "invalid"}, want: "--allow-device-key requires unique canonical"},
+		{name: "the same public key twice", flags: []string{"--allow-device-key", key, "--allow-device-key", key}, want: "--allow-device-key requires unique canonical"},
+	} {
+		for _, target := range []string{"https://example.com", "http://127.0.0.1:3000"} {
+			t.Run(test.name+"/"+target, func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				res := runCLI(t, &runOpts{
+					args: append([]string{"--endpoint", srv.URL, "publish", target}, test.flags...),
+					localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+						t.Error("a refused command line reached the Connector resource request")
+						return nil, errors.New("unexpected Connector resource request")
+					},
+				})
+				if res.code != exitcode.Usage || !strings.Contains(res.stderr.String(), test.want) {
+					t.Fatalf("exit = %d, stderr = %q; want the usage error %q", res.code, res.stderr.String(), test.want)
+				}
+				mustEmptyStdout(t, res)
+				if got := len(srv.Requests()); got != 0 {
+					t.Fatalf("a refused command line sent %d requests", got)
+				}
+			})
+		}
+	}
+}
+
+func TestLocalPublishRejectsDivergentConnectorResource(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000"},
+		env:  map[string]string{"QURL_API_KEY": testAPIKey}, shareStateDir: stateDir, shareRegistry: registry, shareDaemon: &recordingShareDaemon{},
+		preflightTarget: func(context.Context, string, int) error { return nil },
+		localResource: func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+			if _, err := resolveID("agent-one"); err != nil {
+				return nil, err
+			}
+			return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{CRID: "different", ResourcePublicKey: srv.Key.ResourceID}}, nil
+		},
+	})
+	if res.code == 0 || res.stdout.Len() != 0 || !strings.Contains(res.stderr.String(), "does not match the Connector resource") {
+		t.Fatalf("divergent Connector resource accepted: %s", res.stderr.String())
 	}
 }

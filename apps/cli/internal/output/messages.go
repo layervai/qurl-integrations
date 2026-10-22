@@ -15,10 +15,13 @@ const (
 	hintConnectorStopped = "Hint: run `qurl start <CRID>`, then try again."
 
 	// Recovery messages preserve the state and distinguish optional account access.
-	msgAccountRecoveryState  = "Account recovery needs a new device state directory."
-	hintAccountRecoveryState = "Hint: keep existing state intact. Run `QURL_CONNECTOR_STATE_DIR=~/.qurl-recovered qurl account recover` with an unused directory."
-	msgAnonymousRecovery     = "This device cannot recover access with its current credential."
-	hintAnonymousRecovery    = "Hint: keep existing state intact. If you linked an account, run `qurl account recover` with a new QURL_CONNECTOR_STATE_DIR. Otherwise restore a saved copy of this device state; a new identity cannot recover these resources."
+	msgAccountRecoveryState       = "Account recovery needs a new device state directory."
+	hintAccountRecoveryState      = "Hint: keep existing state intact. Run `QURL_CONNECTOR_STATE_DIR=~/.qurl-recovered qurl account recover` with an unused directory."
+	msgAnonymousRecovery          = "This device cannot recover access with its current credential."
+	hintAnonymousRecovery         = "Hint: keep existing state intact. If you linked an account, run `qurl account recover` with a new QURL_CONNECTOR_STATE_DIR. Otherwise restore a saved copy of this device state; a new identity cannot recover these resources."
+	hintExternalAnonymousRecovery = "Hint: keep this state directory intact. The supervising app can restore its saved copy of this state, or enroll a new state directory with `qurl login --anonymous` or `qurl login --enrollment-token-file <path>` under `--supervision external`."
+	msgExternalDeviceMissing      = "This state directory has no enrolled device."
+	hintExternalDeviceMissing     = "Hint: enroll this state directory first with `qurl login --anonymous` or `qurl login --enrollment-token-file <path>` under `--supervision external`."
 	// msgNoCredential renders the explicit account-key bootstrap condition.
 	msgNoCredential = "This machine is not enrolled with qURL."
 
@@ -27,6 +30,46 @@ const (
 	hintNotFound      = "Hint: the CRID may be mistyped, expired, or no longer published. Ask whoever shared it for a current one."
 	hintQuotaExceeded = "Hint: if this device is not linked to an account, run `qurl account setup`. For account plan limits, see https://layerv.ai/pricing."
 	hintRetryAfter    = "Retry after %ds."
+	// The two lines after a "too many requests" answer to an approval or to
+	// a denial by code. %s is the wait in words.
+	hintTryCodeAgainIn = "Try again in %s."
+	hintAskForCode     = "Ask the person for the code on their screen."
+
+	// hintShareNotFound is the not-found guidance for sharing or getting a
+	// CRID, in place of hintNotFound. The service answers a mistyped CRID, a
+	// removed resource, and a device that is not allowed with one 404, so
+	// the hint names all three and claims none. The remedy is conditional
+	// for the same reason: a publisher can allow a device only on a private
+	// resource, so the hint must not send the reader of a public CRID after a
+	// grant that cannot help. It says "removed", never "deleted": that word
+	// belongs to hintRevoked, the answer only an owner gets, and the journey
+	// validators require it to prove that answer.
+	//
+	// Its last two sentences say what a public resource allows, in the words
+	// of get's help. A device that cannot share a public resource opens it
+	// only where the deployment offers the request that uses the CRID alone,
+	// and the deployment a release ships does not offer it yet. That is when
+	// get prints this hint. Where the request is offered and can be made for
+	// the CRID, get's not-found answer has hintCRIDNotFound. A release that
+	// ships a deployment which offers the request drops the last sentence,
+	// as get's help does.
+	hintShareNotFound = "Hint: the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it. If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it. A public resource opens on other devices only where the deployment offers it. The deployment this release ships does not offer it yet."
+
+	// hintCRIDNotFound is the not-found guidance when `qurl get` asked for a
+	// link with only the CRID, on a device that has an identity. It has the
+	// rules of hintShareNotFound: the answer has one form whatever the cause,
+	// so the hint names every cause and claims none, and it gives the grant
+	// remedy for a private resource only. It differs in what follows that
+	// remedy, because on this path the deployment offers the request and a
+	// public resource can open on other devices, but not every public
+	// resource does.
+	hintCRIDNotFound = "Hint: the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it. If the resource is private, send the publisher this device's public key from `qurl whoami -o json` so they can allow it. Some public resources open only on their owner's devices."
+
+	// hintCRIDNotFoundNoDevice is the same guidance for a machine with no
+	// device identity. That machine has no public key to send yet, so the
+	// hint says so and says which command creates the identity: `qurl get`
+	// does not create one, and the reader should choose to.
+	hintCRIDNotFoundNoDevice = "Hint: the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it. If the resource is private, the publisher must allow this device, and this device has no identity yet. Run `qurl whoami -o json` to create one, then send the publisher the device public key it shows. Some public resources open only on their owner's devices."
 
 	// hintRevoked is owner-truthful: the platform tells a resource's owner
 	// that their own resource was deleted rather than hiding it behind the
@@ -62,6 +105,13 @@ const (
 	// into two spellings of the same label.
 	labelCRID = "CRID:"
 
+	// labelWarning opens every warning, on stderr and in a text document.
+	labelWarning = "Warning:"
+
+	// placeholderCRID stands where a command in a message takes a CRID and
+	// the message has none to put there.
+	placeholderCRID = "<CRID>"
+
 	// msgDeviceEnrolled opens the login confirmation; %s is the account.
 	msgDeviceEnrolled = "Enrolled this device for %s."
 
@@ -78,6 +128,51 @@ const (
 	// what happened, then the one next step.
 	msgPublishFoundExisting = "This URL already has an active resource, so its existing CRID is shown. Delete it first to publish the URL as a new resource."
 
+	// labelAccess prefixes the row of the publish document that says who can
+	// open the resource, and msgPublishPrivate and msgPublishPublic are the
+	// two things it can say. Privacy cannot change after creation, so the
+	// publisher reads it here, in plain words, at the one moment it is set.
+	labelAccess       = "Access:"
+	msgPublishPrivate = "private — only you and the people you allow can open it"
+	msgPublishPublic  = "public — anyone who has the CRID can open it"
+
+	// A publish refused because the target is already published with other
+	// access settings. The headline, from the API error, says what exists;
+	// the hint is the next step for each case. The third hint is for an
+	// answer that does not say whether privacy or the allowed devices differ.
+	hintPublishExistingPublic  = "Hint: to keep using the public resource, run the command again with --public. To make it private instead, delete it with `qurl delete <CRID>` (`qurl list` shows its CRID) and publish again; the new resource gets a new CRID."
+	hintPublishExistingPrivate = "Hint: to keep using the private resource, run the command again without --public. To make it public instead, delete it with `qurl delete <CRID>` (`qurl list` shows its CRID) and publish again; the new resource gets a new CRID."
+	hintPublishAccessDiffers   = "Hint: privacy is fixed when a resource is first published, and publishing again does not change the allowed devices of a resource that exists. Run the command again without --allow-device-key, with --public if the resource is public, then change the allowed devices with `qurl grants <CRID> --add <public-key>` or `--remove <public-key>`. To change privacy, delete the resource and publish again."
+	// hintPublishOtherDevices is the next step when what differs is known to
+	// be the list of allowed devices.
+	hintPublishOtherDevices = "Hint: publishing again does not change the allowed devices of a resource that exists. Run the command again without --allow-device-key, then change the allowed devices with `qurl grants <CRID> --add <public-key>` or `--remove <public-key>`."
+
+	// hintPublishExistingPublicWithout is hintPublishExistingPublic for a
+	// command line that carried access flags, which is every command line
+	// that reaches this conflict: a publish with none keeps the public
+	// resource. Adding --public to such a command line is a usage error, so
+	// the hint names what to leave out. %s is the flag, or the flags, as
+	// they were written.
+	hintPublishExistingPublicWithout = "Hint: to keep using the public resource, run the command again with --public and without %s. To make it private instead, delete it with `qurl delete <CRID>` (`qurl list` shows its CRID) and publish again; the new resource gets a new CRID."
+
+	// msgPublishKeptPublic is the warning for a publish that named no privacy
+	// and found the target already published as public: the resource is kept
+	// and stays public. A person who published it while public was the
+	// default never chose that, so the warning says what it means and how to
+	// change it. %s is the resource's CRID. It follows the word "Warning:",
+	// in the document in text mode and on stderr for JSON and --quiet.
+	msgPublishKeptPublic = "this target was published as public before, and it stays public: anyone who has the CRID can open it. To make it private, delete it with `qurl delete %s` and publish again; the new resource gets a new CRID."
+
+	// hintAccessRequestsNotTurnedOn is the next step when a publish found the
+	// target already published as a private resource and could not turn
+	// access requests on for it. %s is the resource's CRID.
+	hintAccessRequestsNotTurnedOn = "Hint: to try again, run `qurl requests %s --on`, or run this command again."
+
+	// msgPublishRequestsTurnedOn is the one line a publish says when the
+	// target was already published and the command turned access requests on
+	// for it. It takes the place of both already-published notes.
+	msgPublishRequestsTurnedOn = "This target was already published. Access requests are now on for it."
+
 	// msgConnectorConnectionConfig renders native connection configuration
 	// errors without exposing deployment topology or custom-build inputs.
 	msgConnectorConnectionConfig = "This qURL CLI is missing required built-in connection settings, so local sharing can't start."
@@ -87,6 +182,22 @@ const (
 	msgConnectorDirectEgress = "qURL can't start local sharing while this process is configured to use an HTTP proxy."
 
 	hintConnectorDirectEgress = "Hint: unset the lowercase http_proxy environment variable for this command, then retry."
+
+	// msgNoUserServiceManager is Linux without a running systemd user manager
+	// (containers, sandboxes, minimal images); the hint names both supervision
+	// modes that do not need one.
+	msgNoUserServiceManager  = "This Linux session can't reach a systemd user manager, so qURL can't keep sharing in the background."
+	hintNoUserServiceManager = "Hint: run `qurl publish <url> --foreground` to share from this terminal, or have your own process supervisor run `qurl daemon run --supervision external`."
+
+	// msgUnsafeDirectory names the directory other users can write to and its
+	// mode; %s is the directory, %04o its permission bits.
+	msgUnsafeDirectory = "Other users can write to %s (mode %04o), so qURL can't safely keep its files under it."
+	// hintUnsafeStateDirectory applies when the directory holds qurl's state:
+	// %s is the directory again.
+	hintUnsafeStateDirectory = "Hint: run `chmod go-w %s`, then retry. Or set QURL_CONNECTOR_STATE_DIR (or XDG_STATE_HOME) to a directory you own that other users can't write to."
+	// hintUnsafeDirectory applies to any other directory, such as the one that
+	// holds the qurl executable: %s is the directory again.
+	hintUnsafeDirectory = "Hint: run `chmod go-w %s`, then retry."
 
 	labelConnectorErrorCode = "Error code:"
 
@@ -260,17 +371,21 @@ const (
 // can emit, for the CLI-wide jargon gate.
 func CustomerMessages() []string {
 	return []string{
+		msgPreviewIncomplete, msgPreviewDescription, msgPreviewMedia, msgPreviewUpload,
 		errorPrefix,
 		msgLinksUnavailable,
 		msgConnectorStopped,
 		hintConnectorStopped,
-		msgAccountRecoveryState, hintAccountRecoveryState, msgAnonymousRecovery, hintAnonymousRecovery,
+		msgAccountRecoveryState, hintAccountRecoveryState, msgAnonymousRecovery, hintAnonymousRecovery, msgExternalDeviceMissing, hintExternalDeviceMissing, hintExternalAnonymousRecovery,
 		msgNoCredential,
 		hintNoCredential,
 		hintUnauthorized,
 		hintNotFound,
+		hintShareNotFound,
+		hintCRIDNotFound,
+		hintCRIDNotFoundNoDevice,
 		hintQuotaExceeded,
-		hintRetryAfter,
+		hintRetryAfter, hintTryCodeAgainIn, hintAskForCode,
 		hintRevoked,
 		hintRetired,
 		hintScope,
@@ -279,14 +394,42 @@ func CustomerMessages() []string {
 		hintExpired,
 		hintKeyInvalid,
 		labelCRID,
+		labelWarning,
+		placeholderCRID,
 		msgDeviceEnrolled,
 		msgSavedTo,
 		msgAlreadyPublished,
 		msgPublishFoundExisting,
+		labelAccess, msgPublishPrivate, msgPublishPublic,
+		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers, hintPublishOtherDevices,
+		msgPublishKeptPublic,
+		hintAccessRequestsNotTurnedOn, msgPublishRequestsTurnedOn,
+		msgRequestsSendAddress, msgRequestsSendCRID, msgRequestsNextStep, msgRequestsNextStepNoSite,
+		msgRequestsApproveCommand, msgRequestsApproveRule, msgRequestsSafeToSend, msgRequestsSafeToSendCRID,
+		msgRequestsOn, msgRequestsOff, msgRequestsOffOnePerson, msgRequestsOffPeople, msgRequestsOffPeopleUnknown,
+		msgRequesterNameNote, msgRemovalKeysNotChanged, msgRequestsMayBeMore, msgRequestsMayBeMoreForOne, msgDeniedDevice, msgRemovalFinishKeys,
+		msgNoPendingRequests, msgNoPendingRequestsForOne, msgApproveOnlyGivenCodes,
+		msgRequesterNoName, msgRequesterNameUnchecked,
+		msgApproved, msgApprovedCanOpen, msgRemoveCommand, msgDenied,
+		labelName, labelDeviceID, labelApproved, labelAccessRequests, labelApprovedPeople,
+		msgNoApprovedPeople, msgApprovedPeopleNotSaid, msgStateOn, msgStateOff, msgRemovePersonHint,
+		hintPublishExistingPublicWithout,
+		labelPublisher, labelCreated,
+		msgPublisherNoName, msgPublisherUnverified, msgPublisherVerified,
+		msgPublisherSelfDeclared, msgPublisherUnconfirmed,
+		msgPublisherNoticeNamed, msgPublisherNoticeUnnamed,
+		msgPublisherNoticeVerifiedNamed, msgPublisherNoticeVerifiedUnnamed,
+		msgPublisherNoticeCreated,
+		msgPublisherNameSaved, msgPublisherNameSavedVerified, msgPublisherNameRemoved, msgPublisherNameUnset,
 		msgConnectorConnectionConfig,
 		hintConnectorConnectionConfig,
 		msgConnectorDirectEgress,
 		hintConnectorDirectEgress,
+		msgNoUserServiceManager,
+		hintNoUserServiceManager,
+		msgUnsafeDirectory,
+		hintUnsafeStateDirectory,
+		hintUnsafeDirectory,
 		labelConnectorErrorCode,
 		msgConnectorSessionConfig,
 		hintConnectorSessionConfig,

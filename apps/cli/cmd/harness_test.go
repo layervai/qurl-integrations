@@ -3,14 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
@@ -77,10 +81,18 @@ var fixedNow = time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)
 type fakeBrowser struct {
 	opened []string
 	err    error
+	// stdout is the invocation's stdout buffer, set by runCLI, and
+	// stdoutAtOpen what it held at each launch: the evidence for what a
+	// reader had been shown before the browser took over.
+	stdout       *bytes.Buffer
+	stdoutAtOpen []string
 }
 
 func (f *fakeBrowser) open(_ context.Context, link string) error {
 	f.opened = append(f.opened, link)
+	if f.stdout != nil {
+		f.stdoutAtOpen = append(f.stdoutAtOpen, f.stdout.String())
+	}
 	return f.err
 }
 
@@ -93,7 +105,11 @@ type runOpts struct {
 	tty   bool // stdout+stderr TTY-ness
 
 	configDir string
-	sleeps    *[]time.Duration
+	// home is the home directory the invocation looks under for a saved copy
+	// of the qURL agent skill. Empty means it does not look, so no test
+	// reads the home directory of the person who runs the suite.
+	home   string
+	sleeps *[]time.Duration
 	// realSleep leaves the production sleep path in place instead of
 	// injecting a test double, so the API transport waits out its bounded
 	// 429 retries (Retry-After included) on its own context-aware timer.
@@ -107,10 +123,52 @@ type runOpts struct {
 	// refusing fake, so no hermetic test can ever send a real access request
 	// (the clisandbox journey uses the production wiring via realOpener).
 	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
-	// realOpener keeps the production access opener in place instead of the
-	// refusing fake. Only the clisandbox-tagged live suite sets it.
+	// realOpener keeps the production access opener and the production HTTP
+	// client in place instead of the refusing fakes. Only the clisandbox-tagged
+	// live suite sets it to send. The production HTTP client additionally
+	// needs that build tag: in the default build this option leaves the guard
+	// in place.
 	realOpener bool
+	// egress replaces the HTTP boundary every API client sends through; nil
+	// means a guard that fails this test on a request to any host other than
+	// this machine. Only the guard's own tests pass one.
+	egress     *egressGuard
 	verifyLink func(context.Context, string, string) error
+	// cridLinkOffered is the injected answer to "can this machine make the
+	// link request at all". nil means the answer the shipped deployment
+	// gives, "not offered", unless the test injects requestCRIDLink or
+	// requestCRIDLinkAsDevice: a test that supplies an answer to either form
+	// of the request says the request can be made (the clisandbox journey
+	// uses the production wiring via realOpener).
+	cridLinkOffered func() (bool, error)
+	// requestCRIDLink is the injected answer to "give me a link for this CRID
+	// alone"; nil fails a test that asks, so no hermetic test can ever send
+	// that request (the clisandbox journey uses the production wiring via
+	// realOpener).
+	requestCRIDLink func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
+	// requestCRIDLinkAsDevice is the injected answer to "give me a link for
+	// this CRID, as this device"; nil fails a test that asks, so no hermetic
+	// test can ever send that request either (the clisandbox journey uses the
+	// production wiring via realOpener). deviceKey reads the device key. The
+	// SDK calls it only after "not found", and an injected answer that stands
+	// for the SDK does the same: see asDeviceAfterNotFound.
+	requestCRIDLinkAsDevice func(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error)
+	// readDeviceKey is the injected read of the device key that the request
+	// as this device makes when it needs the key. nil is the production
+	// reader. It needs no fake: it only reads a file in this invocation's
+	// state directory and sends nothing, and TestMain pins the plaintext key
+	// storage. A test injects a reader to make the key readable or not
+	// readable on every platform, or to fail when the key is read at all.
+	readDeviceKey func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey)
+	// linkTimeoutBeforeShare is the time limit of a link request that is
+	// followed by a share request when it gives no link. Zero leaves the
+	// production limit of ten seconds. A test sets a short limit together
+	// with a link request that gives no answer until its context ends, so
+	// the limit runs out without a real wait.
+	linkTimeoutBeforeShare time.Duration
+	// linkSite is the injected link origin. Empty explicitly tests an install
+	// whose custom deployment names no link site.
+	linkSite string
 
 	// ctx, when non-nil, replaces context.Background() so a test can cancel a
 	// foreground daemon or another long-running command.
@@ -138,6 +196,9 @@ type runOpts struct {
 	// redirected process-global logger while the command goroutine writes
 	// too.
 	syncStreams bool
+	// nativeClient routes newClient through the production native
+	// registered-client path instead of the account-key mock.
+	nativeClient bool
 	// openRegisteredClient overrides login's native enrollment boundary.
 	// The default returns the already-validated account mock as a registered
 	// client so command tests stay HTTP-only; dedicated API and connector tests
@@ -155,14 +216,34 @@ type runResult struct {
 	stdout bytes.Buffer
 	stderr bytes.Buffer
 	code   int
+	// httpClient is the HTTP client the invocation's API clients sent with,
+	// read back from the command tree's own options: nil is the production
+	// client.
+	httpClient *http.Client
+	// linkRequestGuard is what the harness wires for a form of the link
+	// request that the test gave no answer for. cridLinkOffered,
+	// requestCRIDLink and requestCRIDLinkAsDevice are what the invocation was
+	// wired with, read back from the command tree's own options.
+	linkRequestGuard        *linkRequestGuard
+	cridLinkOffered         func() (bool, error)
+	requestCRIDLink         func(ctx context.Context, resourceCRID string) (*qurl.CRIDLink, error)
+	requestCRIDLinkAsDevice func(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error)
+	// readDeviceKey is the read of the device key the invocation was wired
+	// with, read back the same way.
+	readDeviceKey func(ctx context.Context) ([]byte, connectorstate.NoDeviceKey)
 }
 
 // runCLI executes the real command tree with injected process context: no
-// real environment, no real TTYs, a fixed clock, and recorded sleeps.
+// real environment, no real TTYs, a fixed clock, recorded sleeps, and qURL API
+// clients that cannot send past this machine. That last fence covers the API
+// client only. The access opener is a separate boundary that is refused by
+// default below, and so is the link request in both of its forms; the native
+// runtime and the target preflight are replaced only when a test injects one,
+// and are otherwise the production implementations.
 func runCLI(t *testing.T, o *runOpts) *runResult {
 	t.Helper()
 
-	res := &runResult{}
+	res := &runResult{linkRequestGuard: &linkRequestGuard{report: t.Errorf}}
 	env := o.env
 	if env == nil {
 		env = map[string]string{"QURL_API_KEY": testAPIKey}
@@ -193,6 +274,7 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 	if browser == nil {
 		browser = &fakeBrowser{}
 	}
+	browser.stdout = &res.stdout
 
 	root, opts := newRoot("test", streams, func(g *globalOpts) {
 		// Exercise the injected background-job/daemon boundary on every host. The
@@ -206,6 +288,9 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			return v, ok
 		}
 		g.configDir = configDir
+		if o.home != "" {
+			g.userHomeDir = func() (string, error) { return o.home, nil }
+		}
 		g.now = func() time.Time { return fixedNow }
 		g.newRequestID = func() string { return "cli-req-fixed" }
 		g.openAPIClient = func(context.Context) (qurlapi.Client, error) {
@@ -225,11 +310,24 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		if o.openAPIClient != nil {
 			g.openAPIClient = o.openAPIClient
 		}
+		if o.nativeClient {
+			g.openAPIClient, g.openRegisteredClient = nil, g.openNativeRegisteredClient
+		}
 		if o.openNativeRuntime != nil {
 			g.openNativeRuntime = o.openNativeRuntime
 			g.resolveHubBootstrap = func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil }
 		}
 		g.openBrowser = browser.open
+		switch {
+		case o.egress != nil:
+			g.httpClient = o.egress.client()
+		case o.realOpener && liveJourneysBuilt:
+			// nil is the production default: a live journey names a real
+			// endpoint on purpose. The build tag is part of the condition so
+			// that no test in the default build can switch the guard off.
+		default:
+			g.httpClient = newEgressGuard(t).client()
+		}
 		if o.verifyLink != nil {
 			g.verifyLink = o.verifyLink
 		} else if !o.realOpener {
@@ -248,6 +346,37 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 				return consume.AccessGrant{}, fmt.Errorf("test invoked the platform access opener without injecting one (link %d bytes)", len(link))
 			}
 		}
+		switch {
+		case o.cridLinkOffered != nil:
+			g.cridLinkOffered = o.cridLinkOffered
+		case o.requestCRIDLink != nil || o.requestCRIDLinkAsDevice != nil:
+			g.cridLinkOffered = cridLinkIsOffered
+		case o.realOpener:
+			// nil is the production default, as for enterPortalGrant above.
+		default:
+			g.cridLinkOffered = cridLinkNotOffered
+		}
+		switch {
+		case o.requestCRIDLink != nil:
+			g.requestCRIDLink = o.requestCRIDLink
+		case o.realOpener:
+			// nil is the production default, as for enterPortalGrant above.
+		default:
+			g.requestCRIDLink = res.linkRequestGuard.withTheCRIDAlone
+		}
+		switch {
+		case o.requestCRIDLinkAsDevice != nil:
+			g.requestCRIDLinkAsDevice = o.requestCRIDLinkAsDevice
+		case o.realOpener:
+			// nil is the production default, as for enterPortalGrant above.
+		default:
+			g.requestCRIDLinkAsDevice = res.linkRequestGuard.asTheDevice
+		}
+		if o.readDeviceKey != nil {
+			g.readDeviceKey = o.readDeviceKey
+		}
+		g.linkTimeoutBeforeShare = o.linkTimeoutBeforeShare
+		g.linkSite = func() string { return o.linkSite }
 		switch {
 		case o.sleeps != nil:
 			g.sleep = func(d time.Duration) { *o.sleeps = append(*o.sleeps, d) }
@@ -311,6 +440,9 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	res.httpClient = opts.httpClient
+	res.cridLinkOffered, res.requestCRIDLink, res.requestCRIDLinkAsDevice = opts.cridLinkOffered, opts.requestCRIDLink, opts.requestCRIDLinkAsDevice
+	res.readDeviceKey = opts.readDeviceKey
 	res.code = run(ctx, root, opts)
 	return res
 }
@@ -333,5 +465,36 @@ func mustEmptyStdout(t *testing.T, res *runResult) {
 	t.Helper()
 	if res.stdout.Len() != 0 {
 		t.Fatalf("stdout must be empty, got %q", res.stdout.String())
+	}
+}
+
+// externalLoginEnv is the supervisor's process contract for an external
+// enrollment: a local-key sealed namespace and no account credential. extra
+// holds key/value pairs layered on top of it.
+func externalLoginEnv(extra ...string) map[string]string {
+	env := map[string]string{
+		connectoragentstate.EnvKeyProvider: connectoragentstate.KeyProviderLocalKey,
+		connectoragentstate.EnvLocalKeyFD:  "3",
+	}
+	for i := 0; i+1 < len(extra); i += 2 {
+		env[extra[i]] = extra[i+1]
+	}
+	return env
+}
+
+// refuseNativeRuntime fails the test if a rejected external login reaches the
+// native runtime at all.
+func refuseNativeRuntime(t *testing.T) func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+	t.Helper()
+	return func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		t.Fatal("rejected external login opened the native runtime")
+		return nil, errors.New("unreachable native runtime")
+	}
+}
+
+func mustNoExternalPolicy(t *testing.T, stateDir string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Join(stateDir, connectorstate.RuntimeModeFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected external login established the policy marker: %v", err)
 	}
 }
