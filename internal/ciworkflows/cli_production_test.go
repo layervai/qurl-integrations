@@ -193,7 +193,7 @@ func TestWindowsProductionProofUsesProtectedCustomerReader(t *testing.T) {
 }
 
 func TestWindowsPublicProofSelectionPreservesNormalThreePlatforms(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", releasePleaseWorkflow))
+	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", releasePleaseWorkflow))
 	if err != nil {
 		t.Fatal(err)
 	}
