@@ -130,3 +130,44 @@ func TestCLIProductionCredentialsUseNativeWindowsPermissionsAndCleanup(t *testin
 		}
 	}
 }
+
+func TestPublicCLIProofCannotBuildOrPublish(t *testing.T) {
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	build := workflow.Jobs["release-cli"]
+	if !strings.Contains(build.If, "!inputs.production_proof_only") {
+		t.Fatal("public proof must skip every native and image build")
+	}
+	for _, name := range []string{"publish-cli-release", "validate-homebrew-cask", "validate-windows-release-archive"} {
+		if !strings.Contains(workflow.Jobs[name].If, "needs.release-cli.result == 'success'") {
+			t.Fatalf("%s must still require the ordinary build", name)
+		}
+	}
+	gate := workflow.Jobs["cli-release-gate"]
+	var resolver, qualification step
+	for _, current := range gate.Steps {
+		if current.Name == "Resolve the exact release source" {
+			resolver = current
+		}
+		if current.Name == "Check the exact packaged customer-journey gate once" {
+			qualification = current
+		}
+	}
+	if !strings.Contains(qualification.If, "!inputs.production_proof_only") {
+		t.Fatal("public proof must not run the Sandbox gate")
+	}
+	for _, required := range []string{`"$draft" == false`, `"$HANDOFF_SOURCE_SHA" == "$source_sha"`, `"$release_target" == "$source_sha"`, `"$GITHUB_REPOSITORY" == layervai/qurl-integrations`} {
+		if !strings.Contains(resolver.Run, required) {
+			t.Fatalf("public source binding lacks %s", required)
+		}
+	}
+	public := workflow.Jobs["public-production-candidate"]
+	assertJobPermissions(t, "public-production-candidate", public.Permissions, map[string]string{"contents": "read"})
+	if !strings.Contains(public.If, "inputs.production_proof_only") {
+		t.Fatal("public staging must be opt-in")
+	}
+	proof := workflow.Jobs["production-proof"]
+	if !slices.Contains(parseWorkflowNeeds(t, "production-proof", proof.Needs), "public-production-candidate") ||
+		!strings.Contains(proof.If, "always()") || !strings.Contains(proof.If, "inputs.production_proof_only && needs.public-production-candidate.result == 'success'") {
+		t.Fatal("reuse the production matrix only after signed public archive validation")
+	}
+}

@@ -2118,7 +2118,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	if needs := parseWorkflowNeeds(t, "release-cli", releaseCLI.Needs); !slices.Equal(needs, []string{"cli-release-gate"}) {
 		t.Errorf("release-cli.needs = %v, want only cli-release-gate", needs)
 	}
-	wantReleaseIf := "!cancelled() && needs.cli-release-gate.result == 'success' && needs.cli-release-gate.outputs.required == 'true'" //nolint:misspell // GitHub expression function spelling.
+	wantReleaseIf := "!cancelled() && !inputs.production_proof_only && needs.cli-release-gate.result == 'success' && needs.cli-release-gate.outputs.required == 'true'" //nolint:misspell // GitHub expression function spelling.
 	if got := strings.Join(strings.Fields(releaseCLI.If), " "); got != wantReleaseIf {
 		t.Errorf("release-cli.if = %q, want %q", got, wantReleaseIf)
 	}
