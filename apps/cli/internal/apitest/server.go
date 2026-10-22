@@ -314,7 +314,7 @@ func (s *Server) OmitPublisherMetadata() {
 }
 
 // publisherObject returns the wire publisher object and whether this mock
-// sends one at all. verified is always false: no publisher is verified.
+// sends one at all. verified is always false: this mock models unverified publishers.
 //
 // TODO(upstream-contract): mirrors the qurl-service Publisher object,
 // {"name"?: string, "verified": boolean}, with name omitted when unset.

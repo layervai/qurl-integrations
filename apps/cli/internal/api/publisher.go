@@ -20,8 +20,7 @@ import (
 // Name is self-declared text chosen by whoever owns the resource, so it must
 // never reach a terminal raw: the output package owns the one rendering, which
 // quotes and escapes it and always shows it beside the verification status.
-// Verified is true only when the service said so explicitly. No publisher is
-// verified today.
+// Verified is true only when the service said so explicitly.
 type Publisher struct {
 	Name     string
 	Verified bool
