@@ -798,6 +798,16 @@ change uses `access configure` with the current policy version. If that update
 returns a pending-session error, retry the same update. Do not invent a newer
 version or fall back to public or legacy access.
 
+<!-- TODO(upstream-contract): email backup follows qurl-service consumer access. -->
+When consumer access is enabled, the hosted preview card always offers
+**Email me an access link** as a backup to passkeys. Publishers cannot disable
+this option. The recipient verifies the mailbox and consents to disclose it to
+the publisher. Invitations, approval, entitlement, expiry, and revocation still
+apply. Email-backed grants are separate from passkey-backed grants; first use
+must pass the configured invitation, approval, or entitlement checks. Revoke
+each grant separately. Later email logins reuse the email grant. Contract grant
+replies still omit email.
+
 #### Local apps
 
 ```bash
@@ -959,9 +969,10 @@ https://qurl.link/#…
   Expires in 5m (single use)
 ```
 
-The publisher name is whatever the publisher typed. Publishers are shown as
-`UNVERIFIED` unless LayerV has verified them. Treat a name alone as a claim,
-not as proof. A publisher that set no name shows `no name provided`.
+The publisher name is whatever the publisher typed. A publisher is
+`verified by LayerV` only when the service reports it as verified; otherwise it is
+`UNVERIFIED`, and its name is a claim, not proof. A publisher that set no
+name shows `no name provided`.
 The name is always printed in quotes with unusual characters escaped.
 
 When stdout is not a terminal the command prints the bare link on stdout,
@@ -1551,7 +1562,8 @@ Publisher: "Acme Docs" — UNVERIFIED (self-declared name, not confirmed by Laye
 ```
 
 The name is optional and self-declared. Setting one does not confirm who you
-are. Publishers are shown as `UNVERIFIED` unless LayerV has verified them.
+are or request verification. The service decides the verification status;
+the CLI shows a publisher as `verified by LayerV` only when the service reports it.
 
 The same name appears on every CRID this device's owner publishes, including
 ones already published, so people can tell those CRIDs come from the same
@@ -1747,8 +1759,9 @@ Where the publisher appears:
 "publisher": { "name": "Acme Docs", "verified": false }
 ```
 
-`verified` is always present. It is `true` only when the service confirms
-that LayerV has verified the publisher. `name` is omitted when none is set.
+`verified` is always present and carries the service's verification status.
+Setting a publisher name cannot set it to `true`. `name` is omitted when the
+publisher set none.
 
 The resource's creation date has two keys. `share` and `get --file` describe
 a minted link, so they name it `resource_created_at`: it is the resource's
@@ -1759,7 +1772,8 @@ date.
 
 A name is the publisher's own text: quote or escape it before showing it, and
 never show it without its `verified` status. An agent that acts for a person
-must tell that person the publisher is unverified.
+must tell that person whether the service reports the publisher as verified
+or unverified.
 
 ```bash
 qurl share <CRID> -o json | jq '{link: .qurl, publisher: .publisher}'
@@ -1815,21 +1829,26 @@ see [qurl requests, approve and deny](#qurl-requests-approve-and-deny).
 ### CRID preview metadata
 
 Each CRID has its own optional description and up to four media items. Description
-is public preview text, separate from private owner notes. Media needs a verified
+is public preview text, separate from private owner notes. The optional app
+name is public, with a limit of 100 characters. Omitted text fields stay
+unchanged; an empty string removes that field. Media needs a verified
 publisher. Use the same registered device identity as other publisher commands:
 
 ```sh
 qurl preview get "$CRID"
-qurl preview set "$CRID" --description "A guide to our API"
+qurl preview set "$CRID" --name "API guide" --description "A guide to our API"
 qurl preview upload "$CRID" ./demo.gif --alt "The API in use"
 qurl preview upload "$CRID" ./new-demo.mp4 --alt "Updated demo" --replace "$MEDIA_ID"
 qurl preview remove "$CRID" "$MEDIA_ID"
 qurl preview clear "$CRID"
 ```
 
-`clear` removes description and media and cancels pending uploads. Upload streams
+`clear` removes name, description and media and cancels pending uploads. Upload streams
 directly to private storage without the API credential. Processing is asynchronous;
 read `preview get` again to check it. A failed replacement keeps the current item.
+
+In text mode, `--quiet` keeps its existing description-only output; use
+`-o json` to read the name in scripts.
 Limits: description 500 characters; still images 10 MB; GIF/video 25 MB and 15
 seconds. GIFs become silent video clips. Viewers load one small still first, with
 video only after Play. Use `-o json` for structured revision, media and job state.

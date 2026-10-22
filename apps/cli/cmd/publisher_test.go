@@ -918,13 +918,31 @@ func TestPublisherHelpNeedsNoAccount(t *testing.T) {
 			}
 		}
 		if !strings.Contains(help, "UNVERIFIED") {
-			t.Errorf("%q help does not say publishers are UNVERIFIED:\n%s", args, help)
+			t.Errorf("%q help does not mention the UNVERIFIED status:\n%s", args, help)
+		}
+		if args[1] != "clear" && (!strings.Contains(help, "verified by LayerV") || !strings.Contains(help, "service")) {
+			t.Errorf("%q help does not explain service-reported verification:\n%s", args, help)
 		}
 	}
 	help := runCLI(t, &runOpts{args: []string{"publisher", "--help"}}).stdout.String()
 	for _, want := range []string{"optional", "self-declared", "requests a link", "set", "clear"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("publisher help is missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestPublisherHelpDoesNotDenyVerification(t *testing.T) {
+	for _, args := range [][]string{{"publisher", "--help"}, {"publisher", "set", "--help"}, {"publisher", "clear", "--help"}, {"share", "--help"}, {"get", "--help"}, {"status", "--help"}, {"inspect", "--help"}} {
+		res := runCLI(t, &runOpts{args: args})
+		if res.code != 0 {
+			t.Fatalf("%q: exit = %d", args, res.code)
+		}
+		help := strings.ToLower(res.stdout.String())
+		for _, stale := range []string{"every publisher", "no publisher can be confirmed", "has not confirmed who the publisher is"} {
+			if strings.Contains(help, stale) {
+				t.Errorf("%q help contains stale claim %q", args, stale)
+			}
 		}
 	}
 }

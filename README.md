@@ -1,12 +1,195 @@
-# qurl-integrations
+# qURL CLI and integrations for private app sharing
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that make protected resources invisible by default.
+Use [qURL™ by LayerV](https://layerv.ai/qurl/) to share localhost web apps,
+private APIs, and files through expiring access links. Share a development
+preview, an internal dashboard, or a document with a teammate or AI agent.
+This repository contains
+LayerV's CLI, Slack and Discord integrations, browser extensions for Gmail,
+and Microsoft Teams integration source.
 
-qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock grants the caller's IP temporary access — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
+For an app running on localhost, the CLI connects outward to LayerV without
+opening an inbound port. Publish the app, create a short-lived access link,
+and send that link to its recipient. The app must stay running, and its own
+sign-in still applies. Adding a link to an existing remote URL does not
+restrict any separate public route to that URL.
 
-This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and Chrome and Edge extensions for Gmail — plus shared Go libraries. A Microsoft Teams OAuth core is in progress.
+qURL uses [OpenNHP](https://github.com/OpenNHP/opennhp) to authorize access to
+protected resources. Start with the guide for the task you want to complete:
+
+| Task | Guide |
+| --- | --- |
+| Share a local web app or API with a temporary link | [qURL CLI quickstart](apps/cli/README.md#publish-localhost-in-60-seconds) |
+| Share internal resources from a Slack channel | [qURL for Slack](apps/slack/README.md) |
+| Send one-time file or location links in Discord | [qURL Discord bot](apps/discord/README.md) |
+| Share files in Gmail through expiring links | [Browser extension for Gmail](apps/chrome-extension/README.md) |
+| Build or submit the Microsoft Edge extension | [Edge installation and release guide](apps/edge-extension/README.md) |
+| Develop or deploy the Microsoft Teams integration | [Teams integration source and deployment guide](apps/teams/README.md) |
+| Serve a private S3 static site through a connector | [Private S3 origin image](origins/s3-static-connector/README.md) |
+
+The CLI guide documents local publishing and sharing. Each integration guide
+lists its own setup requirements. Teams deployment is managed outside this
+repository; the presence of its source does not establish a public rollout.
+
+[Localhost quickstart](#share-a-localhost-web-app) ·
+[File sharing](#share-files-and-documents) · [Sharing comparison](#choose-how-to-share-an-app-or-file) ·
+[Sharing questions](#localhost-and-file-sharing-questions) ·
+[Product overview](https://layerv.ai/qurl/) · [Private links](https://qurl.link/)
+
+## Share a localhost web app
+
+For example, let a teammate review a preview running on your laptop without
+deploying a staging server. Your app stays on your machine; the CLI runs the
+Connector that carries access to it.
+
+1. Install the CLI. On macOS with Homebrew:
+
+   ```bash
+   brew install layervai/tap/qurl
+   qurl version
+   ```
+
+   See the [CLI setup guide](apps/cli/README.md#authentication) for the
+   authentication and deployment requirements of your installation, and
+   [other installation options](apps/cli/README.md#install) for Linux or Windows.
+
+2. Keep your existing app running on port 3000. To try a simple file-based
+   preview, run this from a directory containing only files you intend to share:
+
+   ```bash
+   python3 -m http.server 3000 --bind 127.0.0.1
+   ```
+
+3. In a second terminal, publish that local HTTP service:
+
+   ```bash
+   qurl publish http://127.0.0.1:3000
+   ```
+
+4. Replace `REPLACE_WITH_CRID` with the resource identifier printed after the
+   route is ready. Create a link with a requested five-minute access window:
+
+   ```bash
+   qurl share REPLACE_WITH_CRID --ttl 5m --session-duration 5m
+   ```
+
+   Send the returned full qURL link privately. A browser recipient opens the
+   link; your app's own login still applies. The service can shorten the
+   requested lifetime. Keep the app, publishing host, and background daemon
+   available while the recipient uses it.
+
+The CRID identifies the resource; the minted link grants access. CRID-based
+link requests also depend on resource privacy and device grants. Read
+[private CRIDs](apps/cli/README.md#private-crids) before handing a CRID to
+someone else's CLI or agent.
+
+When the preview is over, stop serving it:
+
+```bash
+qurl stop REPLACE_WITH_CRID
+```
+
+`stop` pauses serving without retiring the resource. See the
+[command reference](apps/cli/README.md#commands) for restarting, deleting,
+and managing individual links.
+
+## Share files and documents
+
+Choose a file workflow that matches where the file lives and how it should
+reach the recipient:
+
+| Use case | Workflow |
+| --- | --- |
+| Review files in a local preview directory | Serve a dedicated directory with a local HTTP server, publish its root address with the CLI, and share the access link. Recipients can reach the files that server exposes. |
+| Send an uploaded document from Gmail | Use the [browser extension](apps/chrome-extension/README.md#quickstart) to upload selected files and insert expiring links into a compose draft. |
+| Send separate file links to Discord recipients | Use [`/qurl send`](apps/discord/README.md#commands); the configured bot delivers recipient links by DM. |
+| Let an AI agent share a selected PDF or image | Use the [MCP upload tools](https://github.com/layervai/qurl-mcp#upload-tools), with their supported file types, transport modes, and expiry limits. |
+
+A localhost file server and an uploaded file are different resource lifecycles.
+Local serving needs the host to remain available. Uploads use their configured
+file service. Opening or testing a single-use link can consume it; create a
+fresh recipient link when needed. Use each integration's guide for its actual
+revocation support and file-size limits.
+
+## Choose how to share an app or file
+
+A live preview, an internal API, and an uploaded report have different sharing requirements. Start with where the content should run and how the recipient should be authorized. qURL can connect these workflows through resource access links, while the publishing and file-upload components have their own setup and lifecycle.
+
+| Approach | Where the app or content lives | Recipient access | Useful when |
+| --- | --- | --- | --- |
+| qURL local publishing | Your running app or HTTP file server, reached through the CLI's embedded Connector. | An issued access link, the resource's policy, and any app login. | A reviewer or agent needs temporary access to a particular local resource. |
+| ngrok | Your running service behind an agent endpoint. | An endpoint URL with your configured Traffic Policy and app authentication. | You want a localhost endpoint for preview or integration testing. |
+| Cloudflare Tunnel + Access | Your running origin connected through `cloudflared`. | The application's configured Access policies. | You want to manage application access through identities and groups. |
+| Tailscale Serve | A service or files on a device in your tailnet. | Tailnet connectivity and access rules. | Your collaborators already use the private network. |
+| S3 presigned URL | An object stored in an S3 bucket. | A signed URL for an operation, subject to its expiry and AWS policies. | Your artifact is in object storage and needs temporary download access. |
+| Google Drive | A document or file stored in Drive. | Its configured viewer, commenter, editor, or link permissions. | Review and collaboration should continue through hosted document storage. |
+| Vercel preview | A deployed application in a Preview environment. | A deployment URL and its configured protection. | Reviewers need a hosted build independent of your development machine. |
+
+### qURL and ngrok for localhost sharing
+
+Both tools can connect an app on your machine to remote users without inbound
+port forwarding. The sharing workflow and access model are the useful points
+to compare:
+
+| Question | qURL local sharing | ngrok's documented localhost workflow |
+| --- | --- | --- |
+| What do I send? | An expiring access link for a published resource. | A public endpoint URL, which can be secured with Traffic Policy. |
+| How is access controlled? | Resource identity, signed access grants, and the resource's link and session rules. The app can keep its own login. | Endpoint policies such as OAuth, OIDC, Basic Auth, and IP restrictions. |
+| Does the origin need inbound port forwarding? | No; the Connector connects outbound. | No; the agent establishes an outbound tunnel. |
+
+For private previews and temporary access to an internal app, qURL centers the
+workflow on issuing access to a resource. ngrok also documents public endpoint
+delivery, request inspection, and replay. Choose based on the access and
+testing workflow you need. See [ngrok's localhost guide](https://ngrok.com/use-cases/share-localhost),
+[ngrok security](https://ngrok.com/security), and the
+[LayerV sharing FAQ](https://layerv.ai/faq/).
+
+### Should I share the running app or deploy a preview?
+
+For a teammate reviewing the app currently running on your laptop, qURL's [localhost quickstart](#share-a-localhost-web-app) publishes that service and then issues its access link. The app, host, and serving runtime must remain available. ngrok also connects to a running origin; using an outbound tunnel does not make either workflow a hosted deployment.
+
+A [Vercel Preview deployment](https://vercel.com/docs/deployments/environments) gives reviewers a hosted version of the application. That is a useful choice when review should continue after your laptop goes offline or when you want to inspect a deployed build. It requires the application and environment to be configured for deployment. Use local sharing when the running development instance is the thing to review; use a hosted preview when a deployed version is the thing to review. Both need appropriate access controls.
+
+### Should access follow an application identity or a private network?
+
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/) connects an origin outward without requiring a publicly routable origin IP. [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/choose-application-type/) adds application policies, including identity-provider groups and session controls. For an internal dashboard managed through an organization's identity system, that application-access model can be a good fit. Outbound origin connectivity is shared by Cloudflare Tunnel and qURL; it is not a unique reason to choose qURL.
+
+[Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve) makes a service or files available within a tailnet, under its access rules. That fits collaborators who already have private-network connectivity. [Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel) has a different audience: it makes the configured service reachable from the public internet. Check which mode you are choosing before treating a Tailscale URL as private.
+
+With qURL, the CLI publishes an individual resource and issues access under its resource, link, and session policies. A browser recipient uses the returned link without installing a qURL SDK. The full link is an access credential; sending it to a named person or setting a label does not authenticate that person's identity. Retain the app's login where identity matters. Choose based on whether your workflow needs resource access links, identity-managed application access, or existing private-network membership.
+
+### Should a file stay on the local host or be uploaded?
+
+A qURL link to a local HTTP directory lets recipients read what that server exposes while the host remains available. It is useful for reviewing a current local output or static preview. Use a dedicated directory and the [file-sharing workflow](#share-files-and-documents). For selected PDF or image uploads, the [MCP tools](https://github.com/layervai/qurl-mcp#let-an-ai-agent-share-a-pdf-or-image) use a configured upload service; its format, expiry, and revocation limits differ from local serving. The SDK's link-issuing calls alone do not upload a file.
+
+An [S3 presigned URL](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html) also provides temporary bearer access, scoped to an object and operation. For a download, the object must be in S3; your local machine does not serve that download. Its validity depends on the signing credentials and applicable policies. S3 checks expiry when a request starts, so a download already in progress can continue after URL expiry. Similarly, qURL link redemption and an admitted session have separate lifetimes. Expiring links are not an exclusive qURL capability, and expiry should not be described as erasing a downloaded copy.
+
+[Google Drive sharing](https://support.google.com/drive/answer/2494822?hl=en) is useful when the document belongs in hosted storage with viewer, commenter, or editor permissions. Eligible work or school accounts can also set access expiration. Choose Drive for that document-sharing workflow, an S3 URL for an object-storage download, or qURL for access to a running resource or a supported qURL upload integration. These choices put the content in different places; wrapping a separate public URL does not restrict its original access path.
+
+## Localhost and file-sharing questions
+
+### Does sharing move my app to LayerV?
+
+No. In the local workflow, the app runs on your host and the CLI's embedded
+Connector carries access traffic. A sleeping laptop or stopped app cannot
+serve the preview.
+
+### Does a qURL make an existing public URL private?
+
+Creating a qURL adds an access path. Close or restrict any separate public
+route if access should be available only through qURL.
+
+### Does the link's expiry end an open session?
+
+Link expiry limits new redemption. An already admitted session has its own
+lifetime. The quickstart requests both limits; the service enforces them.
+
+### Is every link single-use, and does it replace application login?
+
+Use limits depend on the link and issuing workflow. A link is an access
+credential, so share it privately. It does not replace your app's login or
+prove a recipient's identity merely because you sent it to a named person.
 
 ## Structure
 
@@ -26,14 +209,22 @@ shared/              Shared Go libraries used by the Go apps
   observability/     OpenTelemetry setup
 ```
 
+## Claude Code and Codex plugins
+
+The qURL plugins live in their own repositories:
+[layervai/claude-plugins](https://github.com/layervai/claude-plugins) for Claude
+Code and [layervai/codex-plugins](https://github.com/layervai/codex-plugins) for
+OpenAI Codex. Each bundles the qURL agent skill; none needs an account.
+
 ## SDKs & MCP server (separate repos)
 
 Language SDKs and the qURL MCP server live in standalone repositories:
 
 | Library | Install | Repo |
 |---------|---------|------|
-| Python SDK | `pip install layerv-qurl` | [layervai/qurl-python](https://github.com/layervai/qurl-python) |
+| Python SDK | `pip install qurl-python` | [layervai/qurl-python](https://github.com/layervai/qurl-python) |
 | TypeScript SDK | `npm install @layervai/qurl` | [layervai/qurl-typescript](https://github.com/layervai/qurl-typescript) |
+| Go SDK | `go get github.com/layervai/qurl-go/qurl` | [layervai/qurl-go](https://github.com/layervai/qurl-go) |
 | MCP server | `npx @layervai/qurl-mcp` | [layervai/qurl-mcp](https://github.com/layervai/qurl-mcp) |
 
 ## Configuration

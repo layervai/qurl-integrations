@@ -9,6 +9,7 @@ import (
 )
 
 const (
+	msgPreviewName        = "Name: %s\n"
 	msgPreviewIncomplete  = "qURL preview response is incomplete"
 	msgPreviewDescription = "Description: %s\nRevision: %d\n"
 	msgPreviewMedia       = "Media %s (%s): %s\n"
@@ -23,10 +24,11 @@ func (p *Printer) Preview(preview *qurlapi.Preview) error {
 	if p.format == FormatJSON {
 		document := struct {
 			Revision    int64               `json:"revision"`
+			Name        escapedJSONString   `json:"name,omitempty"`
 			Description escapedJSONString   `json:"description,omitempty"`
 			Media       []previewMediaJSON  `json:"media,omitempty"`
 			Uploads     []previewUploadJSON `json:"uploads,omitempty"`
-		}{Revision: preview.Revision, Description: escapedJSONString(preview.Description)}
+		}{Revision: preview.Revision, Name: escapedJSONString(preview.Name), Description: escapedJSONString(preview.Description)}
 		for _, m := range preview.Media {
 			document.Media = append(document.Media, previewMediaJSON{m.Width, m.Height, escapedJSONString(m.ID), escapedJSONString(m.Kind), escapedJSONString(m.Alt)})
 		}
@@ -41,6 +43,11 @@ func (p *Printer) Preview(preview *qurlapi.Preview) error {
 		}
 		_, err := fmt.Fprintf(p.out, "%s\n", p.previewText(preview.Description))
 		return err
+	}
+	if preview.Name != "" {
+		if _, err := fmt.Fprintf(p.out, msgPreviewName, p.previewText(preview.Name)); err != nil {
+			return err
+		}
 	}
 	if _, err := fmt.Fprintf(p.out, msgPreviewDescription, p.previewText(preview.Description), preview.Revision); err != nil {
 		return err

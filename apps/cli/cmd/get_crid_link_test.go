@@ -1009,9 +1009,8 @@ func publisherShown(t *testing.T, mode shareMode, run *shareRun) string {
 // link for the CRID alone. The line that names the publisher must be the same
 // bytes on both paths.
 //
-// No service reports a verified publisher today, and the SDK's test server
-// answers with one fixed reply that names none. So the answer is given at the
-// seam where get takes the SDK's result.
+// The SDK's test server answers with one fixed reply that names no publisher.
+// These cases inject the answer where get takes the SDK's result.
 func TestGetShowsThePublisherOfALinkGivenForTheCRIDAloneAsShareDoes(t *testing.T) {
 	state := bootstrapRegisteredState(t)
 	createdAt := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)

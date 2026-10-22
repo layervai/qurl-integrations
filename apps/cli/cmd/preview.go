@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	msgPreviewDescriptionRequired = "provide --description; use an empty string to remove it"
-	msgPreviewAltRequired         = "provide --alt to describe the image or clip"
-	msgPreviewUploaded            = "File uploaded. Processing keeps current media visible. Check with qurl preview get %s."
-	msgPreviewMediaMissing        = "media ID not found; read qurl preview get first"
+	msgPreviewFieldRequired = "provide --name or --description; use an empty string to remove it"
+	msgPreviewAltRequired   = "provide --alt to describe the image or clip"
+	msgPreviewUploaded      = "File uploaded. Processing keeps current media visible. Check with qurl preview get %s."
+	msgPreviewMediaMissing  = "media ID not found; read qurl preview get first"
 )
 
 func previewCmd(opts *globalOpts) *cobra.Command {
@@ -30,26 +30,7 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 		}
 		return opts.printer().Preview(preview)
 	}}
-	var description string
-	set := &cobra.Command{Use: "set <CRID> --description <text>", Short: "Set an optional description (up to 500 characters)", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if !cmd.Flags().Changed("description") {
-			return exitcode.UsageError(errors.New(msgPreviewDescriptionRequired))
-		}
-		client, err := opts.newClient(cmd.Context())
-		if err != nil {
-			return err
-		}
-		current, err := client.Preview(cmd.Context(), args[0])
-		if err != nil {
-			return err
-		}
-		next, err := client.UpdatePreview(cmd.Context(), args[0], qurlapi.PreviewPatch{Revision: current.Revision, Description: &description})
-		if err != nil {
-			return err
-		}
-		return opts.printer().Preview(next)
-	}}
-	set.Flags().StringVar(&description, "description", "", "public preview text; empty removes it")
+	set := previewSetCmd(opts)
 	var alt, replaceID string
 	upload := &cobra.Command{Use: "upload <CRID> <file>", Short: "Upload an image, GIF or short clip (verified publishers only)", Args: exactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
 		if alt == "" {
@@ -75,7 +56,7 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 	upload.Flags().StringVar(&alt, "alt", "", "description for people who cannot see the image or clip")
 	upload.Flags().StringVar(&replaceID, "replace", "", "media ID to replace after processing succeeds")
 	remove := previewRemoveCmd(opts)
-	clearCmd := &cobra.Command{Use: "clear <CRID>", Short: "Remove description and media and cancel pending uploads", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	clearCmd := &cobra.Command{Use: "clear <CRID>", Short: "Remove name, description and media and cancel pending uploads", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := opts.newClient(cmd.Context())
 		if err != nil {
 			return err
@@ -86,7 +67,7 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 		}
 		text := ""
 		ids := []string{}
-		next, err := client.UpdatePreview(cmd.Context(), args[0], qurlapi.PreviewPatch{Revision: current.Revision, Description: &text, MediaIDs: &ids})
+		next, err := client.UpdatePreview(cmd.Context(), args[0], qurlapi.PreviewPatch{Revision: current.Revision, Name: &text, Description: &text, MediaIDs: &ids})
 		if err != nil {
 			return err
 		}
@@ -126,4 +107,36 @@ func previewRemoveCmd(opts *globalOpts) *cobra.Command {
 		return opts.printer().Preview(next)
 	}}
 	return remove
+}
+
+func previewSetCmd(opts *globalOpts) *cobra.Command {
+	var name, description string
+	set := &cobra.Command{Use: "set <CRID>", Short: "Set a public name (up to 100 characters) or description (up to 500 characters)", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if !cmd.Flags().Changed("name") && !cmd.Flags().Changed("description") {
+			return exitcode.UsageError(errors.New(msgPreviewFieldRequired))
+		}
+		client, err := opts.newClient(cmd.Context())
+		if err != nil {
+			return err
+		}
+		current, err := client.Preview(cmd.Context(), args[0])
+		if err != nil {
+			return err
+		}
+		patch := qurlapi.PreviewPatch{Revision: current.Revision}
+		if cmd.Flags().Changed("name") {
+			patch.Name = &name
+		}
+		if cmd.Flags().Changed("description") {
+			patch.Description = &description
+		}
+		next, err := client.UpdatePreview(cmd.Context(), args[0], patch)
+		if err != nil {
+			return err
+		}
+		return opts.printer().Preview(next)
+	}}
+	set.Flags().StringVar(&name, "name", "", "public app name; empty removes it")
+	set.Flags().StringVar(&description, "description", "", "public preview text; empty removes it")
+	return set
 }

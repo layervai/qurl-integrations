@@ -12,12 +12,16 @@ import (
 func TestPreviewOutputEscapesTextAndQuietEmpty(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	p := publisherPrinter(&out, &errBuf, FormatText, false, false, false, true)
-	value := &qurlapi.Preview{Description: "guide\x1b[2K", Media: []qurlapi.PreviewMedia{{ID: "id", Kind: "image\n", Alt: "alt\x1b"}}, Uploads: []qurlapi.PreviewUpload{{ID: "job", Status: "failed\n"}}}
+	value := &qurlapi.Preview{Name: "app\x1b[2K", Description: "guide\x1b[2K", Media: []qurlapi.PreviewMedia{{ID: "id", Kind: "image\n", Alt: "alt\x1b"}}, Uploads: []qurlapi.PreviewUpload{{ID: "job", Status: "failed\n"}}}
 	if err := p.Preview(value); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out.String(), "\x1b") || !strings.Contains(out.String(), `guide\x1b[2K`) {
+	if strings.Contains(out.String(), "\x1b") || !strings.Contains(out.String(), `guide\x1b[2K`) || !strings.Contains(out.String(), `Name: "app\x1b[2K"`) {
 		t.Fatal(out.String())
+	}
+	out.Reset()
+	if err := p.Preview(&qurlapi.Preview{Description: "only"}); err != nil || strings.Contains(out.String(), "Name:") {
+		t.Fatalf("output=%q err=%v", out.String(), err)
 	}
 	out.Reset()
 	p = publisherPrinter(&out, &errBuf, FormatText, false, true, false, true)
@@ -30,7 +34,7 @@ func TestPreviewJSONEscapesWithoutChangingValues(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	p := publisherPrinter(&out, &errBuf, FormatJSON, false, false, false, true)
 	text := "text\u202e\u009b\x1b"
-	value := &qurlapi.Preview{Revision: 9, Description: text, Media: []qurlapi.PreviewMedia{{ID: text, Kind: text, Alt: text, Width: 2, Height: 3}}, Uploads: []qurlapi.PreviewUpload{{ID: text, Status: text, Alt: text, ExpiresAt: 12}}}
+	value := &qurlapi.Preview{Revision: 9, Name: text, Description: text, Media: []qurlapi.PreviewMedia{{ID: text, Kind: text, Alt: text, Width: 2, Height: 3}}, Uploads: []qurlapi.PreviewUpload{{ID: text, Status: text, Alt: text, ExpiresAt: 12}}}
 	if err := p.Preview(value); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +47,7 @@ func TestPreviewJSONEscapesWithoutChangingValues(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Description != text || decoded.Media[0] != value.Media[0] || decoded.Uploads[0] != value.Uploads[0] || decoded.Revision != 9 {
+	if decoded.Name != text || decoded.Description != text || decoded.Media[0] != value.Media[0] || decoded.Uploads[0] != value.Uploads[0] || decoded.Revision != 9 {
 		t.Fatal(decoded)
 	}
 }

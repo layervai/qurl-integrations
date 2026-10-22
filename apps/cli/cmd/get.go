@@ -74,9 +74,8 @@ acted on:
   - With --file - the raw bytes stream to stdout, clean for piping.
 
 With --file, the publisher and creation date are reported on stderr before
-the content is fetched. A publisher name is self-declared and shown as
-UNVERIFIED: LayerV has not confirmed who the publisher is. --quiet omits that
-report.
+the content is fetched. A publisher name is self-declared. The publisher is
+shown as UNVERIFIED unless LayerV has verified them. --quiet omits that report.
 
 When stdout is not a terminal, get never opens a browser: pass --file, or
 use ` + "`qurl share`" + ` if you only need the link.`,
