@@ -89,12 +89,54 @@ type sandboxLocalStateMarker struct {
 // qurl-connector sentinel text. Keep this list in lockstep when those pins
 // change so diagnostic drift fails review instead of silently degrading.
 var sandboxLocalStateMarkers = []sandboxLocalStateMarker{
+	{text: "retire prior native nhp session before replacement", reason: "prior_session_retirement"},
+	{text: "recover prior native session operation before replacement", reason: "prior_operation_recovery"},
 	{text: "native session operation journal is corrupt", reason: "operation_journal_corrupt"},
 	{text: "native session operation state conflict", reason: "operation_conflict"},
 	{text: "qurl: invalid native session operation", reason: "invalid_session_operation"},
 	{text: "qurl: agent binding persistence failed", reason: "agent_binding_persistence"},
 	{text: "qurl: native completion candidate durability is unknown", reason: "completion_persistence"},
 	{text: "qurl: agent state setup lock failed", reason: "agent_state_lock"},
+}
+
+func readSandboxDaemonLocalStateReason(stateDir string) string {
+	logDir, err := connectordaemon.DefaultLogDir(stateDir)
+	if err != nil {
+		return sandboxLocalStateUnclassified
+	}
+	reason := sandboxLocalStateUnclassified
+	for _, name := range []string{"share-daemon.log", "share-daemon.err.log"} {
+		raw, err := os.ReadFile(filepath.Join(logDir, name)) //nolint:gosec // Exact test-owned protected state path.
+		if err != nil {
+			continue
+		}
+		if candidate := sandboxLocalStateReason(string(raw)); candidate != sandboxLocalStateUnclassified {
+			reason = candidate
+		}
+	}
+	return reason
+}
+
+func TestReadSandboxDaemonReasonDoesNotExposeCredentials(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("HOME", stateDir)
+	logDir, err := connectordaemon.DefaultLogDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	private := "lv_live_private-token -----BEGIN PRIVATE KEY----- private-key-material"
+	if err := os.WriteFile(filepath.Join(logDir, "share-daemon.log"), []byte("retire prior native NHP session before replacement: "+private), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "share-daemon.err.log"), []byte(private), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSandboxDaemonLocalStateReason(stateDir); got != "prior_session_retirement" {
+		t.Fatal("daemon diagnostic did not reduce to the fixed retirement reason")
+	}
 }
 
 // sandboxLocalStateReason converts the daemon's private, redacted log text
@@ -892,6 +934,8 @@ func TestSandboxLocalStateReasonIsClosedAndUsesLatestCause(t *testing.T) {
 		log  string
 		want string
 	}{
+		{name: "prior retirement", log: "retire prior native NHP session before replacement: context deadline exceeded " + privateDetail, want: "prior_session_retirement"},
+		{name: "prior recovery", log: "recover prior native session operation before replacement: " + privateDetail, want: "prior_operation_recovery"},
 		{name: "journal", log: privateDetail + ": native session operation journal is corrupt", want: "operation_journal_corrupt"},
 		{name: "conflict", log: "NATIVE SESSION OPERATION STATE CONFLICT: " + privateDetail, want: "operation_conflict"},
 		{name: "invalid operation", log: "prepare: qurl: invalid native session operation: " + privateDetail, want: "invalid_session_operation"},
@@ -934,6 +978,12 @@ func TestSandboxLocalStateReasonDoesNotForwardHostileLogText(t *testing.T) {
 		"\x1b[31mterminal-control\x1b[0m",
 		`C:\Users\runner\private-state cell0.private.example`,
 	}, "\n")
+	for _, marker := range sandboxLocalStateMarkers {
+		got := sandboxLocalStateReason(hostile + "\n" + marker.text + ": -----BEGIN PRIVATE KEY-----\n" + hostile)
+		if got != marker.reason {
+			t.Fatalf("hostile daemon input did not reduce to a fixed reason")
+		}
+	}
 	got := sandboxLocalStateReason(hostile + "\nqurl: invalid native session operation: " + hostile)
 	if got != "invalid_session_operation" {
 		t.Fatalf("hostile local-state reason = %q, want closed invalid_session_operation", got)

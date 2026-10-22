@@ -845,7 +845,8 @@ func externalSandboxLifecycle(t *testing.T, binary string, env map[string]string
 	t.Helper()
 	result := runExternalSandboxCLI(t, binary, env, "-o", "json", command, cridValue)
 	if result.err != nil {
-		t.Fatalf("qurl %s: %v; stderr %q", command, result.err, result.stderr)
+		reason := readSandboxDaemonLocalStateReason(env[connectorstate.EnvStateDirPrimary])
+		t.Fatalf("qurl %s: %v; stderr %q; closed daemon reason %s", command, result.err, result.stderr, reason)
 	}
 	var document sandboxSharingDoc
 	if err := json.Unmarshal([]byte(result.stdout), &document); err != nil {

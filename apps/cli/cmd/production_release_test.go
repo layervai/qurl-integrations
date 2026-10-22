@@ -229,7 +229,8 @@ func productionCLI(t *testing.T, binary string, env map[string]string, input str
 	t.Helper()
 	raw, code := productionCommand(t, binary, env, input, args...)
 	if code != 0 {
-		t.Fatalf("production candidate %s failed with exit %d", args[0], code)
+		reason := readSandboxDaemonLocalStateReason(env[connectorstate.EnvStateDirPrimary])
+		t.Fatalf("production candidate %s failed with exit %d; closed daemon reason %s", args[0], code, reason)
 	}
 	return raw
 }
