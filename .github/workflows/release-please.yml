@@ -86,6 +86,11 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      production_proof_only:
+        description: "Test signed public CLI archives against production without building or publishing"
+        required: false
+        default: false
+        type: boolean
       cli_tag:
         description: "Existing bare CLI release tag (e.g. v0.2.0) to build and attach assets for"
         required: true
@@ -258,6 +263,7 @@ jobs:
           HANDOFF_RUN_ID: ${{ inputs.cli_run_id }}
           HANDOFF_RUN_ATTEMPT: ${{ inputs.cli_run_attempt }}
           GH_TOKEN: ${{ github.token }}
+          PROOF_ONLY: ${{ inputs.production_proof_only }}
         run: |
           set -euo pipefail
           [[ "$CLI_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
@@ -297,6 +303,14 @@ jobs:
             printf '::error::Draft CLI release target mismatch: observed %q; expected exact tag commit %q\n' "$release_target" "$source_sha" >&2
             exit 1
           fi
+          if [[ "${PROOF_ONLY:-false}" == true ]]; then
+            [[ "$GITHUB_REPOSITORY" == layervai/qurl-integrations &&
+              "$draft" == false && "$HANDOFF_SOURCE_SHA" == "$source_sha" &&
+              "$release_target" == "$source_sha" ]] || {
+              echo "::error::Public proof requires the canonical public release and explicit exact source" >&2
+              exit 1
+            }
+          fi
           if [[ ! "$HANDOFF_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ||
             ! "$HANDOFF_RUN_ATTEMPT" =~ ^[1-9][0-9]?$ ]] ||
             (( 10#$HANDOFF_RUN_ATTEMPT > 30 )); then
@@ -311,7 +325,7 @@ jobs:
 
       - id: verify
         name: Check the exact packaged customer-journey gate once
-        if: steps.source.outputs.required == 'true'
+        if: steps.source.outputs.required == 'true' && !inputs.production_proof_only
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_RUN_ID: ${{ inputs.cli_run_id }}
@@ -330,7 +344,7 @@ jobs:
   release-cli:
     needs: cli-release-gate
     if: >-
-      !cancelled() && needs.cli-release-gate.result == 'success' &&
+      !cancelled() && !inputs.production_proof_only && needs.cli-release-gate.result == 'success' &&
       needs.cli-release-gate.outputs.required == 'true'
     outputs:
       qurl_image_digest: ${{ steps.qurl_candidate.outputs.digest }}
@@ -1021,11 +1035,45 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Windows release archive does not expose $command" }
           }
 
+  public-production-candidate:
+    name: Verify signed public CLI archives
+    needs: cli-release-gate
+    if: >-
+      !cancelled() && inputs.production_proof_only &&
+      needs.cli-release-gate.result == 'success' && needs.cli-release-gate.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.0.6'
+      - name: Download and verify every signed public archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+          SOURCE_SHA: ${{ needs.cli-release-gate.outputs.source_sha }}
+        run: python3 scripts/stage-public-cli-proof.py "$CLI_TAG" "$SOURCE_SHA" "$RUNNER_TEMP/production-candidate"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-production-candidate-${{ needs.cli-release-gate.outputs.source_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/production-candidate/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
   production-proof:
     name: Prove the packaged CLI against production
-    needs: [release-cli, cli-release-gate]
+    needs: [release-cli, cli-release-gate, public-production-candidate]
     if: >-
-      !cancelled() && needs.release-cli.result == 'success' &&
+      always() && !cancelled() && needs.cli-release-gate.result == 'success' &&
+      (needs.release-cli.result == 'success' || (inputs.production_proof_only && needs.public-production-candidate.result == 'success')) &&
       needs.cli-release-gate.outputs.required == 'true'
     environment: cli-production
     strategy:

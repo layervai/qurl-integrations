@@ -50,6 +50,10 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: shellcheck scripts/*.sh
 
+      - name: Test signed public CLI proof staging
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 scripts/test-stage-public-cli-proof.py
+
       - name: Test install.sh
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-install.sh
