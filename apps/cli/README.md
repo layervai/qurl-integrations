@@ -213,10 +213,15 @@ is accepted. To write UTF-8 without a BOM:
 
 ```powershell
 [IO.File]::WriteAllText($path, $key + "`n", [Text.UTF8Encoding]::new($false))
+icacls.exe $path /setowner $env:USERNAME | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not set the API-key file owner.' }
+icacls.exe $path /inheritance:r /grant:r "${env:USERNAME}:(F)" '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not protect the API-key file ACL.' }
 ```
 
-Create the file inside an owner-only temporary directory, remove ACL
-inheritance from the file, and remove the file immediately after `qurl login`.
+Create a new file inside an owner-only temporary directory. Set its owner
+explicitly: an elevated PowerShell process can create a file with a different
+default owner. Remove the file immediately after `qurl login`.
 The CLI rejects an inherited or broadly readable ACL with the exact failing
 ACL condition. For most Windows CI jobs, use the one-command `QURL_API_KEY`
 environment value instead; qurl consumes it only for enrollment and does not
