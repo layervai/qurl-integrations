@@ -4073,3 +4073,93 @@ func TestLocalPublishRejectsDivergentConnectorResource(t *testing.T) {
 		t.Fatalf("divergent Connector resource accepted: %s", res.stderr.String())
 	}
 }
+
+// A committed revoke may fail its protection proof. Withdraw a confirmed
+// revoked route without hiding the error that tells the caller to retry.
+func TestDeleteFailureWithdrawsOnlyConfirmedRevokedShare(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		deleteStatus   int
+		resourceStatus string
+		reloadErr      error
+		wantExit       int
+		wantWithdraw   bool
+	}{
+		{name: "revoked", deleteStatus: 503, resourceStatus: "revoked", wantExit: exitcode.Unavailable, wantWithdraw: true},
+		{name: "cleanup failure preserves retry", deleteStatus: 503, resourceStatus: "revoked", reloadErr: connectordaemon.ErrAlreadyRunning, wantExit: exitcode.Unavailable, wantWithdraw: true},
+		{name: "active", deleteStatus: 503, resourceStatus: "active", wantExit: exitcode.Unavailable},
+		{name: "read unavailable", deleteStatus: 503, resourceStatus: "unavailable", wantExit: exitcode.Unavailable},
+		{name: "server failure", deleteStatus: 500, resourceStatus: "revoked", wantExit: exitcode.ServerError, wantWithdraw: true},
+		{name: "forbidden", deleteStatus: 403, resourceStatus: "revoked", wantExit: exitcode.Forbidden},
+		{name: "rate limited", deleteStatus: 429, resourceStatus: "revoked", wantExit: exitcode.RateLimited},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			const deleteDetail = "Delete did not confirm protection; retry to confirm."
+			srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteProblem(t, w, test.deleteStatus, "delete_failed", "Delete Failed", deleteDetail)
+			})
+			srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				if test.resourceStatus == "unavailable" {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource": map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel", "status": test.resourceStatus,
+					"desired_state": "off", "serving_epoch": 1,
+				}}, nil)
+			})
+			stateDir := connectorStateTestDir(t)
+			t.Setenv("QURL_CONNECTOR_STATE_DIR", stateDir)
+			registry, err := openOwnedTestShareRegistry(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			local := localShareFixture(srv)
+			seedLocalConnectorResourceBinding(t, stateDir, &local)
+			if err := registry.Put(context.Background(), &local); err != nil {
+				t.Fatal(err)
+			}
+			daemon := &recordingShareDaemon{reloadErr: test.reloadErr}
+			res := runCLI(t, &runOpts{
+				args:          []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"},
+				env:           map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir},
+				shareRegistry: registry, shareStateDir: stateDir, shareDaemon: daemon,
+			})
+			if res.code != test.wantExit || !strings.Contains(res.stderr.String(), deleteDetail) {
+				t.Fatalf("exit=%d stderr=%q; want exit %d and original delete error", res.code, res.stderr.String(), test.wantExit)
+			}
+			mustEmptyStdout(t, res)
+			if test.reloadErr != nil && !strings.Contains(res.stderr.String(), "local sharing cleanup did not finish") {
+				t.Fatalf("cleanup failure was hidden: %s", res.stderr.String())
+			}
+			_, err = registry.Get(context.Background(), srv.Key.CRID)
+			if test.wantWithdraw {
+				if !errors.Is(err, os.ErrNotExist) || daemon.reloads != 1 || daemon.ensures != 0 {
+					t.Fatalf("revoked route not withdrawn: err=%v daemon=%+v", err, daemon)
+				}
+				assertLocalConnectorResourceRetired(t, stateDir, local.ConnectorID)
+			} else {
+				if err != nil || daemon.reloads != 0 || daemon.ensures != 0 {
+					t.Fatalf("unconfirmed share changed: err=%v daemon=%+v", err, daemon)
+				}
+				store, err := connectorstate.Open(stateDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = store.Close() }()
+				_, retired, found, err := store.ConnectorResourceBinding(context.Background(), local.ConnectorID)
+				if err != nil || !found || retired {
+					t.Fatalf("unconfirmed binding changed: found=%t retired=%t err=%v", found, retired, err)
+				}
+			}
+			if test.deleteStatus < 500 {
+				for _, request := range srv.Requests() {
+					if request.Method == http.MethodGet && request.Path == "/v1/resources/"+srv.Key.CRID {
+						t.Fatal("unambiguous client failure triggered a resource readback")
+					}
+				}
+			}
+		})
+	}
+}
