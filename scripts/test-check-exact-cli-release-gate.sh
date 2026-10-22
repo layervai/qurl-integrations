@@ -185,4 +185,13 @@ for malformed in 0 01 -1 1.0 900719925474099300000; do
     exit 1
   }
 done
+# The one-release build deferral must reject other candidates and actors before API access.
+for actor in justin-layerv another-user; do
+  output=""; status=0
+  output=$(PATH="$fixture:$PATH" SCENARIO=success SOURCE_SHA="$sha" \
+    GH_TOKEN=test GITHUB_REPOSITORY=layervai/qurl-integrations GITHUB_ACTOR="$actor" \
+    QURL_CLI_360_BUILD_WITH_DEFERRED_RESTART=true \
+    "$root/scripts/check-exact-cli-release-gate.sh" "$sha" v1.2.3 700 2 4 2>&1) || status=$?
+  [[ "$status" == 1 && "$output" == *"functional deferral is not authorized"* ]] || exit 1
+done
 echo "exact CLI release gate tests passed"

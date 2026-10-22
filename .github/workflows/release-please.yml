@@ -90,6 +90,11 @@ on:
         description: "Existing bare CLI release tag (e.g. v0.2.0) to build and attach assets for"
         required: true
         type: string
+      build_cli_360_with_deferred_restart:
+        description: "Owner-authorized v3.6.0 build only: retain failed restart proof and all security checks"
+        required: false
+        type: boolean
+        default: false
       source_sha:
         description: "Exact source SHA for an automated customer-journey handoff; omit for operator recovery"
         required: false
@@ -316,6 +321,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CLI_RUN_ID: ${{ inputs.cli_run_id }}
           CLI_RUN_ATTEMPT: ${{ inputs.cli_run_attempt }}
+          QURL_CLI_360_BUILD_WITH_DEFERRED_RESTART: ${{ inputs.build_cli_360_with_deferred_restart }}
         run: |
           set -euo pipefail
           selection=$(scripts/check-exact-cli-release-gate.sh \
@@ -325,7 +331,7 @@ jobs:
             echo "run_id=$(jq -r .run_id <<<"$selection")"
             echo "run_attempt=$(jq -r .run_attempt <<<"$selection")"
           } >>"$GITHUB_OUTPUT"
-          jq -r '"Exact packaged customer journey passed: " + .journey_url' <<<"$selection"
+          jq -r 'if .functional_deferred then "Owner deferred the failed v3.6.0 restart proof; signed build only: " + .journey_url else "Exact packaged customer journey passed: " + .journey_url end' <<<"$selection"
 
   release-cli:
     needs: cli-release-gate
