@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,6 +22,7 @@ import (
 
 	connectorservice "github.com/layervai/qurl-connector/pkg/service"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
@@ -52,7 +54,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 	if !filepath.IsAbs(binary) {
 		t.Fatal("production proof requires the exact unpacked release binary")
 	}
-	key := sandboxSecret(t, "QURL_API_KEY")
+	key := productionCredential(t)
 	owner := os.Getenv("QURL_PRODUCTION_OWNER_ID")
 	if key == "" || owner == "" {
 		t.Fatal("production proof requires disposable credentials and their expected owner")
@@ -169,6 +171,20 @@ func TestProductionReleaseJourney(t *testing.T) {
 			productionGet(t, binary, env, published.CRID, marker, true)
 		})
 	}
+}
+
+// The Windows sandbox helper deliberately has no file reader. Reuse the
+// customer reader so production proof retains its Windows ACL and link fences.
+func productionCredential(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return sandboxSecret(t, "QURL_API_KEY")
+	}
+	key, source, err := auth.Resolve(os.LookupEnv)
+	if err != nil || source != auth.SourceEnvironmentFile {
+		t.Fatal("production proof requires one protected Windows API-key file")
+	}
+	return key
 }
 
 func productionDecode(t *testing.T, raw []byte, target any) {
