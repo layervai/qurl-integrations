@@ -2078,7 +2078,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	if needs := parseWorkflowNeeds(t, "cli-release-gate", gate.Needs); !slices.Equal(needs, []string{releasePleaseJobID, "signal-cli-release"}) {
 		t.Errorf("cli-release-gate needs = %v, want release-please and signal-cli-release", needs)
 	}
-	wantGateIf := "always() && !cancelled() && github.event_name == 'workflow_dispatch' && !inputs.promote_built_cli_360_image" //nolint:misspell // GitHub expression function spelling.
+	wantGateIf := "always() && !cancelled() && github.event_name == 'workflow_dispatch'" //nolint:misspell // GitHub expression function spelling.
 	if got := strings.Join(strings.Fields(gate.If), " "); got != wantGateIf {
 		t.Errorf("cli-release-gate.if = %q, want %q", got, wantGateIf)
 	}
