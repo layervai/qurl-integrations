@@ -1,5 +1,31 @@
 # Changelog
 
+## [3.6.0](https://github.com/layervai/qurl-integrations/compare/v3.5.0...v3.6.0) (2026-10-22)
+
+
+### Features
+
+* **cli:** add commands for per-CRID preview metadata ([#1587](https://github.com/layervai/qurl-integrations/issues/1587)) ([0c07054](https://github.com/layervai/qurl-integrations/commit/0c07054af9653f5f992490c72941f1c05534bf04))
+* **cli:** publish and manage private consumer access ([#1586](https://github.com/layervai/qurl-integrations/issues/1586)) ([d7373c3](https://github.com/layervai/qurl-integrations/commit/d7373c3ffcba91d610bf64f2a435dcec50cf2020))
+* **cli:** say when a saved copy of the qURL agent skill is too old ([#1582](https://github.com/layervai/qurl-integrations/issues/1582)) ([3e79d0e](https://github.com/layervai/qurl-integrations/commit/3e79d0edece0b215dc403ff04ca52aae5edcc874))
+* **cli:** set a public name for each CRID ([#1598](https://github.com/layervai/qurl-integrations/issues/1598)) ([ffeb4a3](https://github.com/layervai/qurl-integrations/commit/ffeb4a380fa433370cec2e3284dafd27d92b6e65))
+* **cli:** support private Windows file origins ([#1532](https://github.com/layervai/qurl-integrations/issues/1532)) ([eb5c529](https://github.com/layervai/qurl-integrations/commit/eb5c529d26cb1b768bc6d21698ac3cca7af4680a))
+
+
+### Bug Fixes
+
+* **ci:** pin anonymous CRID journey settings ([#1614](https://github.com/layervai/qurl-integrations/issues/1614)) ([2280e94](https://github.com/layervai/qurl-integrations/commit/2280e94073769a19e2de7533a6c0b4542deaaa57))
+* **ci:** prove exact CLI candidates against production before release ([#1607](https://github.com/layervai/qurl-integrations/issues/1607)) ([edd3e76](https://github.com/layervai/qurl-integrations/commit/edd3e760e3ce13b520539dfc1c9dc4c77b6b8feb))
+* **cli:** clean up local routes after confirmed committed revocation ([#1517](https://github.com/layervai/qurl-integrations/issues/1517)) ([c53ae04](https://github.com/layervai/qurl-integrations/commit/c53ae04dd520a274b5e7c5f2f52a1353599846ba))
+* **cli:** explain service-reported publisher verification ([#1608](https://github.com/layervai/qurl-integrations/issues/1608)) ([4cce8b7](https://github.com/layervai/qurl-integrations/commit/4cce8b704e716f4a336429d068a21cc134d250e6))
+* **cli:** explain verified publisher status in help ([#1593](https://github.com/layervai/qurl-integrations/issues/1593)) ([6d1c367](https://github.com/layervai/qurl-integrations/commit/6d1c367effb82bc6506c36c567b4f990acec139f))
+* **cli:** get reads the device key only when the link request sends it ([#1583](https://github.com/layervai/qurl-integrations/issues/1583)) ([af0b4db](https://github.com/layervai/qurl-integrations/commit/af0b4db14cdd91ec85237b84cb457cf4fe87c85f))
+* **cli:** keep the share daemon running after a package upgrade ([#1591](https://github.com/layervai/qurl-integrations/issues/1591)) ([31e5159](https://github.com/layervai/qurl-integrations/commit/31e5159d36635b11e33aff37ade089193a1fef21))
+* **cli:** log a Windows daemon job that cannot be parsed ([#1592](https://github.com/layervai/qurl-integrations/issues/1592)) ([57e8f53](https://github.com/layervai/qurl-integrations/commit/57e8f53b12f1ff6c0ad6fd31b0359d438b29018c))
+* **cli:** qurl access exits with the code its failure means ([#1603](https://github.com/layervai/qurl-integrations/issues/1603)) ([7ab4382](https://github.com/layervai/qurl-integrations/commit/7ab43825ee4714ce563f2fb6a077d2fce94bf1fe))
+* **cli:** use the released production CRID configuration ([#1615](https://github.com/layervai/qurl-integrations/issues/1615)) ([cf627d9](https://github.com/layervai/qurl-integrations/commit/cf627d906916cd78e025ea333dbcc29447bfaaf4))
+* patch Go security and align sandbox fixtures ([#1611](https://github.com/layervai/qurl-integrations/issues/1611)) ([05ea8df](https://github.com/layervai/qurl-integrations/commit/05ea8df07d58362bdecf5260ca5981f4936e4622))
+
 ## [3.5.0](https://github.com/layervai/qurl-integrations/compare/v3.4.1...v3.5.0) (2026-10-09)
 
 
