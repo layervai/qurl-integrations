@@ -12,8 +12,16 @@ import (
 func TestProductionProofWindowsCredentialFile(t *testing.T) {
 	key := "lv_test_" + "012345678901234567890123456789012345678901234"
 	path := filepath.Join(t.TempDir(), "api-key-env")
-	if err := os.WriteFile(path, []byte(key+"\n"), 0o600); err != nil {
-		t.Fatal("write fixture key")
+	// Match the actual mint step: .NET file creation can choose a different
+	// default owner from Go's private-file creation on an elevated runner.
+	create := exec.Command("pwsh", "-NoProfile", "-NonInteractive", "-Command",
+		"[IO.File]::WriteAllText($env:PROOF_FIXTURE_KEY_FILE, $env:PROOF_FIXTURE_KEY + \"`n\")")
+	create.Env = append(os.Environ(), "PROOF_FIXTURE_KEY_FILE="+path, "PROOF_FIXTURE_KEY="+key)
+	if err := create.Run(); err != nil {
+		t.Fatal("write native fixture key")
+	}
+	if err := exec.Command("icacls.exe", path, "/setowner", os.Getenv("USERNAME")).Run(); err != nil {
+		t.Fatal("set fixture key owner")
 	}
 	command := exec.Command("icacls.exe", path, "/inheritance:r", "/grant:r",
 		os.Getenv("USERNAME")+":F", "*S-1-5-18:F", "*S-1-5-32-544:F")

@@ -185,7 +185,7 @@ func TestWindowsProductionProofUsesProtectedCustomerReader(t *testing.T) {
 		t.Fatal("Windows reader must execute its native ACL regression")
 	}
 	mint := steps["Mint disposable Windows production credentials"]
-	for _, required := range []string{"icacls.exe $readerKey /inheritance:r /grant:r", "primary/api-key-env", "[IO.File]::WriteAllText($readerKey", " + \"`n\"", "QURL_API_KEY_FILE=$readerKey"} {
+	for _, required := range []string{"icacls.exe $readerKey /setowner $env:USERNAME", "could not set production API-key file owner", "icacls.exe $readerKey /inheritance:r /grant:r", "primary/api-key-env", "[IO.File]::WriteAllText($readerKey", " + \"`n\"", "QURL_API_KEY_FILE=$readerKey"} {
 		if !strings.Contains(mint.Run, required) {
 			t.Fatalf("Windows proof reader file lacks %s", required)
 		}
