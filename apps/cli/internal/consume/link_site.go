@@ -3,27 +3,30 @@ package consume
 import (
 	"net/url"
 	"strings"
+
+	"github.com/layervai/qurl-go/qurl"
 )
 
 // LinkSite returns the origin of the site where a person opens a resource in
 // a browser with only its CRID, for example an origin of the form
 // https://host, or the empty string when this install does not know it.
 //
-// The only place this install can learn it is the deployment settings file
-// QURL_DEPLOYMENT names: the origin its CRID link entry says issued links are
-// on. Nothing here invents a host. With no settings file, with a file that
-// cannot be read, with a file that names no such entry, and with an origin
-// that is not a bare HTTPS origin, the answer is "not known", and the caller
-// gives people the CRID instead. A wrong settings file is not an error here:
-// the commands that need the file to open a link report that themselves.
-//
-// TODO(upstream-contract): the SDK reads the link origin of its own shipped
-// deployment only inside a link request and has no accessor for it. When a
-// release ships a deployment that names one, this needs that accessor, or the
-// install will still not know its own link site.
+// An explicit settings file supplies its own origin. Otherwise the SDK supplies
+// the validated origin from its production deployment. Invalid or absent custom
+// settings return an empty string, so callers display only the CRID.
 func (o *AccessOpener) LinkSite() string {
 	d, configured, err := o.loadDeployment()
-	if err != nil || !configured || d.CRIDLink == nil {
+	if err != nil {
+		return ""
+	}
+	if !configured {
+		origin, err := qurl.CRIDLinkOrigin()
+		if err != nil {
+			return ""
+		}
+		return origin
+	}
+	if d.CRIDLink == nil {
 		return ""
 	}
 	origin := strings.TrimSpace(d.CRIDLink.LinkOrigin)
