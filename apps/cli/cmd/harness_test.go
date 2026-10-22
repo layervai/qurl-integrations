@@ -166,10 +166,8 @@ type runOpts struct {
 	// with a link request that gives no answer until its context ends, so
 	// the limit runs out without a real wait.
 	linkTimeoutBeforeShare time.Duration
-	// linkSite is the origin this install knows as its link site. Empty
-	// leaves the production wiring in place, which reads the injected
-	// environment only and so knows no site unless a test names a settings
-	// file there.
+	// linkSite is the injected link origin. Empty explicitly tests an install
+	// whose custom deployment names no link site.
 	linkSite string
 
 	// ctx, when non-nil, replaces context.Background() so a test can cancel a
@@ -378,9 +376,7 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			g.readDeviceKey = o.readDeviceKey
 		}
 		g.linkTimeoutBeforeShare = o.linkTimeoutBeforeShare
-		if o.linkSite != "" {
-			g.linkSite = func() string { return o.linkSite }
-		}
+		g.linkSite = func() string { return o.linkSite }
 		switch {
 		case o.sleeps != nil:
 			g.sleep = func(d time.Duration) { *o.sleeps = append(*o.sleeps, d) }

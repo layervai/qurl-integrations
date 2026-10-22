@@ -525,16 +525,14 @@ func TestRequestCRIDLinkAsDeviceIsBoundedAndReadsTheSettingsAsTheOtherRequest(t 
 		}
 	})
 
-	// Under the deployment every release ships, the request as a device is
-	// not made either. The context has ended, so a release that does name an
-	// endpoint could not send a request from this test.
+	// The production endpoint is offered, but the canceled context sends nothing.
 	t.Run("shipped deployment", func(t *testing.T) {
 		t.Setenv(qurl.EnvDeploymentPath, "")
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		link, err := (&AccessOpener{LookupEnv: envMap(nil)}).RequestCRIDLinkAsDevice(ctx, reads.read, resourceCRID)
-		if link != nil || !errors.Is(err, qurl.ErrCRIDLinkNotConfigured) || errors.Is(err, qurl.ErrCRIDLinkMisconfigured) {
-			t.Fatalf("RequestCRIDLinkAsDevice under the shipped deployment = %v, %v; want no link and the SDK's answer for a deployment that names no endpoint", link, err)
+		if link != nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("RequestCRIDLinkAsDevice under the shipped deployment = %v, %v; want canceled", link, err)
 		}
 	})
 }
