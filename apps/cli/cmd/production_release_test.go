@@ -21,6 +21,7 @@ import (
 	"time"
 
 	connectorservice "github.com/layervai/qurl-connector/pkg/service"
+	"github.com/layervai/qurl-go/qurl"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
@@ -149,6 +150,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 			if reused.CRID != published.CRID || reused.ResourceID != published.ResourceID || reused.FoundExisting == nil || !*reused.FoundExisting || reused.Private == nil || *reused.Private != test.private {
 				t.Fatal("repeat publication did not reuse the same resource and privacy")
 			}
+			oldRequest, oldSessionDeadline, oldSessionID := productionRetainSession(t, shared.QURL, marker)
 			for _, command := range []string{"stop", "start", "restart"} {
 				next := productionSharing(t, binary, env, command, published)
 				if command != "stop" && next <= epoch {
@@ -166,7 +168,29 @@ func TestProductionReleaseJourney(t *testing.T) {
 						t.Fatal("stopped production route wrote a download")
 					}
 				} else {
+					if !time.Now().Before(oldSessionDeadline) {
+						t.Fatal("original production session expired before the replacement assertion")
+					}
+					before := hits.Load()
+					if err := productionRetainedSessionFetch(oldRequest, marker, true, nil); err != nil {
+						t.Fatal(err)
+					}
+					if !time.Now().Before(oldSessionDeadline) {
+						t.Fatal("original production session expired during the replacement assertion")
+					}
+					if hits.Load() != before {
+						t.Fatal("replaced production session reached the backend")
+					}
 					productionGet(t, binary, env, published.CRID, marker, false)
+					if command == "start" {
+						// The restart assertion needs a grant that is live AFTER start;
+						// an already refused pre-stop grant cannot test restart.
+						priorSessionID := oldSessionID
+						oldRequest, oldSessionDeadline, oldSessionID = productionRetainSession(t, shared.QURL, marker)
+						if oldSessionID == priorSessionID {
+							t.Fatal("production start reused the replaced access session")
+						}
+					}
 				}
 			}
 			productionCLI(t, binary, env, "", "delete", published.CRID, "--yes")
@@ -361,4 +385,54 @@ func productionGet(t *testing.T, binary string, env map[string]string, crid, mar
 	if err != nil || string(content) != marker {
 		t.Fatal("production route did not return the exact local backend bytes")
 	}
+}
+
+// productionRetainedSessionFetch reuses an already authorized request. It has
+// no opener, resolver, cookie jar, or redirect path that can replace its grant.
+func productionRetainedSessionFetch(original *http.Request, marker string, denied bool, transport http.RoundTripper) error {
+	client := &http.Client{Transport: transport, Timeout: 20 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(original.Clone(original.Context()))
+	if err != nil {
+		return errors.New("retained production session request failed")
+	}
+	defer response.Body.Close()
+	if denied {
+		if response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusGone {
+			return errors.New("replaced production session did not return an access refusal")
+		}
+		return nil
+	}
+	if response.StatusCode != http.StatusOK {
+		return errors.New("original production session did not serve content")
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, int64(len(marker)+1)))
+	if err != nil || string(body) != marker {
+		return errors.New("original production session returned unexpected content")
+	}
+	return nil
+}
+
+// productionRetainSession opens once and proves the captured capability works.
+// Only the caller may explicitly capture a new generation; the negative fetch
+// helper cannot resolve, mint, or renew a session.
+func productionRetainSession(t *testing.T, link, marker string) (*http.Request, time.Time, uint64) {
+	t.Helper()
+	started := time.Now()
+	handle, err := qurl.EnterPortal(t.Context(), link)
+	if err != nil || handle == nil || handle.SessionID == 0 || handle.OpenSeconds == 0 {
+		t.Fatal("could not retain the original production access session")
+	}
+	deadline := started.Add(time.Duration(handle.OpenSeconds) * time.Second)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, handle.ResourceURL, nil)
+	if err != nil || handle.AuthorizeContentRequest(request) != nil {
+		t.Fatal("could not authorize the original production access session")
+	}
+	if err := productionRetainedSessionFetch(request, marker, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !time.Now().Before(deadline) {
+		t.Fatal("original production session expired during its positive control")
+	}
+	return request, deadline, handle.SessionID
 }
