@@ -61,7 +61,7 @@ export interface ViewViaQurlLinkOptions {
   /** Browser launch headless? Defaults to true; set `PLAYWRIGHT_HEADED=1`
    *  (or `HEADLESS=0`) in the env to watch it run locally for debugging. */
   headless?: boolean;
-  /** Require one visible top-level iframe with this exact, unmodified target. */
+  /** Require one visible iframe in the main document with this exact target in markup. */
   expectedIframeSrc?: string;
   ownership: { resource_id: string; qurl_id: string; expires_at: string };
   /** Wall-clock budget for navigation + knock + the tunnel-view response, in ms.
@@ -138,9 +138,17 @@ export async function viewViaQurlLink(
       throw new Error(`viewViaQurlLink: tunnel-view returned ${resp.status()} (expected 200).`);
     }
     if (opts.expectedIframeSrc !== undefined) {
+      // Portal bootstrap submits into the current page; the recipient view replaces the SPA.
       const iframe = page.locator('iframe');
-      await iframe.waitFor({ state: 'visible', timeout: Math.max(1, deadline - Date.now()) });
-      if (await iframe.getAttribute('src') !== opts.expectedIframeSrc) {
+      let actualSrc: string | null;
+      try {
+        await iframe.waitFor({ state: 'visible', timeout: Math.max(1, deadline - Date.now()) });
+        actualSrc = await iframe.getAttribute('src', { timeout: Math.max(1, deadline - Date.now()) });
+      } catch {
+        // Locator errors can include an untrusted src with a capability token.
+        throw new Error('viewViaQurlLink: no single visible iframe before the deadline');
+      }
+      if (actualSrc !== opts.expectedIframeSrc) {
         throw new Error('viewViaQurlLink: iframe target differs from the uploaded URL');
       }
     }
