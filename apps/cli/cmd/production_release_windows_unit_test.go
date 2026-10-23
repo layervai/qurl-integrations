@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	connectorservice "github.com/layervai/qurl-connector/pkg/service"
 	"github.com/layervai/qurl-go/qurl"
 	"golang.org/x/sys/windows"
 )
@@ -151,4 +153,56 @@ func TestProductionProofWindowsStateCleanupAfterHandleClose(t *testing.T) {
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatal("Windows proof state directory remains after cleanup")
 	}
+}
+
+// The runner's scratch ancestors are not durable background-executable authority.
+func productionExecutable(t *testing.T, binary string) string {
+	t.Helper()
+	payload, err := os.ReadFile(binary) //nolint:gosec // Exact archive-verified binary, selected by the trusted workflow.
+	if err != nil {
+		t.Fatal("read exact production executable")
+	}
+	staged := filepath.Join(productionStateDir(t), "qurl.exe")
+	createProtectedWindowsDaemonLogForTest(t, staged)
+	if err := os.WriteFile(staged, payload, 0o600); err != nil {
+		t.Fatal("write private production executable")
+	}
+	verify := func() {
+		t.Helper()
+		actual, err := os.ReadFile(staged) //nolint:gosec // Exact file created in this test's private directory.
+		if err != nil || !bytes.Equal(actual, payload) {
+			t.Fatal("private production executable differs from the verified archive")
+		}
+	}
+	verify()
+	t.Cleanup(verify)
+	return staged
+}
+
+func TestProductionProofWindowsExecutablePassesNativeJobFence(t *testing.T) {
+	binary := productionExecutable(t, os.Args[0])
+	label := fmt.Sprintf("ai.layerv.qurl.production-proof.%d", time.Now().UnixNano())
+	logs := productionStateDir(t)
+	manager := connectorservice.NewUserJobManager()
+	t.Cleanup(func() {
+		if err := manager.Remove(label); err != nil {
+			t.Error("remove owned Windows executable proof job")
+		}
+	})
+	job := connectorservice.UserJob{
+		Label: label, BinaryPath: binary,
+		Arguments:   []string{"-test.run=^TestProductionProofWindowsExecutableHelper$"},
+		StandardOut: filepath.Join(logs, "stdout.log"), StandardErr: filepath.Join(logs, "stderr.log"),
+	}
+	if err := manager.Ensure(job); err != nil {
+		t.Fatalf("private Windows executable job failed: %s", productionFailureClass([]byte(err.Error())))
+	}
+	status, err := manager.Status(label)
+	if err != nil || !status.Installed {
+		t.Fatal("private Windows executable proof job was not installed")
+	}
+}
+
+func TestProductionProofWindowsExecutableHelper(t *testing.T) {
+	t.Log("owned Windows executable helper completed")
 }
