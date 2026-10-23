@@ -1,6 +1,9 @@
 /**
  * File upload → revoke → revoked status E2E flow.
  *
+ * Also requires native type:url uploads to display the exact web-app iframe;
+ * these fixtures use the same tracked child/source cleanup.
+ *
  * Covers the revoke path for actual file resources (images/PDFs/etc.) — the
  * other revoke tests (smoke.test.ts, link-lifecycle.test.ts) only exercise
  * URL-based qURLs (`target_url=https://example.com/...`). This file fills
@@ -45,6 +48,7 @@
  */
 
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 
 import { trackedQurlResources } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';
@@ -81,6 +85,26 @@ const ONE_PIXEL_PNG = Uint8Array.from(
 );
 
 describe('File Revoke', () => {
+  // TODO(upstream-contract): infra verify-native-url-smoke-result.sh requires this exact test title.
+  test('type:url upload renders the exact web app through a native recipient view', async () => {
+    const target = `https://example.com/?release=${randomUUID()}`;
+    const upload = await qurl.uploadFile(env.UPLOAD_API_URL, {
+      bytes: Buffer.from(JSON.stringify({ type: 'url', content: target })),
+      filename: 'native-web-app.json', mime: 'application/json',
+    }, env.QURL_API_KEY);
+    tracked.track(upload.resource_id);
+    const minted = await qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(), oneTimeUse: true,
+    });
+    tracked.trackChild(minted.qurl_id);
+    const view = await viewViaQurlLink(minted.qurl_link, {
+      ownership: { resource_id: upload.resource_id, qurl_id: minted.qurl_id, expires_at: minted.expires_at },
+      expectedIframeSrc: target,
+    });
+    expect(view.status).toBe(200);
+    expect(mintIdFromTunnelViewUrl(view.url)).toMatch(/^[0-9a-f]{32}$/);
+  }, 90_000);
+
   test('upload file → view 200 → revoke → resource status revoked', async () => {
     const upload = await qurl.uploadFile(
       env.UPLOAD_API_URL,
