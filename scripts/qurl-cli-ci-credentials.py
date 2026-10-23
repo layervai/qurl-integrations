@@ -278,7 +278,7 @@ def qurl_json(
 def identity(endpoint: str, token: str) -> dict[str, Any]:
     status, response = qurl_json(endpoint, token, "GET", "/v1/me")
     if status != 200 or not isinstance(response.get("data"), dict):
-        raise CredentialError("qURL identity check failed")
+        raise CredentialError(f"qURL identity check failed (HTTP {status})")
     return response["data"]
 
 
