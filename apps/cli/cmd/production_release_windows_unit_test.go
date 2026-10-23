@@ -123,7 +123,7 @@ func TestProductionProofWindowsStateCleanupAfterHandleClose(t *testing.T) {
 		if err != nil {
 			t.Fatal("encode owned Windows proof path")
 		}
-		handle, err := windows.CreateFile(name, windows.READ_CONTROL|windows.SYNCHRONIZE,
+		handle, err := windows.CreateFile(name, windows.GENERIC_READ,
 			windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING,
 			windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 		if err != nil {
@@ -131,7 +131,7 @@ func TestProductionProofWindowsStateCleanupAfterHandleClose(t *testing.T) {
 		}
 		if err := os.Remove(dir); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 			_ = windows.CloseHandle(handle)
-			t.Fatal("owned Windows proof handle did not block removal")
+			t.Fatalf("owned Windows proof handle did not block removal (removed=%t)", err == nil)
 		}
 		started = true
 		go func() {
