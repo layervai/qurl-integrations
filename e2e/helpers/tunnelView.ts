@@ -61,6 +61,7 @@ export interface ViewViaQurlLinkOptions {
   /** Browser launch headless? Defaults to true; set `PLAYWRIGHT_HEADED=1`
    *  (or `HEADLESS=0`) in the env to watch it run locally for debugging. */
   headless?: boolean;
+  expectedIframeSrc?: string;
   ownership: { resource_id: string; qurl_id: string; expires_at: string };
   /** Wall-clock budget for navigation + knock + the tunnel-view response, in ms.
    *  Default 30_000. */
@@ -133,6 +134,13 @@ export async function viewViaQurlLink(
     }
     if (resp.status() !== 200) {
       throw new Error(`viewViaQurlLink: tunnel-view returned ${resp.status()} (expected 200).`);
+    }
+    if (opts.expectedIframeSrc !== undefined) {
+      const iframe = page.locator('iframe');
+      await iframe.waitFor({ state: 'visible', timeout: timeoutMs });
+      if (await iframe.getAttribute('src') !== opts.expectedIframeSrc) {
+        throw new Error('viewViaQurlLink: iframe target differs from the uploaded URL');
+      }
     }
     return { status: resp.status(), url: resp.url() };
   } finally {
