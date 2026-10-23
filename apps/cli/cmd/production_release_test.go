@@ -168,6 +168,8 @@ func TestProductionReleaseJourney(t *testing.T) {
 						t.Fatal("stopped production route wrote a download")
 					}
 				} else {
+					// Start must not revive the pre-stop grant. Restart must refuse
+					// the different live grant captured after start below.
 					if !time.Now().Before(oldSessionDeadline) {
 						t.Fatal("original production session expired before the replacement assertion")
 					}
@@ -387,41 +389,12 @@ func productionGet(t *testing.T, binary string, env map[string]string, crid, mar
 	}
 }
 
-// productionRetainedSessionFetch reuses an already authorized request. It has
-// no opener, resolver, cookie jar, or redirect path that can replace its grant.
-func productionRetainedSessionFetch(original *http.Request, marker string, denied bool, transport http.RoundTripper) (resultErr error) {
-	client := &http.Client{Transport: transport, Timeout: 20 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Do(original.Clone(original.Context()))
-	if err != nil {
-		return errors.New("retained production session request failed")
-	}
-	defer func() {
-		if err := response.Body.Close(); err != nil && resultErr == nil {
-			resultErr = errors.New("retained production session response could not be closed")
-		}
-	}()
-	if denied {
-		if response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusGone {
-			return errors.New("replaced production session did not return an access refusal")
-		}
-		return nil
-	}
-	if response.StatusCode != http.StatusOK {
-		return errors.New("original production session did not serve content")
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, int64(len(marker)+1)))
-	if err != nil || string(body) != marker {
-		return errors.New("original production session returned unexpected content")
-	}
-	return nil
-}
-
 // productionRetainSession opens once and proves the captured capability works.
 // Only the caller may explicitly capture a new generation; the negative fetch
 // helper cannot resolve, mint, or renew a session.
 func productionRetainSession(t *testing.T, link, marker string) (*http.Request, time.Time, uint64) {
 	t.Helper()
+	// OpenSeconds is ACK OpenTime; starting before the call is conservative.
 	started := time.Now()
 	handle, err := qurl.EnterPortal(t.Context(), link)
 	if err != nil || handle == nil || handle.SessionID == 0 || handle.OpenSeconds == 0 {

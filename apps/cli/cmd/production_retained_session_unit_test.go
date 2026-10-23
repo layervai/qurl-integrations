@@ -1,5 +1,3 @@
-//go:build clisandbox && cliproduction
-
 package main
 
 import (
@@ -98,5 +96,22 @@ func TestProductionRetainedSessionSanitizesCloseFailure(t *testing.T) {
 	err = productionRetainedSessionFetch(request, "marker", true, transport)
 	if err == nil || strings.Contains(err.Error(), "private") {
 		t.Fatal("response close failed silently or leaked its diagnostic")
+	}
+}
+
+func TestProductionRetainedSessionRejectsWrongOrOversizePositiveContent(t *testing.T) {
+	for _, body := range []string{"wrong!", "marker-extra"} {
+		t.Run(body, func(t *testing.T) {
+			request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/content", http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+			})
+			if err := productionRetainedSessionFetch(request, "marker", false, transport); err == nil {
+				t.Fatal("unexpected content passed original-session positive control")
+			}
+		})
 	}
 }
