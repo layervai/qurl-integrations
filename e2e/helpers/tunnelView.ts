@@ -61,6 +61,7 @@ export interface ViewViaQurlLinkOptions {
   /** Browser launch headless? Defaults to true; set `PLAYWRIGHT_HEADED=1`
    *  (or `HEADLESS=0`) in the env to watch it run locally for debugging. */
   headless?: boolean;
+  /** Require one visible top-level iframe with this exact, unmodified target. */
   expectedIframeSrc?: string;
   ownership: { resource_id: string; qurl_id: string; expires_at: string };
   /** Wall-clock budget for navigation + knock + the tunnel-view response, in ms.
@@ -115,6 +116,7 @@ export async function viewViaQurlLink(
     // predicate is URL-only — status is checked after, so a non-200 view throws
     // "returned N", not "no response".
     await recordAdmissionAttempt(qurlLink, opts.ownership, timeoutMs);
+    const deadline = Date.now() + timeoutMs;
     const tunnelResponse = page
       .waitForResponse((r) => TUNNEL_VIEW_RE.test(r.url()), { timeout: timeoutMs })
       .catch(() => undefined);
@@ -137,7 +139,7 @@ export async function viewViaQurlLink(
     }
     if (opts.expectedIframeSrc !== undefined) {
       const iframe = page.locator('iframe');
-      await iframe.waitFor({ state: 'visible', timeout: timeoutMs });
+      await iframe.waitFor({ state: 'visible', timeout: Math.max(1, deadline - Date.now()) });
       if (await iframe.getAttribute('src') !== opts.expectedIframeSrc) {
         throw new Error('viewViaQurlLink: iframe target differs from the uploaded URL');
       }

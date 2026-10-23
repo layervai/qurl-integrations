@@ -1,6 +1,9 @@
 /**
  * File upload → revoke → revoked status E2E flow.
  *
+ * Also requires native type:url uploads to display the exact web-app iframe;
+ * these fixtures use the same tracked child/source cleanup.
+ *
  * Covers the revoke path for actual file resources (images/PDFs/etc.) — the
  * other revoke tests (smoke.test.ts, link-lifecycle.test.ts) only exercise
  * URL-based qURLs (`target_url=https://example.com/...`). This file fills
