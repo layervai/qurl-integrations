@@ -285,6 +285,7 @@ func productionFailureClass(stderr []byte) string {
 		{"qURL could not safely save this Connector's device enrollment state on this machine, so it stopped.", "enrollment_persistence"},
 		{"The qURL platform isn't accepting new Connector enrollments here right now.", "enrollment_disabled"},
 		{"qurl: platform denied access (errCode=", "platform_denied"},
+		{"so qURL can't safely keep its files under it.", "unsafe_directory"},
 		// TODO(upstream-contract): keep these fixed classes aligned with qurl-go Windows state errors.
 		{"is not owned by the current Windows user", "state_owner"},
 		{"grants access to another Windows principal", "state_acl"},
