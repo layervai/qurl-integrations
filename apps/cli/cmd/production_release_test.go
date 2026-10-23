@@ -168,6 +168,9 @@ func TestProductionReleaseJourney(t *testing.T) {
 						t.Fatal("stopped production route wrote a download")
 					}
 				} else {
+					// Bracket refusal with real packaged-CLI content so route warm-up
+					// cannot look like old-session revocation.
+					productionGet(t, binary, env, published.CRID, marker, false)
 					// Start must not revive the pre-stop grant. Restart must refuse
 					// the different live grant captured after start below.
 					if !time.Now().Before(oldSessionDeadline) {
@@ -187,8 +190,17 @@ func TestProductionReleaseJourney(t *testing.T) {
 					if command == "start" {
 						// The restart assertion needs a grant that is live AFTER start;
 						// an already refused pre-stop grant cannot test restart.
+						// Tunnel share links are single-visitor by default. Request one
+						// new link instead of trying to consume the pre-stop link again.
+						var restartShared struct {
+							QURL string `json:"qurl"`
+						}
+						productionDecode(t, productionCLI(t, binary, env, "", "share", published.CRID, "-o", "json", "--session-duration", "5m"), &restartShared)
+						if restartShared.QURL == "" || restartShared.QURL == shared.QURL {
+							t.Fatal("production restart proof did not receive a fresh share link")
+						}
 						priorSessionID := oldSessionID
-						oldRequest, oldSessionDeadline, oldSessionID = productionRetainSession(t, shared.QURL, marker)
+						oldRequest, oldSessionDeadline, oldSessionID = productionRetainSession(t, restartShared.QURL, marker)
 						if oldSessionID == priorSessionID {
 							t.Fatal("production start reused the replaced access session")
 						}
