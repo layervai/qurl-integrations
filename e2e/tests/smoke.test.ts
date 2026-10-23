@@ -7,7 +7,7 @@
  * 5. Bot can read/write in test channel
  *
  * Minted target_urls carry the per-run nonce, and every resource / sent
- * Discord message is tracked for best-effort cleanup in afterAll — see
+ * Discord message is tracked for cleanup in afterAll — see
  * helpers/cleanup.ts.
  */
 
@@ -22,8 +22,11 @@ const sentMessages = trackedDiscordMessages(env);
 
 afterAll(async () => {
   // Independent backends (qURL API / Discord) with no shared rate-limit
-  // bucket — run the two best-effort sweeps concurrently.
-  await Promise.all([tracked.revokeAll(), sentMessages.deleteAll()]);
+  // bucket — revoke resources and best-effort delete messages concurrently.
+  const results = await Promise.allSettled([tracked.revokeAll(), sentMessages.deleteAll()]);
+  for (const result of results) {
+    if (result.status === 'rejected') throw result.reason;
+  }
 });
 
 describe('Smoke: Bot connectivity', () => {

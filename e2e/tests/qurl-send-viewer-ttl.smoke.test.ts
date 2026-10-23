@@ -50,14 +50,15 @@ describe('Smoke: /qurl send with viewer_ttl_seconds (Snapchat path)', () => {
     return f;
   }
 
-  // Best-effort cleanup: revoke the uploaded resources so each run doesn't
-  // leak two S3 resources (revokeAll warns-but-never-throws — see
-  // helpers/cleanup.ts), then remove the local fixtures (swallowed; a
-  // stale temp file is not a leaked live resource).
+  // Fail the hook on resource cleanup errors, but always remove local fixtures.
+  // A stale temp file is not a leaked live resource, so unlink remains best-effort.
   afterAll(async () => {
-    await tracked.revokeAll();
-    for (const f of tempFiles) {
-      try { fs.unlinkSync(f); } catch { /* best-effort */ }
+    try {
+      await tracked.revokeAll();
+    } finally {
+      for (const f of tempFiles) {
+        try { fs.unlinkSync(f); } catch { /* best-effort */ }
+      }
     }
   });
 
