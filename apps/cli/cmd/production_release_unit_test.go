@@ -86,6 +86,8 @@ func TestProductionProofFailureClassNeverReturnsSensitiveOutput(t *testing.T) {
 		{"The qURL platform isn't accepting new Connector enrollments here right now.", "enrollment_disabled"},
 		{"qurl: platform denied access (errCode=", "platform_denied"},
 		{"Access is denied.", "os_access_denied"},
+		{"agent state directory is not owned by the current Windows user", "state_owner"},
+		{"agent state directory grants unsafe access to another Windows principal", "state_acl"},
 		{"The system cannot find the file specified.", "os_file_missing"},
 		{"context deadline exceeded", "native_deadline"},
 		{"unrecognized private failure", "unclassified"},

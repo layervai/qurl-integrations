@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -29,6 +30,28 @@ import (
 )
 
 const productionProofEndpoint = "https://api.layerv.ai"
+
+func productionStateDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		// An elevated runner can give temporary directories an Administrators owner.
+		current, err := user.Current()
+		if err != nil || current.Username == "" {
+			t.Fatal("Windows proof requires its current user")
+		}
+		// #nosec G204 -- fixed executable, test-owned TempDir, and current runner identity; no shell.
+		if err := exec.CommandContext(t.Context(), "icacls.exe", dir, "/setowner", current.Username).Run(); err != nil {
+			t.Fatal("set Windows proof state directory owner")
+		}
+		// #nosec G204 -- fixed ACL arguments protect only the test-owned directory; no shell.
+		if err := exec.CommandContext(t.Context(), "icacls.exe", dir, "/inheritance:r", "/grant:r",
+			current.Username+":(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F").Run(); err != nil {
+			t.Fatal("protect Windows proof state directory ACL")
+		}
+	}
+	return dir
+}
 
 type productionPublishDoc struct {
 	CRID          string `json:"crid"`
@@ -64,7 +87,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stateDir, err := filepath.EvalSymlinks(t.TempDir())
+	stateDir, err := filepath.EvalSymlinks(productionStateDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +151,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 			}
 			productionCLI(t, binary, env, "", "list", "-o", "json")
 			productionGet(t, binary, env, published.CRID, marker, false)
-			consumer := map[string]string{"QURL_ENDPOINT": productionProofEndpoint, connectorstate.EnvStateDirPrimary: t.TempDir(), "LAYERV_KEY_PROVIDER": "file"}
+			consumer := map[string]string{"QURL_ENDPOINT": productionProofEndpoint, connectorstate.EnvStateDirPrimary: productionStateDir(t), "LAYERV_KEY_PROVIDER": "file"}
 			var shared struct {
 				QURL string `json:"qurl"`
 			}
@@ -286,6 +309,8 @@ func productionFailureClass(stderr []byte) string {
 		{"The qURL platform isn't accepting new Connector enrollments here right now.", "enrollment_disabled"},
 		{"qurl: platform denied access (errCode=", "platform_denied"},
 		{"Access is denied.", "os_access_denied"},
+		{"is not owned by the current Windows user", "state_owner"},
+		{"grants unsafe access to another Windows principal", "state_acl"},
 		{"The system cannot find the file specified.", "os_file_missing"},
 		{"context deadline exceeded", "native_deadline"},
 	} {

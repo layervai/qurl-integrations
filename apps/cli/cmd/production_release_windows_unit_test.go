@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/layervai/qurl-go/qurl"
 )
 
 func TestProductionProofWindowsCredentialFile(t *testing.T) {
@@ -33,4 +35,24 @@ func TestProductionProofWindowsCredentialFile(t *testing.T) {
 	if productionCredential(t) != key {
 		t.Fatal("production harness did not read its protected Windows key")
 	}
+	t.Run("native state directory", func(t *testing.T) {
+		store, err := qurl.OpenFileAgentState(filepath.Join(t.TempDir(), "agent-state.json"))
+		if err != nil {
+			t.Logf("unprepared Windows state directory class: %s", productionFailureClass([]byte(err.Error())))
+		} else if err := store.Close(); err != nil {
+			t.Fatal("close unprepared Windows state probe")
+		}
+		store, err = qurl.OpenFileAgentState(filepath.Join(productionStateDir(t), "agent-state.json"))
+		if err != nil {
+			t.Fatalf("prepared Windows state directory rejected: %s", productionFailureClass([]byte(err.Error())))
+		}
+		defer func() {
+			if err := store.Close(); err != nil {
+				t.Error("close prepared Windows state probe")
+			}
+		}()
+		if err := store.ValidateContinuity(); err != nil {
+			t.Fatal("prepared Windows state directory failed SDK continuity validation")
+		}
+	})
 }
