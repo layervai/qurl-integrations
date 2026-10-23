@@ -15,11 +15,11 @@ type retainedSessionRoundTrip func(*http.Request) (*http.Response, error)
 func (f retainedSessionRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestProductionRetainedSessionUsesOriginalCapability(t *testing.T) {
-	request, err := http.NewRequest(http.MethodGet, "https://fixture.invalid/content", nil)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/content", http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability"})
+	request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	calls := 0
 	transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
 		calls++
@@ -51,7 +51,7 @@ func TestProductionRetainedSessionUsesOriginalCapability(t *testing.T) {
 func TestProductionRetainedSessionRejectsRedirectAndSuccessfulContent(t *testing.T) {
 	for _, status := range []int{http.StatusFound, http.StatusOK, http.StatusInternalServerError} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
-			request, err := http.NewRequest(http.MethodGet, "https://fixture.invalid/content", nil)
+			request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/content", http.NoBody)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -72,7 +72,7 @@ func TestProductionRetainedSessionRejectsRedirectAndSuccessfulContent(t *testing
 }
 
 func TestProductionRetainedSessionSanitizesTransportFailure(t *testing.T) {
-	request, err := http.NewRequest(http.MethodGet, "https://fixture.invalid/private-token", nil)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/private-token", http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,5 +80,23 @@ func TestProductionRetainedSessionSanitizesTransportFailure(t *testing.T) {
 	err = productionRetainedSessionFetch(request, "marker", true, transport)
 	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private-token") {
 		t.Fatal("transport diagnostic leaked")
+	}
+}
+
+type retainedSessionCloseError struct{ io.Reader }
+
+func (retainedSessionCloseError) Close() error { return errors.New("private close diagnostic") }
+
+func TestProductionRetainedSessionSanitizesCloseFailure(t *testing.T) {
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/content", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Body: retainedSessionCloseError{strings.NewReader("private response")}, Request: r}, nil
+	})
+	err = productionRetainedSessionFetch(request, "marker", true, transport)
+	if err == nil || strings.Contains(err.Error(), "private") {
+		t.Fatal("response close failed silently or leaked its diagnostic")
 	}
 }

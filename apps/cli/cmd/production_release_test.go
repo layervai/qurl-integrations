@@ -389,14 +389,18 @@ func productionGet(t *testing.T, binary string, env map[string]string, crid, mar
 
 // productionRetainedSessionFetch reuses an already authorized request. It has
 // no opener, resolver, cookie jar, or redirect path that can replace its grant.
-func productionRetainedSessionFetch(original *http.Request, marker string, denied bool, transport http.RoundTripper) error {
+func productionRetainedSessionFetch(original *http.Request, marker string, denied bool, transport http.RoundTripper) (resultErr error) {
 	client := &http.Client{Transport: transport, Timeout: 20 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(original.Clone(original.Context()))
 	if err != nil {
 		return errors.New("retained production session request failed")
 	}
-	defer response.Body.Close()
+	defer func() {
+		if err := response.Body.Close(); err != nil && resultErr == nil {
+			resultErr = errors.New("retained production session response could not be closed")
+		}
+	}()
 	if denied {
 		if response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusGone {
 			return errors.New("replaced production session did not return an access refusal")
@@ -424,7 +428,7 @@ func productionRetainSession(t *testing.T, link, marker string) (*http.Request, 
 		t.Fatal("could not retain the original production access session")
 	}
 	deadline := started.Add(time.Duration(handle.OpenSeconds) * time.Second)
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, handle.ResourceURL, nil)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, handle.ResourceURL, http.NoBody)
 	if err != nil || handle.AuthorizeContentRequest(request) != nil {
 		t.Fatal("could not authorize the original production access session")
 	}
