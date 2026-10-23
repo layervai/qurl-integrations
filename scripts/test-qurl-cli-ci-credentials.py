@@ -656,6 +656,24 @@ def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_ru
         assert fake.resource_inventory_requests == 1
 
 
+def test_identity_failure_reports_only_http_status() -> None:
+    secret_canary = "private-response-token-owner-url"
+    with mock.patch.object(
+        credentials,
+        "request",
+        return_value=(401, json.dumps({"error": secret_canary}).encode()),
+    ) as request:
+        try:
+            credentials.identity("https://example.com", "private-token")
+        except credentials.CredentialError as exc:
+            assert str(exc) == "qURL identity check failed (HTTP 401)"
+            assert secret_canary not in str(exc)
+            assert "private-token" not in str(exc)
+        else:
+            raise AssertionError("failed identity response was accepted")
+        assert request.call_count == 1
+
+
 def test_pair_rejects_invalid_input_before_authentication() -> None:
     fake = FakeAPI()
     with (
@@ -1996,6 +2014,7 @@ def main() -> None:
     test_scheduled_soak_workflow_contract()
     test_pair_and_batch_each_validate_one_automation_key()
     test_batch_rejects_invalid_input_before_authentication_and_attempts_every_run()
+    test_identity_failure_reports_only_http_status()
     test_pair_rejects_invalid_input_before_authentication()
     test_pair_failure_revokes_both_exact_keys_with_the_same_token()
     test_pair_first_create_failure_never_mints_a_recovery_key()
