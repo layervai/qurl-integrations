@@ -64,7 +64,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stateDir, err := filepath.EvalSymlinks(t.TempDir())
+	stateDir, err := filepath.EvalSymlinks(productionStateDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 			}
 			productionCLI(t, binary, env, "", "list", "-o", "json")
 			productionGet(t, binary, env, published.CRID, marker, false)
-			consumer := map[string]string{"QURL_ENDPOINT": productionProofEndpoint, connectorstate.EnvStateDirPrimary: t.TempDir(), "LAYERV_KEY_PROVIDER": "file"}
+			consumer := map[string]string{"QURL_ENDPOINT": productionProofEndpoint, connectorstate.EnvStateDirPrimary: productionStateDir(t), "LAYERV_KEY_PROVIDER": "file"}
 			var shared struct {
 				QURL string `json:"qurl"`
 			}
@@ -286,6 +286,12 @@ func productionFailureClass(stderr []byte) string {
 		{"The qURL platform isn't accepting new Connector enrollments here right now.", "enrollment_disabled"},
 		{"qurl: platform denied access (errCode=", "platform_denied"},
 		{"Access is denied.", "os_access_denied"},
+		{"is not owned by the current Windows user", "state_owner"},
+		{"grants access to another Windows principal", "state_acl"},
+		{"grants delete or ACL control to an untrusted Windows principal", "state_ancestor_control"},
+		{"is not owned by a trusted Windows principal", "state_ancestor_owner"},
+		{"ACL must be protected from inheritance", "state_acl_inheritance"},
+		{"has an inherited or inherit-only ACE", "state_acl_flags"},
 		{"The system cannot find the file specified.", "os_file_missing"},
 		{"context deadline exceeded", "native_deadline"},
 	} {
