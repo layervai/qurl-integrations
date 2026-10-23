@@ -3,12 +3,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/layervai/qurl-go/qurl"
+	"golang.org/x/sys/windows"
 )
 
 func TestProductionProofWindowsCredentialFile(t *testing.T) {
@@ -55,4 +57,46 @@ func TestProductionProofWindowsCredentialFile(t *testing.T) {
 			t.Fatal("prepared Windows state directory failed SDK continuity validation")
 		}
 	})
+}
+
+func productionStateDir(t *testing.T) string {
+	t.Helper()
+	// Hosted-runner scratch volumes can grant unsafe ancestor control.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal("find Windows proof user home")
+	}
+	dir, err := os.MkdirTemp(home, "qurl-production-proof-")
+	if err != nil {
+		t.Fatal("create Windows proof state directory")
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error("remove owned Windows proof state directory")
+		}
+	})
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || current == nil || current.User.Sid == nil {
+		t.Fatal("read Windows proof current user SID")
+	}
+	sid := current.User.Sid.String()
+	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf(
+		"O:%sG:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)", sid, sid, sid))
+	if err != nil {
+		t.Fatal("build protected Windows proof ACL")
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal("read protected Windows proof DACL")
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		t.Fatal("read protected Windows proof owner")
+	}
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner, nil, dacl, nil); err != nil {
+		t.Fatal("protect owned Windows proof state directory")
+	}
+	return dir
 }

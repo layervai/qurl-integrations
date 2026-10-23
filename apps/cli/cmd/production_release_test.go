@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -30,42 +29,6 @@ import (
 )
 
 const productionProofEndpoint = "https://api.layerv.ai"
-
-func productionStateDir(t *testing.T) string {
-	t.Helper()
-	if runtime.GOOS != "windows" {
-		return t.TempDir()
-	}
-	// Hosted-runner scratch volumes can grant unsafe ancestor control.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal("find Windows proof user home")
-	}
-	dir, err := os.MkdirTemp(home, "qurl-production-proof-")
-	if err != nil {
-		t.Fatal("create Windows proof state directory")
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Error("remove owned Windows proof state directory")
-		}
-	})
-	// An elevated runner can give temporary directories an Administrators owner.
-	current, err := user.Current()
-	if err != nil || current.Username == "" {
-		t.Fatal("Windows proof requires its current user")
-	}
-	// #nosec G204 -- fixed executable, test-owned directory and current runner identity; no shell.
-	if err := exec.CommandContext(t.Context(), "icacls.exe", dir, "/setowner", current.Username).Run(); err != nil {
-		t.Fatal("set Windows proof state directory owner")
-	}
-	// #nosec G204 -- fixed ACL arguments protect only the test-owned directory; no shell.
-	if err := exec.CommandContext(t.Context(), "icacls.exe", dir, "/inheritance:r", "/grant:r",
-		current.Username+":F", "*S-1-5-18:F", "*S-1-5-32-544:F").Run(); err != nil {
-		t.Fatal("protect Windows proof state directory ACL")
-	}
-	return dir
-}
 
 type productionPublishDoc struct {
 	CRID          string `json:"crid"`
