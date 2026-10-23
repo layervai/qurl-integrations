@@ -73,7 +73,7 @@ func productionStateDir(t *testing.T) string {
 		t.Fatal("create Windows proof state directory")
 	}
 	t.Cleanup(func() {
-		// Match testing.TempDir's bounded retry for closing Windows handles.
+		// Preserve testing.TempDir's retry budget and Windows error set.
 		deadline := time.Now().Add(2 * time.Second)
 		for {
 			err := os.RemoveAll(dir)
@@ -134,6 +134,9 @@ func TestProductionProofWindowsStateCleanupAfterHandleClose(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 			released <- windows.CloseHandle(handle)
 		}()
+		if err := os.Remove(dir); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			t.Fatal("owned Windows proof handle did not block removal")
+		}
 	})
 	if !started {
 		t.Fatal("Windows proof cleanup fixture did not start")
