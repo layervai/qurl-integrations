@@ -33,22 +33,36 @@ const productionProofEndpoint = "https://api.layerv.ai"
 
 func productionStateDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	if runtime.GOOS == "windows" {
-		// An elevated runner can give temporary directories an Administrators owner.
-		current, err := user.Current()
-		if err != nil || current.Username == "" {
-			t.Fatal("Windows proof requires its current user")
+	if runtime.GOOS != "windows" {
+		return t.TempDir()
+	}
+	// Hosted-runner scratch volumes can grant unsafe ancestor control.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal("find Windows proof user home")
+	}
+	dir, err := os.MkdirTemp(home, "qurl-production-proof-")
+	if err != nil {
+		t.Fatal("create Windows proof state directory")
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error("remove owned Windows proof state directory")
 		}
-		// #nosec G204 -- fixed executable, test-owned TempDir, and current runner identity; no shell.
-		if err := exec.CommandContext(t.Context(), "icacls.exe", dir, "/setowner", current.Username).Run(); err != nil {
-			t.Fatal("set Windows proof state directory owner")
-		}
-		// #nosec G204 -- fixed ACL arguments protect only the test-owned directory; no shell.
-		if err := exec.CommandContext(t.Context(), "icacls.exe", dir, "/inheritance:r", "/grant:r",
-			current.Username+":(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F").Run(); err != nil {
-			t.Fatal("protect Windows proof state directory ACL")
-		}
+	})
+	// An elevated runner can give temporary directories an Administrators owner.
+	current, err := user.Current()
+	if err != nil || current.Username == "" {
+		t.Fatal("Windows proof requires its current user")
+	}
+	// #nosec G204 -- fixed executable, test-owned directory and current runner identity; no shell.
+	if err := exec.CommandContext(t.Context(), "icacls.exe", dir, "/setowner", current.Username).Run(); err != nil {
+		t.Fatal("set Windows proof state directory owner")
+	}
+	// #nosec G204 -- fixed ACL arguments protect only the test-owned directory; no shell.
+	if err := exec.CommandContext(t.Context(), "icacls.exe", dir, "/inheritance:r", "/grant:r",
+		current.Username+":F", "*S-1-5-18:F", "*S-1-5-32-544:F").Run(); err != nil {
+		t.Fatal("protect Windows proof state directory ACL")
 	}
 	return dir
 }
@@ -310,7 +324,11 @@ func productionFailureClass(stderr []byte) string {
 		{"qurl: platform denied access (errCode=", "platform_denied"},
 		{"Access is denied.", "os_access_denied"},
 		{"is not owned by the current Windows user", "state_owner"},
-		{"grants unsafe access to another Windows principal", "state_acl"},
+		{"grants access to another Windows principal", "state_acl"},
+		{"grants delete or ACL control to an untrusted Windows principal", "state_ancestor_control"},
+		{"is not owned by a trusted Windows principal", "state_ancestor_owner"},
+		{"ACL must be protected from inheritance", "state_acl_inheritance"},
+		{"has an inherited or inherit-only ACE", "state_acl_flags"},
 		{"The system cannot find the file specified.", "os_file_missing"},
 		{"context deadline exceeded", "native_deadline"},
 	} {
