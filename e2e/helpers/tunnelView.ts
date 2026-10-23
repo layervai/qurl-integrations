@@ -61,10 +61,10 @@ export interface ViewViaQurlLinkOptions {
   /** Browser launch headless? Defaults to true; set `PLAYWRIGHT_HEADED=1`
    *  (or `HEADLESS=0`) in the env to watch it run locally for debugging. */
   headless?: boolean;
-  /** Require one visible iframe in the main document with this exact target in markup. */
+  /** Require the sole iframe in the main document to be visible with this exact target in markup. */
   expectedIframeSrc?: string;
   ownership: { resource_id: string; qurl_id: string; expires_at: string };
-  /** Wall-clock budget for navigation + knock + the tunnel-view response, in ms.
+  /** Wall-clock budget for navigation + knock + response + optional iframe check, in ms.
    *  Default 30_000. */
   timeoutMs?: number;
 }
@@ -138,10 +138,14 @@ export async function viewViaQurlLink(
       throw new Error(`viewViaQurlLink: tunnel-view returned ${resp.status()} (expected 200).`);
     }
     if (opts.expectedIframeSrc !== undefined) {
-      // Portal bootstrap submits into the current page; the recipient view replaces the SPA.
+      // TODO(upstream-contract): NHP portal bootstrap replaces the SPA with the native viewer.
       const iframe = page.locator('iframe');
       let actualSrc: string | null;
       try {
+        if (resp.frame() !== page.mainFrame() || !resp.request().isNavigationRequest()) {
+          throw new Error('recipient view is not a main-document navigation');
+        }
+        await page.waitForURL(TUNNEL_VIEW_RE, { waitUntil: 'domcontentloaded', timeout: Math.max(1, deadline - Date.now()) });
         await iframe.waitFor({ state: 'visible', timeout: Math.max(1, deadline - Date.now()) });
         actualSrc = await iframe.getAttribute('src', { timeout: Math.max(1, deadline - Date.now()) });
       } catch {

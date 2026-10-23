@@ -85,6 +85,7 @@ const ONE_PIXEL_PNG = Uint8Array.from(
 );
 
 describe('File Revoke', () => {
+  // TODO(upstream-contract): infra verify-native-url-smoke-result.sh requires this exact test title.
   test('type:url upload renders the exact web app through a native recipient view', async () => {
     const target = `https://example.com/?release=${randomUUID()}`;
     const upload = await qurl.uploadFile(env.UPLOAD_API_URL, {
