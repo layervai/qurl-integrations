@@ -99,6 +99,8 @@ func TestProductionProofFailureClassNeverReturnsSensitiveOutput(t *testing.T) {
 		{"Windows user job", "windows_job"},
 		{"local share registry", "local_registry"},
 		{"share daemon", "share_daemon"},
+		{"start share daemon: agent state directory is not owned by the current Windows user", "state_owner"},
+		{"local share registry: agent state directory has an inherited or inherit-only ACE", "state_acl_flags"},
 		{"qURL invocation path", "invocation_path"},
 		{"The process cannot access the file because it is being used by another process.", "os_sharing_violation"},
 		{"agent state directory is not owned by the current Windows user", "state_owner"},

@@ -129,14 +129,15 @@ func TestProductionProofWindowsStateCleanupAfterHandleClose(t *testing.T) {
 		if err != nil {
 			t.Fatal("hold owned Windows proof directory")
 		}
+		if err := os.Remove(dir); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			_ = windows.CloseHandle(handle)
+			t.Fatal("owned Windows proof handle did not block removal")
+		}
 		started = true
 		go func() {
 			time.Sleep(100 * time.Millisecond)
 			released <- windows.CloseHandle(handle)
 		}()
-		if err := os.Remove(dir); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			t.Fatal("owned Windows proof handle did not block removal")
-		}
 	})
 	if !started {
 		t.Fatal("Windows proof cleanup fixture did not start")
@@ -145,7 +146,7 @@ func TestProductionProofWindowsStateCleanupAfterHandleClose(t *testing.T) {
 		t.Fatal("close owned Windows proof directory handle")
 	}
 	if !passed {
-		t.Fatal("Windows proof cleanup did not wait for its closing handle")
+		t.Fatal("Windows proof cleanup fixture failed")
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatal("Windows proof state directory remains after cleanup")

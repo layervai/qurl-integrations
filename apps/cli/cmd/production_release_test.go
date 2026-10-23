@@ -285,6 +285,13 @@ func productionFailureClass(stderr []byte) string {
 		{"qURL could not safely save this Connector's device enrollment state on this machine, so it stopped.", "enrollment_persistence"},
 		{"The qURL platform isn't accepting new Connector enrollments here right now.", "enrollment_disabled"},
 		{"qurl: platform denied access (errCode=", "platform_denied"},
+		// TODO(upstream-contract): keep these fixed classes aligned with qurl-go Windows state errors.
+		{"is not owned by the current Windows user", "state_owner"},
+		{"grants access to another Windows principal", "state_acl"},
+		{"grants delete or ACL control to an untrusted Windows principal", "state_ancestor_control"},
+		{"is not owned by a trusted Windows principal", "state_ancestor_owner"},
+		{"ACL must be protected from inheritance", "state_acl_inheritance"},
+		{"has an inherited or inherit-only ACE", "state_acl_flags"},
 		// TODO(upstream-contract): keep these fixed classes aligned with qurl-connector Windows user-job errors.
 		{"validate Windows user job executable", "windows_job_executable"},
 		{"create Windows user job directory", "windows_job_directory"},
@@ -297,13 +304,6 @@ func productionFailureClass(stderr []byte) string {
 		{"local share registry", "local_registry"},
 		{"share daemon", "share_daemon"},
 		{"qURL invocation path", "invocation_path"},
-		// TODO(upstream-contract): keep these fixed classes aligned with qurl-go Windows state errors.
-		{"is not owned by the current Windows user", "state_owner"},
-		{"grants access to another Windows principal", "state_acl"},
-		{"grants delete or ACL control to an untrusted Windows principal", "state_ancestor_control"},
-		{"is not owned by a trusted Windows principal", "state_ancestor_owner"},
-		{"ACL must be protected from inheritance", "state_acl_inheritance"},
-		{"has an inherited or inherit-only ACE", "state_acl_flags"},
 		{"Access is denied.", "os_access_denied"},
 		{"The process cannot access the file because it is being used by another process.", "os_sharing_violation"},
 		{"The system cannot find the file specified.", "os_file_missing"},
