@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -66,7 +67,7 @@ func TestProductionRetainedSessionRejectsRedirectAndSuccessfulContent(t *testing
 				return &http.Response{StatusCode: status, Header: http.Header{"Location": []string{"https://foreign.invalid/secret"}}, Body: io.NopCloser(strings.NewReader("sensitive-response")), Request: r}, nil
 			})
 			err = productionRetainedSessionFetch(request, "marker", true, transport)
-			if err == nil || strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "foreign") {
+			if err == nil || err.Error() != fmt.Sprintf("replaced production session did not return an access refusal (HTTP %d)", status) || strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "foreign") {
 				t.Fatal("wrong refusal classification or private diagnostic exposed")
 			}
 		})

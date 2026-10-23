@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -25,7 +26,7 @@ func productionRetainedSessionFetch(original *http.Request, marker string, denie
 	if denied {
 		// Accept only explicit refusal, including the protected route's concealed 404.
 		if response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusGone {
-			return errors.New("replaced production session did not return an access refusal")
+			return fmt.Errorf("replaced production session did not return an access refusal (HTTP %d)", response.StatusCode)
 		}
 		return nil
 	}
