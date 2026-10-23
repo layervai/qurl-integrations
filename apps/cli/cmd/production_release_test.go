@@ -55,6 +55,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 	if !filepath.IsAbs(binary) {
 		t.Fatal("production proof requires the exact unpacked release binary")
 	}
+	binary = productionExecutable(t, binary)
 	key := productionCredential(t)
 	owner := os.Getenv("QURL_PRODUCTION_OWNER_ID")
 	if key == "" || owner == "" {
