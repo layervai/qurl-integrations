@@ -286,6 +286,7 @@ func productionFailureClass(stderr []byte) string {
 		{"The qURL platform isn't accepting new Connector enrollments here right now.", "enrollment_disabled"},
 		{"qurl: platform denied access (errCode=", "platform_denied"},
 		{"Access is denied.", "os_access_denied"},
+		// TODO(upstream-contract): keep these fixed classes aligned with qurl-go Windows state errors.
 		{"is not owned by the current Windows user", "state_owner"},
 		{"grants access to another Windows principal", "state_acl"},
 		{"grants delete or ACL control to an untrusted Windows principal", "state_ancestor_control"},

@@ -3,11 +3,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-go/qurl"
 	"golang.org/x/sys/windows"
@@ -71,8 +73,18 @@ func productionStateDir(t *testing.T) string {
 		t.Fatal("create Windows proof state directory")
 	}
 	t.Cleanup(func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Error("remove owned Windows proof state directory")
+		// Match testing.TempDir's bounded retry for closing Windows handles.
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			err := os.RemoveAll(dir)
+			if err == nil {
+				return
+			}
+			if (!errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED)) || !time.Now().Before(deadline) {
+				t.Error("remove owned Windows proof state directory")
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 	})
 	current, err := windows.GetCurrentProcessToken().GetTokenUser()
@@ -99,4 +111,40 @@ func productionStateDir(t *testing.T) string {
 		t.Fatal("protect owned Windows proof state directory")
 	}
 	return dir
+}
+
+func TestProductionProofWindowsStateCleanupAfterHandleClose(t *testing.T) {
+	var dir string
+	started := false
+	released := make(chan error, 1)
+	passed := t.Run("transient open handle", func(t *testing.T) {
+		dir = productionStateDir(t)
+		name, err := windows.UTF16PtrFromString(dir)
+		if err != nil {
+			t.Fatal("encode owned Windows proof path")
+		}
+		handle, err := windows.CreateFile(name, windows.READ_CONTROL|windows.SYNCHRONIZE,
+			windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING,
+			windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+		if err != nil {
+			t.Fatal("hold owned Windows proof directory")
+		}
+		started = true
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			released <- windows.CloseHandle(handle)
+		}()
+	})
+	if !started {
+		t.Fatal("Windows proof cleanup fixture did not start")
+	}
+	if err := <-released; err != nil {
+		t.Fatal("close owned Windows proof directory handle")
+	}
+	if !passed {
+		t.Fatal("Windows proof cleanup did not wait for its closing handle")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("Windows proof state directory remains after cleanup")
+	}
 }
