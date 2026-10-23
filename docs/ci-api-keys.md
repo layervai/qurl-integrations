@@ -75,9 +75,9 @@ The production CLI proof retains one admitted browser request across stop/start
 and restart. It requires the same request to return the exact fixture content
 before its original deadline and to reach the fixture backend. A new CLI read
 and a changed serving epoch do not replace this browser capability. This follows
-the session-retention contract in qurl-service #1748.
+the API session-retention contract.
 
 This check does not prove that an old native Connector/controller session is
-refused after replacement. That separate NHP #4506 rollout task remains open.
+refused after replacement. That separate native-replacement rollout task remains open.
 HTTP 200 alone is not proof of content, and no production proof run is claimed
 by this source correction.
