@@ -14,45 +14,36 @@ type retainedSessionRoundTrip func(*http.Request) (*http.Response, error)
 func (f retainedSessionRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestProductionRetainedSessionUsesOriginalCapability(t *testing.T) {
-	for _, refusal := range []int{http.StatusForbidden, http.StatusNotFound, http.StatusGone} {
-		t.Run(http.StatusText(refusal), func(t *testing.T) {
-			request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/content", http.NoBody)
-			if err != nil {
-				t.Fatal(err)
-			}
-			request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
-			calls := 0
-			transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
-				calls++
-				cookie, err := r.Cookie("qurl_vsession")
-				if err != nil || cookie.Value != "original-capability" {
-					t.Fatal("original capability changed or was omitted")
-				}
-				status, body := http.StatusOK, "fixture-content"
-				if calls > 1 {
-					status, body = refusal, "private error body"
-				}
-				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: r}, nil
-			})
-			if err := productionRetainedSessionFetch(request, "fixture-content", false, transport); err != nil {
-				t.Fatal(err)
-			}
-			if err := productionRetainedSessionFetch(request, "fixture-content", true, transport); err != nil {
-				t.Fatal(err)
-			}
-			if calls != 2 {
-				t.Fatal("unexpected request count")
-			}
-			cookie, err := request.Cookie("qurl_vsession")
-			if err != nil || cookie.Value != "original-capability" {
-				t.Fatal("saved request changed")
-			}
-		})
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/content", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	calls := 0
+	transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
+		calls++
+		cookie, err := r.Cookie("qurl_vsession")
+		if err != nil || cookie.Value != "original-capability" {
+			t.Fatal("original capability changed or was omitted")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("fixture-content")), Header: make(http.Header), Request: r}, nil
+	})
+	for range 2 {
+		if err := productionRetainedSessionFetch(request, "fixture-content", transport); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 2 {
+		t.Fatal("unexpected request count")
+	}
+	cookie, err := request.Cookie("qurl_vsession")
+	if err != nil || cookie.Value != "original-capability" {
+		t.Fatal("saved request changed")
 	}
 }
 
-func TestProductionRetainedSessionRejectsRedirectAndSuccessfulContent(t *testing.T) {
-	for _, status := range []int{http.StatusFound, http.StatusOK, http.StatusInternalServerError} {
+func TestProductionRetainedSessionRejectsNonContentStatuses(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusForbidden, http.StatusNotFound, http.StatusGone, http.StatusInternalServerError} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/content", http.NoBody)
 			if err != nil {
@@ -66,9 +57,9 @@ func TestProductionRetainedSessionRejectsRedirectAndSuccessfulContent(t *testing
 				}
 				return &http.Response{StatusCode: status, Header: http.Header{"Location": []string{"https://foreign.invalid/secret"}}, Body: io.NopCloser(strings.NewReader("sensitive-response")), Request: r}, nil
 			})
-			err = productionRetainedSessionFetch(request, "marker", true, transport)
-			if err == nil || err.Error() != fmt.Sprintf("replaced production session did not return an access refusal (HTTP %d)", status) || strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "foreign") {
-				t.Fatal("wrong refusal classification or private diagnostic exposed")
+			err = productionRetainedSessionFetch(request, "marker", transport)
+			if err == nil || err.Error() != fmt.Sprintf("original production session did not serve content (HTTP %d)", status) || strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "foreign") {
+				t.Fatal("wrong status classification or private diagnostic exposed")
 			}
 		})
 	}
@@ -80,7 +71,7 @@ func TestProductionRetainedSessionSanitizesTransportFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	transport := retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) { return nil, errors.New("secret transport diagnostic") })
-	err = productionRetainedSessionFetch(request, "marker", true, transport)
+	err = productionRetainedSessionFetch(request, "marker", transport)
 	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private-token") {
 		t.Fatal("transport diagnostic leaked")
 	}
@@ -96,9 +87,9 @@ func TestProductionRetainedSessionSanitizesCloseFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Body: retainedSessionCloseError{strings.NewReader("private response")}, Request: r}, nil
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: retainedSessionCloseError{strings.NewReader("marker")}, Request: r}, nil
 	})
-	err = productionRetainedSessionFetch(request, "marker", true, transport)
+	err = productionRetainedSessionFetch(request, "marker", transport)
 	if err == nil || strings.Contains(err.Error(), "private") {
 		t.Fatal("response close failed silently or leaked its diagnostic")
 	}
@@ -114,7 +105,7 @@ func TestProductionRetainedSessionRejectsWrongOrOversizePositiveContent(t *testi
 			transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 			})
-			if err := productionRetainedSessionFetch(request, "marker", false, transport); err == nil {
+			if err := productionRetainedSessionFetch(request, "marker", transport); err == nil {
 				t.Fatal("unexpected content passed original-session positive control")
 			}
 		})

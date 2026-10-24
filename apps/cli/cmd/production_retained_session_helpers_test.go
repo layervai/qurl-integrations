@@ -10,10 +10,10 @@ import (
 
 // productionRetainedSessionFetch reuses an already authorized request. It has
 // no opener, resolver, cookie jar, or redirect path that can replace its grant.
-func productionRetainedSessionFetch(original *http.Request, marker string, denied bool, transport http.RoundTripper) (resultErr error) {
+func productionRetainedSessionFetch(original *http.Request, marker string, transport http.RoundTripper) (resultErr error) {
 	client := &http.Client{Transport: transport, Timeout: 20 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	// A transport failure does not prove an application-session refusal.
+	// Transport errors stay sanitized and cannot pass the content check.
 	response, err := client.Do(original.Clone(original.Context()))
 	if err != nil {
 		return errors.New("retained production session request failed")
@@ -23,15 +23,8 @@ func productionRetainedSessionFetch(original *http.Request, marker string, denie
 			resultErr = errors.New("retained production session response could not be closed")
 		}
 	}()
-	if denied {
-		// Accept only explicit refusal, including the protected route's concealed 404.
-		if response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusGone {
-			return fmt.Errorf("replaced production session did not return an access refusal (HTTP %d)", response.StatusCode)
-		}
-		return nil
-	}
 	if response.StatusCode != http.StatusOK {
-		return errors.New("original production session did not serve content")
+		return fmt.Errorf("original production session did not serve content (HTTP %d)", response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, int64(len(marker)+1)))
 	if err != nil || string(body) != marker {
