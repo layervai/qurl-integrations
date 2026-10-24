@@ -470,7 +470,7 @@ func windowsSandboxLifecycle(t *testing.T, binary string, env map[string]string,
 	t.Helper()
 	result := runWindowsSandboxCLI(t, binary, env, "-o", "json", command, cridValue)
 	if result.err != nil {
-		reason := readWindowsSandboxLocalStateReason(env[connectorstate.EnvStateDirPrimary])
+		reason := readSandboxDaemonLocalStateReason(env[connectorstate.EnvStateDirPrimary])
 		t.Fatalf("Windows qurl %s: %v; stderr %q; closed daemon reason %s", command, result.err, result.stderr, reason)
 	}
 	var document windowsSandboxSharingDoc
@@ -478,20 +478,6 @@ func windowsSandboxLifecycle(t *testing.T, binary string, env map[string]string,
 		t.Fatalf("decode Windows qurl %s output: %v", command, err)
 	}
 	return document
-}
-
-func readWindowsSandboxLocalStateReason(stateDir string) string {
-	reason := sandboxLocalStateUnclassified
-	for _, name := range []string{"share-daemon.log", "share-daemon.err.log"} {
-		raw, err := os.ReadFile(filepath.Join(stateDir, "logs", name)) //nolint:gosec // Exact test-owned protected state path.
-		if err != nil {
-			continue
-		}
-		if candidate := sandboxLocalStateReason(string(raw)); candidate != sandboxLocalStateUnclassified {
-			reason = candidate
-		}
-	}
-	return reason
 }
 
 func TestReadWindowsSandboxLocalStateReasonKeepsClassifiedPrimaryLog(t *testing.T) {
@@ -506,8 +492,8 @@ func TestReadWindowsSandboxLocalStateReasonKeepsClassifiedPrimaryLog(t *testing.
 	if err := os.WriteFile(filepath.Join(logsDir, "share-daemon.err.log"), []byte("share daemon session attempt failed; retrying unrelated cause\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := readWindowsSandboxLocalStateReason(stateDir); got != "agent_state_lock" {
-		t.Fatalf("readWindowsSandboxLocalStateReason() = %q, want agent_state_lock", got)
+	if got := readSandboxDaemonLocalStateReason(stateDir); got != "agent_state_lock" {
+		t.Fatalf("readSandboxDaemonLocalStateReason() = %q, want agent_state_lock", got)
 	}
 }
 
