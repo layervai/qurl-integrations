@@ -29,7 +29,8 @@ const {
   RESOURCE_TYPES,
   DM_STATUS,
   MAX_FILE_SIZE,
-  TOKENS_PER_RESOURCE,
+  MINT_BATCH_SIZE,
+  REVOKE_CHILD_BATCH_SIZE,
   MAX_OVERFLOW_REVOKE_IDS,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
@@ -56,7 +57,7 @@ const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { getIdentity } = require('./qurl');
 const { resourceIdLogRef } = require('./utils/resource-id');
 const { qurlApiErrorStatus } = require('./utils/qurl-errors');
-const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
+const { downloadAndUpload, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
@@ -83,8 +84,8 @@ const {
 // Absolute floor above which a single send earns a `WARN`-level
 // audit log at executeSendPipeline entry. 1000 chosen as the cliff
 // where DM fan-out at Discord's ~5/sec per-bot limit starts taking
-// minutes (1000 / 5 = ~3 min) and qurl-service re-uploads get
-// non-trivial (1000 / TOKENS_PER_RESOURCE = 100 re-uploads).
+// minutes (1000 / 5 = ~3 min) and Connector mint requests get
+// non-trivial (1000 / MINT_BATCH_SIZE = 100 mint requests).
 //
 // The effective threshold (`largeSendThreshold()` below) takes the
 // MIN of this floor and half the configured cap, so operators who
@@ -565,8 +566,8 @@ const ALLOWED_FILE_TYPES = [
 const DENY_MIME_SUBSTRINGS = ['macroenabled', 'macro-enabled'];
 
 // Bound concurrent in-flight file sends to prevent N × 25MB = high memory
-// pressure under burst. Each send holds its attachment buffer through the
-// mint-batches re-upload cycle; cap here rather than trust users to
+// pressure under burst. Each send downloads an attachment before minting;
+// cap here rather than trust users to
 // self-throttle. Over-cap sends get a user-facing "try again" rather than
 // exhausting the process.
 const MAX_CONCURRENT_FILE_SENDS = 5;
@@ -707,6 +708,18 @@ function setDetectCooldown(guildId, userId) {
 
 function clearDetectCooldown(guildId, userId) {
   detectCooldowns.delete(detectCooldownKey(guildId, userId));
+}
+
+// Keep revoke failures local to one bounded group, even when many recipients
+// share an upload. batchSettled must still attempt groups after a failure.
+function revokeWorkUnits(byResource) {
+  return [...byResource].flatMap(([resourceId, children]) => {
+    const units = [];
+    for (let i = 0; i < children.length; i += REVOKE_CHILD_BATCH_SIZE) {
+      units.push([resourceId, children.slice(i, i + REVOKE_CHILD_BATCH_SIZE)]);
+    }
+    return units;
+  });
 }
 
 async function batchSettled(items, fn, batchSize = 5) {
@@ -1681,18 +1694,12 @@ const REVOKE_SELECT_RESULT_WAIT_MS = 13 * 60 * 1000;
 const REVOKE_RUNNING_MSG = 'Revocation is still running. Run `/qurl revoke` again in a few minutes to check the result.';
 
 /**
- * Mint one-time links across a stream of connector resources, each capped at
- * TOKENS_PER_RESOURCE tokens. When a resource is exhausted, the caller's
- * `reuploadFn` is invoked to produce a new one.
- *
- * Centralizes the re-upload / batching / quota logic so a fix lands in one
- * place across the send pipeline (file/location) and handleAddRecipients
- * (file/location).
+ * Mint one-time links for one uploaded resource in requests of at most
+ * MINT_BATCH_SIZE links. This is a request bound, not a resource quota.
+ * All batches retain the same guild scope and child cleanup behavior.
  *
  * @param {object} opts
- * @param {string} opts.initialResourceId — resource_id from the first upload
- * @param {() => Promise<{resource_id: string}>} opts.reuploadFn — called when
- *   the current resource's token pool is drained. Must return a fresh resource.
+ * @param {string} opts.initialResourceId — resource_id from the upload
  * @param {string} opts.expiresAt — ISO string; forwarded to mintLinks.
  * @param {number} opts.recipientCount — number of tokens to mint in total.
  * @param {string} opts.apiKey — QURL API key.
@@ -1709,25 +1716,13 @@ const REVOKE_RUNNING_MSG = 'Revocation is still running. Run `/qurl revoke` agai
  *   Optional/back-compat — omitting it leaves the mint body unchanged.
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
  */
-async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
+async function mintLinksInBatches({ initialResourceId, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
   const allLinks = [];
-  let currentResourceId = initialResourceId;
-  let tokensUsed = 0;
+  const currentResourceId = initialResourceId;
 
-  // Mirrored by planMintBatches in scripts/loadtest-standalone.js, so the load
-  // test issues the upload/mint pattern a real send does. Nothing ties the two
-  // at compile time — tests/loadtest-mint-batches.test.js re-implements this
-  // loop as an oracle and diffs the shapes. If the guard, the increment or the
-  // batchSize formula below changes, update that oracle in the same PR or the
-  // load test keeps measuring the old shape while staying green.
   try {
-    for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
-      if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
-        const re = await reuploadFn();
-        currentResourceId = re.resource_id;
-        tokensUsed = 0;
-      }
-      const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
+    for (let i = 0; i < recipientCount; i += MINT_BATCH_SIZE) {
+      const batchSize = Math.min(MINT_BATCH_SIZE, recipientCount - i);
       const minted = await mintLinks(currentResourceId, {
         expiresAt,
         n: batchSize,
@@ -1772,7 +1767,6 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
           throw new Error(`Connector mint_link returned a link without a qurl_link (entry ${i + idx})`);
         }
       });
-      tokensUsed += batchSize;
     }
   } catch (error) {
     // Earlier batches' links were never delivered; revoke them (and the
@@ -1791,7 +1785,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       ids.push(qurlId);
       idsByResource.set(link.resourceId, ids);
     }
-    const entries = [...idsByResource];
+    const entries = revokeWorkUnits(idsByResource);
     const compensation = batchSettled(entries, ([resourceId, ids]) => (
       revokeMintedLinks(resourceId, ids, apiKey)
     ), 5);
@@ -1814,9 +1808,10 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       error: result.reason?.message,
     }] : []));
     if (failures.length > 0 || unidentifiedCount > 0) {
+      const failedResources = new Set(entries.filter((_, i) => results[i].status === 'rejected').map(([id]) => id));
       logger.error('Failed to revoke links after a mint failure', {
-        failed_count: failures.length,
-        total: results.length,
+        failed_count: failedResources.size,
+        total: idsByResource.size,
         unidentified_count: unidentifiedCount,
         failures,
       });
@@ -2038,8 +2033,8 @@ async function executeSendPipeline(interaction, {
     failGate(RangeError, `executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
   }
   // Operator-visibility hook for big sends. Fires when a single send
-  // crosses `largeSendThreshold()` so the operational cost (qurl-
-  // service re-uploads + DM fan-out duration at Discord's per-bot
+  // crosses `largeSendThreshold()` so the operational cost (mint
+  // requests + DM fan-out duration at Discord's per-bot
   // rate limit) surfaces in logs before it shows up on a rate-limit
   // dashboard. Sender + guild ids + resourceType are the natural
   // pivots for "which guild kicked off this 5k-recipient file send."
@@ -2107,40 +2102,21 @@ async function executeSendPipeline(interaction, {
       const filename = sanitizeFilename(attachment.name);
       const expiresAt = expiryToISO(expiresIn);
 
-      // Download once, cache the buffer for re-uploads.
-      // selfDestructSeconds threads through both initial upload AND every
-      // re-upload, so the bot's "Add Recipients" mints the same TTL on
-      // each new resource that gets registered (TOKENS_PER_RESOURCE
-      // exhaustion → re-upload → new connector resource).
       const firstUpload = await downloadAndUpload(attachment.url, filename, attachment.contentType, apiKey, selfDestructSeconds);
       connectorResourceId = firstUpload.resource_id;
-      // Use a holder so we can null out the reference after all re-uploads
-      // finish — the subsequent link-monitor closure would otherwise pin up
-      // to 25MB in memory for up to an hour per concurrent send.
-      const bufHolder = { buf: firstUpload.fileBuffer };
-
-      // try/finally around mintLinksInBatches so a throw inside batching
-      // still releases the 25 MB buffer — otherwise the reuploadFn closure
-      // would pin it on the activeMonitors set / pending error handler for
-      // up to an hour per concurrent send under GC pressure.
-      let allLinks;
-      try {
-        allLinks = await mintLinksInBatches({
-          initialResourceId: firstUpload.resource_id,
-          reuploadFn: () => reUploadBuffer(bufHolder.buf, filename, attachment.contentType, apiKey, selfDestructSeconds),
-          expiresAt,
-          recipientCount: recipients.length,
-          apiKey,
-          selfDestructSeconds,
-          // Guild-scope the mint so watermark attribution (/qurl detect,
-          // #1101) can resolve back to this guild. interaction.guildId is
-          // guaranteed non-null here — the /qurl send + /qurl map entry
-          // points both DM-reject before reaching the pipeline.
-          guildId: interaction.guildId,
-        });
-      } finally {
-        bufHolder.buf = null;
-      }
+      firstUpload.fileBuffer = null;
+      const allLinks = await mintLinksInBatches({
+        initialResourceId: firstUpload.resource_id,
+        expiresAt,
+        recipientCount: recipients.length,
+        apiKey,
+        selfDestructSeconds,
+        // Guild-scope the mint so watermark attribution (/qurl detect,
+        // #1101) can resolve back to this guild. interaction.guildId is
+        // guaranteed non-null here — the /qurl send + /qurl map entry
+        // points both DM-reject before reaching the pipeline.
+        guildId: interaction.guildId,
+      });
 
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
@@ -2157,7 +2133,7 @@ async function executeSendPipeline(interaction, {
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
     } else {
       // Location send — upload JSON payload to connector, then mint in batches
-      // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
+      // of at most MINT_BATCH_SIZE links against the same resource.
       const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
       // Note: google-map JSON resources hit the connector's render
       // carve-out (mapEmbedTmpl/mapFallbackTmpl don't honor
@@ -2170,7 +2146,6 @@ async function executeSendPipeline(interaction, {
       const expiresAt = expiryToISO(expiresIn);
       const allLinks = await mintLinksInBatches({
         initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds),
         expiresAt,
         recipientCount: recipients.length,
         apiKey,
@@ -2221,14 +2196,9 @@ async function executeSendPipeline(interaction, {
     // after a return-from-catch, and `releaseSlot` is idempotent via
     // the `fileSendSlotClaimed` flag. Dropping the duplicate call here
     // keeps the single-release-path invariant visible at a glance.
-    // Surface a specific message for known upstream failure codes so the
-    // user knows what to do (re-upload to refresh the per-resource quota)
-    // instead of seeing a generic "try again" that won't help.
     if (error.apiCode === 'quota_exceeded') {
-      const isFile = resourceType === RESOURCE_TYPES.FILE;
-      const verb = isFile ? 're-upload the file' : 'edit the location query and resend';
       return interaction.editReply({
-        content: `Couldn't create more links — this ${isFile ? 'file' : 'location'} has hit its share limit (${TOKENS_PER_RESOURCE} per upload). To send to more recipients, ${verb}.`,
+        content: "Couldn't create more links — your account has reached a quota. Check your account limits before retrying.",
       });
     }
     return interaction.editReply({ content: 'Failed to create links. Please try again.' });
@@ -2388,7 +2358,7 @@ async function executeSendPipeline(interaction, {
 
   // Save send config for "Add Recipients" reuse. For file sends, also stash
   // the Discord CDN URL + content type so we can re-download + re-upload when
-  // adding recipients (the original resource's 10-token pool may be drained).
+  // adding recipients with a renewed expiry.
   // Logged-and-swallowed: a failure here doesn't block DM delivery (already
   // done above) but it disables future Add Recipients / revoke-via-ui for
   // this send. The per-link rows in qurl_sends persisted above, so /qurl
@@ -3062,11 +3032,11 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     ids.push(qurlId);
     qurlIdsByResource.set(s.resourceId, ids);
   }
-  const resourceIds = [...qurlIdsByResource.keys()];
-  if (resourceIds.length === 0 && unidentifiedCount === 0) return;
+  const entries = revokeWorkUnits(qurlIdsByResource);
+  if (entries.length === 0 && unidentifiedCount === 0) return;
 
-  const cleanup = batchSettled(resourceIds, async (resourceId) => {
-    await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId), apiKey);
+  const cleanup = batchSettled(entries, async ([resourceId, ids]) => {
+    await revokeMintedLinks(resourceId, ids, apiKey);
     return resourceId;
   }, 5);
   // Same bounded wait as mint-failure compensation: the Add Recipients reply
@@ -3076,19 +3046,22 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
       sendId,
       reason: cleanupReason,
       unidentified_count: unidentifiedCount,
-      resources: resourceIds.map(resourceId => ({
+      resources: entries.map(([resourceId, ids]) => ({
         resource_ref: resourceIdLogRef(resourceId),
-        qurl_ids: qurlIdsByResource.get(resourceId),
+        qurl_ids: ids,
       })),
     });
     return;
   }
   const results = await cleanup;
   const failed = [];
+  const failedResources = new Set();
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
+      failedResources.add(entries[index][0]);
       failed.push({
-        resource_ref: resourceIdLogRef(resourceIds[index]),
+        resource_ref: resourceIdLogRef(entries[index][0]),
+        qurl_ids: entries[index][1],
         error: result.reason?.message,
       });
     }
@@ -3097,8 +3070,8 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
       sendId,
       reason: cleanupReason,
-      failed_count: failed.length,
-      total: resourceIds.length,
+      failed_count: failedResources.size,
+      total: qurlIdsByResource.size,
       unidentified_count: unidentifiedCount,
       failures: failed,
     });
@@ -3106,7 +3079,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
       sendId,
       reason: cleanupReason,
-      total: resourceIds.length,
+      total: qurlIdsByResource.size,
     });
   }
 }
@@ -3233,10 +3206,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   try {
     if (hasFile) {
       activeKind = 'file';
-      // Re-download from the stored Discord CDN URL, then upload a fresh
-      // resource so the 10-token pool is full. Re-upload again every
-      // TOKENS_PER_RESOURCE recipients. The original resource is drained by
-      // the initial send, so we CANNOT reuse sendConfig.connector_resource_id.
+      // Retain the existing fresh-upload behavior for Add Recipients. Its
+      // renewed expiry must not depend on the original upload still existing.
       if (!sendConfig.attachment_url) {
         return {
           msg: 'Cannot add file recipients — original attachment is no longer available. Please create a new send.',
@@ -3261,17 +3232,15 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
       const expiresAt = expiryToISO(sendConfig.expires_in);
       let allLinks = [];
-      let fileBuffer = null;
       const filename = sendConfig.attachment_name || 'file';
       const contentType = sendConfig.attachment_content_type || 'application/octet-stream';
 
       try {
-        // Initial download+upload gives us the buffer for subsequent re-uploads.
+        // Upload once for this added-recipient operation.
         const first = await downloadAndUpload(sendConfig.attachment_url, filename, contentType, apiKey, inheritedDestruct);
-        fileBuffer = first.fileBuffer;
+        first.fileBuffer = null;
         allLinks = await mintLinksInBatches({
           initialResourceId: first.resource_id,
-          reuploadFn: () => reUploadBuffer(fileBuffer, filename, contentType, apiKey, inheritedDestruct),
           expiresAt,
           recipientCount: newRecipients.length,
           apiKey,
@@ -3350,7 +3319,6 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       const expiresAt = expiryToISO(sendConfig.expires_in);
       const allLinks = await mintLinksInBatches({
         initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct),
         expiresAt,
         recipientCount: newRecipients.length,
         apiKey,
@@ -8588,9 +8556,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // step skips them.
   const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true });
 
-  // Revoke each resource's children in one call per unique resource_id and
-  // fan the result out to every recipient sharing it (mintLinksInBatches packs
-  // up to TOKENS_PER_RESOURCE recipients per resource).
+  // Revoke bounded child groups independently. A failed group must not stop
+  // later groups or hide confirmed outcomes for other recipients.
   // A row without a usable qurl_id cannot be revoked: a watermarked child lives
   // on the connector's tunnel, so deleting the shared parent would neither
   // reach it nor be safe for other sends. Only that row's recipient fails;
@@ -8607,7 +8574,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     list.push({ recipientId: item.recipient_discord_id, qurlId });
     byResource.set(item.resource_id, list);
   }
-  const resourceEntries = [...byResource.entries()];
+  const resourceEntries = revokeWorkUnits(byResource);
   const totalUsers = new Set(items.map(it => it.recipient_discord_id)).size;
 
   const successUserIds = [];
@@ -8659,7 +8626,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // affected recipients in a separate field while keeping finalization
   // fail-closed.
   const auditTotal = byResource.size;
-  const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
+  const failedResources = new Set(resourceEntries.filter((_, i) => results[i].status === 'rejected').map(([id]) => id));
+  const auditSuccess = auditTotal - failedResources.size;
   const unresolvableRecipients = invalidResourceRecipientIds.size;
   const fullyConfirmed = auditSuccess === auditTotal && unresolvableRecipients === 0;
 
