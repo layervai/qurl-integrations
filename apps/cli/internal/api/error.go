@@ -91,7 +91,7 @@ func (e *Error) ShareNotFound() bool {
 func CustomerMessages() []string {
 	return []string{
 		msgPreviewFileSize, msgPreviewFileType, msgPreviewStillSize, msgPreviewUploadAddress, msgPreviewUploadTransport, msgPreviewUploadStatus,
-		errTemplate, msgAccountCallbackInvalid, msgAccountCallbackComplete, msgAccountLoadFailed, msgAccountUnavailable, msgAccountPortBusy, msgAccountBrowserFailed, msgAccountTimedOut, msgAccountCanceled, msgAccountExchangeFailed, msgAccountHTTPSRequired, msgAccountLinkInvalid, msgAccountOwnersInvalid,
+		errTemplate, accountSignInPageHTML, msgAccountCanceledPage, msgAccountCallbackInvalid, msgAccountCallbackComplete, msgAccountLoadFailed, msgAccountUnavailable, msgAccountPortBusy, msgAccountBrowserFailed, msgAccountTimedOut, msgAccountCanceled, msgAccountExchangeFailed, msgAccountHTTPSRequired, msgAccountLinkInvalid, msgAccountOwnersInvalid,
 		msgPublishAccessConflict, msgPublishExistingPublic, msgPublishExistingPrivate, msgPublishOtherDevices, msgPublishAccessDiffers,
 		msgPrivateUnconfirmed, msgPublicUnconfirmed, msgUnaskedPublicDeleted, msgUnaskedPublicNotDeleted,
 		msgGrantEditUnconfirmed,
@@ -726,6 +726,8 @@ const (
 )
 
 const msgAccountCallbackInvalid = "Invalid sign-in response."
+const msgAccountCanceledPage = "Account sign-in was canceled. You can close this tab."
+
 const msgAccountCallbackComplete = "Return to qURL to finish sign-in. You can close this tab."
 
 // Account sign-in failures retain stable exit classes for scripts.

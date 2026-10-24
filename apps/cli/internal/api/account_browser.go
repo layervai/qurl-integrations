@@ -23,7 +23,7 @@ const accountCallbackAddress = "127.0.0.1:8765"
 const accountCallback = "http://" + accountCallbackAddress + "/callback"
 const accountStateParam = "state"
 
-var accountSignInPage = template.Must(template.New("account-signin").Parse(`<!doctype html>
+const accountSignInPageHTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in | LayerV</title>
 <style>
@@ -41,14 +41,15 @@ a{color:#3a54cf}a:focus-visible{outline:3px solid #3a54cf;outline-offset:4px}
 <a href="{{.Password}}">Use your password</a>
 <p class="footer">Use the same email address as your LayerV account. Only continue if you started this request.</p>
 <a class="cancel" href="{{.Cancel}}">Cancel</a>
-</main></body></html>`))
+</main></body></html>`
+
+var accountSignInPage = template.Must(template.New("account-signin").Parse(accountSignInPageHTML))
 
 // SignInAccount runs authorization-code + PKCE only after explicit account
 // setup. No account token is written to disk or passed to the browser launcher.
 // TODO(upstream-contract): Auth0 serves /authorize and /oauth/token and honors
 // prompt=login consent with an explicit connection. The qURL audience accepts
-// the scopes below; account
-// linking requires qurl:agent as well as verified account identity.
+// the scopes below; linking requires qurl:agent and verified account identity.
 func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Context, string) error) (_ string, retErr error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
@@ -144,8 +145,9 @@ func exchangeAccountCode(ctx context.Context, client *transport, domain, clientI
 }
 
 func accountBrowserHandler(state string, authorizeURL *url.URL, codes chan<- string) http.Handler {
-	links := map[string]string{"Email": "email", "Google": "google-oauth2", "Password": "Username-Password-Authentication"}
-	for method, connection := range links {
+	links := make(map[string]string, 4)
+	// TODO(upstream-contract): These connection names must match the qURL Auth0 tenant.
+	for method, connection := range map[string]string{"Email": "email", "Google": "google-oauth2", "Password": "Username-Password-Authentication"} {
 		target := *authorizeURL
 		query := target.Query()
 		query.Set("connection", connection)
@@ -169,9 +171,8 @@ func accountBrowserHandler(state string, authorizeURL *url.URL, codes chan<- str
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := accountSignInPage.Execute(w, links); err != nil {
-			http.Error(w, msgAccountUnavailable, http.StatusInternalServerError)
-		}
+		// With fixed string data, Execute can fail only if the response write fails.
+		_ = accountSignInPage.Execute(w, links)
 	})
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -193,7 +194,7 @@ func accountBrowserHandler(state string, authorizeURL *url.URL, codes chan<- str
 		}
 		if code == "" {
 			if signInError == "access_denied" && !invalidCode {
-				_, _ = io.WriteString(w, "Account sign-in was canceled. You can close this tab.")
+				_, _ = io.WriteString(w, msgAccountCanceledPage)
 				return
 			}
 			http.Error(w, msgAccountCanceled, http.StatusBadRequest)

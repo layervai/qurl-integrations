@@ -115,7 +115,11 @@ func TestAccountCallbackDenial(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, accountCallback+"?state=expected&"+tc.query, http.NoBody)
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
-		if response.Code != tc.status || !strings.Contains(strings.ToLower(response.Body.String()), msgAccountCanceled) {
+		wantBody := msgAccountCanceled + "\n"
+		if tc.status == http.StatusOK {
+			wantBody = msgAccountCanceledPage
+		}
+		if response.Code != tc.status || response.Body.String() != wantBody {
 			t.Fatalf("denial = %d %q", response.Code, response.Body.String())
 		}
 		select {
