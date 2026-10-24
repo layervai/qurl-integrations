@@ -11,6 +11,7 @@ import (
 
 // productionRetainedSessionFetch reuses an already authorized request. It has
 // no opener, resolver, cookie jar, or redirect path that can replace its grant.
+// A nil transport opens a new connection; non-nil transports are unit-test fakes.
 func productionRetainedSessionFetch(original *http.Request, marker string, transport http.RoundTripper) (resultErr error) {
 	if transport == nil {
 		base, ok := http.DefaultTransport.(*http.Transport)
