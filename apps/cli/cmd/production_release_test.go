@@ -332,6 +332,15 @@ func productionFailureClass(stderr []byte) string {
 		{"context deadline exceeded", "native_deadline"},
 	} {
 		if strings.Contains(string(stderr), known.message) {
+			if known.class == "windows_job_inspect" {
+				_, suffix, _ := strings.Cut(string(stderr), known.message)
+				switch {
+				case strings.Contains(suffix, "context deadline exceeded"):
+					return "windows_job_inspect_timeout"
+				case strings.Contains(suffix, "parse Windows user job state"):
+					return "windows_job_inspect_state"
+				}
+			}
 			return known.class
 		}
 	}

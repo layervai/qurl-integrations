@@ -145,3 +145,19 @@ func TestProductionProofCredentialFailureClassIsPrivate(t *testing.T) {
 		t.Fatal("credential source classification changed")
 	}
 }
+
+func TestProductionWindowsInspectFailureClassesRequireBothParts(t *testing.T) {
+	const canary = "SECRET-CANARY https://private.invalid/token lv_live_private "
+	for _, test := range []struct{ message, want string }{
+		{"inspect Windows user job daemon: powershell.exe: context deadline exceeded", "windows_job_inspect_timeout"},
+		{"inspect Windows user job daemon: parse Windows user job state value: invalid syntax", "windows_job_inspect_state"},
+		{"inspect Windows user job daemon: unknown scheduler error", "windows_job_inspect"},
+		{"context deadline exceeded", "native_deadline"},
+		{"parse Windows user job state value: invalid syntax", "windows_job"},
+		{"context deadline exceeded before inspect Windows user job daemon: unknown", "windows_job_inspect"},
+	} {
+		if got := productionFailureClass([]byte(canary + test.message + canary)); got != test.want {
+			t.Fatalf("fixed failure class = %q, want %q", got, test.want)
+		}
+	}
+}
