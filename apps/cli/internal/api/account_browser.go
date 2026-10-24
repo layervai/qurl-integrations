@@ -182,7 +182,9 @@ func accountBrowserHandler(state string, authorizeURL *url.URL, codes chan<- str
 			return
 		}
 		code := r.URL.Query().Get("code")
-		if len(code) > 4096 || r.URL.Query().Get("error") != "" {
+		invalidCode := len(code) > 4096
+		signInError := r.URL.Query().Get("error")
+		if invalidCode || signInError != "" {
 			code = ""
 		}
 		select {
@@ -190,6 +192,10 @@ func accountBrowserHandler(state string, authorizeURL *url.URL, codes chan<- str
 		default:
 		}
 		if code == "" {
+			if signInError == "access_denied" && !invalidCode {
+				_, _ = io.WriteString(w, "Account sign-in was canceled. You can close this tab.")
+				return
+			}
 			http.Error(w, msgAccountCanceled, http.StatusBadRequest)
 			return
 		}
