@@ -184,6 +184,10 @@ qurl account setup
 Commands that open device state, including `list` and `whoami`, create a device identity on first use.
 `get <CRID>` manages access to your own resource; it is not a recipient link opener.
 
+The browser first opens a local page with email-code and Google choices, plus
+a password option for existing accounts. Credentials are entered only on
+LayerV's secure sign-in page. Choose the same email address as your account.
+
 Sign in through the browser to link the current resources to your account.
 Existing resource IDs and links stay unchanged. On a new device, run
 `QURL_CONNECTOR_STATE_DIR=~/.qurl-recovered qurl account recover` to regain management access.

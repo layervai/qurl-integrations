@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -45,7 +47,33 @@ func TestAccountBrowserPKCEAndState(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		authQuery = u.Query()
+		if u.Host != accountCallbackAddress || u.Path != "/" || u.Query().Get("state") == "" {
+			t.Fatalf("browser did not open the nonce-bound local method chooser: %s", link)
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, link, http.NoBody)
+		if err != nil {
+			return err
+		}
+		page, err := http.DefaultClient.Do(request)
+		if err != nil {
+			return err
+		}
+		body, readErr := io.ReadAll(page.Body)
+		_ = page.Body.Close()
+		if readErr != nil {
+			return readErr
+		}
+		links := accountTestMethodLinks(t, string(body))
+		if len(links) != 3 {
+			t.Fatalf("method links = %d, want email, Google and password", len(links))
+		}
+		for _, method := range []string{"email", "google-oauth2", "Username-Password-Authentication"} {
+			chosen := links[method]
+			if chosen == nil || chosen.Host != strings.TrimPrefix(server.URL, "https://") || chosen.Query().Get("state") != u.Query().Get("state") || chosen.Query().Get("redirect_uri") != accountCallback || chosen.Query().Get("code_challenge") != links["email"].Query().Get("code_challenge") || chosen.Query().Get("code_challenge_method") != "S256" || chosen.Query().Get("scope") != "openid email qurl:read qurl:write qurl:agent" {
+				t.Fatalf("method %s changed the OAuth transaction", method)
+			}
+		}
+		authQuery = links["email"].Query()
 		if authQuery.Get("prompt") != "login consent" {
 			t.Fatal("permanent account link must require visible sign-in and consent")
 		}
@@ -74,7 +102,7 @@ func TestAccountBrowserPKCEAndState(t *testing.T) {
 func TestAccountCallbackDenial(t *testing.T) {
 	for _, query := range []string{"error=access_denied&code=ignored", "code=" + strings.Repeat("a", 4097)} {
 		codes := make(chan string, 1)
-		handler := accountCallbackHandler("expected", codes)
+		handler := accountBrowserHandler("expected", &url.URL{Scheme: "https", Host: "auth.example.test", Path: "/authorize"}, codes)
 		request := httptest.NewRequest(http.MethodGet, accountCallback+"?state=expected&"+query, http.NoBody)
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
@@ -132,5 +160,55 @@ func TestAccountSignInRejectsUntrustedSettings(t *testing.T) {
 				t.Fatalf("settings error: %v", err)
 			}
 		})
+	}
+}
+
+func accountTestMethodLinks(t *testing.T, body string) map[string]*url.URL {
+	t.Helper()
+	links := make(map[string]*url.URL)
+	for _, match := range regexp.MustCompile(`href="([^"]+)"`).FindAllStringSubmatch(body, -1) {
+		target, err := url.Parse(html.UnescapeString(match[1]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if method := target.Query().Get("connection"); method != "" {
+			links[method] = target
+		}
+	}
+	return links
+}
+
+func TestAccountMethodChooserRejectsForeignRequests(t *testing.T) {
+	codes := make(chan string, 1)
+	authorizeURL := url.URL{Scheme: "https", Host: "auth.example.test", Path: "/authorize", RawQuery: url.Values{"state": {"expected"}, "redirect_uri": {accountCallback}}.Encode()}
+	handler := accountBrowserHandler("expected", &authorizeURL, codes)
+	for _, tc := range []struct{ method, host, state string }{
+		{http.MethodPost, accountCallbackAddress, "expected"},
+		{http.MethodGet, "attacker.example", "expected"},
+		{http.MethodGet, accountCallbackAddress, "attacker-state"},
+	} {
+		request := httptest.NewRequest(tc.method, "http://"+accountCallbackAddress+"/?state="+tc.state, http.NoBody)
+		request.Host = tc.host
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), "auth.example.test") {
+			t.Fatalf("foreign request exposed sign-in links: %d", response.Code)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://"+accountCallbackAddress+"/?state=expected&redirect_uri=https://attacker.example&connection=attacker", http.NoBody)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("X-Frame-Options") != "DENY" || response.Header().Get("Referrer-Policy") != "no-referrer" || !strings.Contains(response.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") || !strings.Contains(response.Header().Get("Content-Security-Policy"), "form-action 'none'") {
+		t.Fatalf("chooser status/headers = %d %v", response.Code, response.Header())
+	}
+	for _, target := range accountTestMethodLinks(t, response.Body.String()) {
+		if target.Host != authorizeURL.Host || target.Query().Get("redirect_uri") != accountCallback || target.Query().Get("state") != "expected" {
+			t.Fatal("request parameters changed the server-held OAuth transaction")
+		}
+	}
+	select {
+	case <-codes:
+		t.Fatal("viewing the chooser ended sign-in")
+	default:
 	}
 }
