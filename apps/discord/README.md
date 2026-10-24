@@ -296,3 +296,18 @@ Setup and install cookies use `__Host-` names with `Secure`, `HttpOnly`,
 `SameSite=Lax`, and `Path=/`. Use HTTPS (or browser-supported localhost) for
 local setup tests. Deploying this change invalidates older setup cookies;
 admins with an in-flight setup must start again.
+
+### Sandbox mint-failure audit canary
+
+`MINT_FAILURE_CANARY_ENABLED=true` enables a synthetic audit sample at process
+startup and once an hour, only when `QURL_ENDPOINT` has the sandbox host
+`api.layerv.xyz`. The flag defaults off. The canary uses the same failure audit
+function as `/qurl send`, with `synthetic=true` and
+`send_id=TEST-mint-failure-canary`. It sends no Discord message and creates no
+qURL, resource, token or other authority. Shutdown stops its timer.
+
+Deploy the capable bot image before enabling the sandbox flag in integrations
+infra. Synthetic samples have separate per-role CloudWatch metrics and labeled
+missing-sample alarms; they must not count as customer mint failures. The alarms
+check three consecutive hourly windows. This checks the audit path, not whether
+a customer can send a file. Production must keep the flag off.
