@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -72,7 +73,7 @@ func TestProductionRetainedSessionSanitizesTransportFailure(t *testing.T) {
 	}
 	transport := retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) { return nil, errors.New("secret transport diagnostic") })
 	err = productionRetainedSessionFetch(request, "marker", transport)
-	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private-token") {
+	if err == nil || err.Error() != "retained production session request failed" {
 		t.Fatal("transport diagnostic leaked")
 	}
 }
@@ -109,5 +110,17 @@ func TestProductionRetainedSessionRejectsWrongOrOversizePositiveContent(t *testi
 				t.Fatal("unexpected content passed original-session positive control")
 			}
 		})
+	}
+}
+
+func TestProductionRetainedSessionClassifiesTimeout(t *testing.T) {
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/private-token", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) { return nil, context.DeadlineExceeded })
+	err = productionRetainedSessionFetch(request, "marker", transport)
+	if err == nil || err.Error() != "retained production session request timed out" {
+		t.Fatal("timeout classification missing or contains private context")
 	}
 }

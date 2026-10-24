@@ -31,6 +31,8 @@ import (
 
 const productionProofEndpoint = "https://api.layerv.ai"
 
+const productionFixtureSessionDuration = 5 * time.Minute
+
 type productionPublishDoc struct {
 	CRID          string `json:"crid"`
 	ResourceID    string `json:"resource_id"`
@@ -134,7 +136,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 			var shared struct {
 				QURL string `json:"qurl"`
 			}
-			productionDecode(t, productionCLI(t, binary, env, "", "share", published.CRID, "-o", "json", "--session-duration", "5m"), &shared)
+			productionDecode(t, productionCLI(t, binary, env, "", "share", published.CRID, "-o", "json", "--session-duration", productionFixtureSessionDuration.String()), &shared)
 			if shared.QURL == "" {
 				t.Fatal("production sharing returned no link")
 			}
@@ -362,7 +364,7 @@ func productionCLI(t *testing.T, binary string, env map[string]string, input str
 func productionGet(t *testing.T, binary string, env map[string]string, crid, marker string, denied bool) {
 	t.Helper()
 	destination := filepath.Join(t.TempDir(), "content")
-	_, code := productionCommand(t, binary, env, "", "get", crid, "--file", destination, "--session-duration", "5m")
+	_, code := productionCommand(t, binary, env, "", "get", crid, "--file", destination, "--session-duration", productionFixtureSessionDuration.String())
 	if denied {
 		if code != 5 {
 			t.Fatalf("production access denial exit = %d, want not found (5)", code)
@@ -385,13 +387,14 @@ func productionGet(t *testing.T, binary string, env map[string]string, crid, mar
 // The fetch helper reuses the same request and cannot resolve, mint, or renew it.
 func productionRetainSession(t *testing.T, link, marker string) (*http.Request, time.Time) {
 	t.Helper()
-	// OpenSeconds is ACK OpenTime; starting before the call is conservative.
+	// Browser lifetime uses the requested fixture duration, not the network ACK window.
+	// Starting before admission is conservative for the later first application use.
 	started := time.Now()
 	handle, err := qurl.EnterPortal(t.Context(), link)
 	if err != nil || handle == nil || handle.SessionID == 0 || handle.OpenSeconds == 0 {
 		t.Fatal("could not retain the original production access session")
 	}
-	deadline := started.Add(time.Duration(handle.OpenSeconds) * time.Second)
+	deadline := started.Add(productionFixtureSessionDuration)
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, handle.ResourceURL, http.NoBody)
 	if err != nil || handle.AuthorizeContentRequest(request) != nil {
 		t.Fatal("could not authorize the original production access session")
