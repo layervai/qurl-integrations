@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -16,6 +17,10 @@ func productionRetainedSessionFetch(original *http.Request, marker string, trans
 	// Transport errors stay sanitized and cannot pass the content check.
 	response, err := client.Do(original.Clone(original.Context()))
 	if err != nil {
+		var networkError net.Error
+		if errors.As(err, &networkError) && networkError.Timeout() {
+			return errors.New("retained production session request timed out")
+		}
 		return errors.New("retained production session request failed")
 	}
 	defer func() {
