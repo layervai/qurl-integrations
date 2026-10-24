@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.6.1](https://github.com/layervai/qurl-integrations/compare/v3.6.0...v3.6.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **cli:** offer email code, Google and password for account setup ([#1643](https://github.com/layervai/qurl-integrations/issues/1643)) ([ddd5d56](https://github.com/layervai/qurl-integrations/commit/ddd5d56f00cc473c8ae885d9970d4add89c5f7a7))
+
 ## [3.6.0](https://github.com/layervai/qurl-integrations/compare/v3.5.0...v3.6.0) (2026-10-22)
 
 
