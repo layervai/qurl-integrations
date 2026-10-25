@@ -48,6 +48,46 @@ describe('Connector client — coverage boost', () => {
     globalThis.fetch = originalFetch;
   });
 
+  describe('session duration upper bound before HTTP', () => {
+    const uploads = [
+      ['file download/upload', (c, ttl) => c.uploadToConnector('https://cdn.discordapp.com/x.png', 'x.png', 'image/png', undefined, ttl)],
+      ['buffer re-upload', (c, ttl) => c.reUploadBuffer(Buffer.from('x'), 'x.png', 'image/png', undefined, ttl)],
+      ['cached file download/upload', (c, ttl) => c.downloadAndUpload('https://cdn.discordapp.com/x.png', 'x.png', 'image/png', undefined, ttl)],
+      ['JSON upload', (c, ttl) => c.uploadJsonToConnector({ type: 'google-map' }, 'map.json', undefined, ttl)],
+    ];
+    it.each(uploads)('refuses an invalid viewer timer before %s performs a request', async (_name, upload) => {
+      for (const ttl of [0.499999, 3600.000001, 86400]) {
+        globalThis.fetch = jest.fn();
+        await expect(upload(connector, ttl)).rejects.toThrow('Viewer timer must be between 0.5 and 3600 seconds');
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+      }
+    });
+
+    it.each(uploads)('preserves valid viewer boundaries for %s', async (_name, upload) => {
+      for (const ttl of [0.5, 3600]) {
+        globalThis.fetch = jest.fn(async url => String(url).endsWith('/api/upload')
+          ? new Response(JSON.stringify({ success: true, resource_id: 'res-1' }))
+          : new Response('x', { headers: { 'content-length': '1' } }));
+        await upload(connector, ttl);
+        const requests = globalThis.fetch.mock.calls.filter(([url]) => String(url).endsWith('/api/upload'));
+        expect(requests).toHaveLength(1);
+        expect(requests[0][1].body.get('viewer_ttl_seconds')).toBe(String(ttl));
+      }
+    });
+
+    it.each([1, 10])('keeps the 24-hour boundary and rejects larger values for n=%s', async n => {
+      globalThis.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ success: true, links: [] }) }));
+      await connector.mintLinks('res-1', { expiresAt: '2099-01-01T00:00:00Z', n, selfDestructSeconds: 86400 });
+      expect(JSON.parse(globalThis.fetch.mock.calls[0][1].body).session_duration).toBe('86400s');
+      globalThis.fetch.mockClear();
+      for (const selfDestructSeconds of [86400.000001, 86401]) {
+        // eslint-disable-next-line no-await-in-loop
+        await expect(connector.mintLinks('res-1', { n, selfDestructSeconds })).rejects.toThrow('Session duration exceeds 24 hours');
+      }
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+  });
+
   describe('isAllowedSourceUrl', () => {
     it('returns false for invalid URL string (catch block — line 15)', () => {
       expect(connector.isAllowedSourceUrl('not-a-url-at-all')).toBe(false);

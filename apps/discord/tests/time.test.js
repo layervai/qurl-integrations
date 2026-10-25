@@ -172,11 +172,19 @@ describe('utils/time', () => {
 
     it('clamps the 0.5s preset to "1s" (MinSessionDuration floor)', () => {
       expect(formatSessionDurationSeconds(0.5)).toBe('1s');
+      expect(formatSessionDurationSeconds(0.25)).toBe('1s');
     });
 
     it('ceils fractional values > 1 (defensive — presets are integer ≥1)', () => {
       expect(formatSessionDurationSeconds(2.3)).toBe('3s');
       expect(formatSessionDurationSeconds(1.0001)).toBe('2s');
+    });
+
+    it('accepts 24 hours and refuses any larger finite duration', () => {
+      expect(formatSessionDurationSeconds(86400)).toBe('86400s');
+      for (const value of [86400.000001, 86401]) {
+        expect(() => formatSessionDurationSeconds(value)).toThrow('Session duration exceeds 24 hours');
+      }
     });
 
     it('returns null for null / undefined / non-finite / non-numeric / ≤0', () => {
