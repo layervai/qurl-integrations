@@ -160,7 +160,8 @@ function formatSelfDestructSegment(seconds) {
 // here about how to floor it).
 //
 // Returns the duration string (e.g. "1s", "30s") when the input is a
-// finite positive number; returns null otherwise. Callers should omit
+// finite positive number up to 24 hours; larger values throw. Returns null
+// for other inputs. Callers should omit
 // the wire field entirely when the result is null (qurl-service then
 // uses QURL_SESSION_TTL as the default).
 //
@@ -182,6 +183,7 @@ function formatSelfDestructSegment(seconds) {
 // PR #764 + this PR landing as a coordinated pair.
 function formatSessionDurationSeconds(seconds) {
   if (!isPositiveFinite(seconds)) return null;
+  if (seconds > 86400) throw new Error('Session duration exceeds 24 hours');
   // Math.ceil of any value in (0, 1] is 1; of any positive finite
   // number is ≥1. Combined with the isPositiveFinite guard above,
   // this never emits "0s".

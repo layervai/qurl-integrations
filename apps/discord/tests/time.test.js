@@ -179,6 +179,13 @@ describe('utils/time', () => {
       expect(formatSessionDurationSeconds(1.0001)).toBe('2s');
     });
 
+    it('accepts 24 hours and refuses any larger finite duration', () => {
+      expect(formatSessionDurationSeconds(86400)).toBe('86400s');
+      for (const value of [86400.000001, 86401]) {
+        expect(() => formatSessionDurationSeconds(value)).toThrow('Session duration exceeds 24 hours');
+      }
+    });
+
     it('returns null for null / undefined / non-finite / non-numeric / ≤0', () => {
       const cases = [null, undefined, NaN, Infinity, -Infinity, '30', '0.5', true, false, {}, [], 0, -1, -0.5];
       for (const v of cases) {

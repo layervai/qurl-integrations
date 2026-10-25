@@ -337,6 +337,8 @@ function connectorAuthHeaders(apiKey) {
   return headers;
 }
 
+// Upload entrypoints check the shared session bound before any HTTP request.
+// The same self-destruct seconds later feed mintLinks; resource expiry is separate.
 // Append `viewer_ttl_seconds` to the multipart form when a positive value
 // is provided. Centralized so all four upload paths (file initial,
 // re-upload, file via Discord CDN download, JSON) thread the same wire
@@ -369,6 +371,7 @@ function appendViewerTtl(form, viewerTtlSeconds) {
  * cases would lose coverage if it were removed.
  */
 async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds) {
+  formatSessionDurationSeconds(viewerTtlSeconds);
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!isAllowedSourceUrl(sourceUrl)) {
@@ -428,6 +431,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
  * quota (10) is exhausted and more recipients need links.
  */
 async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds) {
+  formatSessionDurationSeconds(viewerTtlSeconds);
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
 
@@ -463,6 +467,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerT
  * The buffer is cached so subsequent re-uploads don't re-download.
  */
 async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds) {
+  formatSessionDurationSeconds(viewerTtlSeconds);
   filename = sanitizeFilename(filename);
   if (!isAllowedSourceUrl(sourceUrl)) {
     throw new Error('Source URL is not a valid Discord CDN URL');
@@ -1323,6 +1328,7 @@ async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
  * Used for structured payloads like location data.
  */
 async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSeconds) {
+  formatSessionDurationSeconds(viewerTtlSeconds);
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
 
