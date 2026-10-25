@@ -172,6 +172,7 @@ describe('utils/time', () => {
 
     it('clamps the 0.5s preset to "1s" (MinSessionDuration floor)', () => {
       expect(formatSessionDurationSeconds(0.5)).toBe('1s');
+      expect(formatSessionDurationSeconds(0.25)).toBe('1s');
     });
 
     it('ceils fractional values > 1 (defensive — presets are integer ≥1)', () => {

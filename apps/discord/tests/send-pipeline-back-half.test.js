@@ -1936,13 +1936,15 @@ describe('handleAddRecipients — persisted duration bound', () => {
     const payload = kind === 'file'
       ? { attachment_url: 'https://cdn.discordapp.com/x.png', attachment_name: 'x.png', attachment_content_type: 'image/png' }
       : { actual_url: 'https://maps.example.test/place', location_name: 'Place' };
-    mockDb.getSendConfig.mockResolvedValueOnce({ connector_resource_id: 'res-1', expires_in: '30m', self_destruct_seconds: 86401, ...payload });
+    mockDb.getSendConfig.mockResolvedValueOnce({ connector_resource_id: 'res-1', expires_in: '30m', self_destruct_seconds: 3601, ...payload });
     if (kind === 'file') mockDownloadAndUpload.mockImplementationOnce(actualConnector.downloadAndUpload);
     else mockUploadJsonToConnector.mockImplementationOnce(actualConnector.uploadJsonToConnector);
     try {
       const result = await handleAddRecipients('send-duration', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]), makeInteraction(), 'apikey');
       expect(result.newLinks).toEqual([]);
       expect(result.delivered).toBe(0);
+      expect(kind === 'file' ? mockDownloadAndUpload : mockUploadJsonToConnector).toHaveBeenCalledTimes(1);
+      expect(kind === 'file' ? mockUploadJsonToConnector : mockDownloadAndUpload).not.toHaveBeenCalled();
       expect(globalThis.fetch).not.toHaveBeenCalled();
       expect(mockMintLinks).not.toHaveBeenCalled();
       expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();

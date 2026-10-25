@@ -337,18 +337,24 @@ function connectorAuthHeaders(apiKey) {
   return headers;
 }
 
-// Upload entrypoints check the shared session bound before any HTTP request.
-// The same self-destruct seconds later feed mintLinks; resource expiry is separate.
+// TODO(upstream-contract): qurl-s3-connector API.md viewer_ttl_seconds is 0.5–3600s.
+const MIN_VIEWER_TTL_SECONDS = 0.5;
+const MAX_VIEWER_TTL_SECONDS = 3600;
+function assertViewerTtlSeconds(seconds) {
+  if (isPositiveFinite(seconds) && (seconds < MIN_VIEWER_TTL_SECONDS || seconds > MAX_VIEWER_TTL_SECONDS)) {
+    throw new Error('Viewer timer must be between 0.5 and 3600 seconds');
+  }
+}
+
 // Append `viewer_ttl_seconds` to the multipart form when a positive value
 // is provided. Centralized so all four upload paths (file initial,
 // re-upload, file via Discord CDN download, JSON) thread the same wire
-// field name. The connector validates the value (PR #477); we forward
-// it as a string and let the connector own the contract.
+// field name. Upload entrypoints validate before CDN or connector HTTP.
 //
 // Asymmetry note: viewer_ttl_seconds is forwarded VERBATIM (so 0.5 →
 // "0.5"; the fileviewer's client-side blank reads the value directly).
 // The sibling formatSessionDurationSeconds() helper in utils/time.js
-// FLOORS 0.5 to "1s" because qurl-service's MinSessionDuration is
+// ROUNDS UP 0.5 to "1s" because qurl-service's MinSessionDuration is
 // 1 * time.Second. A reader looking at one wire field should know the
 // other has the opposite handling for the 0.5s preset.
 function appendViewerTtl(form, viewerTtlSeconds) {
@@ -371,7 +377,7 @@ function appendViewerTtl(form, viewerTtlSeconds) {
  * cases would lose coverage if it were removed.
  */
 async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds) {
-  formatSessionDurationSeconds(viewerTtlSeconds);
+  assertViewerTtlSeconds(viewerTtlSeconds);
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!isAllowedSourceUrl(sourceUrl)) {
@@ -431,7 +437,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
  * quota (10) is exhausted and more recipients need links.
  */
 async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds) {
-  formatSessionDurationSeconds(viewerTtlSeconds);
+  assertViewerTtlSeconds(viewerTtlSeconds);
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
 
@@ -467,7 +473,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerT
  * The buffer is cached so subsequent re-uploads don't re-download.
  */
 async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds) {
-  formatSessionDurationSeconds(viewerTtlSeconds);
+  assertViewerTtlSeconds(viewerTtlSeconds);
   filename = sanitizeFilename(filename);
   if (!isAllowedSourceUrl(sourceUrl)) {
     throw new Error('Source URL is not a valid Discord CDN URL');
@@ -1328,7 +1334,7 @@ async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
  * Used for structured payloads like location data.
  */
 async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSeconds) {
-  formatSessionDurationSeconds(viewerTtlSeconds);
+  assertViewerTtlSeconds(viewerTtlSeconds);
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
 
