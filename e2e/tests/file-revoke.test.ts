@@ -218,12 +218,14 @@ describe('File Revoke', () => {
     expect(mintIdB).toMatch(/^[0-9a-f]+$/);
     expect(mintIdA).not.toBe(mintIdB); // ← distinct per-recipient `views/` objects
 
-    // The service encodes resource IDs as lowercase base32 with an r- prefix.
-    // Both successful views must use that DNS-safe tunnel label through TLS SNI.
+    // Each recipient uses a fresh 256-bit base32 browser routing label.
+    // Both successful views must pass DNS and TLS SNI on that exact label.
     for (const url of [viewA.url, viewB.url]) {
       const host = new URL(url).hostname;
-      expect(host).toMatch(/^r-[a-z2-7]+\.qurl\.site(?:\.|$)/);
+      expect(host).toMatch(/^q-[a-z2-7]{52}\.qurl\.site(?:\.|$)/);
     }
+
+    expect(new URL(viewA.url).origin).not.toBe(new URL(viewB.url).origin);
 
     // Source cleanup only; shared-tunnel children require owner cleanup (#1552).
     const revoked = await tracked.revoke(upload.resource_id);
