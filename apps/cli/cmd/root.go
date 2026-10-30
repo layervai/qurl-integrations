@@ -670,8 +670,8 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 // invocation. An empty value counts as unset; an invalid one is dropped with a
 // verbose-only note.
 func (o *globalOpts) resolveClientProduct() {
-	value, set := o.lookupEnv("QURL_CLIENT_PRODUCT")
-	if !set || value == "" {
+	value, _ := o.lookupEnv("QURL_CLIENT_PRODUCT")
+	if value == "" {
 		return
 	}
 	if qurlapi.ValidClientProduct(value) {

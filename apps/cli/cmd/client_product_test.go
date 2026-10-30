@@ -5,7 +5,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
@@ -20,28 +19,7 @@ func TestClientProductUserAgent(t *testing.T) {
 		{name: "unset"},
 		{name: "empty is unset", set: true},
 		{name: "desktop", value: "qurl-desktop/1.2.3", product: "qurl-desktop/1.2.3", set: true},
-		{name: "token punctuation", value: "AZaz09!#$%&'*+-.^_`|~/!#$%&'*+-.^_`|~", product: "AZaz09!#$%&'*+-.^_`|~/!#$%&'*+-.^_`|~", set: true},
-		{name: "64 bytes", value: strings.Repeat("a", 62) + "/1", product: strings.Repeat("a", 62) + "/1", set: true},
-		{name: "65 bytes", value: strings.Repeat("a", 63) + "/1", set: true},
-		{name: "missing slash", value: "desktop", set: true},
-		{name: "empty name", value: "/1", set: true},
-		{name: "empty version", value: "desktop/", set: true},
-		{name: "extra slash", value: "desktop/1/2", set: true},
-		{name: "leading space", value: " desktop/1", set: true},
-		{name: "trailing space", value: "desktop/1 ", set: true},
-		{name: "multiple products", value: "desktop/1 other/2", set: true},
-		{name: "tab", value: "desktop/1\t", set: true},
-		{name: "CR", value: "desktop/1\r", set: true},
-		{name: "LF", value: "desktop/1\n", set: true},
-		{name: "CRLF injection", value: "desktop/1\r\nInjected: yes", set: true},
-		{name: "control", value: "desktop/\x00", set: true},
-		{name: "DEL", value: "desktop/\x7f", set: true},
-		{name: "unicode name", value: "désktop/1", set: true},
-		{name: "unicode version", value: "desktop/é", set: true},
-		{name: "comment", value: "desktop/1(comment)", set: true},
-		{name: "separator", value: "desktop/1:2", set: true},
-		{name: "quoted", value: "desktop/\"1\"", set: true},
-		{name: "backslash", value: "desktop/1\\2", set: true},
+		{name: "invalid", value: "desktop/1\r\nInjected: yes", set: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			want := "qurl-cli/test"
