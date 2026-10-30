@@ -160,6 +160,9 @@ router.get('/start', rateLimit, async (req, res) => {
   // Secure) lives in utils/oauth-cookies.js.
   // Start the authentication clock at this redirect, not when the setup link was made.
   state = signQurlOAuthRedirectState(state);
+  if (!state) {
+    return renderError(res, 400, 'Invalid setup link', 'This setup link has expired.');
+  }
   const { codeVerifier, codeChallenge } = createPkcePair();
   setQurlOAuthCookie(res, req, state);
   setQurlOAuthPkceCookie(res, req, codeVerifier);

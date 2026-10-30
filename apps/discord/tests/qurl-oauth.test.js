@@ -184,6 +184,22 @@ describe('qurl-oauth routes', () => {
       }
     });
 
+    it('shows an expired-link response if the clock crosses expiry before re-signing', async () => {
+      const began = Date.now();
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      const expiry = verifyQurlOAuthState(state).payload.expirySec * 1000;
+      let checks = 0;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => {
+        checks += 1;
+        return checks < 3 ? began : expiry;
+      });
+      try {
+        expect((await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`)).status).toBe(400);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
     it('sets Secure flag on the cookie when behind a proxy that sets X-Forwarded-Proto: https', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       const res = await request(app)

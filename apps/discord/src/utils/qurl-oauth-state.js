@@ -29,9 +29,8 @@ const crypto = require('crypto');
 const { createStateSigner } = require('./oauth-state');
 
 const STATE_KIND = 'qurl-oauth';
-// 15 minutes: every setup now forces a fresh sign-in (often a passwordless
-// email round-trip), and this clock starts at the Auth0 redirect, before Auth0
-// even issues its code. The browser-bound cookie still limits a leaked link.
+// The original setup link and OAuth completion share one 15-minute expiry.
+// Redirects record a fresh authentication time without extending that expiry.
 const STATE_TTL_SECONDS = 15 * 60;
 const ACCOUNT_FINGERPRINT_CONTEXT = 'qurl-account-fingerprint:v1';
 
@@ -112,7 +111,7 @@ function signStatePayload(payload) {
 
 function signQurlOAuthRedirectState(state) {
   const verified = verifyQurlOAuthState(state);
-  if (!verified.ok) throw new TypeError('Setup state is invalid or expired');
+  if (!verified.ok) return null;
   const { guildId, discordUserId, expirySec } = verified.payload;
   return signStatePayload({
     k: STATE_KIND, g: guildId, u: discordUserId,
