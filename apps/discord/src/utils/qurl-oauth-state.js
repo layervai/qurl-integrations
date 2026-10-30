@@ -10,7 +10,7 @@
 //
 // Format:
 //   state = base64url(JSON({k: 'qurl-oauth', g: guildId, u: discordUserId,
-//                           n: nonce, e: expirySec})) + '.' + sigHex
+//                           n: nonce, a?: authStartedAt, e: expirySec})) + '.' + sigHex
 //   sig   = HMAC-SHA256(state secret, payload).hex
 //
 // 15-minute TTL. After Auth0 redirects back, the callback re-verifies the
@@ -86,7 +86,7 @@ function b64urlDecode(str) {
   return Buffer.from(padded.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
 }
 
-function signQurlOAuthState(guildId, discordUserId, expiresAt) {
+function signQurlOAuthState(guildId, discordUserId) {
   if (typeof guildId !== 'string' || !guildId) {
     throw new TypeError('signQurlOAuthState: guildId must be a non-empty string');
   }
@@ -94,22 +94,31 @@ function signQurlOAuthState(guildId, discordUserId, expiresAt) {
     throw new TypeError('signQurlOAuthState: discordUserId must be a non-empty string');
   }
   const nonce = crypto.randomBytes(16).toString('hex');
-  const startedAt = Math.floor(Date.now() / 1000);
-  const expirySec = expiresAt ?? startedAt + STATE_TTL_SECONDS;
-  if (!Number.isSafeInteger(expirySec) || expirySec <= startedAt
-      || expirySec > startedAt + STATE_TTL_SECONDS) {
-    throw new TypeError('Setup expiry must remain within the original lifetime');
-  }
+  const expirySec = Math.floor(Date.now() / 1000) + STATE_TTL_SECONDS;
   const payload = {
     k: STATE_KIND,
     g: guildId,
     u: discordUserId,
     n: nonce,
-    a: startedAt,
     e: expirySec,
   };
+  return signStatePayload(payload);
+}
+
+function signStatePayload(payload) {
   const encoded = b64urlEncode(JSON.stringify(payload));
   return `${encoded}.${qurlOAuthStateSigner.sign(encoded)}`;
+}
+
+function signQurlOAuthRedirectState(state) {
+  const verified = verifyQurlOAuthState(state);
+  if (!verified.ok) throw new TypeError('Setup state is invalid or expired');
+  const { guildId, discordUserId, expirySec } = verified.payload;
+  return signStatePayload({
+    k: STATE_KIND, g: guildId, u: discordUserId,
+    n: crypto.randomBytes(16).toString('hex'),
+    a: Math.floor(Date.now() / 1000), e: expirySec,
+  });
 }
 
 // Returns { ok: true, payload } on success, or { ok: false, reason } on
@@ -155,6 +164,7 @@ function verifyQurlOAuthState(state) {
 
 module.exports = {
   signQurlOAuthState,
+  signQurlOAuthRedirectState,
   verifyQurlOAuthState,
   fingerprintQurlAccountSubject,
   qurlAccountFingerprintKeyEpoch,

@@ -13,7 +13,7 @@ const { AUDIT_EVENTS, SETUP_VIA } = require('../constants');
 const { sendDM } = require('../discord');
 const {
   verifyQurlOAuthState,
-  signQurlOAuthState,
+  signQurlOAuthRedirectState,
   fingerprintQurlAccountSubject,
   qurlAccountFingerprintKeyEpoch,
 } = require('../utils/qurl-oauth-state');
@@ -159,7 +159,7 @@ router.get('/start', rateLimit, async (req, res) => {
   // Cookie shape (__Host- prefix, Path=/, HttpOnly, SameSite=Lax,
   // Secure) lives in utils/oauth-cookies.js.
   // Start the authentication clock at this redirect, not when the setup link was made.
-  state = signQurlOAuthState(verified.payload.guildId, verified.payload.discordUserId, verified.payload.expirySec);
+  state = signQurlOAuthRedirectState(state);
   const { codeVerifier, codeChallenge } = createPkcePair();
   setQurlOAuthCookie(res, req, state);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
