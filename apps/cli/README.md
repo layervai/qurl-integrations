@@ -413,7 +413,7 @@ directory that holds its control socket; see
 identify its product/version, for example `qurl-desktop/1.2.3`. Set it in the
 CLI and daemon environments. It must be a single RFC 9110 `name/version`
 product with nonempty token-only parts, at most 64 bytes in total. Valid values
-prefix the User-Agent: `qurl-desktop/1.2.3 qurl-cli/<version>`. Unset or invalid
+prefix the User-Agent: `qurl-desktop/1.2.3 qurl-cli/<version>`. Unset, empty, or invalid
 values leave the CLI User-Agent unchanged; invalid values produce a one-line
 note only with `--verbose`. Use only a product name and version, no user or
 device identifiers.

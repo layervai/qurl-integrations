@@ -670,7 +670,7 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 // invocation and drops an invalid value with a verbose-only note.
 func (o *globalOpts) resolveClientProduct() {
 	value, set := o.lookupEnv("QURL_CLIENT_PRODUCT")
-	if !set {
+	if !set || value == "" {
 		return
 	}
 	if qurlapi.ValidClientProduct(value) {

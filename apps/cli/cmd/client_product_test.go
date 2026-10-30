@@ -18,7 +18,7 @@ func TestClientProductUserAgent(t *testing.T) {
 		set                  bool
 	}{
 		{name: "unset"},
-		{name: "empty", set: true},
+		{name: "empty is unset", set: true},
 		{name: "desktop", value: "qurl-desktop/1.2.3", product: "qurl-desktop/1.2.3", set: true},
 		{name: "token punctuation", value: "AZaz09!#$%&'*+-.^_`|~/!#$%&'*+-.^_`|~", product: "AZaz09!#$%&'*+-.^_`|~/!#$%&'*+-.^_`|~", set: true},
 		{name: "64 bytes", value: strings.Repeat("a", 62) + "/1", product: strings.Repeat("a", 62) + "/1", set: true},
