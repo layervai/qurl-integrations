@@ -383,6 +383,8 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	waitHeadlessNativeRetry = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {}, verbose: true,
+		// Set directly: the daemon command shares the root PersistentPreRun, so
+		// resolveSettings wiring is covered by TestClientProductReachesRequestsThroughRoot.
 		resolvedClientProduct:  "qurl-desktop/1.2.3",
 		resolvedShareGroupMode: connectordaemon.GroupModeSingle, resolvedSupervision: connectorstate.RuntimeSupervisionNative,
 		sleep: func(time.Duration) {}, newRequestID: func() string { return "headless-test-request" },
