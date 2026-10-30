@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -198,6 +197,8 @@ type globalOpts struct {
 	// resolvedSupervision is the lifecycle contract every mutating command
 	// checks against the namespace's policy marker before it acts.
 	resolvedSupervision connectorstate.RuntimeSupervision
+	// resolvedClientProduct is the validated QURL_CLIENT_PRODUCT, or empty.
+	resolvedClientProduct string
 }
 
 // rootOption is a test hook for injecting process context.
@@ -521,6 +522,7 @@ func (o *globalOpts) resolveSettings() error {
 		return exitcode.UsageError(err)
 	}
 	o.resolvedSupervision = mode
+	o.resolveClientProduct()
 	o.resolved = true
 	return nil
 }
@@ -664,39 +666,40 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 	return qurlapi.New(o.accountConfig(key, ""))
 }
 
-// RFC 9110 product with a required version; both parts use token characters.
-var clientProductPattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
-
-func (o *globalOpts) clientProduct() string {
-	if o.lookupEnv == nil {
-		return ""
-	}
+// resolveClientProduct reads the environment-only QURL_CLIENT_PRODUCT once per
+// invocation and drops an invalid value with a verbose-only note.
+func (o *globalOpts) resolveClientProduct() {
 	value, set := o.lookupEnv("QURL_CLIENT_PRODUCT")
 	if !set {
-		return ""
+		return
 	}
-	if len(value) <= 64 && clientProductPattern.MatchString(value) {
-		return value
+	if qurlapi.ValidClientProduct(value) {
+		o.resolvedClientProduct = value
+		return
 	}
 	if log := o.verboseLogger(); log != nil {
 		log("ignoring invalid QURL_CLIENT_PRODUCT: expected name/version with token characters, at most 64 bytes")
 	}
-	return ""
 }
 
-func (o *globalOpts) accountConfig(key, owner string) *qurlapi.Config {
+// apiConfig is the transport configuration every API client shares.
+func (o *globalOpts) apiConfig(baseURL string) *qurlapi.Config {
 	return &qurlapi.Config{
-		OwnerID:       owner,
-		BaseURL:       o.resolvedEndpoint,
-		APIKey:        key,
+		BaseURL:       baseURL,
 		Version:       o.version,
-		ClientProduct: o.clientProduct(),
+		ClientProduct: o.resolvedClientProduct,
 		Verbose:       o.verboseLogger(),
 		Sleep:         o.sleep,
 		NewRequestID:  o.newRequestID,
 		HTTPClient:    o.httpClient,
 		Now:           o.now,
 	}
+}
+
+func (o *globalOpts) accountConfig(key, owner string) *qurlapi.Config {
+	cfg := o.apiConfig(o.resolvedEndpoint)
+	cfg.APIKey, cfg.OwnerID = key, owner
+	return cfg
 }
 
 // registeredAccountBootstrap owns the account-key capability only during one
@@ -1134,16 +1137,7 @@ func requireExternalOwnerScopedAgentState(ctx context.Context, store qurl.AgentS
 // openRegisteredDeviceClient builds the narrow REST client around the durable
 // device credential held in store.
 func (o *globalOpts) openRegisteredDeviceClient(ctx context.Context, origin string, store qurl.AgentStateStore) (qurlapi.Client, error) {
-	return qurlapi.NewRegistered(ctx, &qurlapi.Config{
-		BaseURL:       origin,
-		Version:       o.version,
-		ClientProduct: o.clientProduct(),
-		Verbose:       o.verboseLogger(),
-		Sleep:         o.sleep,
-		NewRequestID:  o.newRequestID,
-		HTTPClient:    o.httpClient,
-		Now:           o.now,
-	}, store)
+	return qurlapi.NewRegistered(ctx, o.apiConfig(origin), store)
 }
 
 // bindDeviceOwner records the authenticated owner in the namespace's registry,

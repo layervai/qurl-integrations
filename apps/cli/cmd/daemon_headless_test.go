@@ -383,7 +383,7 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	waitHeadlessNativeRetry = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {}, verbose: true,
-		lookupEnv:              func(name string) (string, bool) { return "qurl-desktop/1.2.3", name == "QURL_CLIENT_PRODUCT" },
+		resolvedClientProduct:  "qurl-desktop/1.2.3",
 		resolvedShareGroupMode: connectordaemon.GroupModeSingle, resolvedSupervision: connectorstate.RuntimeSupervisionNative,
 		sleep: func(time.Duration) {}, newRequestID: func() string { return "headless-test-request" },
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },

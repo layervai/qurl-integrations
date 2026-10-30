@@ -44,13 +44,13 @@ func TestClientProductUserAgent(t *testing.T) {
 		{name: "backslash", value: "desktop/1\\2", set: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			want := "qurl-cli/test"
+			if tc.product != "" {
+				want = tc.product + " " + want
+			}
 			for _, registered := range []bool{false, true} {
 				for _, verbose := range []bool{false, true} {
 					var diagnostics bytes.Buffer
-					want := "qurl-cli/test"
-					if tc.product != "" {
-						want = tc.product + " " + want
-					}
 					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						if got := r.Header.Get("User-Agent"); got != want {
 							t.Errorf("User-Agent = %q, want %q", got, want)
@@ -62,6 +62,7 @@ func TestClientProductUserAgent(t *testing.T) {
 						streams:   &output.Streams{Err: &diagnostics},
 						lookupEnv: func(name string) (string, bool) { return tc.value, name == "QURL_CLIENT_PRODUCT" && tc.set },
 					}
+					opts.resolveClientProduct()
 					var client qurlapi.Client
 					var err error
 					if registered {

@@ -222,3 +222,15 @@ func TestTransportDoesNotMutateCallerRequestAcrossRetry(t *testing.T) {
 		t.Fatalf("caller request was mutated: body_same=%t headers=%v", req.Body == originalBody, req.Header)
 	}
 }
+
+func TestTransportIgnoresInvalidClientProduct(t *testing.T) {
+	for product, want := range map[string]string{
+		"":                           "qurl-cli/test",
+		"qurl-desktop/1.2.3":         "qurl-desktop/1.2.3 qurl-cli/test",
+		"desktop/1\r\nInjected: yes": "qurl-cli/test",
+	} {
+		if got := newTransport(&Config{Version: "test", ClientProduct: product}).userAgent; got != want {
+			t.Errorf("ClientProduct %q: User-Agent = %q, want %q", product, got, want)
+		}
+	}
+}

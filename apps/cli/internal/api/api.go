@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -368,8 +369,9 @@ type Config struct {
 	APIKey string
 	// Version is the CLI version, used in the User-Agent header.
 	Version string
-	// ClientProduct is an optional, validated RFC 9110 name/version product.
-	// It precedes the CLI product in the User-Agent for host-app attribution.
+	// ClientProduct is an optional RFC 9110 name/version product. When
+	// ValidClientProduct accepts it, it precedes the CLI product in the
+	// User-Agent for host-app attribution; otherwise it is ignored.
 	ClientProduct string
 	// Verbose, when non-nil, receives one already-redacted diagnostic line
 	// per transport event.
@@ -388,6 +390,16 @@ type Config struct {
 	// attempts and bounded backoffs. Redirects are always refused because
 	// credentials must not follow a Location header to another origin.
 	HTTPClient *http.Client
+}
+
+// clientProductPattern is an RFC 9110 product with a required version; both
+// parts use token characters.
+var clientProductPattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+// ValidClientProduct reports whether product is one name/version product of
+// at most 64 bytes that Config.ClientProduct may put in the User-Agent.
+func ValidClientProduct(product string) bool {
+	return len(product) <= 64 && clientProductPattern.MatchString(product)
 }
 
 type client struct {

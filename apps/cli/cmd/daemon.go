@@ -560,11 +560,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	}
 	configured := configuredHeadlessShare(headless)
 	openFactory := func(initCtx context.Context) (connectordaemon.GroupFactory, error) {
-		apiConfig := &qurlapi.Config{
-			BaseURL: origin, Version: opts.version, Verbose: opts.verboseLogger(),
-			ClientProduct: opts.clientProduct(),
-			Sleep:         opts.sleep, NewRequestID: opts.newRequestID, HTTPClient: opts.httpClient,
-		}
+		apiConfig := opts.apiConfig(origin)
 		return buildNativeSessionFactory(initCtx, connectorshare.NativeRuntimeConfig{
 			StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
 			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,

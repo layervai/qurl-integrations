@@ -151,10 +151,7 @@ func bootstrapGlobalOpts(t *testing.T, endpoint string, runtime *bootstrapNative
 		resolvedEndpoint:    endpoint,
 		resolvedSupervision: connectorstate.RuntimeSupervisionNative,
 		version:             "bootstrap-test",
-		lookupEnv: func(name string) (string, bool) {
-			if name == "QURL_CLIENT_PRODUCT" {
-				return "", false
-			}
+		lookupEnv: func(string) (string, bool) {
 			t.Fatal("warm registered-device open read an account credential")
 			return "", false
 		},
