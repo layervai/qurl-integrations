@@ -18,28 +18,30 @@ func TestResolveClientProduct(t *testing.T) {
 		{name: "invalid", value: "desktop/1\r\nInjected: yes"},
 	} {
 		for _, verbose := range []bool{false, true} {
-			var diagnostics bytes.Buffer
-			opts := &globalOpts{
-				verbose: verbose,
-				streams: &output.Streams{Err: &diagnostics},
-				lookupEnv: func(name string) (string, bool) {
-					if name != "QURL_CLIENT_PRODUCT" {
-						return "", false
-					}
-					return tc.value, true
-				},
-			}
-			opts.resolveClientProduct()
-			if opts.resolvedClientProduct != tc.product {
-				t.Errorf("%s verbose=%t: resolvedClientProduct = %q, want %q", tc.name, verbose, opts.resolvedClientProduct, tc.product)
-			}
-			wantDiagnostic := ""
-			if verbose && tc.value != "" && tc.product == "" {
-				wantDiagnostic = "[debug] ignoring invalid QURL_CLIENT_PRODUCT: expected name/version with token characters, at most 64 bytes\n"
-			}
-			if got := diagnostics.String(); got != wantDiagnostic {
-				t.Errorf("%s verbose=%t: diagnostics = %q, want %q", tc.name, verbose, got, wantDiagnostic)
-			}
+			t.Run(fmt.Sprintf("%s/verbose=%t", tc.name, verbose), func(t *testing.T) {
+				var diagnostics bytes.Buffer
+				opts := &globalOpts{
+					verbose: verbose,
+					streams: &output.Streams{Err: &diagnostics},
+					lookupEnv: func(name string) (string, bool) {
+						if name != "QURL_CLIENT_PRODUCT" {
+							return "", false
+						}
+						return tc.value, true
+					},
+				}
+				opts.resolveClientProduct()
+				if opts.resolvedClientProduct != tc.product {
+					t.Errorf("resolvedClientProduct = %q, want %q", opts.resolvedClientProduct, tc.product)
+				}
+				wantDiagnostic := ""
+				if verbose && tc.value != "" && tc.product == "" {
+					wantDiagnostic = "[debug] ignoring invalid QURL_CLIENT_PRODUCT: expected name/version with token characters, at most 64 bytes\n"
+				}
+				if got := diagnostics.String(); got != wantDiagnostic {
+					t.Errorf("diagnostics = %q, want %q", got, wantDiagnostic)
+				}
+			})
 		}
 	}
 }

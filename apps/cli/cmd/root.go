@@ -683,7 +683,8 @@ func (o *globalOpts) resolveClientProduct() {
 	}
 }
 
-// apiConfig is the transport configuration every API client shares.
+// apiConfig is the transport configuration every API client shares. Build
+// qurlapi.Config only here so each client carries the host product.
 func (o *globalOpts) apiConfig(baseURL string) *qurlapi.Config {
 	return &qurlapi.Config{
 		BaseURL:       baseURL,
