@@ -1,7 +1,6 @@
 package qurlapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -48,22 +47,21 @@ func (a accountAccessRules) request(ctx context.Context, method string, body any
 		}
 		return accessrules.AccountLibrary{}, fixed
 	}
-	var unique map[string]json.RawMessage
-	if accessrules.StrictDecode(reply.body, &unique) != nil {
-		return accessrules.AccountLibrary{}, qurl.ErrInvalidAPIResponse
-	}
+	// Unknown envelope fields, including the service's built-ins, are ignored
+	// so the service can evolve; each rule still decodes strictly because the
+	// whole list is written back.
 	var envelope struct {
-		Data json.RawMessage `json:"data"`
+		Data struct {
+			AccountID string                   `json:"account_id"`
+			Version   *int64                   `json:"version"`
+			Items     []accessrules.Definition `json:"items"`
+		} `json:"data"`
 	}
-	if json.Unmarshal(reply.body, &envelope) != nil {
+	if json.Unmarshal(reply.body, &envelope) != nil || envelope.Data.Version == nil {
 		return accessrules.AccountLibrary{}, qurl.ErrInvalidAPIResponse
 	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(envelope.Data, &fields) != nil || len(fields) != 4 || bytes.Equal(bytes.TrimSpace(fields["version"]), []byte("null")) {
-		return accessrules.AccountLibrary{}, qurl.ErrInvalidAPIResponse
-	}
-	var library accessrules.AccountLibrary
-	if accessrules.StrictDecode(envelope.Data, &library) != nil || library.Validate() != nil {
+	library := accessrules.AccountLibrary{AccountID: envelope.Data.AccountID, Version: *envelope.Data.Version, Items: envelope.Data.Items}
+	if library.Validate() != nil {
 		return accessrules.AccountLibrary{}, qurl.ErrInvalidAPIResponse
 	}
 	return library, nil

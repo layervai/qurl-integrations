@@ -27,7 +27,6 @@ type accessRuleJournal struct {
 	Items         []accessrules.Definition `json:"items"`
 	Endpoint      string                   `json:"endpoint"`
 	AccountID     string                   `json:"account_id"`
-	BaseVersion   int64                    `json:"base_version"`
 	Base          []accessrules.Definition `json:"base"`
 	Sync          string                   `json:"sync"`
 	Conflicts     []string                 `json:"conflicts"`
@@ -62,7 +61,7 @@ func (j *accessRuleJournal) status() {
 	}
 }
 func (j *accessRuleJournal) validate() error {
-	if j.SchemaVersion != 1 || j.LocalVersion < 0 || j.LocalVersion > accessrules.MaxVersion || j.BaseVersion < 0 || j.BaseVersion > accessrules.MaxVersion || j.Endpoint == "" || accessrules.ValidateItems(j.Items) != nil || accessrules.ValidateItems(j.Base) != nil || j.Conflicts == nil {
+	if j.SchemaVersion != 1 || j.LocalVersion < 0 || j.LocalVersion > accessrules.MaxVersion || j.Endpoint == "" || accessrules.ValidateItems(j.Items) != nil || accessrules.ValidateItems(j.Base) != nil || j.Conflicts == nil {
 		return errors.New("invalid access rules journal")
 	}
 	if !slices.Contains([]string{accessrules.SyncLocal, accessrules.SyncPending, accessrules.SyncSynced, accessrules.SyncOffline, accessrules.SyncConflict}, j.Sync) {
@@ -110,7 +109,7 @@ func (s *AccessRuleStore) readJournal(path string) (accessRuleJournal, error) {
 		return accessRuleJournal{}, err
 	}
 	var j accessRuleJournal
-	if rejectUnpairedJSONSurrogates(data) != nil || accessrules.StrictDecode(data, &j) != nil || j.validate() != nil {
+	if DecodeStrictJSON(data, &j) != nil || j.validate() != nil {
 		return accessRuleJournal{}, errors.New("invalid access rules journal")
 	}
 	if j.Endpoint != s.endpoint {
@@ -274,7 +273,7 @@ func (s *AccessRuleStore) Sync(ctx context.Context, remote accessrules.Remote) (
 				return accessrules.ErrAccountMismatch
 			}
 			j.Items, j.Conflicts = accessrules.Merge(candidate, j.Items, applied.Items)
-			j.Base, j.BaseVersion = applied.Items, applied.Version
+			j.Base = applied.Items
 			j.status()
 			return nil
 		})
@@ -294,7 +293,7 @@ func (s *AccessRuleStore) mergeAccount(ctx context.Context, account accessrules.
 			}
 		}
 		j.Items, j.Conflicts = merged, conflicts
-		j.AccountID, j.BaseVersion, j.Base = account.AccountID, account.Version, account.Items
+		j.AccountID, j.Base = account.AccountID, account.Items
 		j.status()
 		candidate = slices.Clone(j.Items)
 		return nil

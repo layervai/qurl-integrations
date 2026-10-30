@@ -170,7 +170,7 @@ func TestAccessRulesSyncMergeConflictAndAccountIsolation(t *testing.T) {
 	if _, err := store.Save(t.Context(), 0, &local); err != nil {
 		t.Fatal(err)
 	}
-	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "account-one", Items: []accessrules.Definition{{ID: "22222222-2222-4222-8222-222222222222", Name: "Remote", Mode: "review"}}, BuiltIns: accessrules.BuiltIns()}}
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "account-one", Items: []accessrules.Definition{{ID: "22222222-2222-4222-8222-222222222222", Name: "Remote", Mode: "review"}}}}
 	got, err := store.Sync(t.Context(), remote)
 	if err != nil || got.Sync != "synced" || len(got.Items) != 2 {
 		t.Fatalf("first sync %+v %v", got, err)
@@ -201,7 +201,7 @@ func TestAccessRulesSyncRefetchesAfterCASAndPreservesPendingOnFailure(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "account-one", Items: []accessrules.Definition{}, BuiltIns: accessrules.BuiltIns()}}
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "account-one", Items: []accessrules.Definition{}}}
 	remote.race = func() {
 		remote.library.Version++
 		remote.library.Items = append(remote.library.Items, accessrules.Definition{ID: "22222222-2222-4222-8222-222222222222", Name: "Race", Mode: "keys"})
@@ -231,7 +231,7 @@ func TestAccessRulesAccountSwitchArchivesPendingAndLoadsFreshLibrary(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{}, BuiltIns: accessrules.BuiltIns()}}
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{}}}
 	snapshot, err := store.Sync(t.Context(), remote)
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +241,7 @@ func TestAccessRulesAccountSwitchArchivesPendingAndLoadsFreshLibrary(t *testing.
 	if _, err = store.Save(t.Context(), snapshot.LocalVersion, &local); err != nil {
 		t.Fatal(err)
 	}
-	remote.library = accessrules.AccountLibrary{AccountID: "two", Items: []accessrules.Definition{}, BuiltIns: accessrules.BuiltIns()}
+	remote.library = accessrules.AccountLibrary{AccountID: "two", Items: []accessrules.Definition{}}
 	count := remote.putCount
 	snapshot, err = store.Sync(t.Context(), remote)
 	if err != nil || len(snapshot.Items) != 0 || remote.putCount != count {
@@ -260,7 +260,7 @@ func TestAccessRulesSyncKeepsLocalEditMadeDuringPUT(t *testing.T) {
 	if _, err := store.Save(t.Context(), 0, &definition); err != nil {
 		t.Fatal(err)
 	}
-	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{}, BuiltIns: accessrules.BuiltIns()}}
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{}}}
 	remote.onPut = func() {
 		snapshot, err := store.Snapshot(t.Context())
 		if err != nil {
@@ -279,7 +279,7 @@ func TestAccessRulesSyncKeepsLocalEditMadeDuringPUT(t *testing.T) {
 
 func TestAccessRulesUnchangedSyncDoesNotInvalidateLocalRevision(t *testing.T) {
 	store := openAccessRulesTestStore(t)
-	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{}, BuiltIns: accessrules.BuiltIns()}}
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{}}}
 	first, err := store.Sync(t.Context(), remote)
 	if err != nil {
 		t.Fatal(err)

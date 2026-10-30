@@ -45,7 +45,7 @@ func rulesCmd(opts *globalOpts) *cobra.Command {
 		if saveVersion < 0 || saveVersion >= accessrules.MaxVersion {
 			return exitcode.UsageError(errors.New("--version must be the current local access rules version"))
 		}
-		definition, err := readRuleDefinition(cmd, opts, file)
+		definition, err := readRuleDefinition(cmd, opts, file, "--file")
 		if err != nil {
 			return err
 		}
@@ -117,9 +117,9 @@ func (o *globalOpts) ruleStore() (*connectorstate.AccessRuleStore, error) {
 	}
 	return connectorstate.OpenAccessRules(dir, o.resolvedEndpoint)
 }
-func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file string) (accessrules.Definition, error) {
+func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file, flag string) (accessrules.Definition, error) {
 	if file != "-" {
-		return accessrules.Definition{}, exitcode.UsageError(errors.New("use --file - or --rule-file - and pipe one access rule as JSON"))
+		return accessrules.Definition{}, exitcode.UsageError(errors.New("use " + flag + " - and pipe one access rule as JSON"))
 	}
 	body, err := readRequestBody(cmd.Context(), opts.streams, http.MethodPut)
 	if err != nil {
@@ -128,15 +128,15 @@ func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file string) (acce
 	if len(body) > accessrules.MaxBytes {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("access rule JSON is too large"))
 	}
-	definition, err := accessrules.DecodeDefinition(body)
-	if err != nil {
-		return accessrules.Definition{}, exitcode.UsageError(err)
+	var definition accessrules.Definition
+	if connectorstate.DecodeStrictJSON(body, &definition) != nil || definition.Validate(strings.HasPrefix(definition.ID, "builtin.")) != nil {
+		return accessrules.Definition{}, exitcode.UsageError(errors.New("invalid access rule definition"))
 	}
 	return definition, nil
 }
 func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (accessrules.Definition, error) {
 	if cmd.Flags().Changed(ruleFileFlag) {
-		return readRuleDefinition(cmd, o, file)
+		return readRuleDefinition(cmd, o, file, "--"+ruleFileFlag)
 	}
 	if strings.TrimSpace(selector) == "" {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("--rule requires an access rule ID or exact name"))
@@ -280,7 +280,7 @@ func ruleCreateCmd(opts *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if accessrules.StrictDecode(body, &definition.AllowedEmails) != nil || definition.AllowedEmails == nil {
+			if connectorstate.DecodeStrictJSON(body, &definition.AllowedEmails) != nil || definition.AllowedEmails == nil {
 				return exitcode.UsageError(errors.New("additional email addresses must be a JSON array"))
 			}
 		}

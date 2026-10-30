@@ -6,11 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"reflect"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -23,6 +20,11 @@ const MaxVersion int64 = 1<<53 - 1
 
 // MaxBytes bounds library and definition input before decoding.
 const MaxBytes = 256 << 10
+
+// MaxItems bounds one custom library.
+const MaxItems = 100
+
+const fieldEmailDomain = "email_domain"
 
 // Policy modes and synchronization states are shared bridge vocabulary.
 const (
@@ -70,9 +72,10 @@ func (d *Definition) Policy(version int64) qurl.ConsumerAccessPolicy {
 }
 
 // Validate rejects unsupported modes and contradictory or malformed definitions.
+// A built-in matches by ID and policy only, so its display name may change.
 func (d *Definition) Validate(builtin bool) error {
 	if builtin {
-		if !slices.ContainsFunc(BuiltIns(), func(b Definition) bool { return reflect.DeepEqual(b, *d) }) {
+		if !d.builtIn() {
 			return errors.New("unsupported built-in access rule")
 		}
 		return nil
@@ -94,88 +97,48 @@ func (d *Definition) Validate(builtin bool) error {
 	return nil
 }
 
-// ValidateItems bounds a complete custom library including storage overhead.
+func (d *Definition) builtIn() bool {
+	for _, b := range BuiltIns() {
+		if b.ID == d.ID && b.Policy(1).SameDefinition(d.Policy(1)) {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateItems checks a complete custom library against the service's count
+// and size budget.
 func ValidateItems(items []Definition) error {
-	if items == nil || len(items) > 100 {
-		return errors.New("access rules require an array of at most 100 custom rules")
+	if items == nil {
+		return errors.New("access rules require an array")
 	}
 	seen := map[string]bool{}
-	size := 1024
+	// TODO(upstream-contract): copied from qurl-service
+	// internal/repository/access_rules.go ValidateAccessRules; keep identical.
+	size := 8192
 	for _, d := range items {
 		if d.Validate(false) != nil || seen[d.ID] {
 			return errors.New("invalid or duplicate custom access rule")
 		}
 		seen[d.ID] = true
-		size += 128 + len(d.ID) + len(d.Name) + len(d.Mode) + len(d.EmailDomain) + len(d.ContractID)
-		for _, e := range d.AllowedEmails {
-			size += 1 + len(e)
+		size += 7 + len("idnamemode") + len(d.ID) + len(d.Name) + len(d.Mode)
+		if d.EmailDomain != "" {
+			size += len(fieldEmailDomain) + len(d.EmailDomain)
+		}
+		if d.ContractID != "" {
+			size += len("contract_id") + len(d.ContractID)
+		}
+		if d.AllowedEmails != nil {
+			size += 3 + len("allowed_emails")
+			for _, e := range d.AllowedEmails {
+				size += 1 + len(e)
+			}
 		}
 	}
-	if size > MaxBytes {
+	if len(items) > MaxItems || size > MaxBytes {
 		return errors.New("access rule library is too large")
 	}
 	return nil
-}
-
-// DecodeDefinition accepts one exact definition, including a frozen built-in snapshot.
-func DecodeDefinition(data []byte) (Definition, error) {
-	var d Definition
-	if StrictDecode(data, &d) != nil || d.Validate(strings.HasPrefix(d.ID, "builtin.")) != nil {
-		return Definition{}, errors.New("invalid access rule definition")
-	}
-	return d, nil
-}
-
-// StrictDecode rejects duplicate/unknown fields, trailing JSON and invalid UTF-8.
-func StrictDecode(data []byte, target any) error {
-	if len(data) > MaxBytes*4 || !utf8.Valid(data) || !validEscapedUnicode(data) {
-		return errors.New("invalid access rules JSON")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	if err := uniqueValue(decoder, 0); err != nil {
-		return errors.New("invalid access rules JSON")
-	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return errors.New("invalid access rules JSON")
-	}
-	decoder = json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(target) != nil {
-		return errors.New("invalid access rules JSON")
-	}
-	return nil
-}
-func uniqueValue(decoder *json.Decoder, depth int) error {
-	if depth > 12 {
-		return errors.New("JSON is too deep")
-	}
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	seen := map[string]bool{}
-	for decoder.More() {
-		if delim == '{' {
-			key, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			name, ok := key.(string)
-			if !ok || seen[name] {
-				return errors.New("duplicate JSON field")
-			}
-			seen[name] = true
-		}
-		if err := uniqueValue(decoder, depth+1); err != nil {
-			return err
-		}
-	}
-	_, err = decoder.Token()
-	return err
 }
 
 // Merge preserves local edits while accepting independent remote changes.
@@ -233,11 +196,11 @@ var (
 )
 
 // AccountLibrary is the authenticated service snapshot, never printed directly.
+// The service's built-ins are ignored: the CLI never uses them.
 type AccountLibrary struct {
 	AccountID string       `json:"account_id"`
 	Version   int64        `json:"version"`
 	Items     []Definition `json:"items"`
-	BuiltIns  []Definition `json:"built_ins"`
 }
 
 // Remote preserves the library's whole-list CAS contract.
@@ -271,7 +234,7 @@ func EqualItems(a, b []Definition) bool {
 
 // Validate verifies a complete service response without guessing absent fields.
 func (l AccountLibrary) Validate() error {
-	if strings.TrimSpace(l.AccountID) == "" || l.Version < 0 || l.Version > MaxVersion || ValidateItems(l.Items) != nil || !EqualItems(l.BuiltIns, BuiltIns()) {
+	if strings.TrimSpace(l.AccountID) == "" || l.Version < 0 || l.Version > MaxVersion || ValidateItems(l.Items) != nil {
 		return errors.New("invalid account access rules response")
 	}
 	return nil
@@ -297,7 +260,7 @@ func (d *Definition) UnmarshalJSON(data []byte) error {
 			if parsed.Mode != "contract" || bytes.Equal(value, []byte("null")) {
 				return errors.New("invalid access rule definition")
 			}
-		case ModeEmailDomain, "allowed_emails":
+		case fieldEmailDomain, "allowed_emails":
 			if parsed.Mode != ModeEmailDomain || bytes.Equal(value, []byte("null")) {
 				return errors.New("invalid access rule definition")
 			}
@@ -307,46 +270,6 @@ func (d *Definition) UnmarshalJSON(data []byte) error {
 	}
 	*d = Definition(parsed)
 	return nil
-}
-func validEscapedUnicode(data []byte) bool {
-	for i := 0; i < len(data); i++ {
-		if data[i] != '"' {
-			continue
-		}
-		for i++; i < len(data) && data[i] != '"'; i++ {
-			if data[i] != '\\' {
-				continue
-			}
-			i++
-			if i >= len(data) || data[i] != 'u' {
-				continue
-			}
-			var ok bool
-			i, ok = unicodeEscapeEnd(data, i)
-			if !ok {
-				return false
-			}
-		}
-	}
-	return true
-}
-func unicodeEscapeEnd(data []byte, marker int) (int, bool) {
-	if marker+4 >= len(data) {
-		return marker, false
-	}
-	value, err := strconv.ParseUint(string(data[marker+1:marker+5]), 16, 16)
-	if err != nil || value >= 0xdc00 && value <= 0xdfff {
-		return marker, false
-	}
-	last := marker + 4
-	if value < 0xd800 || value > 0xdbff {
-		return last, true
-	}
-	if last+6 >= len(data) || data[last+1] != '\\' || data[last+2] != 'u' {
-		return marker, false
-	}
-	low, err := strconv.ParseUint(string(data[last+3:last+7]), 16, 16)
-	return last + 6, err == nil && low >= 0xdc00 && low <= 0xdfff
 }
 
 // SameItem includes the absence of a UUID when comparing conflict choices.

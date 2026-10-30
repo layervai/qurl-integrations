@@ -936,7 +936,7 @@ func (s *Server) handleIdentityRoute(w http.ResponseWriter, r *http.Request) boo
 	case "/v1/me":
 		s.handleMe(w, r)
 	case "/v1/me/access-rules":
-		WriteEnvelope(s.t, w, http.StatusOK, accessrules.AccountLibrary{AccountID: MeOwnerID, Version: 0, Items: []accessrules.Definition{}, BuiltIns: accessrules.BuiltIns()}, nil)
+		WriteEnvelope(s.t, w, http.StatusOK, map[string]any{"account_id": MeOwnerID, "version": 0, "items": []accessrules.Definition{}, "built_ins": accessrules.BuiltIns()}, nil)
 	default:
 		return false
 	}

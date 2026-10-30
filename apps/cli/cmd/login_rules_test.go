@@ -36,7 +36,7 @@ func TestAccountLoginsReconcileGuestRulesWithoutChangingLoginResult(t *testing.T
 				if _, err = store.Save(t.Context(), 0, &guest); err != nil {
 					t.Fatal(err)
 				}
-				account := accessrules.AccountLibrary{AccountID: "account-one", Version: 4, Items: []accessrules.Definition{{ID: "22222222-2222-4222-8222-222222222222", Name: "Account rule", Mode: "review"}}, BuiltIns: accessrules.BuiltIns()}
+				account := accessrules.AccountLibrary{AccountID: "account-one", Version: 4, Items: []accessrules.Definition{{ID: "22222222-2222-4222-8222-222222222222", Name: "Account rule", Mode: "review"}}}
 				loaded, merged := false, false
 				srv.Script(http.MethodGet, "/v1/me/access-rules", func(w http.ResponseWriter, _ *http.Request) {
 					loaded = true
