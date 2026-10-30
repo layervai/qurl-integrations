@@ -4234,8 +4234,14 @@ async function handleSetupModal(interaction, { flow_id }) {
     const binding = await prepareGuildOwnerBinding(interaction.guildId, identity.owner_id);
     await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE, binding);
   } catch (err) {
-    logger.warn('Guild key owner verification refused', { ...logFields, code: err?.code });
-    return interaction.editReply({ content: '❌ **Server ownership could not be verified.** Use a key from the existing qURL owner account. If its saved key is no longer valid or ownership must change, contact the bot operator.' });
+    const status = qurlApiErrorStatus(err);
+    const conflict = err?.code === 'GUILD_OWNER_CONFLICT' || err?.name === 'ConditionalCheckFailedException'
+      || status === 401 || status === 403;
+    const log = conflict ? logger.warn : logger.error;
+    log('Guild key owner verification refused', { ...logFields, code: err?.code, status, errorType: err?.name });
+    return interaction.editReply({ content: conflict
+      ? '❌ **Server ownership could not be verified.** Use a key from the existing qURL owner account. If its saved key is no longer valid or ownership must change, contact the bot operator.'
+      : '❌ **Setup is temporarily unavailable.** The existing server connection is unchanged. Try again shortly.' });
   }
   logger.info('Guild API key configured', logFields);
 

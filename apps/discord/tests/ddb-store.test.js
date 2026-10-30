@@ -81,6 +81,29 @@ afterAll(async () => {
 });
 
 describe('guild configs', () => {
+  test('owner-bound key writes compare the exact saved ciphertext', async () => {
+    const ciphertext = mockCiphertext('saved-key');
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: ciphertext } });
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'auth0|owner', expectedApiKey: 'saved-key',
+    });
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ConditionExpression).toContain('qurl_owner_id = :owner');
+    expect(input.ConditionExpression).toContain('qurl_api_key = :prior');
+    expect(input.ExpressionAttributeValues[':prior']).toBe(ciphertext);
+    expect(input.ExpressionAttributeValues[':owner']).toBe('auth0|owner');
+  });
+
+  test('a changed key snapshot fails before the update', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: mockCiphertext('changed-key') } });
+    await expect(store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'auth0|owner', expectedApiKey: 'saved-key',
+    })).rejects.toMatchObject({ code: 'GUILD_OWNER_CONFLICT' });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
   test('setGuildApiKey: encrypts apiKey before write, preserves configured_at on re-key', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'configurer');

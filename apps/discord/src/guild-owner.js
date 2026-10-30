@@ -10,6 +10,7 @@ function ownerConflict() {
 async function prepareGuildOwnerBinding(guildId, ownerId) {
   if (typeof ownerId !== 'string' || !ownerId) throw ownerConflict();
   const prior = await db.getGuildConfigWithApiKey(guildId);
+  // TODO(upstream-contract): /v1/me owner_id and API-key ownership use the JWT sub.
   let priorOwner = prior?.qurl_owner_id;
   if (!priorOwner && prior?.qurl_api_key) {
     // Migrate a legacy row only after the service attests its saved key's owner.
@@ -20,4 +21,4 @@ async function prepareGuildOwnerBinding(guildId, ownerId) {
   return { ownerId, expectedApiKey: prior?.qurl_api_key || null };
 }
 
-module.exports = { prepareGuildOwnerBinding, ownerConflict };
+module.exports = { prepareGuildOwnerBinding };

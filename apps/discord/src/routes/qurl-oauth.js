@@ -8,6 +8,7 @@ const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
 const { prepareGuildOwnerBinding } = require('../guild-owner');
+const { qurlApiErrorStatus } = require('../utils/qurl-errors');
 const { AUDIT_EVENTS, SETUP_VIA } = require('../constants');
 const { sendDM } = require('../discord');
 const {
@@ -316,9 +317,14 @@ router.get('/callback', rateLimit, async (req, res) => {
   try {
     ownerBinding = await prepareGuildOwnerBinding(guildId, qurlAccountSubject);
   } catch (err) {
-    logger.warn('qURL setup owner verification refused', { guildId, code: err?.code });
-    return renderError(res, 409, 'Server ownership could not be verified',
-      'Use the existing qURL owner account. If its saved key is no longer valid or ownership must change, contact the bot operator.');
+    const status = qurlApiErrorStatus(err);
+    const conflict = err?.code === 'GUILD_OWNER_CONFLICT' || status === 401 || status === 403;
+    const log = conflict ? logger.warn : logger.error;
+    log('qURL setup owner verification refused', { guildId, code: err?.code, status, errorType: err?.name });
+    return conflict
+      ? renderError(res, 409, 'Server ownership could not be verified',
+        'Use the existing qURL owner account. If its saved key is no longer valid or ownership must change, contact the bot operator.')
+      : renderError(res, 503, 'Setup is temporarily unavailable', 'The existing server connection is unchanged. Try again shortly.');
   }
 
   // 2. Mint a guild-scoped qURL API key via POST /v1/api-keys, owned by

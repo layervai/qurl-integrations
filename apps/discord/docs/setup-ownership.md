@@ -6,6 +6,9 @@ expiry, flow nonce, and authentication time. Both setup entry points request
 authentication before the current redirect. Missing or invalid identity fails
 before the bot mints a key.
 
+The service uses the Auth0 subject as the JWT owner ID and as the owner of keys
+minted by that JWT. `/v1/me` reports that same owner ID for API keys.
+
 Each configured guild stores `qurl_owner_id`, the stable qURL owner identity.
 It does not depend on the OAuth state secret or audit-log retention. Setup can
 replace a key for the same owner. A different owner gets a refusal with guidance.
@@ -31,3 +34,6 @@ revoke the old credential, reconcile its webhook subscription references, and
 use a conditional update against the reviewed guild row. Never delete a row or
 clear its owner as a way to make an unverified setup succeed. This process needs
 operator action; there is no automatic or self-service owner reset.
+
+Bot removal currently records an uninstall audit event and retains the guild row.
+It cannot reset the owner. The raw row-delete helper has no production caller.

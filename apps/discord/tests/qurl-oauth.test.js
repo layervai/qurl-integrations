@@ -372,6 +372,20 @@ describe('qurl-oauth routes', () => {
       expect(tokenBody.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');
     });
 
+    it('keeps an infrastructure failure separate from an owner mismatch', async () => {
+      db.getGuildConfigWithApiKey.mockRejectedValueOnce(new Error('DDB unavailable'));
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true, json: async () => ({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }),
+      });
+      const res = await request(app).get(`/oauth/qurl/callback?code=code&state=${encodeURIComponent(state)}`)
+        .set('Cookie', cookieFor(state));
+      expect(res.status).toBe(503);
+      expect(res.text).toContain('temporarily unavailable');
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
+    });
+
     it('rejects a different stored owner before minting a key', async () => {
       db.getGuildConfigWithApiKey.mockResolvedValueOnce({ qurl_owner_id: 'another-owner', qurl_api_key: 'saved' });
       const state = signQurlOAuthState('guild-1', 'admin-2');
@@ -608,7 +622,11 @@ describe('qurl-oauth routes', () => {
       );
     });
 
-    it('500s when persist fails after successful mint, and best-effort deletes the orphan key', async () => {
+    it.each([
+      [new Error('DDB throttled'), 500],
+      [Object.assign(new Error('conditional write lost'), { name: 'ConditionalCheckFailedException' }), 409],
+      [Object.assign(new Error('saved key changed'), { code: 'GUILD_OWNER_CONFLICT' }), 409],
+    ])('cleans up an orphan after a failed key write: %s', async (persistError, expectedStatus) => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       let resolveDeleteFired;
       const deleteFired = new Promise((resolve) => { resolveDeleteFired = resolve; });
@@ -626,12 +644,12 @@ describe('qurl-oauth routes', () => {
           return { ok: true, status: 204, text: () => Promise.resolve('') };
         });
       globalThis.fetch = fetchSpy;
-      db.setGuildApiKey.mockRejectedValueOnce(new Error('DDB throttled'));
+      db.setGuildApiKey.mockRejectedValueOnce(persistError);
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
       ).set('Cookie', cookieFor(state));
-      expect(res.status).toBe(500);
-      expect(res.text).toContain('provisioned but not stored');
+      expect(res.status).toBe(expectedStatus);
+      expect(res.text).toContain(expectedStatus === 500 ? 'provisioned but not stored' : 'Server setup changed');
       await deleteFired;
       const deleteCall = fetchSpy.mock.calls.find((c) => typeof c[1]?.method === 'string' && c[1].method === 'DELETE');
       expect(deleteCall).toBeDefined();
@@ -815,7 +833,7 @@ describe('qurl-oauth — MAP_COMMAND_ENABLED=true', () => {
         }));
         jest.doMock('../src/store', () => ({
           setGuildApiKey: jest.fn().mockResolvedValue(undefined),
-  getGuildConfigWithApiKey: jest.fn().mockResolvedValue(undefined),
+          getGuildConfigWithApiKey: jest.fn().mockResolvedValue(undefined),
           getGuildApiKey: jest.fn(),
           getGuildConfig: jest.fn().mockResolvedValue({ guild_id: 'guild-1', configured_by: 'admin-2' }),
           getPendingLink: jest.fn(),

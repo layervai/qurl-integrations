@@ -1703,6 +1703,22 @@ describe('handleSetupModal (dispatcher path)', () => {
     }
   });
 
+  it('refuses a pasted key from a different stored owner', async () => {
+    mockDb.getGuildConfigWithApiKey.mockResolvedValueOnce({ qurl_owner_id: 'another-owner', qurl_api_key: 'saved' });
+    const interaction = makeModalInteraction();
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining('ownership could not be verified') });
+  });
+
+  it('reports a temporary identity outage without claiming an owner conflict', async () => {
+    require('../src/qurl').getIdentity.mockRejectedValueOnce(Object.assign(new Error('Unavailable'), { status: 503 }));
+    const interaction = makeModalInteraction();
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining('temporarily unavailable') });
+  });
+
   it('validates key + persists + replies success', async () => {
     const interaction = makeModalInteraction();
     await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
