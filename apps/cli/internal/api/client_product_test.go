@@ -17,6 +17,7 @@ func TestValidClientProduct(t *testing.T) {
 		{name: "64 bytes", value: strings.Repeat("a", maxClientProductLen-2) + "/1", valid: true},
 		{name: "65 bytes", value: strings.Repeat("a", maxClientProductLen-1) + "/1"},
 		{name: "reserved CLI name", value: "qurl-cli/0.0.1"},
+		{name: "reserved-looking but distinct", value: "qurl-cli-desktop/1", valid: true},
 		{name: "reserved CLI name any case", value: "QURL-CLI/0.0.1"},
 		{name: "missing slash", value: "desktop"},
 		{name: "empty name", value: "/1"},
