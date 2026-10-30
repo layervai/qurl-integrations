@@ -400,12 +400,19 @@ var clientProductPattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$
 // MaxClientProductLen bounds Config.ClientProduct in bytes.
 const MaxClientProductLen = 64
 
+// cliProduct is the CLI's own User-Agent product name.
+const cliProduct = "qurl-cli"
+
+// ClientProductRule describes what ValidClientProduct accepts, for diagnostics.
+var ClientProductRule = fmt.Sprintf("name/version with token characters, at most %d bytes, not named %s",
+	MaxClientProductLen, cliProduct)
+
 // ValidClientProduct reports whether product is one name/version product of
 // at most MaxClientProductLen bytes that Config.ClientProduct may put in the User-Agent.
 func ValidClientProduct(product string) bool {
 	// The CLI's own product name is reserved so a host cannot pose as the CLI.
 	return len(product) <= MaxClientProductLen && clientProductPattern.MatchString(product) &&
-		!strings.HasPrefix(strings.ToLower(product), "qurl-cli/")
+		!strings.HasPrefix(strings.ToLower(product), cliProduct+"/")
 }
 
 type client struct {

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
@@ -19,6 +20,7 @@ func TestResolveClientProduct(t *testing.T) {
 		{name: "empty is unset", empty: true},
 		{name: "desktop", value: "qurl-desktop/1.2.3", product: "qurl-desktop/1.2.3"},
 		{name: "invalid", value: "desktop/1\r\nInjected: yes"},
+		{name: "reserved", value: "qurl-cli/1.0"},
 	} {
 		for _, verbose := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/verbose=%t", tc.name, verbose), func(t *testing.T) {
@@ -40,7 +42,7 @@ func TestResolveClientProduct(t *testing.T) {
 				}
 				wantDiagnostic := ""
 				if verbose && tc.value != "" && tc.product == "" {
-					wantDiagnostic = "[debug] ignoring invalid QURL_CLIENT_PRODUCT: expected name/version with token characters, at most 64 bytes\n"
+					wantDiagnostic = "[debug] ignoring invalid QURL_CLIENT_PRODUCT: expected " + qurlapi.ClientProductRule + "\n"
 				}
 				if got := diagnostics.String(); got != wantDiagnostic {
 					t.Errorf("diagnostics = %q, want %q", got, wantDiagnostic)

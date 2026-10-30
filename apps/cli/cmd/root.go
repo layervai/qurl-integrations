@@ -680,7 +680,7 @@ func (o *globalOpts) resolveClientProduct() {
 		return
 	}
 	if log := o.verboseLogger(); log != nil {
-		log("ignoring invalid QURL_CLIENT_PRODUCT: expected name/version with token characters, at most %d bytes", qurlapi.MaxClientProductLen)
+		log("ignoring invalid QURL_CLIENT_PRODUCT: expected %s", qurlapi.ClientProductRule)
 	}
 }
 
