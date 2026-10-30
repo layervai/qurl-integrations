@@ -39,8 +39,14 @@ var cliSentinels = map[string]struct {
 	code int
 }{
 	"accessrules.ErrConflict":           {accessrules.ErrConflict, Conflict},
-	"accessrules.ErrAccountMismatch":    {accessrules.ErrAccountMismatch, Conflict},
+	"accessrules.ErrRuleConflict":       {accessrules.ErrRuleConflict, Conflict},
+	"accessrules.ErrAccountMismatch":    {accessrules.ErrAccountMismatch, Config},
 	"accessrules.ErrUnlinked":           {accessrules.ErrUnlinked, Forbidden},
+	"accessrules.ErrRuleNotFound":       {accessrules.ErrRuleNotFound, NotFound},
+	"accessrules.ErrAmbiguousRule":      {accessrules.ErrAmbiguousRule, Usage},
+	"accessrules.ErrDuplicateName":      {accessrules.ErrDuplicateName, InvalidInput},
+	"accessrules.ErrLibraryLimit":       {accessrules.ErrLibraryLimit, InvalidInput},
+	"state.ErrAccessRulesFile":          {state.ErrAccessRulesFile, Config},
 	"qurlapi.ErrAccountLoad":            {qurlapi.ErrAccountLoad, Unavailable},
 	"qurlapi.ErrAccountUnavailable":     {qurlapi.ErrAccountUnavailable, Unavailable},
 	"qurlapi.ErrAccountExchange":        {qurlapi.ErrAccountExchange, Unavailable},

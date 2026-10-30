@@ -63,7 +63,7 @@ func TestAccessRulesConcurrentProcesses(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			_, e = store.Save(context.Background(), snapshot.LocalVersion, &accessrules.Definition{ID: id, Name: "Process", Mode: "keys"})
+			_, e = store.Save(context.Background(), snapshot.LocalVersion, &accessrules.Definition{ID: id, Name: "Process " + id, Mode: "keys"})
 			if e == nil {
 				return
 			}
@@ -126,8 +126,9 @@ func TestAccessRulesRejectUnsafeJournal(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := store.Snapshot(t.Context()); err == nil {
-				t.Fatal("unsafe journal accepted")
+			var damaged *AccessRulesFileError
+			if _, err := store.Snapshot(t.Context()); !errors.As(err, &damaged) || damaged.Path != path {
+				t.Fatalf("unsafe journal not named: %v", err)
 			}
 		})
 	}
@@ -299,4 +300,68 @@ func openAccessRulesTestStore(t *testing.T) *AccessRuleStore {
 		t.Fatal(err)
 	}
 	return store
+}
+
+func TestAccessRulesSyncStatusAloneKeepsTheEditRevision(t *testing.T) {
+	store := openAccessRulesTestStore(t)
+	saved, err := store.Save(t.Context(), 0, &accessrules.Definition{ID: ruleID, Name: "Local", Mode: "keys"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{}}}
+	synced, err := store.Sync(t.Context(), remote)
+	if err != nil || synced.Sync != "synced" || synced.LocalVersion != saved.LocalVersion {
+		t.Fatalf("uploading unchanged rules moved the revision: %+v -> %+v %v", saved, synced, err)
+	}
+	remote.fail = errors.New("offline")
+	if _, err = store.Sync(t.Context(), remote); err == nil {
+		t.Fatal("failure swallowed")
+	}
+	offline, err := store.Snapshot(t.Context())
+	if err != nil || offline.Sync != "offline" || offline.LocalVersion != saved.LocalVersion {
+		t.Fatalf("status change moved the revision: %+v %v", offline, err)
+	}
+}
+
+func TestAccessRulesMergeOverTheLimitKeepsLocalRules(t *testing.T) {
+	store := openAccessRulesTestStore(t)
+	for i := range 60 {
+		if _, err := store.Save(t.Context(), -1, &accessrules.Definition{ID: fmt.Sprintf("%08d-1111-4111-8111-111111111111", i), Name: "Guest " + strconv.Itoa(i), Mode: "keys"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	account := make([]accessrules.Definition, 60)
+	for i := range account {
+		account[i] = accessrules.Definition{ID: fmt.Sprintf("%08d-2222-4222-8222-222222222222", i), Name: "Account " + strconv.Itoa(i), Mode: "keys"}
+	}
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: account}}
+	if _, err := store.Sync(t.Context(), remote); !errors.Is(err, accessrules.ErrLibraryLimit) || remote.putCount != 0 {
+		t.Fatalf("merge over the limit: %v puts=%d", err, remote.putCount)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil || len(snapshot.Items) != 60 || snapshot.Sync != "local" {
+		t.Fatalf("guest rules changed: %d %s %v", len(snapshot.Items), snapshot.Sync, err)
+	}
+}
+
+func TestAccessRulesConflictsResolveByNameAtTheCurrentRevision(t *testing.T) {
+	store := openAccessRulesTestStore(t)
+	if _, err := store.Save(t.Context(), 0, &accessrules.Definition{ID: ruleID, Name: "Local", Mode: "keys"}); err != nil {
+		t.Fatal(err)
+	}
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{{ID: ruleID, Name: "Remote", Mode: "review"}}}}
+	snapshot, err := store.Sync(t.Context(), remote)
+	if err != nil || snapshot.Sync != "conflict" {
+		t.Fatalf("conflict %+v %v", snapshot, err)
+	}
+	if _, err = store.Delete(t.Context(), -1, "Local"); !errors.Is(err, accessrules.ErrRuleConflict) {
+		t.Fatalf("delete of a conflicting rule: %v", err)
+	}
+	if _, err = store.Resolve(t.Context(), -1, "Unrelated", "local"); !errors.Is(err, accessrules.ErrRuleNotFound) {
+		t.Fatalf("resolve of an unknown rule: %v", err)
+	}
+	snapshot, err = store.Resolve(t.Context(), -1, "Remote", "account")
+	if err != nil || len(snapshot.Conflicts) != 0 || snapshot.Items[0].Name != "Remote" {
+		t.Fatalf("resolve by the account name %+v %v", snapshot, err)
+	}
 }

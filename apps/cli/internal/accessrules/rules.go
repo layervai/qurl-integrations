@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -106,8 +107,8 @@ func (d *Definition) builtIn() bool {
 	return false
 }
 
-// ValidateItems checks a complete custom library against the service's count
-// and size budget.
+// ValidateItems checks a complete custom library, returning ErrLibraryLimit
+// when only the count or size budget is exceeded.
 func ValidateItems(items []Definition) error {
 	if items == nil {
 		return errors.New("access rules require an array")
@@ -136,9 +137,41 @@ func ValidateItems(items []Definition) error {
 		}
 	}
 	if len(items) > MaxItems || size > MaxBytes {
-		return errors.New("access rule library is too large")
+		return ErrLibraryLimit
 	}
 	return nil
+}
+
+// Find returns the one rule whose ID or exact name is selector.
+func Find(selector string, lists ...[]Definition) (Definition, error) {
+	var matches []Definition
+	for _, list := range lists {
+		for _, d := range list {
+			if d.ID == selector {
+				return d, nil
+			}
+			if d.Name == selector && !slices.ContainsFunc(matches, func(m Definition) bool { return m.ID == d.ID }) {
+				matches = append(matches, d)
+			}
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return Definition{}, ErrRuleNotFound
+	case 1:
+		return matches[0], nil
+	default:
+		return Definition{}, ErrAmbiguousRule
+	}
+}
+
+// NameTaken reports whether another custom rule or a built-in already uses
+// d's name, ignoring case and surrounding space.
+func NameTaken(items []Definition, d *Definition) bool {
+	name := strings.TrimSpace(d.Name)
+	return slices.ContainsFunc(append(BuiltIns(), items...), func(other Definition) bool {
+		return other.ID != d.ID && strings.EqualFold(strings.TrimSpace(other.Name), name)
+	})
 }
 
 // Merge preserves local edits while accepting independent remote changes.
@@ -191,8 +224,13 @@ func Merge(base, local, remote []Definition) (items []Definition, conflicts []st
 // Local revision and account guards never carry rule contents.
 var (
 	ErrConflict        = errors.New("access rules changed; reload before retrying")
+	ErrRuleConflict    = fmt.Errorf("%w: resolve this rule's sync conflict first", ErrConflict)
 	ErrAccountMismatch = errors.New("access rules belong to another account or deployment; use that profile")
 	ErrUnlinked        = errors.New("access rules are local until this device is linked to an account")
+	ErrRuleNotFound    = errors.New("access rule not found")
+	ErrAmbiguousRule   = errors.New("more than one access rule has this name; use its ID")
+	ErrDuplicateName   = errors.New("an access rule with this name already exists")
+	ErrLibraryLimit    = errors.New("access rules exceed the 100-rule or size limit")
 )
 
 // AccountLibrary is the authenticated service snapshot, never printed directly.

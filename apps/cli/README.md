@@ -487,7 +487,7 @@ than switching in place.
 | `qurl publish <target-url>` | Publish a remote URL or serve a local app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |
-| `qurl rules list`, `save`, `delete`, `sync`, `resolve` | Manage saved access rules; works locally before account linking |
+| `qurl rules list`, `create`, `save`, `delete`, `sync`, `resolve` | Manage saved access rules; works locally before account linking |
 | `qurl access <action> <CRID> [<decision-id>]` | Manage private consumer policies, invitations, and grants |
 | `qurl requests [<CRID>]` | List access requests, or turn them on or off for a private resource |
 | `qurl approve <CRID> <code>` | Approve one person's request for access to a private resource |
@@ -773,7 +773,7 @@ immediate revocation. See
 Access rules are named presets for future shares. The ready-made choices and your
 custom rules work before account linking. `qurl rules sync` merges them with your
 linked account; unrelated edits merge, while different edits to the same rule
-require `qurl rules resolve <id> --use local|account --version <local_version>`.
+require `qurl rules resolve <id-or-name> --use local|account`.
 Changes and deletions never change existing resources or links. Link expiry and
 session limits remain separate.
 
@@ -786,20 +786,23 @@ qurl rules sync -o json
 For a complete JSON snapshot or an edit from a supervising app:
 
 ```sh
-qurl rules list -o json
-qurl rules save --version 0 --file - -o json <<'JSON'
-{"id":"11111111-1111-4111-8111-111111111111","name":"Team","mode":"email_domain","email_domain":"example.com","allowed_emails":["Partner@outside.example"]}
+version=$(qurl rules list -o json | jq .local_version)
+qurl rules save --version "$version" --file - -o json <<'JSON'
+{"id":"11111111-1111-4111-8111-111111111111","name":"Partners","mode":"email_domain","email_domain":"example.com","allowed_emails":["Partner@outside.example"]}
 JSON
-qurl publish http://127.0.0.1:3000 --rule "Team"
+qurl publish http://127.0.0.1:3000 --rule Partners
 qurl rules sync -o json
 ```
 
-`rules create` generates the UUID and reads the revision for you. Use
-`--emails-file -` to pipe a JSON array of optional additional email addresses
-without putting them in process arguments. The JSON bridge requires a new UUID
-for each custom rule. Read `local_version` before save/delete;
-use the UUID to edit that same rule. Built-in IDs are immutable. Names may be
-repeated, so use the ID when a name is ambiguous. The private choices include
+`rules create` generates the UUID, lowercases the email domain, and prints only
+the new rule (`-q` prints its ID). Use `--emails-file -` to pipe a JSON array
+of optional additional email addresses without putting them in process
+arguments. `delete` and `resolve` take an ID or exact name and act on the
+current rules; pass `--version` to refuse a stale edit. The JSON bridge requires
+a new UUID for each custom rule and the `local_version` from your last read.
+Built-in IDs are immutable. Names are unique, ignoring case, including the
+ready-made names; rules synced from another device can still share a name, so
+use the ID when a name is ambiguous. The private choices include
 Invite only, Verify an email, Ask first by email, Approved passkeys and devices,
 People at a domain, and Approved by your service (requires `contract_id`). Saving
 a rule sends no invitation and approves nobody.
@@ -817,7 +820,9 @@ resource identities, local paths, grants or per-link settings.
 The JSON bridge returns `schema_version`, `local_version`, `items`, `built_ins`,
 `sync` and `conflicts`. Synchronization retains local changes on network or
 authentication failure; `sync` reports `local`, `synced`, `pending`, `offline` or
-`conflict`. A malformed account response fails explicitly. The journal is isolated
+`conflict`; in text mode it also prints one warning when rules stay on this
+device. A malformed account response fails explicitly. A damaged rules file
+exits 3 and names the file; move it aside to start fresh. The journal is isolated
 by the selected device state directory, deployment and canonical account; another
 account gets its own cache, preserving pending edits when you switch back. A
 different deployment requires its own state directory. Sync never enrolls or links a

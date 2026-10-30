@@ -3,6 +3,7 @@ package accessrules
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -129,7 +130,24 @@ func TestValidateItemsUsesTheServiceSizeBudget(t *testing.T) {
 		t.Fatalf("library at the service limit rejected: %v", err)
 	}
 	items[4].AllowedEmails[255] = "1" + items[4].AllowedEmails[255]
-	if err := ValidateItems(items); err == nil {
+	if err := ValidateItems(items); !errors.Is(err, ErrLibraryLimit) {
 		t.Fatalf("library one byte over the service limit: %v", err)
+	}
+}
+
+func TestFindSelectsByIDOrExactName(t *testing.T) {
+	a := Definition{ID: testID, Name: "Team", Mode: "keys"}
+	b := Definition{ID: otherID, Name: "Team", Mode: "review"}
+	if got, err := Find(otherID, []Definition{a, b}); err != nil || got.ID != otherID {
+		t.Fatalf("by ID: %+v %v", got, err)
+	}
+	if got, err := Find("Team", []Definition{a}, []Definition{a}); err != nil || got.ID != testID {
+		t.Fatalf("one rule listed twice: %+v %v", got, err)
+	}
+	if _, err := Find("Team", []Definition{a, b}); !errors.Is(err, ErrAmbiguousRule) {
+		t.Fatalf("ambiguous: %v", err)
+	}
+	if _, err := Find("team", []Definition{a}); !errors.Is(err, ErrRuleNotFound) {
+		t.Fatalf("names match exactly: %v", err)
 	}
 }

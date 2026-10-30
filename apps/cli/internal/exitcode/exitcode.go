@@ -270,8 +270,18 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 	switch {
 	case errors.Is(err, accessrules.ErrUnlinked):
 		return Forbidden, true
-	case errors.Is(err, accessrules.ErrConflict), errors.Is(err, accessrules.ErrAccountMismatch):
+	case errors.Is(err, accessrules.ErrConflict):
 		return Conflict, true
+	case errors.Is(err, accessrules.ErrAccountMismatch), errors.Is(err, state.ErrAccessRulesFile):
+		// Not Conflict: no reload helps. The remedy is local, the profile for
+		// that deployment or moving the named file aside.
+		return Config, true
+	case errors.Is(err, accessrules.ErrRuleNotFound):
+		return NotFound, true
+	case errors.Is(err, accessrules.ErrAmbiguousRule):
+		return Usage, true
+	case errors.Is(err, accessrules.ErrDuplicateName), errors.Is(err, accessrules.ErrLibraryLimit):
+		return InvalidInput, true
 
 	case errors.Is(err, qurlapi.ErrAccountPort), errors.Is(err, qurlapi.ErrAccountEndpoint):
 		return Config, true

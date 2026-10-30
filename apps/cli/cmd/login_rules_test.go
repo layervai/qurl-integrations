@@ -140,3 +140,23 @@ func assertLoginIdentityAndRuleRead(t *testing.T, requests []apitest.RecordedReq
 		}
 	}
 }
+
+func TestLoginPointsConflictingRulesToResolve(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	store, err := connectorstate.OpenAccessRules(dir, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "11111111-1111-4111-8111-111111111111"
+	if _, err = store.Save(t.Context(), 0, &accessrules.Definition{ID: id, Name: "Guest edit", Mode: "keys"}); err != nil {
+		t.Fatal(err)
+	}
+	srv.Script(http.MethodGet, "/v1/me/access-rules", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, accessrules.AccountLibrary{AccountID: "account-one", Version: 1, Items: []accessrules.Definition{{ID: id, Name: "Account edit", Mode: "review"}}}, nil)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "login"}, env: map[string]string{}, stdin: strings.NewReader(testAPIKey + "\n"), shareStateDir: dir})
+	if result.code != 0 || !strings.Contains(result.stderr.String(), "qurl rules resolve") || strings.Contains(result.stderr.String(), "when the account is available") {
+		t.Fatalf("login conflict notice: %d %s", result.code, result.stderr.String())
+	}
+}

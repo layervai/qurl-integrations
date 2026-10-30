@@ -20,19 +20,33 @@ func (p *Printer) AccessRules(snapshot *accessrules.Snapshot) error {
 		return p.writeJSON(snapshot)
 	}
 	for _, items := range [][]accessrules.Definition{snapshot.BuiltIns, snapshot.Items} {
-		for _, d := range items {
-			if p.quiet {
-				if _, err := fmt.Fprintln(p.out, d.ID); err != nil {
-					return err
-				}
-				continue
-			}
-			if _, err := fmt.Fprintf(p.out, "%s  %q  %s\n", d.ID, d.Name, accessRuleLabel(d.Mode)); err != nil {
+		for i := range items {
+			if err := p.accessRuleLine(&items[i]); err != nil {
 				return err
 			}
 		}
 	}
+	if p.quiet {
+		return nil
+	}
 	_, err := fmt.Fprintf(p.out, "Version: %d\nSync: %s\n", snapshot.LocalVersion, snapshot.Sync)
+	return err
+}
+
+// AccessRule prints one rule, or only its ID when quiet.
+func (p *Printer) AccessRule(d *accessrules.Definition) error {
+	if p.format == FormatJSON {
+		return p.writeJSON(d)
+	}
+	return p.accessRuleLine(d)
+}
+
+func (p *Printer) accessRuleLine(d *accessrules.Definition) error {
+	if p.quiet {
+		_, err := fmt.Fprintln(p.out, d.ID)
+		return err
+	}
+	_, err := fmt.Fprintf(p.out, "%s  %q  %s\n", d.ID, d.Name, accessRuleLabel(d.Mode))
 	return err
 }
 func accessRuleLabel(mode string) string {
