@@ -667,11 +667,14 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 	return qurlapi.New(o.accountConfig(key, ""))
 }
 
+// clientProductEnv is the environment-only variable naming the host product.
+const clientProductEnv = "QURL_CLIENT_PRODUCT"
+
 // resolveClientProduct reads the environment-only QURL_CLIENT_PRODUCT once per
 // invocation. An empty value counts as unset; an invalid one is dropped with a
 // verbose-only note.
 func (o *globalOpts) resolveClientProduct() {
-	value, _ := o.lookupEnv("QURL_CLIENT_PRODUCT")
+	value, _ := o.lookupEnv(clientProductEnv)
 	if value == "" {
 		return
 	}
@@ -680,7 +683,7 @@ func (o *globalOpts) resolveClientProduct() {
 		return
 	}
 	if log := o.verboseLogger(); log != nil {
-		log("ignoring invalid QURL_CLIENT_PRODUCT: expected %s", qurlapi.ClientProductRule)
+		log("ignoring invalid %s: expected %s", clientProductEnv, qurlapi.ClientProductRule)
 	}
 }
 

@@ -404,8 +404,8 @@ const MaxClientProductLen = 64
 const cliProduct = "qurl-cli"
 
 // ClientProductRule describes what ValidClientProduct accepts, for diagnostics.
-var ClientProductRule = fmt.Sprintf("name/version with token characters, at most %d bytes, not named %s",
-	MaxClientProductLen, cliProduct)
+// TestClientProductRuleMatchesLimits keeps it in step with the constants.
+const ClientProductRule = "name/version with token characters, at most 64 bytes, not named qurl-cli"
 
 // ValidClientProduct reports whether product is one name/version product of
 // at most MaxClientProductLen bytes that Config.ClientProduct may put in the

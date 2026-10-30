@@ -1,6 +1,7 @@
 package qurlapi
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -39,6 +40,14 @@ func TestValidClientProduct(t *testing.T) {
 	} {
 		if got := ValidClientProduct(tc.value); got != tc.valid {
 			t.Errorf("%s: ValidClientProduct(%q) = %t, want %t", tc.name, tc.value, got, tc.valid)
+		}
+	}
+}
+
+func TestClientProductRuleMatchesLimits(t *testing.T) {
+	for _, part := range []string{strconv.Itoa(MaxClientProductLen) + " bytes", cliProduct} {
+		if !strings.Contains(ClientProductRule, part) {
+			t.Errorf("ClientProductRule %q does not mention %q", ClientProductRule, part)
 		}
 	}
 }
