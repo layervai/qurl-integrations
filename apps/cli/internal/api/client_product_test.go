@@ -45,9 +45,7 @@ func TestValidClientProduct(t *testing.T) {
 }
 
 func TestClientProductRuleMatchesLimits(t *testing.T) {
-	for _, part := range []string{strconv.Itoa(MaxClientProductLen) + " bytes", cliProduct} {
-		if !strings.Contains(ClientProductRule, part) {
-			t.Errorf("ClientProductRule %q does not mention %q", ClientProductRule, part)
-		}
+	if limit := strconv.Itoa(MaxClientProductLen) + " bytes"; !strings.Contains(ClientProductRule, limit) {
+		t.Errorf("ClientProductRule %q does not mention %q", ClientProductRule, limit)
 	}
 }
