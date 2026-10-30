@@ -69,6 +69,7 @@ func newTransport(cfg *Config) *transport {
 		newRequestID = randomRequestID
 	}
 	userAgent := "qurl-cli/" + cfg.Version
+	// Deliberately re-validated: any caller of this package may set the field.
 	if ValidClientProduct(cfg.ClientProduct) {
 		userAgent = cfg.ClientProduct + " " + userAgent
 	}

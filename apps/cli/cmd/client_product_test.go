@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
@@ -65,6 +67,40 @@ func TestClientProductUserAgent(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+			}
+		})
+	}
+}
+
+type userAgentRecorder struct{ got string }
+
+func (r *userAgentRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.got = req.Header.Get("User-Agent")
+	return nil, errors.New("recorded")
+}
+
+// TestClientProductReachesRequestsThroughRoot proves resolveSettings wires the
+// environment into the real command tree, with --verbose already parsed.
+func TestClientProductReachesRequestsThroughRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name, value, wantUA string
+		wantNote            bool
+	}{
+		{name: "valid", value: "qurl-desktop/1.2.3", wantUA: "qurl-desktop/1.2.3 qurl-cli/test"},
+		{name: "invalid", value: "desktop", wantUA: "qurl-cli/test", wantNote: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &userAgentRecorder{}
+			res := runCLI(t, &runOpts{
+				args:   []string{"--endpoint", "http://127.0.0.1:1", "--verbose", "list"},
+				env:    map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CLIENT_PRODUCT": tc.value},
+				egress: &egressGuard{report: t.Errorf, next: rec},
+			})
+			if rec.got != tc.wantUA {
+				t.Errorf("User-Agent = %q, want %q", rec.got, tc.wantUA)
+			}
+			if got := strings.Contains(res.stderr.String(), "ignoring invalid QURL_CLIENT_PRODUCT"); got != tc.wantNote {
+				t.Errorf("invalid-value note = %t, want %t; stderr %q", got, tc.wantNote, res.stderr.String())
 			}
 		})
 	}

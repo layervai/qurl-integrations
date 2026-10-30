@@ -411,7 +411,8 @@ directory that holds its control socket; see
 
 `QURL_CLIENT_PRODUCT` (environment-only) lets a host app bundling the CLI
 identify its product/version, for example `qurl-desktop/1.2.3`. Set it in the
-CLI and daemon environments. It must be a single RFC 9110 `name/version`
+CLI and daemon environments; background services the CLI installs do not
+carry it, so set it in the service environment too. It must be a single RFC 9110 `name/version`
 product with nonempty token-only parts, at most 64 bytes in total. Valid values
 prefix the User-Agent: `qurl-desktop/1.2.3 qurl-cli/<version>`. Unset, empty, or invalid
 values leave the CLI User-Agent unchanged; invalid values produce a one-line
