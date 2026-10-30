@@ -397,23 +397,23 @@ type Config struct {
 // parts use token characters.
 var clientProductPattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
-// MaxClientProductLen bounds Config.ClientProduct in bytes.
-const MaxClientProductLen = 64
+// maxClientProductLen bounds Config.ClientProduct in bytes.
+const maxClientProductLen = 64
 
 // cliProduct is the CLI's own User-Agent product name.
 const cliProduct = "qurl-cli"
 
 // ClientProductRule describes what ValidClientProduct accepts, for diagnostics.
 // TestClientProductRuleMatchesLimits keeps the byte limit in step with
-// MaxClientProductLen, which a const string cannot format.
+// maxClientProductLen, which a const string cannot format.
 const ClientProductRule = "name/version with token characters, at most 64 bytes, not named " + cliProduct
 
 // ValidClientProduct reports whether product is one name/version product of
-// at most MaxClientProductLen bytes that Config.ClientProduct may put in the
+// at most maxClientProductLen bytes that Config.ClientProduct may put in the
 // User-Agent.
 func ValidClientProduct(product string) bool {
 	// The CLI's own product name is reserved so a host cannot pose as the CLI.
-	return len(product) <= MaxClientProductLen && clientProductPattern.MatchString(product) &&
+	return len(product) <= maxClientProductLen && clientProductPattern.MatchString(product) &&
 		!strings.HasPrefix(strings.ToLower(product), cliProduct+"/")
 }
 

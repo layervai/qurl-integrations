@@ -14,8 +14,8 @@ func TestValidClientProduct(t *testing.T) {
 		{name: "empty"},
 		{name: "desktop", value: "qurl-desktop/1.2.3", valid: true},
 		{name: "token punctuation", value: "AZaz09!#$%&'*+-.^_`|~/!#$%&'*+-.^_`|~", valid: true},
-		{name: "64 bytes", value: strings.Repeat("a", MaxClientProductLen-2) + "/1", valid: true},
-		{name: "65 bytes", value: strings.Repeat("a", MaxClientProductLen-1) + "/1"},
+		{name: "64 bytes", value: strings.Repeat("a", maxClientProductLen-2) + "/1", valid: true},
+		{name: "65 bytes", value: strings.Repeat("a", maxClientProductLen-1) + "/1"},
 		{name: "reserved CLI name", value: "qurl-cli/0.0.1"},
 		{name: "reserved CLI name any case", value: "QURL-CLI/0.0.1"},
 		{name: "missing slash", value: "desktop"},
@@ -45,7 +45,7 @@ func TestValidClientProduct(t *testing.T) {
 }
 
 func TestClientProductRuleMatchesLimits(t *testing.T) {
-	if limit := strconv.Itoa(MaxClientProductLen) + " bytes"; !strings.Contains(ClientProductRule, limit) {
+	if limit := strconv.Itoa(maxClientProductLen) + " bytes"; !strings.Contains(ClientProductRule, limit) {
 		t.Errorf("ClientProductRule %q does not mention %q", ClientProductRule, limit)
 	}
 }
