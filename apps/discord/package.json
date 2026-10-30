@@ -31,7 +31,7 @@
     "discord.js": "14.27.0",
     "express": "~5.2.1",
     "helmet": "~7.2.0",
-    "jose": "~5.9.6"
+    "jose": "~6.2.13"
   },
   "devDependencies": {
     "@aws-sdk/client-ssm": "^3.1036.0",
