@@ -406,13 +406,14 @@ const cliProduct = "qurl-cli"
 // ClientProductRule describes what ValidClientProduct accepts, for diagnostics.
 // TestClientProductRuleMatchesLimits keeps the byte limit in step with
 // maxClientProductLen, which a const string cannot format.
-const ClientProductRule = "name/version with token characters, at most 64 bytes, not named " + cliProduct
+const ClientProductRule = "name/version with token characters (e.g. myapp/1.2.3), at most 64 bytes, not named " + cliProduct
 
 // ValidClientProduct reports whether product is one name/version product of
 // at most maxClientProductLen bytes that Config.ClientProduct may put in the
 // User-Agent.
 func ValidClientProduct(product string) bool {
-	// The CLI's own product name is reserved so a host cannot pose as the CLI.
+	// The CLI's own product name is reserved so a host cannot pose as the CLI;
+	// the pattern allows one "/", so the prefix is exactly the name.
 	return len(product) <= maxClientProductLen && clientProductPattern.MatchString(product) &&
 		!strings.HasPrefix(strings.ToLower(product), cliProduct+"/")
 }
