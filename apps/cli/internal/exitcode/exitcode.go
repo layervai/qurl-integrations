@@ -22,6 +22,8 @@ import (
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
+
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
@@ -266,6 +268,11 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 		return code, true
 	}
 	switch {
+	case errors.Is(err, accessrules.ErrUnlinked):
+		return Forbidden, true
+	case errors.Is(err, accessrules.ErrConflict), errors.Is(err, accessrules.ErrAccountMismatch):
+		return Conflict, true
+
 	case errors.Is(err, qurlapi.ErrAccountPort), errors.Is(err, qurlapi.ErrAccountEndpoint):
 		return Config, true
 	case errors.Is(err, qurlapi.ErrAccountDenied):

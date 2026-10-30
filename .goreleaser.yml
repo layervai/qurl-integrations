@@ -154,6 +154,14 @@ homebrew_casks:
       - manpages/qurl-request.1
       - manpages/qurl-requests.1
       - manpages/qurl-restart.1
+      - manpages/qurl-rules-capabilities.1
+      - manpages/qurl-rules-create.1
+      - manpages/qurl-rules-delete.1
+      - manpages/qurl-rules-list.1
+      - manpages/qurl-rules-resolve.1
+      - manpages/qurl-rules-save.1
+      - manpages/qurl-rules-sync.1
+      - manpages/qurl-rules.1
       - manpages/qurl-share.1
       - manpages/qurl-start.1
       - manpages/qurl-status.1

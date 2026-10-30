@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -103,6 +104,8 @@ func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
 					switch r.URL.Path {
+					case "/v1/me/access-rules":
+						_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"account_id": "auth0|account", "version": 0, "items": []any{}, "built_ins": accessrules.BuiltIns()}})
 					case "/v1/me":
 						if r.Header.Get("Authorization") == "Bearer account-token" && r.Header.Get("X-QURL-Owner") != owner {
 							t.Error("recovery identity used the wrong owner")

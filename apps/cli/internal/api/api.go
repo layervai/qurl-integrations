@@ -22,12 +22,15 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 )
 
 const schemeHTTPS = "https"
 
 // Client is what commands program against.
 type Client interface {
+	AccessRules() accessrules.Remote
 	ConsumerManagement() ConsumerManagementClient
 	Preview(ctx context.Context, id string) (*Preview, error)
 	UpdatePreview(ctx context.Context, id string, patch PreviewPatch) (*Preview, error)

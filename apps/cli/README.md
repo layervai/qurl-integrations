@@ -487,6 +487,7 @@ than switching in place.
 | `qurl publish <target-url>` | Publish a remote URL or serve a local app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |
+| `qurl rules list`, `save`, `delete`, `sync`, `resolve` | Manage saved access rules; works locally before account linking |
 | `qurl access <action> <CRID> [<decision-id>]` | Manage private consumer policies, invitations, and grants |
 | `qurl requests [<CRID>]` | List access requests, or turn them on or off for a private resource |
 | `qurl approve <CRID> <code>` | Approve one person's request for access to a private resource |
@@ -766,6 +767,61 @@ in-flight requests. During session rotation the retiring session can retain
 old headers until replacement promotion and drain, so an update is not
 immediate revocation. See
 [docs/session-groups.md](../../docs/session-groups.md#runtime-request-headers).
+
+### Saved access rules
+
+Access rules are named presets for future shares. The ready-made choices and your
+custom rules work before account linking. `qurl rules sync` merges them with your
+linked account; unrelated edits merge, while different edits to the same rule
+require `qurl rules resolve <id> --use local|account --version <local_version>`.
+Changes and deletions never change existing resources or links. Link expiry and
+session limits remain separate.
+
+```sh
+qurl rules create Team --mode email_domain --email-domain example.com
+qurl publish http://127.0.0.1:3000 --rule Team
+qurl rules sync -o json
+```
+
+For a complete JSON snapshot or an edit from a supervising app:
+
+```sh
+qurl rules list -o json
+qurl rules save --version 0 --file - -o json <<'JSON'
+{"id":"11111111-1111-4111-8111-111111111111","name":"Team","mode":"email_domain","email_domain":"example.com","allowed_emails":["Partner@outside.example"]}
+JSON
+qurl publish http://127.0.0.1:3000 --rule "Team"
+qurl rules sync -o json
+```
+
+`rules create` generates the UUID and reads the revision for you. Use
+`--emails-file -` to pipe a JSON array of optional additional email addresses
+without putting them in process arguments. The JSON bridge requires a new UUID
+for each custom rule. Read `local_version` before save/delete;
+use the UUID to edit that same rule. Built-in IDs are immutable. Names may be
+repeated, so use the ID when a name is ambiguous. The private choices include
+Invite only, Verify an email, Ask first by email, Approved passkeys and devices,
+People at a domain, and Approved by your service (requires `contract_id`). Saving
+a rule sends no invitation and approves nobody.
+
+Supervising apps use `qurl rules capabilities -o json` offline, and pass complete
+validated snapshots through standard input with `publish --rule-file -` or
+`access configure <CRID> --rule-file - --version <resource_policy_version>`.
+The latter deliberately changes an existing private resource's access. A public
+rule cannot convert private resources; selecting a different rule while publishing
+an already existing target fails without changing it. `--rule`/`--rule-file`
+cannot be combined with other access flags. A snapshot remains valid after its
+saved rule is renamed or deleted. Rule JSON contains policy only, never credentials,
+resource identities, local paths, grants or per-link settings.
+
+The JSON bridge returns `schema_version`, `local_version`, `items`, `built_ins`,
+`sync` and `conflicts`. Synchronization retains local changes on network or
+authentication failure; `sync` reports `local`, `synced`, `pending`, `offline` or
+`conflict`. A malformed account response fails explicitly. The journal is isolated
+by the selected device state directory, deployment and canonical account; another
+account gets its own cache, preserving pending edits when you switch back. A
+different deployment requires its own state directory. Sync never enrolls or links a
+device. `account setup` attempts reconciliation after successful linking.
 
 ### qurl publish
 

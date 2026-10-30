@@ -24,7 +24,7 @@ func TestPublishConsumerPolicyRequiresConfirmation(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Fatal(err)
 				}
-				if body.ConsumerAccess == nil || *body.ConsumerAccess != *policy || body.Private == nil || !*body.Private || body.AccessRequests {
+				if body.ConsumerAccess == nil || !body.ConsumerAccess.Equal(*policy) || body.Private == nil || !*body.Private || body.AccessRequests {
 					t.Fatalf("unsafe create: %+v", body)
 				}
 				row := map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true}
@@ -35,7 +35,7 @@ func TestPublishConsumerPolicyRequiresConfirmation(t *testing.T) {
 			})
 			result, err := newTestClient(t, srv, nil).Publish(t.Context(), existingTarget, PublishOptions{ConsumerAccess: policy, KeepExistingPublic: true})
 			if confirmed {
-				if err != nil || result.ConsumerAccess == nil || *result.ConsumerAccess != *policy {
+				if err != nil || result.ConsumerAccess == nil || !result.ConsumerAccess.Equal(*policy) {
 					t.Fatalf("result=%+v error=%v", result, err)
 				}
 			} else if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
@@ -237,5 +237,23 @@ func TestEveryConsumerManagementMethodMapsAPIErrors(t *testing.T) {
 		if err := call(); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
 			t.Errorf("%s error = %v (%T), want *Error with status 409", name, err, err)
 		}
+	}
+}
+
+func TestPublishDomainSnapshotMismatchNeverEditsExistingResource(t *testing.T) {
+	srv := apitest.NewServer(t)
+	requested := &qurl.ConsumerAccessPolicy{Mode: "email_domain", Version: 1, EmailDomain: "example.com", AllowedEmails: []string{"Partner@outside.com"}}
+	actual := *requested
+	actual.AllowedEmails = []string{"Different@outside.com"}
+	actual.Version = 4
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "consumer_access": actual}, map[string]any{"found_existing": true})
+	})
+	_, err := newTestClient(t, srv, nil).Publish(t.Context(), existingTarget, PublishOptions{ConsumerAccess: requested})
+	if !errors.Is(err, ErrPublishAccessConflict) {
+		t.Fatalf("mismatch accepted: %v", err)
+	}
+	if len(srv.Requests()) != 1 {
+		t.Fatal("snapshot selection mutated existing resource")
 	}
 }
