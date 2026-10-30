@@ -523,7 +523,7 @@ func (o *globalOpts) resolveSettings() error {
 		return exitcode.UsageError(err)
 	}
 	o.resolvedSupervision = mode
-	o.resolveClientProduct()
+	o.resolvedClientProduct = o.resolveClientProduct()
 	o.resolved = true
 	return nil
 }
@@ -670,22 +670,18 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 // clientProductEnv is the environment-only variable naming the host product.
 const clientProductEnv = "QURL_CLIENT_PRODUCT"
 
-// resolveClientProduct reads the environment-only QURL_CLIENT_PRODUCT once per
-// invocation. An empty value counts as unset; an invalid one is dropped with a
+// resolveClientProduct returns the environment-only QURL_CLIENT_PRODUCT, or
+// empty. An empty value counts as unset; an invalid one is dropped with a
 // verbose-only note.
-func (o *globalOpts) resolveClientProduct() {
-	o.resolvedClientProduct = ""
+func (o *globalOpts) resolveClientProduct() string {
 	value, _ := o.lookupEnv(clientProductEnv)
-	if value == "" {
-		return
-	}
-	if qurlapi.ValidClientProduct(value) {
-		o.resolvedClientProduct = value
-		return
+	if value == "" || qurlapi.ValidClientProduct(value) {
+		return value
 	}
 	if log := o.verboseLogger(); log != nil {
 		log("ignoring invalid %s: expected %s", clientProductEnv, qurlapi.ClientProductRule)
 	}
+	return ""
 }
 
 // apiConfig is the transport configuration every API client shares. Build

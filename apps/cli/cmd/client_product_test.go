@@ -36,9 +36,8 @@ func TestResolveClientProduct(t *testing.T) {
 						return tc.value, tc.value != "" || tc.empty
 					},
 				}
-				opts.resolveClientProduct()
-				if opts.resolvedClientProduct != tc.product {
-					t.Errorf("resolvedClientProduct = %q, want %q", opts.resolvedClientProduct, tc.product)
+				if got := opts.resolveClientProduct(); got != tc.product {
+					t.Errorf("resolveClientProduct() = %q, want %q", got, tc.product)
 				}
 				wantDiagnostic := ""
 				if verbose && tc.value != "" && tc.product == "" {
