@@ -75,7 +75,7 @@ func TestClientProductUserAgent(t *testing.T) {
 						t.Fatal(err)
 					}
 					wantDiagnostic := ""
-					if verbose && tc.set && tc.product == "" {
+					if verbose && tc.set && tc.value != "" && tc.product == "" {
 						wantDiagnostic = "[debug] ignoring invalid QURL_CLIENT_PRODUCT: expected name/version with token characters, at most 64 bytes\n"
 					}
 					if got := diagnostics.String(); got != wantDiagnostic {

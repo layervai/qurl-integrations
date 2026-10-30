@@ -667,7 +667,8 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 }
 
 // resolveClientProduct reads the environment-only QURL_CLIENT_PRODUCT once per
-// invocation and drops an invalid value with a verbose-only note.
+// invocation. An empty value counts as unset; an invalid one is dropped with a
+// verbose-only note.
 func (o *globalOpts) resolveClientProduct() {
 	value, set := o.lookupEnv("QURL_CLIENT_PRODUCT")
 	if !set || value == "" {
