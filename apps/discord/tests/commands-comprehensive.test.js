@@ -142,6 +142,7 @@ const mockDb = {
   updateSendDMStatus: jest.fn(),
   getGuildApiKey: jest.fn().mockResolvedValue(null),
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
+  getGuildConfigWithApiKey: jest.fn().mockResolvedValue(undefined),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
@@ -189,6 +190,7 @@ jest.mock('../src/connector', () => ({
 const mockCreateOneTimeLink = jest.fn();
 const mockGetResourceStatus = jest.fn();
 jest.mock('../src/qurl', () => ({
+  getIdentity: jest.fn().mockResolvedValue({ owner_id: 'synthetic-owner' }),
   createOneTimeLink: mockCreateOneTimeLink,
   getResourceStatus: mockGetResourceStatus,
 }));
@@ -1712,6 +1714,7 @@ describe('handleSetupModal (dispatcher path)', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(mockDb.setGuildApiKey).toHaveBeenCalledWith(
       'guild-1', VALID_KEY, 'user-1', 'paste',
+      { ownerId: 'synthetic-owner', expectedApiKey: null },
     );
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -76,13 +76,16 @@ legacy static invite links do not complete installation after it is enabled.
 
 The Add to Discord flow prompts the installing admin to sign in to qURL and
 connects the server automatically. For a bot that is already installed, a
-server admin can run `/qurl setup` to complete or replace that connection. The
+server admin can run `/qurl setup` to complete or replace a connection for the
+same qURL owner. A different owner is refused. The
 key is stored **encrypted at rest** and scoped to the server. Run `/qurl status`
 to confirm the connection.
 
 Every Add to Discord and `/qurl setup` asks for a fresh qURL sign-in, even if
 the browser is already signed in, so a guild is never silently bound to
-whichever qURL account that browser session belongs to.
+whichever qURL account that browser session belongs to. See
+[setup ownership and recovery](docs/setup-ownership.md) for legacy keys and
+operator-assisted recovery.
 
 ### 3. Share
 

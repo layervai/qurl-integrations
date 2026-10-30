@@ -31,6 +31,7 @@ jest.mock('../src/discord', () => ({
 
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
+  getGuildConfigWithApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
   getPendingLink: jest.fn(),
   consumePendingLink: jest.fn(),
@@ -41,6 +42,10 @@ jest.mock('../src/commands', () => ({
   handleCommand: jest.fn(),
   commands: [],
   registerCommands: jest.fn(),
+}));
+
+jest.mock('../src/utils/auth0-jwks', () => ({
+  verifyAuth0IdToken: jest.fn().mockResolvedValue({ ok: true, payload: { sub: 'auth0|abc' } }),
 }));
 
 const request = require('supertest');
@@ -732,7 +737,7 @@ describe('Discord install callback', () => {
       expect(installRes.status).toBe(302);
       expect(setupRes.status).toBe(302);
       const stableParams = (location) => [...new URL(location).searchParams.entries()]
-        .filter(([key]) => !['state', 'code_challenge'].includes(key))
+        .filter(([key]) => !['state', 'code_challenge', 'nonce'].includes(key))
         .sort(([left], [right]) => left.localeCompare(right));
       expect(stableParams(installRes.headers.location))
         .toEqual(stableParams(setupRes.headers.location));
@@ -825,7 +830,7 @@ describe('Discord install callback', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 201,

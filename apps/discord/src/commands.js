@@ -54,6 +54,7 @@ const {
 } = require('./utils/time');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { getIdentity } = require('./qurl');
+const { prepareGuildOwnerBinding } = require('./guild-owner');
 const { resourceIdLogRef } = require('./utils/resource-id');
 const { qurlApiErrorStatus } = require('./utils/qurl-errors');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
@@ -4228,7 +4229,14 @@ async function handleSetupModal(interaction, { flow_id }) {
     });
   }
 
-  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE);
+  try {
+    const identity = await getIdentity(submittedKey, interaction.guildId);
+    const binding = await prepareGuildOwnerBinding(interaction.guildId, identity.owner_id);
+    await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE, binding);
+  } catch (err) {
+    logger.warn('Guild key owner verification refused', { ...logFields, code: err?.code });
+    return interaction.editReply({ content: '❌ **Server ownership could not be verified.** Use a key from the existing qURL owner account. If its saved key is no longer valid or ownership must change, contact the bot operator.' });
+  }
   logger.info('Guild API key configured', logFields);
 
   fireAndForgetLinkGuildWebhookSubscription({

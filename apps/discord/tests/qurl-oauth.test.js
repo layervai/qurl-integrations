@@ -23,6 +23,7 @@ jest.mock('../src/logger', () => ({
 
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
+  getGuildConfigWithApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
   getGuildConfig: jest.fn(),
   getPendingLink: jest.fn(),
@@ -57,7 +58,7 @@ const discord = require('../src/discord');
 const logger = require('../src/logger');
 const guildWebhookLink = require('../src/guild-webhook-link');
 const { AUDIT_EVENTS } = require('../src/constants');
-const { signQurlOAuthState } = require('../src/utils/qurl-oauth-state');
+const { signQurlOAuthState, verifyQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 const {
   QURL_OAUTH_SESSION_COOKIE,
   QURL_OAUTH_PKCE_COOKIE,
@@ -132,7 +133,8 @@ describe('qurl-oauth routes', () => {
       // re-prompt. Pin both so a future refactor can't drop either.
       expect(loc.searchParams.get('prompt')).toBe('login consent');
       expect(loc.searchParams.get('connection')).toBe('email');
-      expect(loc.searchParams.get('state')).toBe(state);
+      expect(loc.searchParams.get('state')).not.toBe(state);
+      expect(verifyQurlOAuthState(loc.searchParams.get('state')).payload).toMatchObject({ guildId: 'guild-1', discordUserId: 'admin-2' });
       expect(loc.searchParams.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');
 
       const codeVerifier = cookieValue(res.headers['set-cookie'], QURL_OAUTH_PKCE_COOKIE);
@@ -163,7 +165,7 @@ describe('qurl-oauth routes', () => {
       expect(cookieHeader).toMatch(/HttpOnly/i);
       expect(cookieHeader).toMatch(/SameSite=Lax/i);
       expect(cookieHeader).toMatch(/Path=\/(?:;|\s|$)/);
-      expect(cookieHeader).toContain(encodeURIComponent(state));
+      expect(cookieHeader).toContain(encodeURIComponent(new URL(res.headers.location).searchParams.get('state')));
     });
 
     it('400s on missing state', async () => {
@@ -295,7 +297,7 @@ describe('qurl-oauth routes', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 201,
@@ -341,7 +343,7 @@ describe('qurl-oauth routes', () => {
       const fetchSpy = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz', token_type: 'Bearer', expires_in: 3600 }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig', token_type: 'Bearer', expires_in: 3600 }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 201,
@@ -357,12 +359,25 @@ describe('qurl-oauth routes', () => {
       expect(tokenBody.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');
     });
 
+    it('rejects a different stored owner before minting a key', async () => {
+      db.getGuildConfigWithApiKey.mockResolvedValueOnce({ qurl_owner_id: 'another-owner', qurl_api_key: 'saved' });
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true, json: async () => ({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }),
+      });
+      const res = await request(app).get(`/oauth/qurl/callback?code=code&state=${encodeURIComponent(state)}`)
+        .set('Cookie', cookieFor(state));
+      expect(res.status).toBe(409);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
+    });
+
     it('502s when qurl-service mint fails', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz', token_type: 'Bearer', expires_in: 3600 }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig', token_type: 'Bearer', expires_in: 3600 }),
         })
         .mockResolvedValueOnce({
           ok: false, status: 500,
@@ -381,7 +396,7 @@ describe('qurl-oauth routes', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz', token_type: 'Bearer', expires_in: 3600 }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig', token_type: 'Bearer', expires_in: 3600 }),
         })
         .mockResolvedValueOnce({
           ok: false, status: 403,
@@ -414,7 +429,7 @@ describe('qurl-oauth routes', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz', token_type: 'Bearer', expires_in: 3600 }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig', token_type: 'Bearer', expires_in: 3600 }),
         })
         .mockResolvedValueOnce({
           ok: false, status: 403,
@@ -457,7 +472,7 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain('qURL is connected');
       expect(res.text).toContain('/qurl send is ready');
       expect(res.text).not.toContain('/qurl map');
-      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', 'oauth');
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', 'oauth', { ownerId: 'auth0|abc', expectedApiKey: null });
       expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
         guild_id: 'guild-1',
         configured_by: 'admin-2',
@@ -525,6 +540,7 @@ describe('qurl-oauth routes', () => {
         'lv_live_abc',
         'admin-2',
         'oauth',
+        { ownerId: 'auth0|abc', expectedApiKey: null },
       );
       expect(logger.audit).toHaveBeenCalledWith(
         AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
@@ -547,7 +563,7 @@ describe('qurl-oauth routes', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 201,
@@ -562,7 +578,7 @@ describe('qurl-oauth routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
-      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc', 'admin-2', 'oauth');
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc', 'admin-2', 'oauth', { ownerId: 'auth0|abc', expectedApiKey: null });
       expect(discord.sendDM).toHaveBeenCalledWith(
         'admin-2', expect.stringContaining('qURL is connected'),
       );
@@ -586,7 +602,7 @@ describe('qurl-oauth routes', () => {
       const fetchSpy = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 201,
@@ -613,7 +629,7 @@ describe('qurl-oauth routes', () => {
       );
     });
 
-    it('renders success without qURL-account-email line when id_token verification fails', async () => {
+    it('refuses setup before minting when id_token verification fails', async () => {
       const { verifyAuth0IdToken } = require('../src/utils/auth0-jwks');
       verifyAuth0IdToken.mockResolvedValueOnce({ ok: false, reason: 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED' });
       const state = signQurlOAuthState('guild-1', 'admin-2');
@@ -629,18 +645,12 @@ describe('qurl-oauth routes', () => {
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
       ).set('Cookie', cookieFor(state));
-      expect(res.status).toBe(200);
-      expect(res.text).toContain('qURL is connected');
-      expect(res.text).toMatch(/<dt>Discord guild<\/dt>\s*<dd>guild-1<\/dd>/);
-      expect(res.text).toMatch(/<dt>API key prefix<\/dt>\s*<dd>lv_live_a<\/dd>/);
-      expect(res.text).not.toMatch(/<dt>qURL account<\/dt>/);
-      expect(logger.audit).toHaveBeenCalledWith(
-        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
-        expect.objectContaining({ qurl_account_subject_fingerprint: null }),
-      );
+      expect(res.status).toBe(403);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
-    it('renders success without qURL-account-email line when id_token field is absent from the Auth0 response', async () => {
+    it('refuses setup before minting when the Auth0 response has no id_token', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
@@ -654,13 +664,9 @@ describe('qurl-oauth routes', () => {
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
       ).set('Cookie', cookieFor(state));
-      expect(res.status).toBe(200);
-      expect(res.text).toContain('qURL is connected');
-      expect(res.text).not.toMatch(/<dt>qURL account<\/dt>/);
-      expect(logger.audit).toHaveBeenCalledWith(
-        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
-        expect.objectContaining({ qurl_account_subject_fingerprint: null }),
-      );
+      expect(res.status).toBe(403);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
     it('502s when qurl-service mint response has api_key but missing key_id (orphan-cleanup contract)', async () => {
@@ -668,7 +674,7 @@ describe('qurl-oauth routes', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 201,
@@ -687,7 +693,7 @@ describe('qurl-oauth routes', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 201,
@@ -796,6 +802,7 @@ describe('qurl-oauth — MAP_COMMAND_ENABLED=true', () => {
         }));
         jest.doMock('../src/store', () => ({
           setGuildApiKey: jest.fn().mockResolvedValue(undefined),
+  getGuildConfigWithApiKey: jest.fn().mockResolvedValue(undefined),
           getGuildApiKey: jest.fn(),
           getGuildConfig: jest.fn().mockResolvedValue({ guild_id: 'guild-1', configured_by: 'admin-2' }),
           getPendingLink: jest.fn(),
@@ -820,7 +827,7 @@ describe('qurl-oauth — MAP_COMMAND_ENABLED=true', () => {
         globalThis.fetch = jest.fn()
           .mockResolvedValueOnce({
             ok: true, status: 200,
-            json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+            json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }),
           })
           .mockResolvedValueOnce({
             ok: true, status: 201,
