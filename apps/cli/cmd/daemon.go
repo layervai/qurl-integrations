@@ -560,13 +560,12 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	}
 	configured := configuredHeadlessShare(headless)
 	openFactory := func(initCtx context.Context) (connectordaemon.GroupFactory, error) {
-		apiConfig := opts.apiConfig(origin)
 		return buildNativeSessionFactory(initCtx, connectorshare.NativeRuntimeConfig{
 			StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
 			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
 			EnrollmentCredential: enrollmentCredential, RefreshMode: connectorRefreshModeAuto,
 			SessionOperations: sessionOperations,
-		}, common, apiConfig, verifyOwner, configured)
+		}, common, opts.apiConfig(origin), verifyOwner, configured)
 	}
 	var factory connectordaemon.GroupFactory
 	var closeFactory func() error
