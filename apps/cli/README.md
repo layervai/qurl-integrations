@@ -418,7 +418,7 @@ total. Valid values prefix the User-Agent:
 `qurl-desktop/1.2.3 qurl-cli/<version>`. Unset, empty, or invalid values leave
 the CLI User-Agent unchanged; invalid values produce a one-line note only with
 `--verbose`. Use only a product name and version, no user or device
-identifiers. It tags requests to the qURL API only.
+identifiers. Only qURL API requests carry it in their User-Agent.
 
 Also honored: `QURL_DEPLOYMENT` (a sandbox or custom deployment settings file;
 production settings are included in releases; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and

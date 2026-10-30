@@ -13,8 +13,10 @@ import (
 func TestResolveClientProduct(t *testing.T) {
 	for _, tc := range []struct {
 		name, value, product string
+		empty                bool
 	}{
-		{name: "empty is unset"},
+		{name: "unset"},
+		{name: "empty is unset", empty: true},
 		{name: "desktop", value: "qurl-desktop/1.2.3", product: "qurl-desktop/1.2.3"},
 		{name: "invalid", value: "desktop/1\r\nInjected: yes"},
 	} {
@@ -28,7 +30,7 @@ func TestResolveClientProduct(t *testing.T) {
 						if name != "QURL_CLIENT_PRODUCT" {
 							return "", false
 						}
-						return tc.value, true
+						return tc.value, tc.value != "" || tc.empty
 					},
 				}
 				opts.resolveClientProduct()
