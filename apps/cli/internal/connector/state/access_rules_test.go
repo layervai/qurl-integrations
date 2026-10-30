@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,7 +18,10 @@ import (
 const ruleID = "11111111-1111-4111-8111-111111111111"
 
 func TestAccessRulesPersistWithoutDeviceIdentity(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "new-access-rules")
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fresh namespace already exists: %v", err)
+	}
 	store, err := OpenAccessRules(dir, "https://api.example.test")
 	if err != nil {
 		t.Fatal(err)
@@ -30,7 +34,10 @@ func TestAccessRulesPersistWithoutDeviceIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, _ := OpenAccessRules(dir, "https://api.example.test")
+	other, err := OpenAccessRules(dir, "https://api.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, err := other.Snapshot(t.Context())
 	if err != nil || len(got.Items) != 1 || got.LocalVersion != saved.LocalVersion {
 		t.Fatalf("restart %+v: %v", got, err)
@@ -66,22 +73,27 @@ func TestAccessRulesConcurrentProcesses(t *testing.T) {
 		}
 		t.Fatal("concurrent save never succeeded")
 	}
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	commands := make([]*exec.Cmd, 6)
+	outputs := make([]bytes.Buffer, len(commands))
 	for i := range commands {
 		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestAccessRulesConcurrentProcesses$") //nolint:gosec // G204: re-executes this test binary with a fixed test selector.
 		cmd.Env = append(os.Environ(), "QURL_RULE_TEST_CHILD=yes", "QURL_RULE_TEST_DIR="+dir, "QURL_RULE_TEST_ID="+fmt.Sprintf("%08d-1111-4111-8111-111111111111", i))
+		cmd.Stdout, cmd.Stderr = &outputs[i], &outputs[i]
 		commands[i] = cmd
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, cmd := range commands {
+	for index, cmd := range commands {
 		if err := cmd.Wait(); err != nil {
-			t.Fatal(err)
+			t.Fatalf("child %d: %v\n%s", index, err, outputs[index].Bytes())
 		}
 	}
-	store, _ := OpenAccessRules(dir, "https://api.example.test")
+	store, err := OpenAccessRules(dir, "https://api.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	snapshot, err := store.Snapshot(t.Context())
 	if err != nil || len(snapshot.Items) != len(commands) {
 		t.Fatalf("lost concurrent updates: %+v %v", snapshot, err)
@@ -91,7 +103,7 @@ func TestAccessRulesConcurrentProcesses(t *testing.T) {
 func TestAccessRulesRejectUnsafeJournal(t *testing.T) {
 	for _, kind := range []string{"symlink", "malformed", "unknown"} {
 		t.Run(kind, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := secureStateTestDir(t)
 			path := filepath.Join(dir, "access_rules.json")
 			if kind == "symlink" {
 				target := filepath.Join(t.TempDir(), "target")
@@ -106,11 +118,14 @@ func TestAccessRulesRejectUnsafeJournal(t *testing.T) {
 				if kind == "malformed" {
 					raw = `not JSON`
 				}
-				if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				if err := replaceConnectorResources(dir, path, []byte(raw)); err != nil {
 					t.Fatal(err)
 				}
 			}
-			store, _ := OpenAccessRules(dir, "https://api.example.test")
+			store, err := OpenAccessRules(dir, "https://api.example.test")
+			if err != nil {
+				t.Fatal(err)
+			}
 			if _, err := store.Snapshot(t.Context()); err == nil {
 				t.Fatal("unsafe journal accepted")
 			}
@@ -150,7 +165,7 @@ func (r *ruleRemote) Replace(_ context.Context, v int64, items []accessrules.Def
 	return r.library, nil
 }
 func TestAccessRulesSyncMergeConflictAndAccountIsolation(t *testing.T) {
-	store, _ := OpenAccessRules(t.TempDir(), "https://api.example.test")
+	store := openAccessRulesTestStore(t)
 	local := accessrules.Definition{ID: ruleID, Name: "Local", Mode: "keys"}
 	if _, err := store.Save(t.Context(), 0, &local); err != nil {
 		t.Fatal(err)
@@ -181,7 +196,7 @@ func TestAccessRulesSyncMergeConflictAndAccountIsolation(t *testing.T) {
 	}
 }
 func TestAccessRulesSyncRefetchesAfterCASAndPreservesPendingOnFailure(t *testing.T) {
-	store, _ := OpenAccessRules(t.TempDir(), "https://api.example.test")
+	store := openAccessRulesTestStore(t)
 	_, err := store.Save(t.Context(), 0, &accessrules.Definition{ID: ruleID, Name: "Local", Mode: "keys"})
 	if err != nil {
 		t.Fatal(err)
@@ -210,7 +225,7 @@ func TestAccessRulesSyncRefetchesAfterCASAndPreservesPendingOnFailure(t *testing
 }
 
 func TestAccessRulesAccountSwitchArchivesPendingAndLoadsFreshLibrary(t *testing.T) {
-	store, _ := OpenAccessRules(t.TempDir(), "https://api.example.test")
+	store := openAccessRulesTestStore(t)
 	local := accessrules.Definition{ID: ruleID, Name: "Account one", Mode: "keys"}
 	_, err := store.Save(t.Context(), 0, &local)
 	if err != nil {
@@ -240,7 +255,7 @@ func TestAccessRulesAccountSwitchArchivesPendingAndLoadsFreshLibrary(t *testing.
 }
 
 func TestAccessRulesSyncKeepsLocalEditMadeDuringPUT(t *testing.T) {
-	store, _ := OpenAccessRules(t.TempDir(), "https://api.example.test")
+	store := openAccessRulesTestStore(t)
 	definition := accessrules.Definition{ID: ruleID, Name: "Before PUT", Mode: "keys"}
 	if _, err := store.Save(t.Context(), 0, &definition); err != nil {
 		t.Fatal(err)
@@ -263,7 +278,7 @@ func TestAccessRulesSyncKeepsLocalEditMadeDuringPUT(t *testing.T) {
 }
 
 func TestAccessRulesUnchangedSyncDoesNotInvalidateLocalRevision(t *testing.T) {
-	store, _ := OpenAccessRules(t.TempDir(), "https://api.example.test")
+	store := openAccessRulesTestStore(t)
 	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{}, BuiltIns: accessrules.BuiltIns()}}
 	first, err := store.Sync(t.Context(), remote)
 	if err != nil {
@@ -273,4 +288,15 @@ func TestAccessRulesUnchangedSyncDoesNotInvalidateLocalRevision(t *testing.T) {
 	if err != nil || second.LocalVersion != first.LocalVersion {
 		t.Fatalf("unchanged sync invalidates open form: %+v %+v %v", first, second, err)
 	}
+}
+
+// Use a secure child namespace: existing t.TempDir() inherits a Windows ACL
+// that production correctly refuses.
+func openAccessRulesTestStore(t *testing.T) *AccessRuleStore {
+	t.Helper()
+	store, err := OpenAccessRules(secureStateTestDir(t), "https://api.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
 }

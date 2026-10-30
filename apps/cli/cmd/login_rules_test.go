@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -22,6 +23,9 @@ func TestAccountLoginsReconcileGuestRulesWithoutChangingLoginResult(t *testing.T
 	for _, external := range []bool{false, true} {
 		for _, status := range []int{http.StatusOK, http.StatusForbidden, http.StatusServiceUnavailable} {
 			t.Run(http.StatusText(status)+map[bool]string{false: "/plain", true: "/external"}[external], func(t *testing.T) {
+				if external && runtime.GOOS == "windows" {
+					t.Skip("external token files are unsupported; covered by TestExternalLoginUnsupportedPlatformLeavesNamespaceUntouched")
+				}
 				srv := apitest.NewServer(t)
 				dir := connectorStateTestDir(t)
 				store, err := connectorstate.OpenAccessRules(dir, srv.URL)

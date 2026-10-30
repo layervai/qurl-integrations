@@ -13,7 +13,7 @@ import (
 )
 
 func TestRulesOfflineBridgePersistsAndRejectsStaleUI(t *testing.T) {
-	dir := t.TempDir()
+	dir := connectorStateTestDir(t)
 	input := `{"id":"11111111-1111-4111-8111-111111111111","name":"Team","mode":"email_domain","email_domain":"example.com","allowed_emails":["Partner@elsewhere.com"]}`
 	saved := runCLI(t, &runOpts{args: []string{"rules", "save", "--version", "0", "--file", "-", "-o", "json"}, stdin: strings.NewReader(input), env: map[string]string{}, shareStateDir: dir})
 	if saved.code != 0 {
@@ -94,7 +94,7 @@ func TestRulesSyncAuthFailureKeepsSavedWorkAndIntegrityFailsClosed(t *testing.T)
 				w.WriteHeader(status)
 				_, _ = w.Write([]byte(`{"secret":"private-mailbox@example.com"}`))
 			})
-			dir := t.TempDir()
+			dir := connectorStateTestDir(t)
 			store, err := connectorstate.OpenAccessRules(dir, srv.URL)
 			if err != nil {
 				t.Fatal(err)
