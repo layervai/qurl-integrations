@@ -825,6 +825,7 @@ describe('Discord install callback', () => {
       expect(sessionCookieValue).not.toBeNull();
       expect(pkceCookieValue).not.toBeNull();
       const stateFromRedirect = new URL(stage2.headers.location).searchParams.get('state');
+      expect(new URL(stage2.headers.location).searchParams.get('nonce')).toBe(stateFromRedirect);
       expect(sessionCookieValue).toBe(stateFromRedirect);
 
       globalThis.fetch = jest.fn()

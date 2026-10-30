@@ -157,6 +157,29 @@ describe('qurl-oauth routes', () => {
       expect(loc.searchParams.get('code_challenge')).not.toBe(codeVerifier);
     });
 
+    it('refreshes the sign-in clock without extending the setup link lifetime', async () => {
+      const began = Date.now();
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(began);
+      try {
+        const state = signQurlOAuthState('guild-1', 'admin-2');
+        const expiry = verifyQurlOAuthState(state).payload.expirySec;
+        clock.mockReturnValue(began + 60_000);
+        const first = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
+        const renewed = new URL(first.headers.location).searchParams.get('state');
+        expect(verifyQurlOAuthState(renewed).payload).toMatchObject({
+          expirySec: expiry, authStartedAt: Math.floor((began + 60_000) / 1000),
+        });
+        clock.mockReturnValue(began + 120_000);
+        const second = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(renewed)}`);
+        const twice = new URL(second.headers.location).searchParams.get('state');
+        expect(verifyQurlOAuthState(twice).payload.expirySec).toBe(expiry);
+        clock.mockReturnValue((expiry + 1) * 1000);
+        expect((await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(twice)}`)).status).toBe(400);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
     it('sets Secure flag on the cookie when behind a proxy that sets X-Forwarded-Proto: https', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       const res = await request(app)
@@ -384,6 +407,25 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain('temporarily unavailable');
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
+    });
+
+    it('migrates a legacy saved key through the real service identity reader', async () => {
+      db.getGuildConfigWithApiKey.mockResolvedValueOnce({ qurl_api_key: 'legacy-saved-key' });
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: {
+          owner_id: 'auth0|abc', auth_type: 'api_key', api_key: { key_id: 'legacy-key-id', scopes: ['qurl:read', 'qurl:write'] },
+        } }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { api_key: 'new-saved-key', key_id: 'new-key-id' } }) });
+      const res = await request(app).get(`/oauth/qurl/callback?code=code&state=${encodeURIComponent(state)}`)
+        .set('Cookie', cookieFor(state));
+      expect(res.status).toBe(200);
+      expect(globalThis.fetch.mock.calls[1][0]).toBe('http://localhost:9999/v1/me');
+      expect(globalThis.fetch.mock.calls[1][1].headers.Authorization).toBe('Bearer legacy-saved-key');
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'new-saved-key', 'admin-2', 'oauth', {
+        ownerId: 'auth0|abc', expectedApiKey: 'legacy-saved-key',
+      });
     });
 
     it('rejects a different stored owner before minting a key', async () => {

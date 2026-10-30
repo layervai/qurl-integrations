@@ -3,7 +3,9 @@
 OAuth setup requires a signed ID token with the correct issuer, audience,
 expiry, flow nonce, and authentication time. Both setup entry points request
 `max_age=0`. The callback permits five seconds of clock difference and rejects
-authentication before the current redirect. Missing or invalid identity fails
+authentication before the current redirect. The signed state carries that redirect time
+separately from its expiry; refreshing the nonce never extends the original
+15-minute setup lifetime. Missing or invalid identity fails
 before the bot mints a key.
 
 The service uses the Auth0 subject as the JWT owner ID and as the owner of keys

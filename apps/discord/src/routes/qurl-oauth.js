@@ -16,7 +16,6 @@ const {
   signQurlOAuthState,
   fingerprintQurlAccountSubject,
   qurlAccountFingerprintKeyEpoch,
-  STATE_TTL_SECONDS,
 } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
@@ -160,7 +159,7 @@ router.get('/start', rateLimit, async (req, res) => {
   // Cookie shape (__Host- prefix, Path=/, HttpOnly, SameSite=Lax,
   // Secure) lives in utils/oauth-cookies.js.
   // Start the authentication clock at this redirect, not when the setup link was made.
-  state = signQurlOAuthState(verified.payload.guildId, verified.payload.discordUserId);
+  state = signQurlOAuthState(verified.payload.guildId, verified.payload.discordUserId, verified.payload.expirySec);
   const { codeVerifier, codeChallenge } = createPkcePair();
   setQurlOAuthCookie(res, req, state);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
@@ -249,7 +248,10 @@ router.get('/callback', rateLimit, async (req, res) => {
   // re-bind or replay the verifier. Path-must-match invariant lives in
   // the clear helpers.
   clearQurlOAuthCookies(res);
-  const { guildId, discordUserId } = verified.payload;
+  const { guildId, discordUserId, authStartedAt } = verified.payload;
+  if (!Number.isSafeInteger(authStartedAt)) {
+    return renderError(res, 400, 'Invalid setup link', 'Start a new setup flow to verify a fresh sign-in.');
+  }
 
   // Exchange the code, then verify the identity before any owner or key change.
   let accessToken;
@@ -299,7 +301,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     }
     const identity = await verifyAuth0IdToken(tokenJson.id_token, {
       nonce: state,
-      startedAt: verified.payload.expirySec - STATE_TTL_SECONDS,
+      startedAt: authStartedAt,
     });
     if (!identity.ok || typeof identity.payload?.sub !== 'string' || !identity.payload.sub) {
       logger.warn('qURL setup identity verification refused', { guildId, reason: identity.reason });
@@ -408,7 +410,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       'A network error occurred while provisioning your qURL key. Please run /qurl setup again.');
   }
 
-  // 3. Persist the key. setGuildApiKey is idempotent (upsert) — the
+  // 3. Persist the key with an owner and saved-key condition. The
   //    previous key (if any) remains valid on qurl-service until the
   //    admin manually revokes it via layerv.ai.
   try {

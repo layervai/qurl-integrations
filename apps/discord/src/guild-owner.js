@@ -15,7 +15,7 @@ async function prepareGuildOwnerBinding(guildId, ownerId) {
   if (!priorOwner && prior?.qurl_api_key) {
     // Migrate a legacy row only after the service attests its saved key's owner.
     priorOwner = (await getIdentity(prior.qurl_api_key, guildId)).owner_id;
-    if (typeof priorOwner !== 'string' || !priorOwner) throw ownerConflict();
+    if (typeof priorOwner !== 'string' || !priorOwner) throw new Error('qURL identity owner is missing');
   }
   if (priorOwner && priorOwner !== ownerId) throw ownerConflict();
   return { ownerId, expectedApiKey: prior?.qurl_api_key || null };

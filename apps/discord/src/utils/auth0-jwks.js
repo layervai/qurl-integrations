@@ -63,7 +63,9 @@ async function verifyAuth0IdToken(idToken, binding) {
       clockTolerance: 0,
       ...(binding ? { requiredClaims: ['sub', 'exp', 'iat', 'nonce', 'auth_time'] } : {}),
     });
-    if (binding && (payload.nonce !== binding.nonce
+    if (binding && (!Number.isSafeInteger(binding.startedAt)
+        || typeof binding.nonce !== 'string' || !binding.nonce
+        || payload.nonce !== binding.nonce
         || typeof payload.sub !== 'string' || !payload.sub
         || !Number.isSafeInteger(payload.auth_time)
         || payload.auth_time < binding.startedAt - 5

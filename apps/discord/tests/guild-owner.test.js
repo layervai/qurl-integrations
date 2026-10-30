@@ -26,7 +26,7 @@ test('legacy owner migration needs the saved credential to prove the same owner'
   expect(getIdentity).toHaveBeenCalledWith('saved', 'g');
   await expect(prepareGuildOwnerBinding('g', 'another')).rejects.toMatchObject({ code: 'GUILD_OWNER_CONFLICT' });
   getIdentity.mockResolvedValue({});
-  await expect(prepareGuildOwnerBinding('g', 'owner')).rejects.toMatchObject({ code: 'GUILD_OWNER_CONFLICT' });
+  await expect(prepareGuildOwnerBinding('g', 'owner')).rejects.toThrow('identity owner is missing');
   getIdentity.mockRejectedValue(new Error('unavailable'));
   await expect(prepareGuildOwnerBinding('g', 'owner')).rejects.toThrow('unavailable');
 });

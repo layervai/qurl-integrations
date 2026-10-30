@@ -22,7 +22,7 @@
 // session — there's no consumed-nonce store. The practical impact is
 // bounded because Auth0's `code` parameter is single-use and short-lived
 // (so the second presentation needs a fresh Auth0 grant), and a re-mint
-// on the bot side is an idempotent upsert in guild_configs. The signed
+// on the bot side is conditional on the saved key and durable owner. The signed
 // state is NOT a one-shot token; it's an integrity envelope. PR copy and
 // route comments avoid the "single-use" framing for that reason.
 const crypto = require('crypto');
@@ -86,7 +86,7 @@ function b64urlDecode(str) {
   return Buffer.from(padded.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
 }
 
-function signQurlOAuthState(guildId, discordUserId) {
+function signQurlOAuthState(guildId, discordUserId, expiresAt) {
   if (typeof guildId !== 'string' || !guildId) {
     throw new TypeError('signQurlOAuthState: guildId must be a non-empty string');
   }
@@ -94,12 +94,18 @@ function signQurlOAuthState(guildId, discordUserId) {
     throw new TypeError('signQurlOAuthState: discordUserId must be a non-empty string');
   }
   const nonce = crypto.randomBytes(16).toString('hex');
-  const expirySec = Math.floor(Date.now() / 1000) + STATE_TTL_SECONDS;
+  const startedAt = Math.floor(Date.now() / 1000);
+  const expirySec = expiresAt ?? startedAt + STATE_TTL_SECONDS;
+  if (!Number.isSafeInteger(expirySec) || expirySec <= startedAt
+      || expirySec > startedAt + STATE_TTL_SECONDS) {
+    throw new TypeError('Setup expiry must remain within the original lifetime');
+  }
   const payload = {
     k: STATE_KIND,
     g: guildId,
     u: discordUserId,
     n: nonce,
+    a: startedAt,
     e: expirySec,
   };
   const encoded = b64urlEncode(JSON.stringify(payload));
@@ -143,7 +149,7 @@ function verifyQurlOAuthState(state) {
   if (Math.floor(Date.now() / 1000) >= payload.e) return { ok: false, reason: 'expired' };
   return {
     ok: true,
-    payload: { guildId: payload.g, discordUserId: payload.u, nonce: payload.n, expirySec: payload.e },
+    payload: { guildId: payload.g, discordUserId: payload.u, nonce: payload.n, expirySec: payload.e, authStartedAt: payload.a },
   };
 }
 
