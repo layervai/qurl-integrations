@@ -20,8 +20,8 @@ func TestResolveClientProduct(t *testing.T) {
 		for _, verbose := range []bool{false, true} {
 			var diagnostics bytes.Buffer
 			opts := &globalOpts{
-				verbose:   verbose,
-				streams:   &output.Streams{Err: &diagnostics},
+				verbose: verbose,
+				streams: &output.Streams{Err: &diagnostics},
 				lookupEnv: func(name string) (string, bool) {
 					if name != "QURL_CLIENT_PRODUCT" {
 						return "", false
