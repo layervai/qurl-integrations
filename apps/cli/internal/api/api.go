@@ -408,7 +408,8 @@ var ClientProductRule = fmt.Sprintf("name/version with token characters, at most
 	MaxClientProductLen, cliProduct)
 
 // ValidClientProduct reports whether product is one name/version product of
-// at most MaxClientProductLen bytes that Config.ClientProduct may put in the User-Agent.
+// at most MaxClientProductLen bytes that Config.ClientProduct may put in the
+// User-Agent.
 func ValidClientProduct(product string) bool {
 	// The CLI's own product name is reserved so a host cannot pose as the CLI.
 	return len(product) <= MaxClientProductLen && clientProductPattern.MatchString(product) &&
