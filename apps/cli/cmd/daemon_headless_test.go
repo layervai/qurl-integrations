@@ -360,7 +360,7 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 			t.Fatal("first headless bootstrap did not request authenticated owner verification")
 		}
 		if apiConfig == nil || apiConfig.BaseURL != "https://api.example.com" || apiConfig.Version != "test" ||
-			apiConfig.Verbose == nil || apiConfig.Sleep == nil || apiConfig.NewRequestID == nil {
+			apiConfig.ClientProduct != "qurl-desktop/1.2.3" || apiConfig.Verbose == nil || apiConfig.Sleep == nil || apiConfig.NewRequestID == nil {
 			t.Fatalf("headless registered-client config = %+v, want endpoint, version, and observability hooks", apiConfig)
 		}
 		if cfg.EnrollmentCredential != credential {
@@ -383,6 +383,7 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	waitHeadlessNativeRetry = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {}, verbose: true,
+		lookupEnv:              func(name string) (string, bool) { return "qurl-desktop/1.2.3", name == "QURL_CLIENT_PRODUCT" },
 		resolvedShareGroupMode: connectordaemon.GroupModeSingle, resolvedSupervision: connectorstate.RuntimeSupervisionNative,
 		sleep: func(time.Duration) {}, newRequestID: func() string { return "headless-test-request" },
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },

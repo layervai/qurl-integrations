@@ -368,6 +368,9 @@ type Config struct {
 	APIKey string
 	// Version is the CLI version, used in the User-Agent header.
 	Version string
+	// ClientProduct is an optional, validated RFC 9110 name/version product.
+	// It precedes the CLI product in the User-Agent for host-app attribution.
+	ClientProduct string
 	// Verbose, when non-nil, receives one already-redacted diagnostic line
 	// per transport event.
 	Verbose func(format string, args ...any)

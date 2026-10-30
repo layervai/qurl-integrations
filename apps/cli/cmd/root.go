@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -663,17 +664,38 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 	return qurlapi.New(o.accountConfig(key, ""))
 }
 
+// RFC 9110 product with a required version; both parts use token characters.
+var clientProductPattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+func (o *globalOpts) clientProduct() string {
+	if o.lookupEnv == nil {
+		return ""
+	}
+	value, set := o.lookupEnv("QURL_CLIENT_PRODUCT")
+	if !set {
+		return ""
+	}
+	if len(value) <= 64 && clientProductPattern.MatchString(value) {
+		return value
+	}
+	if log := o.verboseLogger(); log != nil {
+		log("ignoring invalid QURL_CLIENT_PRODUCT: expected name/version with token characters, at most 64 bytes")
+	}
+	return ""
+}
+
 func (o *globalOpts) accountConfig(key, owner string) *qurlapi.Config {
 	return &qurlapi.Config{
-		OwnerID:      owner,
-		BaseURL:      o.resolvedEndpoint,
-		APIKey:       key,
-		Version:      o.version,
-		Verbose:      o.verboseLogger(),
-		Sleep:        o.sleep,
-		NewRequestID: o.newRequestID,
-		HTTPClient:   o.httpClient,
-		Now:          o.now,
+		OwnerID:       owner,
+		BaseURL:       o.resolvedEndpoint,
+		APIKey:        key,
+		Version:       o.version,
+		ClientProduct: o.clientProduct(),
+		Verbose:       o.verboseLogger(),
+		Sleep:         o.sleep,
+		NewRequestID:  o.newRequestID,
+		HTTPClient:    o.httpClient,
+		Now:           o.now,
 	}
 }
 
@@ -1113,13 +1135,14 @@ func requireExternalOwnerScopedAgentState(ctx context.Context, store qurl.AgentS
 // device credential held in store.
 func (o *globalOpts) openRegisteredDeviceClient(ctx context.Context, origin string, store qurl.AgentStateStore) (qurlapi.Client, error) {
 	return qurlapi.NewRegistered(ctx, &qurlapi.Config{
-		BaseURL:      origin,
-		Version:      o.version,
-		Verbose:      o.verboseLogger(),
-		Sleep:        o.sleep,
-		NewRequestID: o.newRequestID,
-		HTTPClient:   o.httpClient,
-		Now:          o.now,
+		BaseURL:       origin,
+		Version:       o.version,
+		ClientProduct: o.clientProduct(),
+		Verbose:       o.verboseLogger(),
+		Sleep:         o.sleep,
+		NewRequestID:  o.newRequestID,
+		HTTPClient:    o.httpClient,
+		Now:           o.now,
 	}, store)
 }
 

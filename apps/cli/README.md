@@ -409,6 +409,15 @@ commands and `QURL_CONNECTOR_RUNTIME_DIR` (environment-only) selects the
 directory that holds its control socket; see
 [External supervision](#external-supervision).
 
+`QURL_CLIENT_PRODUCT` (environment-only) lets a host app bundling the CLI
+identify its product/version, for example `qurl-desktop/1.2.3`. Set it in the
+CLI and daemon environments. It must be a single RFC 9110 `name/version`
+product with nonempty token-only parts, at most 64 bytes in total. Valid values
+prefix the User-Agent: `qurl-desktop/1.2.3 qurl-cli/<version>`. Unset or invalid
+values leave the CLI User-Agent unchanged; invalid values produce a one-line
+note only with `--verbose`. Use only a product name and version, no user or
+device identifiers.
+
 Also honored: `QURL_DEPLOYMENT` (a sandbox or custom deployment settings file;
 production settings are included in releases; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
 `QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the

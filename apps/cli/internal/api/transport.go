@@ -68,10 +68,14 @@ func newTransport(cfg *Config) *transport {
 	if newRequestID == nil {
 		newRequestID = randomRequestID
 	}
+	userAgent := "qurl-cli/" + cfg.Version
+	if cfg.ClientProduct != "" {
+		userAgent = cfg.ClientProduct + " " + userAgent
+	}
 	return &transport{
 		ownerID:      cfg.OwnerID,
 		next:         httpClient,
-		userAgent:    "qurl-cli/" + cfg.Version,
+		userAgent:    userAgent,
 		newRequestID: newRequestID,
 		// nil means the context-aware timer path in backoff; tests inject a
 		// recorder.

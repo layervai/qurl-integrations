@@ -442,7 +442,10 @@ func TestOpenNativeRegisteredClient_ExplicitLoginUsesRealConnectorRecovery(t *te
 		resolvedEndpoint:    srv.URL,
 		resolvedSupervision: connectorstate.RuntimeSupervisionNative,
 		version:             "real-connector-recovery-test",
-		lookupEnv: func(string) (string, bool) {
+		lookupEnv: func(name string) (string, bool) {
+			if name == "QURL_CLIENT_PRODUCT" {
+				return "", false
+			}
 			t.Fatal("explicit connector recovery unexpectedly read ambient account authority")
 			return "", false
 		},
