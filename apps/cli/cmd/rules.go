@@ -375,7 +375,7 @@ func ruleCreateCmd(opts *globalOpts) *cobra.Command {
 	}}
 	cmd.Flags().StringVar(&mode, modeFlag, "", "public, keys, invite_only, email_capture, email_domain, review or contract")
 	cmd.Flags().StringVar(&domain, "email-domain", "", "email domain for domain access, such as example.com")
-	cmd.Flags().StringVar(&contract, consumerContract, "", "integration reference for access approved by your service")
+	cmd.Flags().StringVar(&contract, consumerContract, "", "integration reference for Custom access, where your service decides who gets in")
 	cmd.Flags().StringVar(&emailsFile, "emails-file", "", "use - to read optional additional email addresses as a JSON array")
 	return cmd
 }

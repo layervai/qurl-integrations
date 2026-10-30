@@ -60,10 +60,10 @@ func Modes() []string {
 func BuiltIns() []Definition {
 	return []Definition{
 		{ID: "builtin.public", Name: "Anyone with the link", Mode: ModePublic},
-		{ID: "builtin.invite_only", Name: "Invite only", Mode: "invite_only"},
-		{ID: "builtin.review", Name: "Ask first by email", Mode: "review"},
-		{ID: "builtin.email_capture", Name: "Verify an email", Mode: "email_capture"},
-		{ID: "builtin.keys", Name: "Approved passkeys and devices", Mode: "keys"},
+		{ID: "builtin.invite_only", Name: "People you invite", Mode: "invite_only"},
+		{ID: "builtin.review", Name: "People you approve", Mode: "review"},
+		{ID: "builtin.email_capture", Name: "Anyone with a verified email", Mode: "email_capture"},
+		{ID: "builtin.keys", Name: "Devices you approve", Mode: "keys"},
 	}
 }
 

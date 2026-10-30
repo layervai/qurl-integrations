@@ -1,7 +1,9 @@
 package output
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 )
@@ -19,7 +21,12 @@ func (p *Printer) AccessRules(snapshot *accessrules.Snapshot) error {
 	if p.format == FormatJSON {
 		return p.writeJSON(snapshot)
 	}
-	for _, items := range [][]accessrules.Definition{snapshot.BuiltIns, snapshot.Items} {
+	// Ready-made choices read lowest to highest protection; ties keep catalog order.
+	builtIns := slices.Clone(snapshot.BuiltIns)
+	slices.SortStableFunc(builtIns, func(a, b accessrules.Definition) int {
+		return cmp.Compare(accessModes[a.Mode].level, accessModes[b.Mode].level)
+	})
+	for _, items := range [][]accessrules.Definition{builtIns, snapshot.Items} {
 		for i := range items {
 			if err := p.accessRuleLine(&items[i]); err != nil {
 				return err
@@ -49,23 +56,25 @@ func (p *Printer) accessRuleLine(d *accessrules.Definition) error {
 	_, err := fmt.Fprintf(p.out, "%s  %q  %s\n", d.ID, d.Name, accessRuleLabel(d.Mode))
 	return err
 }
+
+// accessModes mirrors the catalog fixture's presentation labels and protection
+// levels (0 = no level); TestAccessModesMatchCatalog keeps them identical.
+var accessModes = map[string]struct {
+	label string
+	level int
+}{
+	"public":        {"Anyone with the link", 1},
+	"email_capture": {"Anyone with a verified email", 2},
+	"email_domain":  {"Work or school email", 3},
+	"invite_only":   {"People you invite", 4},
+	"review":        {"People you approve", 4},
+	"keys":          {"Devices you approve", 5},
+	"contract":      {"Custom access", 0},
+}
+
 func accessRuleLabel(mode string) string {
-	switch mode {
-	case "public":
-		return "Anyone with the link"
-	case "keys":
-		return "Approved passkeys and devices"
-	case "invite_only":
-		return "Invite only"
-	case "email_capture":
-		return "Verify an email"
-	case "email_domain":
-		return "People at a domain"
-	case "review":
-		return "Ask first by email"
-	case "contract":
-		return "Approved by your service"
-	default:
-		return "Unavailable"
+	if m, ok := accessModes[mode]; ok {
+		return m.label
 	}
+	return "Unavailable"
 }

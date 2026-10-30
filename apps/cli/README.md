@@ -780,6 +780,7 @@ session limits remain separate.
 ```sh
 qurl rules create Team --mode email_domain --email-domain example.com
 qurl publish http://127.0.0.1:3000 --rule Team
+qurl publish http://127.0.0.1:8080 --rule "People you invite"
 qurl rules sync -o json
 ```
 
@@ -802,10 +803,11 @@ current rules; pass `--version` to refuse a stale edit. The JSON bridge requires
 a new UUID for each custom rule and the `local_version` from your last read.
 Built-in IDs are immutable. Names are unique, ignoring case, including the
 ready-made names; rules synced from another device can still share a name, so
-use the ID when a name is ambiguous. The private choices include
-Invite only, Verify an email, Ask first by email, Approved passkeys and devices,
-People at a domain, and Approved by your service (requires `contract_id`). Saving
-a rule sends no invitation and approves nobody.
+use the ID when a name is ambiguous. The ready-made choices, from least to most
+protection, are Anyone with the link, Anyone with a verified email, People you
+invite, People you approve and Devices you approve. Saved rules can also use
+Work or school email (requires `email_domain`) and Custom access (requires
+`contract_id`). Saving a rule sends no invitation and approves nobody.
 
 Supervising apps use `qurl rules capabilities -o json` offline, and pass complete
 validated snapshots through standard input with `publish --rule-file -` or

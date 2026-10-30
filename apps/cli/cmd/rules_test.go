@@ -185,7 +185,7 @@ func TestRulesErrorsNameTheCause(t *testing.T) {
 		want string
 	}{
 		{[]string{"create", " team", "--mode", "review"}, 8, "already exists"},
-		{[]string{"create", "INVITE ONLY", "--mode", "review"}, 8, "already exists"},
+		{[]string{"create", "PEOPLE YOU INVITE", "--mode", "review"}, 8, "already exists"},
 		{[]string{"create", "Other"}, 2, "--mode must be one of"},
 		{[]string{"create", "Other", "--mode", "email_domain", "--email-domain", "not a domain"}, 2, "--email-domain must be a domain"},
 		{[]string{"create", "Other", "--mode", "keys", "--email-domain", "example.com"}, 2, "apply only to --mode email_domain"},
@@ -232,6 +232,23 @@ func TestPublishBuiltInRuleNeedsNoSavedRules(t *testing.T) {
 		if result.code != 0 {
 			t.Errorf("%v: %d %s", rule, result.code, result.stderr.String())
 		}
+	}
+}
+
+func TestPublishBuiltInRuleByName(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Policy map[string]any `json:"consumer_access"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Policy["mode"] != "invite_only" {
+			t.Fatalf("built-in policy lost: %+v %v", body, err)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "consumer_access": body.Policy}, nil)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "People you invite", "-o", "json"}, shareStateDir: connectorStateTestDir(t)})
+	if result.code != 0 {
+		t.Fatalf("%d %s", result.code, result.stderr.String())
 	}
 }
 

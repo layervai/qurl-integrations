@@ -73,6 +73,17 @@ func TestFrozenCatalogContract(t *testing.T) {
 		Modes         []string     `json:"modes"`
 		BuiltIns      []Definition `json:"built_ins"`
 		Examples      []Definition `json:"examples"`
+		// Display copy shared by every surface; output checks labels and levels.
+		Presentation map[string]struct {
+			Label       string  `json:"label"`
+			Summary     string  `json:"summary"`
+			Level       *int    `json:"level"`
+			LevelName   *string `json:"level_name"`
+			IfForwarded string  `json:"if_forwarded"`
+			TheyWill    string  `json:"they_will"`
+			YouWill     string  `json:"you_will"`
+			YouWillSee  string  `json:"you_will_see"`
+		} `json:"presentation"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -81,6 +92,16 @@ func TestFrozenCatalogContract(t *testing.T) {
 	}
 	if catalog.SchemaVersion != 1 || !reflect.DeepEqual(catalog.Modes, Modes()) || !EqualItems(catalog.BuiltIns, BuiltIns()) {
 		t.Fatal("built-in catalog drifted")
+	}
+	for _, mode := range catalog.Modes {
+		if catalog.Presentation[mode].Label == "" || catalog.Presentation[mode].Summary == "" {
+			t.Errorf("mode %s has no presentation", mode)
+		}
+	}
+	for _, d := range catalog.BuiltIns {
+		if d.Name != catalog.Presentation[d.Mode].Label {
+			t.Errorf("built-in %s is named %q, not its mode's label", d.ID, d.Name)
+		}
 	}
 	for _, d := range catalog.Examples {
 		if err = d.Validate(false); err != nil {
@@ -102,7 +123,7 @@ func TestBuiltInSnapshotsMatchByIDAndModeOnly(t *testing.T) {
 	if err := renamed.Validate(true); err != nil {
 		t.Fatalf("renamed built-in rejected: %v", err)
 	}
-	for _, d := range []Definition{{ID: "builtin.keys", Name: "Approved passkeys and devices", Mode: "review"}, {ID: "builtin.unknown", Name: "x", Mode: "keys"}} {
+	for _, d := range []Definition{{ID: "builtin.keys", Name: "Devices you approve", Mode: "review"}, {ID: "builtin.unknown", Name: "x", Mode: "keys"}} {
 		if d.Validate(true) == nil {
 			t.Errorf("built-in %+v accepted", d)
 		}

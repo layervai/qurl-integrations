@@ -3,13 +3,42 @@
   "modes": ["public", "keys", "invite_only", "email_capture", "email_domain", "review", "contract"],
   "built_ins": [
     {"id": "builtin.public", "name": "Anyone with the link", "mode": "public"},
-    {"id": "builtin.invite_only", "name": "Invite only", "mode": "invite_only"},
-    {"id": "builtin.review", "name": "Ask first by email", "mode": "review"},
-    {"id": "builtin.email_capture", "name": "Verify an email", "mode": "email_capture"},
-    {"id": "builtin.keys", "name": "Approved passkeys and devices", "mode": "keys"}
+    {"id": "builtin.invite_only", "name": "People you invite", "mode": "invite_only"},
+    {"id": "builtin.review", "name": "People you approve", "mode": "review"},
+    {"id": "builtin.email_capture", "name": "Anyone with a verified email", "mode": "email_capture"},
+    {"id": "builtin.keys", "name": "Devices you approve", "mode": "keys"}
   ],
   "examples": [
     {"id": "11111111-1111-4111-8111-111111111111", "name": "People at Example", "mode": "email_domain", "email_domain": "example.com", "allowed_emails": ["Partner@outside.example"]},
     {"id": "22222222-2222-4222-8222-222222222222", "name": "Customers", "mode": "contract", "contract_id": "customer-entitlement"}
-  ]
+  ],
+  "presentation": {
+    "public": {
+      "label": "Anyone with the link", "summary": "Opens for anyone who has the link.", "level": 1, "level_name": "Open",
+      "if_forwarded": "Opens for them too.", "they_will": "Just open the link.", "you_will": "Do nothing.", "you_will_see": "Not who opened it."
+    },
+    "email_capture": {
+      "label": "Anyone with a verified email", "summary": "Anyone can open it after confirming an email. You’ll see who.", "level": 2, "level_name": "Verified",
+      "if_forwarded": "Opens once they confirm their own email.", "they_will": "Enter a code from their email.", "you_will": "Do nothing.", "you_will_see": "Each person’s email."
+    },
+    "email_domain": {
+      "label": "Work or school email", "summary": "Only email addresses at a domain you choose, like studio.com.", "level": 3, "level_name": "Limited",
+      "if_forwarded": "Opens only with an email at your domain.", "they_will": "Enter a code from their work or school email.", "you_will": "Choose the domain once.", "you_will_see": "Each person’s email."
+    },
+    "invite_only": {
+      "label": "People you invite", "summary": "Only the email addresses you add. Forwarded links won’t open.", "level": 4, "level_name": "Private",
+      "if_forwarded": "Won’t open.", "they_will": "Confirm the invited email with a code.", "you_will": "Add each person’s email.", "you_will_see": "Each person’s email."
+    },
+    "review": {
+      "label": "People you approve", "summary": "Anyone can ask. Only people you approve get in.", "level": 4, "level_name": "Private",
+      "if_forwarded": "They can ask. It stays closed until you approve.", "they_will": "Confirm their email, then wait for you.", "you_will": "Approve or decline each request.", "you_will_see": "Each request, before anyone gets in."
+    },
+    "keys": {
+      "label": "Devices you approve", "summary": "Only passkeys and devices you approve. Forwarded links won’t open.", "level": 5, "level_name": "Strongest",
+      "if_forwarded": "Won’t open on their device.", "they_will": "Create a passkey and send you its approval code.", "you_will": "Approve each passkey or device.", "you_will_see": "Each approved device."
+    },
+    "contract": {
+      "label": "Custom access", "summary": "Your app or service decides who gets in.", "level": null, "level_name": null
+    }
+  }
 }
