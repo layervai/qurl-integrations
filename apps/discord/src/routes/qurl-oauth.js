@@ -24,7 +24,6 @@ const { createPkcePair, isPkceVerifier } = require('../utils/oauth-pkce');
 const {
   buildAuth0AuthorizeUrl,
   qurlOAuthCallbackUrl,
-  oauthNonceForState,
 } = require('../utils/auth0-authorize-url');
 const { singleStringParam } = require('../utils/query-params');
 const {
@@ -298,7 +297,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       return renderError(res, 403, 'Fresh sign-in required', 'The sign-in did not return a verified identity.');
     }
     const identity = await verifyAuth0IdToken(tokenJson.id_token, {
-      nonce: oauthNonceForState(state),
+      nonce: state,
       startedAt: verified.payload.expirySec - STATE_TTL_SECONDS,
     });
     if (!identity.ok || typeof identity.payload?.sub !== 'string' || !identity.payload.sub) {

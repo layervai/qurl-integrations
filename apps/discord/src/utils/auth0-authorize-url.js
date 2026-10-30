@@ -1,4 +1,3 @@
-const crypto = require('crypto');
 const config = require('../config');
 
 // Both /qurl setup and Add to Discord end at the same callback and bind a
@@ -26,7 +25,7 @@ function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
   // no refresh-token use, so offline_access is deliberately absent.
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
-  authorizeUrl.searchParams.set('nonce', oauthNonceForState(state));
+  authorizeUrl.searchParams.set('nonce', state);
   authorizeUrl.searchParams.set('max_age', '0');
   authorizeUrl.searchParams.set('state', state);
   authorizeUrl.searchParams.set('code_challenge', codeChallenge);
@@ -49,8 +48,4 @@ function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
   return authorizeUrl;
 }
 
-function oauthNonceForState(state) {
-  return crypto.createHash('sha256').update(state).digest('hex');
-}
-
-module.exports = { buildAuth0AuthorizeUrl, qurlOAuthCallbackUrl, oauthNonceForState };
+module.exports = { buildAuth0AuthorizeUrl, qurlOAuthCallbackUrl };
