@@ -106,6 +106,19 @@ beforeEach(() => {
 });
 
 describe('qurl-oauth routes', () => {
+  it.each(['/start', '/callback'])('rate-limits %s before any authorization HTTP request', async (path) => {
+    const previous = config.RATE_LIMIT_MAX_REQUESTS;
+    config.RATE_LIMIT_MAX_REQUESTS = 1;
+    globalThis.fetch = jest.fn();
+    try {
+      expect((await request(app).get(`/oauth/qurl${path}`)).status).toBe(400);
+      expect((await request(app).get(`/oauth/qurl${path}`)).status).toBe(429);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    } finally {
+      config.RATE_LIMIT_MAX_REQUESTS = previous;
+    }
+  });
+
   describe('GET /oauth/qurl/start', () => {
     it('redirects to Auth0 authorize URL with the right params on valid state', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
