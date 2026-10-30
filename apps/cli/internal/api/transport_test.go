@@ -223,7 +223,7 @@ func TestTransportDoesNotMutateCallerRequestAcrossRetry(t *testing.T) {
 	}
 }
 
-func TestTransportIgnoresInvalidClientProduct(t *testing.T) {
+func TestTransportClientProductUserAgent(t *testing.T) {
 	for _, tc := range []struct{ product, want string }{
 		{"", "qurl-cli/test"},
 		{"qurl-desktop/1.2.3", "qurl-desktop/1.2.3 qurl-cli/test"},

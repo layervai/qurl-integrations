@@ -674,6 +674,7 @@ const clientProductEnv = "QURL_CLIENT_PRODUCT"
 // invocation. An empty value counts as unset; an invalid one is dropped with a
 // verbose-only note.
 func (o *globalOpts) resolveClientProduct() {
+	o.resolvedClientProduct = ""
 	value, _ := o.lookupEnv(clientProductEnv)
 	if value == "" {
 		return

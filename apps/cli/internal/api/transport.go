@@ -70,7 +70,8 @@ func newTransport(cfg *Config) *transport {
 	}
 	// TODO(upstream-contract): the API classifies clients by the first
 	// User-Agent product token, so the host product must stay first and the
-	// CLI product must remain present.
+	// CLI product must remain present. The value is self-reported, so the
+	// server must use it for attribution only, never for authorization.
 	userAgent := cliProduct + "/" + cfg.Version
 	// Deliberately re-validated: any caller of this package may set the field.
 	if ValidClientProduct(cfg.ClientProduct) {
