@@ -414,7 +414,7 @@ identify its product/version, for example `qurl-desktop/1.2.3`. Set it in
 every environment that runs the CLI or daemon, including background services
 the CLI installs (they do not inherit it). It must be a single RFC 9110
 `name/version` product with nonempty token-only parts, at most 64 bytes in
-total. Valid values prefix the User-Agent:
+total, and not named `qurl-cli`. Valid values prefix the User-Agent:
 `qurl-desktop/1.2.3 qurl-cli/<version>`. Unset, empty, or invalid values leave
 the CLI User-Agent unchanged; invalid values produce a one-line note only with
 `--verbose`. Use only a product name and version, no user or device

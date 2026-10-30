@@ -197,7 +197,8 @@ type globalOpts struct {
 	// resolvedSupervision is the lifecycle contract every mutating command
 	// checks against the namespace's policy marker before it acts.
 	resolvedSupervision connectorstate.RuntimeSupervision
-	// resolvedClientProduct is the validated QURL_CLIENT_PRODUCT, or empty.
+	// resolvedClientProduct is the validated QURL_CLIENT_PRODUCT, or empty. It
+	// is set by resolveSettings, so build API configs only after it has run.
 	resolvedClientProduct string
 }
 

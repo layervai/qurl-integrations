@@ -30,6 +30,7 @@ func TestResolveClientProduct(t *testing.T) {
 						if name != "QURL_CLIENT_PRODUCT" {
 							return "", false
 						}
+						// The empty case is set-but-empty; "unset" is not set at all.
 						return tc.value, tc.value != "" || tc.empty
 					},
 				}
@@ -68,7 +69,11 @@ func TestClientProductReachesRequestsThroughRoot(t *testing.T) {
 			if res.code != 0 {
 				t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 			}
-			if got := srv.Requests()[0].Header.Get("User-Agent"); got != tc.wantUA {
+			reqs := srv.Requests()
+			if len(reqs) == 0 {
+				t.Fatal("the command sent no request")
+			}
+			if got := reqs[0].Header.Get("User-Agent"); got != tc.wantUA {
 				t.Errorf("User-Agent = %q, want %q", got, tc.wantUA)
 			}
 			if got := strings.Contains(res.stderr.String(), "ignoring invalid QURL_CLIENT_PRODUCT"); got != tc.wantNote {

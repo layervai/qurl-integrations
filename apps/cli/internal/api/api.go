@@ -403,7 +403,9 @@ const MaxClientProductLen = 64
 // ValidClientProduct reports whether product is one name/version product of
 // at most MaxClientProductLen bytes that Config.ClientProduct may put in the User-Agent.
 func ValidClientProduct(product string) bool {
-	return len(product) <= MaxClientProductLen && clientProductPattern.MatchString(product)
+	// The CLI's own product name is reserved so a host cannot pose as the CLI.
+	return len(product) <= MaxClientProductLen && clientProductPattern.MatchString(product) &&
+		!strings.HasPrefix(strings.ToLower(product), "qurl-cli/")
 }
 
 type client struct {
