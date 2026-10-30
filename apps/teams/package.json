@@ -29,23 +29,23 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.967.0",
-    "@aws-sdk/client-kms": "^3.967.0",
-    "@aws-sdk/lib-dynamodb": "^3.967.0",
-    "@microsoft/teams.api": "^2.0.15",
-    "@microsoft/teams.apps": "^2.0.15",
+    "@aws-sdk/client-dynamodb": "^3.1156.0",
+    "@aws-sdk/client-kms": "^3.1156.0",
+    "@aws-sdk/lib-dynamodb": "^3.1156.0",
+    "@microsoft/teams.api": "^2.1.1",
+    "@microsoft/teams.apps": "^2.1.1",
     "@microsoft/teams.common": "^2.0.15",
-    "express": "^5.1.0",
-    "jose": "^6.0.0"
+    "express": "^5.3.0",
+    "jose": "^6.2.13"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.0",
     "@types/express": "^5.0.6",
     "@types/node": "^22.19.0",
-    "@vitest/coverage-v8": "5.0.0",
-    "eslint": "^10.0.0",
+    "@vitest/coverage-v8": "5.0.5",
+    "eslint": "^10.13.0",
     "typescript": "^6.0.2",
-    "typescript-eslint": "^8.46.4",
+    "typescript-eslint": "^8.72.0",
     "vitest": "^5.0.0"
   },
   "overrides": {
