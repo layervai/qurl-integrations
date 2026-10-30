@@ -130,7 +130,7 @@ jobs:
           args: --timeout=5m ./e2e/cmd/verify-ownership/...
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit
 
       # The wider of the two gates: tsconfig.json includes **/*.ts, so this
       # covers helpers/ and the live tests/ too, while the unit run below
