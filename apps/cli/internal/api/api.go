@@ -371,7 +371,8 @@ type Config struct {
 	Version string
 	// ClientProduct is an optional RFC 9110 name/version product. When
 	// ValidClientProduct accepts it, it precedes the CLI product in the
-	// User-Agent for host-app attribution; otherwise it is ignored.
+	// User-Agent for host-app attribution; otherwise it is ignored. It is
+	// self-reported: use only a product name and version, never an identifier.
 	ClientProduct string
 	// Verbose, when non-nil, receives one already-redacted diagnostic line
 	// per transport event.
@@ -396,10 +397,13 @@ type Config struct {
 // parts use token characters.
 var clientProductPattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
+// MaxClientProductLen bounds Config.ClientProduct in bytes.
+const MaxClientProductLen = 64
+
 // ValidClientProduct reports whether product is one name/version product of
-// at most 64 bytes that Config.ClientProduct may put in the User-Agent.
+// at most MaxClientProductLen bytes that Config.ClientProduct may put in the User-Agent.
 func ValidClientProduct(product string) bool {
-	return len(product) <= 64 && clientProductPattern.MatchString(product)
+	return len(product) <= MaxClientProductLen && clientProductPattern.MatchString(product)
 }
 
 type client struct {

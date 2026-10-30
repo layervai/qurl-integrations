@@ -22,7 +22,12 @@ func TestResolveClientProduct(t *testing.T) {
 			opts := &globalOpts{
 				verbose:   verbose,
 				streams:   &output.Streams{Err: &diagnostics},
-				lookupEnv: func(name string) (string, bool) { return tc.value, name == "QURL_CLIENT_PRODUCT" },
+				lookupEnv: func(name string) (string, bool) {
+					if name != "QURL_CLIENT_PRODUCT" {
+						return "", false
+					}
+					return tc.value, true
+				},
 			}
 			opts.resolveClientProduct()
 			if opts.resolvedClientProduct != tc.product {
