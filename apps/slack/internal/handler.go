@@ -2692,7 +2692,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 				"• `/qurl-admin protect-url` — Guided URL picker; choose an existing URL resource and channel alias",
 				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Typed: protect an existing URL resource in this channel",
 				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Typed: protect an existing no-alias URL resource in this channel",
-				"• Typed connector options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
+				"• Typed connector options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<container-name>` or `web_container:<container-name>`; Compose accepts `service:<service-name>`; `env:compose` also works",
 			)
 		} else {
 			lines = append(lines,
