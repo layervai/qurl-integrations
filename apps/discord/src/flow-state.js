@@ -714,11 +714,9 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   }
 }
 
-// Explicit delete. Emits FLOW_DELETED (the SLI numerator) — TTL
-// reap deliberately does NOT emit this event so the
-// silently-dropped count surfaces in the difference. If a future
-// PR adds a TTL-driven sweeper it MUST emit a distinct event
-// (e.g. FLOW_REAPED) so the SLI math stays intact.
+// Explicit deletion emits FLOW_DELETED (the SLI numerator). Expired-only
+// recovery emits FLOW_REAPED instead, so an abandoned row remains in the
+// FLOW_CREATED minus FLOW_DELETED count. Native DDB TTL reap emits neither.
 //
 // `stage` is both the audit value AND the conditional-delete gate:
 // the row is only removed when its `stage` attribute equals the
@@ -744,7 +742,8 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
 // behavior is exactly the pre-existing stage-gate-only delete
 // (the only path used by terminal-flow callers, where there
 // is no concurrent advancement to race against).
-// expiredOnly adds an atomic TTL check for recovery across different stages.
+// expiredOnly is used by supersedeOrCreate for expired predecessors. The
+// atomic TTL check protects live replacements even when stage/version repeat.
 async function deleteFlow(flow_id, { stage, reason, expectedVersion, expiredOnly = false } = {}) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.deleteFlow: flow_id must be a non-empty string');
@@ -789,7 +788,7 @@ async function deleteFlow(flow_id, { stage, reason, expectedVersion, expiredOnly
 
   if (expiredOnly) {
     // A new live row can reuse the old stage and version after creation resets it.
-    conditionParts.push('#e <= :expired_now');
+    conditionParts.push('#e < :expired_now');
     exprNames['#e'] = 'expires_at';
     exprValues[':expired_now'] = nowEpochSeconds();
   }
@@ -842,7 +841,7 @@ async function deleteFlow(flow_id, { stage, reason, expectedVersion, expiredOnly
     throw err;
   }
 
-  logger.audit(AUDIT_EVENTS.FLOW_DELETED, {
+  logger.audit(expiredOnly ? AUDIT_EVENTS.FLOW_REAPED : AUDIT_EVENTS.FLOW_DELETED, {
     flow_id,
     stage,
     reason,
@@ -936,8 +935,8 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
 
   // Live sibling flows retain their slot. An expired sibling can be recovered,
   // but the delete must check expiry atomically in case a new live row replaced it.
-  const expiredSibling = surviving.stage !== stage && surviving.expires_at <= nowEpochSeconds();
-  if (surviving.stage !== stage && !expiredSibling) {
+  const expired = surviving.expires_at < nowEpochSeconds();
+  if (surviving.stage !== stage && !expired) {
     return { created: false, surviving };
   }
 
@@ -950,7 +949,7 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
     stage: surviving.stage,
     reason: 'admin_cleanup',
     expectedVersion: surviving.version,
-    expiredOnly: expiredSibling,
+    expiredOnly: expired,
   });
   if (!claimed.deleted) {
     // Lost the OCC race or the row evaporated. Re-peek so the

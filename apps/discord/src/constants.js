@@ -417,7 +417,7 @@ const AUDIT_EVENTS = {
   //                   posture as FLOW_CREATED.
   FLOW_TRANSITION: 'flow_transition',
 
-  // Emitted on every explicit deleteFlow() call — flow numerator for
+  // Emitted on ordinary explicit deleteFlow() calls — flow numerator for
   // the "Flow continuity" SLI (completed_flows). TTL-reaped flows do
   // NOT emit this event; the SLI math relies on that asymmetry to
   // identify silent drops (FLOW_CREATED count minus FLOW_DELETED
@@ -437,6 +437,10 @@ const AUDIT_EVENTS = {
   //               sustained 'abort' rate indicates a UX problem.
   //   - `flow_id`: HIGH-cardinality. Forensic-query ONLY.
   FLOW_DELETED: 'flow_deleted',
+
+  // Expired-only recovery removes a row without marking its abandoned flow complete.
+  // Same payload as FLOW_DELETED; native DynamoDB TTL deletion emits no audit.
+  FLOW_REAPED: 'flow_reaped',
 
   // Emitted when a request to a dependency returns 401 or 403 — catches
   // rotation drift (qurl-service API key, GitHub App token, etc.) that

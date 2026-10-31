@@ -1047,23 +1047,42 @@ describe('flow-state.supersedeOrCreate', () => {
     expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
   });
 
-  test('recovers an expired modal at another stage before DynamoDB TTL reap', async () => {
-    const orphanRow = { flow_id: FLOW_ID, stage: 'awaiting_setup_modal', version: 2,
-      payload: null, expires_at: Math.floor(Date.now() / 1000) - 120 };
-    ddbMock.on(PutCommand).rejectsOnce(ccfe()).resolves({});
-    ddbMock.on(GetCommand).resolves({ Item: orphanRow });
-    ddbMock.on(DeleteCommand).resolves({});
-    const result = await flowState.supersedeOrCreate({ flow_id: FLOW_ID,
-      stage: 'awaiting_setup_button', payload: null, ttl_seconds: 120 });
-    expect(result).toEqual({ created: true, version: 1 });
-    const input = ddbMock.commandCalls(DeleteCommand)[0].args[0].input;
-    expect(input.ConditionExpression).toContain('#s = :stage');
-    expect(input.ConditionExpression).toContain('#v = :expected');
-    expect(input.ConditionExpression).toContain('#e <= :expired_now');
-    expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
-      ':stage': 'awaiting_setup_modal', ':expected': 2, ':expired_now': expect.any(Number),
-    }));
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(2);
+  test.each(['awaiting_setup_modal', 'awaiting_setup_button'])(
+    'recovers expired %s without marking an abandoned flow complete', async (stage) => {
+      const orphanRow = { flow_id: FLOW_ID, stage, version: 2,
+        payload: null, expires_at: Math.floor(Date.now() / 1000) - 120 };
+      ddbMock.on(PutCommand).rejectsOnce(ccfe()).resolves({});
+      ddbMock.on(GetCommand).resolves({ Item: orphanRow });
+      ddbMock.on(DeleteCommand).resolves({});
+      const result = await flowState.supersedeOrCreate({ flow_id: FLOW_ID,
+        stage: 'awaiting_setup_button', payload: null, ttl_seconds: 120 });
+      expect(result).toEqual({ created: true, version: 1 });
+      const input = ddbMock.commandCalls(DeleteCommand)[0].args[0].input;
+      expect(input.ConditionExpression).toContain('#s = :stage');
+      expect(input.ConditionExpression).toContain('#v = :expected');
+      expect(input.ConditionExpression).toContain('#e < :expired_now');
+      expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
+        ':stage': stage, ':expected': 2, ':expired_now': expect.any(Number),
+      }));
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(2);
+      expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_REAPED,
+        { flow_id: FLOW_ID, stage, reason: 'admin_cleanup' });
+      expect(logger.audit).not.toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_DELETED, expect.anything());
+    });
+
+  test('preserves a sibling at the exact expiry second, matching loadFlow and transitionFlow', async () => {
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(2_000_000_000_000);
+    try {
+      const row = { flow_id: FLOW_ID, stage: 'awaiting_setup_modal', version: 2,
+        payload: null, expires_at: 2_000_000_000 };
+      ddbMock.on(PutCommand).rejects(ccfe());
+      ddbMock.on(GetCommand).resolves({ Item: row });
+      const result = await flowState.supersedeOrCreate({ flow_id: FLOW_ID,
+        stage: 'awaiting_setup_button', payload: null, ttl_seconds: 120 });
+      expect(result.created).toBe(false);
+      expect(result.surviving.expires_at).toBe(row.expires_at);
+      expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
+    } finally { clock.mockRestore(); }
   });
 
   test('does not delete a live replacement with the expired row\'s stage and version', async () => {
@@ -1193,6 +1212,17 @@ describe('flow-state.supersedeOrCreate', () => {
 });
 
 describe('expired-only flow deletion', () => {
+  test('explicit false preserves the terminal-delete condition and completion audit', async () => {
+    ddbMock.on(DeleteCommand).resolves({});
+    await flowState.deleteFlow(FLOW_ID, { stage: 'awaiting_setup_modal',
+      reason: 'terminal', expiredOnly: false });
+    const input = ddbMock.commandCalls(DeleteCommand)[0].args[0].input;
+    expect(input.ConditionExpression).toBe('attribute_exists(flow_id) AND #s = :stage');
+    expect(input.ExpressionAttributeNames).not.toHaveProperty('#e');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_DELETED,
+      { flow_id: FLOW_ID, stage: 'awaiting_setup_modal', reason: 'terminal' });
+  });
+
   test('rejects a non-boolean guard before a DynamoDB call', async () => {
     await expect(flowState.deleteFlow(FLOW_ID, { stage: 'awaiting_setup_modal',
       reason: 'admin_cleanup', expiredOnly: 'true' })).rejects.toThrow('expiredOnly must be a boolean');
