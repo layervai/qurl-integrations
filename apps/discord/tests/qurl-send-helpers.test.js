@@ -445,6 +445,27 @@ describe('resolveMentionableSelection', () => {
     expect(r.droppedFromRoles).toBe(1);
   });
 
+  test.each([undefined, null, {}])('named role with unavailable members is reported without inventing recipients (%s)', (members) => {
+    const int = makeMentionableInteraction({ pickedRoles: [['role-cold', { id: 'role-cold', mentionable: true, members }]] });
+    const result = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(result.users).toEqual([]);
+    expect([...result.namedRoleMembersUnavailable]).toEqual(['role-cold']);
+    expect(result.everyoneCacheCold).toBe(false);
+  });
+
+  test('mixed roles retain valid humans and distinct bot filtering while reporting unavailable members', () => {
+    const human = makeUser('100000000000000001');
+    const bot = { ...makeUser('100000000000000099'), bot: true };
+    const int = makeMentionableInteraction({ pickedRoles: [
+      ['role-cold', { id: 'role-cold', mentionable: true }],
+      makeRole({ id: 'role-live', members: [{ user: human }, { user: bot }] }),
+    ] });
+    const result = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(result.users).toEqual([human]);
+    expect(result.droppedFromRoles).toBe(1);
+    expect([...result.namedRoleMembersUnavailable]).toEqual(['role-cold']);
+  });
+
   test('everyoneCacheCold: @everyone WITH perm but missing guild.members.cache → flag set, no expansion', () => {
     const int = makeMentionableInteraction({
       pickedRoles: [makeRole({ mentionable: true, id: GUILD_ID, members: [] })],
@@ -493,10 +514,10 @@ describe('resolveMentionableSelection', () => {
     expect(r.droppedFromRoles).toBe(0);
   });
 
-  test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold, roleMentionsDenied }', () => {
+  test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold, namedRoleMembersUnavailable, roleMentionsDenied }', () => {
     const int = makeMentionableInteraction({});
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
-    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'massMentionDenied', 'roleMentionsDenied', 'users']);
+    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'massMentionDenied', 'namedRoleMembersUnavailable', 'roleMentionsDenied', 'users']);
   });
 
   describe('role-mention permission gate (#326)', () => {

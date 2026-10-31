@@ -399,6 +399,23 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Mention Everyone/);
   });
 
+  test('unavailable named role gives a retry reason instead of an empty no-op', async () => {
+    const int = makeSelectInteraction({ users: [], roles: [['role-cold', { id: 'role-cold', mentionable: true }]] });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Picked role members could not be loaded');
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Try again in a few seconds');
+  });
+
+  test('valid user plus unavailable named role advances with a visible warning', async () => {
+    const int = makeSelectInteraction({ roles: [['role-cold', { id: 'role-cold', mentionable: true }]] });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ recipientIds: [u1], warningsBlock: expect.stringContaining('Picked role members could not be loaded') }),
+    }));
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Picked role members could not be loaded');
+  });
+
   test('mentionable picker: partial-valid pick with cold-cache @everyone → flow advances AND everyoneCacheCold warning surfaces', async () => {
     const u1 = makeUser('100000000000000001');
     const int = makeSelectInteraction({
