@@ -1008,6 +1008,7 @@ that accidentally carried a numeric value.
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SLACK_SIGNING_SECRET` | Yes | Slack app signing secret |
+| `FEEDBACK_SLACK_WEBHOOK_URL` | No | Secret HTTPS incoming-webhook URL for feedback delivery, normally on `hooks.slack.com`. Unset or invalid values disable `/qurl feedback` and omit it from help; startup logs a notice or warning. A different host produces a warning but still receives feedback. Store this value as a secret. |
 | `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
 | `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
