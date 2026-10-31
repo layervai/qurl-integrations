@@ -82,24 +82,13 @@
 //                                               // appeared but the caller
 //                                               // denied via the
 //                                               // `allowMassMention` opt
-//     massMentionExpanded:  <boolean>,          // true iff @everyone was
-//                                               // allowed AND the walk
-//                                               // iterated at least one
-//                                               // non-bot member from
-//                                               // `members.cache` (the
-//                                               // member may already be
-//                                               // in `ids` via a prior
-//                                               // named mention — dedup
-//                                               // happens inside
-//                                               // `consider()`; the flag
-//                                               // records that the
-//                                               // expansion ran, not
-//                                               // that it added new
-//                                               // entries). False when
-//                                               // cache was cold,
-//                                               // all-bot, or cap-
-//                                               // saturated before the
-//                                               // walk reached it.
+//     massMentionExpanded:  <boolean>,          // allowed, had room before
+//                                               // the full cache walk,
+//                                               // and saw a human (even
+//                                               // if already selected).
+//                                               // False for a denied,
+//                                               // cold, all-bot, or
+//                                               // already-full selection.
 //                                               // Mutually exclusive
 //                                               // with massMentionDenied.
 //   }
@@ -617,9 +606,11 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   if (everyonePresent && allowMassMention) {
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
-      // TODO(upstream-contract): Discord's keyed member Collection has unique IDs.
-      // Count the loaded snapshot without retaining cache-only overflow IDs.
-      // Explicit mentions keep priority; this synchronous walk cannot see joins.
+      // TODO(upstream-contract): discord.js keeps members.cache keyed by member ID.
+      // Exact counts require O(cache) work; only the loaded snapshot is counted.
+      // Explicit mentions keep priority, then cache order fills the remaining slots.
+      // Cache order can change between runs (#324). Do not await in this walk.
+      // Count overflow without retaining cache-only IDs.
       const hadCapacityForEveryone = ids.size < cap;
       for (const [memberId, member] of everyoneMembers) {
         if (isBotMember(member)) continue;

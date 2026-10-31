@@ -1131,6 +1131,7 @@ describe('@everyone reports overflow instead of silently truncating (#384)', () 
 
 
 test('everyone overflow dedupes an overlapping role and external explicit mention', () => {
+  logger.debug.mockClear();
   const users = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [String(2000 + i), {}]));
   const interaction = makeInteraction({ users, roles: { '7000': { members: Object.keys(users).slice(0, 30), mentionable: true } } });
   const result = parseRecipientMentions('<@900000000000000002> <@&7000> @everyone', interaction, { allowMassMention: true });
@@ -1141,4 +1142,24 @@ test('everyone overflow dedupes an overlapping role and external explicit mentio
   expect(logger.debug).toHaveBeenCalledWith('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
     uniqueCount: 41, cap: 25, cappedCount: 16,
   });
+});
+
+test('large everyone snapshots do not retain overflow IDs', () => {
+  const users = Object.fromEntries(Array.from({ length: 100000 }, (_, i) => [String(2000 + i), {}]));
+  const interaction = makeInteraction({ users });
+  const originalAdd = Set.prototype.add;
+  let additions = 0;
+  const addSpy = jest.spyOn(Set.prototype, 'add').mockImplementation(function (value) {
+    additions++;
+    return originalAdd.call(this, value);
+  });
+  let result;
+  try {
+    result = parseRecipientMentions('@everyone', interaction, { allowMassMention: true });
+  } finally {
+    addSpy.mockRestore();
+  }
+  expect(result.ids).toHaveLength(25);
+  expect(result.cappedCount).toBe(99975);
+  expect(additions).toBeLessThanOrEqual(100);
 });
