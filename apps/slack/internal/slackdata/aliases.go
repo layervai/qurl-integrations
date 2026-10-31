@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -44,8 +43,7 @@ func (s *Store) BindChannelAlias(ctx context.Context, teamID, channelID, aliasNa
 		return fmt.Errorf("ensure alias_bindings map: %w", err)
 	}
 
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -60,8 +58,8 @@ func (s *Store) BindChannelAlias(ctx context.Context, teamID, channelID, aliasNa
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			exprResourceID: stringAttr(resourceID),
-			exprNow:        stringAttr(nowISO),
-			exprNowNano:    unixNanoAttr(now),
+			exprNow:        updatedAt,
+			exprNowNano:    updatedAtNano,
 		},
 	})
 	if err != nil {
@@ -84,8 +82,7 @@ func (s *Store) UnbindChannelAlias(ctx context.Context, teamID, channelID, alias
 		}
 	}
 
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -99,8 +96,8 @@ func (s *Store) UnbindChannelAlias(ctx context.Context, teamID, channelID, alias
 			exprAliasName:     aliasName,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			exprNow:     stringAttr(nowISO),
-			exprNowNano: unixNanoAttr(now),
+			exprNow:     updatedAt,
+			exprNowNano: updatedAtNano,
 		},
 	})
 	if err != nil {
@@ -114,8 +111,7 @@ func (s *Store) UnbindChannelAlias(ctx context.Context, teamID, channelID, alias
 }
 
 func (s *Store) ensureAliasBindingsMap(ctx context.Context, teamID, channelID string) error {
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -129,8 +125,8 @@ func (s *Store) ensureAliasBindingsMap(ctx context.Context, teamID, channelID st
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			exprEmptyMap: &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{}},
-			exprNow:      stringAttr(nowISO),
-			exprNowNano:  unixNanoAttr(now),
+			exprNow:      updatedAt,
+			exprNowNano:  updatedAtNano,
 		},
 	})
 	if err != nil {

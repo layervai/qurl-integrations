@@ -611,6 +611,8 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	})
+	now := time.Date(2026, 10, 31, 12, 34, 56, 123456789, time.FixedZone("test", -6*60*60))
+	store.Now = func() time.Time { return now }
 	if err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID); err != nil {
 		t.Fatalf("TransferOwnership: %v", err)
 	}
@@ -620,7 +622,13 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 	if table := aws.ToString(got.TableName); table != "ws" {
 		t.Errorf("TableName = %q, want ws", table)
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, updated_at = :now ADD admin_slack_user_ids :owner_set" {
+	if stamp, ok := got.ExpressionAttributeValues[exprNowNano].(*ddbtypes.AttributeValueMemberN); !ok || stamp.Value != strconv.FormatInt(now.UnixNano(), 10) {
+		t.Fatalf("ownership transfer purge stamp = %#v", got.ExpressionAttributeValues[exprNowNano])
+	}
+	if stamp, ok := got.ExpressionAttributeValues[exprNow].(*ddbtypes.AttributeValueMemberS); !ok || stamp.Value != "2026-10-31T18:34:56Z" {
+		t.Fatalf("ownership transfer display stamp = %#v", got.ExpressionAttributeValues[exprNow])
+	}
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :owner_set" {
 		t.Errorf("UpdateExpression = %q", exp)
 	}
 	if cond := aws.ToString(got.ConditionExpression); cond != "attribute_exists(slack_team_id) AND owner_id = :current_owner" {
