@@ -4,6 +4,7 @@ const parser = require('@babel/parser');
 const traverse = require('@babel/traverse').default;
 const manifest = require('../deploy-manifest.json');
 const srcDir = path.join(__dirname, '../src');
+// TODO(upstream-contract): keep schema keys in sync with the managed preflight.
 const ENV_GROUPS = ['required', 'required_production', 'optional', 'sdk_optional', 'forbidden_production'];
 
 function javascriptFiles(directory) {
@@ -20,6 +21,10 @@ function envReads(files, strict = true) {
     const member = memberPath => {
       const node = memberPath.node;
       const object = node.object;
+      const property = node.computed ? node.property.value : node.property.name;
+      if (strict && property === 'env' && object?.name !== 'process') {
+        throw new Error('Untracked environment object');
+      }
       if (object?.name === 'process' && (node.computed ? node.property.value : node.property.name) === 'env') {
         const parent = memberPath.parent;
         const directRead = ['MemberExpression', 'OptionalMemberExpression'].includes(parent.type) && parent.object === node;
@@ -39,6 +44,9 @@ function envReads(files, strict = true) {
       MemberExpression: member,
       OptionalMemberExpression: member,
       CallExpression({ node }) {
+        if (strict && node.callee?.name === 'require' && ['process', 'node:process'].includes(node.arguments[0]?.value)) {
+          throw new Error('Untracked process module import');
+        }
         if (file === path.join(srcDir, 'config.js') && node.callee?.name === 'intEnv') {
           if (node.arguments[0]?.type !== 'StringLiteral') throw new Error('intEnv must name its environment key');
           names.add(node.arguments[0].value);
@@ -56,6 +64,9 @@ test.each([
   'process.env[unknownKey];',
   'process["env"][unknownKey];',
   'process?.env[unknownKey];',
+  'const { env } = require("node:process"); env.UNTRACKED;',
+  'globalThis.process.env.UNTRACKED;',
+  'globalThis.process["env"].UNTRACKED;',
 ])('untracked environment access fails closed: %s', source => {
   const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'discord-env-contract-'));
   const file = path.join(directory, 'config.js');
@@ -110,7 +121,7 @@ test('the image bundles its contract and matches the configured port and health 
   const dockerfile = fs.readFileSync(path.join(__dirname, '../Dockerfile'), 'utf8');
   expect(dockerfile).toContain('COPY --chown=node:node deploy-manifest.json ./deploy-manifest.json');
   expect(dockerfile).toContain('ENV NODE_ENV=production');
-  expect(dockerfile).toContain(`EXPOSE ${manifest.port}`);
+  expect(dockerfile).toMatch(new RegExp(`^EXPOSE ${manifest.port}$`, 'm'));
   expect(dockerfile).toContain(`http://127.0.0.1:${manifest.port}${manifest.healthcheck.path}`);
   let port;
   traverse(parser.parse(fs.readFileSync(path.join(__dirname, '../src/config.js'), 'utf8')), {
