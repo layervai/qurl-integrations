@@ -210,6 +210,8 @@ const AUDIT_EVENTS = {
   // from handleAddRecipients on a sendConfig that has both file +
   // location.
   UPLOAD_SUCCESS: 'upload_success',
+  // TODO(upstream-contract): paired UploadRejectedCapacityCount filter in infra.
+  UPLOAD_REJECTED_CAPACITY: 'upload_rejected_capacity',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',
   // DISPATCH_SENT_NO_REFS fires when sendDM resolved ok:true but the

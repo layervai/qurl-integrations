@@ -4014,3 +4014,22 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(message.content).not.toMatch(/\u202E/u);
   });
 });
+
+test('slot-claim capacity rejection emits the count-only audit signal', async () => {
+  const originalActive = _test.getActiveFileSends();
+  try {
+    _test.setActiveFileSends(5);
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, makePipelineParams());
+    expect(interaction.editReply).toHaveBeenLastCalledWith({
+      content: 'The bot is processing too many file sends right now. Please try again in a moment.',
+      components: [],
+    });
+    expect(logger.audit).toHaveBeenCalledWith('upload_rejected_capacity', {
+      active_file_sends: 5, max_concurrent: 5,
+    });
+    expect(_test.getActiveFileSends()).toBe(5);
+  } finally {
+    _test.setActiveFileSends(originalActive);
+  }
+});

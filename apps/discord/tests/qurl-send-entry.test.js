@@ -40,6 +40,9 @@ describe('handleQurlSend — slash entry', () => {
         content: expect.stringMatching(/too many file sends/i),
         ephemeral: true,
       }));
+      expect(logger.audit).toHaveBeenCalledWith('upload_rejected_capacity', {
+        active_file_sends: 99, max_concurrent: 5,
+      });
       expect(isOnCooldown(SENDER_ID)).toBe(false);
       expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     } finally {
