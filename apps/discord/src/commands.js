@@ -2309,6 +2309,7 @@ async function executeSendPipeline(interaction, {
     // bot's child revoke (revokeMintedLinks) needs to reconcile each orphan.
     // Scrub err.message even for AWS service exceptions: validation messages
     // can echo offending request values, but contain useful failure details.
+    logger.audit(AUDIT_EVENTS.PERSIST_FAILED, { send_id: sendId, link_count: qurlLinks.length });
     logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
       sendId,
       errorName: err?.name,
@@ -3492,6 +3493,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         failed: 0,
       };
     }
+    logger.audit(AUDIT_EVENTS.PERSIST_FAILED, { send_id: sendId, link_count: batchSends.length });
     logger.error('recordQURLSendBatch failed in addRecipients; aborting before DMs', {
       sendId, error: err.message, linkCount: batchSends.length,
     });
