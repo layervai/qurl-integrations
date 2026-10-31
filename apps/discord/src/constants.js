@@ -182,7 +182,8 @@ const LOG_EVENTS = Object.freeze({
 //
 // SECRETS CONTRACT: callers SHOULD pass only non-sensitive meta values
 // from a small, pre-vetted vocabulary: `send_id`, `kind`, `count`,
-// `expires_in`, `api_code`, `success`, `total`. logger.audit()
+// `expires_in`, `api_code`, `success`, `total`, `active_file_sends`,
+// `max_concurrent`. logger.audit()
 // defends in two layers if a caller still slips a secret-shaped key
 // in (top-level OR nested):
 //   1. The value is redacted to '[REDACTED]' in the emitted payload.
