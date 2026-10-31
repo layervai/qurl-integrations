@@ -208,10 +208,9 @@ if (process.env.NODE_ENV !== 'test') {
 
 // Any deploy that runs the qURL OAuth setup flow must encrypt persisted
 // credentials at rest, in any NODE_ENV — guild_configs.qurl_api_key is
-// written straight out of that callback. setGuildApiKey uses
-// encrypt as a backstop, but failing closed at boot is the loud
-// signal. Smoke-test the key material so a malformed value is caught here
-// instead of on the first encryptOrPlaintext() call minutes into serving traffic.
+// written straight out of that callback. Operator-managed local config keeps
+// its explicit plaintext fallback; OAuth deployments require this boot gate.
+// Smoke-test key material here instead of failing on the first write.
 //
 // Role-agnostic by design: a `gateway`-role process doesn't mount the
 // OAuth callback, but env vars are uniform across roles in a single
@@ -228,7 +227,7 @@ if (process.env.KEY_ENCRYPTION_KEY || process.env.KEY_ENCRYPTION_KEY_PREV) {
     const { smokeTestKeys } = require('./utils/crypto');
     smokeTestKeys();
   } catch (err) {
-    logger.error('KEY_ENCRYPTION_KEY smoke test failed at boot — refusing to start', { error: err.message });
+    logger.error('Encryption key smoke test failed at boot — refusing to start', { error: err.message });
     process.exit(1);
   }
 }
