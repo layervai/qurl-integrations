@@ -55,7 +55,7 @@ function _resetGatewayActivity() {
  * Inspect a discord.js client or gateway shim and return a health snapshot.
  * A never-connected standby returns null so callers emit no opinion.
  *
- * @param {import('discord.js').Client|object} client - discord.js client or gateway shim.
+ * @param {import('discord.js').Client|object} client - discord.js client with isReady(), or gateway shim.
  * @param {() => number} now - Injected for testability.
  * @returns {{ healthy: boolean, ping_ms: number, ack_age_ms: number|null, activity_age_ms: number|null, is_ready: boolean }|null}
  */
@@ -121,7 +121,7 @@ function readGatewayHealth(client, now = Date.now) {
  * Start the heartbeat timer. Returns the timer handle so callers
  * (gracefulShutdown) can clear it.
  *
- * @param {import('discord.js').Client|object} client - discord.js client or gateway shim.
+ * @param {import('discord.js').Client|object} client - discord.js client with isReady(), or gateway shim.
  * @param {{ intervalMs?: number, now?: () => number }} [opts]
  */
 function startGatewayHeartbeat(client, opts = {}) {
@@ -192,7 +192,7 @@ function startGatewayHeartbeat(client, opts = {}) {
 /**
  * Start the active-guild-count gauge.
  *
- * @param {import('discord.js').Client|object} client - discord.js client or gateway shim.
+ * @param {import('discord.js').Client|object} client - discord.js client with isReady(), or gateway shim.
  * @param {{ intervalMs?: number }} [opts]
  */
 function startActiveGuildCount(client, opts = {}) {
@@ -223,7 +223,7 @@ function startActiveGuildCount(client, opts = {}) {
           return;
         }
         emitCount(result);
-      } else {
+      } else if (typeof client.isReady === 'function' && client.isReady()) {
         emitCount(client.guilds?.cache?.size);
       }
     } catch (err) {
@@ -231,12 +231,9 @@ function startActiveGuildCount(client, opts = {}) {
     }
   }
 
-  // Legacy-client caveat (#196): index.js calls startActiveGuildCount() right after
-  // client.login() resolves, which is BEFORE the gateway READY event
-  // populates client.guilds.cache. The first datapoint here can be 0
-  // while the bot is actually in N guilds — an artifact of the cache
-  // hydrating asynchronously. The 60s interval makes this self-
-  // correcting within one window.
+  // TODO(upstream-contract): discord.js Client#isReady is the legacy readiness signal.
+  // Legacy cache size is unknown before READY; the next ready tick emits
+  // the hydrated count. The shim supplies its own membership sampler.
   tick();
 
   const timer = setInterval(tick, intervalMs);
