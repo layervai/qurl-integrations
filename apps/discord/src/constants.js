@@ -181,7 +181,7 @@ const LOG_EVENTS = Object.freeze({
 // Justin's review comment on infra repo #309.
 //
 // SECRETS CONTRACT: callers SHOULD pass only non-sensitive meta values
-// from a small, pre-vetted vocabulary: `send_id`, `kind`, `count`,
+// from a small, pre-vetted vocabulary: `send_id`, `kind`, `count`, `operation`,
 // `expires_in`, `api_code`, `success`, `total`. logger.audit()
 // defends in two layers if a caller still slips a secret-shaped key
 // in (top-level OR nested):
@@ -210,6 +210,9 @@ const AUDIT_EVENTS = {
   // from handleAddRecipients on a sendConfig that has both file +
   // location.
   UPLOAD_SUCCESS: 'upload_success',
+  // TODO(upstream-contract): ConnectorNoResourceId matches this event/agent
+  // pair after the producer rollout. Counts missing IDs, including upstream create failures.
+  CONNECTOR_NO_RESOURCE_ID: 'connector_no_resource_id',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',
   // DISPATCH_SENT_NO_REFS fires when sendDM resolved ok:true but the
