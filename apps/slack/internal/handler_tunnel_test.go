@@ -1160,7 +1160,7 @@ func TestHelpListsGuidedAndTypedTunnelInstall(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	for _, want := range []string{"/qurl-admin protect-connector`", "Guided connector setup", "/qurl-admin protect-connector <id>", "Typed connector options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
+	for _, want := range []string{"/qurl-admin protect-connector`", "Guided connector setup", "/qurl-admin protect-connector <id>", "Typed connector options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<container-name>", "service:<service-name>", "web_container:<container-name>"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("/qurl help = %q, missing %q", got, want)
 		}
@@ -1174,9 +1174,9 @@ func TestTunnelInstallUsageSplitsTypedEnvironmentExamples(t *testing.T) {
 	for _, want := range []string{
 		"Guided setup is exactly `/qurl-admin protect-connector`",
 		"• Docker:",
-		"container:<name>|web_container:<name>",
+		"container:<container-name>|web_container:<container-name>",
 		"• Compose:",
-		"service:<name>",
+		"service:<service-name>",
 		"• ECS/Fargate or Kubernetes:",
 		"`env:compose` is accepted as shorthand",
 	} {

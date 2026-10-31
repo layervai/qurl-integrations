@@ -555,13 +555,13 @@ func tunnelWebRefKindValidationMessage(env tunnelInstallEnvironment, kind tunnel
 		if kind == tunnelWebRefKindService {
 			return ""
 		}
-		return "Use `service:<name>` with Docker Compose installs."
+		return "Use `service:<service-name>` with Docker Compose installs."
 	}
 	if kind == tunnelWebRefKindService {
-		return "Use `service:<name>` only with `env:docker-compose`; use `container:<name>` or `web_container:<name>` for Docker container installs."
+		return "Use `service:<service-name>` only with `env:docker-compose`; use `container:<container-name>` or `web_container:<container-name>` for Docker container installs."
 	}
 	if kind == tunnelWebRefKindContainer && env != tunnelEnvDocker {
-		return "Use `container:<name>` or `web_container:<name>` only with Docker container installs."
+		return "Use `container:<container-name>` or `web_container:<container-name>` only with Docker container installs."
 	}
 	return ""
 }
