@@ -81,8 +81,8 @@ async function cdnFetchFollowSafe(sourceUrl) {
 // Log the raw connector body at debug level and throw a body-free Error.
 // Mirrors qurl.js — connector responses may echo request headers/tokens, and
 // upstream callers log err.message into application logs.
-// qURL API error codes the connector can pass back via the `error` string.
-// Surface them as Error.apiCode so the caller can branch on a typed value
+// qURL API codes come from connector code or legacy error prose.
+// Surface known codes as Error.apiCode so the caller can branch on a typed value
 // instead of substring-matching the human-readable message (which the
 // connector / upstream API can rephrase without notice).
 const QUOTA_EXCEEDED_PATTERNS = [
@@ -99,10 +99,11 @@ function parseConnectorBody(bodyText) {
 
   try {
     parsed = JSON.parse(bodyText);
-    // Connector wraps upstream API errors as `{success:false, error:"..."}`.
-    // The wrapped string is what we pattern-match for known codes.
+    // TODO(upstream-contract): connector code values take precedence over legacy prose.
     const errStr = typeof parsed.error === 'string' ? parsed.error : '';
-    if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
+    if (parsed.code === 'quota_exceeded') {
+      apiCode = 'quota_exceeded';
+    } else if (!parsed.code && QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
       apiCode = 'quota_exceeded';
       apiDetail = errStr;
     }
