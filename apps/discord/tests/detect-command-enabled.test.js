@@ -48,3 +48,31 @@ describe('/qurl detect activation', () => {
     });
   });
 });
+
+
+describe('qURL command data builder', () => {
+  test.each([
+    [false, false], [false, true], [true, false], [true, true],
+  ])('uses explicit map=%s and detect=%s flags', (map, detect) => {
+    withFreshEnv({ MAP_COMMAND_ENABLED: String(!map), DETECT_COMMAND_ENABLED: String(!detect) }, () => {
+      const { _test } = require('../src/commands');
+      const cfg = { MAP_COMMAND_ENABLED: map, DETECT_COMMAND_ENABLED: detect };
+      const data = _test.buildQurlCommandData(cfg).toJSON();
+      expect(data.name).toBe('qurl');
+      expect(data.options.map(option => option.name)).toEqual([
+        'send', ...(detect ? ['detect'] : []), ...(map ? ['map'] : []),
+        'revoke', 'help', 'setup', 'status',
+      ]);
+      const send = data.options.find(option => option.name === 'send');
+      expect(send.options[0]).toMatchObject({ name: 'attachment', type: 11, required: true });
+      if (map) {
+        const location = data.options.find(option => option.name === 'map');
+        expect(location.options[0]).toMatchObject({ name: 'location', type: 3, required: true, autocomplete: true });
+        const shared = ['recipients', 'expires-in', 'self-destruct', 'personal-message'];
+        expect(location.options.filter(option => shared.includes(option.name)))
+          .toEqual(send.options.filter(option => shared.includes(option.name)));
+      }
+      expect(_test.buildQurlCommandData(cfg).toJSON()).toEqual(data);
+    });
+  });
+});
