@@ -3,6 +3,7 @@ const path = require('node:path');
 const parser = require('@babel/parser');
 const traverse = require('@babel/traverse').default;
 const manifest = require('../deploy-manifest.json');
+const srcDir = path.join(__dirname, '../src');
 const ENV_GROUPS = ['required', 'required_production', 'optional', 'sdk_optional', 'forbidden_production'];
 
 function javascriptFiles(directory) {
@@ -12,17 +13,25 @@ function javascriptFiles(directory) {
   });
 }
 
-function envReads(files) {
+function envReads(files, strict = true) {
   const names = new Set();
   for (const file of files) {
     const ast = parser.parse(fs.readFileSync(file, 'utf8'), { sourceType: 'unambiguous' });
     const member = memberPath => {
       const node = memberPath.node;
       const object = node.object;
-      if (object?.type !== 'MemberExpression' || object.object?.name !== 'process' || object.property?.name !== 'env') return;
+      if (object?.name === 'process' && (node.computed ? node.property.value : node.property.name) === 'env') {
+        const parent = memberPath.parent;
+        const directRead = ['MemberExpression', 'OptionalMemberExpression'].includes(parent.type) && parent.object === node;
+        const knownBootCall = file === path.join(srcDir, 'index.js') && parent.type === 'CallExpression'
+          && parent.arguments[0] === node && ['missingProdKeys', 'missingKekRequiredKeys'].includes(parent.callee.name);
+        if (strict && !directRead && !knownBootCall) throw new Error('Untracked environment alias or destructuring');
+      }
+      if (file === path.join(srcDir, 'boot-requirements.js') && object?.name === 'env' && !node.computed) names.add(node.property.name);
+      if (object?.type !== 'MemberExpression' || object.object?.name !== 'process' || (object.computed ? object.property?.value : object.property?.name) !== 'env') return;
       const name = node.computed ? node.property.value : node.property.name;
       if (typeof name === 'string') names.add(name);
-      else if (!file.endsWith('/config.js') || memberPath.getFunctionParent()?.node.id?.name !== 'intEnv') {
+      else if (strict && (file !== path.join(srcDir, 'config.js') || memberPath.getFunctionParent()?.node.id?.name !== 'intEnv')) {
         throw new Error(`Untracked dynamic environment read in ${path.basename(file)}`);
       }
     };
@@ -30,7 +39,7 @@ function envReads(files) {
       MemberExpression: member,
       OptionalMemberExpression: member,
       CallExpression({ node }) {
-        if (file.endsWith('/config.js') && node.callee?.name === 'intEnv') {
+        if (file === path.join(srcDir, 'config.js') && node.callee?.name === 'intEnv') {
           if (node.arguments[0]?.type !== 'StringLiteral') throw new Error('intEnv must name its environment key');
           names.add(node.arguments[0].value);
         }
@@ -39,6 +48,23 @@ function envReads(files) {
   }
   return names;
 }
+
+test.each([
+  'const { UNTRACKED } = process.env;',
+  'const env = process.env; env.UNTRACKED;',
+  'unknownHelper(process.env);',
+  'process.env[unknownKey];',
+  'process["env"][unknownKey];',
+])('untracked environment access fails closed: %s', source => {
+  const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'discord-env-contract-'));
+  const file = path.join(directory, 'config.js');
+  try {
+    fs.writeFileSync(file, source);
+    expect(() => envReads([file])).toThrow(/Untracked/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('every runtime environment read is declared, and every app declaration has a real reader', () => {
   const reads = envReads(javascriptFiles(path.join(__dirname, '../src')));
@@ -54,7 +80,7 @@ test('every runtime environment read is declared, and every app declaration has 
 });
 
 test('SDK environment exceptions have real readers in the installed Node SDK', () => {
-  const sdkReads = envReads(javascriptFiles(path.dirname(require.resolve('@layervai/qurl/node'))));
+  const sdkReads = envReads(javascriptFiles(path.dirname(require.resolve('@layervai/qurl/node'))), false);
   expect(manifest.env.sdk_optional).toEqual(['QURL_DEPLOYMENT']);
   for (const name of manifest.env.sdk_optional) expect(sdkReads.has(name)).toBe(true);
 });
