@@ -123,7 +123,7 @@ func (c *JobController) Ensure(ctx context.Context) error {
 		// The native ownership check below must succeed before replacement.
 		status = IPCStatus{}
 	}
-	expectedJobVersion, err := JobVersion(c.BinaryVersion, c.ShareGroupMode, c.ClientProduct)
+	expectedJobVersion, err := c.expectedJobVersion(status)
 	if err != nil {
 		return err
 	}
@@ -180,6 +180,16 @@ func (c *JobController) Ensure(ctx context.Context) error {
 	// Native assignment recovery can legitimately outlive a CLI readiness
 	// deadline, so serving convergence is observed through the control plane.
 	return c.Manager.Ensure(job)
+}
+
+// The external supervisor owns attribution; another CLI environment must not
+// demand a restart. Native supervision pins the installing CLI's product.
+func (c *JobController) expectedJobVersion(status IPCStatus) (string, error) {
+	product := c.ClientProduct
+	if c.Supervision == connectorstate.RuntimeSupervisionExternal {
+		_, product, _ = strings.Cut(status.JobVersion, "/client/")
+	}
+	return JobVersion(c.BinaryVersion, c.ShareGroupMode, product)
 }
 
 func unmanagedDaemonMismatch(status IPCStatus, expectedJobVersion string, statusErr error) error {
@@ -271,7 +281,7 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 		"--hub-server-public-key-b64", hub.ServerPublicKeyB64,
 		// Pin native ownership even if the user later selects external in their profile.
 		"--supervision", string(connectorstate.RuntimeSupervisionNative),
-		"--client-product", c.ClientProduct,
+		"--client-product="+c.ClientProduct,
 	)
 	arguments = append(arguments, daemonJobLogArguments(stdoutPath, stderrPath)...)
 	return connectorservice.UserJob{

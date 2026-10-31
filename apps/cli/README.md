@@ -414,7 +414,11 @@ identify its product/version, for example `qurl-desktop/1.2.3`. Set it in the
 environment that runs the CLI. Native background jobs carry
 the validated value from installation, including an explicit empty value.
 Changing or clearing it replaces the managed daemon on the next publish/start.
-External supervisors must set it in their own daemon environment.
+External supervisors set it in their own daemon environment; CLI invocations
+can name a different product without restarting that external daemon.
+Native supervision treats a changed or missing value as a job change, so use
+a consistent environment across a host app and terminal commands to avoid
+replacing the managed daemon on each invocation.
 It must be a single RFC 9110
 `name/version` product with nonempty token-only parts, at most 64 bytes in
 total, and not named `qurl-cli` (case-insensitive). Valid values prefix the User-Agent:

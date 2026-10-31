@@ -86,7 +86,7 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 			"--hub-host", "hub.sandbox.layerv.xyz", "--hub-port", "443",
 			"--hub-server-public-key-b64", testHubKey,
 			"--supervision", "native",
-			"--client-product", "",
+			"--client-product=",
 		)
 		wantArguments = append(wantArguments, daemonJobLogArguments(
 			filepath.Join(dir, "logs", "share-daemon.log"), filepath.Join(dir, "logs", "share-daemon.err.log"))...)
@@ -843,7 +843,8 @@ func TestJobArgumentsAreTiedToTheJobProtocolVersion(t *testing.T) {
 	var names []string
 	for _, argument := range job.Arguments {
 		if strings.HasPrefix(argument, "--") || argument == "daemon" || argument == "run" {
-			names = append(names, argument)
+			name, _, _ := strings.Cut(argument, "=")
+			names = append(names, name)
 		}
 	}
 	if daemonJobProtocolVersion != pinnedProtocol || !slices.Equal(names, pinned) {
@@ -854,7 +855,7 @@ func TestJobArgumentsAreTiedToTheJobProtocolVersion(t *testing.T) {
 
 func TestJobVersionPinsClientProduct(t *testing.T) {
 	for _, mode := range []GroupMode{GroupModeSingle, GroupModePerShare} {
-		for _, product := range []string{"", "host-app/1.2.3", "host&app/1.2"} {
+		for _, product := range []string{"", "host-app/1.2.3", "host&app/1.2", "host%h$HOME/1"} {
 			version, err := JobVersion("3.4.1", mode, product)
 			if err != nil {
 				t.Fatal(err)
@@ -901,17 +902,44 @@ func TestManagedDaemonReplacedWhenClientProductChangesOrClears(t *testing.T) {
 				t.Fatalf("replaced jobs = %d", len(manager.replaced))
 			}
 			job := manager.replaced[0]
-			index := slices.Index(job.Arguments, "--client-product")
-			if index < 0 || index+1 >= len(job.Arguments) || job.Arguments[index+1] != product {
+			if !slices.Contains(job.Arguments, "--client-product="+product) {
 				t.Fatalf("job arguments = %q", job.Arguments)
 			}
 			rendered, err := connectorservice.RenderLaunchdUserJob(job)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(rendered, "<string>--client-product</string>") {
+			if !strings.Contains(rendered, "<string>--client-product="+product+"</string>") {
 				t.Fatal("rendered job dropped product argument")
 			}
 		})
+	}
+}
+
+func TestExternalDaemonAttributionBelongsToItsSupervisor(t *testing.T) {
+	for _, product := range []string{"", "terminal/2"} {
+		dir := t.TempDir()
+		controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "3.4.1", "https://api.example.test", GroupModeSingle, testHubResolver)
+		manager := &recordingJobManager{}
+		controller.Manager = manager
+		controller.ClientProduct = product
+		controller.Supervision = connectorstate.RuntimeSupervisionExternal
+		installed, err := JobVersion("3.4.1", GroupModeSingle, "host-app/1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{JobVersion: installed}, true, nil }
+		reloads := 0
+		controller.Reload = func(context.Context) (bool, error) { reloads++; return true, nil }
+		if err := controller.Ensure(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if reloads != 1 || manager.statusCalls != 0 || len(manager.jobs) != 0 || len(manager.replaced) != 0 {
+			t.Fatal("external attribution must only reload its supervisor's daemon")
+		}
+		controller.BinaryVersion = "3.4.2"
+		if err := controller.Ensure(context.Background()); err == nil {
+			t.Fatal("attribution exemption bypassed the binary contract")
+		}
 	}
 }

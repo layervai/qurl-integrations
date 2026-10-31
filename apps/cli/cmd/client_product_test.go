@@ -97,7 +97,7 @@ func TestDaemonJobClientProductOverridesItsEnvironment(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			args := []string{"daemon", "run", "--state-dir", t.TempDir(), "--job-version", tc.job}
 			if tc.explicit {
-				args = append(args, "--client-product", tc.product)
+				args = append(args, "--client-product="+tc.product)
 			}
 			res := runCLI(t, &runOpts{args: args, env: map[string]string{clientProductEnv: tc.env}})
 			if res.code == 0 || !strings.Contains(res.stderr.String(), "no durable account owner") {
