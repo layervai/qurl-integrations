@@ -6,6 +6,7 @@ const config = require('./config');
 const { assertConfiguredWebhookSecret } = require('./utils/webhook-secret');
 const db = require('./store');
 const logger = require('./logger');
+const eventConsumer = require('./event-consumer');
 const { LOG_EVENTS } = require('./constants');
 const { renderPage } = require('./templates/page');
 const { isPositiveFinite } = require('./utils/time');
@@ -176,12 +177,17 @@ app.get('/metrics', metricsRateLimit, async (req, res) => {
   if (!crypto.timingSafeEqual(authHash, expectedHash)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  const stats = await db.getStats();
+  if (req.query.view !== undefined && req.query.view !== 'consumer') {
+    return res.status(400).json({ error: 'Unsupported metrics view' });
+  }
+  // Routine worker scrapes must not scan the aggregate tables.
+  const stats = req.query.view === 'consumer' ? undefined : await db.getStats();
   res.json({
     status: 'ok',
     uptime: process.uptime(),
     memory: process.memoryUsage(),
     stats,
+    eventConsumer: eventConsumer.getMetrics(),
   });
 });
 

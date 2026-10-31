@@ -401,6 +401,22 @@ let DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 // `_resetStateForTest` or hot-reload can't drift the size — the
 // underflow guard the previous counter shape needed is gone.
 const inFlightPromises = new Set();
+// Process-lifetime counters; never retain message, user, or shard IDs.
+let pollCount = 0;
+let atCapPollCount = 0;
+let handlerRejectionCount = 0;
+
+function getMetrics() {
+  return {
+    running,
+    qurl_bot_event_inflight: inFlightPromises.size,
+    qurl_bot_event_inflight_limit: MAX_INFLIGHT_HANDLERS,
+    qurl_bot_event_polls_total: pollCount,
+    qurl_bot_event_atcap_polls_total: atCapPollCount,
+    qurl_bot_event_dispatch_handler_rejections_total: handlerRejectionCount,
+  };
+}
+
 let isWorkerDispatch = false;
 
 // State-machine rate-limit on the at-cap log. The *transition* into
@@ -730,6 +746,7 @@ function trackDispatch(maybePromise) {
   maybePromise.finally(() => {
     inFlightPromises.delete(maybePromise);
   }).catch((err) => {
+    handlerRejectionCount++;
     // Attaching `.finally()` above counts as a handler for Node's
     // unhandled-rejection bookkeeping, so a rejection that pre-PR
     // would have surfaced at `process.on('unhandledRejection', ...)`
@@ -755,6 +772,7 @@ function trackDispatch(maybePromise) {
 }
 
 async function pollOnce(client) {
+  pollCount++;
   // Backpressure check: if too many handlers are in-flight, pause
   // receives until they drain. Returns from this iteration without
   // pulling messages; pollLoop will call us again, and the
@@ -781,6 +799,7 @@ async function pollOnce(client) {
   // is therefore (cap - 1) + RECEIVE_MAX_MESSAGES overshoot. Off-by-
   // one is intentional and matches the .env.example math.
   if (inFlightPromises.size >= MAX_INFLIGHT_HANDLERS) {
+    atCapPollCount++;
     if (!atCapPauseLogged) {
       logger.warn(AT_CAP_PAUSE_WARN_MSG, capPayload);
       atCapPauseLogged = true;
@@ -1339,12 +1358,16 @@ function _resetStateForTest() {
   seenEventIds.clear();
   lastMissingEventIdWarnMs = 0;
   inFlightPromises.clear();
+  pollCount = 0;
+  atCapPollCount = 0;
+  handlerRejectionCount = 0;
   isWorkerDispatch = false;
   clearAtCapState();
   DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 }
 
 module.exports = {
+  getMetrics,
   start,
   stop,
   trackDispatch,
