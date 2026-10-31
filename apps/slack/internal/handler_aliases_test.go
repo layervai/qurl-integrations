@@ -615,3 +615,60 @@ func TestHandleAliases_EmptyChannelIDRejected(t *testing.T) {
 		t.Errorf("response missing channel-required guard: %q", async)
 	}
 }
+
+func TestHandleAliases_LabelsOnlyLegacyDirectURLBindings(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"old-url": "https://old.example.com/private?token=do-not-render",
+		"healthy": "r_healthy",
+		"opaque":  "public-resource-key-without-old-prefix",
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_healthy", testKeyType: client.ResourceTypeTunnel, testKeySlug: "healthy-tunnel"},
+			{testKeyResourceID: "public-resource-key-without-old-prefix", testKeyType: client.ResourceTypeTunnel, testKeySlug: "opaque-tunnel"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+	_, _, reply := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if strings.Count(reply, "broken binding") != 1 {
+		t.Fatalf("expected only the legacy URL binding to be marked, got %q", reply)
+	}
+	for _, line := range strings.Split(reply, "\n") {
+		if strings.Contains(line, "`$old-url`") && !strings.Contains(line, "broken binding") {
+			t.Fatalf("legacy alias lacks repair note: %q", line)
+		}
+	}
+	for _, want := range []string{"`$old-url`", "`$healthy`", "`$opaque`", "/qurl-admin set-alias"} {
+		if !strings.Contains(reply, want) {
+			t.Errorf("reply missing %q: %q", want, reply)
+		}
+	}
+	if strings.Contains(reply, "old.example.com") || strings.Contains(reply, "do-not-render") {
+		t.Errorf("legacy raw URL leaked: %q", reply)
+	}
+}
+
+func TestHandleAliases_LegacyOnlySkipsResourceLookup(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"old-url": "https://old.example.com/private",
+	})
+	var reads atomic.Int32
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		reads.Add(1)
+		writeResourceListFixture(t, w, nil, "next-page", true)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+	_, _, reply := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if reads.Load() != 0 {
+		t.Errorf("legacy-only bindings made %d resource lookups", reads.Load())
+	}
+	if !strings.Contains(reply, "`$old-url`") || !strings.Contains(reply, "broken binding") {
+		t.Errorf("missing legacy binding repair copy: %q", reply)
+	}
+}
