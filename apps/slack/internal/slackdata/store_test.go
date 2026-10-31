@@ -869,8 +869,8 @@ func TestLookupChannelAlias_HappyPath(t *testing.T) {
 	if captured == nil {
 		t.Fatal("GetItem was not called")
 	}
-	if !aws.ToBool(captured.ConsistentRead) {
-		t.Fatal("alias lookup must observe a completed unbind before a new bind")
+	if aws.ToBool(captured.ConsistentRead) {
+		t.Fatal("ordinary alias reads must retain their eventual-read cost")
 	}
 	if aws.ToString(captured.TableName) != "cp" {
 		t.Errorf("TableName = %q, want cp", aws.ToString(captured.TableName))
@@ -1674,4 +1674,16 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 			t.Fatalf("deleted channels = %v, want %v", deletedChannels, want)
 		}
 	})
+}
+
+func TestLookupChannelAliasConsistent(t *testing.T) {
+	var captured *dynamodb.GetItemInput
+	store := newStore(&stubDDB{getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+		captured = in
+		return &dynamodb.GetItemOutput{}, nil
+	}})
+	_, found, err := store.LookupChannelAliasConsistent(context.Background(), "T1", "C1", "prod-db")
+	if err != nil || found || captured == nil || !aws.ToBool(captured.ConsistentRead) {
+		t.Fatalf("consistent precheck: found=%v err=%v input=%+v", found, err, captured)
+	}
 }

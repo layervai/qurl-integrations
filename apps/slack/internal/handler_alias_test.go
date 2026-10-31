@@ -71,7 +71,7 @@ func (f *fakeAliasStore) key(teamID, channelID string) string {
 	return teamID + "|" + channelID
 }
 
-func (f *fakeAliasStore) LookupChannelAlias(_ context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error) {
+func (f *fakeAliasStore) LookupChannelAliasConsistent(_ context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	rid, found := f.rows[f.key(teamID, channelID)][aliasName]
