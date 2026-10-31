@@ -661,9 +661,9 @@ func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consi
 	return string(pt), newAPIKeyCacheToken(ctBlob.Value, wrappedKey.Value), nil
 }
 
-// TODO(upstream-contract): Keep the TTL column and fixed signal in sync with
-// qurl-integrations-infra modules/qurl-slack-ddb and the filter in
-// qurl-bot-slack/terraform/credential_ttl_monitoring.tf (infra PR #1968).
+// TODO(upstream-contract): Keep the TTL column and fixed security_event value
+// in sync with the infra repo durable workspace-state table and credential TTL
+// metric filter. Track the producer/filter rollout together in public issue #934.
 const (
 	credentialTTLAttribute        = "ttl"
 	credentialTTLSecurityEventKey = "security_event"
