@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -590,12 +589,15 @@ func TestHandleList_PrimaryCreateScopedToAdminRows(t *testing.T) {
 
 func TestHandleList_TunnelTokenShadowedByChannelAlias(t *testing.T) {
 	const slugID, boundID = "r_slug_docs", "r_bound_docs"
-	for _, alternate := range []bool{false, true} {
-		t.Run(strconv.FormatBool(alternate), func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		alternate bool
+	}{{"no safe alias", false}, {"safe alternate alias", true}} {
+		t.Run(tc.name, func(t *testing.T) {
 			ts := newAdminTestServers(t)
 			ts.seedAdmin(t)
 			bindings := map[string]string{"docs": boundID}
-			if alternate {
+			if tc.alternate {
 				bindings["kb"] = slugID
 			}
 			policy := seedChannelPolicySet(testAdminTeamID, "C_test", "", []string{slugID, boundID})
@@ -615,7 +617,7 @@ func TestHandleList_TunnelTokenShadowedByChannelAlias(t *testing.T) {
 			body := inv.captured.waitForBody(t, 2*time.Second)
 			values := createQurlButtonValues(t, parseSlackBlocks(t, body))
 			want := []string{"docs"}
-			if alternate {
+			if tc.alternate {
 				want = append(want, "kb")
 			}
 			if fmt.Sprint(values) != fmt.Sprint(want) {
@@ -654,13 +656,19 @@ func TestHandleList_AliasSnapshotFailureDoesNotAdvertiseTokens(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB)
+	var listCalls atomic.Int32
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		listCalls.Add(1)
 		writeResourceListFixture(t, w, []map[string]any{{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: "docs"}}, "", false)
 	})
+	// Let the scope read succeed, then fail the alias snapshot read.
 	ts.ddb.SetGetItemErrAfter(ts.tableNames.channelPolicy, 1, errors.New("alias snapshot unavailable"))
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 	_, _, reply := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if listCalls.Load() != 1 {
+		t.Fatalf("scope failed before resource listing: calls=%d", listCalls.Load())
+	}
 	if !strings.Contains(reply, serviceUnreachableMessage) {
 		t.Fatalf("unverified alias snapshot rendered: %s", reply)
 	}

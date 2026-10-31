@@ -448,6 +448,8 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// rows whose first bound alias becomes the primary token when they have no
 	// intrinsic token — the sort key must match what the row renders.
 	aliasMap := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
+	// listChannelScope already rejected missing AdminStore and empty channel.
+	// Nil here means the second policy read failed, so tokens are unverified.
 	if aliasMap == nil {
 		_ = h.postResponse(log, responseURL, serviceUnreachableMessage)
 		return
@@ -782,7 +784,10 @@ func resourceDisplayTokenForList(r *client.Resource, boundAliases []string, shar
 		}
 		// Channel aliases win over slugs; an unbound tunnel resource alias
 		// is not part of get's URL-only resource-alias fallback.
-		if (found && owner != r.ResourceID) || (!found && r.Slug == "" && r.Alias != "" && token == r.Alias) {
+		shadowed := found && owner != r.ResourceID
+		unboundResourceAlias := !found && r.Slug == "" && r.Alias != "" && token == r.Alias
+		if shadowed || unboundResourceAlias {
+			// Both alias inputs come from the same resource-keyed policy snapshot.
 			return firstAliasOtherThan(boundAliases, token), token
 		}
 	}
@@ -1052,7 +1057,7 @@ func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logg
 	}
 	entries, err := h.cfg.AdminStore.GetChannelPolicy(ctx, teamID, channelID)
 	if err != nil {
-		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelDebug), "list: channel-policy fetch for alias display failed",
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "list: channel-policy fetch for alias display failed",
 			"error", err, "team_id", teamID, "channel_id", channelID)
 		return nil
 	}
