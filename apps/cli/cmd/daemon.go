@@ -369,6 +369,7 @@ func daemonJobArgument(arguments []string, name string) string {
 // replace it. The native hold never opens a session or reconciles resources.
 func waitDaemonJobRefusalWithIPC(ctx context.Context, opts *globalOpts, hold time.Duration) {
 	arguments := daemonJobArguments()
+	// Native definitions always pass state-dir; do not infer a namespace for raw invalid input.
 	stateDir := filepath.Clean(daemonJobArgument(arguments, "--state-dir"))
 	if !filepath.IsAbs(stateDir) || stateDir == filepath.Dir(stateDir) {
 		waitDaemonJobRefusal(ctx, hold)

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	connectorservice "github.com/layervai/qurl-connector/pkg/service"
 	qurl "github.com/layervai/qurl-go/qurl"
@@ -55,7 +56,8 @@ const daemonJobProtocolVersion = "6"
 
 // TODO(upstream-contract): UserJobManager.Replace must stop the old process
 // before starting its replacement, so the namespace lease cannot have two
-// owners. Verified against qurl-connector v0.14.2. An unreachable running job
+// owners. Ensure must also replace a changed installed definition.
+// Verified against qurl-connector v0.14.2. An unreachable running job
 // is not relocated automatically: its namespace cannot be confirmed.
 
 // JobController installs, upgrades, and signals the per-user daemon job.
@@ -106,13 +108,26 @@ func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode Gro
 		InvocationPath: os.Args[0], Endpoint: endpoint, ShareGroupMode: mode, Supervision: supervision,
 		ResolveHub: resolveHub, LookPath: exec.LookPath,
 	}
-	controller.ProbeStatus = controller.IPC.Status
-	controller.Reload = controller.IPC.ReloadIfRunning
+	controller.ProbeStatus = func(ctx context.Context) (IPCStatus, bool, error) {
+		// A starting owner may publish its runtime hint after this client was built.
+		socket, err := SocketPathForStateDir(stateDir, lookupEnv)
+		if err != nil {
+			return IPCStatus{}, false, err
+		}
+		controller.IPC.SocketPath = socket
+		controller.RuntimeDir = filepath.Dir(socket)
+		return controller.IPC.Status(ctx)
+	}
+	controller.Reload = func(ctx context.Context) (bool, error) { return controller.IPC.ReloadIfRunning(ctx) }
 	return controller, nil
 }
 
 // Ensure reloads a compatible live daemon or installs the current job definition.
 func (c *JobController) Ensure(ctx context.Context) error {
+	return c.ensure(ctx, true)
+}
+
+func (c *JobController) ensure(ctx context.Context, waitForStartup bool) error {
 	if err := c.prepare(); err != nil {
 		return err
 	}
@@ -157,6 +172,12 @@ func (c *JobController) Ensure(ctx context.Context) error {
 		return ErrExternalDaemonNotRunning
 	}
 	if err := c.validateNativeOwner(status, running, expectedJobVersion, statusErr); err != nil {
+		if waitForStartup && errors.Is(err, ErrNativeDaemonUnreachable) {
+			if err := c.waitForNativeOwner(ctx); err != nil {
+				return err
+			}
+			return c.ensure(ctx, false)
+		}
 		return err
 	}
 
@@ -179,6 +200,31 @@ func (c *JobController) Ensure(ctx context.Context) error {
 	// Native assignment recovery can legitimately outlive a CLI readiness
 	// deadline, so serving convergence is observed through the control plane.
 	return c.Manager.Ensure(job)
+}
+
+// A short startup race must not fail a second command or replace an unknown owner.
+func (c *JobController) waitForNativeOwner(ctx context.Context) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, running, err := c.ProbeStatus(waitCtx)
+		if waitCtx.Err() != nil {
+			return errors.Join(ErrNativeDaemonUnreachable, ctx.Err())
+		}
+		if err != nil && (!running || !errors.Is(err, errIPCStatusIncompatible)) {
+			return err
+		}
+		if running {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return errors.Join(ErrNativeDaemonUnreachable, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (c *JobController) validateNativeOwner(status IPCStatus, reachable bool, expected string, statusErr error) error {

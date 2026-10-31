@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	connectorservice "github.com/layervai/qurl-connector/pkg/service"
+
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -238,5 +240,65 @@ func TestDaemonRepairsInvalidHintButClientFailsClosed(t *testing.T) {
 	}
 	if recovered, err := SocketPathForStateDir(dir, nil); err != nil || recovered != path {
 		t.Fatalf("repaired address = %q, %v", recovered, err)
+	}
+}
+
+func TestStoppedLegacyPinnedOwnerCanBeReinstalled(t *testing.T) {
+	root := shortTempRoot(t)
+	dir := filepath.Join(root, "state")
+	if err := connectorstate.EnsureDirMode(dir); err != nil {
+		t.Fatal(err)
+	}
+	lookup := lookupEnvFrom(map[string]string{RuntimeDirEnv: filepath.Join(root, "runtime")})
+	path, err := SocketPathForStateDir(dir, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	manager := emptyManager(t)
+	go func() { done <- (&IPCServer{SocketPath: path, Manager: manager, JobVersion: "5/2.4.0"}).Run(ctx) }()
+	stopped := false
+	t.Cleanup(func() {
+		cancel()
+		if !stopped {
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Error("legacy owner did not stop")
+			}
+		}
+	})
+	ready, stop := context.WithTimeout(t.Context(), 3*time.Second)
+	defer stop()
+	if err := (IPCClient{SocketPath: path}).WaitReady(ready); err != nil {
+		t.Fatal(err)
+	}
+	controller, err := NewJobController(dir, filepath.Join(root, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := &recordingJobManager{}
+	controller.Manager = jobs
+	if err := controller.Ensure(t.Context()); !errors.Is(err, ErrStateNamespaceUnverified) {
+		t.Fatalf("live legacy owner: %v", err)
+	}
+	if len(jobs.jobs)+len(jobs.replaced)+jobs.statusCalls != 0 {
+		t.Fatal("unverified legacy job was changed or inspected")
+	}
+	// The verified owning app/service manager stops its own process, not IPC.
+	cancel()
+	select {
+	case <-done:
+		stopped = true
+	case <-time.After(3 * time.Second):
+		t.Fatal("legacy owner did not stop")
+	}
+	jobs.status = &connectorservice.ServiceStatus{}
+	if err := controller.Ensure(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs.jobs) != 1 || len(jobs.replaced) != 0 || jobs.statusCalls != 1 {
+		t.Fatalf("stopped legacy recovery: %+v", jobs)
 	}
 }

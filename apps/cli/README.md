@@ -725,8 +725,23 @@ version for namespace isolation. A running native job at an unknown socket is
 never replaced automatically. A native job that refuses its arguments reports
 its ownership without opening routes, so the next start, restart, or publish
 can replace it safely. Wait for startup, or restart the owning app
-with the updated CLI. An older daemon using a pinned runtime directory must
-be restarted once to provide the new namespace handshake.
+with the updated CLI. Commands wait up to three seconds for a starting native
+job, and read its runtime hint again before deciding it is unreachable.
+
+An older daemon using a pinned runtime directory needs an owner-controlled
+stop before the updated CLI can install its replacement. `qurl restart` is a
+resource command and cannot bypass this ownership check. Quit the app that
+started a foreground daemon. For a native job, first inspect its arguments
+in launchd, systemd, or Task Scheduler and confirm `--state-dir` names your
+namespace. Then stop that exact job through the same service manager. Retry
+`qurl start <resource>` or publish with the updated CLI. The stopped job can
+be replaced; a running job with unverified ownership cannot.
+
+The saved runtime hint persists after shutdown or a reboot. A deleted runtime
+directory is recreated by its owner. Unsetting the environment variable does
+not clear the saved choice. To return to automatic address selection, stop the
+verified owner, remove only `daemon-runtime-dir.json` from its state directory,
+then start the owner again without an explicit runtime directory.
 
 Windows named pipes have no length limit, so the pipe address ignores this
 variable entirely: a value left in the environment there has no effect and is

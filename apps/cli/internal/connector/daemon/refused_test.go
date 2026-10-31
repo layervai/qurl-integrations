@@ -69,3 +69,61 @@ func TestRefusedJobCanBeReplacedWithoutServingResources(t *testing.T) {
 		}
 	}
 }
+
+func TestStartingNativeOwnerPublishesRuntimeHint(t *testing.T) {
+	dir := shortTempDir(t)
+	controller, err := NewJobController(dir, filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := lookupEnvFrom(map[string]string{RuntimeDirEnv: filepath.Join(dir, "runtime")})
+	path, err := SocketPathForStateDir(dir, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := JobVersion("2.4.0", GroupModeSingle, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	start := make(chan struct{})
+	manager := emptyManager(t)
+	go func() {
+		select {
+		case <-start:
+			done <- (&IPCServer{StateDir: dir, SocketPath: path, Manager: manager, JobVersion: version}).Run(ctx)
+		case <-ctx.Done():
+			done <- ctx.Err()
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("starting owner did not stop")
+		}
+	})
+	probe := controller.ProbeStatus
+	first := true
+	controller.ProbeStatus = func(ctx context.Context) (IPCStatus, bool, error) {
+		status, running, err := probe(ctx)
+		if first {
+			first = false
+			if running || err != nil {
+				t.Fatalf("initial owner: %v, %v", running, err)
+			}
+			close(start)
+		}
+		return status, running, err
+	}
+	jobs := &recordingJobManager{}
+	controller.Manager = jobs
+	if err := controller.Ensure(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if controller.IPC.SocketPath != path || len(jobs.jobs)+len(jobs.replaced) != 0 || jobs.statusCalls != 1 {
+		t.Fatalf("starting owner was replaced or its hint was lost: %+v", jobs)
+	}
+}

@@ -34,8 +34,8 @@ const windowsPlatform = "windows"
 // and client resolves exactly <dir>/daemon.sock. This directory must be
 // dedicated to one state namespace. A daemon saves its selected directory in
 // private state for clients without the environment override. Existing
-// directories must already have mode 0700; startup creates missing directories but never changes the mode
-// of an existing runtime directory.
+// directories must already have mode 0700; startup creates missing
+// directories but never changes an existing runtime directory mode.
 const RuntimeDirEnv = "QURL_CONNECTOR_RUNTIME_DIR"
 
 // SocketPathForStateDir returns the platform IPC address for one state
@@ -148,11 +148,9 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 		retErr = errors.Join(retErr, listener.Close())
 		retErr = errors.Join(retErr, cleanup())
 	}()
-	if s.StateDir != "" {
-		if runtime.GOOS != windowsPlatform {
-			if err := connectorstate.WriteDaemonRuntimeDir(s.StateDir, filepath.Dir(path)); err != nil {
-				return fmt.Errorf("save share daemon runtime directory: %w", err)
-			}
+	if s.StateDir != "" && runtime.GOOS != windowsPlatform {
+		if err := connectorstate.WriteDaemonRuntimeDir(s.StateDir, filepath.Dir(path)); err != nil {
+			return fmt.Errorf("save share daemon runtime directory: %w", err)
 		}
 	}
 
@@ -187,7 +185,6 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	})
 	// ReadTimeout bounds a stalled PUT /overlay body, which MaxBytesReader
 	// caps only in size.
-
 	server := &http.Server{Handler: s.controlHandler(mux), ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 10 * time.Second}
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()

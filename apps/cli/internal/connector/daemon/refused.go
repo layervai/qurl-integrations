@@ -3,7 +3,7 @@ package daemon
 import "context"
 
 // RunRefusedJob exposes ownership while a native job waits to be replaced.
-// It opens no routes and rejects every control mutation.
+// It opens no routes and rejects every control mutation. Protocol 0 forces replacement.
 func RunRefusedJob(ctx context.Context, stateDir, socketPath string) error {
 	return (&IPCServer{
 		StateDir: stateDir, SocketPath: socketPath, JobVersion: "0/refused",
