@@ -2919,7 +2919,7 @@ async function executeSendPipeline(interaction, {
               confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | ${formatSelfDestructSegment(selfDestructSeconds)}`;
               if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
               if (confirmRendered.attachmentText) {
-                confirmMsg += `\nAttached recipients.txt covers the original ${delivered} delivered recipients only; newly added recipients are not listed.`;
+                confirmMsg += `\nAttached recipients.txt lists only the original recipients; newly added recipients are not listed.`;
               }
               monitor.updateBaseMsg(confirmMsg);
               await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
