@@ -1385,6 +1385,11 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		return
 	}
 
+	if values.Get("ssl_check") == "1" {
+		respondJSON(w, http.StatusOK, map[string]string{"ok": slackFormBoolTrue})
+		return
+	}
+
 	command := values.Get(fieldCommand)
 	text := strings.TrimSpace(values.Get(fieldText))
 	// Parse before dispatch so setup emails are redacted even when a user types
