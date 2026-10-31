@@ -164,14 +164,12 @@ func TestError_ErrorsAsRoundTrip(t *testing.T) {
 // actionable for the handler.
 func TestBindWorkspace_ValidationGuards(t *testing.T) {
 	cases := []struct {
-		name      string
-		mapping   *WorkspaceMapping
-		seedAdmin string
+		name    string
+		mapping *WorkspaceMapping
 	}{
-		{"nil mapping", nil, "U"},
-		{"empty team_id", &WorkspaceMapping{OwnerID: "u_owner"}, "U"},
-		{"empty owner_id", &WorkspaceMapping{TeamID: "T"}, "U"},
-		{"empty seed_admin", &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, ""},
+		{"nil mapping", nil},
+		{"empty team_id", &WorkspaceMapping{OwnerID: "u_owner"}},
+		{"empty owner_id", &WorkspaceMapping{TeamID: "T"}},
 	}
 	store := newStore(&stubDDB{
 		putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
@@ -181,7 +179,7 @@ func TestBindWorkspace_ValidationGuards(t *testing.T) {
 	})
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := store.BindWorkspace(context.Background(), c.mapping, c.seedAdmin)
+			err := store.BindWorkspace(context.Background(), c.mapping)
 			var ae *Error
 			if !errors.As(err, &ae) {
 				t.Fatalf("got %v, want *Error", err)
@@ -221,7 +219,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -254,7 +252,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -279,7 +277,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -310,7 +308,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -340,7 +338,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				}}, nil
 			},
 		})
-		_ = store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, testCallerSlackID)
+		_ = store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"})
 		if !disambigConsistent {
 			t.Errorf("disambig GetItem ConsistentRead = false, want true (regression would replay the eventual-consistency race)")
 		}
@@ -362,7 +360,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				return nil, errors.New("transport blip")
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -407,7 +405,7 @@ func TestBindWorkspace_ReclaimsLegacyAuth0SubRow(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		if err != nil {
 			t.Fatalf("BindWorkspace reclaim: got %v, want nil (legacy row should be reclaimed)", err)
 		}
@@ -456,7 +454,7 @@ func TestBindWorkspace_ReclaimsLegacyAuth0SubRow(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -516,11 +514,11 @@ func TestBindWorkspace_WritesSeedAdminAttribute(t *testing.T) {
 	})
 	const (
 		teamID    = "T_seed"
-		ownerID   = "auth0|owner-1"
+		ownerID   = "USEEDADMIN"
 		seedAdmin = "USEEDADMIN"
 	)
 	if err := store.BindWorkspace(context.Background(),
-		&WorkspaceMapping{TeamID: teamID, OwnerID: ownerID}, seedAdmin); err != nil {
+		&WorkspaceMapping{TeamID: teamID, OwnerID: ownerID}); err != nil {
 		t.Fatalf("BindWorkspace: %v", err)
 	}
 	if captured == nil {
@@ -547,7 +545,7 @@ func TestBindWorkspace_TransportErrorMapsTo503(t *testing.T) {
 			return nil, errors.New("dial tcp: timeout")
 		},
 	})
-	err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, testCallerSlackID)
+	err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"})
 	var ae *Error
 	if !errors.As(err, &ae) {
 		t.Fatalf("got %v, want *Error", err)

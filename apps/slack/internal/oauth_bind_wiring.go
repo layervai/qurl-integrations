@@ -13,7 +13,7 @@ import (
 // SlackdataBinder is the slice of slackdata.Store needed to bridge the OAuth
 // callback's package-local WorkspaceMapping shape to the real workspace store.
 type SlackdataBinder interface {
-	BindWorkspace(ctx context.Context, m *slackdata.WorkspaceMapping, seedAdmin string) error
+	BindWorkspace(ctx context.Context, m *slackdata.WorkspaceMapping) error
 }
 
 type oauthAdminStoreAdapter struct {
@@ -26,12 +26,12 @@ func NewOAuthAdminStoreAdapter(store SlackdataBinder) oauth.AdminStore {
 }
 
 // BindWorkspace translates the OAuth mapping shape into slackdata's store shape.
-func (a *oauthAdminStoreAdapter) BindWorkspace(ctx context.Context, m *oauth.WorkspaceMapping, seedAdmin string) error {
+func (a *oauthAdminStoreAdapter) BindWorkspace(ctx context.Context, m *oauth.WorkspaceMapping) error {
 	return a.store.BindWorkspace(ctx, &slackdata.WorkspaceMapping{
 		TeamID:    m.TeamID,
 		OwnerID:   m.OwnerID,
 		CreatedAt: m.CreatedAt,
-	}, seedAdmin)
+	})
 }
 
 // ClassifyOAuthBindError maps slackdata.Store's 409 bind conflicts to the
