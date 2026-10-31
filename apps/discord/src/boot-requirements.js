@@ -451,9 +451,8 @@ function invalidHotStandbyValues(cfg) {
 }
 
 // State-signing secret checks for the shared OAuth state signer
-// (utils/oauth-state.js). Two rules, both production-only (the caller
-// in index.js sits inside the NODE_ENV=production block, keeping dev
-// localhost workflows convenient):
+// (utils/oauth-state.js). The caller applies both rules in every non-test
+// environment; a dormant OAuth flow needs no state secret:
 //
 //   Presence — when qURL OAuth is configured (required AUTH0_* set), SOME key
 //   in the signer's resolution chain must exist. This deliberately stays

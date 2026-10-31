@@ -13,20 +13,9 @@ const logger = require('../logger');
 // work without ceremony; production boot validation should require it.
 //
 // KEY ROTATION — IMPORTANT:
-// The decryption key is cached at module load via getKey(). Rotating
-// KEY_ENCRYPTION_KEY requires BOTH:
-//   1) A process restart (rolling deploy), because the cached key is never
-//      invalidated at runtime; and
-//   2) An out-of-band re-encryption migration of existing ciphertext in:
-//        - guild_configs.qurl_api_key
-//        - orphaned_oauth_tokens.access_token
-//        - qurl_send_configs.attachment_url
-//        - qurl_send_configs.interaction_token
-//      Read each row with the OLD key, then write back with the NEW key
-//      BEFORE the cutover deploy. There is no in-process dual-key support.
-// Missing step 2 → rows encrypted with the old key become unreadable after
-// deploy. If this ever becomes painful, add a `KEY_ENCRYPTION_KEY_PREV`
-// env var here that decryption falls back to.
+// Current and optional previous keys are cached on first use. Rotation needs
+// a rolling restart. Keep KEY_ENCRYPTION_KEY_PREV until old ciphertext has
+// been re-encrypted; new writes always use KEY_ENCRYPTION_KEY.
 
 const PREFIX = 'enc:v1:';
 const ALGO = 'aes-256-gcm';
@@ -152,13 +141,23 @@ function decrypt(value) {
   }
 }
 
+// Validate both write and fallback-read keys before serving traffic.
+function smokeTestKeys() {
+  const probe = 'boot-smoke';
+  if (decrypt(encryptStrict(probe)) !== probe) throw new Error('current-key round-trip mismatch');
+  const previous = getPrevKey();
+  if (previous && decrypt(encryptWithKey(previous, probe)) !== probe) {
+    throw new Error('previous-key round-trip mismatch');
+  }
+}
+
 // Reset cache — test-only; lets jest env var changes take effect. Exported
 // conditionally so a production caller that accidentally imports it can't
 // null out the encryption key at runtime (which would break the next
 // encrypt call mid-request).
 function _resetKeyCache() { cachedKey = null; cachedPrevKey = null; plaintextWarned = false; }
 
-const exports_ = { encrypt, encryptStrict, decrypt };
+const exports_ = { encrypt, encryptStrict, decrypt, smokeTestKeys };
 if (process.env.NODE_ENV !== 'production') {
   exports_._resetKeyCache = _resetKeyCache;
 }

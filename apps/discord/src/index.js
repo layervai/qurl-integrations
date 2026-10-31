@@ -189,6 +189,12 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
+
+}
+
+// Active OAuth flows must fail at boot in preview/dev as well as production.
+// Only the explicit test environment may use the signer's test fallback.
+if (process.env.NODE_ENV !== 'test') {
   // Presence + length-floor policy for the OAuth state-signing secrets
   // lives in boot-requirements.js (invalidStateSecretValues) so it's
   // unit-testable; this is just the log-and-exit plumbing, same
@@ -217,15 +223,10 @@ if (kekMissing.length > 0) {
   logger.error('Generate KEY_ENCRYPTION_KEY with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
   process.exit(1);
 }
-if (process.env.KEY_ENCRYPTION_KEY) {
+if (process.env.KEY_ENCRYPTION_KEY || process.env.KEY_ENCRYPTION_KEY_PREV) {
   try {
-    // encryptStrict (not encrypt) so a future refactor that drops the
-    // outer env-var guard fails loudly here instead of silently falling
-    // through encrypt's plaintext-passthrough branch.
-    const { encryptStrict, decrypt } = require('./utils/crypto');
-    if (decrypt(encryptStrict('boot-smoke')) !== 'boot-smoke') {
-      throw new Error('round-trip mismatch');
-    }
+    const { smokeTestKeys } = require('./utils/crypto');
+    smokeTestKeys();
   } catch (err) {
     logger.error('KEY_ENCRYPTION_KEY smoke test failed at boot — refusing to start', { error: err.message });
     process.exit(1);

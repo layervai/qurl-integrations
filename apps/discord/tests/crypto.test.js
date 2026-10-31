@@ -8,7 +8,7 @@ jest.mock('../src/logger', () => ({
 }));
 
 const nodeCrypto = require('crypto');
-const { encrypt, encryptStrict, decrypt, _resetKeyCache } = require('../src/utils/crypto');
+const { encrypt, encryptStrict, decrypt, smokeTestKeys, _resetKeyCache } = require('../src/utils/crypto');
 
 const VALID_KEY = nodeCrypto.randomBytes(32).toString('base64');
 
@@ -124,5 +124,35 @@ describe('utils/crypto', () => {
       _resetKeyCache();
       expect(() => encryptStrict('x')).toThrow(/KEY_ENCRYPTION_KEY is malformed/);
     });
+  });
+});
+
+
+describe('boot encryption-key smoke test (#191)', () => {
+  beforeEach(() => {
+    process.env.KEY_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64');
+    delete process.env.KEY_ENCRYPTION_KEY_PREV;
+    _resetKeyCache();
+  });
+  afterEach(() => {
+    delete process.env.KEY_ENCRYPTION_KEY;
+    delete process.env.KEY_ENCRYPTION_KEY_PREV;
+    _resetKeyCache();
+  });
+  test('accepts a valid current key without a previous key', () => {
+    expect(smokeTestKeys()).toBeUndefined();
+  });
+  test('exercises fallback decryption with a distinct valid previous key', () => {
+    process.env.KEY_ENCRYPTION_KEY_PREV = Buffer.alloc(32, 8).toString('base64');
+    expect(smokeTestKeys()).toBeUndefined();
+  });
+  test('rejects a malformed previous key before any stored row needs it', () => {
+    process.env.KEY_ENCRYPTION_KEY_PREV = 'not-base64';
+    expect(smokeTestKeys).toThrow('KEY_ENCRYPTION_KEY_PREV is malformed');
+  });
+  test('does not treat a previous key as authority to write without a current key', () => {
+    delete process.env.KEY_ENCRYPTION_KEY;
+    process.env.KEY_ENCRYPTION_KEY_PREV = Buffer.alloc(32, 8).toString('base64');
+    expect(smokeTestKeys).toThrow('KEY_ENCRYPTION_KEY is required');
   });
 });
