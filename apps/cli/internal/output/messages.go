@@ -129,7 +129,7 @@ const (
 	msgPublishSettingsDiffer = "This item is already shared with other settings. Use qurl access configure to change it."
 
 	// msgWorksOnce follows a single-use link in a text document; %s is its CRID.
-	msgWorksOnce = "Works once. Run qurl share %s for a new link."
+	msgWorksOnce = "Single-use. Run qurl share %s for a new link."
 
 	// msgPublishFoundExisting is the text-document note for that same case:
 	// what happened, then the one next step.

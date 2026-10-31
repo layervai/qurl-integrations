@@ -345,7 +345,7 @@ type ruleSettingFlags struct {
 
 func (f *ruleSettingFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.expiresIn, "expires-in", "", "public rules: each shared link expires after this long, such as 1h or 7d (1m to 30d)")
-	cmd.Flags().BoolVar(&f.oneBrowser, "one-browser", false, "public rules: each shared link works once (alias --once)")
+	cmd.Flags().BoolVar(&f.oneBrowser, "one-browser", false, "public rules: Single-use link: only the first person to open it gets in (alias --once)")
 	cmd.Flags().StringVar(&f.sessionLength, "session-length", "", "public rules: how long each visit lasts, such as 30m (1s to 24h)")
 	cmd.Flags().StringVar(&f.approvals, "approvals-last", "", "review and keys rules: 1d, 7d, 30d, 90d or never (default: never)")
 	// --once is the short spelling of --one-browser.

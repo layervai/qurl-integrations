@@ -789,14 +789,14 @@ A rule can also carry settings for its mode:
 | Section | Flag | Applies to | Values |
 |---------|------|------------|--------|
 | Links you share | `--expires-in` | public | Expires after, `1m` to `30d` (required with any limit) |
-| Links you share | `--one-browser` (or `--once`) | public | Link works once |
+| Links you share | `--one-browser` (or `--once`) | public | Single-use link: only the first person to open it gets in |
 | Links you share | `--session-length` | public | Session length, `1s` to `24h` |
 | Approvals | `--approvals-last` | review, keys | `1d`, `7d`, `30d`, `90d` or `never` (the default) |
 
 Links you share: the limits apply to links you share from this item. The item's
 permanent address isn't used with limits: `qurl publish --rule` mints a
 temporary link with them and prints it as `Link:` (JSON `link.qurl`,
-`link.expires_at`; a link that works once is followed by `Works once. Run qurl
+`link.expires_at`; a single-use link is followed by `Single-use. Run qurl
 share <CRID> for a new link.`), and saves the limits with the share on this device, so a
 later `qurl share <CRID>` link uses them too (`--ttl` and `--session-duration`
 override). Approvals last travels in the resource's policy
@@ -814,7 +814,7 @@ qurl rules create "Quick look" --mode public --expires-in 1h --one-browser
 qurl rules create Reviewers --mode review --approvals-last 7d
 qurl rules create Studio --mode email_domain --email-domain studio.com
 qurl rules list
-# 5f0c…  "Quick look"  Anyone with the link · links expire in 1 hour · works once
+# 5f0c…  "Quick look"  Anyone with the link · links expire in 1 hour · single-use
 # 8a21…  "Reviewers"   People you approve · approvals last 7 days
 # 3d9e…  "Studio"      People at studio.com
 ```

@@ -65,7 +65,7 @@ func TestAccessRuleSummaryUsesContractCopy(t *testing.T) {
 		rule accessrules.Definition
 		want string
 	}{
-		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}, "Anyone with the link · links expire in 1 hour · works once"},
+		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}, "Anyone with the link · links expire in 1 hour · single-use"},
 		{accessrules.Definition{Mode: "review", ApprovalExpiresIn: new("7d")}, "People you approve · approvals last 7 days"},
 		{accessrules.Definition{Mode: "email_domain", EmailDomain: "studio.com"}, "People at studio.com"},
 		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "90m", SessionDuration: new("1d")}}, "Anyone with the link · links expire in 90 minutes · sessions last 1 day"},

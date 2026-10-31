@@ -56,7 +56,7 @@ func TestRulesCreateTakesSettingsForItsModeOnly(t *testing.T) {
 		}
 	}
 	listed := runCLI(t, &runOpts{args: []string{"rules", "list"}, env: map[string]string{}, shareStateDir: dir})
-	for _, want := range []string{"Anyone with the link · links expire in 1 hour · works once · sessions last 30 minutes", "People you approve · approvals last 7 days"} {
+	for _, want := range []string{"Anyone with the link · links expire in 1 hour · single-use · sessions last 30 minutes", "People you approve · approvals last 7 days"} {
 		if !strings.Contains(listed.stdout.String(), want) {
 			t.Errorf("list lacks %q:\n%s", want, listed.stdout.String())
 		}
@@ -150,7 +150,7 @@ func TestPublishSaysASingleUseLinkWorksOnce(t *testing.T) {
 	scriptMint(t, srv, &mints)
 	rule := `{"id":"11111111-1111-4111-8111-111111111111","name":"Once","mode":"public","link_limits":{"expires_in":"1h","one_time_use":true}}`
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--color", "never", "publish", "https://api.example.com", "--rule-file", "-"}, stdin: strings.NewReader(rule), shareStateDir: connectorStateTestDir(t), tty: true})
-	want := "Works once. Run qurl share " + srv.Key.CRID + " for a new link."
+	want := "Single-use. Run qurl share " + srv.Key.CRID + " for a new link."
 	if result.code != 0 || !strings.Contains(result.stdout.String(), want) || len(mints) != 1 || mints[0]["one_time_use"] != true {
 		t.Fatalf("publish %d mints %v\n%s%s", result.code, mints, result.stdout.String(), result.stderr.String())
 	}

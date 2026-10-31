@@ -57,7 +57,7 @@ func TestShareFromOlderServiceRendersUnverified(t *testing.T) {
 		want := fixtureShareLink + "\n\n" +
 			"  " + wantUnnamedPublisherRow + "\n" +
 			"  Expires in 5m (single use)\n\n" +
-			"Works once. Run qurl share " + srv.Key.CRID + " for a new link.\n"
+			"Single-use. Run qurl share " + srv.Key.CRID + " for a new link.\n"
 		if got := res.stdout.String(); got != want {
 			t.Errorf("terminal share =\n%s\nwant\n%s", got, want)
 		}
