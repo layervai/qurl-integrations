@@ -61,6 +61,7 @@ const daemonJobProtocolVersion = "6"
 // is not relocated automatically: its namespace cannot be confirmed.
 
 // JobController installs, upgrades, and signals the per-user daemon job.
+// Probes refresh its IPC target; one controller must not be used concurrently.
 type JobController struct {
 	Manager connectorservice.UserJobManager
 	IPC     IPCClient

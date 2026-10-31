@@ -729,13 +729,18 @@ with the updated CLI. Commands wait up to three seconds for a starting native
 job, and read its runtime hint again before deciding it is unreachable.
 
 An older daemon using a pinned runtime directory needs an owner-controlled
-stop before the updated CLI can install its replacement. `qurl restart` is a
+stop before the updated CLI can install its replacement. This includes an
+older binary holding a refused job without IPC, or a job at a moved socket.
+`qurl restart` is a
 resource command and cannot bypass this ownership check. Quit the app that
 started a foreground daemon. For a native job, first inspect its arguments
 in launchd, systemd, or Task Scheduler and confirm `--state-dir` names your
 namespace. Then stop that exact job through the same service manager. Retry
 `qurl start <resource>` or publish with the updated CLI. The stopped job can
 be replaced; a running job with unverified ownership cannot.
+A refused native job also keeps the namespace lease: foreground mode cannot
+take over until that owner stops. Use a background start/publish to replace
+a verified refused job, or stop its owner before foreground mode.
 
 The saved runtime hint persists after shutdown or a reboot. A deleted runtime
 directory is recreated by its owner. Unsetting the environment variable does

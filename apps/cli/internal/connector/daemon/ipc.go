@@ -49,8 +49,8 @@ func SocketPathForStateDir(stateDir string, lookupEnv func(string) (string, bool
 	return resolveSocketPath(stateDir, lookupEnv, false)
 }
 
-// SocketPathForDaemon permits the namespace owner to repair an invalid hint
-// after taking the state lease. Clients never fall back from an invalid hint.
+// SocketPathForDaemon resolves past an invalid hint. After taking the state
+// lease, the caller rewrites the hint from IPCServer.Run. Clients fail closed.
 func SocketPathForDaemon(stateDir string, lookupEnv func(string) (string, bool)) (string, error) {
 	return resolveSocketPath(stateDir, lookupEnv, true)
 }
