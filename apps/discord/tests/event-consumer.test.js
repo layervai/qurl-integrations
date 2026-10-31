@@ -1330,6 +1330,38 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     }
   });
 
+  test.each(['resolve', 'reject'])('a handler %s wakes a capped poll without waiting for its backoff', async (outcome) => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      let finish;
+      const handler = new Promise((resolve, reject) => { finish = outcome === 'resolve' ? resolve : reject; });
+      withWorkerDispatch(() => {
+        eventConsumer.trackDispatch(handler);
+        for (let i = 1; i < eventConsumer._test.MAX_INFLIGHT_HANDLERS; i++) {
+          eventConsumer.trackDispatch(new Promise(() => {}));
+        }
+      });
+      sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+      const client = makeStubClient();
+      for (let i = 0; i < 4; i++) await pollOnceFast(client);
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(1600);
+      let woke = false;
+      const paused = withMockedSqs(() => eventConsumer._test.pollOnce(client)).then(() => { woke = true; });
+      await jest.advanceTimersByTimeAsync(10);
+      expect(woke).toBe(false);
+      finish(outcome === 'reject' ? new Error('handler failed') : undefined);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(woke).toBe(true);
+      await paused;
+      expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(0);
+      await pollOnceFast(client);
+      expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(1);
+      expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('pollOnce: at-cap backoff doubles each iteration up to the ceiling', async () => {
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     try {

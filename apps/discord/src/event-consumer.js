@@ -401,6 +401,7 @@ let DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 // `_resetStateForTest` or hot-reload can't drift the size — the
 // underflow guard the previous counter shape needed is gone.
 const inFlightPromises = new Set();
+let atCapDrainController = null;
 // Process-lifetime counters; never retain message, user, or shard IDs.
 let pollCount = 0;
 let atCapPollCount = 0;
@@ -744,7 +745,9 @@ function trackDispatch(maybePromise) {
   // hot-reload swaps modules) silently no-op rather than drifting
   // the size negative. No underflow guard needed.
   maybePromise.finally(() => {
-    inFlightPromises.delete(maybePromise);
+    if (inFlightPromises.delete(maybePromise) && inFlightPromises.size < MAX_INFLIGHT_HANDLERS) {
+      atCapDrainController?.abort();
+    }
   }).catch((err) => {
     handlerRejectionCount++;
     // Attaching `.finally()` above counts as a handler for Node's
@@ -806,19 +809,21 @@ async function pollOnce(client) {
     }
     // Steady-state at-cap is intentionally silent — the entry warn
     // + the exit info already bookend the pause for operators.
-    await abortableSleep(currentBackoffMs);
+    const drainController = new AbortController();
+    atCapDrainController = drainController;
+    try {
+      await abortableSleep(currentBackoffMs, drainController.signal);
+    } finally {
+      if (atCapDrainController === drainController) atCapDrainController = null;
+    }
     // Exponential backoff: each consecutive at-cap iteration doubles
     // the wait up to MAX (cadence: 100→200→400→800→1600ms, then
     // clamped at 1600ms), so a sustained streak drops the wake rate
     // from 10/s to ~0.6/s at the ceiling without significantly
     // delaying recovery. The first 5 iterations average ~1.6/s
     // before settling at the 1.6s ceiling.
-    // Trade-off: a release that lands mid-sleep delays the next
-    // below-cap observation (and the paired pause-end log) by up to
-    // MAX (1.6s) worst-case, ~MAX/2 (~800ms) average since releases
-    // land uniformly within the sleep window. Operators pairing
-    // pause-start/pause-end durations in CloudWatch see this as
-    // inflated dwell time at the ceiling.
+    // A handler completion wakes this pause as soon as capacity returns;
+    // sustained at-cap traffic keeps the same bounded polling cadence.
     //
     // No jitter: the downstream wedge isn't sensitive to wake-time
     // alignment, so even if multiple worker processes hit the cap
@@ -1015,29 +1020,29 @@ function permanentAwsErrorCode(err) {
 // sleep degrades to a pure setTimeout — abortableSleep is also
 // reachable from the at-cap backpressure pause, and we don't want
 // a missing controller to throw and crash the loop.
-function abortableSleep(ms) {
+function abortableSleep(ms, wakeSignal) {
   return new Promise((resolve) => {
-    // Capture once so addEventListener and removeEventListener target
-    // the same controller by identity, even if module-level
-    // stopController is swapped during the sleep.
-    const ctrl = stopController;
+    // Capture once so listener cleanup uses the same signal after stop/reset.
+    const signal = wakeSignal && stopController
+      ? AbortSignal.any([stopController.signal, wakeSignal])
+      : wakeSignal || stopController?.signal;
     // Already-aborted fast path: a stop() that landed before this
     // sleep started returns immediately.
-    if (ctrl?.signal.aborted) {
+    if (signal?.aborted) {
       resolve();
       return;
     }
     let onAbort;
     const t = setTimeout(() => {
-      if (ctrl && onAbort) {
-        ctrl.signal.removeEventListener('abort', onAbort);
+      if (signal && onAbort) {
+        signal.removeEventListener('abort', onAbort);
       }
       resolve();
     }, ms);
     // .unref()ed so a stray timer can't pin the event loop if the
     // loop exits via a different path mid-sleep.
     t.unref?.();
-    if (ctrl) {
+    if (signal) {
       onAbort = () => {
         clearTimeout(t);
         resolve();
@@ -1047,7 +1052,7 @@ function abortableSleep(ms) {
       // at most once per spec. If timeout and abort fire near-
       // simultaneously, both resolve() calls may run; the second is
       // a Promise no-op (resolve is idempotent).
-      ctrl.signal.addEventListener('abort', onAbort, { once: true });
+      signal.addEventListener('abort', onAbort, { once: true });
     }
   });
 }
@@ -1353,6 +1358,7 @@ function _resetStateForTest() {
   running = false;
   loopPromise = null;
   stopController = null;
+  atCapDrainController = null;
   sqsClient = null;
   onFatalCb = null;
   seenEventIds.clear();
