@@ -1555,7 +1555,10 @@ describe('qurl sends', () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'sender', attachment_url: encryptedUrl, personal_message: 'hi' },
     });
-    const result = await store.getSendConfig('s1', 'sender');
+    const controller = new AbortController();
+    const result = await store.getSendConfig('s1', 'sender', { signal: controller.signal });
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
+    expect(ddbMock.commandCalls(GetCommand)[0].args[1]).toEqual({ abortSignal: controller.signal });
     expect(result.attachment_url).toBe('https://cdn.example/attachment');
   });
 

@@ -2625,6 +2625,67 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     }
   });
 
+  it.each([
+    [{ revoked_at: '2026-10-31T00:00:00Z' }, true],
+    [{ revoking_at: '2026-10-31T00:00:00Z' }, false],
+  ])('management expiry reflects confirmed persisted revoke only (%j)', async (state, revoked) => {
+    const { end, interaction, sendId } = await setupRevocableSend();
+    mockDb.getSendConfig.mockResolvedValueOnce(state);
+    try {
+      await end(null, 'time');
+      expect(mockDb.getSendConfig).toHaveBeenCalledWith(sendId, 'sender-1', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+      const final = interaction.editReply.mock.calls.at(-1)[0];
+      if (revoked) {
+        expect(final.content).toBe('Links for this send have already been revoked.');
+        expect(final.content).not.toContain('Management window closed');
+      } else expect(final.content).toContain('Management window closed');
+      expect(final.components).toEqual([]);
+    } finally { clearCooldown('sender-1'); }
+  });
+
+  it('management expiry keeps the safe closed view when the state read fails', async () => {
+    const { end, interaction } = await setupRevocableSend();
+    mockDb.getSendConfig.mockRejectedValueOnce(new Error('store unavailable'));
+    try {
+      await expect(end(null, 'time')).resolves.not.toThrow();
+      expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain('Management window closed');
+      expect(logger.warn).toHaveBeenCalledWith('Could not check send revoked state when management closed', expect.objectContaining({ error: 'store unavailable' }));
+    } finally { clearCooldown('sender-1'); }
+  });
+
+  it('bounds the management-state read and closes safely on timeout', async () => {
+    const { end, interaction } = await setupRevocableSend();
+    const controller = new AbortController();
+    const timeout = jest.spyOn(AbortSignal, 'timeout').mockReturnValueOnce(controller.signal);
+    mockDb.getSendConfig.mockImplementationOnce((_sendId, _sender, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('read timeout')), { once: true });
+    }));
+    try {
+      const closing = end(null, 'time');
+      expect(timeout).toHaveBeenCalledWith(1000);
+      controller.abort();
+      await closing;
+      expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain('Management window closed');
+    } finally { controller.abort(); timeout.mockRestore(); clearCooldown('sender-1'); }
+  });
+
+  it('a local revoke completing during the persisted read keeps its full result', async () => {
+    const { collect, end, finishRevoke, interaction, makeClick } = await setupRevocableSend();
+    const read = defer();
+    mockDb.getSendConfig.mockReturnValueOnce(read.promise);
+    try {
+      const closing = end(null, 'time');
+      finishRevoke.resolve();
+      await collect(makeClick('revoke'));
+      const revoked = interaction.editReply.mock.calls.at(-1)[0];
+      read.resolve({});
+      await closing;
+      expect(interaction.editReply.mock.calls.at(-1)[0].content).toBe(revoked.content);
+      expect(revoked.content).toContain('Revoked 1/1 user.');
+      expect(revoked.content).toContain('Alice');
+    } finally { read.resolve({}); clearCooldown('sender-1'); }
+  });
+
   it('Add selection extends the later inline revoke names in original recipient order', async () => {
     const { collect, end, interaction, makeClick } = await setupRevocableSend();
     const selection = {

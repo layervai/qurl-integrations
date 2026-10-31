@@ -1107,11 +1107,12 @@ async function saveSendConfig({
   }));
 }
 
-async function getSendConfig(sendId, senderDiscordId) {
+async function getSendConfig(sendId, senderDiscordId, { signal } = {}) {
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
-  }));
+    ConsistentRead: true,
+  }), ...(signal ? [{ abortSignal: signal }] : []));
   const row = res.Item;
   if (!row) return row;
   if (row.sender_discord_id !== senderDiscordId) return undefined; // ownership check

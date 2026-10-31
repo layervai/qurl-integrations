@@ -2947,12 +2947,22 @@ async function executeSendPipeline(interaction, {
       }
     });
 
-    collector.on('end', (_, reason) => {
+    collector.on('end', async (_, reason) => {
       // stop() freezes the final getFullMsg() render internally, so the
       // post-stop getFullMsg() below preserves the last-known counter
       // (vs. re-rendering against a cleared linkStatus → `0 of N viewed`).
       monitor.stop();
       if (reason === 'time') {
+        let revokedElsewhere = false;
+        if (!revokeSucceeded && !revokeInFlight) {
+          try {
+            const persisted = await db.getSendConfig(sendId, interaction.user.id, { signal: AbortSignal.timeout(1000) });
+            revokedElsewhere = Boolean(persisted?.revoked_at);
+          } catch (err) {
+            logger.warn('Could not check send revoked state when management closed', { sendId, error: err.message });
+          }
+        }
+        // Re-check the local result after the read: a button revoke may have completed meanwhile.
         // After a SUCCESSFUL revoke, re-render the revoke result
         // instead of the pre-revoke confirmMsg + Management-window
         // banner — otherwise the user's "Revoked X/Y links" view
@@ -2985,10 +2995,14 @@ async function executeSendPipeline(interaction, {
         }
         // Revoke attempted but failed — leave the failure message.
         if (revokeInFlight) return;
+        if (revokedElsewhere) {
+          interaction.editReply({ content: 'Links for this send have already been revoked.', components: [] }).catch(logIgnoredDiscordErr);
+          return;
+        }
         // Management window closed — this is the confirmation's terminal
         // render. Freeze it so a webhook fast-path edit arriving after the
         // collector ended can't re-animate the counter over the
-        // window-closed banner. Fire-and-forget .catch in this sync 'end'
+        // window-closed banner. Fire-and-forget .catch in this 'end'
         // handler (best-effort, logged-swallowed); the monitor.stop()
         // above froze the poll, leaving the fast-path as the only
         // off-monitor editor to fence. Expired is intentionally NOT fenced
