@@ -233,3 +233,54 @@ test('treats Retry-After: 0 as an honored directive of zero', async () => {
   expect(fetchMock).toHaveBeenCalledTimes(2);
   expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('no usable Retry-After'));
 });
+
+test.each([408, 425, 429, 502, 503, 504])('GET retries transient HTTP %d within its budget', async (status) => {
+  const first = new Response('discarded', { status });
+  const last = new Response('final', { status });
+  const cancel = jest.spyOn(first.body!, 'cancel');
+  const lastCancel = jest.spyOn(last.body!, 'cancel');
+  fetchMock.mockResolvedValueOnce(first).mockResolvedValueOnce(last);
+  const pending = fetchWithTransientRetry(url, undefined, { maxAttempts: 2 });
+  await jest.advanceTimersByTimeAsync(10_000);
+  const result = await pending;
+  expect(result).toBe(last);
+  await expect(result.text()).resolves.toBe('final');
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(cancel).toHaveBeenCalledTimes(1);
+  expect(lastCancel).not.toHaveBeenCalled();
+});
+
+test.each([400, 401, 403, 404, 409, 422, 500])('GET preserves non-retryable HTTP %d', async (status) => {
+  const response = new Response('final', { status });
+  const cancel = jest.spyOn(response.body!, 'cancel');
+  fetchMock.mockResolvedValue(response);
+  expect(await fetchWithTransientRetry(url)).toBe(response);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(cancel).not.toHaveBeenCalled();
+});
+
+test('a network rejection propagates without retry', async () => {
+  const failure = new TypeError('synthetic network failure');
+  fetchMock.mockRejectedValue(failure);
+  await expect(fetchWithTransientRetry(url)).rejects.toBe(failure);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+test.each([502, 504])('POST does not retry an ambiguous HTTP %d', async (status) => {
+  const response = new Response('uncertain result', { status });
+  fetchMock.mockResolvedValue(response);
+  expect(await fetchWithTransientRetry(url, { method: 'POST' })).toBe(response);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+
+test.each([408, 425, 429, 503])('POST retries pre-processing HTTP %d', async (status) => {
+  fetchMock.mockResolvedValueOnce(new Response(null, { status }))
+    .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+  const pending = fetchWithTransientRetry(url, { method: 'post' }, { maxAttempts: 2 });
+  await jest.advanceTimersByTimeAsync(10_000);
+  const result = await pending;
+  expect(result.status).toBe(200);
+  await expect(result.text()).resolves.toBe('ok');
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
