@@ -224,6 +224,8 @@ function startActiveGuildCount(client, opts = {}) {
         }
         emitCount(result);
       } else {
+        // The legacy cache is incomplete before READY and during reconnects.
+        if (typeof client.isReady === 'function' && !client.isReady()) return;
         emitCount(client.guilds?.cache?.size);
       }
     } catch (err) {
@@ -231,12 +233,6 @@ function startActiveGuildCount(client, opts = {}) {
     }
   }
 
-  // Legacy-client caveat (#196): index.js calls startActiveGuildCount() right after
-  // client.login() resolves, which is BEFORE the gateway READY event
-  // populates client.guilds.cache. The first datapoint here can be 0
-  // while the bot is actually in N guilds — an artifact of the cache
-  // hydrating asynchronously. The 60s interval makes this self-
-  // correcting within one window.
   tick();
 
   const timer = setInterval(tick, intervalMs);
