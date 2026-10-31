@@ -2436,7 +2436,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
 });
 
 describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)', () => {
-  async function setupRevocableSend() {
+  async function setupRevocableSend(recipients = [{ id: 'u1', username: 'Alice' }]) {
     const collectHandlers = {};
     const response = {
       createMessageComponentCollector: jest.fn(() => ({
@@ -2471,7 +2471,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     });
 
     await executeSendPipeline(interaction, makePipelineParams({
-      recipients: [{ id: 'u1', username: 'Alice' }],
+      recipients,
     }));
     expect(collectHandlers.collect).toEqual(expect.any(Function));
     const sendId = mockDb.saveSendConfig.mock.calls[0][0].sendId;
@@ -2491,6 +2491,31 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       sendId,
     };
   }
+
+  it('keeps a frozen caller recipient snapshot unchanged after Add Recipients', async () => {
+    const recipients = Object.freeze([{ id: 'u1', username: 'Alice' }]);
+    const { collect, makeClick } = await setupRevocableSend(recipients);
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: null, actual_url: null, expires_in: '30m',
+    });
+    const selection = {
+      users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
+    };
+    const click = makeClick('add');
+    click.reply.mockResolvedValueOnce({
+      awaitMessageComponent: jest.fn().mockResolvedValue(selection),
+    });
+    try {
+      await collect(click);
+      expect(selection.deferUpdate).toHaveBeenCalled();
+      expect(recipients).toEqual([{ id: 'u1', username: 'Alice' }]);
+      expect(logger.error).not.toHaveBeenCalledWith('Add recipients failed', expect.anything());
+    } finally {
+      clearCooldown('sender-1');
+    }
+  });
 
   it('bounds button result waiting and keeps the lock until background revoke finishes', async () => {
     jest.useFakeTimers();
