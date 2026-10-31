@@ -711,12 +711,12 @@ describe('event-consumer: pollLoop error backoff', () => {
     }
   });
 
-  test('onFatal callback routes permanent-error path away from process.exit', async () => {
+  test.each(['QueueDoesNotExist', 'CredentialsProviderError', 'CredentialsError'])('onFatal handles %s without a retry or direct exit', async (code) => {
     const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
     const onFatal = jest.fn();
     sqsMock.on(ReceiveMessageCommand).callsFake(() => {
       const err = new Error('q gone');
-      err.name = 'QueueDoesNotExist';
+      err.name = code;
       throw err;
     });
     eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
@@ -876,6 +876,11 @@ describe('event-consumer: start/stop lifecycle', () => {
 
     const badCreds = Object.assign(new Error('creds'), { name: 'UnrecognizedClientException' });
     expect(permanentAwsErrorCode(badCreds)).toBe('UnrecognizedClientException');
+
+    for (const code of ['CredentialsProviderError', 'CredentialsError']) {
+      expect(permanentAwsErrorCode(Object.assign(new Error('no credentials'), { name: code }))).toBe(code);
+      expect(permanentAwsErrorCode(new Error('wrapper', { cause: { name: code } }))).toBe(code);
+    }
 
     const wrapped = Object.assign(new Error('wrap'), {
       cause: { name: 'QueueDoesNotExist' },

@@ -128,7 +128,7 @@
 // (fatal log + process.exit(1) so ECS surfaces the misconfig in
 // deploy-time monitoring), and transient (log + POLL_ERROR_BACKOFF_MS
 // backoff). Permanent codes are typo'd queue URL, missing IAM perm,
-// region drift, and bad creds — anything a retry won't fix. See
+// region drift, bad creds, and an exhausted credential provider chain. See
 // PERMANENT_AWS_ERROR_CODES for the full set.
 //
 // How tracking works without coupling to handler internals: the
@@ -948,6 +948,9 @@ const PERMANENT_AWS_ERROR_CODES = new Set([
   // Bad/expired credentials.
   'UnrecognizedClientException',
   'InvalidClientTokenId',
+  // No credential provider could supply credentials.
+  'CredentialsProviderError',
+  'CredentialsError',
 ]);
 
 // Returns the matched permanent-error code from anywhere in err's
