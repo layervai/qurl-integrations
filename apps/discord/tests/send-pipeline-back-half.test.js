@@ -2522,11 +2522,12 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     expect(revoked.content).toContain('Revoked 1/1 user.');
     expect(revoked.content).toContain('Alice');
     interaction.editReply.mockClear();
-    end(null, 'time');
+    await end(null, 'time');
     const final = interaction.editReply.mock.calls.at(-1)[0];
     expect(final.content).toBe(revoked.content);
     expect(final.components).toEqual([]);
     expect(final.content).not.toContain('Management window');
+    clearCooldown('sender-1');
   });
 
   it('Add selection extends the later inline revoke names in original recipient order', async () => {
@@ -2548,10 +2549,11 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     try {
       await collect(add);
       expect(selection.editReply).toHaveBeenCalledWith({ content: 'Added 1 recipient', components: [] });
+      // Discard the original fixture response; the durable rows now include Add.
       mockDb.getSendItems.mockReset();
       mockDb.getSendItems.mockResolvedValueOnce([
-        { recipient_discord_id: 'u1', resource_id: 'res-initial', qurl_id: 'q_u1' },
         { recipient_discord_id: 'u2', resource_id: 'res-added', qurl_id: 'q_added' },
+        { recipient_discord_id: 'u1', resource_id: 'res-initial', qurl_id: 'q_u1' },
       ]);
       mockRevokeMintedLinks.mockReset();
       mockRevokeMintedLinks.mockResolvedValue(undefined);
@@ -2561,7 +2563,10 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       expect(revoked.content).toContain('Alice');
       expect(revoked.content).toContain('Bob');
       expect(revoked.content.indexOf('Alice')).toBeLessThan(revoked.content.indexOf('Bob'));
-      end(null, 'time');
+      expect(mockRevokeMintedLinks.mock.calls.map(([resource, ids]) => [resource, ids])).toEqual(expect.arrayContaining([
+        ['res-initial', ['q_u1']], ['res-added', ['q_added']],
+      ]));
+      await end(null, 'time');
     } finally {
       clearCooldown('sender-1');
     }
