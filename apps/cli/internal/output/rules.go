@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strings"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 )
@@ -53,8 +55,61 @@ func (p *Printer) accessRuleLine(d *accessrules.Definition) error {
 		_, err := fmt.Fprintln(p.out, d.ID)
 		return err
 	}
-	_, err := fmt.Fprintf(p.out, "%s  %q  %s\n", d.ID, d.Name, accessRuleLabel(d.Mode))
+	_, err := fmt.Fprintf(p.out, "%s  %q  %s\n", d.ID, d.Name, AccessRuleSummary(d))
 	return err
+}
+
+// AccessRuleSummary is the contract's one-line rule summary, such as
+// "Anyone with the link · expires in 1 hour · one browser".
+func AccessRuleSummary(d *accessrules.Definition) string {
+	parts := []string{accessRuleLabel(d.Mode)}
+	if d.Mode == accessrules.ModeEmailDomain && d.EmailDomain != "" {
+		parts[0] = "People at " + d.EmailDomain
+	}
+	if l := d.LinkLimits; l != nil {
+		parts = append(parts, "expires in "+ruleDuration(l.ExpiresIn))
+		if l.OneTimeUse != nil && *l.OneTimeUse {
+			parts = append(parts, "one browser")
+		}
+		if l.MaxSessions != nil && *l.MaxSessions > 0 {
+			parts = append(parts, fmt.Sprintf("up to %d %s", *l.MaxSessions, plural(*l.MaxSessions, "session")))
+		}
+		if l.SessionDuration != nil {
+			parts = append(parts, "sessions last "+ruleDuration(*l.SessionDuration))
+		}
+	}
+	if d.ApprovalExpiresIn != nil {
+		parts = append(parts, "approvals last "+ruleDuration(*d.ApprovalExpiresIn))
+	}
+	if d.AllowDownload != nil && *d.AllowDownload {
+		parts = append(parts, "downloads allowed")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// ruleDuration names a validated duration in its largest whole unit.
+func ruleDuration(value string) string {
+	d, err := accessrules.ParseDuration(value)
+	if err != nil {
+		return value
+	}
+	for _, unit := range []struct {
+		size time.Duration
+		name string
+	}{{24 * time.Hour, "day"}, {time.Hour, "hour"}, {time.Minute, "minute"}, {time.Second, "second"}} {
+		if d >= unit.size && d%unit.size == 0 {
+			n := int(d / unit.size)
+			return fmt.Sprintf("%d %s", n, plural(n, unit.name))
+		}
+	}
+	return d.String()
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return word
+	}
+	return word + "s"
 }
 
 // accessModes mirrors the catalog fixture's presentation labels and protection

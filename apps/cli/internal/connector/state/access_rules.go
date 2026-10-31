@@ -107,30 +107,10 @@ func (s *AccessRuleStore) readJournal(path string) (accessRuleJournal, error) {
 }
 
 func (s *AccessRuleStore) loadJournal(path string) (accessRuleJournal, error) {
-	info, err := os.Lstat(path)
+	data, err := readOwnerStateFile(path, accessRulesMaxJournal)
 	if errors.Is(err, os.ErrNotExist) {
 		return s.empty(), nil
 	}
-	if err != nil {
-		return accessRuleJournal{}, err
-	}
-	if info.Size() > accessRulesMaxJournal || validateConnectorResourceFile(path, info) != nil {
-		return accessRuleJournal{}, errors.New("unsafe access rules journal")
-	}
-	file, err := openConnectorResourceState(path)
-	if err != nil {
-		return accessRuleJournal{}, err
-	}
-	defer func() { _ = file.Close() }()
-	opened, err := file.Stat()
-	if err != nil {
-		return accessRuleJournal{}, err
-	}
-	current, err := os.Lstat(path)
-	if err != nil || !os.SameFile(info, opened) || !os.SameFile(opened, current) {
-		return accessRuleJournal{}, errors.New("access rules journal changed while opening")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, accessRulesMaxJournal+1))
 	if err != nil {
 		return accessRuleJournal{}, err
 	}
@@ -140,6 +120,33 @@ func (s *AccessRuleStore) loadJournal(path string) (accessRuleJournal, error) {
 	}
 	return j, nil
 }
+
+// readOwnerStateFile reads one owner-only state file of at most limit bytes,
+// refusing links and a file replaced while it was opened.
+func readOwnerStateFile(path string, limit int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > limit || validateConnectorResourceFile(path, info) != nil {
+		return nil, errors.New("unsafe state file")
+	}
+	file, err := openConnectorResourceState(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	current, err := os.Lstat(path)
+	if err != nil || !os.SameFile(info, opened) || !os.SameFile(opened, current) {
+		return nil, errors.New("state file changed while opening")
+	}
+	return io.ReadAll(io.LimitReader(file, limit+1))
+}
+
 func (s *AccessRuleStore) update(ctx context.Context, change func(*accessRuleJournal) error) (accessrules.Snapshot, error) {
 	unlock, err := acquireNamedStateLock(ctx, s.dir, ".access_rules.lock")
 	if err != nil {

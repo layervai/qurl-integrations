@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 )
 
 const testID = "11111111-1111-4111-8111-111111111111"
@@ -170,5 +171,97 @@ func TestFindSelectsByIDOrExactName(t *testing.T) {
 	}
 	if _, err := Find("team", []Definition{a}); !errors.Is(err, ErrRuleNotFound) {
 		t.Fatalf("names match exactly: %v", err)
+	}
+}
+
+func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
+	head := `{"id":"` + testID + `","name":"Team",`
+	for _, raw := range []string{
+		head + `"mode":"public","link_limits":{"expires_in":"1h","one_time_use":true,"max_sessions":5,"session_duration":"30m"},"allow_download":true}`,
+		head + `"mode":"public","link_limits":{"expires_in":"30d","one_time_use":false,"max_sessions":0}}`,
+		head + `"mode":"review","approval_expires_in":"7d"}`,
+		head + `"mode":"keys","approval_expires_in":"365d","allow_download":false}`,
+		head + `"mode":"email_domain","email_domain":"studio.com","allow_download":true}`,
+	} {
+		var d Definition
+		if err := json.Unmarshal([]byte(raw), &d); err != nil || d.Validate(false) != nil {
+			t.Fatalf("valid settings rejected: %s %v %v", raw, err, d.Validate(false))
+		}
+		encoded, err := json.Marshal(d)
+		var again Definition
+		// Byte-exact: an explicit false or 0 must survive a write-back.
+		if err != nil || string(encoded) != raw || json.Unmarshal(encoded, &again) != nil || !EqualItems([]Definition{d}, []Definition{again}) {
+			t.Fatalf("settings did not round-trip: %s -> %s", raw, encoded)
+		}
+	}
+	for _, raw := range []string{
+		head + `"mode":"review","link_limits":{"expires_in":"1h"}}`,
+		head + `"mode":"public","approval_expires_in":"7d"}`,
+		head + `"mode":"public","link_limits":{"one_time_use":true}}`,
+		head + `"mode":"public","link_limits":{"expires_in":"1h","max_sessions":null}}`,
+		head + `"mode":"public","link_limits":{"expires_in":"1h","extra":1}}`,
+		head + `"mode":"public","link_limits":null}`,
+		head + `"mode":"public","allow_download":null}`,
+		head + `"mode":"public","link_limits":{"expires_in":"30s"}}`,
+		head + `"mode":"public","link_limits":{"expires_in":"31d"}}`,
+		head + `"mode":"public","link_limits":{"expires_in":"1h","max_sessions":1001}}`,
+		head + `"mode":"public","link_limits":{"expires_in":"1h","session_duration":"25h"}}`,
+		head + `"mode":"review","approval_expires_in":"30m"}`,
+		head + `"mode":"keys","approval_expires_in":"366d"}`,
+		head + `"mode":"public","link_limits":{"expires_in":"1h","session_duration":"1500ms"}}`,
+		head + `"mode":"review","approval_expires_in":""}`,
+	} {
+		if decodeDefinition(raw) == nil {
+			t.Errorf("invalid settings accepted: %s", raw)
+		}
+	}
+}
+
+func TestRuleSettingsAreComparedAndBuiltInsCarryNone(t *testing.T) {
+	a := Definition{ID: testID, Name: "Team", Mode: "review", ApprovalExpiresIn: new("7d")}
+	b := a
+	b.ApprovalExpiresIn = new("30d")
+	if EqualItems([]Definition{a}, []Definition{b}) {
+		t.Fatal("approval lifetime change not seen")
+	}
+	if (&Definition{ID: "builtin.review", Name: "People you approve", Mode: "review", ApprovalExpiresIn: new("7d")}).Validate(true) == nil {
+		t.Fatal("built-in with settings accepted")
+	}
+}
+
+func TestValidateItemsCountsRuleSettings(t *testing.T) {
+	// A library exactly at the budget goes over it once a rule gains a setting.
+	items := make([]Definition, 5)
+	long := 1262
+	for r := range items {
+		emails := make([]string, 256)
+		for i := range emails {
+			digits := 184
+			if long > 0 {
+				digits, long = 185, long-1
+			}
+			emails[i] = fmt.Sprintf("%0*d@example.com", digits, i)
+		}
+		items[r] = Definition{ID: fmt.Sprintf("%08d-1111-4111-8111-111111111111", r), Name: "n", Mode: ModeEmailDomain, EmailDomain: "example.com", AllowedEmails: emails}
+	}
+	if err := ValidateItems(items); err != nil {
+		t.Fatal(err)
+	}
+	items[0].AllowDownload = new(false)
+	if err := ValidateItems(items); !errors.Is(err, ErrLibraryLimit) {
+		t.Fatalf("an explicit allow_download was not counted: %v", err)
+	}
+}
+
+func TestParseDurationMatchesServiceGrammar(t *testing.T) {
+	for value, want := range map[string]time.Duration{"1h": time.Hour, "7d": 7 * 24 * time.Hour, "1w": 7 * 24 * time.Hour, "90m": 90 * time.Minute, "30s": 30 * time.Second} {
+		if got, err := ParseDuration(value); err != nil || got != want {
+			t.Errorf("ParseDuration(%q) = %v %v, want %v", value, got, err, want)
+		}
+	}
+	for _, value := range []string{"", "d", "-1d", "1y", "abc"} {
+		if _, err := ParseDuration(value); err == nil {
+			t.Errorf("ParseDuration(%q) accepted", value)
+		}
 	}
 }
