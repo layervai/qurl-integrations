@@ -2927,54 +2927,47 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       : undefined;
     const config = require('../src/config');
     const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
-    let setup;
     try {
       config.QURL_SEND_MAX_RECIPIENTS = 101;
-      setup = await setupRevocableSend(recipients);
-    } finally {
-      config.QURL_SEND_MAX_RECIPIENTS = originalCap;
-    }
-    const { collect, makeClick, interaction } = setup;
-    config.QURL_SEND_MAX_RECIPIENTS = 101;
-    expect(interaction.editReply.mock.calls.some(([payload]) => Boolean(payload.files))).toBe(attachmentMode);
-    mockDb.getSendItems.mockReset();
-    mockDb.getSendItems.mockRejectedValueOnce(new Error('ddb unavailable'));
+      const { collect, makeClick, interaction } = await setupRevocableSend(recipients);
+      expect(interaction.editReply.mock.calls.some(([payload]) => Boolean(payload.files))).toBe(attachmentMode);
+      mockDb.getSendItems.mockReset();
+      mockDb.getSendItems.mockRejectedValueOnce(new Error('ddb unavailable'));
 
-    const revokeClick = makeClick('revoke');
-    await collect(revokeClick);
+      const revokeClick = makeClick('revoke');
+      await collect(revokeClick);
 
-    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: 'Failed to revoke links. Try `/qurl revoke` instead.',
-      components: [],
-    }));
-    mockRevokeMintedLinks.mockReset();
+      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+        content: 'Failed to revoke links. Try `/qurl revoke` instead.',
+        components: [],
+      }));
+      mockRevokeMintedLinks.mockReset();
 
-    const selectInteraction = {
-      users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
-      deferUpdate: jest.fn().mockResolvedValue(undefined),
-      editReply: jest.fn().mockResolvedValue(undefined),
-    };
-    const selectReply = {
-      awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
-    };
-    const addClick = makeClick('add');
-    addClick.reply.mockResolvedValueOnce(selectReply);
+      const selectInteraction = {
+        users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
+        deferUpdate: jest.fn().mockResolvedValue(undefined),
+        editReply: jest.fn().mockResolvedValue(undefined),
+      };
+      const selectReply = {
+        awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
+      };
+      const addClick = makeClick('add');
+      addClick.reply.mockResolvedValueOnce(selectReply);
 
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-initial', expires_in: '30m',
-      attachment_url: 'https://cdn.discordapp.com/x.png',
-      attachment_name: 'x.png', attachment_content_type: 'image/png',
-    });
-    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
-    mockMintLinks.mockResolvedValueOnce([
-      {
-        qurl_link: 'https://q.test/added',
-        qurl_id: 'q_added',
-        resource_id: 'res-added',
-      },
-    ]);
+      mockDb.getSendConfig.mockResolvedValueOnce({
+        connector_resource_id: 'res-initial', expires_in: '30m',
+        attachment_url: 'https://cdn.discordapp.com/x.png',
+        attachment_name: 'x.png', attachment_content_type: 'image/png',
+      });
+      mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
+      mockMintLinks.mockResolvedValueOnce([
+        {
+          qurl_link: 'https://q.test/added',
+          qurl_id: 'q_added',
+          resource_id: 'res-added',
+        },
+      ]);
 
-    try {
       await collect(addClick);
 
       expect(addClick.reply).toHaveBeenCalledWith(expect.objectContaining({
@@ -2987,10 +2980,11 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       const updated = interaction.editReply.mock.calls.find(([payload]) => payload.content?.startsWith(`Sent to ${attachmentMode ? 101 : 2} users`))?.[0];
       expect(updated).toBeDefined();
       if (attachmentMode) {
-        expect(updated.content).toContain('Attached recipients.txt covers the original 100 delivered recipients only; newly added recipients are not listed.');
+        expect(updated.content).toContain('Attached recipients.txt lists only the original recipients; newly added recipients are not listed.');
       } else {
         expect(updated.content).not.toContain('Attached recipients.txt');
       }
+      expect(updated.content.length).toBeLessThanOrEqual(2000);
       expect(updated.files).toBeUndefined();
       expect(selectInteraction.editReply).toHaveBeenCalledWith({
         content: 'Added 1 recipient',
