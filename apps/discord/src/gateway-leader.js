@@ -129,7 +129,8 @@ function createGatewayLeader({
   let heldLock = false;
   // Set true around `handleInboundHandoff`'s in-flight
   // `manager.connect()`. The watchdog observes this via
-  // `isConnecting()` and skips its own `manager.connect()` call —
+  // `isConnecting()` and skips its own `manager.connect()` call while
+  // bounding the wait with its recovery deadline —
   // a Discord WS cold-connect routinely takes 1-3 s, longer than
   // the watchdog's 1 s tick, so without this flag the two would
   // race and call `connect()` concurrently. @discordjs/ws's
@@ -429,10 +430,9 @@ function createGatewayLeader({
       //
       // Internal timeout: a hung `manager.connect()` (e.g., Discord
       // WS endpoint resolution black-holed) would otherwise pin
-      // `connecting=true` indefinitely and the watchdog would
-      // no-op every tick. Racing connect against a timer lets us
-      // throw on timeout so the caller (control-channel server)
-      // returns 500 to the active.
+      // `connecting=true` until the watchdog exits. This shorter timer
+      // returns 500 to the active while the watchdog retains its process
+      // deadline; neither path starts a second connect.
       //
       // Critical: `connecting=true` MUST stay true until the
       // UNDERLYING `manager.connect()` actually settles — not just
@@ -448,22 +448,9 @@ function createGatewayLeader({
       // returns when EITHER settles, but the flag stays held until
       // the underlying connect resolves or rejects.
       //
-      // Bounded-settlement assumption: @discordjs/ws's
-      // WebSocketManager.connect() is contracted to settle in
-      // bounded time — the shim wraps it and the underlying
-      // WebSocket has its own handshake/heartbeat timeouts. A
-      // truly-never-settling connect would pin `connecting=true`
-      // forever and the watchdog would no-op every tick, leaving
-      // a stuck standby. We trust the upstream contract here
-      // rather than racing ANOTHER timer (which would re-introduce
-      // the concurrent-connect race this guard exists to prevent).
-      // If a future @discordjs/ws version ever drops that contract,
-      // either set a hard ceiling here that accepts the concurrent
-      // risk, or wire a `manager.destroy()`-on-timeout escape in
-      // the shim layer. Tracking issue #415 covers a process-level
-      // health check (alert on `connecting=true` duration > 30s
-      // and exit(1) so ECS replaces the task) — preferred recovery
-      // over racing another timer.
+      // Keep the flag until the original connect settles; a second connect
+      // would race the same manager. The watchdog bounds a stuck flag with
+      // its process-wide recovery deadline and replaces this process.
       connecting = true;
       // `manager.connect()` is inside the try so a synchronous throw
       // (defensive — @discordjs/ws's WebSocketManager.connect contract
@@ -713,7 +700,7 @@ function createGatewayLeader({
 
   // For the connection-watchdog: when the leader is itself mid-
   // `manager.connect()` (inbound-handoff path), the watchdog must
-  // back off rather than fire its own concurrent connect.
+  // avoid concurrent connect while retaining its process-wide deadline.
   function isConnecting() {
     return connecting;
   }

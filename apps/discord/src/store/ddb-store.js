@@ -15,7 +15,7 @@
 // App-layer encryption: sensitive fields
 // (`guild_configs.qurl_api_key`, `qurl_send_configs.attachment_url`,
 // `qurl_send_configs.interaction_token`) are envelope-encrypted via
-// `utils/crypto.encrypt`. Ciphertext is stored as a regular `S` string.
+// `utils/crypto`. Ciphertext is stored as a regular `S` string.
 // DDB server-side encryption (AWS-managed aws/dynamodb CMK,
 // configured at the table level) is defense-in-
 // depth — the primary encryption is the app-layer envelope.
@@ -38,7 +38,7 @@ const {
   TransactWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
-const { encrypt, decrypt } = require('../utils/crypto');
+const { encryptOrPlaintext, encrypt, decrypt } = require('../utils/crypto');
 const logger = require('../logger');
 const {
   DM_STATUS,
@@ -1055,7 +1055,7 @@ async function saveSendConfig({
   expiresIn, personalMessage, locationName, attachmentName,
   attachmentContentType, attachmentUrl, selfDestructSeconds,
 }) {
-  const encryptedUrl = attachmentUrl ? encrypt(attachmentUrl) : null;
+  const encryptedUrl = attachmentUrl ? encryptOrPlaintext(attachmentUrl) : null;
   await ddb.send(new PutCommand({
     TableName: TABLES.qurl_send_configs,
     Item: {
@@ -1595,7 +1595,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
     Key: { guild_id: guildId },
     UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
     ExpressionAttributeValues: {
-      ':k': encrypt(apiKey),
+      ':k': encryptOrPlaintext(apiKey),
       ':b': configuredBy,
       ':u': now,
     },
