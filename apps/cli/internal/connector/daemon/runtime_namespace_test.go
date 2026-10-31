@@ -69,6 +69,9 @@ func TestRuntimeRecoveryAndNamespaceIsolation(t *testing.T) {
 	}
 	otherState := filepath.Join(root, "other")
 	foreign := IPCClient{StateDir: otherState, SocketPath: path}
+	if err := foreign.WaitReady(t.Context()); !errors.Is(err, ErrStateNamespaceMismatch) {
+		t.Fatalf("foreign readiness = %v", err)
+	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return dialDaemonIPC(ctx, path) }}
 	t.Cleanup(transport.CloseIdleConnections)
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://qurl.local/reload", http.NoBody)
@@ -162,6 +165,9 @@ func TestLegacyPinnedOwnerCannotBeEvicted(t *testing.T) {
 		}
 	}
 	client := IPCClient{StateDir: stateDir, SocketPath: path}
+	if err := client.WaitReady(t.Context()); !errors.Is(err, ErrStateNamespaceUnverified) {
+		t.Fatalf("legacy readiness = %v", err)
+	}
 	if _, err := client.ReloadIfRunning(t.Context()); !errors.Is(err, ErrStateNamespaceUnverified) {
 		t.Fatalf("legacy reload = %v", err)
 	}

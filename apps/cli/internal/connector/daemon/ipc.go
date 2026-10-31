@@ -318,15 +318,7 @@ func (c IPCClient) Status(ctx context.Context) (IPCStatus, bool, error) {
 		return IPCStatus{}, true, fmt.Errorf("share daemon status exceeds %d bytes", maxIPCStatusBytes)
 	}
 	status, err := decodeIPCStatus(bytes.NewReader(body))
-	if c.StateDir != "" {
-		namespace := response.Header.Get(ipcNamespaceHeader)
-		if namespace == "" && !c.namespaceIdentifiedByAddress() {
-			return status, true, ErrStateNamespaceUnverified
-		}
-		if namespace != "" && namespace != ipcNamespace(c.StateDir) {
-			return IPCStatus{}, true, ErrStateNamespaceMismatch
-		}
-	}
+
 	if err != nil {
 		return IPCStatus{}, true, fmt.Errorf("%w: %w", errIPCStatusIncompatible, err)
 	}
@@ -523,6 +515,20 @@ func ipcNamespace(stateDir string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(filepath.Clean(stateDir))))
 }
 
+func (c IPCClient) validateNamespaceResponse(response *http.Response) error {
+	if c.StateDir == "" {
+		return nil
+	}
+	namespace := response.Header.Get(ipcNamespaceHeader)
+	if namespace == "" && !c.namespaceIdentifiedByAddress() {
+		return ErrStateNamespaceUnverified
+	}
+	if namespace != "" && namespace != ipcNamespace(c.StateDir) {
+		return ErrStateNamespaceMismatch
+	}
+	return nil
+}
+
 // do sends one request; a nil body sends none, a non-nil body is JSON.
 func (c IPCClient) do(ctx context.Context, method, path string, body []byte) (*http.Response, bool, error) {
 	if c.StateDir != "" && method != http.MethodGet {
@@ -571,6 +577,10 @@ func (c IPCClient) do(ctx context.Context, method, path string, body []byte) (*h
 	if response.StatusCode == http.StatusConflict {
 		_ = response.Body.Close()
 		return nil, true, ErrStateNamespaceMismatch
+	}
+	if err := c.validateNamespaceResponse(response); err != nil {
+		_ = response.Body.Close()
+		return nil, true, err
 	}
 	return response, true, nil
 }
