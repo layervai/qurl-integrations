@@ -537,6 +537,9 @@ describe('qURL client', () => {
 
       const headers = globalThis.fetch.mock.calls[0][1].headers;
       expect(headers.Authorization).toBe('Bearer test-api-key');
+      expect(require('../src/logger').info).toHaveBeenCalledWith('Created one-time qURL', {
+        resource_ref: resourceIdLogRef('r1'), crid_ref: undefined, expires_in: '1h',
+      });
     });
   });
 

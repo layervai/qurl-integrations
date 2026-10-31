@@ -338,7 +338,11 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
     }),
   );
 
-  logger.info('Created one-time qURL', { resource_ref: resourceIdLogRef(result.resource_id), crid_ref: result.crid ? resourceIdLogRef(result.crid) : undefined, expires_in: expiresIn });
+  logger.info('Created one-time qURL', {
+    resource_ref: resourceIdLogRef(result.resource_id),
+    crid_ref: result.crid ? resourceIdLogRef(result.crid) : undefined,
+    expires_in: expiresIn,
+  });
   return result;
 }
 
