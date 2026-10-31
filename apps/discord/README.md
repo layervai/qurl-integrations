@@ -262,6 +262,13 @@ locally (`npm run dev`) needs a DynamoDB endpoint — `docker-compose.yml` spins
 up a local DynamoDB and `scripts/provision-ddb-local.js` creates the tables.
 See `.env.example` for the local-development environment setup.
 
+The provisioner reads `scripts/ddb-local-schema.json`. Infrastructure CI compares
+that data file from upstream `main` with mocked Sandbox and production plans:
+table names, keys and types, GSIs and projections, and TTL. Schema changes need
+a paired infrastructure check. Existing local tables are not migrated; recreate
+only your disposable local tables when needed. The provisioner fails with a
+repair instruction if an existing table lacks a required GSI. It never drops data.
+
 ## Architecture
 
 - **Multi-tenant by default** — the bot serves every server it's invited to.
