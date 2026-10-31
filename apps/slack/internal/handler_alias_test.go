@@ -772,7 +772,7 @@ func TestSetAlias_MissingTeamOrChannelID(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	h.ServeHTTP(w2, newSignedRequest(t, "/slack/commands", body2, sign2))
 	got2 := decodeSlackText(t, w2.Body.Bytes())
-	if !strings.Contains(got2, "Could not read your Slack workspace or channel ID") {
+	if !strings.Contains(got2, "missing Slack workspace ID") {
 		t.Errorf("missing team_id response = %q, want defensive-guard copy", got2)
 	}
 	// Store must not have been dialed in either branch.

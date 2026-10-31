@@ -2323,9 +2323,8 @@ func TestSlashCommandSetup_RepliesNotConfiguredWhenOAuthOff(t *testing.T) {
 	}
 }
 
-// Empty-body fence: locks the contract so a future ParseQuery
-// substitution can't silently change the empty-text help fallback.
-func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
+// A signed body still needs a workspace before command dispatch.
+func TestSlashCommand_EmptyBodyRequiresWorkspace(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(""))
 	sig, ts := signSlackBody(t, "")
@@ -2335,16 +2334,13 @@ func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
-		t.Fatalf("signed empty body: status = %d, want 200 (help branch); body=%s", w.Code, w.Body.String())
+		t.Fatalf("signed empty body: status = %d, want 200 (workspace error); body=%s", w.Code, w.Body.String())
 	}
 	var result map[string]string
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// Assert on `/qurl help` — the unconditional help marker. (`/qurl get`
-	// is now gated on AdminStore, which this handler doesn't wire, so it's
-	// no longer a reliable "help rendered" signal here.)
-	if !strings.Contains(result["text"], "/qurl help") {
-		t.Errorf("signed empty body did not produce help; got: %q", result["text"])
+	if !strings.Contains(result["text"], "missing Slack workspace ID") {
+		t.Errorf("signed empty body omitted workspace error: %q", result["text"])
 	}
 }
