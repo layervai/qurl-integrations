@@ -707,13 +707,22 @@ state path is long, an app container for example, needs.
 Name a directory qURL owns. Startup creates missing directories with mode
 `0700`. An existing directory must be owned by the caller, must not be a
 symlink, and must already have mode `0700`; startup rejects it otherwise
-without changing its permissions. Use a separate
-dedicated directory for each state namespace; the socket address is the
-directory alone, so two namespaces sharing one runtime directory resolve to
-the same socket and lifecycle commands for one will address the other's
-daemon. Set the variable identically for the daemon and for every command that
-addresses the same state directory — a command run without it resolves a
-different address and reports the daemon absent.
+without changing its permissions. Use a separate directory for each state
+namespace. New control requests identify their namespace and refuse a daemon
+serving another one, before reloading it or replacing a native job.
+
+After binding, the daemon saves its runtime directory in the owner-only
+`daemon-runtime-dir.json` file in its state directory. A later command without
+`QURL_CONNECTOR_RUNTIME_DIR` recovers that address, so a plain terminal can
+reach a daemon started by Desktop. An explicit runtime directory still takes
+precedence. An invalid or unsafe marker is an error; the command does not fall
+back to another address and install a competing job. This recovery requires
+the daemon to have started with this CLI version. Older clients omit the new
+namespace header and retain their existing control behavior; use this CLI
+version for namespace isolation. A running native job at an unknown socket is
+never replaced automatically. Wait for startup, or restart the owning app
+with the updated CLI. An older daemon using a pinned runtime directory must
+be restarted once to provide the new namespace handshake.
 
 Windows named pipes have no length limit, so the pipe address ignores this
 variable entirely: a value left in the environment there has no effect and is

@@ -618,8 +618,8 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	}
 	opts.redirectFRPLogs()
 	server := &connectordaemon.IPCServer{
-		SocketPath: socketPath,
-		Manager:    manager, JobVersion: jobVersion,
+		SocketPath: socketPath, StateDir: stateDir,
+		Manager: manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
 }

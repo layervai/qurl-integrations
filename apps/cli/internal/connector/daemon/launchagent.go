@@ -23,6 +23,9 @@ import (
 // DaemonJobLabel is the stable per-user background-job identifier.
 const DaemonJobLabel = "ai.layerv.qurl.share-daemon"
 
+// ErrNativeDaemonUnreachable protects a native owner whose socket is unknown or starting.
+var ErrNativeDaemonUnreachable = errors.New("a native share daemon is running at another or not-yet-ready socket; wait for startup or restart its owner before retrying")
+
 // ErrExternalDaemonNotRunning reports a lifecycle command under external
 // supervision whose daemon is absent. The supervisor, not qurl, starts it.
 var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervised and is not running; start it with 'qurl daemon run --supervision external' and retry")
@@ -98,7 +101,7 @@ func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode Gro
 		Manager: withUserServiceManagerDiagnosis(connectorservice.NewUserJobManager(), func() bool {
 			return systemdUserManagerAvailable(lookupEnv)
 		}),
-		IPC:        IPCClient{SocketPath: socket},
+		IPC:        IPCClient{SocketPath: socket, StateDir: stateDir},
 		RuntimeDir: filepath.Dir(socket),
 		StateDir:   stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
 		InvocationPath: os.Args[0], Endpoint: endpoint, ShareGroupMode: mode, Supervision: supervision,
@@ -154,15 +157,10 @@ func (c *JobController) Ensure(ctx context.Context) error {
 		}
 		return ErrExternalDaemonNotRunning
 	}
-	if running {
-		managed, err := c.Manager.Status(DaemonJobLabel)
-		if err != nil {
-			return fmt.Errorf("inspect native background ownership before replacing incompatible share daemon: %w", err)
-		}
-		if !managed.Installed || !managed.Running {
-			return unmanagedDaemonMismatch(status, expectedJobVersion, statusErr)
-		}
+	if err := c.validateNativeOwner(status, running, expectedJobVersion, statusErr); err != nil {
+		return err
 	}
+
 	hub, err := c.validatedDeployment()
 	if err != nil {
 		return err
@@ -182,6 +180,23 @@ func (c *JobController) Ensure(ctx context.Context) error {
 	// Native assignment recovery can legitimately outlive a CLI readiness
 	// deadline, so serving convergence is observed through the control plane.
 	return c.Manager.Ensure(job)
+}
+
+func (c *JobController) validateNativeOwner(status IPCStatus, reachable bool, expected string, statusErr error) error {
+	managed, err := c.Manager.Status(DaemonJobLabel)
+	if err != nil {
+		return fmt.Errorf("inspect native background ownership before changing share daemon: %w", err)
+	}
+	if reachable {
+		if !managed.Installed || !managed.Running {
+			return unmanagedDaemonMismatch(status, expected, statusErr)
+		}
+		return nil
+	}
+	if managed.Installed && managed.Running {
+		return ErrNativeDaemonUnreachable
+	}
+	return nil
 }
 
 // The external supervisor owns attribution; another CLI environment must not
