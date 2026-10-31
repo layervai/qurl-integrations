@@ -134,3 +134,35 @@ There is no public header or body that identifies a pure scope mismatch.
 This probe only allows the reviewed public and LayerV environment domains.
 Adding an environment suffix requires source review. The probe alone does not
 prove stored scope, production activation, or native CLOSED state.
+
+### Owned target-path input probe (operator opt-in)
+
+`QURL_TARGET_PATH_INPUT_PROBE=1` adds the input-only API1474 matrix to the normal
+`tests/file-revoke.test.ts` run. It uses the first successful file case's existing
+owned child to read its canonical active Connector parent with the same API key.
+It creates no additional upload, identity, browser, or NHP admission. Both API
+mint routes receive three valid and three invalid input cases. Six new child
+qURLs are revoked through the existing child-only helper; each DELETE requires
+204 and each owner read must show revoked. The shared parent is never deleted.
+
+Run through the reviewed normal Sandbox file workflow and shared lock, with the
+existing key. Use `--reporters=default`. The wrapper must explicitly pass the
+opt-in, retain `e2e/owned-target-path-input-journal.jsonl` on every outcome, and
+retain its lock if that file is missing or its status is not
+`INPUT_MATRIX_AND_CHILD_CLEANUP_COMPLETE`. This source does not activate the
+workflow opt-in or replace that guard. Never enable it before the guard exists.
+
+The append-only JSONL journal is created exclusively with mode0600 and every
+snapshot is fsynced before a POST. Earlier known IDs survive an interrupted write.
+The receipt gate requires a newline-terminated final complete record; malformed
+or truncated records keep the result unresolved.
+Returned child IDs are checkpointed before assertions. A lost or ambiguous POST
+response is never retried; the pending intent and journal remain for recovery.
+Known children are still cleaned up. The journal contains no API key or access
+link. Each HTTP call has a ten-second caller abort; the test has a fifteen-minute
+outer limit for the fixed request count and existing bounded read/DELETE retries.
+
+This proves only input responses, stored paths, and API child cleanup. Root must
+separately bind the deployed API/config, six rejected requests' bounded metric
+labels and redacted DEBUG records, and normal flag restoration. It proves no
+NHP/native-session cleanup, Connector object lookup, or production result.
