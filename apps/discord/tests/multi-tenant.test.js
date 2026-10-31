@@ -165,16 +165,16 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
   let originalPrevious;
   beforeAll(() => {
     originalGuildId = process.env.GUILD_ID;
-    originalPrevious = process.env.PREVIOUS_GUILD_ID;
+    originalPrevious = process.env.PREVIOUS_COMMAND_SCOPE;
   });
   afterAll(() => {
     if (originalGuildId === undefined) delete process.env.GUILD_ID; else process.env.GUILD_ID = originalGuildId;
-    if (originalPrevious === undefined) delete process.env.PREVIOUS_GUILD_ID; else process.env.PREVIOUS_GUILD_ID = originalPrevious;
+    if (originalPrevious === undefined) delete process.env.PREVIOUS_COMMAND_SCOPE; else process.env.PREVIOUS_COMMAND_SCOPE = originalPrevious;
     jest.resetModules();
   });
   function load(active, old) {
     if (active === undefined) delete process.env.GUILD_ID; else process.env.GUILD_ID = active;
-    if (old === undefined) delete process.env.PREVIOUS_GUILD_ID; else process.env.PREVIOUS_GUILD_ID = old;
+    if (old === undefined) delete process.env.PREVIOUS_COMMAND_SCOPE; else process.env.PREVIOUS_COMMAND_SCOPE = old;
     jest.resetModules();
     return require('../src/commands');
   }
@@ -193,6 +193,7 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
   it.each([0, 10_000])('steady multi-tenant boot ignores a %i-guild cache and makes no cleanup calls', async size => {
     const commands = load(undefined, undefined);
     const { rest } = api();
+    // Deliberately pass the removed cache argument to guard against reintroducing a scan.
     const guilds = new Map(Array.from({ length: size }, (_, i) => [`guild-${i}`, 'name']));
     await commands.registerCommands({ rest, appId: 'app-1', guilds });
     expect(rest.get).not.toHaveBeenCalled();
@@ -210,8 +211,8 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
     expect(state.get(guildRoute(previous))).toEqual([]);
   });
 
-  it('multi to single: registers the target guild before clearing global commands', async () => {
-    const commands = load(current, undefined);
+  it('multi to single: explicitly clears the old global scope after target registration', async () => {
+    const commands = load(current, 'global');
     const { rest, state } = api();
     await commands.registerCommands({ rest, appId: 'app-1' });
     expect(rest.put.mock.calls.map(([route]) => route)).toEqual([guildRoute(current), globalRoute]);
@@ -220,12 +221,12 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
     expect(state.get(guildRoute(previous))).toHaveLength(1);
   });
 
-  it('single to another: clears both inactive namespaces and preserves the new target', async () => {
+  it('single to another: clears only the explicit old guild and preserves global commands', async () => {
     const commands = load(current, previous);
     const { rest, state } = api();
     await commands.registerCommands({ rest, appId: 'app-1' });
-    expect(rest.get.mock.calls).toEqual([[globalRoute], [guildRoute(previous)]]);
-    expect(state.get(globalRoute)).toEqual([]);
+    expect(rest.get.mock.calls).toEqual([[guildRoute(previous)]]);
+    expect(state.get(globalRoute)[0].name).toBe('old-global');
     expect(state.get(guildRoute(previous))).toEqual([]);
     expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl']);
   });
@@ -234,7 +235,7 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
     const commands = load(current, current);
     const { rest, state } = api();
     await commands.registerCommands({ rest, appId: 'app-1' });
-    expect(rest.get.mock.calls).toEqual([[globalRoute]]);
+    expect(rest.get).not.toHaveBeenCalled();
     expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl']);
   });
 
@@ -248,18 +249,25 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
     expect(state.get(guildRoute(previous))[0].name).toBe('old-guild');
   });
 
-  it('continues the other cleanup when one namespace cannot be read', async () => {
-    const commands = load(current, previous);
+  it('steady single-guild boot never touches the global namespace', async () => {
+    const commands = load(current, undefined);
     const { rest, state } = api();
-    rest.get.mockRejectedValueOnce(new Error('global cleanup unavailable'));
     await commands.registerCommands({ rest, appId: 'app-1' });
+    expect(rest.get).not.toHaveBeenCalled();
     expect(state.get(globalRoute)[0].name).toBe('old-global');
-    expect(state.get(guildRoute(previous))).toEqual([]);
-    expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl']);
+    expect(rest.put).toHaveBeenCalledTimes(1);
+  });
+
+  it('never clears the active global namespace when previous scope is global', async () => {
+    const commands = load(undefined, 'global');
+    const { rest, state } = api();
+    await commands.registerCommands({ rest, appId: 'app-1' });
+    expect(rest.get).not.toHaveBeenCalled();
+    expect(state.get(globalRoute).map(command => command.name)).toEqual(['qurl']);
   });
 
   it('does not treat a malformed namespace response as empty', async () => {
-    const commands = load(current, undefined);
+    const commands = load(current, 'global');
     const { rest, state } = api();
     rest.get.mockResolvedValueOnce({ unexpected: true });
     const logger = require('../src/logger');
@@ -275,11 +283,11 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
 
   it('trims a valid previous guild ID', () => {
     load(undefined, ` ${previous} `);
-    expect(require('../src/config').PREVIOUS_GUILD_ID).toBe(previous);
+    expect(require('../src/config').PREVIOUS_COMMAND_SCOPE).toBe(previous);
   });
 
   it.each(['PLACEHOLDER', 'guild-1', '123', '123456789012345678901'])('rejects invalid previous guild %p before registration', value => {
-    expect(() => load(undefined, value)).toThrow('PREVIOUS_GUILD_ID must be a Discord snowflake');
+    expect(() => load(undefined, value)).toThrow('PREVIOUS_COMMAND_SCOPE must be global or a Discord snowflake');
   });
 });
 

@@ -9585,12 +9585,12 @@ async function registerCommands({ rest, appId }) {
       logger.info(`Registering ${commands.length} slash commands globally (multi-tenant mode): ${commands.map(c => c.data.name).join(', ')}`);
       await rest.put(Routes.applicationCommands(appId), { body: commandData });
     }
-    if (config.GUILD_ID) {
+    if (config.GUILD_ID && config.PREVIOUS_COMMAND_SCOPE === 'global') {
       await purgeStaleCommandNamespace({ rest, route: Routes.applicationCommands(appId), scope: 'global' });
     }
-    if (config.PREVIOUS_GUILD_ID && config.PREVIOUS_GUILD_ID !== config.GUILD_ID) {
+    if (config.PREVIOUS_COMMAND_SCOPE && config.PREVIOUS_COMMAND_SCOPE !== 'global' && config.PREVIOUS_COMMAND_SCOPE !== config.GUILD_ID) {
       await purgeStaleCommandNamespace({
-        rest, route: Routes.applicationGuildCommands(appId, config.PREVIOUS_GUILD_ID), scope: 'previous_guild',
+        rest, route: Routes.applicationGuildCommands(appId, config.PREVIOUS_COMMAND_SCOPE), scope: 'previous_guild',
       });
     }
     logger.info('Slash commands registered.');
