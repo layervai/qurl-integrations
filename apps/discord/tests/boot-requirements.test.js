@@ -729,7 +729,7 @@ describe('missingDetectCommandKeys', () => {
     expect(missingDetectCommandKeys({ DETECT_COMMAND_ENABLED: false, QURL_API_KEY: 'PLACEHOLDER' })).toEqual([]);
   });
   test.each(['QURL_API_KEY', 'DETECT_TUNNEL_SLUG'].flatMap(name =>
-    [undefined, null, 0, '', ' \t', ...(name === 'QURL_API_KEY' ? ['PLACEHOLDER', ' placeholder '] : [])].map(value => [name, value])
+    [undefined, null, 0, '', ' \t', ...(name === 'QURL_API_KEY' ? ['PLACEHOLDER', ' placeholder ', ' lv_live_synthetic_detect', 'lv_live_synthetic_detect\n'] : [])].map(value => [name, value])
   ))('enabled detect rejects %s = %p', (name, value) => {
     expect(missingDetectCommandKeys({ ...ready, [name]: value })).toEqual([name]);
   });

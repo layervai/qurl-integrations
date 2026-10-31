@@ -363,7 +363,7 @@ if (mapCommandMissing.length > 0) {
 const detectCommandMissing = missingDetectCommandKeys(config);
 if (detectCommandMissing.length > 0) {
   logger.error(
-    `DETECT_COMMAND_ENABLED=true but settings are missing/blank or QURL_API_KEY is the PLACEHOLDER seed value: ${detectCommandMissing.join(', ')}. ` +
+    `DETECT_COMMAND_ENABLED=true but required settings are invalid (missing/blank, or a padded/PLACEHOLDER QURL_API_KEY): ${detectCommandMissing.join(', ')}. ` +
     'Seed the bot API key and detect tunnel slug before enabling detect.'
   );
   process.exit(1);

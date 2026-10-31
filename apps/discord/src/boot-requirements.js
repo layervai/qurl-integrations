@@ -520,7 +520,7 @@ function missingDetectCommandKeys(cfg) {
   if (!cfg.DETECT_COMMAND_ENABLED) return [];
   return ['QURL_API_KEY', 'DETECT_TUNNEL_SLUG'].filter(name => {
     const value = cfg[name];
-    return typeof value !== 'string' || !value.trim() || (name === 'QURL_API_KEY' && isInfraSeedSentinel(value));
+    return typeof value !== 'string' || !value.trim() || (name === 'QURL_API_KEY' && (value !== value.trim() || isInfraSeedSentinel(value)));
   });
 }
 

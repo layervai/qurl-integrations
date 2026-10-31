@@ -83,9 +83,9 @@ test('development permits a local HTTP callback with valid OAuth secrets (#62)',
 });
 
 test.each(['QURL_API_KEY', 'DETECT_TUNNEL_SLUG'].flatMap(name =>
-  [undefined, ' \t', ...(name === 'QURL_API_KEY' ? ['PLACEHOLDER', ' placeholder '] : [])].map(value => [name, value])
+  [undefined, ' \t', ...(name === 'QURL_API_KEY' ? ['PLACEHOLDER', ' placeholder ', ' lv_live_synthetic_detect', 'lv_live_synthetic_detect\n'] : [])].map(value => [name, value])
 ))('enabled detect fails before network when %s = %p (#834)', (name, value) => {
-  expectBootFailure({ DETECT_COMMAND_ENABLED: 'true', QURL_API_KEY: 'lv_live_synthetic_detect', DETECT_TUNNEL_SLUG: 'detect-fixture', [name]: value }, `DETECT_COMMAND_ENABLED=true but settings are missing/blank or QURL_API_KEY is the PLACEHOLDER seed value: ${name}.`);
+  expectBootFailure({ DETECT_COMMAND_ENABLED: 'true', QURL_API_KEY: 'lv_live_synthetic_detect', DETECT_TUNNEL_SLUG: 'detect-fixture', [name]: value }, `DETECT_COMMAND_ENABLED=true but required settings are invalid (missing/blank, or a padded/PLACEHOLDER QURL_API_KEY): ${name}.`);
 });
 test.each(['false', 'true'])('detect gate %s with matching configuration reaches the network fence (#834)', flag => {
   const result = boot({ DETECT_COMMAND_ENABLED: flag,

@@ -527,7 +527,7 @@ module.exports = {
   // for the bot's current IP — immediately before each /api/detect POST. No
   // pre-seeded access token: the bot mints per call with its own QURL_API_KEY.
   // A plain NON-secret env (e.g. `detect-sandbox` / `detect-prod`), read
-  // verbatim; no default. When unset, /qurl detect surfaces a clear
+  // trimmed; no default. When unset, /qurl detect surfaces a clear
   // configured-error (resolveDetectTarget throws) rather than silently failing.
   // Set at detect activation, the same gated step that flips DETECT_COMMAND_ENABLED.
   DETECT_TUNNEL_SLUG: process.env.DETECT_TUNNEL_SLUG?.trim(),
