@@ -1925,6 +1925,7 @@ async function executeSendPipeline(interaction, {
   attachment,
   locationUrl,
   locationName,
+  // Initial recipients are deduped and bot-filtered upstream; self-send is allowed.
   recipients,
   expiresIn,
   selfDestructSeconds,

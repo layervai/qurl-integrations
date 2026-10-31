@@ -2493,7 +2493,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
   }
 
   it('keeps a frozen caller recipient snapshot unchanged after Add Recipients', async () => {
-    const recipients = Object.freeze([{ id: 'u1', username: 'Alice' }]);
+    const recipients = Object.freeze([Object.freeze({ id: 'u1', username: 'Alice' })]);
     const { collect, makeClick } = await setupRevocableSend(recipients);
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: null, expires_in: '30m',
