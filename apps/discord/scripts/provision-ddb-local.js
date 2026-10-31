@@ -35,10 +35,8 @@
 //   AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local \
 //   node scripts/provision-ddb-local.js
 //
-// Re-running after a `docker compose up` (which flushes in-memory DDB)
-// is fine — every CreateTable call is wrapped in a
-// `ResourceInUseException` catch that treats the table as already
-// present.
+// Re-running reuses local tables after checking required GSI names.
+// The provisioner never migrates or drops local tables or rows.
 
 const {
   DynamoDBClient,
@@ -206,11 +204,8 @@ async function main() {
   console.log('Done.');
 }
 
-// `tables` is exported so `tests/provisioner-schema-parity.test.js` can
-// pin parity with `ddb-store.js`'s `TABLES` map at PR time (rather than
-// surfacing as a runtime `ResourceNotFoundException` on first local
-// boot). The `require.main === module` guard keeps the script's
-// validation + main() from firing under `require()` in jest.
+// Export the schema and one-table helper for schema/provisioning tests.
+// Requiring this module never validates the environment or calls DynamoDB.
 module.exports = { tables, ensureTable };
 
 if (require.main === module) {
