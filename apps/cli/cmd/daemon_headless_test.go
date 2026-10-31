@@ -360,8 +360,11 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 			t.Fatal("first headless bootstrap did not request authenticated owner verification")
 		}
 		if apiConfig == nil || apiConfig.BaseURL != "https://api.example.com" || apiConfig.Version != "test" ||
-			apiConfig.ClientProduct != "qurl-desktop/1.2.3" || apiConfig.Verbose == nil || apiConfig.Sleep == nil || apiConfig.NewRequestID == nil {
+			apiConfig.Verbose == nil || apiConfig.Sleep == nil || apiConfig.NewRequestID == nil {
 			t.Fatalf("headless registered-client config = %+v, want endpoint, version, and observability hooks", apiConfig)
+		}
+		if apiConfig.ClientProduct != "qurl-desktop/1.2.3" {
+			t.Fatalf("headless registered-client ClientProduct = %q, want %q", apiConfig.ClientProduct, "qurl-desktop/1.2.3")
 		}
 		if cfg.EnrollmentCredential != credential {
 			t.Fatalf("attempt %d enrollment credential = %q", attempts.Load()+1, cfg.EnrollmentCredential)
