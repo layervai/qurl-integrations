@@ -583,18 +583,21 @@ describe('flow-state.transitionFlow', () => {
   test.each([
     ['absent row', undefined, 'not_found'],
     ['live version conflict', { stage: { S: 'a' }, expires_at: { N: String(futureExpiry()) } }, 'conflict'],
+    ['native live conflict', { stage: 'a', expires_at: futureExpiry() }, 'conflict'],
+    ['native expired row', { stage: 'a', expires_at: futureExpiry(-30) }, 'not_found'],
+    ['native numeric string is corrupt', { stage: 'a', expires_at: String(futureExpiry()) }, 'not_found'],
     ['logically expired row', { stage: { S: 'a' }, expires_at: { N: String(futureExpiry(-30)) } }, 'not_found'],
     ['corrupt expiry', { stage: { S: 'a' }, expires_at: { S: 'not-a-number' } }, 'not_found'],
     ['missing expiry', { stage: { S: 'a' } }, 'not_found'],
     ['fractional expiry', { stage: { S: 'a' }, expires_at: { N: '2000000000.5' } }, 'not_found'],
-  ])('%s is classified from the failed write without a follow-up read', async (_, item, result) => {
+  ])('%s is classified from the failed write without a follow-up read', async (label, item, result) => {
     const error = ccfe();
     if (item) error.Item = item;
     ddbMock.on(UpdateCommand).rejects(error);
     const response = await flowState.transitionFlow('id', 1, { stage_to: 'b', terminal: true });
     expect(response).toEqual({ result, version: null });
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
-      flow_id: 'id', stage_from: item?.stage.S ?? null, stage_to: 'b', result,
+      flow_id: 'id', stage_from: typeof item?.stage === 'string' ? item.stage : item?.stage.S ?? null, stage_to: 'b', result,
       terminal: false, extended: false, version: 1,
     });
     expect(ddbMock.calls()).toHaveLength(1);
@@ -602,7 +605,7 @@ describe('flow-state.transitionFlow', () => {
     expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input).toMatchObject({
       ReturnValues: 'ALL_OLD', ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
     });
-    if (item && !item.expires_at?.N) expect(logger.warn).toHaveBeenCalled();
+    if (['corrupt expiry', 'missing expiry', 'native numeric string is corrupt'].includes(label)) expect(logger.warn).toHaveBeenCalled();
   });
 
   test('a conflict audit uses the exact rejected row instead of a stale pre-read', async () => {

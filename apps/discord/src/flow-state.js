@@ -569,13 +569,14 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
     return { result: 'success', version: newVersion };
   } catch (err) {
     if (isConditionalCheckFailed(err)) {
-      // TODO(upstream-contract): installed AWS DocumentClient returns failure
-      // Item as raw AttributeValues, unlike native success Attributes (#253).
+      // TODO(upstream-contract): AWS DocumentClient currently returns raw failure
+      // Item fields (#253); accept native fields too across SDK upgrades.
       // Read only audit fields; never decrypt or log the returned payload.
       const prior = err.Item;
-      stage_from = prior?.stage?.S ?? null;
+      stage_from = typeof prior?.stage === 'string' ? prior.stage : prior?.stage?.S ?? null;
       const rawExpires = prior?.expires_at?.N;
-      const expires = typeof rawExpires === 'string' ? Number(rawExpires) : NaN;
+      const expires = typeof prior?.expires_at === 'number' ? prior.expires_at
+        : typeof rawExpires === 'string' ? Number(rawExpires) : NaN;
       const validExpires = Number.isFinite(expires) && Number.isInteger(expires);
       extended = set_expires_at !== undefined && validExpires && set_expires_at > expires;
       const result = prior && validExpires && expires >= nowEpochSeconds() ? 'conflict' : 'not_found';
