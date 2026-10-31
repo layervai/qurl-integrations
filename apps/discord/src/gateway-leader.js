@@ -84,6 +84,7 @@ const DEFAULT_TICK_INTERVAL_MS = 2_000;
 // takes over next tick). Makes the leader self-sufficient rather
 // than relying on the WS shim's wiring to enforce a timeout.
 const DEFAULT_INBOUND_CONNECT_TIMEOUT_MS = 5_000;
+const MAX_TICK_AGE_MS = 15_000;
 
 // `manager` is conventionally the gateway-ws-shim instance (passed
 // from startHotStandby), but any object satisfying connect() +
@@ -143,6 +144,7 @@ function createGatewayLeader({
   // handler to never call start() again.
   let closed = false;
   let loopPromise = null;
+  let lastTickStartedAt = 0;
   let knownPeerInstanceIds = new Set();
 
   // Best-effort lock release for pushHandoff's bail-out paths. The
@@ -214,6 +216,7 @@ function createGatewayLeader({
     // diverging from the closed-sentinel invariant the rest of the
     // module enforces.
     if (closed) return;
+    lastTickStartedAt = performance.now();
     // Heartbeat write + peer-list refresh run in parallel — both are
     // independent DDB ops, neither feeds into the other. Sequencing
     // them adds ~one DDB RTT to every tick for no correctness gain.
@@ -313,6 +316,7 @@ function createGatewayLeader({
     // task.
     if (loopPromise || closed) return;
     running = true;
+    lastTickStartedAt = performance.now();
     loopPromise = loop().finally(() => { loopPromise = null; });
   }
 
@@ -722,22 +726,11 @@ function createGatewayLeader({
     return knownPeerInstanceIds.has(instanceId);
   }
 
-  // True when the tick loop has been started AND has not yet
-  // exited (loopPromise nulls itself via `.finally` when the loop
-  // returns — start-fail, stop(), or post-pushHandoff drain all
-  // clear it). Consumed by index.js's /health probe on the standby
-  // path so a standby that has no WS by design isn't reported as
-  // unhealthy.
-  //
-  // Limitation worth knowing: this is loop-exists, NOT loop-is-
-  // progressing. A tick wedged inside a hanging DDB call (lock
-  // renew, heartbeat write, peer-cache refresh) would still report
-  // healthy here. Acceptable for now — the 2 s renew + 60 s lock
-  // TTL means a hung loop loses the lock to a peer's cold-acquire
-  // within ~1 min anyway. Tracked: issue #420 (lastTickAt
-  // freshness check follow-up).
+  // Standbys have no WebSocket by design. Readiness needs a running loop
+  // and recent entry into a serialized tick, including startup grace.
+  // A monotonic clock keeps wall-clock corrections out of this deadline.
   function hasStartedTickLoop() {
-    return loopPromise !== null;
+    return loopPromise !== null && performance.now() - lastTickStartedAt <= MAX_TICK_AGE_MS;
   }
 
   return {
@@ -761,4 +754,5 @@ module.exports = {
   createGatewayLeader,
   DEFAULT_TICK_INTERVAL_MS,
   DEFAULT_INBOUND_CONNECT_TIMEOUT_MS,
+  MAX_TICK_AGE_MS,
 };

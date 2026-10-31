@@ -275,6 +275,10 @@ See `.env.example` for the local-development environment setup.
   authenticated), `/oauth/discord/install` plus its callback for customer
   installs, and the qURL OAuth start/callback routes used by `/qurl setup`.
 
+A gateway-only standby uses leader-tick progress for `/health`. Readiness fails
+if the loop does not enter a tick for more than 15 seconds, including a stuck
+database or handoff operation. The deadline uses a monotonic clock.
+
 ## Troubleshooting
 
 **"qURL is not configured"** — an admin needs to run `/qurl setup` on this
