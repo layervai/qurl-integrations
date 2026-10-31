@@ -2084,6 +2084,9 @@ async function executeSendPipeline(interaction, {
       // 3-min Step-3 form loop, then all increment here past the cap. Re-
       // check at the increment point to keep the cap honest.
       if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
+        logger.audit(AUDIT_EVENTS.UPLOAD_REJECTED_CAPACITY, {
+          active_file_sends: activeFileSends, max_concurrent: MAX_CONCURRENT_FILE_SENDS,
+        });
         clearCooldown(interaction.user.id);
         logger.warn('File send rejected at slot-claim: concurrency cap reached', {
           activeFileSends, sendId, sendNonce, userId: interaction.user.id,
@@ -6067,6 +6070,9 @@ async function handleQurlSend(interaction) {
   // backpressure, not user fault; locking the user out for 30s on a
   // capacity rejection would be punitive.
   if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
+    logger.audit(AUDIT_EVENTS.UPLOAD_REJECTED_CAPACITY, {
+      active_file_sends: activeFileSends, max_concurrent: MAX_CONCURRENT_FILE_SENDS,
+    });
     // Log at INFO so capacity-tuning has a trend signal — a sudden
     // burst of these would indicate either MAX_CONCURRENT_FILE_SENDS
     // is undersized or a downstream pipeline is stuck holding slots.

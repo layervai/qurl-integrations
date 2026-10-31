@@ -182,7 +182,8 @@ const LOG_EVENTS = Object.freeze({
 //
 // SECRETS CONTRACT: callers SHOULD pass only non-sensitive meta values
 // from a small, pre-vetted vocabulary: `send_id`, `kind`, `count`,
-// `expires_in`, `api_code`, `success`, `total`. logger.audit()
+// `expires_in`, `api_code`, `success`, `total`, `active_file_sends`,
+// `max_concurrent`. logger.audit()
 // defends in two layers if a caller still slips a secret-shaped key
 // in (top-level OR nested):
 //   1. The value is redacted to '[REDACTED]' in the emitted payload.
@@ -210,6 +211,10 @@ const AUDIT_EVENTS = {
   // from handleAddRecipients on a sendConfig that has both file +
   // location.
   UPLOAD_SUCCESS: 'upload_success',
+  // Entry or atomic slot-claim rejection, once per attempt (including retries).
+  // Payload counts are forensic only; the paired alarm counts both gates together.
+  // TODO(upstream-contract): paired UploadRejectedCapacityCount filter in infra.
+  UPLOAD_REJECTED_CAPACITY: 'upload_rejected_capacity',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',
   // DISPATCH_SENT_NO_REFS fires when sendDM resolved ok:true but the
