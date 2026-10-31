@@ -26,6 +26,7 @@
 // state is NOT a one-shot token; it's an integrity envelope. PR copy and
 // route comments avoid the "single-use" framing for that reason.
 const crypto = require('crypto');
+const { nowEpochSeconds } = require('./time');
 const { createStateSigner } = require('./oauth-state');
 
 const STATE_KIND = 'qurl-oauth';
@@ -94,7 +95,7 @@ function signQurlOAuthState(guildId, discordUserId) {
     throw new TypeError('signQurlOAuthState: discordUserId must be a non-empty string');
   }
   const nonce = crypto.randomBytes(16).toString('hex');
-  const expirySec = Math.floor(Date.now() / 1000) + STATE_TTL_SECONDS;
+  const expirySec = nowEpochSeconds() + STATE_TTL_SECONDS;
   const payload = {
     k: STATE_KIND,
     g: guildId,
@@ -140,7 +141,7 @@ function verifyQurlOAuthState(state) {
   if (typeof payload.g !== 'string' || !payload.g) return { ok: false, reason: 'no_guild_id' };
   if (typeof payload.u !== 'string' || !payload.u) return { ok: false, reason: 'no_user_id' };
   if (typeof payload.e !== 'number') return { ok: false, reason: 'no_expiry' };
-  if (Math.floor(Date.now() / 1000) >= payload.e) return { ok: false, reason: 'expired' };
+  if (nowEpochSeconds() >= payload.e) return { ok: false, reason: 'expired' };
   return {
     ok: true,
     payload: { guildId: payload.g, discordUserId: payload.u, nonce: payload.n, expirySec: payload.e },
