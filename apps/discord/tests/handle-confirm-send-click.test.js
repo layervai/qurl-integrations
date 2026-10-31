@@ -72,6 +72,20 @@ describe('handleConfirmSendClick', () => {
     expect(int.update).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['guild-current-key', 'guild-current-key'],
+    [null, 'test-api-key'],
+  ])('uses current guild key %s or the configured fallback', async (guildKey, expectedKey) => {
+    mockDb.getGuildApiKey.mockResolvedValueOnce(guildKey);
+    require('../src/connector').downloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-current', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-current' }]);
+    mockSendDM.mockResolvedValueOnce({ ok: false });
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    int.guild.iconURL = () => null;
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    expect(mockMintLinks).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ apiKey: expectedKey }));
+  });
+
   test('deleteFlow dedup loser → version-fenced "Recipients changed" reply, no pipeline call', async () => {
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
@@ -119,6 +133,8 @@ describe('handleConfirmSendClick', () => {
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/not configured|setup/i),
     }));
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDeleteFlow).not.toHaveBeenCalled();
     expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 

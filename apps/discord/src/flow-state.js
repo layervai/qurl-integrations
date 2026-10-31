@@ -68,6 +68,7 @@ function isConditionalCheckFailed(err) {
 
 const { encryptStrict, decrypt } = require('./utils/crypto');
 const logger = require('./logger');
+const { nowEpochSeconds } = require('./utils/time');
 const { AUDIT_EVENTS } = require('./constants');
 const { parseFlowId } = require('./flow-id');
 
@@ -151,10 +152,6 @@ function assertExpiresAt(expiresAt) {
   if (expiresAt <= now) {
     throw new RangeError(`flow-state: expires_at must be strictly in the future (got ${expiresAt}; now is ${now}). A row whose TTL is in the past is born expired — it passes the Put, fires FLOW_CREATED, but loadFlow returns null forever after, silently inflating the SLI's silently_dropped numerator. Most often this is a forgotten '+ ttl_seconds' on the caller side.`);
   }
-}
-
-function nowEpochSeconds() {
-  return Math.floor(Date.now() / 1000);
 }
 
 // Encrypt the payload object as a JSON string. Decrypt is the

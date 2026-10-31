@@ -40,6 +40,7 @@ const {
 
 const { encrypt, decrypt } = require('../utils/crypto');
 const logger = require('../logger');
+const { nowEpochSeconds } = require('../utils/time');
 const {
   DM_STATUS,
   AUDIT_EVENTS,
@@ -1157,7 +1158,7 @@ async function getSendRenderState(sendId) {
   // Past the confirm window the interaction token is dead (Discord
   // rejects it); treat the whole render state as absent so the fast-path
   // skips and the poll backstop is the sole renderer.
-  if (typeof row.confirm_expires_at === 'number' && Math.floor(Date.now() / 1000) > row.confirm_expires_at) {
+  if (typeof row.confirm_expires_at === 'number' && nowEpochSeconds() > row.confirm_expires_at) {
     return null;
   }
   return {
@@ -1251,7 +1252,7 @@ async function incrementSendViewedCount(sendId, qurlId, expectedCount) {
     ExpressionAttributeValues: {
       ':sid': sendId,
       ':shard': shard,
-      ':exp': Math.floor(Date.now() / 1000) + QURL_VIEW_TTL_SECONDS,
+      ':exp': nowEpochSeconds() + QURL_VIEW_TTL_SECONDS,
       ':one': 1,
     },
   }));

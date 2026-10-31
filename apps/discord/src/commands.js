@@ -41,6 +41,7 @@ const {
   ddbSendConfigGuardFitsTransaction,
 } = require('./constants');
 const {
+  nowEpochSeconds,
   expiryToISO,
   expiryToMs,
   formatSelfDestructLabel,
@@ -1180,7 +1181,7 @@ function buildDeliveryEmbed({
     const capped = Array.from(personalMessage).slice(0, 280).join('').replace(/[\r\n]+/g, ' ').trim();
     if (capped) descLines.push(`> *"${capped}"*`);
   }
-  const expiryVerb = expiresAt <= Math.floor(Date.now() / 1000) ? 'Closed' : 'Closes';
+  const expiryVerb = expiresAt <= nowEpochSeconds() ? 'Closed' : 'Closes';
   descLines.push(`🕐 ${expiryVerb} <t:${expiresAt}:R>`);
   if (renderActionsAsMarkdown) {
     descLines.push(`[🚪 Step Through](${qurlLink}) · [🛡️ What is qURL?](${TRUST.LANDING_URL})`);
@@ -2548,7 +2549,7 @@ async function executeSendPipeline(interaction, {
         // good). This also bounds the sensitive token's at-rest life until
         // the qurl-bot-ddb DDB TTL on confirm_expires_at lands
         // (infra repo #1227) to physically reap the row.
-        confirmExpiresAt: Math.floor(Date.now() / 1000) + 15 * 60,
+        confirmExpiresAt: nowEpochSeconds() + 15 * 60,
       });
     } catch (err) {
       logger.error('saveSendConfirmState failed; webhook view-counter fast-path disabled for this send (poll backstop still renders)', {
@@ -3786,6 +3787,11 @@ async function handleRevoke(interaction, apiKey) {
   });
 }
 
+async function resolveGuildApiKey(guildId) {
+  const guildKey = guildId ? await db.getGuildApiKey(guildId) : null;
+  return guildKey || config.QURL_API_KEY || null;
+}
+
 // `reason: 'terminal'` reflects the FLOW lifecycle, not the qURL
 // API call's success. The state machine terminated when the user
 // picked an item; downstream revoke outcome is captured by its
@@ -3809,15 +3815,13 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   // resolution that hits an external API, a connector upload) —
   // at-least-once redelivery would then bill or trigger the side
   // effect once per duplicate, defeating the dedup gate's purpose.
-  const [guildApiKey, deleteResult] = await Promise.all([
-    interaction.guildId ? db.getGuildApiKey(interaction.guildId) : null,
+  const [apiKey, deleteResult] = await Promise.all([
+    resolveGuildApiKey(interaction.guildId),
     deleteFlow(flow_id, {
       stage: REVOKE_STAGE_AWAITING_SELECT,
       reason: 'terminal',
     }),
   ]);
-  const apiKey = guildApiKey || config.QURL_API_KEY;
-
   if (!deleteResult.deleted) {
     // Another worker already completed (or admin_cleanup'd) this flow.
     // Reply rather than update — `interaction.update` would mutate
@@ -3996,7 +4000,7 @@ async function handleSetupButton(interaction, { flow_id, row }) {
   const result = await transitionFlow(flow_id, row.version, {
     stage_to: SETUP_STAGE_AWAITING_MODAL,
     terminal: false,
-    set_expires_at: Math.floor(Date.now() / 1000) + SETUP_MODAL_TTL_SECONDS,
+    set_expires_at: nowEpochSeconds() + SETUP_MODAL_TTL_SECONDS,
   });
 
   // Early-return branches below use `interaction.reply` directly
@@ -7033,7 +7037,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
-      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+      set_expires_at: nowEpochSeconds() + SEND_FLOW_TTL_SECONDS,
     });
   } catch (err) {
     logger.error('handleConfirmUserSelect: transitionFlow threw', {
@@ -7333,7 +7337,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
-      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+      set_expires_at: nowEpochSeconds() + SEND_FLOW_TTL_SECONDS,
     });
   } catch (err) {
     logger.error('handleConfirmVoiceEveryone: transitionFlow threw', {
@@ -7456,7 +7460,7 @@ async function handleConfirmPickManual(interaction, { flow_id, row }) {
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
-      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+      set_expires_at: nowEpochSeconds() + SEND_FLOW_TTL_SECONDS,
     });
   } catch (err) {
     logger.error('handleConfirmPickManual: transitionFlow threw', {
@@ -7691,7 +7695,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
-      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+      set_expires_at: nowEpochSeconds() + SEND_FLOW_TTL_SECONDS,
     });
   } catch (err) {
     logger.error('handleConfirmEveryone: transitionFlow threw', {
@@ -7865,7 +7869,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
-      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+      set_expires_at: nowEpochSeconds() + SEND_FLOW_TTL_SECONDS,
     });
   } catch (err) {
     logger.error('handleConfirmExpirySelect: transitionFlow threw', {
@@ -7930,7 +7934,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
-      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+      set_expires_at: nowEpochSeconds() + SEND_FLOW_TTL_SECONDS,
     });
   } catch (err) {
     logger.error('handleConfirmSelfDestructSelect: transitionFlow threw', {
@@ -8060,7 +8064,7 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
-      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+      set_expires_at: nowEpochSeconds() + SEND_FLOW_TTL_SECONDS,
     });
   } catch (err) {
     logger.error('handleConfirmNoteModal: transitionFlow threw', {
@@ -8186,7 +8190,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // silently shrink the delivered set with no signal.
   const [resolveResult, apiKeyResult] = await Promise.allSettled([
     resolveRecipientUsers(interaction, payload.recipientIds),
-    db.getGuildApiKey(interaction.guildId),
+    resolveGuildApiKey(interaction.guildId),
   ]);
   if (resolveResult.status === 'rejected') {
     logger.error('handleConfirmSendClick: resolveRecipientUsers threw', {
@@ -8285,15 +8289,12 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  const guildApiKey = apiKeyResult.value;
-  // Check the resolved key BEFORE deleteFlow. If both guildApiKey and
-  // config.QURL_API_KEY are null (rare: key rotation removed the key
-  // between dispatcher pre-check and Send click), there's nothing to
-  // send with — preserving the flow row lets the user retry after the
+  // Check the freshly resolved key BEFORE deleteFlow. If rotation removed
+  // both guild and fallback keys since dispatch, preserve the flow for retry after the
   // admin re-runs `/qurl setup` without re-invoking the slash command.
   // Cooldown clears so the user isn't stranded for the 30s window
   // while waiting on the admin.
-  const apiKey = guildApiKey || config.QURL_API_KEY;
+  const apiKey = apiKeyResult.value;
   if (!apiKey) {
     clearCooldown(interaction.user.id);
     return interaction.editReply({
@@ -9378,8 +9379,8 @@ const commands = [
       // docstring documents the contract explicitly.
       let resolvedApiKey = null;
       if (API_KEY_GATED_SUBCOMMANDS.has(sub)) {
-        const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
-        if (!guildApiKey && !config.QURL_API_KEY) {
+        resolvedApiKey = await resolveGuildApiKey(interaction.guildId);
+        if (!resolvedApiKey) {
           return interaction.reply({
             content: '❌ **qURL is not configured for this server.**\n\n' +
               'A server admin needs to run `/qurl setup` first.\n' +
@@ -9387,7 +9388,6 @@ const commands = [
             ephemeral: true,
           });
         }
-        resolvedApiKey = guildApiKey || config.QURL_API_KEY;
       }
 
       // /qurl send and /qurl map deliberately don't accept the

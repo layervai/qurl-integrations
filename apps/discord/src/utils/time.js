@@ -1,5 +1,9 @@
 const logger = require('../logger');
 
+function nowEpochSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
 // isPositiveFinite — single predicate for "valid positive numeric
 // seconds/count/TTL" gate. Rejects null, undefined, NaN, ±Infinity,
 // 0, and negative numbers. Strict Number.isFinite (NOT global
@@ -202,6 +206,7 @@ function settlesWithin(promise, ms) {
 }
 
 module.exports = {
+  nowEpochSeconds,
   settlesWithin,
   expiryToISO,
   expiryToMs,

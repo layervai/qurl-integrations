@@ -8,6 +8,7 @@ jest.mock('../src/logger', () => ({
 }));
 
 const {
+  nowEpochSeconds,
   expiryToISO,
   expiryToMs,
   formatSelfDestructLabel,
@@ -270,5 +271,12 @@ describe('settlesWithin', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('nowEpochSeconds', () => {
+  it.each([[0, 0], [999, 0], [1000, 1], [1001, 1], [-1, -1]])('floors system milliseconds %s to %s seconds', (milliseconds, expected) => {
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(milliseconds);
+    try { expect(nowEpochSeconds()).toBe(expected); } finally { clock.mockRestore(); }
   });
 });

@@ -37,6 +37,7 @@ const crypto = require('crypto');
 const express = require('express');
 const config = require('../config');
 const logger = require('../logger');
+const { nowEpochSeconds } = require('../utils/time');
 const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { createPkcePair } = require('../utils/oauth-pkce');
 const { buildAuth0AuthorizeUrl } = require('../utils/auth0-authorize-url');
@@ -98,7 +99,7 @@ function renderError(res, statusCode, headline, detail) {
 const INSTALL_STATE_RE = /^(\d{1,12})\.[A-Za-z0-9_-]{43}$/;
 
 function mintInstallState() {
-  const expirySec = Math.floor(Date.now() / 1000) + DISCORD_INSTALL_COOKIE_TTL_SECONDS;
+  const expirySec = nowEpochSeconds() + DISCORD_INSTALL_COOKIE_TTL_SECONDS;
   return `${expirySec}.${crypto.randomBytes(32).toString('base64url')}`;
 }
 
@@ -109,7 +110,7 @@ function inspectInstallState(req, state) {
   return {
     hasCookie: Boolean(cookieState),
     matches,
-    valid: matches && expirySec > Math.floor(Date.now() / 1000),
+    valid: matches && expirySec > nowEpochSeconds(),
   };
 }
 
