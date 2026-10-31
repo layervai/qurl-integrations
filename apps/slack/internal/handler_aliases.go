@@ -102,14 +102,9 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	// once followed by every alias that resolves to it here.
 	groups := groupAliasEntriesByResource(entries)
 
-	// Resolve each group's slug from the workspace tunnel list — the SAME
-	// source `/qurl list` reads (and the one the API actually populates
-	// slugs on; the per-id `GET /v1/resources/{id}` path does not). One
-	// fetch covers every group, joined by resource_id. Best-effort: a
-	// failed fetch degrades each row to its channel aliases alone (never
-	// the opaque resource_id). Skipped entirely when every group is
-	// resource-less (all-legacy channel) — there's nothing to join, so we
-	// don't spend an upstream call.
+	// One workspace resource-list page supplies labels for every joinable ID.
+	// A failed lookup degrades to aliases only. Empty IDs and direct-URL
+	// bindings cannot join, so skip the request when every group has that shape.
 	var byID map[string]client.Resource
 	var hasMore bool
 	if groupsNeedResolution(groups) {
@@ -118,12 +113,8 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	lines := make([]string, 0, len(groups))
 	unresolved := 0
 	for i := range groups {
-		// Resource-less groups (the "\x00"-keyed legacy/synthetic rows)
-		// never participate in the join — skip the lookup. For a real
-		// resource_id, a miss (nil map from a failed fetch, or absent from
-		// the scanned page) leaves r as the zero-value Resource, which
-		// formatAliasGroupLine degrades to the alias-only row, and counts
-		// toward the pagination-gap signal below.
+		// Empty IDs and direct-URL bindings never join. A missing real resource
+		// degrades to aliases only and counts toward the pagination-gap signal.
 		var r client.Resource
 		if rid := groups[i].resourceID; rid != "" && !isLegacyDirectURLBinding(rid) {
 			var ok bool
@@ -176,10 +167,8 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	_ = h.postResponse(log, responseURL, body)
 }
 
-// groupsNeedResolution reports whether any group carries a resource_id —
-// i.e. whether the ListResources slug join is worth an upstream call. A
-// Resource-less and legacy direct-URL groups cannot join the resource list;
-// skip the fetch when every group has one of those shapes.
+// groupsNeedResolution reports whether any group has a joinable resource ID.
+// Empty IDs and legacy direct-URL bindings cannot join the resource list.
 func groupsNeedResolution(groups []aliasGroup) bool {
 	for i := range groups {
 		if groups[i].resourceID != "" && !isLegacyDirectURLBinding(groups[i].resourceID) {
