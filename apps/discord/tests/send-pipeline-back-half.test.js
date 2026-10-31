@@ -2746,62 +2746,42 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(2);
   });
 
-  it('allows Add Recipients after Revoke fails because links still exist', async () => {
+  it('rejects stale Add and expand actions after a failed revoke closes the card (#861)', async () => {
     const { collect, makeClick, interaction } = await setupRevocableSend();
     mockDb.getSendItems.mockReset();
     mockDb.getSendItems.mockRejectedValueOnce(new Error('ddb unavailable'));
-
-    const revokeClick = makeClick('revoke');
-    await collect(revokeClick);
-
+    await collect(makeClick('revoke'));
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: 'Failed to revoke links. Try `/qurl revoke` instead.',
-      components: [],
+      content: 'Failed to revoke links. Try `/qurl revoke` instead.', components: [],
     }));
-    mockRevokeMintedLinks.mockReset();
 
-    const selectInteraction = {
-      users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
-      deferUpdate: jest.fn().mockResolvedValue(undefined),
-      editReply: jest.fn().mockResolvedValue(undefined),
-    };
-    const selectReply = {
-      awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
-    };
+    interaction.editReply.mockClear();
     const addClick = makeClick('add');
-    addClick.reply.mockResolvedValueOnce(selectReply);
-
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-initial', expires_in: '30m',
-      attachment_url: 'https://cdn.discordapp.com/x.png',
-      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    await collect(addClick);
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'This management card is closed after a revoke attempt. Run `/qurl revoke` to check the result.',
+      ephemeral: true,
     });
-    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
-    mockMintLinks.mockResolvedValueOnce([
-      {
-        qurl_link: 'https://q.test/added',
-        qurl_id: 'q_added',
-        resource_id: 'res-added',
-      },
-    ]);
+    const expandClick = makeClick('expand');
+    await collect(expandClick);
+    expect(expandClick.deferUpdate).toHaveBeenCalled();
+    expect(interaction.editReply).not.toHaveBeenCalled();
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
+  });
 
-    try {
-      await collect(addClick);
-
-      expect(addClick.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: 'Select additional recipients:',
-        fetchReply: true,
-      }));
-      expect(selectInteraction.deferUpdate).toHaveBeenCalled();
-      expect(mockMintLinks).toHaveBeenCalledTimes(2);
-      expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(2);
-      expect(selectInteraction.editReply).toHaveBeenCalledWith({
-        content: 'Added 1 recipient',
-        components: [],
-      });
-    } finally {
-      clearCooldown('sender-1');
-    }
+  it('a stale pre-revoke expand cannot replace a successful revoke result (#861)', async () => {
+    const { collect, makeClick, interaction, finishRevoke, revokeStarted } = await setupRevocableSend();
+    const pending = collect(makeClick('revoke'));
+    await revokeStarted.promise;
+    finishRevoke.resolve();
+    await pending;
+    expect(interaction.editReply).toHaveBeenLastCalledWith(expect.objectContaining({ content: expect.stringContaining('Revoked 1/1 user.') }));
+    interaction.editReply.mockClear();
+    const expandClick = makeClick('expand');
+    await collect(expandClick);
+    expect(expandClick.deferUpdate).toHaveBeenCalled();
+    expect(interaction.editReply).not.toHaveBeenCalled();
   });
 
   it('rejects Revoke while Add Recipients is waiting on selection', async () => {
