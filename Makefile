@@ -12,13 +12,8 @@ fmt:
 
 ## Linting
 
-# Pinned so local runs match CI exactly. Keep in sync with every pin site:
-# .github/workflows/slack.yml (2), .github/workflows/shared-test.yml (2),
-# .github/workflows/cli.yml (2), .github/workflows/e2e.yml (2),
-# .github/workflows/workflow-contract.yml (1),
-# and .pre-commit-config.yaml's golangci-lint rev. An unpinned PATH install
-# drifts: newer golangci-lint versions flag issues the pinned config is clean
-# on.
+# Pinned so local runs match CI exactly. internal/ciworkflows/linter_pin_test.go
+# checks every workflow pin and the pre-commit hook against this version.
 GOLANGCI_LINT_VERSION := v2.12.2
 
 lint:
