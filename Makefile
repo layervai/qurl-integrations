@@ -125,7 +125,7 @@ pre-commit-run:
 ## target omits is noted on the target.
 ##
 ## The root go.mod excludes node_modules from Go package discovery.
-## gofmt still walks those directories; use fmt before installing Node packages.
+## gofmt and goimports in fmt still walk node_modules and may format its Go files.
 
 # $(1) is the app directory. Every app pins its own Node in .nvmrc and CI
 # feeds that file to setup-node, so a mismatched local Node can pass here and
