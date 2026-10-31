@@ -1009,6 +1009,32 @@ enabled on `workspace_mappings.expires_at`. Durable workspace binding rows must
 not write `expires_at`; DynamoDB TTL is table-wide and would reap any real row
 that accidentally carried a numeric value.
 
+## Conversation-mode controls
+
+These values are source defaults when the task does not set an override. Check
+the task definition and environment overrides before changing a deployment.
+The process reads these controls at startup; replace the task after a change.
+
+| Variable | Source default | Meaning |
+| --- | --- | --- |
+| `QURL_AGENT_DISABLED` | `false` | Organization kill switch. `true` disables the agent. An invalid boolean also disables it. |
+| `QURL_AGENT_CONFIRM_ENABLED` | `false` | Enables mutation confirmation only when the read-only agent and block-message delivery are wired. An invalid boolean keeps it off. |
+| `QURL_AGENT_DEFAULT_ENABLED` | `false` | Default for workspaces without their own agent toggle. An explicit workspace choice takes precedence. An invalid boolean keeps the default off. |
+| `QURL_AGENT_MAX_TURNS_PER_USER_PER_HOUR` | `30` | Per-user turn cap within a workspace. `0` removes this cap. |
+| `QURL_AGENT_MAX_TURNS_PER_TEAM_PER_HOUR` | `300` | Workspace turn cap. `0` removes this cap. |
+
+Turn caps use fixed UTC hour buckets. Missing, negative, or invalid integer
+values use the source default. These are cost backstops: a rate-counter storage
+failure allows the turn and logs `agent: turn-rate counter failed; allowing turn
+(fail-open)`. Watch that warning and the deployment's matching alarm.
+
+Keep 30/300 as the initial guardrails. Before changing them, review pilot turn
+usage, rejected turns, model usage, and the workflows that customers need.
+A higher cap does not establish capacity, and `0` removes that protection.
+Enablement flags do not replace model credentials, storage, Slack scopes, or
+message-delivery checks. Verify those paths in the target environment before
+broad enablement.
+
 ## Environment variables
 
 | Variable | Required | Description |
