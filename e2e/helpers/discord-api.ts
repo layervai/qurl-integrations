@@ -39,6 +39,7 @@ export class DiscordApiError extends Error {
   }
 }
 
+// shortcut: 204 keeps returning null; use a nullable type if callers need mixed response shapes.
 export async function api<T = unknown>(token: string, method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {
     Authorization: `Bot ${token}`,
