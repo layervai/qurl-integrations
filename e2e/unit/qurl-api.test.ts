@@ -425,8 +425,10 @@ describe('revokeLink retry path', () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: { code } }), {
       status: 503, headers: { 'Retry-After': '30' },
     })).mockResolvedValueOnce(new Response(null, { status: 404 }));
-    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WAIT_MS);
+    await expect(pending).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(jest.getTimerCount()).toBe(0);
   });
 
@@ -437,9 +439,24 @@ describe('revokeLink retry path', () => {
   });
 
   test('a malformed pending response is not confirmation', async () => {
-    fetchMock.mockResolvedValueOnce(new Response('not JSON', { status: 503, headers: { 'Retry-After': '30' } }));
-    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
+    fetchMock.mockResolvedValueOnce(new Response('not JSON', { status: 503, headers: { 'Retry-After': '30' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }));
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WAIT_MS);
+    await expect(pending).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('keeps the existing legacy 503 to 204 confirmation path', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('protection update pending', {
+      status: 503, headers: { 'Retry-After': '30' },
+    })).mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(31_999);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   test('an immediate 404 does not prove a revoke succeeded', async () => {

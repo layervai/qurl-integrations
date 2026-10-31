@@ -257,25 +257,25 @@ export async function revokeLink(
   const url = new URL(baseUrl);
   url.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
   const init = { method: 'DELETE', headers: { Authorization: `Bearer ${apiKey}` } };
-  let res = cleanupRetryBudget
-    ? await fetchWithCleanupRetry(url, init, cleanupRetryBudget)
-    : await fetch(url, init);
   let committed = false;
-  // TODO(upstream-contract): qurl-service#1998 distinguishes this from a dark/generic 503.
-  if (confirmPending && !cleanupRetryBudget && res.status === 503) {
-    const problem = await res.json().catch(() => null) as { error?: { code?: unknown } } | null;
-    if (problem?.error?.code === 'revocation_pending') {
-      const raw = res.headers.get('retry-after')?.trim() ?? '';
-      const seconds = /^\d+$/.test(raw) ? Number(raw) : NaN;
-      const waitMs = seconds * 1000;
-      if (waitMs > 0 && waitMs <= REVOKE_CONFIRM_WAIT_MS) {
-        committed = true;
-        // Keep the existing estimate pad without shortening the server's directive.
-        await new Promise(resolve => setTimeout(resolve, Math.min(waitMs + 2000, REVOKE_CONFIRM_WAIT_MS)));
-        res = await fetch(url, init);
-      }
-    }
-  }
+  const res = cleanupRetryBudget
+    ? await fetchWithCleanupRetry(url, init, cleanupRetryBudget)
+    : await fetchWithTransientRetry(url, init, confirmPending ? {
+      maxAttempts: 2,
+      maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS,
+      shouldRetry: async (response) => {
+        if (response.status !== 503) return true;
+        const raw = response.headers.get('retry-after')?.trim() ?? '';
+        const waitMs = /^\d+$/.test(raw) ? Number(raw) * 1000 : NaN;
+        // Never shorten a server directive to fit this caller's wait budget.
+        if (waitMs > REVOKE_CONFIRM_WAIT_MS) return false;
+        // This caller needs only the status; the retry response body is discarded.
+        const problem = await response.json().catch(() => null) as { error?: { code?: unknown } } | null;
+        // TODO(upstream-contract): qurl-service#1998 reserves this code for a saved revoke.
+        committed = problem?.error?.code === 'revocation_pending';
+        return !committed || waitMs > 0;
+      },
+    } : { maxAttempts: 1 });
   await res.body?.cancel().catch(() => {});
   const confirmed = res.status === 204 || (committed && res.status === 404);
   if (!confirmed && confirmPending) {
