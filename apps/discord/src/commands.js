@@ -603,40 +603,13 @@ const ALREADY_REVOKING_SEND_MSG = 'Already revoking links for this send.';
 
 const sendCooldowns = new Map();
 
-// Hard ceiling so a bad actor spraying unique user IDs (or a bug generating
-// them) can't grow a cooldown Map beyond this. Above this, the 10%-drop
-// eviction still fires; if that fails to reclaim, evictOldest drops the
-// oldest single entries to guarantee we never exceed the cap. Shared by
-// sendCooldowns and detectCooldowns so the two buckets stay byte-for-byte
-// parallel (see evictOldest).
+// Hard ceiling shared by send and detect; expired entries use the time sweep.
 const COOLDOWNS_MAX = 20000;
 
-// Shared eviction for the cooldown Maps — extracted so setCooldown and
-// setDetectCooldown share ONE implementation rather than two parallel
-// copies that could silently drift. Two phases, both relative to `max`:
-//   1. Soft bulk-drop: once the Map crosses HALF the cap, evict the oldest
-//      ~10% in one pass (cheap amortized trim so we rarely reach the cap).
-//   2. Hard cap: drop the oldest one-at-a-time until size <= max, so the
-//      ceiling holds even under a pathological insertion pattern that beats
-//      the bulk drop.
-// Relies on Map insertion-order iteration (`.keys()` yields oldest first);
-// callers delete+re-set on touch so active entries re-insert at the tail.
+// Trim only excess entries. A normal insertion evicts at most one oldest key;
+// callers delete+re-set on touch so active entries move to the tail.
 function evictOldest(map, max) {
-  const softThreshold = Math.floor(max / 2);
-  if (map.size > softThreshold) {
-    const dropCount = Math.max(1, Math.floor(map.size / 10));
-    const it = map.keys();
-    for (let i = 0; i < dropCount; i++) {
-      const k = it.next().value;
-      if (k === undefined) break;
-      map.delete(k);
-    }
-  }
-  while (map.size > max) {
-    const oldest = map.keys().next().value;
-    if (oldest === undefined) break;
-    map.delete(oldest);
-  }
+  while (map.size > max) map.delete(map.keys().next().value);
 }
 
 function isOnCooldown(userId) {
@@ -647,8 +620,7 @@ function isOnCooldown(userId) {
 
 function setCooldown(userId) {
   // LRU-ish behavior: delete first so set() re-inserts at the end of the
-  // Map's insertion order. Combined with evictOldest's bulk 10%-drop,
-  // active users stay resident while stale entries roll out.
+  // Map's insertion order. At capacity, only the oldest excess key rolls out.
   sendCooldowns.delete(userId);
   sendCooldowns.set(userId, Date.now());
   evictOldest(sendCooldowns, COOLDOWNS_MAX);
