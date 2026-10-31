@@ -256,6 +256,66 @@ func TestDaemonRunExternalStopDuringDeferredFirstReconcileTouchesNothing(t *test
 	}
 }
 
+func TestDaemonRunExternalHeadlessColdAndWarmStartDefersServing(t *testing.T) {
+	stateDir := connectorStateTestDir(t)
+	configPath := writeHeadlessConfigFixture(t)
+	tokenPath := filepath.Join(t.TempDir(), "enrollment-token")
+	const credential = "external-headless-test-token"
+	if err := os.WriteFile(tokenPath, []byte(credential), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	srv := apitest.NewServer(t)
+	originalBuilder := buildNativeSessionFactory
+	t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
+	var factories []*headlessTestFactory
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ *qurlapi.Config, verifyOwner bool, _ *connectorstate.LocalShare) (connectordaemon.GroupFactory, error) {
+		cold := len(factories) == 0
+		if verifyOwner != cold || (cold && cfg.EnrollmentCredential != credential) || (!cold && cfg.EnrollmentCredential != "") {
+			t.Fatal("headless restart did not preserve cold enrollment and warm owner continuity")
+		}
+		// Model the native factory committing its registered identity on enrollment.
+		if cold {
+			writeHeadlessAgentState(t, stateDir, true)
+		}
+		factory := &headlessTestFactory{started: make(chan struct{})}
+		factories = append(factories, factory)
+		return factory, nil
+	}
+	markerPath := filepath.Join(stateDir, connectorstate.RuntimeModeFile)
+	var marker os.FileInfo
+	for _, phase := range []string{"cold", "warm"} {
+		res, status := runDaemonUntilReady(t, stateDir,
+			"--supervision", "external", "--state-dir", stateDir, "--endpoint", srv.URL,
+			"--headless-config", configPath, "--enrollment-token-file", tokenPath)
+		if res.code != 130 || len(status.Running) != 0 || len(status.Resources) != 0 {
+			t.Fatalf("headless %s stop: exit=%d status=%+v stderr=%s", phase, res.code, status, res.stderr.String())
+		}
+		current, err := os.Stat(markerPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if marker != nil && (!os.SameFile(marker, current) || !marker.ModTime().Equal(current.ModTime())) {
+			t.Fatal("warm headless start rewrote the external policy marker")
+		}
+		marker = current
+		factory := factories[len(factories)-1]
+		select {
+		case <-factory.started:
+			t.Fatal("headless daemon served before its supervisor's first reload")
+		default:
+		}
+		if factory.closed.Load() != 1 {
+			t.Fatal("headless factory was not closed once")
+		}
+		if err := os.Remove(tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	if len(factories) != 2 || len(srv.Requests()) != 0 {
+		t.Fatal("headless restarts must open one native factory each without REST calls")
+	}
+}
+
 // TestDaemonRunExternalResolvesTheSocketBeforeAnyDurableWrite pins the order
 // of the daemon's start-up: a runtime directory it cannot use is refused
 // before the external policy marker is committed, so a misconfigured
