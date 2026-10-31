@@ -11,6 +11,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const {
   createGatewaySessionStore,
   DEFAULT_WRITE_THROTTLE_MS,
+  MAX_IN_FLIGHT_WRITES,
 } = require('../src/gateway-session-store');
 
 // Helper to build the standard test store + mocks. Each test calls
@@ -552,5 +553,98 @@ describe('stop()', () => {
 describe('throttle default', () => {
   it('exposes DEFAULT_WRITE_THROTTLE_MS at 1000', () => {
     expect(DEFAULT_WRITE_THROTTLE_MS).toBe(1000);
+  });
+});
+
+describe('bounded session write backpressure', () => {
+  test('ten minutes of stalled writes stay bounded while the mirror advances', async () => {
+    let now = 0;
+    const { store, ddbMock, logger } = makeStore({ clock: () => now });
+    const settle = [];
+    const warningTimes = [];
+    ddbMock.on(PutCommand).callsFake(() => new Promise(resolve => { settle.push(resolve); }));
+    logger.warn.mockImplementation(message => {
+      if (message === 'gateway-session-store: write backpressure') warningTimes.push(now);
+    });
+    try {
+      for (let second = 0; second < 600; second++) {
+        now = second * 1000;
+        store.updateSessionInfo('0:1', sessionInfo({ sequence: second }));
+        expect(store._getInFlightCountForTest()).toBeLessThanOrEqual(MAX_IN_FLIGHT_WRITES);
+      }
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(MAX_IN_FLIGHT_WRITES);
+      expect(store._getInFlightCountForTest()).toBe(MAX_IN_FLIGHT_WRITES);
+      expect(store.retrieveSessionInfo('0:1').sequence).toBe(599);
+      expect(warningTimes[0]).toBeLessThan(5 * 60_000);
+      expect(warningTimes.length).toBeGreaterThan(0);
+      expect(warningTimes.length).toBeLessThanOrEqual(10);
+      for (const [, fields] of logger.warn.mock.calls) {
+        expect(fields).toEqual({ in_flight_writes: MAX_IN_FLIGHT_WRITES, skipped_writes: expect.any(Number) });
+      }
+      settle.forEach(resolve => resolve({}));
+      await store._awaitInFlightForTest();
+      expect(store._getInFlightCountForTest()).toBe(0);
+      now += 1000;
+      store.updateSessionInfo('0:1', sessionInfo({ sequence: 600 }));
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(MAX_IN_FLIGHT_WRITES + 1);
+    } finally {
+      settle.forEach(resolve => resolve({}));
+      ddbMock.on(PutCommand).resolves({});
+      await store.flushFinal();
+      ddbMock.restore();
+    }
+  });
+
+  test('null-clear shares the same cap and still clears the local mirror immediately', async () => {
+    let now = 0;
+    const { store, ddbMock } = makeStore({ clock: () => now });
+    const settle = [];
+    ddbMock.on(PutCommand).callsFake(() => new Promise(resolve => { settle.push(resolve); }));
+    ddbMock.on(DeleteCommand).resolves({});
+    try {
+      for (let index = 0; index < MAX_IN_FLIGHT_WRITES; index++) {
+        now += 1000;
+        store.updateSessionInfo('0:1', sessionInfo({ sequence: index }));
+      }
+      store.updateSessionInfo('0:1', null);
+      expect(store.retrieveSessionInfo('0:1')).toBeNull();
+      expect(store._getInFlightCountForTest()).toBe(MAX_IN_FLIGHT_WRITES);
+      expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
+    } finally {
+      settle.forEach(resolve => resolve({}));
+      ddbMock.on(PutCommand).resolves({});
+      await store.flushFinal();
+      ddbMock.restore();
+    }
+  });
+
+  test('warnings have a one-minute budget and recover after wall-clock rollback', async () => {
+    let now = 0;
+    const { store, ddbMock, logger } = makeStore({ clock: () => now, writeThrottleMs: 1 });
+    const settle = [];
+    ddbMock.on(PutCommand).callsFake(() => new Promise(resolve => { settle.push(resolve); }));
+    try {
+      for (let index = 0; index < MAX_IN_FLIGHT_WRITES; index++) {
+        now++;
+        store.updateSessionInfo('0:1', sessionInfo({ sequence: index }));
+      }
+      now++;
+      store.updateSessionInfo('0:1', sessionInfo({ sequence: 1000 }));
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      now += 59_999;
+      store.updateSessionInfo('0:1', sessionInfo({ sequence: 1001 }));
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      now++;
+      store.updateSessionInfo('0:1', sessionInfo({ sequence: 1002 }));
+      expect(logger.warn).toHaveBeenCalledTimes(2);
+      now = 0;
+      store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-after-clock-change' }));
+      expect(logger.warn).toHaveBeenCalledTimes(3);
+    } finally {
+      settle.forEach(resolve => resolve({}));
+      ddbMock.on(PutCommand).resolves({});
+      await store.flushFinal();
+      ddbMock.restore();
+    }
   });
 });
