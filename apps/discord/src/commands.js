@@ -789,7 +789,7 @@ function resolveRoleNames(guild, ids) {
 
 // --- Shared DM delivery payload builder ---
 // Builds the {embeds, components} payload for a per-recipient DM. The
-// embed copy is intentionally evocative ("opened a door", "Closes")
+// embed copy is intentionally evocative ("opened a door", "Closing time")
 // rather than literal ("shared a file with you") — the brand goal is to
 // convey the qURL hidden-layer model, not just announce a file transfer.
 // Links within Discord's 512-character component limit render as the
@@ -814,7 +814,7 @@ function resolveRoleNames(guild, ids) {
 //     │                                                             │
 //     │  Vik opened a door for you.                                 │  (description, line 1)
 //     │  > "Quarterly numbers — for your eyes only."                │  (description, line 2 — optional italic blockquote)
-//     │  🕐 Closes in 1 day                                         │  (description, line 3 — Discord <t:N:R>, auto-updates
+//     │  🕐 Closing time: in 1 day                                  │  (description, line 3 — Discord <t:N:R>, auto-updates
 //     │                                                             │   client-side to "in 16 hours" / "in 1 hour" / "1 hour ago")
 //     │                                                             │
 //     │  ┌──────────────────────────┐                               │
@@ -1131,10 +1131,8 @@ function buildDeliveryEmbed({
   // between description and expiry. Folding also strips addFields'
   // vertical padding, keeping the Step Through button close.
   //
-  // `<t:N:R>` is Discord's client-side relative-time markdown. Pick
-  // the verb at render time so already-expired rows read naturally
-  // ("Closed 3 days ago") while future rows keep the live countdown
-  // copy ("Closes in 1 day").
+  // A noun label stays grammatical when Discord's relative timestamp flips
+  // from future to past, even if no expiry webhook edit reaches this DM.
   //
   // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl send`
   // and `/qurl map` pipe raw input through `sanitizeMessage`
@@ -1180,8 +1178,7 @@ function buildDeliveryEmbed({
     const capped = Array.from(personalMessage).slice(0, 280).join('').replace(/[\r\n]+/g, ' ').trim();
     if (capped) descLines.push(`> *"${capped}"*`);
   }
-  const expiryVerb = expiresAt <= Math.floor(Date.now() / 1000) ? 'Closed' : 'Closes';
-  descLines.push(`🕐 ${expiryVerb} <t:${expiresAt}:R>`);
+  descLines.push(`🕐 Closing time: <t:${expiresAt}:R>`);
   if (renderActionsAsMarkdown) {
     descLines.push(`[🚪 Step Through](${qurlLink}) · [🛡️ What is qURL?](${TRUST.LANDING_URL})`);
   }

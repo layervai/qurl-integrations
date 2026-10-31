@@ -220,25 +220,36 @@ describe('buildDeliveryPayload — senderAlias sanitization (author row)', () =>
     expect(authorName).not.toMatch(/\uD83C(?![\uDC00-\uDFFF])/);
   });
 
-  it('renders Discord native relative-time <t:N:R> in the description (Closes line)', () => {
+  it('renders Discord native relative-time <t:N:R> with a tense-neutral closing-time label', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
     const desc = capturedEmbeds[0]._description;
-    expect(desc).toMatch(/🕐 Closes <t:1735689600:R>/);
+    expect(desc).toMatch(/🕐 Closing time: <t:1735689600:R>/);
     expect(desc).not.toMatch(/Closes in \*\*\d/);
   });
 
-  it('renders Closed when the qURL already expired at delivery render time', () => {
+  it('keeps the same noun label when already expired at delivery render time', () => {
     const expiredAt = TEST_NOW_SECONDS - 60;
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: expiredAt });
     const desc = capturedEmbeds[0]._description;
-    expect(desc).toMatch(new RegExp(`🕐 Closed <t:${expiredAt}:R>`));
-    expect(desc).not.toMatch(/🕐 Closes <t:/);
+    expect(desc).toMatch(new RegExp(`🕐 Closing time: <t:${expiredAt}:R>`));
+    expect(desc).not.toMatch(/🕐 (Closes|Closed) /);
+  });
+
+  it('needs no follow-on edit when a delivered future timestamp becomes past (#375)', () => {
+    const expiresAt = TEST_NOW_SECONDS + 60;
+    buildDeliveryPayload({ ...baseArgs, expiresAt });
+    const delivered = capturedEmbeds[0]._description;
+    Date.now.mockReturnValue((expiresAt + 3 * 60 * 60) * 1000);
+    buildDeliveryPayload({ ...baseArgs, expiresAt });
+    expect(capturedEmbeds[1]._description).toBe(delivered);
+    expect(delivered).toContain(`🕐 Closing time: <t:${expiresAt}:R>`);
+    expect(delivered).not.toMatch(/🕐 (Closes|Closed) /);
   });
 
   it('accepts Number.MAX_SAFE_INTEGER as a positive integer (no synthetic upper bound)', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: Number.MAX_SAFE_INTEGER });
     const desc = capturedEmbeds[0]._description;
-    expect(desc).toContain(`🕐 Closes <t:${Number.MAX_SAFE_INTEGER}:R>`);
+    expect(desc).toContain(`🕐 Closing time: <t:${Number.MAX_SAFE_INTEGER}:R>`);
   });
 
   it.each([
@@ -330,7 +341,7 @@ describe('buildDeliveryPayload — senderAlias sanitization (author row)', () =>
     expect(lines).toHaveLength(3);
     expect(lines[0]).toBe('opened a door for you.');
     expect(lines[1]).toContain('Quarterly numbers');
-    expect(lines[2]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
+    expect(lines[2]).toMatch(/^🕐 Closing time: <t:1735689600:R>$/);
     expect(capturedEmbeds[0].addFields).not.toHaveBeenCalled();
   });
 
@@ -340,7 +351,7 @@ describe('buildDeliveryPayload — senderAlias sanitization (author row)', () =>
     const lines = desc.split('\n');
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe('opened a door for you.');
-    expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
+    expect(lines[1]).toMatch(/^🕐 Closing time: <t:1735689600:R>$/);
     expect(capturedEmbeds[0].addFields).not.toHaveBeenCalled();
   });
 
@@ -356,7 +367,7 @@ describe('buildDeliveryPayload — senderAlias sanitization (author row)', () =>
     const lines = desc.split('\n');
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe('opened a door for you.');
-    expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
+    expect(lines[1]).toMatch(/^🕐 Closing time: <t:1735689600:R>$/);
   });
 });
 
