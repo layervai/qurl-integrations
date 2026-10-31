@@ -244,6 +244,11 @@ describe('handleQurlSend — slash entry', () => {
       ([msg]) => typeof msg === 'string' && msg.includes('bot-only-or-self mention list'),
     );
     expect(infoLogCalls).toEqual([]);
+    expect(logger.debug).toHaveBeenCalledWith('handleQurlSlashSend: all-invalid mention input', {
+      resource_type: 'file', dropped_bots: 0, unresolved_ids: 0,
+      transient_failure_ids: 0, invalid_tokens: 0, capped_count: 0,
+      mass_mention_denied: false, role_mentions_denied: 1,
+    });
   });
 
   test('text path: <@&roleId> for non-mentionable role WITH MENTION_EVERYONE → expands normally, no warning', async () => {
@@ -624,6 +629,11 @@ describe('handleQurlSend — slash entry', () => {
       await handleQurlSend(int);
       const supersedeCalls = mockSupersedeOrCreate.mock.calls;
       expect(supersedeCalls.length).toBe(0);
+      expect(logger.debug).toHaveBeenCalledWith('handleQurlSlashSend: all-invalid mention input', {
+        resource_type: 'file', dropped_bots: 0, unresolved_ids: 0,
+        transient_failure_ids: 0, invalid_tokens: 0, capped_count: 0,
+        mass_mention_denied: true, role_mentions_denied: 0,
+      });
     });
   });
 });
