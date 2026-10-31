@@ -162,6 +162,8 @@ func (s *Store) LookupChannelAlias(ctx context.Context, teamID, channelID, alias
 	}
 	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
+		// A completed unbind must be visible to the next alias command.
+		ConsistentRead: aws.Bool(true),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),

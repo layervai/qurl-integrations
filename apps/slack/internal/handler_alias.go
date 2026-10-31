@@ -32,6 +32,7 @@ import (
 // existing PK/SK; no GSI, no SK reshape, no data migration (the table
 // is empty pending Slack bot sandbox deploy).
 type AliasStore interface {
+	// LookupChannelAlias reads the current binding; a missing binding is not an error.
 	LookupChannelAlias(ctx context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error)
 	// BindChannelAlias atomically binds aliasName→resourceID on
 	// (teamID, channelID). Implementations issue a DynamoDB UpdateItem

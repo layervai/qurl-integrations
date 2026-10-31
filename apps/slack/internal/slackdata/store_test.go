@@ -869,6 +869,9 @@ func TestLookupChannelAlias_HappyPath(t *testing.T) {
 	if captured == nil {
 		t.Fatal("GetItem was not called")
 	}
+	if !aws.ToBool(captured.ConsistentRead) {
+		t.Fatal("alias lookup must observe a completed unbind before a new bind")
+	}
 	if aws.ToString(captured.TableName) != "cp" {
 		t.Errorf("TableName = %q, want cp", aws.ToString(captured.TableName))
 	}
