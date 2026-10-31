@@ -31,6 +31,7 @@ RUN npm ci --omit=dev --omit=optional --ignore-scripts --no-audit \
 # though they're never needed in the runtime image. Enumerating src/
 # keeps layer caching effective across unrelated edits.
 COPY --chown=node:node src/ ./src/
+COPY --chown=node:node deploy-manifest.json ./deploy-manifest.json
 
 EXPOSE 3000
 

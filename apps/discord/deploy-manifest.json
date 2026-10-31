@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "name": "qurl-bot-discord",
+  "port": 3000,
+  "healthcheck": {
+    "path": "/health"
+  },
+  "roles": [
+    "combined",
+    "gateway",
+    "http"
+  ],
+  "env": {
+    "required": [
+      "DDB_TABLE_PREFIX",
+      "DISCORD_TOKEN"
+    ],
+    "required_production": [
+      "KEY_ENCRYPTION_KEY",
+      "METRICS_TOKEN",
+      "NODE_ENV"
+    ],
+    "optional": [
+      "AUTH0_AUDIENCE",
+      "AUTH0_CLIENT_ID",
+      "AUTH0_CLIENT_SECRET",
+      "AUTH0_DOMAIN",
+      "AUTH0_EMAIL_CONNECTION",
+      "AWS_REGION",
+      "BASE_URL",
+      "CONNECTOR_URL",
+      "DETECT_COMMAND_ENABLED",
+      "DETECT_EXTRA_NON_PROD_HOST_SUFFIXES",
+      "DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS",
+      "DETECT_TUNNEL_SLUG",
+      "DISCORD_CLIENT_ID",
+      "DISCORD_CLIENT_SECRET",
+      "ENABLE_EVENT_SHIPPER",
+      "ENABLE_GATEWAY_HOT_STANDBY",
+      "ENABLE_GATEWAY_RESUME",
+      "GATEWAY_CONTROL_BIND_ADDR",
+      "GATEWAY_CONTROL_PORT",
+      "GATEWAY_HANDOFF_HMAC",
+      "GOOGLE_MAPS_API_KEY",
+      "GUILD_ID",
+      "INSTANCE_ID",
+      "INSTANCE_IP",
+      "KEY_ENCRYPTION_KEY_PREV",
+      "LOG_LEVEL",
+      "MAP_COMMAND_ENABLED",
+      "OAUTH_STATE_SECRET",
+      "PORT",
+      "PROCESS_ROLE",
+      "QURL_API_KEY",
+      "QURL_BOT_DRAIN_DEADLINE_MS",
+      "QURL_BOT_EVENTS_QUEUE_URL",
+      "QURL_BOT_MAX_INFLIGHT_HANDLERS",
+      "QURL_DETECT_COOLDOWN_MS",
+      "QURL_ENDPOINT",
+      "QURL_OAUTH_STATE_SECRET",
+      "QURL_SEND_COOLDOWN_MS",
+      "QURL_SEND_MAX_RECIPIENTS",
+      "QURL_VIEW_COUNTER_COALESCE_MS",
+      "QURL_WEBHOOK_PURE_BYOK",
+      "QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP",
+      "QURL_WEBHOOK_SECRET",
+      "RATE_LIMIT_INSTALL_MAX_REQUESTS",
+      "RATE_LIMIT_MAX_REQUESTS",
+      "RATE_LIMIT_WINDOW_MS",
+      "SHARD_ID",
+      "STORE_TYPE",
+      "TRUST_PROXY"
+    ],
+    "sdk_optional": [
+      "QURL_DEPLOYMENT"
+    ],
+    "forbidden_production": [
+      "CI",
+      "DDB_TEST_ENDPOINT",
+      "ENABLE_VIEW_UPDATE_PUSH",
+      "JEST_WORKER_ID"
+    ],
+    "required_if_enabled": {
+      "MAP_COMMAND_ENABLED": [
+        "GOOGLE_MAPS_API_KEY"
+      ],
+      "DETECT_COMMAND_ENABLED": [
+        "DETECT_TUNNEL_SLUG",
+        "QURL_DEPLOYMENT"
+      ],
+      "ENABLE_EVENT_SHIPPER": [
+        "QURL_BOT_EVENTS_QUEUE_URL"
+      ],
+      "ENABLE_GATEWAY_HOT_STANDBY": [
+        "GATEWAY_HANDOFF_HMAC"
+      ]
+    }
+  }
+}

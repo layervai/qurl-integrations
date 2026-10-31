@@ -135,6 +135,20 @@ remove them only after cleanup or link expiry is confirmed.
 
 ## Configuration
 
+[deploy-manifest.json](deploy-manifest.json) is the deployment contract for
+runtime environment names, the container port and the health path. The image
+bundles it at `/app/deploy-manifest.json`. The managed preflight reads that
+file from the selected immutable image and checks the saved Terraform plan
+before runtime apply. Both Sandbox and production run production-mode images.
+
+The manifest lists unconditional and production requirements, optional app and
+SDK settings, forbidden production hooks, and dependencies of enabled features.
+Tests check declarations against actual runtime environment reads and the
+installed SDK. New settings must update this file with the code that reads them.
+Boot validators still check actual secret values and value-dependent OAuth
+setup rules; a matching name or secret reference does not prove valid credentials.
+
+
 The bot is a Node.js service (**Node ≥ 22**) backed by DynamoDB. Copy
 `.env.example` to `.env` and fill it in — every variable is documented inline.
 The variables below are the ones most deployments need; see `.env.example` for
