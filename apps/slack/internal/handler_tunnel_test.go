@@ -46,7 +46,7 @@ const (
 	testTunnelChannelID              = "C_test"
 	testTunnelImageRef               = "ghcr.io/layervai/qurl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	testTunnelAPIKey                 = "lv_live_test_bootstrap"
-	testTunnelAPIKeyID               = "key_tunnel_bootstrap"
+	testTunnelAPIKeyID               = "key_Aa0123456789"
 	testSlackResponseURL             = "https://hooks.slack.test/response"
 	testAgentAuditTable              = "agent_state"
 	testTunnelAgentReason            = "customer requested connector setup"
@@ -3702,8 +3702,8 @@ func TestRevokeBootstrapKeyAfterInstallFailureTreatsNotFoundAsBenign(t *testing.
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete || r.URL.Path != "/v1/api-keys/key_already_absent" {
-			t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_already_absent", r.Method, r.URL.Path)
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/api-keys/key_Absent000001" {
+			t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_Absent000001", r.Method, r.URL.Path)
 		}
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":{"title":"not found","status":404}}`))
@@ -3714,7 +3714,7 @@ func TestRevokeBootstrapKeyAfterInstallFailureTreatsNotFoundAsBenign(t *testing.
 	log := slog.New(slog.NewTextHandler(&logs, nil))
 	c := client.New(server.URL, "unused", client.WithRetry(0))
 
-	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, c, &client.APIKey{KeyID: "key_already_absent"}, "response_url_delivery_failed")
+	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, c, &client.APIKey{KeyID: "key_Absent000001"}, "response_url_delivery_failed")
 
 	got := logs.String()
 	if !strings.Contains(got, "already absent") || !strings.Contains(got, "response_url_delivery_failed") {
@@ -3722,6 +3722,21 @@ func TestRevokeBootstrapKeyAfterInstallFailureTreatsNotFoundAsBenign(t *testing.
 	}
 	if strings.Contains(got, "cleanup failed") {
 		t.Fatalf("log = %q, 404 should not be logged as cleanup failed", got)
+	}
+}
+
+func TestRevokeBootstrapKeyAfterInstallFailureLogsInvalidID(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1); w.WriteHeader(http.StatusNoContent) }))
+	t.Cleanup(server.Close)
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, client.New(server.URL, "unused", client.WithRetry(0)), &client.APIKey{KeyID: "key_invalid"}, "render_failed")
+	if hits.Load() != 0 {
+		t.Fatal("invalid ID reached upstream")
+	}
+	if got := logs.String(); !strings.Contains(got, "tunnel_bootstrap_cleanup_failed") || !strings.Contains(got, "invalid key_id") || !strings.Contains(got, "render_failed") {
+		t.Fatalf("missing actionable cleanup failure: %s", got)
 	}
 }
 
@@ -3741,7 +3756,7 @@ func TestRevokeBootstrapKeyAfterInstallFailureHonorsParentCancellation(t *testin
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	revokeBootstrapKeyAfterInstallFailure(parent, log, c, &client.APIKey{KeyID: "key_shutdown"}, "shutdown")
+	revokeBootstrapKeyAfterInstallFailure(parent, log, c, &client.APIKey{KeyID: "key_Shutdown0001"}, "shutdown")
 
 	select {
 	case <-hits:
@@ -4596,7 +4611,7 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
 		apiKeyHits++
 		idempotencyKeys = append(idempotencyKeys, r.Header.Get(client.HeaderIdempotencyKey))
-		keyID := fmt.Sprintf("key_retry_%d", apiKeyHits)
+		keyID := fmt.Sprintf("key_Retry%07d", apiKeyHits)
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:  keyID,
 			testKeyAPIKey: fmt.Sprintf("lv_live_retry_bootstrap_%d", apiKeyHits),
@@ -4605,7 +4620,7 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
-	ts.addCustomer(http.MethodDelete, "/v1/api-keys/key_retry_1", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/key_Retry0000001", func(w http.ResponseWriter, _ *http.Request) {
 		revokeHits++
 		w.WriteHeader(http.StatusNoContent)
 	})

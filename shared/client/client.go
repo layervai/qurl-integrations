@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -117,6 +118,24 @@ var ErrCreateAPIKeyMissingKind = errors.New("create api key: kind is required")
 
 // ErrRevokeAPIKeyEmptyID is returned by RevokeAPIKey when keyID is empty.
 var ErrRevokeAPIKeyEmptyID = errors.New("revoke api key: key_id is empty")
+
+// ErrRevokeAPIKeyInvalidID reports a malformed v1 API-key identity.
+var ErrRevokeAPIKeyInvalidID = errors.New("revoke api key: invalid key_id")
+
+// TODO(upstream-contract): matches the v1 service key_id contract; suffixes
+// are case-sensitive alphanumeric identities, not API-key secrets or hex IDs.
+var apiKeyIDPattern = regexp.MustCompile(`^key_[A-Za-z0-9]{12}$`)
+
+// ValidateAPIKeyID checks an already-trimmed v1 key_id before a revoke call.
+func ValidateAPIKeyID(keyID string) error {
+	if keyID == "" {
+		return ErrRevokeAPIKeyEmptyID
+	}
+	if !apiKeyIDPattern.MatchString(keyID) {
+		return ErrRevokeAPIKeyInvalidID
+	}
+	return nil
+}
 
 // ErrDeleteResourceEmptyID is returned by DeleteResource when resourceID
 // is empty.
@@ -1103,8 +1122,8 @@ func (c *Client) CreateAPIKey(ctx context.Context, input *CreateAPIKeyInput) (*A
 // RevokeAPIKey revokes a qURL API key by key_id.
 func (c *Client) RevokeAPIKey(ctx context.Context, keyID string) error {
 	keyID = strings.TrimSpace(keyID)
-	if keyID == "" {
-		return ErrRevokeAPIKeyEmptyID
+	if err := ValidateAPIKeyID(keyID); err != nil {
+		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/api-keys/"+url.PathEscape(keyID), http.NoBody)
 	if err != nil {

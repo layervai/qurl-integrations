@@ -1480,11 +1480,11 @@ func TestRevokeAPIKey(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if err := c.RevokeAPIKey(context.Background(), "key_tunnel_bootstrap"); err != nil {
+	if err := c.RevokeAPIKey(context.Background(), " \tkey_Aa0123456789\n"); err != nil {
 		t.Fatalf("RevokeAPIKey: %v", err)
 	}
-	if gotMethod != http.MethodDelete || gotPath != "/v1/api-keys/key_tunnel_bootstrap" {
-		t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_tunnel_bootstrap", gotMethod, gotPath)
+	if gotMethod != http.MethodDelete || gotPath != "/v1/api-keys/key_Aa0123456789" {
+		t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_Aa0123456789", gotMethod, gotPath)
 	}
 }
 
@@ -1492,8 +1492,8 @@ func TestRevokeAPIKeyReturnsAPIErrorOnFailure(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete || r.URL.Path != "/v1/api-keys/key_missing" {
-			t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_missing", r.Method, r.URL.Path)
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/api-keys/key_Zz9876543210" {
+			t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_Zz9876543210", r.Method, r.URL.Path)
 		}
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":{"title":"not found","status":404,"detail":"key already gone"}}`))
@@ -1501,13 +1501,31 @@ func TestRevokeAPIKeyReturnsAPIErrorOnFailure(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	err := c.RevokeAPIKey(context.Background(), "key_missing")
+	err := c.RevokeAPIKey(context.Background(), "key_Zz9876543210")
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("RevokeAPIKey error = %v, want APIError", err)
 	}
 	if apiErr.StatusCode != http.StatusNotFound || apiErr.Detail != "key already gone" {
 		t.Fatalf("APIError = %+v, want 404 key already gone", apiErr)
+	}
+}
+
+func TestRevokeAPIKeyRejectsMalformedIDsBeforeHTTP(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	c := testClient(srv.URL, "test-key")
+	for _, id := range []string{"k_123456789012", "key_", "key_12345678901", "key_1234567890123", "KEY_Aa0123456789", "key_Aa012345678/", "key_Aa012345678?", "key_Aa012345678#", "key_Aa012345678%", "key_Aa012345678_", "key_Aa012345678-", "key_Aa012345678é", "key_Aa012345678\n9", "../key_Aa0123456789", "lv_live_synthetic"} {
+		if err := c.RevokeAPIKey(context.Background(), id); !errors.Is(err, ErrRevokeAPIKeyInvalidID) {
+			t.Errorf("invalid id unexpectedly accepted: %q, error %v", id, err)
+		}
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("malformed IDs made %d HTTP requests", requests.Load())
 	}
 }
 

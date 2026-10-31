@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	qurlclient "github.com/layervai/qurl-integrations/shared/client"
 )
 
 const (
@@ -66,14 +68,7 @@ const (
 	// minting.
 	structuredErrorEnvelopeCode = "__structured_error_envelope__"
 
-	// credentialKindAPIKey is the `kind` sent on the workspace-key mint. This
-	// package hand-rolls its qurl-service HTTP client and does not import
-	// shared/client, so it keeps its own copy of the enum value.
-	//
-	// TODO(upstream-contract): mirrors qurl-service's kind-first
-	// `CreateApiKeyRequest.kind`; keep in lockstep with
-	// shared/client.CredentialKindAPIKey.
-	credentialKindAPIKey = "api_key"
+	credentialKindAPIKey = qurlclient.CredentialKindAPIKey
 )
 
 // ErrAPIKeyProvisioningQuotaReached is returned when qurl-service refuses key
@@ -516,8 +511,9 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 // RevokeAPIKey best-effort deletes the minted key. Matches the Discord
 // orphan-cleanup pattern.
 func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID string) error {
-	if keyID == "" {
-		return errors.New("RevokeAPIKey: empty keyID")
+	keyID = strings.TrimSpace(keyID)
+	if err := qurlclient.ValidateAPIKeyID(keyID); err != nil {
+		return err
 	}
 	reqURL, err := m.joinAPIKeyURL(keyID)
 	if err != nil {

@@ -9,7 +9,10 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	qurlclient "github.com/layervai/qurl-integrations/shared/client"
 )
 
 const (
@@ -1059,7 +1062,7 @@ func TestHTTPAPIKeyMinterReplacementMintQuotaExceeded(t *testing.T) {
 func TestHTTPAPIKeyMinterMintWorkspaceMissingAPIKey(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"api_key":{"key_id":"k_1","key_prefix":"lv_x"}}`)
+		_, _ = io.WriteString(w, `{"api_key":{"key_id":"key_Aa0123456789","key_prefix":"lv_x"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
@@ -1093,14 +1096,35 @@ func TestHTTPAPIKeyMinterRevokeHappyPath(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	if err := m.RevokeAPIKey(context.Background(), "tok", "k_1"); err != nil {
+	if err := m.RevokeAPIKey(context.Background(), "tok", " \tkey_Aa0123456789\n"); err != nil {
 		t.Fatalf("RevokeAPIKey: %v", err)
 	}
 	if gotMethod != http.MethodDelete {
 		t.Errorf("method: got %q want DELETE", gotMethod)
 	}
-	if gotPath != "/v1/api-keys/k_1" {
-		t.Errorf("path: got %q want /v1/api-keys/k_1", gotPath)
+	if gotPath != "/v1/api-keys/key_Aa0123456789" {
+		t.Errorf("path: got %q want /v1/api-keys/key_Aa0123456789", gotPath)
+	}
+}
+
+func TestHTTPAPIKeyMinterRevokeMalformedIDBeforeHTTP(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	for _, id := range []string{"k_1", "key_12345678901", "key_1234567890123", "../key_Aa0123456789", "key_Aa012345678/", "key_Aa012345678%", "lv_live_synthetic"} {
+		if err := m.RevokeAPIKey(context.Background(), "tok", id); !errors.Is(err, qurlclient.ErrRevokeAPIKeyInvalidID) {
+			t.Errorf("invalid key ID error = %v", err)
+		}
+	}
+	if err := m.RevokeAPIKey(context.Background(), "tok", " \t\n"); !errors.Is(err, qurlclient.ErrRevokeAPIKeyEmptyID) {
+		t.Fatalf("empty key ID error = %v", err)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("malformed IDs made %d HTTP requests", requests.Load())
 	}
 }
 
@@ -1118,7 +1142,7 @@ func TestHTTPAPIKeyMinterRevokeNotFoundClassified(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	err := m.RevokeAPIKey(context.Background(), "tok", "k_1")
+	err := m.RevokeAPIKey(context.Background(), "tok", "key_Aa0123456789")
 	if !errors.Is(err, ErrAPIKeyNotFound) {
 		t.Fatalf("RevokeAPIKey 404 error = %v, want ErrAPIKeyNotFound", err)
 	}
@@ -1130,7 +1154,7 @@ func TestHTTPAPIKeyMinterRevokeNon2xx(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	if err := m.RevokeAPIKey(context.Background(), "tok", "k_1"); err == nil {
+	if err := m.RevokeAPIKey(context.Background(), "tok", "key_Aa0123456789"); err == nil {
 		t.Fatal("expected error on 5xx")
 	}
 }
@@ -1143,7 +1167,7 @@ func TestHTTPAPIKeyMinterRevokeSuccessIgnoresBody(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	if err := m.RevokeAPIKey(context.Background(), "tok", "k_1"); err != nil {
+	if err := m.RevokeAPIKey(context.Background(), "tok", "key_Aa0123456789"); err != nil {
 		t.Fatalf("successful revoke body must be ignored, got %v", err)
 	}
 }
@@ -1156,7 +1180,7 @@ func TestHTTPAPIKeyMinterRevokeOversizedAuthFailureTyped(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	err := m.RevokeAPIKey(context.Background(), "tok", "k_1")
+	err := m.RevokeAPIKey(context.Background(), "tok", "key_Aa0123456789")
 
 	var authErr *DependencyAuthFailureError
 	if !errors.As(err, &authErr) {
@@ -1182,7 +1206,7 @@ func TestHTTPAPIKeyMinterRevokeAuthFailureTyped(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	err := m.RevokeAPIKey(context.Background(), "tok", "k_1")
+	err := m.RevokeAPIKey(context.Background(), "tok", "key_Aa0123456789")
 
 	var authErr *DependencyAuthFailureError
 	if !errors.As(err, &authErr) {

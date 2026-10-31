@@ -2178,6 +2178,11 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 // it, a deployment that refuses the revoke would leave admins unable to
 // disconnect at all.
 func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string) (revoked bool, err error) {
+	if errors.Is(revokeErr, client.ErrRevokeAPIKeyInvalidID) || errors.Is(revokeErr, client.ErrRevokeAPIKeyEmptyID) {
+		// Like legacy rows without an ID, retain the upstream-key warning.
+		slog.Warn("/qurl uninstall: unusable saved qURL key id — local-only disconnect", "team_id", teamID, "caller_user_id", userID)
+		return false, nil
+	}
 	var apiErr *client.APIError
 	if errors.As(revokeErr, &apiErr) {
 		switch apiErr.StatusCode {
