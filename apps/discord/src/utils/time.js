@@ -117,16 +117,14 @@ function isLegitimateSelfDestructSelectValue(value) {
 
 // formatSelfDestructLabel — renders a stored seconds value as the matching
 // preset's friendly label (e.g., 0.5 → "1/2 second"). Used by the form to
-// echo what the user picked, with a timing note below one minute. Falls back to a compact "Ns" rendering for
+// echo what the user picked. Falls back to a compact "Ns" rendering for
 // any finite off-preset value (unreachable through the dropdown today but
 // defends against a backfilled config). Non-finite (NaN/Infinity) returns
 // "(invalid)" so a corrupted DB row doesn't surface as the literal string
 // "NaNs" / "Infinitys" in the form preview.
 function formatSelfDestructLabel(seconds) {
   const match = findPresetBySeconds(seconds);
-  const timingNote = seconds > 0 && seconds < 60
-    ? "\nAccess stops at the timer; an open file may briefly continue loading." : '';
-  if (match) return match.label + timingNote;
+  if (match) return match.label;
   // Intentionally NOT isPositiveFinite — this branch's purpose is
   // to flag *non-finite* (NaN/Infinity) as "(invalid)" while still
   // letting 0 / negative off-preset values render as "0s" / "-5s"
@@ -135,7 +133,15 @@ function formatSelfDestructLabel(seconds) {
   // "finish the refactor" by switching to isPositiveFinite — that
   // would silently re-route 0 / negatives to "(invalid)" too.
   if (!Number.isFinite(seconds)) return '(invalid)';
-  return `${seconds}s${timingNote}`;
+  return `${seconds}s`;
+}
+
+// The viewer may blank before the server's one-second access minimum.
+function formatSelfDestructTimingNote(seconds) {
+  if (!isPositiveFinite(seconds) || seconds >= 60) return '';
+  return seconds < 1
+    ? 'Access uses a one-second minimum; open content may briefly continue loading.'
+    : 'Access stops at the timer; open content may briefly continue loading.';
 }
 
 // formatSelfDestructSegment — renders the self-destruct status as a
@@ -146,7 +152,9 @@ function formatSelfDestructLabel(seconds) {
 // with the rest of the header.
 function formatSelfDestructSegment(seconds) {
   if (isPositiveFinite(seconds)) {
-    return `Self-destruct: ${formatSelfDestructLabel(seconds)}`;
+    const label = `Self-destruct: ${formatSelfDestructLabel(seconds)}`;
+    const note = formatSelfDestructTimingNote(seconds);
+    return note ? `${label}\n${note}` : label;
   }
   return 'Self-destruct: off';
 }
@@ -214,6 +222,7 @@ module.exports = {
   // rendering a wrong-time marker.
   parseExpiryMs,
   formatSelfDestructLabel,
+  formatSelfDestructTimingNote,
   formatSelfDestructSegment,
   formatSessionDurationSeconds,
   isPositiveFinite,

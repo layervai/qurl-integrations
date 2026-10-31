@@ -115,13 +115,13 @@ describe('utils/time', () => {
   describe('formatSelfDestructLabel', () => {
     it('renders each preset seconds value as the matching label', () => {
       for (const preset of SELF_DESTRUCT_PRESETS) {
-        expect(formatSelfDestructLabel(preset.seconds).split('\n')[0]).toBe(preset.label);
+        expect(formatSelfDestructLabel(preset.seconds)).toBe(preset.label);
       }
     });
 
     it('falls back to a compact "Ns" rendering for off-preset values', () => {
-      expect(formatSelfDestructLabel(2).split('\n')[0]).toBe('2s');
-      expect(formatSelfDestructLabel(0.75).split('\n')[0]).toBe('0.75s');
+      expect(formatSelfDestructLabel(2)).toBe('2s');
+      expect(formatSelfDestructLabel(0.75)).toBe('0.75s');
     });
 
     it('renders "(invalid)" for non-finite stored values (corrupted DB row)', () => {
@@ -135,8 +135,10 @@ describe('utils/time', () => {
   describe('formatSelfDestructSegment', () => {
     it('renders each preset as "Self-destruct: <label>"', () => {
       for (const preset of SELF_DESTRUCT_PRESETS) {
-        expect(formatSelfDestructSegment(preset.seconds).split('\n')[0])
-          .toBe(`Self-destruct: ${preset.label}`);
+        expect(formatSelfDestructSegment(preset.seconds))
+          .toBe(`Self-destruct: ${preset.label}${preset.seconds < 60 ? '\n' + (preset.seconds < 1
+            ? 'Access uses a one-second minimum; open content may briefly continue loading.'
+            : 'Access stops at the timer; open content may briefly continue loading.') : ''}`);
       }
     });
 

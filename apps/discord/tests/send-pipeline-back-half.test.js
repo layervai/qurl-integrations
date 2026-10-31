@@ -4058,18 +4058,27 @@ describe('send-confirm audit correlation', () => {
   });
 });
 
-test.each([0.5, 1, 5, 30, 60, 300, null])('short-timer precision note reaches preview and recap (%s seconds)', seconds => {
-  const preview = _test.renderConfirmCardContent({
-    resourceType: 'file', resourceLabel: 'report.pdf', validRecipients: [], expiresIn: '1h',
-    selfDestructSeconds: seconds,
+describe.each(['file', 'maps'])('self-destruct timing copy for %s', resourceType => {
+  test.each([
+    [0.5, 'Access uses a one-second minimum; open content may briefly continue loading.'],
+    [0.75, 'Access uses a one-second minimum; open content may briefly continue loading.'],
+    [1, 'Access stops at the timer; open content may briefly continue loading.'],
+    [2, 'Access stops at the timer; open content may briefly continue loading.'],
+    [5, 'Access stops at the timer; open content may briefly continue loading.'],
+    [30, 'Access stops at the timer; open content may briefly continue loading.'],
+    [60, null], [300, null], [null, null],
+  ])('preview and recap keep the note on its own line (%s seconds)', (seconds, note) => {
+    const preview = _test.renderConfirmCardContent({
+      resourceType, resourceLabel: 'shared content', validRecipients: [], expiresIn: '1h',
+      selfDestructSeconds: seconds,
+    });
+    const recap = renderSendConfirm({
+      delivered: 1, expiresIn: '1h', selfDestructSeconds: seconds,
+      failedNamesPlain: [], successNames: ['alice'], showAll: false,
+    }).content;
+    for (const content of [preview, recap]) {
+      if (note) expect(content.split('\n')).toContain(note);
+      else expect(content).not.toContain('open content may briefly continue loading');
+    }
   });
-  const recap = renderSendConfirm({
-    delivered: 1, expiresIn: '1h', selfDestructSeconds: seconds,
-    failedNamesPlain: [], successNames: ['alice'], showAll: false,
-  }).content;
-  const note = 'Access stops at the timer; an open file may briefly continue loading.';
-  for (const content of [preview, recap]) {
-    if (seconds > 0 && seconds < 60) expect(content).toContain(note);
-    else expect(content).not.toContain(note);
-  }
 });
