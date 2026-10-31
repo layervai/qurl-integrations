@@ -209,7 +209,7 @@ if (previousCommandScope && previousCommandScope !== 'global' && !isDiscordSnowf
 // every callsite.
 //
 // Both modes run the same command surface (/qurl) and the same routes.
-// Per-guild qURL configuration flows through /qurl setup in either mode;
+// Per-guild qURL configuration flows through /qurl-admin setup in either mode;
 // the only behavioral difference is command registration scope.
 const isMultiTenant = !normalizedGuildId;
 
@@ -256,7 +256,7 @@ function parseAuth0EmailConnection(raw) {
     // Keep the rest of the bot available while failing only OAuth setup
     // closed. A malformed optional setting must not weaken account selection,
     // but it also must not take down /qurl send, webhooks, or the gateway.
-    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); blocking every /qurl setup entry path (including legacy modal paste) while qURL OAuth is configured, until corrected; other bot operations remain available.`);
+    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); blocking every /qurl-admin setup entry path (including legacy modal paste) while qURL OAuth is configured, until corrected; other bot operations remain available.`);
     return { value: '', state: 'rejected' };
   }
   return { value, state: 'pinned' };
@@ -459,8 +459,8 @@ module.exports = {
   // webhook linking fail closed instead of silently taking the rotation path.
   QURL_WEBHOOK_PURE_BYOK: process.env.QURL_WEBHOOK_PURE_BYOK === 'true',
 
-  // qURL OAuth (Auth0) — for /qurl setup admin consent flow.
-  // When unset, /qurl setup falls back to the legacy modal-paste path so the
+  // qURL OAuth (Auth0) — for /qurl-admin setup admin consent flow.
+  // When unset, /qurl-admin setup falls back to the legacy modal-paste path so the
   // bot stays usable until Justin registers the Auth0 application + drops
   // these into prod SSM. See project_qurl_bot_onboarding_model.md memory for
   // the OAuth-app shape (Regular Web Application, callback URL = BASE_URL +
@@ -521,7 +521,7 @@ module.exports = {
   // QURL_ENDPOINT can't be missing — the
   // ternary below always yields a value. QURL_API_KEY is only the
   // global fallback for /qurl send + /qurl map; every deployment shape
-  // configures a per-guild key through /qurl setup, so it is
+  // configures a per-guild key through /qurl-admin setup, so it is
   // absent from prodRequired(). The separate production webhook gate requires
   // QURL_API_KEY when QURL_WEBHOOK_SECRET is set, for default-owner discovery.
   QURL_API_KEY: process.env.QURL_API_KEY,

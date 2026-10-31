@@ -3900,10 +3900,10 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   }).catch(logIgnoredDiscordErr);
 }
 
-// /qurl setup — legacy modal-paste path conversion. See
+// /qurl-admin setup — legacy modal-paste path conversion. See
 // docs/zero-downtime-design.md Pillar 1 for the two-stage shape:
 //
-//   /qurl setup (slash)          createFlow(awaiting_setup_button)
+//   /qurl-admin setup (slash)          createFlow(awaiting_setup_button)
 //       → reply with [Configure qURL] button
 //   button click (dispatcher)    transitionFlow → awaiting_setup_modal
 //       → showModal()                              (set_expires_at extends TTL)
@@ -3926,7 +3926,7 @@ const SETUP_AUTH_POLICY_UNAVAILABLE_MSG =
 function rejectSetupForInvalidAuthPolicy(interaction) {
   // warn, not error: server.js already raised the one actionable error-level
   // signal at boot; this fires per user interaction while the deploy is broken.
-  logger.warn('Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot');
+  logger.warn('Refusing /qurl-admin setup: AUTH0_EMAIL_CONNECTION was rejected at boot');
   return interaction.reply({
     content: SETUP_AUTH_POLICY_UNAVAILABLE_MSG,
     ephemeral: true,
@@ -4018,7 +4018,7 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     // transitionFlow Update (TTL reap or a concurrent
     // admin_cleanup). Tell the user to rerun.
     return interaction.reply({
-      content: 'This setup session expired or was replaced — please run `/qurl setup` again.',
+      content: 'This setup session expired or was replaced — please run `/qurl-admin setup` again.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
@@ -4044,13 +4044,13 @@ async function handleSetupButton(interaction, { flow_id, row }) {
 
   // Roll back the OCC transition if showModal throws. Without the
   // delete, the row sits at awaiting_setup_modal until TTL and the
-  // admin's /qurl setup rerun trips the supersede peek into the
+  // admin's /qurl-admin setup rerun trips the supersede peek into the
   // "you already have a modal open" branch. If the rollback itself
   // also fails (DDB region outage), the error logs at error-level
   // — admin recovery is the SETUP_MODAL_TTL_SECONDS (5 min) wait.
   //
   // expectedVersion gates the rollback delete on the exact version
-  // we just wrote. If a concurrent /qurl setup rerun's
+  // we just wrote. If a concurrent /qurl-admin setup rerun's
   // supersedeOrCreate ALSO observed this row and won the version
   // race first, this delete fails (deleted:false) — correct: the
   // row that exists at flow_id is now the new caller's, not ours
@@ -4091,7 +4091,7 @@ async function handleSetupButton(interaction, { flow_id, row }) {
         metric: 'setup_rollback_failed',
       });
     });
-    // The "run /qurl setup again" guidance is accurate when the
+    // The "run /qurl-admin setup again" guidance is accurate when the
     // rollback succeeded (clean state, rerun works). If the rollback
     // ALSO failed (rare double-DDB-failure logged just above), the
     // rerun will hit the "you already have a modal open" branch
@@ -4109,7 +4109,7 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     // silently swallow, leaving the admin with no feedback.
     await safeReply(
       interaction,
-      'Could not open the configuration form — please run `/qurl setup` again.',
+      'Could not open the configuration form — please run `/qurl-admin setup` again.',
     );
   }
 }
@@ -4142,7 +4142,7 @@ async function handleSetupModal(interaction, { flow_id }) {
     // (admin walks away mid-paste past the 300 s budget), so the
     // wording covers both "expired" and "already processed."
     return interaction.reply({
-      content: 'This setup session has expired or was already processed — run `/qurl setup` again.',
+      content: 'This setup session has expired or was already processed — run `/qurl-admin setup` again.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
@@ -4198,7 +4198,7 @@ async function handleSetupModal(interaction, { flow_id }) {
   if (!SETUP_API_KEY_REGEX.test(submittedKey)) {
     logger.warn('validate-key rejected (bad format)', logFields);
     return interaction.reply({
-      content: 'Invalid API key format. Keys start with `lv_live_` or `lv_test_` and are at least 28 characters. Run `/qurl setup` again to retry.',
+      content: 'Invalid API key format. Keys start with `lv_live_` or `lv_test_` and are at least 28 characters. Run `/qurl-admin setup` again to retry.',
       ephemeral: true,
     });
   }
@@ -4243,7 +4243,7 @@ async function handleSetupModal(interaction, { flow_id }) {
   // propagate would fire the dispatcher's universal safety-net
   // reply ("Something went wrong — please run the command again"),
   // which is actively wrong: the key IS saved. Admin can confirm
-  // with /qurl status; the saved-but-no-confirmation case is rare
+  // with /qurl-admin status; the saved-but-no-confirmation case is rare
   // and recoverable, the misleading-error case is not.
   return interaction.editReply({
     content: SETUP_SUCCESS_MSG,
@@ -4269,7 +4269,7 @@ async function handleSetupModal(interaction, { flow_id }) {
 // (or a UserSelectMenu when `recipients:` was omitted) plus Send /
 // Cancel buttons. The confirm card is flow_state-backed so the Send
 // dedup gate fires on `deleteFlow` (consistent with /qurl revoke,
-// /qurl setup).
+// /qurl-admin setup).
 // ─────────────────────────────────────────────────────────────
 
 const {
@@ -6343,7 +6343,7 @@ const DETECT_NO_MATCH_MSG = '🔍 No qURL watermark found in this image (for thi
 // Server-staff permissions that grant /qurl detect standing — the PM "admins/mods" tier, layered
 // on top of the original-sender tier (see the handler's ACCESS MODEL). Deliberately TIGHT and
 // governance-oriented, not a broad enumeration of every mod bit:
-//   - ManageGuild — this bot's own admin gate (matches /qurl status + setup); an Administrator
+//   - ManageGuild — this bot's own admin gate (matches /qurl-admin status + setup); an Administrator
 //     passes it automatically via PermissionsBitField.has().
 //   - BanMembers — the moderator tier that handles the PM's governance examples (abuse reports,
 //     DMCA, ban appeals).
@@ -8307,7 +8307,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // apiKey gate runs BEFORE deleteFlow: if both guildApiKey AND
   // config.QURL_API_KEY are null (rare — key rotation removed the
   // key), the flow row stays alive and the user can re-click Send
-  // within the TTL after the admin reruns `/qurl setup`. Burning the
+  // within the TTL after the admin reruns `/qurl-admin setup`. Burning the
   // row before discovering there's no key to send with would strand
   // the user on a dead card.
   if (apiKeyResult.status === 'rejected') {
@@ -8327,14 +8327,14 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // config.QURL_API_KEY are null (rare: key rotation removed the key
   // between dispatcher pre-check and Send click), there's nothing to
   // send with — preserving the flow row lets the user retry after the
-  // admin re-runs `/qurl setup` without re-invoking the slash command.
+  // admin re-runs `/qurl-admin setup` without re-invoking the slash command.
   // Cooldown clears so the user isn't stranded for the 30s window
   // while waiting on the admin.
   const apiKey = guildApiKey || config.QURL_API_KEY;
   if (!apiKey) {
     clearCooldown(interaction.user.id);
     return interaction.editReply({
-      content: '❌ qURL is no longer configured for this server. Ask an admin to run `/qurl setup`.',
+      content: '❌ qURL is no longer configured for this server. Ask an admin to run `/qurl-admin setup`.',
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
@@ -9017,14 +9017,6 @@ function buildQurlCommandData(cfg) {
     sub.setName('help')
       .setDescription('Show qURL bot help')
   );
-  builder.addSubcommand(sub =>
-    sub.setName('setup')
-      .setDescription('Configure your qURL API key for this server (admin only)')
-  );
-  builder.addSubcommand(sub =>
-    sub.setName('status')
-      .setDescription('Check if qURL is configured (admin only)')
-  );
   return builder;
 }
 
@@ -9037,10 +9029,11 @@ const commands = [
     // checks the subcommand names and, when map is enabled, that send and map
     // register identical shared options.
     data: buildQurlCommandData(config),
+    // Shared admin handlers also accept guarded, unregistered cached aliases.
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
 
-      // /qurl setup — admin-only, configure API key for this server.
+      // /qurl-admin setup — admin-only, configure API key for this server.
       //
       // Default flow (when AUTH0_* env vars are configured): replies with
       // a one-shot OAuth-redirect link. Admin clicks → Auth0 sign-in +
@@ -9079,11 +9072,11 @@ const commands = [
           // /oauth/qurl/start. Same actionable message as the legacy
           // modal-paste branch below; round-9.6 #4 surface symmetry.
           if (!process.env.KEY_ENCRYPTION_KEY) {
-            logger.error('Refusing /qurl setup (OAuth path): KEY_ENCRYPTION_KEY is not set');
+            logger.error('Refusing /qurl-admin setup (OAuth path): KEY_ENCRYPTION_KEY is not set');
             return interaction.reply({
               content: '❌ **qURL is not ready to accept setup on this server.**\n\n'
                 + 'The bot operator needs to set `KEY_ENCRYPTION_KEY` (encryption-at-rest) before '
-                + '/qurl setup can store keys safely. Ask them to check the deployment env.',
+                + '/qurl-admin setup can store keys safely. Ask them to check the deployment env.',
               ephemeral: true,
             });
           }
@@ -9102,11 +9095,11 @@ const commands = [
         // crypto module's plaintext fallback would silently store a
         // billing-sensitive secret on disk.
         if (!process.env.KEY_ENCRYPTION_KEY) {
-          logger.error('Refusing /qurl setup: KEY_ENCRYPTION_KEY is not set');
+          logger.error('Refusing /qurl-admin setup: KEY_ENCRYPTION_KEY is not set');
           return interaction.reply({
             content: '❌ **qURL is not ready to accept API keys on this server.**\n\n' +
               'The bot operator needs to set `KEY_ENCRYPTION_KEY` (encryption-at-rest) before '
-              + '/qurl setup can store keys safely. Ask them to check the deployment env.',
+              + '/qurl-admin setup can store keys safely. Ask them to check the deployment env.',
             ephemeral: true,
           });
         }
@@ -9119,7 +9112,7 @@ const commands = [
         // in-process Promise.
         //
         // Supersede semantics: supersedeOrCreate's version-gated
-        // deleteFlow makes a second /qurl setup a no-op when the
+        // deleteFlow makes a second /qurl-admin setup a no-op when the
         // prior flow is mid-modal (the surviving peek returns the
         // awaiting_setup_modal row unchanged, and we surface the
         // "modal already open" wording from its registered
@@ -9178,7 +9171,7 @@ const commands = [
         });
       }
 
-      // /qurl status — verify the stored key. Gate behind ManageGuild because
+      // /qurl-admin status — verify the stored key. Gate behind ManageGuild because
       // the response discloses the key's prefix, granted scopes and provenance,
       // and each run spends a KMS decrypt plus one upstream qURL API call.
       // No cooldown, accepted deliberately: the same ManageGuild admin can
@@ -9203,7 +9196,7 @@ const commands = [
           });
           return interaction.editReply({
             content: '⚠️ **The qURL status check could not be completed.**\n'
-              + 'Please try `/qurl status` again later.',
+              + 'Please try `/qurl-admin status` again later.',
           });
         }
         if (guildConfig) {
@@ -9253,10 +9246,10 @@ const commands = [
               // silently rather than mis-flag a present admin.
               if (err?.code === 10007) {
                 originalAdminLeftNotice =
-                  '\n\n⚠️ The admin who originally ran `/qurl setup` (<@' +
+                  '\n\n⚠️ The admin who originally ran `/qurl-admin setup` (<@' +
                   configuredByDisplay + '>) has left this server. ' +
                   'qURL usage continues to bill to their layerv.ai account. ' +
-                  'A current `ManageGuild` admin can run `/qurl setup` again to take over billing.';
+                  'A current `ManageGuild` admin can run `/qurl-admin setup` again to take over billing.';
               }
             }
           }
@@ -9272,7 +9265,7 @@ const commands = [
             failureStage,
             identityFailed,
           } = await identityResultPromise;
-          const reconnectCopy = 'Re-run `/qurl setup` to connect a valid key.\n\n';
+          const reconnectCopy = 'Re-run `/qurl-admin setup` to connect a valid key.\n\n';
           // Every outcome renders as `<verdict copy> + configurationDetails`;
           // only the verdict differs, so build it here and share one exit.
           const STATUS_SCOPE_DISPLAY_MAX = 10;
@@ -9295,7 +9288,7 @@ const commands = [
             verdict = failureStage === 'qurl_service' && (status === 401 || status === 403)
               ? '❌ **The stored qURL key is revoked or invalid.**\n\n' + reconnectCopy
               : '⚠️ **Stored qURL configuration found, but the key check could not be completed.**\n'
-                + 'Please try `/qurl status` again later.\n\n';
+                + 'Please try `/qurl-admin status` again later.\n\n';
           } else {
             // Shows the service-issued `key_prefix` where this handler used to
             // show a sha256 fingerprint of the stored key. That earlier decision
@@ -9356,7 +9349,7 @@ const commands = [
           });
         }
         // Branch the not-configured copy on the active setup flow so
-        // the instructions match what /qurl setup actually accepts —
+        // the instructions match what /qurl-admin setup actually accepts —
         // OAuth-redirect (no api_key arg) vs legacy modal-paste.
         // Pre-OAuth this hardcoded `setup api_key:lv_live_your_key_here`,
         // which never matched the modal flow either; fixed in round-9.6
@@ -9366,12 +9359,12 @@ const commands = [
           notConfiguredCopy = SETUP_AUTH_POLICY_UNAVAILABLE_MSG;
         } else if (config.isQurlSetupAvailable) {
           notConfiguredCopy = '❌ **qURL is not configured for this server.**\n\n'
-            + 'Run `/qurl setup` to connect — you\'ll be redirected to layerv.ai to authorize, '
+            + 'Run `/qurl-admin setup` to connect — you\'ll be redirected to layerv.ai to authorize, '
             + 'and the bot will mint an API key bound to your server. Only server administrators can run setup.';
         } else {
           notConfiguredCopy = '❌ **qURL is not configured for this server.**\n\n'
             + '1. Sign up at **https://layerv.ai** to get your API key\n'
-            + '2. Run `/qurl setup` and paste the key into the modal\n\n'
+            + '2. Run `/qurl-admin setup` and paste the key into the modal\n\n'
             + 'Only server administrators can run setup.';
         }
         return interaction.editReply({
@@ -9414,7 +9407,7 @@ const commands = [
         if (!guildApiKey && !config.QURL_API_KEY) {
           return interaction.reply({
             content: '❌ **qURL is not configured for this server.**\n\n' +
-              'A server admin needs to run `/qurl setup` first.\n' +
+              'A server admin needs to run `/qurl-admin setup` first.\n' +
               'Sign up at **https://layerv.ai** to get your API key.',
             ephemeral: true,
           });
@@ -9468,7 +9461,7 @@ const commands = [
         // PR #177), then glossary (Terms), then operational caveat
         // The "Setting up" section pivots on whether qURL OAuth is
         // configured. When unset (sandbox before Auth0 secrets land), keep
-        // the legacy API-key wording so help matches what /qurl setup does.
+        // the legacy API-key wording so help matches what /qurl-admin setup does.
         // The Add to Discord entrypoint has an additional Discord client-
         // secret dependency, so advertise it only when the full customer
         // install flow is ready.
@@ -9477,12 +9470,12 @@ const commands = [
           oauthSetupSection = SETUP_AUTH_POLICY_UNAVAILABLE_MSG + '\n\n';
         } else if (config.isQurlSetupAvailable) {
           oauthSetupSection = '**Setting up (for Admins):**\n'
-            + '  `/qurl setup` — connect qURL via OAuth (admin only). Click the link, sign in to layerv.ai, consent. No API key paste.\n'
-            + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+            + '  `/qurl-admin setup` — connect qURL via OAuth (admin only). Click the link, sign in to layerv.ai, consent. No API key paste.\n'
+            + '  `/qurl-admin status` — check if qURL is configured (admin only)\n\n';
         } else {
           oauthSetupSection = '**Setting up (for Admins):**\n'
-            + '  `/qurl setup` — configure your API key (admin only)\n'
-            + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+            + '  `/qurl-admin setup` — configure your API key (admin only)\n'
+            + '  `/qurl-admin status` — check if qURL is configured (admin only)\n\n';
         }
         const discordInstallSection = config.isDiscordInstallConfigured
           ? '_Adding the bot to a new server?_ Use the "Add to Discord" link on **https://layerv.ai** — '
@@ -9537,6 +9530,22 @@ const commands = [
           ephemeral: true,
         });
       }
+    },
+  },
+  {
+    data: new SlashCommandBuilder()
+      .setName('qurl-admin')
+      .setDescription('Manage qURL setup and configuration status')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addSubcommand(sub => sub.setName('setup').setDescription('Configure qURL for this server'))
+      .addSubcommand(sub => sub.setName('status').setDescription("Check this server's qURL configuration")),
+    async execute(interaction) {
+      const sub = interaction.options.getSubcommand();
+      if (sub !== 'setup' && sub !== 'status') {
+        return interaction.reply({ content: 'Unknown qURL admin command.', ephemeral: true });
+      }
+      // Reuse the same runtime permission gates as cached setup/status aliases.
+      return commands.find(command => command.data.name === 'qurl').execute(interaction);
     },
   },
 ];
@@ -9923,15 +9932,15 @@ registerFlow(SETUP_BUTTON_CUSTOM_ID, {
   // peek finds a row at awaiting_setup_button surfaces this — its
   // surviving.stage !== awaiting_revoke_select so it doesn't claim,
   // but a generic "try again" wouldn't tell the admin what to do.
-  // (A same-flow-type /qurl setup rerun never hits this path: its
+  // (A same-flow-type /qurl-admin setup rerun never hits this path: its
   // own supersedeOrCreate matches the button stage and version-
   // gated-deletes the prior row in one round-trip.)
-  siblingMessage: 'You have a `/qurl setup` button waiting in this channel — click it or wait for it to expire.',
+  siblingMessage: 'You have a `/qurl-admin setup` button waiting in this channel — click it or wait for it to expire.',
 });
 registerFlow(SETUP_MODAL_CUSTOM_ID, {
   expectedStage: SETUP_STAGE_AWAITING_MODAL,
   handler: handleSetupModal,
-  siblingMessage: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
+  siblingMessage: 'You already have a `/qurl-admin setup` modal open — finish that one, or wait for it to expire.',
 });
 
 // /qurl send + /qurl map confirm-card components. All three customIds

@@ -21,6 +21,7 @@ interface ApplicationCommandOption {
 interface ApplicationCommand {
   name: string;
   type?: number;
+  default_member_permissions?: string | null;
   options?: ApplicationCommandOption[];
 }
 
@@ -40,10 +41,11 @@ type ScopedCommand = ApplicationCommand & { _scope: 'global' | 'guild' };
 // becomes observed rather than theoretical.
 describe('Discord command registration (smoke)', () => {
   const env = loadEnv();
-  // Shared across both assertions so we only hit the Discord API twice per
+  // Shared across the assertions so we only hit the Discord API twice per
   // run instead of four times (halves rate-limit exposure). Initialized
   // to `[]` so the type doesn't lie during the pre-beforeAll window.
   let registrations: ScopedCommand[] = [];
+  let adminRegistrations: ScopedCommand[] = [];
 
   beforeAll(async () => {
     // Bot-identity sanity check. If BOT_TOKEN and BOT_CLIENT_ID drift —
@@ -98,14 +100,12 @@ describe('Discord command registration (smoke)', () => {
           throw err;
         }),
     ]);
-    registrations = [
-      ...globalCommands
-        .filter((c) => c.name === 'qurl')
-        .map((c) => ({ ...c, _scope: 'global' as const })),
-      ...guildCommands
-        .filter((c) => c.name === 'qurl')
-        .map((c) => ({ ...c, _scope: 'guild' as const })),
+    const scopedCommands = [
+      ...globalCommands.map(c => ({ ...c, _scope: 'global' as const })),
+      ...guildCommands.map(c => ({ ...c, _scope: 'guild' as const })),
     ];
+    registrations = scopedCommands.filter(c => c.name === 'qurl');
+    adminRegistrations = scopedCommands.filter(c => c.name === 'qurl-admin');
 
     // Fail the whole suite loudly if Discord returned no /qurl registrations
     // at all. Without this guard the ghost-subcommand test below would
@@ -116,6 +116,16 @@ describe('Discord command registration (smoke)', () => {
         `Either the bot never called commands.set() on boot, or the Discord API returned an empty response. ` +
         `Check bot logs for a "Slash commands registered." line on the latest deploy.`,
       );
+    }
+  });
+
+  it('admin actions register in the same scopes with Manage Server permission', () => {
+    expect(adminRegistrations.map(command => command._scope).sort())
+      .toEqual(registrations.map(command => command._scope).sort());
+    for (const command of adminRegistrations) {
+      expect(command.type ?? CHAT_INPUT_COMMAND_TYPE).toBe(CHAT_INPUT_COMMAND_TYPE);
+      expect(command.default_member_permissions).toBe('32');
+      expect((command.options ?? []).map(option => option.name).sort()).toEqual(['setup', 'status']);
     }
   });
 
@@ -168,7 +178,7 @@ describe('Discord command registration (smoke)', () => {
       console.log(`smoke: MAP_COMMAND_ENABLED="${rawMapFlag}" (mapEnabled=${mapEnabled}); DETECT_COMMAND_ENABLED="${rawDetectFlag}" (detectEnabled=${detectEnabled})`);
       // Base set (always present) + conditionally `detect` / `map`, then sorted to
       // match the actual subcommand list (also sorted, above).
-      const expectedSubcommands = ['help', 'revoke', 'send', 'setup', 'status'];
+      const expectedSubcommands = ['help', 'revoke', 'send'];
       if (detectEnabled) expectedSubcommands.push('detect');
       if (mapEnabled) expectedSubcommands.push('map');
       expectedSubcommands.sort();

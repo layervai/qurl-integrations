@@ -85,7 +85,7 @@ describe('server Auth0 connection policy log', () => {
   it('fails OAuth setup closed and distinguishes a rejected pin from an unset pin', () => {
     const logs = captureServerLogs('private invalid connection!');
     expect(logs.error).toContainEqual([
-      'AUTH0_EMAIL_CONNECTION was rejected; every /qurl setup entry path is blocked until the deployment value is corrected.',
+      'AUTH0_EMAIL_CONNECTION was rejected; every /qurl-admin setup entry path is blocked until the deployment value is corrected.',
       {
         event: 'qurl_oauth_auth0_connection_policy',
         connection: null,

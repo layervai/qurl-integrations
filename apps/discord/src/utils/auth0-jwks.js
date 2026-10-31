@@ -26,7 +26,7 @@ function getJwks() {
   // jose.createRemoteJWKSet returns a function that fetches + caches the
   // JWKS, with built-in key-id-miss refresh. Defaults: 5-min cache TTL,
   // 30-sec cooldown between refresh attempts on miss. Acceptable for our
-  // workload (id_tokens are minted once per /qurl setup completion).
+  // workload (id_tokens are minted once per /qurl-admin setup completion).
   _jwksFn = jose.createRemoteJWKSet(
     new URL(`https://${config.AUTH0_DOMAIN}/.well-known/jwks.json`),
     { cooldownDuration: 30000, cacheMaxAge: 5 * 60 * 1000 },

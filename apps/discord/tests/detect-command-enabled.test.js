@@ -61,7 +61,7 @@ describe('qURL command data builder', () => {
       expect(data.name).toBe('qurl');
       expect(data.options.map(option => option.name)).toEqual([
         'send', ...(detect ? ['detect'] : []), ...(map ? ['map'] : []),
-        'revoke', 'help', 'setup', 'status',
+        'revoke', 'help',
       ]);
       const send = data.options.find(option => option.name === 'send');
       expect(send.options.map(option => option.name))

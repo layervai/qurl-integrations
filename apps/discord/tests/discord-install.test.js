@@ -265,7 +265,7 @@ describe('Discord install callback', () => {
       for (const res of [missing, mismatch, empty, duplicateState]) {
         expect(res.status).toBe(400);
         expect(res.text).toContain('Invalid install link');
-        expect(res.text.indexOf('/qurl setup')).toBeLessThan(
+        expect(res.text.indexOf('/qurl-admin setup')).toBeLessThan(
           res.text.indexOf('install session is invalid or expired'),
         );
         expect(clearedCookieHeader(
@@ -357,7 +357,7 @@ describe('Discord install callback', () => {
         expect(res.status).toBe(503);
         expect(res.text).toMatch(/not configured/i);
         expect(res.text).toContain('may already be in your server');
-        expect(res.text).toContain('/qurl setup');
+        expect(res.text).toContain('/qurl-admin setup');
         expect(res.text).not.toContain('KEY_ENCRYPTION_KEY');
         expect(clearedCookieHeader(
           res.headers['set-cookie'],

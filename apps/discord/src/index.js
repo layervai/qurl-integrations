@@ -124,7 +124,7 @@ logger.info('Process role configured', { role: PROCESS_ROLE, isGateway, isHttp }
 // bot treats itself as a public multi-server app and commands register
 // globally. When GUILD_ID is set to a valid Discord snowflake, commands
 // register to that guild only so they propagate instantly. Per-guild qURL
-// API keys come from /qurl setup (stored encrypted in guild_configs) in
+// API keys come from /qurl-admin setup (stored encrypted in guild_configs) in
 // either mode.
 const { isMultiTenant } = config;
 
@@ -155,7 +155,7 @@ if (isMultiTenant) {
 if (process.env.NODE_ENV === 'production') {
   // QURL_API_KEY is deliberately NOT required: it is only the global
   // fallback for /qurl send + /qurl map, and every deployment shape
-  // relies on per-guild /qurl setup. List is in boot-requirements.js
+  // relies on per-guild /qurl-admin setup. List is in boot-requirements.js
   // for testability.
   const prodMissing = missingProdKeys(process.env);
   if (prodMissing.length > 0) {
@@ -166,7 +166,7 @@ if (process.env.NODE_ENV === 'production') {
 
   // BASE_URL https check — fail fast at boot when the qURL guided setup flow
   // is configured (isQurlOAuthConfigured) but BASE_URL isn't a usable https
-  // origin, so /qurl setup can't dead-end at the OAuth redirect later (#619).
+  // origin, so /qurl-admin setup can't dead-end at the OAuth redirect later (#619).
   // The qURL OAuth router (server.js) mounts unconditionally, so this applies
   // to plain single-guild and multi-tenant deploys alike.
   //
@@ -641,7 +641,7 @@ async function gracefulShutdownTeardown({
 } = {}) {
   // Wait for in-flight HTTP requests to drain — server.close() is async,
   // and process.exit() called immediately after would truncate an OAuth
-  // callback mid-flight, leaving the admin's /qurl setup without a
+  // callback mid-flight, leaving the admin's /qurl-admin setup without a
   // persisted API key.
   await tryClose('HTTP server', httpServer, logger);
   stopServerIntervals();
@@ -1067,7 +1067,7 @@ async function start() {
     // from env at boot.
     //
     // PER-GUILD subscriptions (BYOK view counter) are in-process:
-    // every guild that links its own API key (via /qurl setup or the
+    // every guild that links its own API key (via /qurl-admin setup or the
     // OAuth callback) gets its own subscription. The registry below
     // owns the in-memory map<owner_id, secret> the multi-secret
     // receiver consults on every inbound webhook, primes from

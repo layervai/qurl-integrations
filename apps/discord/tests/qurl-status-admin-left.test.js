@@ -1,11 +1,11 @@
-// Tests for /qurl status service verification and the admin-offboarding nudge
+// Tests for /qurl-admin status service verification and the admin-offboarding nudge
 // (#185).
 //
 // The status reply for a configured guild surfaces a passive notice
 // when the admin who originally ran setup has left the server —
 // remaining ManageGuild admins need to know that qURL usage is still
 // billing to the absent admin's layerv.ai account, and that running
-// /qurl setup again will re-bind the key to themselves.
+// /qurl-admin setup again will re-bind the key to themselves.
 //
 // Best-effort detection: a Discord API blip during the
 // `members.fetch` call is treated as "skip the nudge", not "fail
@@ -54,7 +54,7 @@ const { PermissionFlagsBits } = require('discord.js');
 
 const STORED_KEY = 'lv_live_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
-// Minimal interaction stub for the /qurl status path. The real
+// Minimal interaction stub for the /qurl-admin status path. The real
 // discord.js Interaction has dozens of fields we don't need; only
 // the surface the status handler actually reads is mocked.
 function makeStatusInteraction({ memberFetchBehavior, isAdmin = true }) {
@@ -68,7 +68,7 @@ function makeStatusInteraction({ memberFetchBehavior, isAdmin = true }) {
     deferred: false,
     isAutocomplete: () => false,
     isChatInputCommand: () => true,
-    commandName: 'qurl',
+    commandName: 'qurl-admin',
     options: { getSubcommand: () => 'status' },
     guildId: 'guild-1',
     memberPermissions: { has: (p) => isAdmin && p === PermissionFlagsBits.ManageGuild },
@@ -98,7 +98,7 @@ beforeEach(() => {
   });
 });
 
-describe('/qurl status — admin-offboarding nudge (#185)', () => {
+describe('/qurl-admin status — admin-offboarding nudge (#185)', () => {
   it('rejects non-admins before deferring or checking the stored key', async () => {
     const interaction = makeStatusInteraction({
       memberFetchBehavior: async () => ({ id: 'admin-original' }),
@@ -194,7 +194,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toMatch(/revoked or invalid/i);
-    expect(replyContent).toContain('`/qurl setup`');
+    expect(replyContent).toContain('`/qurl-admin setup`');
     expect(replyContent).not.toContain(STORED_KEY);
     expect(replyContent).toContain('Configured by: <@admin-original>');
     expect(replyContent).toContain('Last updated: 2026-01-01T00:00:00Z');
@@ -627,8 +627,8 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     await handleCommand(interaction);
 
     const replyContent = interaction._editReply.mock.calls[0][0].content;
-    expect(replyContent).toContain('`/qurl setup`');
-    expect(replyContent).not.toContain('try `/qurl status` again later');
+    expect(replyContent).toContain('`/qurl-admin setup`');
+    expect(replyContent).not.toContain('try `/qurl-admin status` again later');
     expect(mockGetIdentity).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith('qURL status key unavailable', {
       guild_id: 'guild-1',
@@ -653,7 +653,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toContain('qURL is configured');
     expect(replyContent).toContain('has left this server');
     expect(replyContent).toContain('<@admin-departed>');
-    expect(replyContent).toMatch(/run.*\/qurl setup/i);
+    expect(replyContent).toMatch(/run.*\/qurl-admin setup/i);
   });
 
   it('does NOT show the nudge on a transient Discord API error (avoids mis-flagging a present admin)', async () => {

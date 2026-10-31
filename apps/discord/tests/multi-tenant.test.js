@@ -109,8 +109,8 @@ describe('multi-tenant mode — registerCommands registration scope', () => {
     expect(mockPut).toHaveBeenCalledTimes(1);
     const [route, opts] = mockPut.mock.calls[0];
     expect(route).toBe('/applications/app-123/commands');
-    expect(opts.body.map(c => c.name).sort()).toEqual(['qurl']);
-    expect(opts.body).toHaveLength(1);
+    expect(opts.body.map(c => c.name).sort()).toEqual(['qurl', 'qurl-admin']);
+    expect(opts.body).toHaveLength(2);
     expect(opts.body[0]).toMatchObject({
       name: 'qurl',
       integration_types: [0],
@@ -136,7 +136,7 @@ describe('multi-tenant mode — registerCommands registration scope', () => {
     expect(mockPut).toHaveBeenCalledTimes(1);
     const [route, opts] = mockPut.mock.calls[0];
     expect(route).toBe('/applications/app-123/guilds/123456789012345678/commands');
-    expect(opts.body.map(c => c.name).sort()).toEqual(['qurl']);
+    expect(opts.body.map(c => c.name).sort()).toEqual(['qurl', 'qurl-admin']);
     expect(opts.body[0]).not.toHaveProperty('integration_types');
     expect(opts.body[0]).not.toHaveProperty('contexts');
     expect(opts.body[0]).not.toHaveProperty('dm_permission');
@@ -145,7 +145,7 @@ describe('multi-tenant mode — registerCommands registration scope', () => {
   it('ships no GitHub account-linking or contributor commands in either mode (#1026)', async () => {
     const { commands } = require('../src/commands');
     const names = commands.map(c => c.data.name);
-    expect(names).toEqual(['qurl']);
+    expect(names).toEqual(['qurl', 'qurl-admin']);
     for (const removed of [
       'link', 'unlink', 'whois', 'contributions', 'stats',
       'leaderboard', 'forcelink', 'bulklink', 'unlinked',
@@ -207,7 +207,7 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
     await commands.registerCommands({ rest, appId: 'app-1' });
     expect(rest.get.mock.calls).toEqual([[guildRoute(previous)]]);
     expect(rest.put.mock.calls.map(([route]) => route)).toEqual([globalRoute, guildRoute(previous)]);
-    expect(state.get(globalRoute).map(command => command.name)).toEqual(['qurl']);
+    expect(state.get(globalRoute).map(command => command.name)).toEqual(['qurl', 'qurl-admin']);
     expect(state.get(guildRoute(previous))).toEqual([]);
   });
 
@@ -216,7 +216,7 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
     const { rest, state } = api();
     await commands.registerCommands({ rest, appId: 'app-1' });
     expect(rest.put.mock.calls.map(([route]) => route)).toEqual([guildRoute(current), globalRoute]);
-    expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl']);
+    expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl', 'qurl-admin']);
     expect(state.get(globalRoute)).toEqual([]);
     expect(state.get(guildRoute(previous))).toHaveLength(1);
   });
@@ -228,7 +228,7 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
     expect(rest.get.mock.calls).toEqual([[guildRoute(previous)]]);
     expect(state.get(globalRoute)[0].name).toBe('old-global');
     expect(state.get(guildRoute(previous))).toEqual([]);
-    expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl']);
+    expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl', 'qurl-admin']);
   });
 
   it('never purges the active guild when the previous value equals it', async () => {
@@ -236,7 +236,7 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
     const { rest, state } = api();
     await commands.registerCommands({ rest, appId: 'app-1' });
     expect(rest.get).not.toHaveBeenCalled();
-    expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl']);
+    expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl', 'qurl-admin']);
   });
 
   it('keeps old namespaces when active registration fails', async () => {
@@ -263,7 +263,7 @@ describe('bounded inactive command-scope cleanup (#84/#94)', () => {
     const { rest, state } = api();
     await commands.registerCommands({ rest, appId: 'app-1' });
     expect(rest.get).not.toHaveBeenCalled();
-    expect(state.get(globalRoute).map(command => command.name)).toEqual(['qurl']);
+    expect(state.get(globalRoute).map(command => command.name)).toEqual(['qurl', 'qurl-admin']);
   });
 
   it('does not treat a malformed namespace response as empty', async () => {
@@ -350,13 +350,15 @@ describe('handleCommand dispatch-time filter', () => {
   );
 
   it.each([
-    ['DM', { guildId: null, user: { id: 'user-1' } }],
-    ['user install inside a guild', {
-      guildId: 'guild-1',
-      authorizingIntegrationOwners: { 1: 'user-1' },
-      user: { id: 'user-1' },
+    ['qurl', 'DM', { guildId: null, user: { id: 'user-1' } }],
+    ['qurl-admin', 'DM', { guildId: null, user: { id: 'user-1' } }],
+    ['qurl', 'user install inside a guild', {
+      guildId: 'guild-1', authorizingIntegrationOwners: { 1: 'user-1' }, user: { id: 'user-1' },
     }],
-  ])('rejects a stale %s /qurl interaction before subcommand dispatch', async (_label, context) => {
+    ['qurl-admin', 'user install inside a guild', {
+      guildId: 'guild-1', authorizingIntegrationOwners: { 1: 'user-1' }, user: { id: 'user-1' },
+    }],
+  ])('rejects stale %s in %s before subcommand dispatch', async (commandName, _label, context) => {
     jest.doMock('../src/store', () => ({}));
     jest.doMock('../src/discord', () => ({
       sendDM: jest.fn(),
@@ -368,7 +370,7 @@ describe('handleCommand dispatch-time filter', () => {
     const interaction = {
       isAutocomplete: () => false,
       isChatInputCommand: () => true,
-      commandName: 'qurl',
+      commandName,
       options: { getSubcommand: jest.fn(() => 'help') },
       reply,
       ...context,
