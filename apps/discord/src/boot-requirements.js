@@ -516,6 +516,14 @@ function missingMapCommandKeys(cfg) {
   return [];
 }
 
+function missingDetectCommandKeys(cfg) {
+  if (!cfg.DETECT_COMMAND_ENABLED) return [];
+  return ['QURL_API_KEY', 'DETECT_TUNNEL_SLUG'].filter(name => {
+    const value = cfg[name];
+    return typeof value !== 'string' || !value.trim() || (name === 'QURL_API_KEY' && isInfraSeedSentinel(value));
+  });
+}
+
 // Process-role parsing for the gateway/HTTP split. Lifted out of
 // index.js so the invalid-value path is testable without spawning a
 // child process — same shape as missingBootKeys above. See
@@ -599,6 +607,7 @@ module.exports = {
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
+  missingDetectCommandKeys,
   missingWebhookSecretKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,

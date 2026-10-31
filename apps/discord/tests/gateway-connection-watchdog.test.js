@@ -1001,3 +1001,79 @@ describe('start() / stop() lifecycle', () => {
 function flushMicrotasks() {
   return new Promise((resolve) => { setImmediate(resolve); });
 }
+
+describe('inbound handoff connect deadline', () => {
+  test.each([true, false])('a stuck leader connect exits once with owned lock = %p', async holding => {
+    const manager = makeFakeManager();
+    let nowMs = 0;
+    const { watchdog, releaseLock, exit, logger } = makeWatchdog({
+      manager, isConnecting: () => true, isHoldingLock: () => holding,
+      maxRecoveryMs: 30_000, now: () => nowMs,
+    });
+    await watchdog._stepForTest();
+    nowMs = 29_999;
+    await watchdog._stepForTest();
+    expect(exit).not.toHaveBeenCalled();
+    nowMs = 30_000;
+    await watchdog._stepForTest();
+    await watchdog._stepForTest();
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(releaseLock).toHaveBeenCalledTimes(holding ? 1 : 0);
+    expect(manager.connect).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('inbound handoff connect timed out'), expect.objectContaining({ recovery_elapsed_ms: 30_000 }));
+  });
+
+  test('a hung peer-row cleanup cannot prevent process replacement', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    let nowMs = 0;
+    const { watchdog, exit, logger } = makeWatchdog({
+      isConnecting: () => true, maxRecoveryMs: 1000, now: () => nowMs,
+      releaseLockCeilingMs: 10, deleteOwnRow: () => new Promise(() => {}),
+    });
+    try {
+      await watchdog._stepForTest();
+      nowMs = 1000;
+      let settled = false;
+      const ending = watchdog._stepForTest().then(() => { settled = true; });
+      await jest.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(true);
+      await ending;
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(logger.warn).toHaveBeenCalledWith('connection-watchdog: deleteOwnRow failed during exhaustion-exit', expect.objectContaining({ error: 'delete_own_row_ceiling_10ms' }));
+    } finally { jest.useRealTimers(); }
+  });
+
+  test('actual leader timeout leaves one pending connect which the watchdog replaces', async () => {
+    const { createGatewayLeader } = require('../src/gateway-leader');
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const manager = makeFakeManager();
+    let settleConnect;
+    manager.connect = jest.fn(() => new Promise(resolve => { settleConnect = resolve; }));
+    const lock = { adoptLockFromHandoff: jest.fn(), releaseLock: jest.fn(async () => ({ released: true })) };
+    const leader = createGatewayLeader({ lock, manager, peerHeartbeat: {}, controlClient: {}, selfInstanceId: 'instance-self', shardId: '0:1', inboundConnectTimeoutMs: 5, logger: { info() {}, warn() {}, error() {}, debug() {} } });
+    let nowMs = 0;
+    const { watchdog, exit } = makeWatchdog({ manager,
+      isHoldingLock: leader.isHoldingLock, isConnecting: leader.isConnecting,
+      releaseLock: leader.releaseLockForImmediateExit, maxRecoveryMs: 30_000, now: () => nowMs,
+    });
+    try {
+      const inbound = expect(leader.handleInboundHandoff({ activeInstanceId: 'peer-fixture', expectedVersion: 5 })).rejects.toThrow('inbound_connect_timeout');
+      await jest.advanceTimersByTimeAsync(5);
+      await inbound;
+      expect(leader.isConnecting()).toBe(true);
+      expect(leader.isHoldingLock()).toBe(true);
+      await watchdog._stepForTest();
+      nowMs = 30_000;
+      await watchdog._stepForTest();
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(manager.connect).toHaveBeenCalledTimes(1);
+      expect(lock.releaseLock).toHaveBeenCalledTimes(1);
+      expect(leader.isHoldingLock()).toBe(false);
+    } finally {
+      settleConnect?.();
+      await new Promise(resolve => setImmediate(resolve));
+      jest.useRealTimers();
+    }
+  });
+});

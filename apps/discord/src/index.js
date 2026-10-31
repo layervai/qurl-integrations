@@ -37,6 +37,7 @@ const {
   baseUrlHttpsProblem,
   missingEventShipperKeys,
   missingMapCommandKeys,
+  missingDetectCommandKeys,
   missingWebhookSecretKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
@@ -356,6 +357,15 @@ if (mapCommandMissing.length > 0) {
     `MAP_COMMAND_ENABLED=true but ${mapCommandMissing.join(', ')} is missing or still the literal "PLACEHOLDER" sentinel. ` +
     'Seed a real Google Maps Platform API key (Places API enabled, no HTTP-referrer restriction) into the ' +
     '/qurl-bot-discord/GOOGLE_MAPS_API_KEY SSM parameter before re-flipping the toggle.'
+  );
+  process.exit(1);
+}
+
+const detectCommandMissing = missingDetectCommandKeys(config);
+if (detectCommandMissing.length > 0) {
+  logger.error(
+    `DETECT_COMMAND_ENABLED=true but ${detectCommandMissing.join(', ')} is missing or still the literal "PLACEHOLDER" sentinel. ` +
+    'Seed the bot API key and detect tunnel slug before enabling detect.'
   );
   process.exit(1);
 }

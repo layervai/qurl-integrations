@@ -2,10 +2,10 @@ const { spawnSync } = require('node:child_process');
 const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
+const bootEnvironment = require('./helpers/boot-environment');
 
 jest.setTimeout(20000);
 
-const CURRENT_KEY = Buffer.alloc(32, 7).toString('base64');
 const PREVIOUS_KEY = Buffer.alloc(32, 8).toString('base64');
 let directory;
 let fence;
@@ -20,37 +20,15 @@ beforeAll(() => {
     const dns = require('node:dns');
     dns.lookup = deny;
     dns.resolve = deny;
+    dns.promises.lookup = deny;
+    dns.promises.resolve = deny;
     globalThis.fetch = deny;
   `);
 });
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
 
 function boot(overrides = {}) {
-  const env = {
-    PATH: process.env.PATH,
-    NODE_ENV: 'production',
-    LOG_LEVEL: 'error',
-    DISCORD_TOKEN: 'synthetic-discord-token',
-    METRICS_TOKEN: 'synthetic-metrics-token',
-    KEY_ENCRYPTION_KEY: CURRENT_KEY,
-    QURL_OAUTH_STATE_SECRET: 's'.repeat(64),
-    QURL_WEBHOOK_PURE_BYOK: 'true',
-    AUTH0_DOMAIN: 'tenant.us.auth0.com',
-    AUTH0_CLIENT_ID: 'synthetic-client',
-    AUTH0_CLIENT_SECRET: 'synthetic-client-secret',
-    AUTH0_AUDIENCE: 'https://api.example.test',
-    BASE_URL: 'https://bot.example.test',
-    QURL_ENDPOINT: 'https://api.example.test',
-    CONNECTOR_URL: 'https://connector.example.test',
-    DDB_TABLE_PREFIX: 'boot-test-',
-    AWS_CONFIG_FILE: path.join(directory, 'unused-aws-config'),
-    AWS_SHARED_CREDENTIALS_FILE: path.join(directory, 'unused-aws-credentials'),
-    AWS_REGION: 'us-east-2',
-    AWS_ACCESS_KEY_ID: 'synthetic',
-    AWS_SECRET_ACCESS_KEY: 'synthetic',
-    ...overrides,
-  };
-  for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];
+  const env = bootEnvironment(directory, overrides);
   const result = spawnSync(process.execPath, ['--require', fence, path.resolve(__dirname, '../src/index.js')], {
     cwd: directory, env, encoding: 'utf8', timeout: 15000, killSignal: 'SIGKILL',
   });
@@ -100,6 +78,19 @@ test('valid current and previous keys pass boot gates and reach the network fenc
 
 test('development permits a local HTTP callback with valid OAuth secrets (#62)', () => {
   const result = boot({ NODE_ENV: 'development', BASE_URL: 'http://localhost:3000' });
+  expect(result.output).toContain('BOOT_TEST_NETWORK_BLOCKED');
+  expect(result.status).toBe(97);
+});
+
+test.each(['QURL_API_KEY', 'DETECT_TUNNEL_SLUG'].flatMap(name =>
+  [undefined, ' \t', ...(name === 'QURL_API_KEY' ? ['PLACEHOLDER', ' placeholder '] : [])].map(value => [name, value])
+))('enabled detect fails before network when %s = %p (#834)', (name, value) => {
+  expectBootFailure({ DETECT_COMMAND_ENABLED: 'true', QURL_API_KEY: 'lv_live_synthetic_detect', DETECT_TUNNEL_SLUG: 'detect-fixture', [name]: value }, `DETECT_COMMAND_ENABLED=true but ${name}`);
+});
+test.each(['false', 'true'])('detect gate %s with matching configuration reaches the network fence (#834)', flag => {
+  const result = boot({ DETECT_COMMAND_ENABLED: flag,
+    ...(flag === 'true' ? { QURL_API_KEY: 'lv_live_synthetic_detect', DETECT_TUNNEL_SLUG: 'detect-fixture' } : {}),
+  });
   expect(result.output).toContain('BOOT_TEST_NETWORK_BLOCKED');
   expect(result.status).toBe(97);
 });
