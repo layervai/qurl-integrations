@@ -760,6 +760,30 @@ describe('event-consumer: pollLoop error backoff', () => {
     }
   });
 
+  test.each(['CredentialsProviderError', 'CredentialsError'])('a hard cause under %s remains fatal after a successful poll', async (code) => {
+    const onFatal = jest.fn();
+    let receives = 0;
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      receives++;
+      if (receives === 2) throw Object.assign(new Error('provider wrapper', { cause: { name: 'AccessDeniedException' } }), { name: code });
+      if (receives === 3) eventConsumer._test.getStopController().abort();
+      return { Messages: [] };
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    try {
+      eventConsumer.start(makeStubClient(), { onFatal });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(receives).toBe(2);
+      expect(onFatal).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        'Event consumer: permanent AWS failure, exiting',
+        expect.objectContaining({ code: 'AccessDeniedException' }),
+      );
+    } finally {
+      await eventConsumer.stop();
+    }
+  });
+
   test('onFatal throw falls back to process.exit(1)', async () => {
     const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
     const onFatal = jest.fn(() => { throw new Error('shutdown failed'); });
@@ -923,6 +947,18 @@ describe('event-consumer: start/stop lifecycle', () => {
     const cyclic = new Error('cyclic');
     cyclic.cause = cyclic;
     expect(permanentAwsErrorCode(cyclic)).toBeNull();
+  });
+
+  test.each(['CredentialsProviderError', 'CredentialsError'])('a hard cause wins over %s across error aliases', (code) => {
+    const { permanentAwsErrorCode } = eventConsumer._test;
+    for (const field of ['name', 'code', 'Code']) {
+      const cause = { [field]: 'AccessDeniedException' };
+      expect(permanentAwsErrorCode({ name: code, cause })).toBe('AccessDeniedException');
+    }
+    expect(permanentAwsErrorCode({ name: code, code: 'InvalidQueueUrl' })).toBe('InvalidQueueUrl');
+    const cyclic = { name: code };
+    cyclic.cause = cyclic;
+    expect(permanentAwsErrorCode(cyclic)).toBe(code);
   });
 
   test('pollOnce passes the stopController.signal in the SDK send options', async () => {
