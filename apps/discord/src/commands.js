@@ -1508,8 +1508,8 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // handler; never decreases.
 
   // No explicit `expired` state in the rendered counter: qurl.accessed
-  // is the only event we receive, and the 14-min monitor cap covers the
-  // practical "user never opened it" window. Pre-PR-455 modelled
+  // is the only event we receive. The interaction-token edit window
+  // bounds the 14-min monitor cap (#465). Pre-PR-455 modelled
   // expired explicitly via upstream polling; the webhook-only world
   // can't observe expiration without a separate qurl.expired
   // subscription (out of scope).

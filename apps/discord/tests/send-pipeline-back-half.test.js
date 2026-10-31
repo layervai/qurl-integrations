@@ -757,8 +757,11 @@ describe('monitorLinkStatus — duration cap + activeMonitors LRU', () => {
       '7d', 'Sent', { components: [] }, 1,
     );
     try {
-      await jest.advanceTimersByTimeAsync(14 * 60 * 1000);
-      expect(mockDb.getQurlViews).toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(13 * 60 * 1000);
+      const beforeLastMinute = mockDb.getQurlViews.mock.calls.length;
+      expect(beforeLastMinute).toBeGreaterThan(0);
+      await jest.advanceTimersByTimeAsync(60 * 1000);
+      expect(mockDb.getQurlViews.mock.calls.length).toBeGreaterThan(beforeLastMinute);
       expect(interaction.editReply).not.toHaveBeenCalled();
       // Expiration is observed on the next scheduled tick, within one minute.
       await jest.advanceTimersByTimeAsync(60 * 1000);
