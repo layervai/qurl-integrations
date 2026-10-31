@@ -661,11 +661,20 @@ func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consi
 	return string(pt), newAPIKeyCacheToken(ctBlob.Value, wrappedKey.Value), nil
 }
 
+// TODO(upstream-contract): Keep the TTL column and fixed signal in sync with
+// qurl-integrations-infra modules/qurl-slack-ddb and the filter in
+// qurl-bot-slack/terraform/credential_ttl_monitoring.tf (infra PR #1968).
+const (
+	credentialTTLAttribute        = "ttl"
+	credentialTTLSecurityEventKey = "security_event"
+	credentialTTLSecurityEvent    = "workspace_credential_ttl_present"
+)
+
 // Durable credential rows share a table with expiring OAuth state. A TTL
 // on a credential row can delete live credentials; never log its contents.
 func warnCredentialTTL(ctx context.Context, item map[string]ddbtypes.AttributeValue) {
-	if _, present := item["ttl"]; present {
-		slog.WarnContext(ctx, "durable workspace credential row has unexpected TTL", "security_event", "workspace_credential_ttl_present")
+	if _, present := item[credentialTTLAttribute]; present {
+		slog.WarnContext(ctx, "durable workspace credential row has unexpected TTL", credentialTTLSecurityEventKey, credentialTTLSecurityEvent)
 	}
 }
 
@@ -721,7 +730,7 @@ func (p *DDBProvider) cachedAPIKeyStillCurrent(ctx context.Context, workspaceID 
 		ExpressionAttributeNames: map[string]string{
 			apiKeyValidationProjectionKey:     attrQURLAPIKey,
 			apiKeyValidationProjectionDataKey: attrDataKeyCT,
-			apiKeyValidationProjectionTTL:     "ttl",
+			apiKeyValidationProjectionTTL:     credentialTTLAttribute,
 		},
 		ConsistentRead: aws.Bool(true),
 	})
