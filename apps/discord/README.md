@@ -265,6 +265,10 @@ NODE_OPTIONS=--experimental-vm-modules DDB_TEST_ENDPOINT=http://127.0.0.1:8000 \
   npm test -- --runInBand --coverage=false flow-state-ddb-local.test.js
 ```
 
+The contract test needs Node VM modules as well as the loopback endpoint.
+A normal test run with only the development endpoint exported skips it.
+
+
 This uses synthetic credentials and a unique temporary table, then deletes it.
 The contract test rejects non-loopback endpoints. The VM flag lets Jest load the real SDK modules.
 Running the bot locally (`npm run dev`) needs a DynamoDB endpoint — `docker-compose.yml` spins

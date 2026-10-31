@@ -552,6 +552,8 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       ReturnValues: 'UPDATED_OLD',
       ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
     }));
+    // UPDATED_OLD includes stage even when unchanged because SET names it.
+    // It can also include old ciphertext when payload is replaced; never log it.
     const prior = res?.Attributes;
     stage_from = prior?.stage ?? null;
     extended = set_expires_at !== undefined && typeof prior?.expires_at === 'number'

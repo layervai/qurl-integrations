@@ -411,7 +411,7 @@ describe('flow-state.loadFlow', () => {
 
 describe('flow-state.transitionFlow', () => {
   test('happy path: emits FLOW_TRANSITION with terminal=true and bumps version', async () => {
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'stage_a' } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'stage_a', payload: 'old-ciphertext-must-stay-private' } });
 
     const res = await flowState.transitionFlow('id', 4, {
       stage_to: 'stage_b',
@@ -432,6 +432,9 @@ describe('flow-state.transitionFlow', () => {
     expect(updCall.args[0].input.ExpressionAttributeValues[':expected']).toBe(4);
     expect(updCall.args[0].input.ExpressionAttributeValues[':stage_to']).toBe('stage_b');
     expect(updCall.args[0].input.ExpressionAttributeValues[':payload'].startsWith('enc:v1:')).toBe(true);
+    expect(decrypt).not.toHaveBeenCalled();
+    expect(JSON.stringify(logger.audit.mock.calls)).not.toContain('old-ciphertext');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('old-ciphertext');
 
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
       flow_id: 'id',

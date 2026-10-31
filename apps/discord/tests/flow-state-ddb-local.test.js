@@ -2,8 +2,9 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 
-// Opt in with a local emulator; this test never connects to an AWS endpoint.
-const localTest = process.env.DDB_TEST_ENDPOINT ? test : test.skip;
+// Require both the emulator and the Node capability used by the real SDK.
+// Exporting the dev endpoint alone must not break a normal Jest run.
+const localTest = process.env.DDB_TEST_ENDPOINT && typeof require('node:vm').SourceTextModule === 'function' ? test : test.skip;
 localTest('real SDK flow transitions retain success/conflict/absence with one update each', async () => {
   const endpoint = process.env.DDB_TEST_ENDPOINT;
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(endpoint).hostname)) {
