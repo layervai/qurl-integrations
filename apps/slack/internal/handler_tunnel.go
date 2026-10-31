@@ -375,7 +375,7 @@ func (e tunnelInstallEnvironment) label() (string, error) {
 // [opts]` is the typed power-user form that skips the modal. This is the
 // single-word rename of the former two-word `tunnel install` (the resource type
 // is still a "tunnel" internally — see client.ResourceTypeTunnel).
-func (h *Handler) handleExposeConnector(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleExposeConnector(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	if tunnelInstallWizardRequest(text) {
 		h.handleTunnelInstallWizard(w, values)
@@ -402,7 +402,7 @@ func (h *Handler) handleExposeConnector(w http.ResponseWriter, values url.Values
 		respondSlack(w, ":warning: missing channel_id in slash command payload")
 		return
 	}
-	if !h.requireAdminSync(w, teamID, userID, AdminActionExposeConnector) {
+	if !h.requireAdminSync(requestCtx, w, teamID, userID, AdminActionExposeConnector) {
 		return
 	}
 

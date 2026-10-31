@@ -131,7 +131,7 @@ func unwrapSlackURLArg(s string) string {
 // Either way the effect is the same: make an existing URL resource available in
 // THIS Slack channel by binding a channel alias to its resource_id. The dashboard
 // stays Slack-blind, and Slack users never type opaque `r_...` resource IDs.
-func (h *Handler) handleExposeURL(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleExposeURL(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	_, rest := slashVerb(text, adminVerbProtectURL)
 	if strings.TrimSpace(rest) == "" {
@@ -150,7 +150,7 @@ func (h *Handler) handleExposeURL(w http.ResponseWriter, values url.Values) {
 	if !ok {
 		return
 	}
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionExposeURL) {
+	if !h.requireAliasAdminGate(requestCtx, w, teamID, values, AdminActionExposeURL) {
 		return
 	}
 

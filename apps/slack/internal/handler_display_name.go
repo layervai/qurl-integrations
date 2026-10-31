@@ -166,7 +166,7 @@ func stripSurroundingQuotes(s string) string {
 // field and no qurl-service change. Resolution + update are two upstream
 // calls, so this runs async (acks immediately, posts the result via
 // response_url) like the slug-targeted set-alias path.
-func (h *Handler) handleSetDisplayName(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleSetDisplayName(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	rest := stripSetDisplayNamePrefix(text)
 
@@ -186,7 +186,7 @@ func (h *Handler) handleSetDisplayName(w http.ResponseWriter, values url.Values)
 	// interaction. The parser usage hints above are surfaced before the
 	// gate (the grammar is public — it's in the ungated `/qurl-admin help`),
 	// matching the set-alias posture.
-	if !h.requireAdminSync(w, teamID, userID, AdminActionSetDisplayName) {
+	if !h.requireAdminSync(requestCtx, w, teamID, userID, AdminActionSetDisplayName) {
 		return
 	}
 
@@ -206,7 +206,7 @@ func (h *Handler) handleSetDisplayName(w http.ResponseWriter, values url.Values)
 // Name to the install default ("Slack qURL Connector install for <id>") by PATCHing
 // the resource description — it does NOT blank it, because a tunnel always
 // has a Display Name (the description field doubles as it).
-func (h *Handler) handleUnsetDisplayName(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleUnsetDisplayName(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	rest := stripUnsetDisplayNamePrefix(text)
 
@@ -221,7 +221,7 @@ func (h *Handler) handleUnsetDisplayName(w http.ResponseWriter, values url.Value
 		return
 	}
 
-	if !h.requireAdminSync(w, teamID, userID, AdminActionUnsetDisplayName) {
+	if !h.requireAdminSync(requestCtx, w, teamID, userID, AdminActionUnsetDisplayName) {
 		return
 	}
 
