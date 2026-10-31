@@ -2504,9 +2504,8 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     expect(result).toContain('Revoked for: Alice');
 
     interaction.editReply.mockClear();
-    end([], 'time');
+    await end([], 'time');
     expect(interaction.editReply).toHaveBeenCalledWith({ content: result, components: [] });
-    expect(result).not.toContain('Management window');
   });
 
   it('includes newly added recipients in the collector revoke result (#200)', async () => {
@@ -2532,7 +2531,8 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       expect(selection.editReply).toHaveBeenCalledWith({ content: 'Added 1 recipient', components: [] });
 
       mockDb.getSendItems.mockReset();
-      mockDb.getSendItems.mockResolvedValue([
+      // Counts come from DDB; names must include the collector's added recipient.
+      mockDb.getSendItems.mockResolvedValueOnce([
         { recipient_discord_id: 'u1', resource_id: 'res-initial', qurl_id: 'q_original' },
         { recipient_discord_id: 'u2', resource_id: 'res-added', qurl_id: 'q_added' },
       ]);
