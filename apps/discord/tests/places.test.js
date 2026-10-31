@@ -107,6 +107,32 @@ describe('buildPlaceUrl', () => {
 });
 
 describe('searchPlaces', () => {
+  test('cached results remain available when a new request would be throttled', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ status: 'OK', predictions: [{ place_id: 'ChIJ1', description: 'White House' }] }));
+    const first = await searchPlaces('White House');
+    const deny = jest.fn(() => false);
+    expect(await searchPlaces(' white house ', deny)).toEqual(first);
+    expect(deny).not.toHaveBeenCalled();
+    expect(await searchPlaces('new prefix', deny)).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(await searchPlaces('new prefix', () => true)).toEqual(first);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('single-flight followers do not spend request budget', async () => {
+    let finish;
+    fetchMock.mockReturnValueOnce(new Promise(resolve => { finish = () => resolve(jsonResponse({ status: 'ZERO_RESULTS', predictions: [] })); }));
+    const firstBudget = jest.fn(() => true);
+    const deniedBudget = jest.fn(() => false);
+    const first = searchPlaces('shared prefix', firstBudget);
+    const follower = searchPlaces('SHARED PREFIX', deniedBudget);
+    finish();
+    await expect(Promise.all([first, follower])).resolves.toEqual([[], []]);
+    expect(firstBudget).toHaveBeenCalledTimes(1);
+    expect(deniedBudget).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   test('returns [] (no fetch) when GOOGLE_MAPS_API_KEY is unset', async () => {
     delete config.GOOGLE_MAPS_API_KEY;
     const r = await searchPlaces('eiffel');

@@ -40,14 +40,16 @@ describe('handleAutocomplete', () => {
   }
 
   test('rotating prefixes and guilds share one user budget before Places I/O', async () => {
+    const upstreamRequests = jest.fn();
+    mockSearchPlaces.mockImplementation(async (_query, mayFetch) => { if (mayFetch()) upstreamRequests(); return []; });
     for (let i = 0; i < 11; i++) {
       const int = makeAutocompleteInteraction({ guildId: `guild-${i}`, focused: { name: 'location', value: `prefix-${i}` } });
       await handleAutocomplete(int);
       expect(int.respond).toHaveBeenCalledWith([]);
     }
-    expect(mockSearchPlaces).toHaveBeenCalledTimes(10);
+    expect(upstreamRequests).toHaveBeenCalledTimes(10);
     await handleAutocomplete(makeAutocompleteInteraction({ userId: 'other-user' }));
-    expect(mockSearchPlaces).toHaveBeenCalledTimes(11);
+    expect(upstreamRequests).toHaveBeenCalledTimes(11);
   });
 
   test('missing user identity fails closed without Places I/O', async () => {
@@ -117,7 +119,7 @@ describe('handleAutocomplete', () => {
     ]);
     const int = makeAutocompleteInteraction();
     await handleAutocomplete(int);
-    expect(mockSearchPlaces).toHaveBeenCalledWith('whitehouse');
+    expect(mockSearchPlaces).toHaveBeenCalledWith('whitehouse', expect.any(Function));
     expect(int.respond).toHaveBeenCalledTimes(1);
     const choices = int.respond.mock.calls[0][0];
     expect(choices).toHaveLength(2);

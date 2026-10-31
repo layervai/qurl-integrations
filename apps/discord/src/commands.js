@@ -9685,11 +9685,12 @@ async function handleAutocomplete(interaction) {
       return await interaction.respond([]);
     }
 
-    if (!takeAutocompleteToken(interaction.user?.id)) return await interaction.respond([]);
+    const userId = interaction.user?.id;
+    if (typeof userId !== 'string' || userId.length === 0 || userId.length > 64) return await interaction.respond([]);
 
     let results;
     try {
-      results = await searchPlaces(rawQuery);
+      results = await searchPlaces(rawQuery, () => takeAutocompleteToken(userId));
     } catch (err) {
       // Per-call log at debug so keystroke-rate failures don't spam.
       logger.debug('autocomplete handler failed', {

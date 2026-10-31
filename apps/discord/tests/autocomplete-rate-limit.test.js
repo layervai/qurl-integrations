@@ -18,10 +18,20 @@ test('allows ten immediate calls and refills one token per second without resett
   expect(takeAutocompleteToken('user')).toBe(false);
 });
 
+test('ten 100ms refills restore exactly one token without rounding drift', () => {
+  let now = 100_000;
+  jest.spyOn(Date, 'now').mockImplementation(() => now);
+  for (let i = 0; i < 10; i++) takeAutocompleteToken('user');
+  for (let i = 0; i < 10; i++) {
+    now += 100;
+    expect(takeAutocompleteToken('user')).toBe(i === 9);
+  }
+});
+
 test('preserves active budgets at capacity and replaces only an idle oldest entry', () => {
   let now = 100_000;
   jest.spyOn(Date, 'now').mockImplementation(() => now);
-  for (let i = 0; i < 10_000; i++) autocompleteBuckets.set(`user-${i}`, { tokens: 0, updatedAt: now });
+  for (let i = 0; i < 10_000; i++) autocompleteBuckets.set(`user-${i}`, { creditMs: 0, updatedAt: now });
   expect(takeAutocompleteToken('new')).toBe(false);
   expect(autocompleteBuckets.size).toBe(10_000);
   expect(takeAutocompleteToken('user-0')).toBe(false);
