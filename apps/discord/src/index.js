@@ -51,6 +51,7 @@ const { initHttpOnly } = require('./http-only-init');
 const eventConsumer = require('./event-consumer');
 const eventPublisher = require('./event-publisher');
 const webhookSubscriptions = require('./webhook-subscriptions');
+const { drainGuildWebhookSubscriptions } = require('./guild-webhook-link');
 const { LOG_KINDS } = require('./constants');
 
 // Process role — selects which subset of the bot runs in this
@@ -659,6 +660,8 @@ async function gracefulShutdownTeardown({
   // actually running per process (combined + flag-on is rejected
   // at boot), so the sequencing matters only as documentation.
   await eventPublisher.stop();
+  // Finish accepted links before storage closes or gateway session state is sealed.
+  await drainGuildWebhookSubscriptions();
   // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
   // heartbeat tick during client.destroy() would race with the
   // WebSocketShard teardown and surface as a confusing "Sampler

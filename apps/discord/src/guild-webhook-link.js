@@ -24,6 +24,7 @@ const subs = require('./webhook-subscriptions');
 const LINK_RESULTS = Object.freeze({
   MISSING_ARGS: 'missing-args',
   CONFIG_MISSING: 'config-missing',
+  SHUTTING_DOWN: 'shutting-down',
   REGISTER_FAILED: 'register-failed',
   OWNER_MISSING: 'owner-missing',
   PERSIST_FAILED: 'persist-failed',
@@ -314,11 +315,15 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
 // the .catch + descriptionContext format so the two call sites stay
 // in sync — a future audit-log shape change should touch one place.
 //
-// KNOWN QUIRK (tracked in issue #487): SIGTERM mid-link drops the
-// in-flight work. The operator runs /qurl-admin setup again; the backfill script
-// also catches first-time API-key-only rows. Polling fallback covers correctness.
-// Returns the settled promise for tests; production setup must not await it.
+// Keep accepted background work visible to the shutdown drain.
+const inFlightGuildLinks = new Set();
+let guildLinksDraining = false;
+
 function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, configuredBy }) {
+  if (guildLinksDraining) {
+    logger.warn('Guild webhook link skipped during shutdown');
+    return Promise.resolve({ ok: false, reason: LINK_RESULTS.SHUTTING_DOWN });
+  }
   const door = normalizeSetupVia(via);
   if (door === SETUP_VIA.UNKNOWN) {
     try {
@@ -327,7 +332,7 @@ function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, confi
     // Setup callers also get the store's door warning; this one covers any
     // future caller that links a subscription without writing the key.
   }
-  return linkGuildWebhookSubscription({
+  const task = linkGuildWebhookSubscription({
     guildId,
     apiKey,
     // Same normalization as the setup audit, so both record the same door.
@@ -335,10 +340,45 @@ function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, confi
   }).catch((err) => logger.warn('linkGuildWebhookSubscription contract drift — threw unexpectedly', {
     error: err?.message, guildId,
   }));
+  inFlightGuildLinks.add(task);
+  task.then(() => inFlightGuildLinks.delete(task), () => inFlightGuildLinks.delete(task));
+  return task;
+}
+
+async function waitForGuildLinkWork(task, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      task,
+      new Promise(resolve => { timer = setTimeout(() => resolve(undefined), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function linkGuildWebhookSubscriptionForSetup(args) {
+  const task = fireAndForgetLinkGuildWebhookSubscription(args);
+  // A timeout only bounds the response; the tracked task keeps running.
+  const result = await waitForGuildLinkWork(task, config.QURL_WEBHOOK_SETUP_WAIT_MS).catch(() => undefined);
+  return result?.ok === true;
+}
+
+async function drainGuildWebhookSubscriptions() {
+  guildLinksDraining = true;
+  if (inFlightGuildLinks.size === 0) return true;
+  const result = await waitForGuildLinkWork(Promise.allSettled([...inFlightGuildLinks]), 10_000);
+  if (result === undefined) {
+    logger.warn('Guild webhook link shutdown drain timed out', { in_flight: inFlightGuildLinks.size });
+    return false;
+  }
+  return true;
 }
 
 module.exports = {
   linkGuildWebhookSubscription,
   fireAndForgetLinkGuildWebhookSubscription,
+  linkGuildWebhookSubscriptionForSetup,
+  drainGuildWebhookSubscriptions,
   LINK_RESULTS,
 };

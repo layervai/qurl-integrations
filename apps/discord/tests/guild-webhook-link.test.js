@@ -437,3 +437,70 @@ describe('fireAndForgetLinkGuildWebhookSubscription — door normalization', () 
     expect(logger.warn.mock.calls.filter(([msg]) => msg.startsWith('Unrecognized setup door'))).toHaveLength(0);
   });
 });
+
+describe('setup wait and shutdown drain', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  function freshLinks() {
+    let links;
+    jest.isolateModules(() => { links = require('../src/guild-webhook-link'); });
+    return links;
+  }
+
+  function pendingRegistration() {
+    let resolve;
+    const promise = new Promise(r => { resolve = r; });
+    mockEnsureWebhookSubscription.mockReturnValueOnce(promise);
+    return () => resolve({ webhookId: 'wh_drain', secret: 'sec_drain', action: 'created', ownerId: 'usr_drain' });
+  }
+  const args = { guildId: 'g_drain', apiKey: 'lv_other', via: SETUP_VIA.PASTE, configuredBy: 'u-1' };
+
+  test('completed setup confirms the webhook and clears its wait timer', async () => {
+    const links = freshLinks();
+    await expect(links.linkGuildWebhookSubscriptionForSetup(args)).resolves.toBe(true);
+    await expect(links.drainGuildWebhookSubscriptions()).resolves.toBe(true);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test('timed-out setup keeps accepted work tracked until shutdown can drain it', async () => {
+    const links = freshLinks();
+    const finish = pendingRegistration();
+    const setup = links.linkGuildWebhookSubscriptionForSetup(args);
+    await jest.advanceTimersByTimeAsync(require('../src/config').QURL_WEBHOOK_SETUP_WAIT_MS);
+    await expect(setup).resolves.toBe(false);
+    expect(mockSetGuildWebhookSubscription).not.toHaveBeenCalled();
+    let drained = false;
+    const drain = links.drainGuildWebhookSubscriptions().then(result => { drained = result; });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(drained).toBe(false);
+    finish();
+    await drain;
+    expect(drained).toBe(true);
+    expect(mockSetGuildWebhookSubscription).toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test('shutdown stops accepting new links and returns after its bounded wait', async () => {
+    const links = freshLinks();
+    const finish = pendingRegistration();
+    const task = links.fireAndForgetLinkGuildWebhookSubscription(args);
+    const drain = links.drainGuildWebhookSubscriptions();
+    await expect(links.fireAndForgetLinkGuildWebhookSubscription(args)).resolves.toEqual({ ok: false, reason: LINK_RESULTS.SHUTTING_DOWN });
+    await jest.advanceTimersByTimeAsync(10_000);
+    await expect(drain).resolves.toBe(false);
+    expect(mockWarn).toHaveBeenCalledWith('Guild webhook link shutdown drain timed out', { in_flight: 1 });
+    finish();
+    await task;
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test('known registration failure gives partial setup without changing its audit', async () => {
+    const links = freshLinks();
+    mockEnsureWebhookSubscription.mockRejectedValueOnce(new Error('upstream unavailable'));
+    await expect(links.linkGuildWebhookSubscriptionForSetup(args)).resolves.toBe(false);
+    expect(mockAudit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED, expect.any(Object));
+    await expect(links.drainGuildWebhookSubscriptions()).resolves.toBe(true);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+});
