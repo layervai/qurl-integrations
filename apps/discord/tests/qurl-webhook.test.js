@@ -424,7 +424,7 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
   beforeAll(() => {
     jest.resetModules();
   });
-  it('returns 429 after 150 OWNER_UNKNOWN events from the same IP', async () => {
+  it('limits an unknown owner without blocking siblings behind the same IP', async () => {
     // eslint-disable-next-line global-require
     const isolatedSubs = require('../src/webhook-subscriptions');
     expect(jest.isMockFunction(isolatedSubs.start)).toBe(true);
@@ -449,7 +449,36 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
       .set('QURL-Signature', signBody(unknownRaw))
       .send(unknownRaw);
     expect(limited.status).toBe(429);
+    const siblingRaw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: 'usr_other_unknown' });
+    const sibling = await request(isolatedApp)
+      .post('/webhooks/qurl').set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(siblingRaw)).send(siblingRaw);
+    expect(sibling.status).toBe(401);
+    const validRaw = JSON.stringify(VALID_PAYLOAD);
+    const valid = await request(isolatedApp)
+      .post('/webhooks/qurl').set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(validRaw)).send(validRaw);
+    expect(valid.status).toBe(200);
   });
+
+  it('bounds missing-owner attempts without consuming a registered owner budget', async () => {
+    // eslint-disable-next-line global-require
+    const isolatedApp = require('../src/server').app;
+    const missingRaw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: undefined });
+    for (let i = 0; i <= 150; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      const attempt = await request(isolatedApp)
+        .post('/webhooks/qurl').set('Content-Type', 'application/json')
+        .set('QURL-Signature', signBody(missingRaw)).send(missingRaw);
+      expect(attempt.status).toBe(i < 150 ? 401 : 429);
+    }
+    const validRaw = JSON.stringify(VALID_PAYLOAD);
+    const valid = await request(isolatedApp)
+      .post('/webhooks/qurl').set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(validRaw)).send(validRaw);
+    expect(valid.status).toBe(200);
+  });
+
 });
 
 describe('POST /webhooks/qurl — bad-sig limiter scope (only HMAC failures count)', () => {
