@@ -3062,6 +3062,36 @@ describe('handleAddRecipients — validate expires_in BEFORE recordQURLSendBatch
 });
 
 describe('handleAddRecipients — DB failure mid-flow', () => {
+  it('rejects a stale collector selection before minting when the persisted count is full', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({ recipient_count: 50, expires_in: '30m' });
+    const result = await handleAddRecipients('send-1', makeUsersCollection([
+      { id: 'u1', username: 'Alice', bot: false },
+    ]), makeInteraction(), 'apikey');
+    expect(result.msg).toContain('reached its recipient limit');
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('revokes fresh children and gives capacity guidance when another collector wins the reservation', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      recipient_count: 49, expires_in: '30m', attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_1', qurl_link: 'https://q.test/1' }]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(Object.assign(new Error('limit'), { code: 'SEND_RECIPIENT_LIMIT', remaining: 0 }));
+    const result = await handleAddRecipients('send-1', makeUsersCollection([
+      { id: 'u1', username: 'Alice', bot: false },
+    ]), makeInteraction(), 'apikey');
+    expect(result.msg).toContain('reached its recipient limit');
+    expect(result.newLinks).toEqual([]);
+    expect(result.newRecipients).toEqual([]);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_1'], 'apikey');
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+
   it('aborts before DMs when recordQURLSendBatch fails (no orphan live links)', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
@@ -3614,6 +3644,7 @@ describe('executeSendPipeline — guild_id threading (#1101)', () => {
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ guildId: 'guild-1' })]),
     );
+    expect(mockDb.saveSendConfig).toHaveBeenCalledWith(expect.objectContaining({ recipientCount: 1 }));
   });
 });
 
@@ -3706,7 +3737,7 @@ describe('handleAddRecipients — guild_id threading (#1101)', () => {
     );
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ guildId: 'guild-1' })]),
-      { requireSendConfigUnrevoked: true },
+      { requireSendConfigUnrevoked: true, maxRecipients: 50 },
     );
   });
 });

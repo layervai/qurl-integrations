@@ -2376,11 +2376,16 @@ async function executeSendPipeline(interaction, {
       attachmentContentType: attachment?.contentType || null,
       attachmentUrl: attachment?.url || null,
       selfDestructSeconds,
+      recipientCount: qurlLinks.length,
     });
   } catch (err) {
-    logger.error('saveSendConfig failed; Add Recipients will be unavailable for this send', {
-      sendId, error: err.message,
-    });
+    if (err?.name === 'ConditionalCheckFailedException') {
+      logger.warn('Existing send configuration was preserved', { sendId });
+    } else {
+      logger.error('saveSendConfig failed; Add Recipients will be unavailable for this send', {
+        sendId, error: err.message,
+      });
+    }
   }
 
   // Ephemeral confirmation with Add Recipients + Revoke buttons.
@@ -3091,6 +3096,12 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
 // derived from originalInteraction directly so no caller can pass a
 // mismatched value and accidentally let one user add recipients to another
 // user's send.
+function recipientLimitMessage(remaining) {
+  return remaining > 0
+    ? `This send has room for ${remaining} more recipients. Choose fewer people, or create a new send.`
+    : 'This send has reached its recipient limit. Create a new send to add more people.';
+}
+
 async function handleAddRecipients(sendId, usersCollection, originalInteraction, apiKey) {
   const senderDiscordId = originalInteraction.user.id;
   const sendConfig = await db.getSendConfig(sendId, senderDiscordId);
@@ -3152,6 +3163,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
   if (newRecipients.length === 0) {
     return { msg: 'No valid recipients selected (bots and yourself are excluded).', newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
+  }
+
+  if (Number.isSafeInteger(sendConfig.recipient_count)
+      && sendConfig.recipient_count + newRecipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    return {
+      msg: recipientLimitMessage(Math.max(0, config.QURL_SEND_MAX_RECIPIENTS - sendConfig.recipient_count)),
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
   }
 
   // Create new QURL links for each resource type in the send config
@@ -3454,8 +3473,17 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // abort BEFORE any DMs go out. The revoked-race branch below also deletes
   // freshly minted resources because those rows deliberately never land.
   try {
-    await db.recordQURLSendBatch(batchSends, { requireSendConfigUnrevoked: true });
+    await db.recordQURLSendBatch(batchSends, { requireSendConfigUnrevoked: true, maxRecipients: config.QURL_SEND_MAX_RECIPIENTS });
   } catch (err) {
+    if (err?.code === 'SEND_RECIPIENT_LIMIT') {
+      await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+        rowsMayHavePersisted: false, reason: 'recipient_limit',
+      });
+      return {
+        msg: recipientLimitMessage(err.remaining),
+        newLinks: [], newRecipients: [], delivered: 0, failed: 0,
+      };
+    }
     if (err?.code === 'SEND_CONFIG_REVOKED') {
       logger.warn('recordQURLSendBatch refused Add Recipients for revoked send', {
         sendId, error: err.message, linkCount: batchSends.length,
