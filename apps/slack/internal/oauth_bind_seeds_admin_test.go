@@ -1,13 +1,11 @@
 package internal
 
-// BindWorkspace → CheckAdmin end-to-end across the real
-// slackdata.Store + fakeDDB. Other layers fence the producer
-// (PutItem inspection) and consumer (pre-seeded fixture rows)
-// in isolation; this fences the `admin_slack_user_ids` SS-
-// attribute seam between them.
+// BindWorkspace seeds the owner into admin-list display as well as retaining
+// the owner_id gate. This uses the real store across the fake DDB seam.
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -19,17 +17,16 @@ func TestBindWorkspaceSeedsAdminThatCheckAdminAccepts(t *testing.T) {
 	store := newStoreFromFake(t, ddb, names, nil)
 
 	const (
-		teamID    = "T_e2eBindCheck"
-		ownerID   = "auth0|seed-admin-owner"
-		seedAdmin = "USEEDADMIN1"
+		teamID  = "T_e2eBindCheck"
+		ownerID = "USEEDADMIN1"
 	)
 
 	if err := store.BindWorkspace(context.Background(),
-		&slackdata.WorkspaceMapping{TeamID: teamID, OwnerID: ownerID}, seedAdmin); err != nil {
+		&slackdata.WorkspaceMapping{TeamID: teamID, OwnerID: ownerID}); err != nil {
 		t.Fatalf("BindWorkspace: %v", err)
 	}
 
-	isAdmin, gotOwner, err := store.CheckAdmin(context.Background(), teamID, seedAdmin)
+	isAdmin, gotOwner, err := store.CheckAdmin(context.Background(), teamID, ownerID)
 	if err != nil {
 		t.Fatalf("CheckAdmin: %v", err)
 	}
@@ -38,6 +35,14 @@ func TestBindWorkspaceSeedsAdminThatCheckAdminAccepts(t *testing.T) {
 	}
 	if gotOwner != ownerID {
 		t.Errorf("CheckAdmin ownerID = %q, want %q", gotOwner, ownerID)
+	}
+
+	listedOwner, admins, err := store.ListAdmins(context.Background(), teamID)
+	if err != nil {
+		t.Fatalf("ListAdmins: %v", err)
+	}
+	if listedOwner != ownerID || !slices.Equal(admins, []string{ownerID}) {
+		t.Errorf("fresh admin list = owner %q members %v, want owner only", listedOwner, admins)
 	}
 
 	// Non-seed user on the same workspace must NOT be admin —

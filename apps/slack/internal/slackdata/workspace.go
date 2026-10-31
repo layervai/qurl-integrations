@@ -286,8 +286,9 @@ func (s *Store) AgentEnabledFor(ctx context.Context, teamID string) (value, set 
 // Called from /oauth/qurl/callback BEFORE the API key is minted on
 // qurl-service — bind acts as the gate so a rebind-refused outcome
 // can't overwrite the existing admin's stored credential. The
-// seedAdmin becomes the only entry in admin_slack_user_ids;
-// additional admins are added later via /qurl-admin admin add.
+// OwnerID becomes the only entry in admin_slack_user_ids for admin-list
+// display. CheckAdmin grants the owner directly from owner_id; additional
+// admins are added later via /qurl-admin admin add.
 //
 // OwnerID is the Slack user ID of the first /setup invoker — written
 // once at first bind, never mutated by /qurl admin add. Only the
@@ -295,7 +296,7 @@ func (s *Store) AgentEnabledFor(ctx context.Context, teamID string) (value, set 
 // admin verbs but cannot re-point the workspace's qURL credential.
 //
 // Returns 409 (via *Error) if the row already exists. Two sub-cases:
-//   - the existing row's owner_id matches the caller's seedAdmin →
+//   - the existing row's owner_id matches the caller's OwnerID →
 //     ErrCodeWorkspaceAlreadyBoundToCaller. The callback treats this
 //     as idempotent success and continues to the key stage, which
 //     reuses a healthy key or mints only when the key is missing or
@@ -315,19 +316,14 @@ func (s *Store) AgentEnabledFor(ctx context.Context, teamID string) (value, set 
 // Surfacing same-owner as 409 (instead of silently overwriting) is
 // intentional: PutItem would replace the entire row including any
 // admin_slack_user_ids added after the first bind.
-func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin string) error {
+func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping) error {
 	if m == nil || m.TeamID == "" || m.OwnerID == "" {
 		return &Error{
 			StatusCode: http.StatusBadRequest,
 			Title:      "BindWorkspace: team_id and owner_id are required",
 		}
 	}
-	if seedAdmin == "" {
-		return &Error{
-			StatusCode: http.StatusBadRequest,
-			Title:      "BindWorkspace: seed_admin user_id is required",
-		}
-	}
+	ownerID := m.OwnerID
 	// Capture `now` once: the same logical bind action's CreatedAt
 	// fallback and updated_at attribute should reflect the same
 	// instant rather than two sub-microsecond-apart readings of
@@ -344,15 +340,11 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	// would clobber later-added admins. Both deserve the 409 signal;
 	// the post-CCFE disambiguation read below distinguishes the two
 	// cases so the callback can branch idempotent vs. rebind-refused.
-	// owner_id and seed_admin_slack_user_id are equal by construction at
-	// first bind (the callback passes verified.UserID for both), not by
-	// coincidence. They're kept distinct because their long-term roles
-	// diverge: owner_id is the mutable-someday gate anchor (the #539
-	// transfer verb would rewrite it), while seed_admin_slack_user_id is
-	// the write-once forensic record of who originally claimed the workspace.
+	// Initial owner and forensic seed share one verified Slack ID. The
+	// stored seed remains separate so a later ownership transfer cannot rewrite it.
 	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName:           aws.String(s.WorkspaceMappingsName),
-		Item:                workspaceMappingItem(m.TeamID, m.OwnerID, seedAdmin, created, now),
+		Item:                workspaceMappingItem(m.TeamID, m.OwnerID, ownerID, created, now),
 		ConditionExpression: aws.String("attribute_not_exists(slack_team_id)"),
 	})
 	if err == nil {
@@ -413,7 +405,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 		// silently locking the original owner out at the qurl-service
 		// layer (workspace_keys reassigned to a different auth0_subject).
 		existingOwner := readString(check.Item, attrOwnerID)
-		if existingOwner == seedAdmin {
+		if existingOwner == ownerID {
 			return &Error{
 				StatusCode: http.StatusConflict,
 				Code:       ErrCodeWorkspaceAlreadyBoundToCaller,
@@ -436,12 +428,12 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 			// Log the provider prefix (e.g. `auth0|`) — not the full sub —
 			// so on-call can confirm "yes, pre-pivot row" from CloudWatch
 			// without a DDB read. The prefix carries no per-user identifier.
-			slog.Warn("BindWorkspace: existing owner_id is shape-bad (pre-pivot Auth0 sub) — reclaiming row for caller (first-come-claims)", "team_id", m.TeamID, "new_owner", seedAdmin, "legacy_owner_prefix", LegacyOwnerPrefix(existingOwner), "legacy_owner_len", len(existingOwner))
+			slog.Warn("BindWorkspace: existing owner_id is shape-bad (pre-pivot Auth0 sub) — reclaiming row for caller (first-come-claims)", "team_id", m.TeamID, "new_owner", ownerID, "legacy_owner_prefix", LegacyOwnerPrefix(existingOwner), "legacy_owner_len", len(existingOwner))
 			// Preserve the orphaned row's original created_at so the reclaim
 			// keeps the one durable signal that this workspace predates the
 			// #510 migration (the comment on reclaimLegacyWorkspace explains
 			// the fallback when it's absent).
-			return s.reclaimLegacyWorkspace(ctx, m, seedAdmin, existingOwner, readString(check.Item, attrCreatedAt))
+			return s.reclaimLegacyWorkspace(ctx, m, ownerID, existingOwner, readString(check.Item, attrCreatedAt))
 		}
 		if existingOwner == "" {
 			// A row exists but carries no owner_id. This shouldn't happen —
