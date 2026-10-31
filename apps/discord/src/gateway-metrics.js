@@ -224,7 +224,7 @@ function startActiveGuildCount(client, opts = {}) {
         }
         emitCount(result);
       } else {
-        // The legacy cache is incomplete before READY and during reconnects.
+        // Only sample a ready legacy cache; login can finish before READY (#196).
         if (typeof client.isReady === 'function' && !client.isReady()) return;
         emitCount(client.guilds?.cache?.size);
       }
