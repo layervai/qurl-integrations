@@ -22,11 +22,18 @@ func TestGolangciLintPinsMatchMakefile(t *testing.T) {
 		t.Fatal("Makefile must pin GOLANGCI_LINT_VERSION")
 	}
 	expected := string(match[1])
-	runPin := regexp.MustCompile(`github\.com/golangci/golangci-lint/v2/cmd/golangci-lint@([^\s]+)`)
+	runPin := regexp.MustCompile(`github\.com/golangci/golangci-lint/v2/cmd/golangci-lint@(\$\{\{[^}]*\}\}|[^\s]+)`)
+	bareRun := regexp.MustCompile(`\bgolangci-lint (?:run|version --short)\b`)
 	actions, invocations := 0, 0
 	for _, filename := range workflowFiles(t) {
 		workflow := readWorkflow(t, filename)
 		for jobID, job := range workflow.Jobs {
+			installedByAction := false
+			for i := range job.Steps {
+				if strings.HasPrefix(job.Steps[i].Uses, "golangci/golangci-lint-action@") {
+					installedByAction = true
+				}
+			}
 			for i := range job.Steps {
 				current := &job.Steps[i]
 				check := func(pin string) {
@@ -34,7 +41,10 @@ func TestGolangciLintPinsMatchMakefile(t *testing.T) {
 					pin = strings.Trim(pin, "\"'")
 					switch pin {
 					case "${{ env.GOLANGCI_LINT_VERSION }}", "${GOLANGCI_LINT_VERSION}", "$GOLANGCI_LINT_VERSION":
-						value := job.Env["GOLANGCI_LINT_VERSION"]
+						value := workflow.Env["GOLANGCI_LINT_VERSION"]
+						if override, ok := job.Env["GOLANGCI_LINT_VERSION"]; ok {
+							value = override
+						}
 						if override, ok := current.Env["GOLANGCI_LINT_VERSION"]; ok {
 							value = override
 						}
@@ -49,9 +59,29 @@ func TestGolangciLintPinsMatchMakefile(t *testing.T) {
 					pin, _ := current.With["version"].(string)
 					check(pin)
 				}
+				if strings.Contains(current.Uses, "golangci-lint") && !strings.HasPrefix(current.Uses, "golangci/golangci-lint-action@") {
+					t.Errorf("%s job %s has an unclassified linter action %q", filename, jobID, current.Uses)
+				}
 				for _, pin := range runPin.FindAllStringSubmatch(current.Run, -1) {
 					invocations++
 					check(pin[1])
+				}
+				// Bare run/version probes use the pinned action's installed binary.
+				remaining := runPin.ReplaceAllString(current.Run, "")
+				for _, line := range strings.Split(remaining, "\n") {
+					line = strings.TrimSpace(line)
+					if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "echo ") {
+						continue
+					}
+					if installedByAction {
+						if line == "command -v golangci-lint" {
+							continue
+						}
+						line = bareRun.ReplaceAllString(line, "")
+					}
+					if strings.Contains(line, "golangci-lint") {
+						t.Errorf("%s job %s has an unclassified linter command: %s", filename, jobID, line)
+					}
 				}
 			}
 		}
