@@ -78,3 +78,17 @@ test('parallel reads each get a separate rate-limit wait budget', async () => {
   expect((await pending).every(result => result.ok)).toBe(true);
   expect(fetchMock).toHaveBeenCalledTimes(4);
 });
+
+test.each(readers)('%s keeps one total attempt budget across 429 and gateway failures', async (_name, read) => {
+  fetchMock.mockResolvedValueOnce(new Response(null, { status: 429, headers: { 'Retry-After': '0.4' } }))
+    .mockResolvedValueOnce(new Response(null, { status: 503 }))
+    .mockResolvedValueOnce(new Response('{}'));
+  const pending = read();
+  await jest.advanceTimersByTimeAsync(400);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  await jest.advanceTimersByTimeAsync(1999);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  await jest.advanceTimersByTimeAsync(1);
+  await pending;
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+});

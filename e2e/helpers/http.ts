@@ -171,7 +171,7 @@ export async function fetchWithTransientRetry(
  * Reuse cleanup's Retry-After parser so a long directive never causes an early retry. */
 export function fetchGetWithTransientRetry(
   input: string | URL,
-  init?: Pick<RequestInit, 'headers' | 'redirect' | 'signal'>,
+  init?: Pick<RequestInit, 'headers' | 'redirect'>,
 ): Promise<Response> {
   return fetchWithTransientRetry(input, { ...init, method: 'GET' }, {
     cleanupRetryBudget: { remainingMs: 10_000 },
@@ -210,7 +210,7 @@ async function retryCleanupRateLimit(
     : Number.isFinite(date) ? Math.max(0, date - Date.now()) : 1000;
   const delayMs = Math.max(250, Math.ceil(hintedMs));
   if (!Number.isFinite(delayMs) || delayMs > budget.remainingMs) {
-    console.warn(`[rate-limit] 429 retry declined: ${delayMs}ms exceeds the remaining ${budget.remainingMs}ms sweep budget`);
+    console.warn(`[rate-limit] 429 retry declined: ${delayMs}ms exceeds the remaining ${budget.remainingMs}ms retry budget`);
     return response;
   }
   budget.remainingMs -= delayMs;
