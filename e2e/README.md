@@ -101,3 +101,18 @@ share Discord channel state. Their config alone loads
 sandbox-health embed. After each live run the reporter posts a per-file
 pass/fail rollup to the test channel (missing env or Discord errors warn,
 never fail the run).
+
+### Scoped recipient path check
+
+The existing distinct-recipient file test opens B, then opens A and keeps A's
+browser context for three direct requests: A's path must return 200, B's existing
+path on A's origin must return 403, and A's path must still return 200. It does
+not follow B's link or issue another knock. Redirects, transport failures, 404,
+and 5xx do not prove scoped denial.
+
+The ownership receipt records the observed expected path and child identity.
+This is not stored-path proof. For API1474 acceptance, the operator must compare
+that expected path with the exact source-bound native admission STATE row using
+the existing read-only collector. Pair this actual result with the deployed
+API's shared target-path vector contract. A passing browser check alone does not
+complete the ledger task or prove production activation or native CLOSED state.

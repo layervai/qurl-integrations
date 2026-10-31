@@ -27,7 +27,7 @@
  * (the knock) → `200 r_<id>.qurl.site…/views/<mint-id>` (the tunnel view).
  */
 
-import { chromium, type Browser } from 'playwright';
+import { chromium, type Browser, type APIRequestContext } from 'playwright';
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, accessSync, constants } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -63,6 +63,8 @@ export interface ViewViaQurlLinkOptions {
   headless?: boolean;
   /** Require the sole iframe in the main document to be visible with this exact target in markup. */
   expectedIframeSrc?: string;
+  /** Probe a known existing sibling through THIS session, without another knock. */
+  siblingViewPath?: string;
   ownership: { resource_id: string; qurl_id: string; expires_at: string };
   /** Wall-clock budget for navigation + knock + response + optional iframe check, in ms.
    *  Default 30_000. */
@@ -156,6 +158,16 @@ export async function viewViaQurlLink(
         throw new Error('viewViaQurlLink: iframe target differs from the uploaded URL');
       }
     }
+    if (opts.siblingViewPath !== undefined) {
+      const probe = await probeScopedSibling(page.context().request, resp.url(), opts.siblingViewPath);
+      appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS!, JSON.stringify({
+        event: 'owned_scope_boundary_probe', resource_id: opts.ownership.resource_id,
+        qurl_id: opts.ownership.qurl_id, observed_at: new Date().toISOString(),
+        expected_target_path: new URL(resp.url()).pathname, sibling_target_path: opts.siblingViewPath,
+        own_before_status: probe.ownBefore, sibling_status: probe.sibling, own_after_status: probe.ownAfter,
+        persisted_target_path: 'pending_independent_native_state_readback',
+      }) + '\n', { mode: 0o600 });
+    }
     return { status: resp.status(), url: resp.url() };
   } finally {
     // Always tear the browser down — a leaked chromium would hang jest's worker exit.
@@ -213,4 +225,26 @@ export async function checkOwnershipConfig(): Promise<void> {
   const result = spawnSync(process.env.QURL_OWNERSHIP_VERIFIER!, ['--check-config'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 16_384 });
   if (result.error || result.status !== 0) throw new Error('public ownership configuration failed');
   await readOwner();
+}
+
+/** The browser context supplies its existing origin cookie. All three requests
+ * go directly to one authorized origin; no qURL link or admission is reopened. */
+export async function probeScopedSibling(request: APIRequestContext, ownViewURL: string, siblingPath: string) {
+  const own = new URL(ownViewURL);
+  if (own.protocol !== 'https:' || !/^q-[a-z2-7]{52}\.qurl\.site(?:\.layerv\.(?:xyz|ai))?$/.test(own.hostname) ||
+      !/^\/views\/[0-9a-f]{32}$/.test(own.pathname) || own.search || own.hash || own.username || own.password ||
+      !/^\/views\/[0-9a-f]{32}$/.test(siblingPath) || siblingPath === own.pathname)
+    throw new Error('scope probe requires two distinct canonical recipient view paths');
+  const sibling = new URL(siblingPath, own.origin);
+  const statuses: number[] = [];
+  for (const target of [own, sibling, own]) {
+    let response;
+    try { response = await request.get(target.href, { maxRedirects: 0, timeout: 10_000 }); }
+    catch { throw new Error('scope probe request failed'); }
+    statuses.push(response.status());
+    await response.dispose();
+  }
+  if (statuses[0] !== 200 || statuses[1] !== 403 || statuses[2] !== 200)
+    throw new Error('same-session scope probe requires own200 sibling403 own200');
+  return { ownBefore: statuses[0], sibling: statuses[1], ownAfter: statuses[2] };
 }
