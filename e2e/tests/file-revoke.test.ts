@@ -191,8 +191,13 @@ describe('File Revoke', () => {
     // cold chromium and these run on a single jest worker (maxWorkers:1) — serial
     // keeps peak memory to one browser and avoids the two knocks racing for the
     // shared CI egress IP's WAF budget.
-    const viewA = await viewViaQurlLink(mintedA.qurl_link, { ownership: { resource_id: upload.resource_id, qurl_id: mintedA.qurl_id, expires_at: mintedA.expires_at } });
+    // Open B first so its real existing object path is known. Its browser closes
+    // before A opens; A's same-session probe never follows B's admission link.
     const viewB = await viewViaQurlLink(mintedB.qurl_link, { ownership: { resource_id: upload.resource_id, qurl_id: mintedB.qurl_id, expires_at: mintedB.expires_at } });
+    const viewA = await viewViaQurlLink(mintedA.qurl_link, {
+      ownership: { resource_id: upload.resource_id, qurl_id: mintedA.qurl_id, expires_at: mintedA.expires_at },
+      siblingViewPath: new URL(viewB.url).pathname,
+    });
 
     // Both recipients get a served (200) per-recipient object end-to-end.
     expect(viewA.status).toBe(200);

@@ -101,3 +101,36 @@ share Discord channel state. Their config alone loads
 sandbox-health embed. After each live run the reporter posts a per-file
 pass/fail rollup to the test channel (missing env or Discord errors warn,
 never fail the run).
+
+### Scoped recipient path check
+
+The distinct-recipient file test opens recipient B's view, then recipient A's
+view. It keeps A's browser context for three direct requests. The own-path
+requests must return HTTP 200 before and after the sibling-path request. The
+probe does not follow B's link or issue another knock. All requests share the
+viewer's remaining wall-clock deadline. Each request uses at most ten seconds
+and has a unique, non-secret `X-Request-ID`.
+
+The router hides an internal authorization refusal with its not-found response
+or a connection close. A 404 or reset alone does not prove that the internal
+authorizer returned HTTP 403. Resets can also come from an edge or TLS layer.
+The receipt marks these observations as pending proof. Unexpected responses,
+DNS failures and timeouts fail the probe. A sibling response in the 2xx range
+reports an explicit cross-recipient breach with the numeric status only.
+
+One final receipt is written on success or failure. It retains all three request
+IDs, known numeric statuses and a fixed failure code. It contains no raw error
+or response body. A failed receipt cannot qualify the ledger check.
+
+To complete the [Connector target-path check](https://github.com/layervai/qurl-service/blob/main/docs/runbooks/prod-rollout-ledger/2026-09-05-pr-1474-target-path-cutover.md),
+the operator must match the sibling request ID to the exact internal
+resource-authorize HTTP 403 access record. Positive own-path requests can hit
+the router cache and need not create fresh backend access records. The operator
+must also compare the expected path and exact child/public identity with the
+matching native admission STATE row using the read-only collector. Pair these
+results with the deployed API/router source and shared target-path vectors.
+There is no public header or body that identifies a pure scope mismatch.
+
+This probe only allows the reviewed public and LayerV environment domains.
+Adding an environment suffix requires source review. The probe alone does not
+prove stored scope, production activation, or native CLOSED state.
