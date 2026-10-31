@@ -106,7 +106,7 @@ jest.mock('../../src/connector', () => ({
 
 jest.mock('../../src/qurl', () => ({
   createOneTimeLink: jest.fn(),
-  deleteLink: jest.fn(),
+  revokeResource: jest.fn(),
   getResourceStatus: jest.fn(),
 }));
 

@@ -345,7 +345,7 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
 // Whole-resource revoke. Retained for scripts/loadtest-standalone.js only: bot
 // revoke and cleanup must revoke children (connector.revokeMintedLinks),
 // because a shared parent delete never reaches watermarked children.
-async function deleteLink(resourceId, apiKey) {
+async function revokeResource(resourceId, apiKey) {
   resourcePath(resourceId);
   const client = makeClient(apiKey);
   // Revoke at the resource level: every link minted on the resource stops
@@ -462,7 +462,7 @@ async function getResourceStatus(resourceId, apiKey) {
 
 module.exports = {
   createOneTimeLink,
-  deleteLink,
+  revokeResource,
   revokeOrdinaryLinks,
   REVOKE_BATCH_MAX_IDS,
   getIdentity,

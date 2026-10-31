@@ -129,7 +129,6 @@ const mockDb = {
   getLinkedDiscordIds: jest.fn(() => new Set()),
   createPendingLink: jest.fn(),
   getLinkByGithub: jest.fn(),
-  deleteLink: jest.fn().mockReturnValue({ changes: 1 }),
   getContributions: jest.fn(() => []),
   getBadges: jest.fn(() => []),
   getStreak: jest.fn(() => null),

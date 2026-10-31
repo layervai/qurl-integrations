@@ -165,7 +165,7 @@ if (require.main === module && fs.existsSync(envFile)) {
 
 const config = require('../src/config');
 const { mintLinks, reUploadBuffer } = require('../src/connector');
-const { createOneTimeLink, deleteLink } = require('../src/qurl');
+const { createOneTimeLink, revokeResource } = require('../src/qurl');
 const {
   hasSafeResourceIdShape,
   maskResourceIdPath,
@@ -973,7 +973,7 @@ async function trackCreate(fn) {
 // upload parent by the public key the connector returns, so reclaim retains
 // those rows for manual cleanup or confirmed expiry.
 function recordResource(resourceId, kind) {
-  // Share deleteLink's transport guard so every recorded ID is sweepable and
+  // Share revokeResource's transport guard so every recorded ID is sweepable and
   // a malformed service response cannot persist a bearer token in the ledger.
   // Warn rather than stopping: a malformed upload response is worth surfacing,
   // but must not silently truncate the rest of a load-test round. `res-1` is
@@ -1184,7 +1184,7 @@ async function reclaim(ledgerPath) {
     for (const id of pending) {
       swept.add(id);
       try {
-        await deleteLink(id);
+        await revokeResource(id);
         revoked++;
         outstanding.delete(id);
       } catch (e) {
@@ -1204,7 +1204,7 @@ async function reclaim(ledgerPath) {
           const status = qurlApiErrorStatus(e);
           // SDK 2.x deletes only by CRID and rejects any other identifier before
           // a request, so older ledgers' retired r_ IDs cannot drain
-          // automatically. deleteLink sends only the ID, so a client-side
+          // automatically. revokeResource sends only the ID, so a client-side
           // rejection is an identifier rejection that no re-run can fix. If the
           // SDK ever rejected client configuration this way instead, every row
           // would land here at once, which reads plainly in the summary.
