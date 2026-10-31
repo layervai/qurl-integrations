@@ -142,7 +142,11 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		if !hasNonSlugAlias(r.Slug, groups[i].aliases) {
 			continue
 		}
-		lines = append(lines, formatAliasGroupLine(r.TargetURL, r.Slug, r.Description, groups[i].aliases))
+		line := formatAliasGroupLine(r.TargetURL, r.Slug, r.Description, groups[i].aliases)
+		if isLegacyDirectURLBinding(groups[i].resourceID) {
+			line += " (broken binding — ask your Slack admin to rebind with `/qurl-admin set-alias`)"
+		}
+		lines = append(lines, line)
 	}
 	sort.Strings(lines)
 
