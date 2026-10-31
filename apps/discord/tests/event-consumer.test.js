@@ -1008,6 +1008,7 @@ describe('event-consumer: start/stop lifecycle', () => {
     const client = makeStubClient();
 
     eventConsumer.start(client);
+    expect(eventConsumer.getMetrics().running).toBe(true);
     eventConsumer.start(client);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('start() called while already running'),
@@ -1015,6 +1016,7 @@ describe('event-consumer: start/stop lifecycle', () => {
 
     await eventConsumer.stop();
     await eventConsumer.stop();
+    expect(eventConsumer.getMetrics().running).toBe(false);
   });
 
   test('stop() drains in-flight handlers before resolving (settled within deadline)', async () => {

@@ -177,7 +177,8 @@ app.get('/metrics', metricsRateLimit, async (req, res) => {
   if (!crypto.timingSafeEqual(authHash, expectedHash)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  const stats = await db.getStats();
+  // Routine worker scrapes must not scan the aggregate tables.
+  const stats = req.query.view === 'consumer' ? undefined : await db.getStats();
   res.json({
     status: 'ok',
     uptime: process.uptime(),

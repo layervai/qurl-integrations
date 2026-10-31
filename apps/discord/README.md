@@ -335,7 +335,7 @@ repair instruction if an existing table lacks a required GSI. It never drops dat
   authenticated), `/oauth/discord/install` plus its callback for customer
   installs, and the qURL OAuth start/callback routes used by `/qurl setup`.
 
-The authenticated JSON `/metrics` response includes `eventConsumer` for this
+The authenticated JSON `/metrics?view=consumer` response includes `eventConsumer` for this
 process: `running`, `qurl_bot_event_inflight`, `qurl_bot_event_inflight_limit`,
 `qurl_bot_event_polls_total`, `qurl_bot_event_atcap_polls_total`, and
 `qurl_bot_event_dispatch_handler_rejections_total`. The in-flight gauge reads the
@@ -344,13 +344,20 @@ process lifetime and reset on restart; an inactive consumer reports `running:
 false`. No message, user, or shard IDs are retained for these metrics. Workers
 can consume events from multiple gateway shards, so these are worker metrics.
 
+The consumer-only view omits aggregate store stats and performs no table scan.
+The default `/metrics` response retains its legacy totals, which scan tables;
+use the consumer-only view for routine pressure scrapes.
+
 For a dashboard, scrape each worker as a stable target; a load-balanced URL
-mixes replicas and cannot supply valid counter deltas. Chart in-flight / limit
-for utilization and delta(atcap_polls_total) / delta(polls_total) for the fraction
-of polls at capacity. Ignore reset intervals and zero denominators. This is a
-poll fraction, not elapsed time at capacity: capped polls back off. Use
-rejections_total deltas for handler failure rate. These source fields do not
-establish a deployed dashboard or observed capacity.
+mixes replicas and cannot supply valid counter deltas. Chart
+`qurl_bot_event_inflight / qurl_bot_event_inflight_limit` for utilization and
+`delta(qurl_bot_event_atcap_polls_total) / delta(qurl_bot_event_polls_total)`
+for the fraction of poll attempts at capacity. Ignore reset intervals and zero
+denominators. Polls include attempts that later fail at SQS. This is a poll
+fraction, not elapsed time at capacity: capped polls back off. Chart deltas of
+`qurl_bot_event_dispatch_handler_rejections_total` for rejected tracked promises;
+synchronous throws and untracked work are not included. These source fields do
+not establish a deployed dashboard or observed capacity.
 
 Gateway session persistence admits at most 100 in-flight background writes.
 The live in-memory session keeps advancing during backpressure. Look for

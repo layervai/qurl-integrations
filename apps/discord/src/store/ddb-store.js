@@ -151,7 +151,8 @@ const nowIso = () => new Date().toISOString();
 // Aggregate counters for the token-gated /metrics endpoint. Both are
 // full-table Scans, which is why /health uses healthCheck() instead —
 // see the note there. /metrics is rate-limited and bearer-gated, so the
-// scan cost is bounded to deliberate operator scrapes.
+// legacy totals are for deliberate operator scrapes. The consumer-only view
+// skips these scans for routine worker-pressure collection.
 async function getStats() {
   const [configuredGuilds, totalSends] = await Promise.all([
     countAll(TABLES.guild_configs),
@@ -2058,7 +2059,7 @@ async function scanGuildSubscriptions() {
 // `getStats()` against DDB is a paginated full-table Scan. Using
 // it at health-check cadence would
 // scale RCU cost with table size and amplify cost-per-instance in
-// any fleet. /metrics keeps the full aggregation — that's the right
+// any fleet. Default /metrics keeps the full aggregation — that's the right
 // home for it.
 async function healthCheck() {
   // Probe `guild_configs` rather than a higher-traffic table. It has
