@@ -3438,7 +3438,7 @@ func startExternalJourneyDaemon(t *testing.T, daemon *journeyDaemon, stateDir, e
 	admissionsBefore := daemon.admitter.admissions()
 	ctx, cancel := context.WithCancel(context.Background())
 	daemon.manager, daemon.cancel, daemon.done = manager, cancel, make(chan error, 1)
-	version, err := connectordaemon.JobVersion(daemon.version, connectordaemon.GroupModeSingle)
+	version, err := connectordaemon.JobVersion(daemon.version, connectordaemon.GroupModeSingle, "")
 	if err != nil {
 		t.Fatal(err)
 	}
