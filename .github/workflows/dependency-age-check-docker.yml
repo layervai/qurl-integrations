@@ -10,7 +10,7 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Cancel superseded runs on the same PR branch — the reusable workflow
+# Cancel superseded runs on the same PR — the reusable workflow
 # makes sequential registry calls; no reason to let two race for an
 # outdated diff.
 concurrency:
