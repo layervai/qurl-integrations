@@ -284,3 +284,21 @@ test.each([408, 425, 429, 503])('POST retries pre-processing HTTP %d', async (st
   await expect(result.text()).resolves.toBe('ok');
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
+
+test('a response filter can decline a retry without discarding the response body', async () => {
+  fetchMock.mockResolvedValueOnce(new Response('diagnostic', { status: 503 }));
+  const shouldRetry = jest.fn(async () => false);
+  const response = await fetchWithTransientRetry(url, undefined, { shouldRetry });
+  expect(await response.text()).toBe('diagnostic');
+  expect(shouldRetry).toHaveBeenCalledTimes(1);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(jest.getTimerCount()).toBe(0);
+});
+
+test('a response filter cannot enable an unsafe POST replay', async () => {
+  fetchMock.mockResolvedValueOnce(new Response(null, { status: 502 }));
+  const shouldRetry = jest.fn(async () => true);
+  expect((await fetchWithTransientRetry(url, { method: 'POST' }, { shouldRetry })).status).toBe(502);
+  expect(shouldRetry).not.toHaveBeenCalled();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
