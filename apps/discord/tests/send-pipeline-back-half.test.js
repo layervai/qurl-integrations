@@ -1204,6 +1204,89 @@ describe('revokeAllLinks', () => {
     expect(result.failureUserIds.sort()).toEqual(['u-1', 'u-2']);
   });
 
+  it.each([undefined, null, ''])('finalizes expired legacy rows with child ID %p without claiming a revoke', async qurlId => {
+    mockDb.getSendItems.mockResolvedValueOnce([{
+      resource_id: 'res-legacy', recipient_discord_id: 'u-legacy', qurl_id: qurlId,
+      created_at: '2000-01-01T00:00:00.000Z', expires_in: '24h',
+      dm_status: 'sent', dm_channel_id: 'dm-legacy', dm_message_id: 'm-legacy',
+    }]);
+    const result = await revokeAllLinks('send-expired-legacy', 'sender-1', 'apikey');
+    expect(result).toMatchObject({ success: 0, total: 1, expired: 1, successUserIds: [], failureUserIds: [] });
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+    expect(mockEditDM).not.toHaveBeenCalled();
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-expired-legacy', 'sender-1');
+    expect(logger.audit).toHaveBeenCalledWith('revoke_success', {
+      send_id: 'send-expired-legacy', success: 0, total: 0, unresolvable_recipients: 0, expired_legacy_recipients: 1,
+    });
+    const rendered = safeRevokeHeader('send-expired-legacy', result.success, result.total, result.finalizationFailed, result.expired);
+    expect(rendered).toContain('Revoked 0/1 user. Links for 1 user had already expired.');
+    expect(rendered).not.toContain('Could not confirm');
+  });
+
+  it('finalizes a mix of confirmed revokes and proven expired legacy recipients', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-old', recipient_discord_id: 'u-old', created_at: '2000-01-01T00:00:00.000Z', expires_in: '24h' },
+      { resource_id: 'res-live', recipient_discord_id: 'u-live', qurl_id: 'q_live' },
+    ]);
+    const result = await revokeAllLinks('send-mixed-closed', 'sender-1', 'apikey');
+    expect(result).toMatchObject({ success: 1, total: 2, expired: 1, successUserIds: ['u-live'], failureUserIds: [] });
+    expect(mockRevokeMintedLinks.mock.calls).toEqual([['res-live', ['q_live'], 'apikey']]);
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-mixed-closed', 'sender-1');
+    expect(logger.audit).toHaveBeenCalledWith('revoke_success', {
+      send_id: 'send-mixed-closed', success: 1, total: 1, unresolvable_recipients: 0, expired_legacy_recipients: 1,
+    });
+  });
+
+  it.each([
+    { created_at: undefined },
+    { created_at: 0 },
+    { created_at: 'not-a-date' },
+    { created_at: '2000-01-01' },
+    { created_at: '2999-01-01T00:00:00.000Z' },
+    { expires_in: undefined },
+    { expires_in: 'nonsense' },
+    { expires_in: '999999d' },
+    { qurl_id: 'at_not_a_child_id' },
+    { resource_id: ' ' },
+  ])('keeps unproven legacy row %p unconfirmed', async override => {
+    mockDb.getSendItems.mockResolvedValueOnce([{
+      resource_id: 'res-legacy', recipient_discord_id: 'u-legacy',
+      created_at: '2000-01-01T00:00:00.000Z', expires_in: '24h', ...override,
+    }]);
+    const result = await revokeAllLinks('send-unproven-legacy', 'sender-1', 'apikey');
+    expect(result).toMatchObject({ success: 0, total: 1, failureUserIds: ['u-legacy'] });
+    expect(result.expired).toBeUndefined();
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+  });
+
+  it('uses the exact expiry boundary and counts a mixed-outcome recipient only as failed', async () => {
+    const created = '2000-01-01T00:00:00.000Z';
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.parse(created) + 86_400_000);
+    try {
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-legacy', recipient_discord_id: 'u-mixed', created_at: created, expires_in: '24h' },
+        { resource_id: 'res-legacy', recipient_discord_id: 'u-mixed', created_at: created, expires_in: '24h' },
+        { resource_id: 'res-live', recipient_discord_id: 'u-mixed', qurl_id: 'q_unconfirmed' },
+      ]);
+      mockRevokeMintedLinks.mockRejectedValueOnce(new Error('unconfirmed'));
+      const result = await revokeAllLinks('send-mixed-legacy', 'sender-1', 'apikey');
+      expect(result).toMatchObject({ success: 0, total: 1, failureUserIds: ['u-mixed'] });
+      expect(result.expired).toBeUndefined();
+      expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+      expect(logger.audit).toHaveBeenCalledWith('revoke_failed', expect.objectContaining({ expired_legacy_recipients: 1 }));
+    } finally { clock.mockRestore(); }
+  });
+
+  it('still calls revoke for a known child ID even when its recorded expiry passed', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([{
+      resource_id: 'res-known', recipient_discord_id: 'u-known', qurl_id: 'q_known',
+      created_at: '2000-01-01T00:00:00.000Z', expires_in: '24h',
+    }]);
+    await revokeAllLinks('send-known-expired', 'sender-1', 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-known', ['q_known'], 'apikey');
+  });
+
   it('keeps malformed rows without resource_id retryable without revoking them', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-ok', recipient_discord_id: 'u-ok', qurl_id: 'q_u_ok' },
@@ -1782,6 +1865,17 @@ describe('renderRevokeMsg', () => {
 describe('buildRevokeHeader (slash-command revoke path)', () => {
   // eslint-disable-next-line global-require
   const { buildRevokeHeader } = require('../src/revoke-render');
+
+  it('excludes proven expired users from the unconfirmed count without calling them revoked', () => {
+    expect(buildRevokeHeader(1, 3, { expired: 1 }))
+      .toContain('Revoked 1/3 users. Links for 1 user had already expired. Could not confirm revocation for 1 user.');
+    expect(renderRevokeMsg('send-expired-render', [], 2, false, 0, true, 2).content)
+      .toContain('Links for 2 users had already expired. qURL could not save the final revocation state.');
+  });
+
+  it.each([-1, NaN, 0.5, '1', 2])('rejects an invalid expired count %p', expired => {
+    expect(() => buildRevokeHeader(0, 1, { expired })).toThrow(/expired revoke count/);
+  });
 
   it('zero-attempt: "Revoked 0/0 users." (no already-opened note)', () => {
     expect(buildRevokeHeader(0, 0)).toBe('Revoked 0/0 users.');
