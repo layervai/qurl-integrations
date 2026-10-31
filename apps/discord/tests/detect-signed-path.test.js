@@ -37,6 +37,9 @@ beforeEach(() => {
 });
 it('mints the exact guild path and sends no API key or guild header', async () => {
   await expect(detect(Buffer.from('image'), { guildId, contentType: 'image/png' })).resolves.toEqual(result);
+  expect(require('@layervai/qurl').QURLClient).toHaveBeenCalledWith(expect.objectContaining({
+    apiKey: 'bot-key', baseUrl: 'https://api.layerv.ai', timeout: 30000, maxRetries: 3,
+  }));
   expect(mockClient.createQurlForResource).toHaveBeenCalledWith(crid, { expires_in: '5m', session_duration: '5m', target_path: path });
   expect(mockOpen).toHaveBeenCalledWith({ qurl, expectedCRID: crid });
   expect(send).toHaveBeenCalledWith(expect.objectContaining({ method: 'POST', headers: { 'Content-Type': 'image/png' } }));
