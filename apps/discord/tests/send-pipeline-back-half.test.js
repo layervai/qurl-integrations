@@ -151,6 +151,7 @@ jest.mock('../src/connector', () => ({
 
 jest.mock('../src/qurl', () => ({
   createOneTimeLink: jest.fn(),
+  revokeResource: jest.fn(),
 }));
 
 jest.mock('../src/places', () => ({ searchPlaces: jest.fn().mockResolvedValue([]) }));
@@ -829,7 +830,7 @@ describe('revokeAllLinks', () => {
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaa', 'q_bbb'], 'apikey');
-    expect(require('../src/qurl').revokeResource).toBeUndefined();
+    expect(require('../src/qurl').revokeResource).not.toHaveBeenCalled();
     expect(result.success).toBe(2);
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
   });
