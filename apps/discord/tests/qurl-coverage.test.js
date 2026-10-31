@@ -473,6 +473,26 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     }
   });
 
+  it('returns a long parent-read Retry-After without an uncancellable SDK sleep', async () => {
+    const response = apiError(429);
+    response.headers.get = name => name.toLowerCase() === 'retry-after' ? '3600' : null;
+    globalThis.fetch = jest.fn().mockResolvedValueOnce(response);
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1'], 'guild-key'))
+      .rejects.toMatchObject({ status: 429, failedCount: 1 });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops SDK deletes at the parent deadline and retains the first confirmation', async () => {
+    const budget = new AbortController();
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(apiOk(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID }))
+      .mockImplementationOnce(async () => { budget.abort(); return apiOk(204); });
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID,
+      ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2', 'q_aaaaaaaaaa3'], 'guild-key', { signal: budget.signal }))
+      .rejects.toMatchObject({ failedCount: 2, confirmedQurlIds: ['q_aaaaaaaaaa1'] });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('stops mid-batch once the budget expires', async () => {
     const budget = new AbortController();
     const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockImplementation(ms => (
@@ -493,7 +513,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
       const { ERROR_CODE_NETWORK, ERROR_CODE_TIMEOUT } = require('@layervai/qurl');
       expect([ERROR_CODE_NETWORK, ERROR_CODE_TIMEOUT]).toContain(err.code);
       expect(err.message).not.toContain('unknown_error');
-      expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     } finally {
       timeoutSpy.mockRestore();
     }

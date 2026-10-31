@@ -8583,11 +8583,13 @@ function renderSendConfirm({
 // DISPLAY_NAME_FALLBACK, so a forgotten 4th arg still renders
 // gracefully on the recipient side.
 async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DISPLAY_NAME_FALLBACK) {
+  // Stop destructive work before the 13-minute interaction result deadline.
+  const signal = AbortSignal.timeout(12 * 60 * 1000);
   // Establish the durable no-more-recipients barrier before reading the send
   // rows. getSendItems uses a strongly consistent base-table query, so an Add
   // transaction that committed before this barrier is included; one racing
   // after it fails the revoking_at condition check.
-  const barrierEstablished = await db.markSendRevoking(sendId, senderDiscordId);
+  const barrierEstablished = await db.markSendRevoking(sendId, senderDiscordId, { signal });
   // The durable store returns false for unknown, finalized, or foreign sends.
   // Never issue a DELETE unless it positively confirms the barrier.
   if (!barrierEstablished) {
@@ -8605,7 +8607,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // revoke step can edit each strict-success recipient's DM in place.
   // Legacy rows predating that wire-up have the refs unset — the edit
   // step skips them.
-  const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true });
+  const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true, signal });
 
   // Revoke each resource's children together, retaining per-child confirmations
   // even if a sibling fails (mintLinksInBatches packs
@@ -8633,7 +8635,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const failureUserIds = [];
 
   const results = await batchSettled(resourceEntries, async ([resourceId, children]) => {
-    await revokeMintedLinks(resourceId, children.map(child => child.qurlId), apiKey);
+    signal.throwIfAborted();
+    await revokeMintedLinks(resourceId, children.map(child => child.qurlId), apiKey, { signal });
     return resourceId;
   }, 5);
 
@@ -8793,7 +8796,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       // operational outcomes (recipient deleted DM / blocked bot) from
       // surprises that warrant oncall attention.
       const editResults = await batchSettled(entries, async ([, refs]) => {
-        const res = await editDM(refs.channelId, refs.messageId, editPayload);
+        const res = await editDM(refs.channelId, refs.messageId, editPayload, { signal });
         if (!res.ok) {
           const e = new Error('editDM returned not-ok');
           e.expected = res.expected;
@@ -8842,7 +8845,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   let finalizationFailed = false;
   if (fullyConfirmed) {
     try {
-      const finalized = await db.markSendRevoked(sendId, senderDiscordId);
+      const finalized = await db.markSendRevoked(sendId, senderDiscordId, { signal });
       if (finalized !== true) throw new Error('finalization was not confirmed');
     } catch (err) {
       finalizationFailed = true;

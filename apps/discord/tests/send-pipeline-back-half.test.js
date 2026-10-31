@@ -821,6 +821,27 @@ describe('revokeAllLinks', () => {
     recipient_discord_id: `user-${i + 1}`,
   }));
 
+  it('stops queued resources at the shared work deadline and keeps the send retryable', async () => {
+    const budget = new AbortController();
+    const timeout = jest.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+      expect(ms).toBe(12 * 60 * 1000);
+      return budget.signal;
+    });
+    mockDb.getSendItems.mockResolvedValueOnce(makeItems(8));
+    mockRevokeMintedLinks.mockImplementationOnce(async () => { budget.abort(); });
+    try {
+      const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+      expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_item_1'], 'apikey', { signal: budget.signal });
+      expect(mockDb.getSendItems).toHaveBeenCalledWith('send-1', 'sender-1', { consistentRead: true, signal: budget.signal });
+      expect(result).toMatchObject({ success: 1, total: 8, failureUserIds: expect.any(Array) });
+      expect(result.failureUserIds).toHaveLength(7);
+      expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
   it('revokes every recorded child of a shared resource in one call and never deletes the parent', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_aaa' },
@@ -830,10 +851,10 @@ describe('revokeAllLinks', () => {
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaa', 'q_bbb'], 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaa', 'q_bbb'], 'apikey', { signal: expect.any(AbortSignal) });
     expect(require('../src/qurl').revokeResource).not.toHaveBeenCalled();
     expect(result.success).toBe(2);
-    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1', { signal: expect.any(AbortSignal) });
   });
 
   it('leaves the send retryable when the connector cannot confirm a child revoke', async () => {
@@ -865,7 +886,7 @@ describe('revokeAllLinks', () => {
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey', { signal: expect.any(AbortSignal) });
     expect(result).toMatchObject({
       success: 1, total: 2, successUserIds: ['user-1'], failureUserIds: ['user-2'],
     });
@@ -883,7 +904,7 @@ describe('revokeAllLinks', () => {
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey', { signal: expect.any(AbortSignal) });
     expect(result.success).toBe(1);
   });
 
@@ -894,8 +915,8 @@ describe('revokeAllLinks', () => {
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
-    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1');
-    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1', { signal: expect.any(AbortSignal) });
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1', { signal: expect.any(AbortSignal) });
     expect(mockDb.markSendRevoking.mock.invocationCallOrder[0])
       .toBeLessThan(mockDb.getSendItems.mock.invocationCallOrder[0]);
     expect(mockDb.getSendItems.mock.invocationCallOrder[0])
@@ -942,7 +963,7 @@ describe('revokeAllLinks', () => {
     expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
       send_id: 'send-1', success: 1, total: 2, unresolvable_recipients: 0,
     });
-    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1');
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1', { signal: expect.any(AbortSignal) });
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
 
@@ -1042,7 +1063,7 @@ describe('revokeAllLinks', () => {
     expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
       send_id: 'send-43', success: 0, total: 2, unresolvable_recipients: 0,
     });
-    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-43', 'sender-1');
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-43', 'sender-1', { signal: expect.any(AbortSignal) });
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
 
@@ -1110,8 +1131,8 @@ describe('revokeAllLinks', () => {
     });
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-finalize-fail', 'sender-1');
-    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-finalize-fail', 'sender-1');
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-finalize-fail', 'sender-1', { signal: expect.any(AbortSignal) });
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-finalize-fail', 'sender-1', { signal: expect.any(AbortSignal) });
     expect(logger.audit).toHaveBeenCalledWith('revoke_success', {
       send_id: 'send-finalize-fail', success: 1, total: 1, unresolvable_recipients: 0,
     });
@@ -1120,7 +1141,7 @@ describe('revokeAllLinks', () => {
       { sendId: 'send-finalize-fail', error: 'DDB finalize failed' },
     );
     expect(mockEditDM).toHaveBeenCalledWith(
-      'channel-1', 'message-1', expect.any(Object),
+      'channel-1', 'message-1', expect.any(Object), { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -1203,7 +1224,7 @@ describe('revokeAllLinks', () => {
       failureUserIds: [],
     });
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith(
-      'send-duplicate-recipient', 'sender-1',
+      'send-duplicate-recipient', 'sender-1', { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -1236,7 +1257,7 @@ describe('revokeAllLinks', () => {
     const result = await revokeAllLinks('send-malformed', 'sender-1', 'apikey');
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-ok', ['q_u_ok'], 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-ok', ['q_u_ok'], 'apikey', { signal: expect.any(AbortSignal) });
     expect(result).toMatchObject({
       success: 1,
       total: 2,
@@ -2753,7 +2774,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       { sendId, error: 'DDB read failed' },
     );
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockDb.markSendRevoked).toHaveBeenCalledWith(sendId, 'sender-1');
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith(sendId, 'sender-1', { signal: expect.any(AbortSignal) });
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('Revoked 1/1 user.'),
     }));

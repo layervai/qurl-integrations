@@ -294,3 +294,17 @@ describe('editInteractionReply via webhook token (cross-replica view-counter pri
     expect(JSON.stringify(fields)).not.toContain(TOKEN);
   });
 });
+
+it('does not edit a DM after the revoke work deadline', async () => {
+  const budget = new AbortController();
+  budget.abort();
+  expect(await editDM('c', 'm', { components: [] }, { signal: budget.signal })).toMatchObject({ ok: false });
+  expect(restMock.patch).not.toHaveBeenCalled();
+});
+
+it('passes the revoke deadline into Discord REST queue and request handling', async () => {
+  const signal = new AbortController().signal;
+  restMock.patch.mockResolvedValueOnce({});
+  expect(await editDM('c', 'm', { components: [] }, { signal })).toEqual({ ok: true });
+  expect(restMock.patch.mock.calls[0][1].signal).toBe(signal);
+});
