@@ -747,9 +747,8 @@ func TestSetChannelAlias_DuplicateAliasIsRefused(t *testing.T) {
 }
 
 // TestSetAlias_MissingTeamOrChannelID pins the defensive guard in
-// aliasPreamble: a Slack form payload that arrives without team_id or
-// channel_id surfaces the "Could not read your Slack workspace or
-// channel ID" copy and never dials the store. Catches a malformed
+// the command and alias guards: a missing team_id gets the workspace
+// error; a missing channel_id gets the alias error. Neither dials the store. Catches a malformed
 // fixture or a future regression in form parsing rather than silently
 // writing a row keyed on empty strings.
 func TestSetAlias_MissingTeamOrChannelID(t *testing.T) {
@@ -773,7 +772,7 @@ func TestSetAlias_MissingTeamOrChannelID(t *testing.T) {
 	h.ServeHTTP(w2, newSignedRequest(t, "/slack/commands", body2, sign2))
 	got2 := decodeSlackText(t, w2.Body.Bytes())
 	if !strings.Contains(got2, "missing Slack workspace ID") {
-		t.Errorf("missing team_id response = %q, want defensive-guard copy", got2)
+		t.Errorf("missing team_id response = %q, want early workspace-guard copy", got2)
 	}
 	// Store must not have been dialed in either branch.
 	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {

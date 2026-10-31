@@ -44,3 +44,18 @@ func TestSlashMissingWorkspaceRejectsBeforeCredentialLookup(t *testing.T) {
 		})
 	}
 }
+
+func TestSlashEmptyTextWithWorkspaceShowsHelp(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	body := url.Values{fieldTeamID: {"T123"}, fieldCommand: {commandUser}, fieldText: {""}}.Encode()
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, newSignedRequest(t, pathSlackCommands, body, body))
+	h.Wait()
+	var ack map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &ack); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ack[respFieldText], "/qurl help") {
+		t.Fatalf("empty-text reply = %s", response.Body.String())
+	}
+}
