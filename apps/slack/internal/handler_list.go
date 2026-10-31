@@ -338,7 +338,7 @@ const listFooterButtons = "Tap *Create qURL* on any row with a button, or copy a
 // then a channel-bound alias when the resource has no alias.
 //
 // The listing is CHANNEL-SCOPED: a member sees only the tunnels in this
-// channel's [slackdata.Store.AllowedResourceIDsForChannel] set (the union of
+// channel's [slackdata.Store.ChannelScopedResourceIDs] set (the union of
 // its `allowed_resource_ids` and `alias_bindings` values) — the same definition
 // `/qurl get` mints against and `/qurl aliases` lists. A resource available in
 // another channel does not appear here until an admin makes it available here
@@ -381,7 +381,7 @@ func (h *Handler) listChannelScope(ctx context.Context, log *slog.Logger, respon
 		_ = h.postResponse(log, responseURL, ":warning: Admin features are not configured for this deployment.")
 		return nil, false
 	}
-	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
+	allowed, err := h.cfg.AdminStore.ChannelScopedResourceIDs(ctx, teamID, channelID)
 	if err != nil {
 		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "list: channel allow-set fetch failed — failing closed", "error", err, "team_id", teamID, "channel_id", channelID)
 		_ = h.postResponse(log, responseURL, ":warning: "+serviceUnreachableMessage)
@@ -1020,7 +1020,7 @@ func mrkdwnCodeSpan(text string) string {
 //
 // Cost: one GetChannelPolicy (GetItem) per /qurl list, purely for the
 // cosmetic alias display — a second point read of the same channel_policies
-// row the scope gate already read via AllowedResourceIDsForChannel. The two
+// row the scope gate already read via ChannelScopedResourceIDs. The two
 // have different shapes (this returns alias→resource entries; the gate returns
 // the membership set), so they're kept as separate reads rather than folded;
 // both are cheap GetItems on a tiny row behind the dominant upstream
