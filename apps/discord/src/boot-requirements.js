@@ -35,8 +35,8 @@ function bootRequired() {
 }
 
 // Additionally required when NODE_ENV=production. QURL_API_KEY is NOT
-// here: it is only the global fallback for /qurl send + /qurl map, and
-// every deployment shape relies on per-guild /qurl setup instead.
+// here: send/map can use per-guild setup. Detect and default-webhook
+// discovery enforce their conditional global-key requirements separately.
 //
 // KEY_ENCRYPTION_KEY appears here AND in missingKekRequiredKeys. The
 // two overlap on prod-with-OAuth (both fail closed there); the

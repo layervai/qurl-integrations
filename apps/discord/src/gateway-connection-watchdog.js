@@ -334,6 +334,7 @@ function createConnectionWatchdog({
     if (recovering || isConnecting()) {
       const mode = recovering ? 'automatic reconnect' : 'inbound handoff connect';
       attempts = 0;
+      // One timer spans both modes; the timeout log names the current mode.
       const currentTime = now();
       if (recoveryStartedAt === null) {
         recoveryStartedAt = currentTime;

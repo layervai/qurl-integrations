@@ -1024,6 +1024,47 @@ describe('inbound handoff connect deadline', () => {
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('inbound handoff connect timed out'), expect.objectContaining({ recovery_elapsed_ms: 30_000 }));
   });
 
+  test('switching from pending connect to recovery keeps one deadline', async () => {
+    const manager = makeFakeManager();
+    let pending = true;
+    let nowMs = 0;
+    const { watchdog, exit, releaseLock } = makeWatchdog({
+      manager, isConnecting: () => pending, now: () => nowMs, maxRecoveryMs: 1000,
+    });
+    await watchdog._stepForTest();
+    nowMs = 500;
+    pending = false;
+    manager._setRecovering(true);
+    await watchdog._stepForTest();
+    nowMs = 1000;
+    await watchdog._stepForTest();
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+    expect(manager.connect).not.toHaveBeenCalled();
+  });
+
+  test('a settled slow connect leaves a fresh deadline for a later handoff', async () => {
+    const manager = makeFakeManager();
+    let pending = true;
+    let nowMs = 0;
+    const { watchdog, exit } = makeWatchdog({
+      manager, isConnecting: () => pending, now: () => nowMs, maxRecoveryMs: 1000,
+    });
+    await watchdog._stepForTest();
+    nowMs = 500;
+    pending = false;
+    await watchdog._stepForTest();
+    expect(manager.connect).toHaveBeenCalledTimes(1);
+    manager._setConnected(false);
+    pending = true;
+    nowMs = 750;
+    await watchdog._stepForTest();
+    nowMs = 1000;
+    await watchdog._stepForTest();
+    expect(exit).not.toHaveBeenCalled();
+    expect(manager.connect).toHaveBeenCalledTimes(1);
+  });
+
   test('a hung peer-row cleanup cannot prevent process replacement', async () => {
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     let nowMs = 0;
