@@ -1085,7 +1085,7 @@ describe('parseRecipientMentions — cap + length safety', () => {
 });
 
 describe('role fixtures default to permission denial (#348)', () => {
-  test.each([['123'], { members: ['123'] }])('omitted mentionable denies %j', (role) => {
+  test.each([[['123']], [{ members: ['123'] }]])('omitted mentionable denies %j', (role) => {
     const int = makeInteraction({ roles: { '7000': role } });
     const result = parseRecipientMentions('<@&7000>', int);
     expect(result.ids).toEqual([]);

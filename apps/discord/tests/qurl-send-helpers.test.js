@@ -215,7 +215,8 @@ describe('resolveMentionableSelection', () => {
     const u2 = makeUser('100000000000000002');
     const int = makeMentionableInteraction({
       pickedRoles: [
-        makeRole({ mentionable: true,
+        makeRole({
+          mentionable: true,
           id: 'role-eng',
           members: [{ user: u1 }, { user: bot1 }, { user: u2 }],
         }),
@@ -347,7 +348,8 @@ describe('resolveMentionableSelection', () => {
     const overlapBot = roleABots[0].user; // same User ref as role A's first bot
     const human = makeUser('100000000000000001');
     const roleA = makeRole({ mentionable: true, id: 'role-a', members: roleABots });
-    const roleB = makeRole({ mentionable: true,
+    const roleB = makeRole({
+          mentionable: true,
       id: 'role-b',
       members: [{ user: overlapBot }, { user: human }],
     });
@@ -360,11 +362,13 @@ describe('resolveMentionableSelection', () => {
   test('overlap dedup: same bot in two picked roles counted once in droppedFromRoles', () => {
     const bot1 = makeUser('100000000000000099', { bot: true });
     const u1 = makeUser('100000000000000001');
-    const roleA = makeRole({ mentionable: true,
+    const roleA = makeRole({
+          mentionable: true,
       id: 'role-a',
       members: [{ user: bot1 }, { user: u1 }],
     });
-    const roleB = makeRole({ mentionable: true,
+    const roleB = makeRole({
+          mentionable: true,
       id: 'role-b',
       members: [{ user: bot1 }],
     });
@@ -379,7 +383,8 @@ describe('resolveMentionableSelection', () => {
   test('named-role overlap: directly-picked user object identity preserved (cap-priority parity with @everyone)', () => {
     const u1Picked = makeUser('100000000000000001');
     const u1FromRole = { ...makeUser('100000000000000001'), tag: 'from-role-view' };
-    const role = makeRole({ mentionable: true,
+    const role = makeRole({
+          mentionable: true,
       id: 'role-eng',
       members: [{ user: u1FromRole }],
     });
@@ -395,7 +400,8 @@ describe('resolveMentionableSelection', () => {
 
   test('directly-picked bot + same bot in role → droppedFromRoles 0 (partition reports it via droppedBots)', () => {
     const bot1 = makeUser('100000000000000099', { bot: true });
-    const role = makeRole({ mentionable: true,
+    const role = makeRole({
+          mentionable: true,
       id: 'role-with-bot',
       members: [{ user: bot1 }],
     });
@@ -412,7 +418,8 @@ describe('resolveMentionableSelection', () => {
     const bot1 = makeUser('100000000000000091', { bot: true });
     const bot2 = makeUser('100000000000000092', { bot: true });
     const int = makeMentionableInteraction({
-      pickedRoles: [makeRole({ mentionable: true,
+      pickedRoles: [makeRole({
+          mentionable: true,
         id: 'role-bots',
         members: [{ user: bot1 }, { user: bot2 }],
       })],
@@ -427,7 +434,8 @@ describe('resolveMentionableSelection', () => {
     const u1 = makeUser('100000000000000001');
     const bot1 = makeUser('100000000000000091', { bot: true });
     const int = makeMentionableInteraction({
-      pickedRoles: [makeRole({ mentionable: true,
+      pickedRoles: [makeRole({
+          mentionable: true,
         id: 'role-eng',
         members: [{ user: u1 }, { user: bot1 }],
       })],
