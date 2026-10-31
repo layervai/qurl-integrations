@@ -3692,7 +3692,12 @@ async function handleRevoke(interaction, apiKey) {
   }
   await interaction.deferReply({ ephemeral: true });
 
-  const recentSends = await db.getRecentSends(interaction.user.id, 5);
+  if (config.isMultiTenant && !interaction.guildId) {
+    return interaction.editReply({ content: 'Use this command in a server.' });
+  }
+  const recentSends = config.isMultiTenant
+    ? await db.getRecentSends(interaction.user.id, 5, interaction.guildId)
+    : await db.getRecentSends(interaction.user.id, 5);
 
   if (recentSends.length === 0) {
     return interaction.editReply({ content: 'No recent sends to revoke.' });
