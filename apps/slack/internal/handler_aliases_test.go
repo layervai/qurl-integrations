@@ -345,6 +345,7 @@ func TestHandleAliases_CompleteListingLogsNoWarning(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
 		"bastion": "r_resolved01",
+		"":        "r_hidden_without_alias",
 	})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{

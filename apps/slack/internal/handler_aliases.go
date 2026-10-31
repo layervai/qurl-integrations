@@ -113,6 +113,9 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	lines := make([]string, 0, len(groups))
 	unresolved := 0
 	for i := range groups {
+		if len(groups[i].aliases) == 0 {
+			continue
+		}
 		// Empty IDs and direct-URL bindings never join. A missing real resource
 		// degrades to aliases only and counts toward the pagination-gap signal.
 		var r client.Resource
