@@ -20,8 +20,11 @@ function loadServer(env) {
 }
 
 it.each(['true', 'false', '-1', '1oops', '1.5', '1e2', 'Infinity', 'NaN', '9007199254740992'])(
-  'refuses invalid TRUST_PROXY=%s at module load', value => {
-    expect(() => loadServer({ TRUST_PROXY: value })).toThrow(/TRUST_PROXY must be/);
+  'refuses invalid TRUST_PROXY=%s before opening HTTP', value => {
+    const { app, startServer } = loadServer({ TRUST_PROXY: value, NODE_ENV: 'production', PROCESS_ROLE: 'http' });
+    const listen = jest.spyOn(app, 'listen').mockReturnValue({});
+    expect(startServer).toThrow(/TRUST_PROXY must be/);
+    expect(listen).not.toHaveBeenCalled();
   },
 );
 
@@ -54,4 +57,8 @@ it('refuses startup after an all-hops override without opening a listener', () =
   app.set('trust proxy', true);
   expect(startServer).toThrow(/TRUST_PROXY changed/);
   expect(listen).not.toHaveBeenCalled();
+});
+
+it('allows gateway-only imports without activating invalid HTTP proxy settings', () => {
+  expect(loadServer({ TRUST_PROXY: '1oops', NODE_ENV: 'production', PROCESS_ROLE: 'gateway' }).app.get('trust proxy')).toBe(0);
 });

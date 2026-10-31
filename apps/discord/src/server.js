@@ -5,9 +5,8 @@ const helmet = require('helmet');
 
 const rawProxyHops = process.env.TRUST_PROXY?.trim();
 const proxyHops = rawProxyHops ? Number(rawProxyHops) : (process.env.NODE_ENV === 'production' ? 1 : 0);
-if ((rawProxyHops && !/^\d+$/.test(rawProxyHops)) || !Number.isSafeInteger(proxyHops) || proxyHops < 0) {
-  throw new Error('TRUST_PROXY must be a non-negative whole hop count (0 for direct connections, 1 behind the LayerV ALB)');
-}
+const proxyHopsValid = (!rawProxyHops || /^\d+$/.test(rawProxyHops))
+  && Number.isSafeInteger(proxyHops) && proxyHops >= 0;
 
 const config = require('./config');
 const { assertConfiguredWebhookSecret } = require('./utils/webhook-secret');
@@ -39,7 +38,8 @@ app.use((req, res, next) => {
 
 // The managed ingress has one ALB that appends the client address. A numeric
 // count ignores client-supplied entries farther left in X-Forwarded-For.
-app.set('trust proxy', proxyHops);
+// Invalid HTTP settings stay inert for gateway-only imports; startServer rejects them.
+app.set('trust proxy', proxyHopsValid ? proxyHops : 0);
 
 // helmet covers HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-
 // Policy, X-DNS-Prefetch-Control, etc. The HTTP CSP is the single source of
@@ -288,6 +288,9 @@ app.use((err, req, res, next) => {
 
 // Start server
 function startServer() {
+  if (!proxyHopsValid) {
+    throw new Error('TRUST_PROXY must be a non-negative whole hop count (0 for direct connections, 1 behind the LayerV ALB)');
+  }
   if (app.get('trust proxy') !== proxyHops) {
     throw new Error('TRUST_PROXY changed after boot configuration');
   }
