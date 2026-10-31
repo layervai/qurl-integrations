@@ -16,6 +16,6 @@
     "jest": "^30.3.0",
     "playwright": "^1.60.0",
     "ts-jest": "^29.4.9",
-    "typescript": "^6.0.2"
+    "typescript": "^7.0.2"
   }
 }
