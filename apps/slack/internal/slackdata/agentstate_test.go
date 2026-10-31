@@ -149,11 +149,7 @@ func (f *agentFakeDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInpu
 	return &dynamodb.DeleteItemOutput{}, nil
 }
 
-// Query models the two AgentStore shapes that tests need: ListAuditEntries emits
-// pk equality + begins_with(sk) with ScanIndexForward + Limit, while
-// PurgeWorkspaceAgentState emits pk equality only and pages over the whole
-// partition. It reads the expression values directly rather than parsing the
-// KeyConditionExpression text.
+// BatchWriteItem models unconditional deletes; batchFunc overrides failures.
 func (f *agentFakeDDB) BatchWriteItem(ctx context.Context, in *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
 	f.batchCalls++
 	if f.batchFunc != nil {
@@ -172,6 +168,11 @@ func (f *agentFakeDDB) BatchWriteItem(ctx context.Context, in *dynamodb.BatchWri
 	return &dynamodb.BatchWriteItemOutput{}, nil
 }
 
+// Query models the two AgentStore shapes that tests need: ListAuditEntries emits
+// pk equality + begins_with(sk) with ScanIndexForward + Limit, while
+// PurgeWorkspaceAgentState emits pk equality only and pages over the whole
+// partition. It reads the expression values directly rather than parsing the
+// KeyConditionExpression text.
 func (f *agentFakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
 	if f.queryErr != nil {
 		return nil, f.queryErr

@@ -725,6 +725,7 @@ func readNumber(item map[string]ddbtypes.AttributeValue, key string) int64 {
 
 // Deletes are idempotent; retry only unfinished requests with bounded backoff.
 func (s *AgentStore) deleteAgentStateBatch(ctx context.Context, pending []ddbtypes.WriteRequest) error {
+	// The caller retries the whole purge within its deadline; keep this budget short.
 	const maxRetries = 3
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
