@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -217,6 +218,25 @@ func TestMintReplacementAndPersistDependencyAuthFailureAuditWiring(t *testing.T)
 	assertDependencyAuthFailureAudit(t,
 		requireAuditRoute(t, logs(), "oauth_callback_replacement_mint"),
 		"oauth_callback_replacement_mint", http.MethodPost, testAPIKeysPath, http.StatusForbidden, testInsufficientScope, "req_replacement_mint")
+}
+
+func TestRevokeOrphanKeyAsyncLogsInvalidID(t *testing.T) {
+	logs := captureDefaultSlogJSON(t)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	minter := &HTTPAPIKeyMinter{BaseURL: server.URL, HTTPClient: server.Client()}
+	revokeOrphanKeyAsync(minter, "access-token", "key_invalid", testTeamID)
+	if requests.Load() != 0 {
+		t.Fatal("invalid ID reached upstream")
+	}
+	records := logs()
+	if len(records) != 1 || records[0]["msg"] != "oauth/callback orphan-key revoke failed" || records[0]["error"] != "revoke api key: invalid key_id" {
+		t.Fatalf("missing orphan cleanup warning: %#v", records)
+	}
 }
 
 func TestRevokeOrphanKeyAsyncDependencyAuthFailureAuditWiring(t *testing.T) {

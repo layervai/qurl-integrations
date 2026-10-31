@@ -3725,6 +3725,21 @@ func TestRevokeBootstrapKeyAfterInstallFailureTreatsNotFoundAsBenign(t *testing.
 	}
 }
 
+func TestRevokeBootstrapKeyAfterInstallFailureLogsInvalidID(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1); w.WriteHeader(http.StatusNoContent) }))
+	t.Cleanup(server.Close)
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, client.New(server.URL, "unused", client.WithRetry(0)), &client.APIKey{KeyID: "key_invalid"}, "render_failed")
+	if hits.Load() != 0 {
+		t.Fatal("invalid ID reached upstream")
+	}
+	if got := logs.String(); !strings.Contains(got, "tunnel_bootstrap_cleanup_failed") || !strings.Contains(got, "invalid key_id") || !strings.Contains(got, "render_failed") {
+		t.Fatalf("missing actionable cleanup failure: %s", got)
+	}
+}
+
 func TestRevokeBootstrapKeyAfterInstallFailureHonorsParentCancellation(t *testing.T) {
 	t.Parallel()
 

@@ -68,14 +68,7 @@ const (
 	// minting.
 	structuredErrorEnvelopeCode = "__structured_error_envelope__"
 
-	// credentialKindAPIKey is the `kind` sent on the workspace-key mint. This
-	// package hand-rolls its qurl-service HTTP client and keeps this local
-	// enum name while sharing key-ID validation with shared/client.
-	//
-	// TODO(upstream-contract): mirrors qurl-service's kind-first
-	// `CreateApiKeyRequest.kind`; keep in lockstep with
-	// shared/client.CredentialKindAPIKey.
-	credentialKindAPIKey = "api_key"
+	credentialKindAPIKey = qurlclient.CredentialKindAPIKey
 )
 
 // ErrAPIKeyProvisioningQuotaReached is returned when qurl-service refuses key

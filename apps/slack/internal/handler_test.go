@@ -875,6 +875,26 @@ func TestSlashCommandUninstallLegacyRowWithoutKeyIDDisconnectsLocally(t *testing
 // with API-key auth, which qurl-service categorically forbids (403), so this is
 // the universal prod outcome for a live key — the upstream revoke degrades to a
 // local-only disconnect and the reply keeps the "not revoked outside Slack" caveat.
+func TestSlashCommandUninstallMalformedStoredKeyIDDisconnectsLocally(t *testing.T) {
+	for _, keyID := range []string{"key_invalid", " \t"} {
+		provider := &revokingAuthProvider{recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"}, keyID: keyID}
+		h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
+		resp := slashUninstallAsAdmin(t, h)
+		if calls, _ := rec.snapshot(); calls != 0 {
+			t.Fatalf("invalid saved ID made %d upstream calls", calls)
+		}
+		if provider.deleteCalls != 1 {
+			t.Fatalf("local delete calls=%d, want 1", provider.deleteCalls)
+		}
+		if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
+			t.Fatalf("missing upstream-key caveat: %q", resp[respFieldText])
+		}
+		if strings.Contains(resp[respFieldText], "API key has been revoked") {
+			t.Fatal("claimed an upstream revoke without one")
+		}
+	}
+}
+
 func TestSlashCommandUninstallRevokeForbiddenFallsBackToLocalOnly(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},

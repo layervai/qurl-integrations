@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	qurlclient "github.com/layervai/qurl-integrations/shared/client"
@@ -1107,9 +1108,12 @@ func TestHTTPAPIKeyMinterRevokeHappyPath(t *testing.T) {
 }
 
 func TestHTTPAPIKeyMinterRevokeMalformedIDBeforeHTTP(t *testing.T) {
-	requests := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { requests++; w.WriteHeader(http.StatusNoContent) }))
-	defer srv.Close()
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	for _, id := range []string{"k_1", "key_12345678901", "key_1234567890123", "../key_Aa0123456789", "key_Aa012345678/", "key_Aa012345678%", "lv_live_synthetic"} {
 		if err := m.RevokeAPIKey(context.Background(), "tok", id); !errors.Is(err, qurlclient.ErrRevokeAPIKeyInvalidID) {
@@ -1119,8 +1123,8 @@ func TestHTTPAPIKeyMinterRevokeMalformedIDBeforeHTTP(t *testing.T) {
 	if err := m.RevokeAPIKey(context.Background(), "tok", " \t\n"); !errors.Is(err, qurlclient.ErrRevokeAPIKeyEmptyID) {
 		t.Fatalf("empty key ID error = %v", err)
 	}
-	if requests != 0 {
-		t.Fatalf("malformed IDs made %d HTTP requests", requests)
+	if requests.Load() != 0 {
+		t.Fatalf("malformed IDs made %d HTTP requests", requests.Load())
 	}
 }
 

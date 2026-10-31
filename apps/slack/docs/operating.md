@@ -729,6 +729,12 @@ authenticated JWT (see "Workspace key rotation" above); an owner/operator-
 authenticated uninstall revoke is future work, tracked with the escape hatch in
 #806.
 
+A missing or malformed saved key ID also uses local-only disconnect. The client
+rejects it before HTTP, and uninstall keeps the upstream-key warning; it never
+claims the key was revoked. Ask the qURL account owner to revoke any remaining
+workspace key outside Slack. Cleanup after a failed install or OAuth mint logs
+an explicit failure if the returned ID is invalid.
+
 `event`-free log lines under the `/qurl uninstall:` prefix report the outcome; the
 terminal `/qurl uninstall: disconnected workspace Slack commands` line carries
 `upstream_revoked` so a single query separates the rare real revoke from the

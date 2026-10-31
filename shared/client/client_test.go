@@ -1512,17 +1512,20 @@ func TestRevokeAPIKeyReturnsAPIErrorOnFailure(t *testing.T) {
 }
 
 func TestRevokeAPIKeyRejectsMalformedIDsBeforeHTTP(t *testing.T) {
-	requests := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { requests++; w.WriteHeader(http.StatusNoContent) }))
-	defer srv.Close()
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
 	c := testClient(srv.URL, "test-key")
 	for _, id := range []string{"k_123456789012", "key_", "key_12345678901", "key_1234567890123", "KEY_Aa0123456789", "key_Aa012345678/", "key_Aa012345678?", "key_Aa012345678#", "key_Aa012345678%", "key_Aa012345678_", "key_Aa012345678-", "key_Aa012345678é", "key_Aa012345678\n9", "../key_Aa0123456789", "lv_live_synthetic"} {
 		if err := c.RevokeAPIKey(context.Background(), id); !errors.Is(err, ErrRevokeAPIKeyInvalidID) {
 			t.Errorf("invalid id unexpectedly accepted: %q, error %v", id, err)
 		}
 	}
-	if requests != 0 {
-		t.Fatalf("malformed IDs made %d HTTP requests", requests)
+	if requests.Load() != 0 {
+		t.Fatalf("malformed IDs made %d HTTP requests", requests.Load())
 	}
 }
 
