@@ -31,7 +31,7 @@ function makeInteraction({ senderId = '900000000000000001', users = {}, roles = 
   for (const [roleId, spec] of Object.entries(roles)) {
     const isObjectSpec = spec && typeof spec === 'object' && !Array.isArray(spec);
     const memberIds = isObjectSpec ? (spec.members || []) : spec;
-    const mentionable = isObjectSpec ? spec.mentionable !== false : true;
+    const mentionable = isObjectSpec && spec.mentionable === true;
     const roleMembers = new Map();
     for (const mid of memberIds) {
       const existing = memberCache.get(mid) ?? { user: { id: mid, bot: false } };
@@ -167,7 +167,7 @@ describe('parseRecipientMentions — role mentions', () => {
   test('expands a role to its current members', () => {
     const int = makeInteraction({
       users: { '101': {}, '102': {}, '103': {} },
-      roles: { '7000': ['101', '102', '103'] },
+      roles: { '7000': { mentionable: true, members: ['101', '102', '103'] } },
     });
     expect(parseRecipientMentions('<@&7000>', int))
       .toMatchObject({ ids: ['101', '102', '103'], invalidTokens: [], cappedCount: 0 });
@@ -176,7 +176,7 @@ describe('parseRecipientMentions — role mentions', () => {
   test('merges role expansion with direct user mentions, deduped', () => {
     const int = makeInteraction({
       users: { '101': {}, '102': {}, '103': {} },
-      roles: { '7000': ['101', '102'] },
+      roles: { '7000': { mentionable: true, members: ['101', '102'] } },
     });
     expect(parseRecipientMentions('<@103> <@&7000> <@101>', int).ids.sort())
       .toEqual(['101', '102', '103']);
@@ -186,7 +186,7 @@ describe('parseRecipientMentions — role mentions', () => {
     const int = makeInteraction({
       senderId: '900',
       users: { '900': {}, '801': { bot: true }, '101': {} },
-      roles: { '7000': ['900', '801', '101'] },
+      roles: { '7000': { mentionable: true, members: ['900', '801', '101'] } },
     });
     expect(parseRecipientMentions('<@&7000>', int).ids.sort())
       .toEqual(['101', '900']);
@@ -202,7 +202,7 @@ describe('parseRecipientMentions — role mentions', () => {
     const int = makeInteraction({
       senderId: '900',
       users: { '801': { bot: true } },
-      roles: { '7000': ['801'] },
+      roles: { '7000': { mentionable: true, members: ['801'] } },
     });
     const res = parseRecipientMentions('<@&7000>', int);
     expect(res.ids).toEqual([]);
@@ -213,7 +213,7 @@ describe('parseRecipientMentions — role mentions', () => {
     const int = makeInteraction({
       senderId: '900',
       users: { '900': {} },
-      roles: { '7000': ['900'] },
+      roles: { '7000': { mentionable: true, members: ['900'] } },
     });
     expect(parseRecipientMentions('<@&7000>', int))
       .toMatchObject({ ids: ['900'], invalidTokens: [], cappedCount: 0 });
@@ -255,7 +255,7 @@ describe('parseRecipientMentions — role mentions', () => {
       users[id] = {};
       roleMembers.push(id);
     }
-    const int = makeInteraction({ users, roles: { '7000': roleMembers } });
+    const int = makeInteraction({ users, roles: { '7000': { mentionable: true, members: roleMembers } } });
     const directMentions = directIds.map(id => `<@${id}>`).join(' ');
     const res = parseRecipientMentions(`<@&7000> ${directMentions}`, int);
     expect(res.ids).toHaveLength(25);
@@ -266,7 +266,7 @@ describe('parseRecipientMentions — role mentions', () => {
   test('user listed BOTH directly AND via a role mention appears once in ids, role is not flagged useless', () => {
     const int = makeInteraction({
       users: { '101': {} },
-      roles: { '7000': ['101'] },
+      roles: { '7000': { mentionable: true, members: ['101'] } },
     });
     expect(parseRecipientMentions('<@101> <@&7000>', int))
       .toMatchObject({ ids: ['101'], invalidTokens: [], cappedCount: 0 });
@@ -275,7 +275,7 @@ describe('parseRecipientMentions — role mentions', () => {
   test('role mention repeated in input expands once (no double-counting)', () => {
     const int = makeInteraction({
       users: { '101': {}, '102': {} },
-      roles: { '7000': ['101', '102'] },
+      roles: { '7000': { mentionable: true, members: ['101', '102'] } },
     });
     const res = parseRecipientMentions('<@&7000> <@&7000> <@&7000>', int);
     expect(res.ids.sort()).toEqual(['101', '102']);
@@ -730,7 +730,7 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
   test('@everyone + <@&role> combined: dedupe across sources, cap applies', () => {
     const int = makeInteraction({
       users: { '101': {}, '102': {}, '103': {} },
-      roles: { '7000': ['101', '102'] },
+      roles: { '7000': { mentionable: true, members: ['101', '102'] } },
     });
     const res = parseRecipientMentions(
       '<@&7000> @everyone',
@@ -961,7 +961,7 @@ describe('parseRecipientMentions — cap + length safety', () => {
     }
     const int = makeInteraction({
       users,
-      roles: { '7000': role1Members, '7001': role2Members },
+      roles: { '7000': { mentionable: true, members: role1Members }, '7001': { mentionable: true, members: role2Members } },
     });
     const res = parseRecipientMentions('<@&7000> <@&7001>', int);
     expect(res.ids).toHaveLength(25);
@@ -1081,5 +1081,14 @@ describe('parseRecipientMentions — cap + length safety', () => {
       expect.objectContaining({ uniqueCount: 51, cap: 25, cappedCount: 26 }),
     );
     expect(logger.debug).not.toHaveBeenCalled();
+  });
+});
+
+describe('role fixtures default to permission denial (#348)', () => {
+  test.each([['123'], { members: ['123'] }])('omitted mentionable denies %j', (role) => {
+    const int = makeInteraction({ roles: { '7000': role } });
+    const result = parseRecipientMentions('<@&7000>', int);
+    expect(result.ids).toEqual([]);
+    expect(result.roleMentionsDenied).toEqual(['7000']);
   });
 });
