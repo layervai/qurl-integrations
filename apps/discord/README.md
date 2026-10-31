@@ -266,7 +266,8 @@ The provisioner reads `scripts/ddb-local-schema.json`. Infrastructure CI compare
 that data file from upstream `main` with mocked Sandbox and production plans:
 table names, keys and types, GSIs and projections, and TTL. Schema changes need
 a paired infrastructure check. Existing local tables are not migrated; recreate
-only your disposable local tables when needed. The provisioner never drops data.
+only your disposable local tables when needed. The provisioner fails with a
+repair instruction if an existing table lacks a required GSI. It never drops data.
 
 ## Architecture
 

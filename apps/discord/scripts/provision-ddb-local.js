@@ -8,9 +8,6 @@
 // prod that's handled by terraform; locally we provision via this
 // script.
 //
-// Keys, GSIs and TTL for all four Store tables match the infrastructure
-// module; CI compares its mocked plans with the data-only schema below.
-//
 // SCOPE: this provisioner covers the Store-contract tables only (those
 // in `src/store/ddb-store.js`'s TABLES map). Other modules use their
 // own dedicated tables that this script does NOT create:
@@ -24,7 +21,8 @@
 // provision them via terraform against localhost or `aws dynamodb
 // create-table --endpoint-url http://localhost:8000`.
 //
-// CI compares the data-only schema with a mocked infrastructure plan, including
+// TODO(upstream-contract): infrastructure CI reads scripts/ddb-local-schema.json.
+// It compares the data with mocked infrastructure plans, including
 // keys, GSIs, projections and TTL. Update both sides in a coordinated change.
 // Existing local tables are not migrated: recreate only your disposable local
 // tables when a schema change requires it. This script never drops tables.
@@ -152,6 +150,14 @@ async function ensureTable(client, prefix, spec) {
     // breaking instanceof). The SDK always sets `err.name` to the
     // service-side exception name, so this is the canonical check.
     if (err.name === 'ResourceInUseException') {
+      if (spec.gsis?.length) {
+        const { Table } = await client.send(new DescribeTableCommand({ TableName }));
+        const indexes = new Set((Table.GlobalSecondaryIndexes || []).map(index => index.IndexName));
+        const missing = spec.gsis.filter(index => !indexes.has(index.IndexName));
+        if (missing.length) {
+          throw new Error(`Local table ${TableName} lacks GSI ${missing.map(index => index.IndexName).join(', ')}; recreate only this disposable local table. No data was deleted.`);
+        }
+      }
       console.log(`exists   ${TableName}`);
     } else {
       throw err;
@@ -205,7 +211,7 @@ async function main() {
 // surfacing as a runtime `ResourceNotFoundException` on first local
 // boot). The `require.main === module` guard keeps the script's
 // validation + main() from firing under `require()` in jest.
-module.exports = { tables };
+module.exports = { tables, ensureTable };
 
 if (require.main === module) {
   main().catch(err => {
