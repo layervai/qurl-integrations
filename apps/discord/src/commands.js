@@ -1243,10 +1243,10 @@ function buildRevokedDMPayload({ senderAlias }) {
 //
 // CALLER INVARIANT: every call site MUST await db.recordQURLSendBatch
 // before invoking the dispatch loop that calls this function. The
-// underlying UpdateCommand has no attribute_exists guard (#366), so
-// without that ordering a stale recipient_discord_id would create an
-// orphan row. executeSendPipeline + handleAddRecipients both honor
-// this — recordQURLSendBatch awaits to completion (with an early-
+// store ignores status writes for missing recipient rows. Persisting
+// first keeps valid delivery status from being dropped. executeSendPipeline
+// + handleAddRecipients both honor this — recordQURLSendBatch awaits
+// completion (with an early-
 // return on throw) before the batchSettled dispatch loop starts.
 async function persistDispatchResult(sendId, recipientDiscordId, result) {
   // Wraps the DDB call so a write failure can't propagate up as a

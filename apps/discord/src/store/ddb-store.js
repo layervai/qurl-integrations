@@ -527,23 +527,35 @@ async function getQurlViews(qurlIds) {
 }
 
 async function updateSendDMStatus(sendId, recipientDiscordId, status) {
-  await ddb.send(new UpdateCommand({
-    TableName: TABLES.qurl_sends,
-    Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
-    UpdateExpression: 'SET dm_status = :s',
-    ExpressionAttributeValues: { ':s': status },
-  }));
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_sends,
+      Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+      ConditionExpression: 'attribute_exists(send_id)',
+      UpdateExpression: 'SET dm_status = :s',
+      ExpressionAttributeValues: { ':s': status },
+    }));
+  } catch (err) {
+    if (err?.name !== 'ConditionalCheckFailedException') throw err;
+    logger.debug('updateSendDMStatus: recipient row no longer exists');
+  }
 }
 
 // Coalesces dm_status + DM channel/message refs into one Update so the
 // hot dispatch path stays at one DDB write per successful recipient.
 async function markSendDMDelivered(sendId, recipientDiscordId, channelId, messageId) {
-  await ddb.send(new UpdateCommand({
-    TableName: TABLES.qurl_sends,
-    Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
-    UpdateExpression: 'SET dm_status = :s, dm_channel_id = :c, dm_message_id = :m',
-    ExpressionAttributeValues: { ':s': DM_STATUS.SENT, ':c': channelId, ':m': messageId },
-  }));
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_sends,
+      Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+      ConditionExpression: 'attribute_exists(send_id)',
+      UpdateExpression: 'SET dm_status = :s, dm_channel_id = :c, dm_message_id = :m',
+      ExpressionAttributeValues: { ':s': DM_STATUS.SENT, ':c': channelId, ':m': messageId },
+    }));
+  } catch (err) {
+    if (err?.name !== 'ConditionalCheckFailedException') throw err;
+    logger.debug('markSendDMDelivered: recipient row no longer exists');
+  }
 }
 
 // qurl_id-index GSI lookup for the qurl.expired webhook handler.
