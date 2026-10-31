@@ -3,6 +3,8 @@
  * Uses bot token to read/write messages and verify bot behavior.
  */
 
+import { CleanupRetryBudget, fetchWithCleanupRetry } from './http';
+
 const API = 'https://discord.com/api/v10';
 
 export interface DiscordMessage {
@@ -32,7 +34,15 @@ export interface DiscordMessage {
   timestamp: string;
 }
 
-export async function api(token: string, method: string, path: string, body?: unknown): Promise<any> {
+export class DiscordApiError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = 'DiscordApiError';
+  }
+}
+
+// shortcut: 204 keeps returning null; use a nullable type if callers need mixed response shapes.
+export async function api<T = unknown>(token: string, method: string, path: string, body?: unknown, cleanupRetryBudget?: CleanupRetryBudget): Promise<T> {
   const headers: Record<string, string> = {
     Authorization: `Bot ${token}`,
   };
@@ -41,12 +51,14 @@ export async function api(token: string, method: string, path: string, body?: un
     headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(`${API}${path}`, opts);
+  const res = cleanupRetryBudget
+    ? await fetchWithCleanupRetry(`${API}${path}`, opts, cleanupRetryBudget)
+    : await fetch(`${API}${path}`, opts);
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Discord API ${method} ${path}: ${res.status} ${text}`);
+    throw new DiscordApiError(res.status, `Discord API ${method} ${path}: ${res.status} ${text}`);
   }
-  if (res.status === 204) return null;
+  if (res.status === 204) return null as T;
   return res.json();
 }
 
@@ -57,8 +69,8 @@ export async function sendMessage(token: string, channelId: string, content: str
 
 /** Delete a message the bot posted (test cleanup — bots may always delete
  * their own posts; MANAGE_MESSAGES is only needed for others'). */
-export async function deleteMessage(token: string, channelId: string, messageId: string): Promise<void> {
-  await api(token, 'DELETE', `/channels/${channelId}/messages/${messageId}`);
+export async function deleteMessage(token: string, channelId: string, messageId: string, cleanupRetryBudget?: CleanupRetryBudget): Promise<void> {
+  await api(token, 'DELETE', `/channels/${channelId}/messages/${messageId}`, undefined, cleanupRetryBudget);
 }
 
 /** Get recent messages from a channel */

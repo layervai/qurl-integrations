@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: scripts-${{ github.head_ref || github.ref_name }}
+  group: scripts-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
