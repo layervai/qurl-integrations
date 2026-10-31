@@ -18,6 +18,8 @@ class OriginDefaultTest(unittest.TestCase):
                       "manifests": [{"digest": "sha256:" + char * 64,
                                      "platform": {"os": "linux", "architecture": arch}}
                                     for arch, char in (("amd64", "a"), ("arm64", "b"))]}
+        self.index["manifests"].append({"digest": "sha256:" + "c" * 64,
+                                        "platform": {"os": "unknown", "architecture": "unknown"}})
         self.body = json.dumps(self.index).encode()
         self.pin = check.IMAGE + "@sha256:" + hashlib.sha256(self.body).hexdigest()
 
@@ -35,13 +37,15 @@ class OriginDefaultTest(unittest.TestCase):
 
     def test_incomplete_or_ambiguous_platforms_fail(self):
         cases = []
-        missing = copy.deepcopy(self.index); missing["manifests"].pop(); cases.append(missing)
+        missing = copy.deepcopy(self.index); missing["manifests"].pop(0); cases.append(missing)
         duplicate = copy.deepcopy(self.index); duplicate["manifests"].append(duplicate["manifests"][0]); cases.append(duplicate)
         invalid = copy.deepcopy(self.index); invalid["manifests"][0]["digest"] = "main"; cases.append(invalid)
         single = copy.deepcopy(self.index); single["mediaType"] = "application/vnd.oci.image.manifest.v1+json"; cases.append(single)
         for document in cases:
             with self.subTest(document=document), self.assertRaises(ValueError):
-                check.check_manifest(self.pin, json.dumps(document).encode())
+                body = json.dumps(document).encode()
+                pin = check.IMAGE + "@sha256:" + hashlib.sha256(body).hexdigest()
+                check.check_manifest(pin, body)
 
 
 if __name__ == "__main__":

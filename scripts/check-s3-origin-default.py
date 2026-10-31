@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the Slack default against the anonymously readable promoted origin."""
+"""Check the public origin pin before Slack release workflows build a new image."""
 import hashlib
 import json
 from pathlib import Path
