@@ -71,7 +71,7 @@ jest.mock('discord.js', () => {
     TextInputBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
     TextInputStyle: { Short: 1, Paragraph: 2 },
     AttachmentBuilder: jest.fn().mockImplementation((buf, opts) => ({ buf, name: opts?.name })),
-    PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n, ManageGuild: 32n },
+    PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n, ManageGuild: 32n, MentionEveryone: 131072n },
   };
 });
 

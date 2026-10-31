@@ -133,6 +133,18 @@ describe('handleQurlSend — slash entry', () => {
     );
   });
 
+  test('warm over-cap server explains disabled everyone button through the slash handler', async () => {
+    const guildMembers = Object.fromEntries(Array.from({ length: 26 }, (_, i) => [String(200000000000000000n + BigInt(i)), {}]));
+    const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT }, guildMembers });
+    int.guild.memberCount = 26;
+    int.memberPermissions = { has: permission => permission === 131072n };
+    await handleQurlSend(int);
+    const reply = int.editReply.mock.calls.at(-1)[0];
+    expect(reply.content).toContain('@everyone is unavailable:');
+    expect(reply.content).toContain('26 human recipients, above the 25-recipient limit.');
+    expect(reply.content).toContain('Pick individual recipients or a smaller role.');
+  });
+
   test('happy path without recipients → confirm card with picker', async () => {
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT },

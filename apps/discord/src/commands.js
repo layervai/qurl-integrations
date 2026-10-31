@@ -4991,6 +4991,16 @@ function renderConfirmCardContent({
   if (selfIncluded && mode !== RECIPIENT_MODE_VOICE) {
     content += 'ℹ\u{FE0F} **Send includes you.**\n';
   }
+  if (
+    mode === RECIPIENT_MODE_PICKER
+    && interaction?.guild
+    && interaction.memberPermissions?.has?.(PermissionFlagsBits.MentionEveryone) === true
+  ) {
+    const { count, accurate } = computeEveryoneDisplayCount(interaction.guild);
+    if (accurate && count > config.QURL_SEND_MAX_RECIPIENTS) {
+      content += `ℹ️ **@everyone is unavailable:** this server has ${count} human recipients, above the ${config.QURL_SEND_MAX_RECIPIENTS}-recipient limit. Pick individual recipients or a smaller role.\n`;
+    }
+  }
   if (needsPicker) {
     content += '\n**Pick recipients below.**\n';
   } else if (mode === RECIPIENT_MODE_VOICE) {
@@ -5387,21 +5397,7 @@ function renderConfirmCardRows({
     //    handleConfirmEveryone (authoritative — partition runs against
     //    the prewarmed cache).
     const overCap = countIsAccurate && displayCount != null && displayCount > config.QURL_SEND_MAX_RECIPIENTS;
-    // Fixed label — no live count, no overcap suffix. The disabled+
-    // greyed-out button is the visual signal for the three degraded
-    // states (count unavailable, empty guild, exceeds cap).
-    //
-    // UX TRADE-OFF: the warm-cache over-cap branch DOES disable here
-    // with no in-card "exceeds N cap" hint anymore. Previously the
-    // label spelled out the reason; now the user sees only a greyed-
-    // out button. Deliberate per product call ("terse labels"); the
-    // disable trigger is structurally rare (guild with > 20k non-bot
-    // members), and the cold-cache over-cap branch still surfaces
-    // the actionable copy via `handleConfirmEveryone`'s click-time
-    // reject (this render-time disable can't fire on cold cache, so
-    // the click goes through). If the warm-cache hint ever needs to
-    // come back, the lever is right here.
-    //
+    // Keep the button label terse; content explains the warm-cache cap.
     // BOTTOM ROW COMPONENT BUDGET: Discord caps an ActionRow at 5
     // components. The current worst-case render is
     // [🔊 Voice] + [📢 @everyone] + Note + Send + Cancel = 5, exactly
@@ -5411,8 +5407,7 @@ function renderConfirmCardRows({
     const everyoneDisabled = displayCount == null || displayCount === 0 || overCap;
     if (everyoneDisabled) {
       // Diagnostic: surface the exact state when the @everyone button
-      // renders disabled. Users see only a greyed-out button with no
-      // label hint, so reports like "why is @everyone disabled?"
+      // renders disabled. Reports like "why is @everyone disabled?"
       // require digging into renderConfirmCardRows state — capturing
       // it inline here makes those reports answerable from logs.
       //
