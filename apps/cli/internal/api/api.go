@@ -221,6 +221,9 @@ type Published struct {
 	// LimitedLink is the temporary link minted with a public access rule's
 	// link limits; the permanent address is not shared with limits.
 	LimitedLink *ShareLink
+	// OtherSettings is set when the resource already existed and keeps
+	// settings other than the chosen access rule's.
+	OtherSettings bool
 }
 
 // AllowedPasskey is one person the publisher approved for a private resource.
@@ -522,7 +525,7 @@ func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*Shar
 }
 
 // MintLimitedLink uses POST /v1/resources/{id}/qurls: unlike share by CRID,
-// it can set one_time_use and max_sessions. one_time_use and max_sessions are
+// it can set one_time_use. one_time_use and an unlimited max_sessions are
 // always sent, because a Connector link is single-use when they are omitted.
 func (c *client) MintLimitedLink(ctx context.Context, crid string, limits accessrules.LinkLimits) (*ShareLink, error) {
 	expiresIn, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn)
@@ -534,11 +537,7 @@ func (c *client) MintLimitedLink(ctx context.Context, crid string, limits access
 	if oneBrowser {
 		use = qurl.OneTimeUse()
 	}
-	sessions := 0
-	if limits.MaxSessions != nil {
-		sessions = *limits.MaxSessions
-	}
-	opts := []qurl.PortalOption{qurl.ValidFor(expiresIn), use, qurl.MaxSessions(sessions)}
+	opts := []qurl.PortalOption{qurl.ValidFor(expiresIn), use, qurl.MaxSessions(0)}
 	if limits.SessionDuration != nil {
 		session, ok := accessrules.SessionLength.Parse(*limits.SessionDuration)
 		if !ok {

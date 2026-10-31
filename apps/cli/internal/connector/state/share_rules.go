@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/layervai/qurl-go/crid"
 
@@ -21,29 +20,14 @@ const (
 	shareRulesMaxBytes = 4 << 20
 )
 
-// ShareRule is what a share keeps from the access rule it was created with,
-// so later edits to that rule leave the share unchanged.
-type ShareRule struct {
-	RuleID            string `json:"rule_id"`
-	ApprovalExpiresIn string `json:"approval_expires_in,omitempty"`
-	AllowDownload     bool   `json:"allow_download,omitempty"`
-}
-
-// ApprovalDuration is how long the share's approvals last; false means they never expire.
-func (r ShareRule) ApprovalDuration() (time.Duration, bool) {
-	if r.ApprovalExpiresIn == "" {
-		return 0, false
-	}
-	return accessrules.ApprovalDuration(&r.ApprovalExpiresIn)
-}
+// ShareRuleStore is the profile-local record of the link limits each public
+// share was created with, per CRID, so later links default to them.
+type ShareRuleStore struct{ dir string }
 
 type shareRulesState struct {
-	SchemaVersion int                  `json:"schema_version"`
-	Shares        map[string]ShareRule `json:"shares"`
+	SchemaVersion int                               `json:"schema_version"`
+	Shares        map[string]accessrules.LinkLimits `json:"shares"`
 }
-
-// ShareRuleStore is the profile-local record of rule settings per CRID.
-type ShareRuleStore struct{ dir string }
 
 // OpenShareRules creates only the safe local directory.
 func OpenShareRules(dir string) (*ShareRuleStore, error) {
@@ -56,46 +40,38 @@ func OpenShareRules(dir string) (*ShareRuleStore, error) {
 	return &ShareRuleStore{dir: dir}, nil
 }
 
-// ShareRuleFrom is the snapshot a share keeps from d; false when d carries
-// nothing a share must remember.
-func ShareRuleFrom(d *accessrules.Definition) (ShareRule, bool) {
-	r := ShareRule{RuleID: d.ID, AllowDownload: d.AllowDownload != nil && *d.AllowDownload}
-	if d.ApprovalExpiresIn != nil {
-		r.ApprovalExpiresIn = *d.ApprovalExpiresIn
-	}
-	return r, r.ApprovalExpiresIn != "" || r.AllowDownload
-}
-
-// Get returns the snapshot recorded for crid.
-func (s *ShareRuleStore) Get(ctx context.Context, id string) (ShareRule, bool, error) {
-	var rule ShareRule
-	var ok bool
+// Get returns the link limits recorded for id, or nil.
+func (s *ShareRuleStore) Get(ctx context.Context, id string) (*accessrules.LinkLimits, error) {
+	var limits *accessrules.LinkLimits
 	err := s.update(ctx, func(state *shareRulesState) bool {
-		rule, ok = state.Shares[id]
+		if kept, ok := state.Shares[id]; ok {
+			limits = &kept
+		}
 		return false
 	})
-	return rule, ok, err
+	return limits, err
 }
 
-// Set records rule for crid, or forgets crid when rule is nil.
-func (s *ShareRuleStore) Set(ctx context.Context, id string, rule *ShareRule) error {
-	if crid.Validate(id) != nil || rule != nil && !rule.valid() {
-		return errors.New("invalid share rule")
+// Set records limits for id, or forgets id when limits is nil.
+func (s *ShareRuleStore) Set(ctx context.Context, id string, limits *accessrules.LinkLimits) error {
+	if crid.Validate(id) != nil || limits != nil && !validLinkLimits(*limits) {
+		return errors.New("invalid share link limits")
 	}
 	return s.update(ctx, func(state *shareRulesState) bool {
-		if rule == nil {
+		if limits == nil {
 			_, had := state.Shares[id]
 			delete(state.Shares, id)
 			return had
 		}
-		state.Shares[id] = *rule
+		state.Shares[id] = *limits
 		return true
 	})
 }
 
-func (r ShareRule) valid() bool {
-	_, approval := r.ApprovalDuration()
-	return r.RuleID != "" && len(r.RuleID) <= 64 && (r.ApprovalExpiresIn == "" || approval)
+// validLinkLimits applies a public rule's own validation to kept limits.
+func validLinkLimits(limits accessrules.LinkLimits) bool {
+	rule := accessrules.Definition{ID: "00000000-0000-4000-8000-000000000000", Name: "kept", Mode: accessrules.ModePublic, LinkLimits: &limits}
+	return rule.Validate(false) == nil
 }
 
 func (s *ShareRuleStore) update(ctx context.Context, change func(*shareRulesState) bool) error {
@@ -105,7 +81,7 @@ func (s *ShareRuleStore) update(ctx context.Context, change func(*shareRulesStat
 	}
 	defer func() { _ = unlock() }()
 	path := filepath.Join(s.dir, shareRulesFile)
-	state := shareRulesState{SchemaVersion: 1, Shares: map[string]ShareRule{}}
+	state := shareRulesState{SchemaVersion: 1, Shares: map[string]accessrules.LinkLimits{}}
 	data, err := readOwnerStateFile(path, shareRulesMaxBytes)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -118,7 +94,7 @@ func (s *ShareRuleStore) update(ctx context.Context, change func(*shareRulesStat
 		return nil
 	}
 	if len(state.Shares) > shareRulesMaxItems {
-		return errors.New("too many shares remember access rule settings on this device")
+		return errors.New("too many shares remember link limits on this device")
 	}
 	if data, err = json.Marshal(state); err != nil {
 		return err
@@ -130,8 +106,8 @@ func (s *shareRulesState) valid() bool {
 	if s.SchemaVersion != 1 || s.Shares == nil || len(s.Shares) > shareRulesMaxItems {
 		return false
 	}
-	for id, rule := range s.Shares {
-		if crid.Validate(id) != nil || !rule.valid() {
+	for id, limits := range s.Shares {
+		if crid.Validate(id) != nil || !validLinkLimits(limits) {
 			return false
 		}
 	}

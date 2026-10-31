@@ -184,13 +184,15 @@ type consumerAccessJSON struct {
 	ContractID    string   `json:"contract_id,omitempty"`
 	EmailDomain   string   `json:"email_domain,omitempty"`
 	AllowedEmails []string `json:"allowed_emails,omitempty"`
+	// ApprovalExpiresIn is how long each approval lasts; the service enforces it.
+	ApprovalExpiresIn string `json:"approval_expires_in,omitempty"`
 }
 
 func policyDocument(policy *qurl.ConsumerAccessPolicy) *consumerAccessJSON {
 	if policy == nil {
 		return nil
 	}
-	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID, EmailDomain: policy.EmailDomain, AllowedEmails: policy.AllowedEmails}
+	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID, EmailDomain: policy.EmailDomain, AllowedEmails: policy.AllowedEmails, ApprovalExpiresIn: policy.ApprovalExpiresIn}
 }
 
 func (p *Printer) consumerGrantText(value *qurl.ConsumerGrant) error {

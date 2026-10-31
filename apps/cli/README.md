@@ -788,26 +788,32 @@ A rule can also carry settings for its mode:
 
 | Section | Flag | Applies to | Values |
 |---------|------|------------|--------|
-| Limits | `--expires-in` | public | Link expires after, `1m` to `30d` (required with any limit) |
-| Limits | `--one-browser` | public | Works for one browser |
-| Limits | `--max-sessions` | public | Total times the link can be opened; leave unset for no limit (`0` to `1000`) |
-| Limits | `--session-length` | public | Session length, `1s` to `24h` |
+| Links you share | `--expires-in` | public | Expires after, `1m` to `30d` (required with any limit) |
+| Links you share | `--one-browser` | public | Works for one browser |
+| Links you share | `--session-length` | public | Session length, `1s` to `24h` |
 | Approvals | `--approvals-last` | review, keys | `1d`, `7d`, `30d`, `90d` or `never` (the default) |
-| Files | `--allow-download` | any | Allow downloads; applies to files you share |
 
-Limits apply to the links you share. The item's permanent address isn't used
-with limits: `qurl publish --rule` mints a temporary link with them and prints
-it as `Link:` (JSON `link.qurl`, `link.expires_at`). With Approvals last,
-`qurl access approve` ends each review approval or key opt-in that long after
-you approve it; `--expires-at` sets another end. The CLI serves no files, so
-Allow downloads is only kept with the share for the apps that do.
+Links you share: the limits apply to links you share from this item. The item's
+permanent address isn't used with limits: `qurl publish --rule` mints a
+temporary link with them and prints it as `Link:` (JSON `link.qurl`,
+`link.expires_at`), and saves the limits with the share on this device, so a
+later `qurl share <CRID>` link uses them too (`--ttl` and `--session-duration`
+override). Approvals last travels in the resource's policy
+(`consumer_access.approval_expires_in`) and the service enforces it: each
+review approval or key opt-in ends that long after it is granted, whoever
+approves it, and `qurl access approve --expires-at` may only end it sooner.
+
+Publishing again to an item that is already shared keeps the settings it was
+shared with. If the rule's settings differ, publish prints `This item is
+already shared with other settings. Use qurl access configure to change it.`
+on stderr and JSON carries `"settings_differ": true`.
 
 ```sh
 qurl rules create "Quick look" --mode public --expires-in 1h --one-browser
 qurl rules create Reviewers --mode review --approvals-last 7d
 qurl rules create Studio --mode email_domain --email-domain studio.com
 qurl rules list
-# 5f0c…  "Quick look"  Anyone with the link · expires in 1 hour · one browser
+# 5f0c…  "Quick look"  Anyone with the link · links expire in 1 hour · one browser
 # 8a21…  "Reviewers"   People you approve · approvals last 7 days
 # 3d9e…  "Studio"      People at studio.com
 ```
@@ -845,8 +851,8 @@ rule cannot convert private resources; selecting a different rule while publishi
 an already existing target fails without changing it. `--rule`/`--rule-file`
 cannot be combined with other access flags. A snapshot remains valid after its
 saved rule is renamed or deleted. Rule JSON contains policy and the settings
-above only (`link_limits` with `expires_in`, `one_time_use`, `max_sessions` and
-`session_duration`; `approval_expires_in`; `allow_download`), never credentials,
+above only (`link_limits` with `expires_in`, `one_time_use` and `session_duration`;
+`approval_expires_in`), never credentials,
 resource identities, local paths or grants. Each rule decodes strictly: an
 unknown field, a null, or a setting for another mode is refused.
 

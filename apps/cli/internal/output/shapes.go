@@ -41,6 +41,9 @@ type publishJSON struct {
 	Publisher     publisherJSON `json:"publisher"`
 	// Link is the temporary link minted with an access rule's link limits.
 	Link *limitedLinkJSON `json:"link,omitempty"`
+	// SettingsDiffer is true when an existing share keeps settings other
+	// than the chosen rule's.
+	SettingsDiffer bool `json:"settings_differ,omitempty"`
 }
 
 type limitedLinkJSON struct {
@@ -197,6 +200,9 @@ type downloadJSON struct {
 // while --quiet and JSON keep their stdout documents unchanged and note the
 // replay on stderr.
 func (p *Printer) Publish(res *qurlapi.Published) error {
+	if res.OtherSettings {
+		p.Warnf("%s", msgPublishSettingsDiffer)
+	}
 	if p.format == FormatJSON || p.quiet {
 		switch {
 		case res.KeptPublic:
@@ -226,6 +232,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			FoundExisting:  res.FoundExisting,
 			Publisher:      publisherDocument(res.Publisher),
 			Link:           limitedLinkDocument(res.LimitedLink),
+			SettingsDiffer: res.OtherSettings,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, res.CRID)

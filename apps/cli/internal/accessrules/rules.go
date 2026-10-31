@@ -51,26 +51,21 @@ type Definition struct {
 	EmailDomain   string   `json:"email_domain,omitempty"`
 	AllowedEmails []string `json:"allowed_emails,omitempty"`
 	ContractID    string   `json:"contract_id,omitempty"`
-	// Share-time settings. Pointers keep an explicit default (false, 0), so
+	// Share-time settings. Pointers keep an explicit default (false), so
 	// a library written back holds exactly what was read.
 	// LinkLimits applies to the links a public rule shares; nil shares the
 	// resource's permanent address.
 	LinkLimits *LinkLimits `json:"link_limits,omitempty"`
 	// ApprovalExpiresIn is how long a review or keys approval lasts; nil
-	// approvals never expire.
+	// approvals never expire. It travels in the policy and the service enforces it.
 	ApprovalExpiresIn *string `json:"approval_expires_in,omitempty"`
-	// AllowDownload lets recipients download shared files. The CLI serves no
-	// files, so it only carries the setting.
-	AllowDownload *bool `json:"allow_download,omitempty"`
 }
 
 // LinkLimits bounds one minted temporary link. Durations use the service's
-// expires_in and session_duration grammar; nil one_time_use is false and nil
-// max_sessions is no limit.
+// expires_in and session_duration grammar; nil one_time_use is false.
 type LinkLimits struct {
 	ExpiresIn       string  `json:"expires_in"`
 	OneTimeUse      *bool   `json:"one_time_use,omitempty"`
-	MaxSessions     *int    `json:"max_sessions,omitempty"`
 	SessionDuration *string `json:"session_duration,omitempty"`
 }
 
@@ -86,9 +81,6 @@ var (
 	SessionLength  = Bounds{time.Second, day}
 	ApprovalExpiry = Bounds{time.Hour, 365 * day}
 )
-
-// MaxLinkSessions is the largest max_sessions a link accepts.
-const MaxLinkSessions = 1000
 
 // Parse reads s in the service duration grammar and reports whether it is in range.
 func (b Bounds) Parse(s string) (time.Duration, bool) {
@@ -137,8 +129,6 @@ func (d *Definition) validateSettings() error {
 			return errors.New("link limits apply only to public rules")
 		case !expiry:
 			return errors.New("link_limits.expires_in must be from 1m to 30d")
-		case l.MaxSessions != nil && (*l.MaxSessions < 0 || *l.MaxSessions > MaxLinkSessions):
-			return errors.New("link_limits.max_sessions must be from 0 to 1000")
 		case l.SessionDuration != nil && !ValidSessionLength(*l.SessionDuration):
 			return errors.New("link_limits.session_duration must be whole seconds from 1s to 24h")
 		}
@@ -165,7 +155,7 @@ func ValidSessionLength(s string) bool {
 }
 
 func (d *Definition) hasSettings() bool {
-	return d.LinkLimits != nil || d.ApprovalExpiresIn != nil || d.AllowDownload != nil
+	return d.LinkLimits != nil || d.ApprovalExpiresIn != nil
 }
 
 func samePointer[T comparable](a, b *T) bool {
@@ -174,14 +164,12 @@ func samePointer[T comparable](a, b *T) bool {
 
 // sameSettings compares field presence too, since an explicit default round-trips.
 func sameSettings(a, b *Definition) bool {
-	if (a.LinkLimits == nil) != (b.LinkLimits == nil) {
-		return false
-	}
-	if l, m := a.LinkLimits, b.LinkLimits; l != nil && (l.ExpiresIn != m.ExpiresIn || !samePointer(l.OneTimeUse, m.OneTimeUse) ||
-		!samePointer(l.MaxSessions, m.MaxSessions) || !samePointer(l.SessionDuration, m.SessionDuration)) {
-		return false
-	}
-	return samePointer(a.ApprovalExpiresIn, b.ApprovalExpiresIn) && samePointer(a.AllowDownload, b.AllowDownload)
+	return SameLinkLimits(a.LinkLimits, b.LinkLimits) && samePointer(a.ApprovalExpiresIn, b.ApprovalExpiresIn)
+}
+
+// SameLinkLimits compares limits field by field, presence included.
+func SameLinkLimits(a, b *LinkLimits) bool {
+	return a == b || a != nil && b != nil && a.ExpiresIn == b.ExpiresIn && samePointer(a.OneTimeUse, b.OneTimeUse) && samePointer(a.SessionDuration, b.SessionDuration)
 }
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -204,7 +192,14 @@ func BuiltIns() []Definition {
 
 // Policy expands this preset into an independent resource policy snapshot.
 func (d *Definition) Policy(version int64) qurl.ConsumerAccessPolicy {
-	return qurl.ConsumerAccessPolicy{Mode: d.Mode, Version: version, ContractID: d.ContractID, EmailDomain: d.EmailDomain, AllowedEmails: slices.Clone(d.AllowedEmails)}
+	return qurl.ConsumerAccessPolicy{Mode: d.Mode, Version: version, ContractID: d.ContractID, EmailDomain: d.EmailDomain, AllowedEmails: slices.Clone(d.AllowedEmails), ApprovalExpiresIn: d.approvalExpiresIn()}
+}
+
+func (d *Definition) approvalExpiresIn() string {
+	if d.ApprovalExpiresIn == nil {
+		return ""
+	}
+	return *d.ApprovalExpiresIn
 }
 
 // Validate rejects unsupported modes and contradictory or malformed definitions.
@@ -291,16 +286,10 @@ func settingsSize(d *Definition) int {
 	if d.ApprovalExpiresIn != nil {
 		size += len("approval_expires_in") + len(*d.ApprovalExpiresIn)
 	}
-	if d.AllowDownload != nil {
-		size += len("allow_download") + 1
-	}
 	if l := d.LinkLimits; l != nil {
 		size += 3 + len("link_limits") + len("expires_in") + len(l.ExpiresIn)
 		if l.OneTimeUse != nil {
 			size += len("one_time_use") + 1
-		}
-		if l.MaxSessions != nil {
-			size += len("max_sessions") + len(strconv.Itoa(*l.MaxSessions))
 		}
 		if l.SessionDuration != nil {
 			size += len("session_duration") + len(*l.SessionDuration)
@@ -479,7 +468,7 @@ func (d *Definition) UnmarshalJSON(data []byte) error {
 			if !presentWithoutNulls(value, "expires_in") {
 				return errors.New("invalid access rule definition")
 			}
-		case "approval_expires_in", "allow_download":
+		case "approval_expires_in":
 			if bytes.Equal(value, []byte("null")) {
 				return errors.New("invalid access rule definition")
 			}

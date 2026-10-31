@@ -339,17 +339,14 @@ var approvalsLast = map[string]string{"1d": "1d", "7d": "7d", "30d": "30d", "90d
 // ruleSettingFlags are the rule settings typed on the command line.
 type ruleSettingFlags struct {
 	expiresIn, sessionLength, approvals string
-	oneBrowser, allowDownload           bool
-	maxSessions                         int
+	oneBrowser                          bool
 }
 
 func (f *ruleSettingFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.expiresIn, "expires-in", "", "public rules: each shared link expires after this long, such as 1h or 7d (1m to 30d)")
 	cmd.Flags().BoolVar(&f.oneBrowser, "one-browser", false, "public rules: each shared link works for one browser")
-	cmd.Flags().IntVar(&f.maxSessions, "max-sessions", 0, "public rules: total times a shared link can be opened (default: no limit)")
 	cmd.Flags().StringVar(&f.sessionLength, "session-length", "", "public rules: how long each visit lasts, such as 30m (1s to 24h)")
 	cmd.Flags().StringVar(&f.approvals, "approvals-last", "", "review and keys rules: 1d, 7d, 30d, 90d or never (default: never)")
-	cmd.Flags().BoolVar(&f.allowDownload, "allow-download", false, "let people download files you share with this rule")
 }
 
 // apply validates the settings for d.Mode and copies them into d.
@@ -357,18 +354,15 @@ func (f *ruleSettingFlags) apply(cmd *cobra.Command, d *accessrules.Definition) 
 	changed := func(names ...string) bool {
 		return slices.ContainsFunc(names, func(name string) bool { return cmd.Flags().Changed(name) })
 	}
-	if changed("expires-in", "one-browser", "max-sessions", "session-length") {
+	if changed("expires-in", "one-browser", "session-length") {
 		if d.Mode != accessrules.ModePublic {
-			return errors.New("--expires-in, --one-browser, --max-sessions and --session-length apply only to --mode public")
+			return errors.New("--expires-in, --one-browser and --session-length apply only to --mode public")
 		}
 		if !changed("expires-in") {
 			return errors.New("link limits need --expires-in, such as --expires-in 1h")
 		}
 		if _, ok := accessrules.LinkExpiry.Parse(f.expiresIn); !ok {
 			return errors.New("--expires-in must be from 1m to 30d, such as 1h or 7d")
-		}
-		if f.maxSessions < 0 || f.maxSessions > accessrules.MaxLinkSessions {
-			return errors.New("--max-sessions must be from 0 to 1000; 0 means no limit")
 		}
 		if changed("session-length") && !accessrules.ValidSessionLength(f.sessionLength) {
 			return errors.New("--session-length must be whole seconds from 1s to 24h, such as 30m")
@@ -377,9 +371,6 @@ func (f *ruleSettingFlags) apply(cmd *cobra.Command, d *accessrules.Definition) 
 		d.LinkLimits = &accessrules.LinkLimits{ExpiresIn: f.expiresIn}
 		if changed("one-browser") {
 			d.LinkLimits.OneTimeUse = new(f.oneBrowser)
-		}
-		if changed("max-sessions") {
-			d.LinkLimits.MaxSessions = new(f.maxSessions)
 		}
 		if changed("session-length") {
 			d.LinkLimits.SessionDuration = new(f.sessionLength)
@@ -397,9 +388,6 @@ func (f *ruleSettingFlags) apply(cmd *cobra.Command, d *accessrules.Definition) 
 			d.ApprovalExpiresIn = new(value)
 		}
 	}
-	if changed("allow-download") {
-		d.AllowDownload = new(f.allowDownload)
-	}
 	return nil
 }
 
@@ -408,13 +396,15 @@ func ruleCreateCmd(opts *globalOpts) *cobra.Command {
 	var settings ruleSettingFlags
 	cmd := &cobra.Command{Use: "create <name>", Short: "Create a named access rule", Long: `Create a named access rule for future shares.
 
-Limits (public rules) apply to the links you share. The item's permanent
-address isn't used with limits: each share gets a temporary link instead.
-Approvals (review and keys rules) set how long each approval lasts.
-Allow downloads applies to files you share.`, Example: `  qurl rules create Team --mode keys --approvals-last 30d
+Links you share (public rules): limits apply to links you share from this
+item. The item's permanent address isn't used with limits: publishing shares
+a temporary link, and later qurl share links for the item use the same limits
+unless --ttl or --session-duration say otherwise.
+Approvals last (review and keys rules) is how long each approval lasts; the
+service enforces it for every approver.`, Example: `  qurl rules create Team --mode keys --approvals-last 30d
   qurl rules create Colleagues --mode email_domain --email-domain example.com
   qurl rules create "Quick look" --mode public --expires-in 1h --one-browser
-  qurl rules create Reviewers --mode review --approvals-last 7d --allow-download`, Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+  qurl rules create Reviewers --mode review --approvals-last 7d`, Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if cmd.Flags().Changed(consumerContract) && mode != accessrules.ModeContract {
 			return exitcode.UsageError(errors.New("--contract applies only to --mode contract"))
 		}
@@ -510,24 +500,40 @@ func ruleInputError(d *accessrules.Definition) error {
 	}
 }
 
-// applyRuleToShare runs once the resource exists. A new share keeps the
-// rule's approval and download settings; a public rule with link limits gets
-// a minted temporary link in published.LimitedLink.
+// applyRuleToShare runs once the resource exists. A new public share keeps
+// the rule's link limits for later links and gets a temporary link minted with
+// them in published.LimitedLink. A share that already existed keeps what it
+// was created with, and published.OtherSettings says when the rule differs.
 func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, published *qurlapi.Published) error {
 	if rule == nil {
 		return nil
 	}
-	id := published.CRID
-	// Settings are copied at creation, so republishing keeps the first rule's.
-	if published.FoundExisting == nil || !*published.FoundExisting {
-		if err := o.recordShareRule(ctx, id, rule); err != nil {
-			return fmt.Errorf("published %s, but could not save its access rule settings on this device: %w", id, err)
+	id, limits := published.CRID, rule.LinkLimits
+	if published.FoundExisting != nil && *published.FoundExisting {
+		kept, err := o.savedLinkLimits(ctx, id)
+		if err != nil && !errors.Is(err, errNoSavedLinkLimits) {
+			return err
+		}
+		approvals := ""
+		if published.ConsumerAccess != nil {
+			approvals = published.ConsumerAccess.ApprovalExpiresIn
+		}
+		policy := rule.Policy(1)
+		published.OtherSettings = !accessrules.SameLinkLimits(kept, limits) || approvals != policy.ApprovalExpiresIn
+		limits = kept
+	} else if limits != nil {
+		store, err := o.shareRuleStore()
+		if err == nil {
+			err = store.Set(ctx, id, limits)
+		}
+		if err != nil {
+			return fmt.Errorf("published %s, but could not save its link limits on this device: %w", id, err)
 		}
 	}
-	if rule.LinkLimits == nil {
+	if limits == nil {
 		return nil
 	}
-	link, err := client.MintLimitedLink(ctx, id, *rule.LinkLimits)
+	link, err := client.MintLimitedLink(ctx, id, *limits)
 	if err != nil {
 		return fmt.Errorf("published %s, but could not create its link with the rule's limits; run the same publish again: %w", id, err)
 	}
@@ -535,21 +541,30 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 	return nil
 }
 
-// recordShareRule stores what the share keeps from rule, or forgets an
-// earlier record when rule is nil or carries nothing to keep.
-func (o *globalOpts) recordShareRule(ctx context.Context, id string, rule *accessrules.Definition) error {
-	store, err := o.shareRuleStore()
+// savedLinkLimits is what a share on this device was created with, if anything.
+func (o *globalOpts) savedLinkLimits(ctx context.Context, id string) (*accessrules.LinkLimits, error) {
+	dir, err := o.resolveShareStateDir("")
 	if err != nil {
-		return err
+		// Without a profile directory nothing was saved on this device; the
+		// caller's own path reports the missing profile.
+		return nil, errNoSavedLinkLimits
 	}
-	var kept *connectorstate.ShareRule
-	if rule != nil {
-		if snapshot, ok := connectorstate.ShareRuleFrom(rule); ok {
-			kept = &snapshot
-		}
+	store, err := connectorstate.OpenShareRules(dir)
+	if err != nil {
+		return nil, ruleCommandError(err)
 	}
-	return store.Set(ctx, id, kept)
+	limits, err := store.Get(ctx, id)
+	switch {
+	case err != nil:
+		return nil, ruleCommandError(err)
+	case limits == nil:
+		return nil, errNoSavedLinkLimits
+	}
+	return limits, nil
 }
+
+// errNoSavedLinkLimits means this device saved no link limits for a share.
+var errNoSavedLinkLimits = errors.New("no saved link limits")
 
 func (o *globalOpts) shareRuleStore() (*connectorstate.ShareRuleStore, error) {
 	dir, err := o.resolveShareStateDir("")

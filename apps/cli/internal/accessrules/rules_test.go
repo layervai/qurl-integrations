@@ -177,11 +177,11 @@ func TestFindSelectsByIDOrExactName(t *testing.T) {
 func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
 	head := `{"id":"` + testID + `","name":"Team",`
 	for _, raw := range []string{
-		head + `"mode":"public","link_limits":{"expires_in":"1h","one_time_use":true,"max_sessions":5,"session_duration":"30m"},"allow_download":true}`,
-		head + `"mode":"public","link_limits":{"expires_in":"30d","one_time_use":false,"max_sessions":0}}`,
+		head + `"mode":"public","link_limits":{"expires_in":"1h","one_time_use":true,"session_duration":"30m"}}`,
+		head + `"mode":"public","link_limits":{"expires_in":"30d","one_time_use":false}}`,
 		head + `"mode":"review","approval_expires_in":"7d"}`,
-		head + `"mode":"keys","approval_expires_in":"365d","allow_download":false}`,
-		head + `"mode":"email_domain","email_domain":"studio.com","allow_download":true}`,
+		head + `"mode":"keys","approval_expires_in":"365d"}`,
+		head + `"mode":"email_domain","email_domain":"studio.com"}`,
 	} {
 		var d Definition
 		if err := json.Unmarshal([]byte(raw), &d); err != nil || d.Validate(false) != nil {
@@ -189,7 +189,7 @@ func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
 		}
 		encoded, err := json.Marshal(d)
 		var again Definition
-		// Byte-exact: an explicit false or 0 must survive a write-back.
+		// Byte-exact: an explicit false must survive a write-back.
 		if err != nil || string(encoded) != raw || json.Unmarshal(encoded, &again) != nil || !EqualItems([]Definition{d}, []Definition{again}) {
 			t.Fatalf("settings did not round-trip: %s -> %s", raw, encoded)
 		}
@@ -198,13 +198,14 @@ func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
 		head + `"mode":"review","link_limits":{"expires_in":"1h"}}`,
 		head + `"mode":"public","approval_expires_in":"7d"}`,
 		head + `"mode":"public","link_limits":{"one_time_use":true}}`,
-		head + `"mode":"public","link_limits":{"expires_in":"1h","max_sessions":null}}`,
+		head + `"mode":"public","link_limits":{"expires_in":"1h","session_duration":null}}`,
+		head + `"mode":"public","link_limits":{"expires_in":"1h","max_sessions":1}}`,
+		head + `"mode":"review","allow_download":true}`,
 		head + `"mode":"public","link_limits":{"expires_in":"1h","extra":1}}`,
 		head + `"mode":"public","link_limits":null}`,
-		head + `"mode":"public","allow_download":null}`,
+		head + `"mode":"review","approval_expires_in":null}`,
 		head + `"mode":"public","link_limits":{"expires_in":"30s"}}`,
 		head + `"mode":"public","link_limits":{"expires_in":"31d"}}`,
-		head + `"mode":"public","link_limits":{"expires_in":"1h","max_sessions":1001}}`,
 		head + `"mode":"public","link_limits":{"expires_in":"1h","session_duration":"25h"}}`,
 		head + `"mode":"review","approval_expires_in":"30m"}`,
 		head + `"mode":"keys","approval_expires_in":"366d"}`,
@@ -247,9 +248,10 @@ func TestValidateItemsCountsRuleSettings(t *testing.T) {
 	if err := ValidateItems(items); err != nil {
 		t.Fatal(err)
 	}
-	items[0].AllowDownload = new(false)
-	if err := ValidateItems(items); !errors.Is(err, ErrLibraryLimit) {
-		t.Fatalf("an explicit allow_download was not counted: %v", err)
+	// Settings count toward the same budget, with the service's formula.
+	limits := Definition{LinkLimits: &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(false), SessionDuration: new("30m")}, ApprovalExpiresIn: new("7d")}
+	if got, want := settingsSize(&limits), 19+2+3+11+10+2+12+1+16+3; got != want {
+		t.Fatalf("settings size %d, want %d", got, want)
 	}
 }
 

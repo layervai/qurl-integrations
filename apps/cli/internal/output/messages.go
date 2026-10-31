@@ -124,6 +124,10 @@ const (
 	// says it in the document itself via msgPublishFoundExisting.
 	msgAlreadyPublished = "This target was already published; showing the existing resource."
 
+	// msgPublishSettingsDiffer warns that an existing share keeps the
+	// settings it was created with, not the chosen rule's.
+	msgPublishSettingsDiffer = "This item is already shared with other settings. Use qurl access configure to change it."
+
 	// msgPublishFoundExisting is the text-document note for that same case:
 	// what happened, then the one next step.
 	msgPublishFoundExisting = "This URL already has an active resource, so its existing CRID is shown. Delete it first to publish the URL as a new resource."
@@ -399,6 +403,7 @@ func CustomerMessages() []string {
 		msgDeviceEnrolled,
 		msgSavedTo,
 		msgAlreadyPublished,
+		msgPublishSettingsDiffer,
 		msgPublishFoundExisting,
 		labelAccess, msgPublishPrivate, msgPublishPublic,
 		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers, hintPublishOtherDevices,

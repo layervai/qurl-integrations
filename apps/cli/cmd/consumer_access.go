@@ -35,8 +35,8 @@ approve, deny, revoke_grant, configure.
 Read the version from a listing before a decision. Use --version with that
 version. The first policy on an existing private resource uses --version 0.
 A key opt-in uses decision-id new and --version 0. An approval or key opt-in
-lasts as long as the share's access rule says (Approvals last), unless
---expires-at sets its end. Contract approval
+lasts as long as the resource's policy says (Approvals last); the service sets
+its end. --expires-at may end it sooner, never later. Contract approval
 requires a trusted publisher entitlement receipt and expiry; it does not
 verify payment. Mailbox verification proves email control, not legal identity.
 If a contract notification is pending, repeat the same receipt, expiry and version.
@@ -85,7 +85,7 @@ Use --access when you publish to choose the initial policy.`,
 			if err != nil {
 				return err
 			}
-			result, err := opts.executeWithShareRule(cmd.Context(), client.ConsumerManagement(), assessment.Input, &input)
+			result, err := executeConsumerAction(cmd.Context(), client.ConsumerManagement(), assessment.Input, &input)
 			if err != nil {
 				return err
 			}
@@ -103,7 +103,7 @@ Use --access when you publish to choose the initial policy.`,
 	cmd.Flags().StringVar(&credentialID, "credential-id", "", "credential id for a key opt-in")
 	cmd.Flags().StringVar(&key, "credential-key", "", "public credential key for a key opt-in")
 	cmd.Flags().StringVar(&entitlement, "entitlement", "", "trusted publisher entitlement receipt")
-	cmd.Flags().StringVar(&expiry, "expires-at", "", "when the approval ends, as an RFC 3339 time (default: the share's access rule; required with --entitlement)")
+	cmd.Flags().StringVar(&expiry, "expires-at", "", "when the approval ends, as an RFC 3339 time (default: the policy's Approvals last; required with --entitlement)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "allow changes to a test CRID on a production endpoint")
 	return cmd
 }
@@ -132,7 +132,6 @@ type consumerAccessInput struct {
 	version                                                                                       int64
 	expiresAt                                                                                     *time.Time
 	policy                                                                                        *qurl.ConsumerAccessPolicy
-	rule                                                                                          *accessrules.Definition
 }
 
 func validateConsumerActionFlags(cmd *cobra.Command, action string, allowed map[string][]string) error {
@@ -278,44 +277,5 @@ func (o *globalOpts) applyConsumerRule(cmd *cobra.Command, input *consumerAccess
 	}
 	policy := definition.Policy(input.version + 1)
 	input.policy = &policy
-	input.rule = &definition
-	return nil
-}
-
-// executeWithShareRule runs the action with the share's kept rule settings:
-// an approval lasts as long as the rule says, and a new policy replaces or
-// clears what the share kept.
-func (o *globalOpts) executeWithShareRule(ctx context.Context, owner qurlapi.ConsumerManagementClient, crid string, input *consumerAccessInput) (*qurlapi.ConsumerManagementResult, error) {
-	if err := o.defaultApprovalExpiry(ctx, crid, input); err != nil {
-		return nil, err
-	}
-	result, err := executeConsumerAction(ctx, owner, crid, input)
-	if err != nil || input.action != consumerConfigure {
-		return result, err
-	}
-	if err := o.recordShareRule(ctx, crid, input.rule); err != nil {
-		return nil, fmt.Errorf("configured %s, but could not save its access rule settings on this device: %w", crid, err)
-	}
-	return result, nil
-}
-
-// defaultApprovalExpiry gives a review approval or key opt-in the share's
-// approval lifetime, unless --expires-at or a contract receipt says otherwise.
-func (o *globalOpts) defaultApprovalExpiry(ctx context.Context, crid string, input *consumerAccessInput) error {
-	if input.action != consumerApprove || input.expiresAt != nil || input.entitlement != "" {
-		return nil
-	}
-	store, err := o.shareRuleStore()
-	if err != nil {
-		return ruleCommandError(err)
-	}
-	kept, ok, err := store.Get(ctx, crid)
-	if err != nil {
-		return ruleCommandError(err)
-	}
-	if lifetime, set := kept.ApprovalDuration(); ok && set {
-		expiresAt := o.now().UTC().Add(lifetime).Truncate(time.Second)
-		input.expiresAt = &expiresAt
-	}
 	return nil
 }

@@ -323,11 +323,11 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err := registry.Put(ctx, local); err != nil {
 		return compensate(err)
 	}
-	shared := &qurlapi.Published{CRID: local.CRID, FoundExisting: resolved.FoundExisting}
+	shared := &qurlapi.Published{CRID: local.CRID, FoundExisting: resolved.FoundExisting, ConsumerAccess: resolved.ConsumerAccess}
 	if err := opts.applyRuleToShare(ctx, client, access.Rule, shared); err != nil {
 		return compensate(err)
 	}
-	return finishLocalPublish(ctx, opts, client, registry, resolved, local, shared.LimitedLink, stateDir, foreground, compensate)
+	return finishLocalPublish(ctx, opts, client, registry, resolved, local, shared, stateDir, foreground, compensate)
 }
 
 func validateLocalPublishRequest(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool) (string, error) {
@@ -636,13 +636,13 @@ func finishLocalPublish(
 	registry localShareRegistry,
 	resolved *agent.ResolvedResource,
 	local *connectorstate.LocalShare,
-	limited *qurlapi.ShareLink,
+	applied *qurlapi.Published,
 	stateDir string,
 	foreground bool,
 	compensate func(error) error,
 ) error {
 	if foreground {
-		return runForegroundLocalPublish(ctx, opts, client, registry, resolved, local, limited, stateDir)
+		return runForegroundLocalPublish(ctx, opts, client, registry, resolved, local, applied, stateDir)
 	}
 	logDir, err := connectordaemon.DefaultLogDir(stateDir)
 	if err != nil {
@@ -659,7 +659,7 @@ func finishLocalPublish(
 	if err != nil {
 		return err
 	}
-	return printLocalPublishServing(opts, resolved, local, limited, sharing)
+	return printLocalPublishServing(opts, resolved, local, applied, sharing)
 }
 
 func runForegroundLocalPublish(
@@ -669,7 +669,7 @@ func runForegroundLocalPublish(
 	registry localShareRegistry,
 	resolved *agent.ResolvedResource,
 	local *connectorstate.LocalShare,
-	limited *qurlapi.ShareLink,
+	applied *qurlapi.Published,
 	stateDir string,
 ) (retErr error) {
 	var (
@@ -736,7 +736,7 @@ func runForegroundLocalPublish(
 	if err != nil {
 		return err
 	}
-	if err := printLocalPublishServing(opts, resolved, local, limited, sharing); err != nil {
+	if err := printLocalPublishServing(opts, resolved, local, applied, sharing); err != nil {
 		return err
 	}
 	retErr = <-daemonErr
@@ -783,12 +783,15 @@ func withoutExpectedDaemonCancellation(err error) error {
 // unnamed and unverified. The text document deliberately has no publisher
 // row: a first publish stays calm, and the status is shown where a recipient
 // decides (share, get) and where an owner asks (status, inspect, publisher).
-func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource, local *connectorstate.LocalShare, limited *qurlapi.ShareLink, sharing *qurlapi.Sharing) error {
+func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource, local *connectorstate.LocalShare, applied *qurlapi.Published, sharing *qurlapi.Sharing) error {
 	published := &qurlapi.Published{
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
 		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private, ConsumerAccess: resolved.ConsumerAccess,
 		AccessRequests: resolved.AccessRequests, AccessRequestsTurnedOn: resolved.AccessRequestsTurnedOn,
-		KeptPublic: resolved.KeptPublic, LinkSiteURL: opts.resourceAddress(local.CRID), LimitedLink: limited,
+		KeptPublic: resolved.KeptPublic, LinkSiteURL: opts.resourceAddress(local.CRID),
+	}
+	if applied != nil {
+		published.LimitedLink, published.OtherSettings = applied.LimitedLink, applied.OtherSettings
 	}
 	if sharing != nil {
 		published.Publisher = sharing.Publisher

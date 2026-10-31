@@ -65,11 +65,11 @@ func TestAccessRuleSummaryUsesContractCopy(t *testing.T) {
 		rule accessrules.Definition
 		want string
 	}{
-		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}, "Anyone with the link · expires in 1 hour · one browser"},
+		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}, "Anyone with the link · links expire in 1 hour · one browser"},
 		{accessrules.Definition{Mode: "review", ApprovalExpiresIn: new("7d")}, "People you approve · approvals last 7 days"},
 		{accessrules.Definition{Mode: "email_domain", EmailDomain: "studio.com"}, "People at studio.com"},
-		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "90m", MaxSessions: new(1), SessionDuration: new("1d")}, AllowDownload: new(true)}, "Anyone with the link · expires in 90 minutes · up to 1 session · sessions last 1 day · downloads allowed"},
-		{accessrules.Definition{Mode: "keys", AllowDownload: new(false)}, "Devices you approve"},
+		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "90m", SessionDuration: new("1d")}}, "Anyone with the link · links expire in 90 minutes · sessions last 1 day"},
+		{accessrules.Definition{Mode: "keys"}, "Devices you approve"},
 	} {
 		if got := AccessRuleSummary(&tc.rule); got != tc.want {
 			t.Errorf("summary %q, want %q", got, tc.want)
