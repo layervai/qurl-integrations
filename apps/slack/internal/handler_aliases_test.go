@@ -333,12 +333,15 @@ func TestHandleAliases_IncompleteListingLogsTriageWarning(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 
-	logs, _ := runProcessAliasesCapturingLogs(t, h, "C_test")
+	logs, rendered := runProcessAliasesCapturingLogs(t, h, "C_test")
 	if !strings.Contains(logs, "listing may be incomplete") {
 		t.Errorf("expected incomplete-listing warning, got logs: %q", logs)
 	}
 	if !strings.Contains(logs, "unresolved_groups=1") {
 		t.Errorf("expected unresolved_groups=1 in warning, got logs: %q", logs)
+	}
+	if !strings.Contains(rendered, "Some resource details were not on this page") || !strings.Contains(rendered, "later page, or its binding may be stale") {
+		t.Errorf("missing accurate detail note: %q", rendered)
 	}
 }
 
@@ -353,14 +356,17 @@ func TestHandleAliases_CompleteListingLogsNoWarning(t *testing.T) {
 	})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_resolved01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "resolved"},
+			{testKeyResourceID: "r_resolved01", testKeyType: client.ResourceTypeURL, testKeyTargetURL: "https://resolved.example.com"},
 		}, "next-cursor", true)
 	})
 	h := newAdminTestHandler(t, ts)
 
-	logs, _ := runProcessAliasesCapturingLogs(t, h, "C_test")
+	logs, rendered := runProcessAliasesCapturingLogs(t, h, "C_test")
 	if strings.Contains(logs, "listing may be incomplete") {
 		t.Errorf("incomplete-listing warning fired when every binding resolved: %q", logs)
+	}
+	if strings.Contains(rendered, "Some resource details") {
+		t.Errorf("detail note on complete resolution: %q", rendered)
 	}
 }
 
@@ -402,6 +408,9 @@ func TestHandleAliases_PartialUnresolvedCompletePageNoWarning(t *testing.T) {
 	// Page complete → a stale/deleted binding is not a pagination gap.
 	if strings.Contains(logs, "listing may be incomplete") {
 		t.Errorf("triage warning fired on a complete page (stale binding is not pagination): %q", logs)
+	}
+	if strings.Contains(rendered, "Some resource details") {
+		t.Errorf("detail note on a complete page: %q", rendered)
 	}
 }
 
