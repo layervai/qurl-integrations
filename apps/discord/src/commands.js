@@ -8715,6 +8715,11 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     users: { success, total },
   });
 
+  // TODO(upstream-contract): qurl-service's
+  // TestRevokeQurl_Idempotent_SecondRevokeDoesNotRepublish pins repeated
+  // DELETE /v1/qurls/{id} as a 204 no-op, so confirmed partial work is retryable.
+  // 404 can mean wrong owner; 401/403 can recover after setup. None confirms
+  // deletion. Keep the barrier until every child and finalization are confirmed.
   // Finalize confirmed deletes before best-effort DM edits can consume the
   // remaining deadline. Failed/uncertain writes keep the durable retry barrier.
   let finalizationFailed = false;
@@ -8724,10 +8729,14 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       if (finalized !== true) throw new Error('finalization was not confirmed');
     } catch (err) {
       finalizationFailed = true;
-      logger.error('Failed to finalize revoked send state', {
-        sendId,
-        error: err?.message ?? String(err),
-      });
+      if (signal.aborted) {
+        logger.info('Revoke finalization reached work deadline', { sendId });
+      } else {
+        logger.error('Failed to finalize revoked send state', {
+          sendId,
+          error: err?.message ?? String(err),
+        });
+      }
     }
   }
 

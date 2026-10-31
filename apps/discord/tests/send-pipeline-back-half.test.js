@@ -837,6 +837,25 @@ describe('revokeAllLinks', () => {
     }
   });
 
+  it('keeps confirmed deletes retryable when the deadline fires during finalization', async () => {
+    const budget = new AbortController();
+    const timeout = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(budget.signal);
+    mockDb.getSendItems.mockResolvedValueOnce(makeItems(1));
+    mockDb.markSendRevoked.mockImplementationOnce(async (_send, _owner, { signal }) => {
+      budget.abort();
+      signal.throwIfAborted();
+    });
+    try {
+      const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+      expect(result).toMatchObject({ success: 1, total: 1, finalizationFailed: true });
+      expect(logger.info).toHaveBeenCalledWith('Revoke finalization reached work deadline', { sendId: 'send-1' });
+      expect(logger.error).not.toHaveBeenCalledWith('Failed to finalize revoked send state', expect.anything());
+      expect(mockDb.markSendRevoking).toHaveBeenCalledTimes(1);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
   it('stops queued resources at the shared work deadline and keeps the send retryable', async () => {
     const budget = new AbortController();
     const timeout = jest.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {

@@ -67,6 +67,7 @@ const RESOURCE_QURL_LOG_PATH = '/resources/:resourceId/qurls/:qurlId';
 const REVOKE_BATCH_MAX_IDS = 10;
 const ORDINARY_REVOKE_ATTEMPT_TIMEOUT_MS = 10_000;
 const ORDINARY_REVOKE_MAX_RETRIES = 0;
+// Each child can need a 10s lookup and a 10s delete, plus scheduling headroom.
 const ORDINARY_REVOKE_BUDGET_PER_CALL_MS = 25_000;
 const UNKNOWN_STATUS0_CODE = 'unknown_error';
 
