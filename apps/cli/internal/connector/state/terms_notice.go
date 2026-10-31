@@ -10,7 +10,8 @@ import (
 
 const termsNoticeFile = "terms-notice-version"
 
-// TermsNoticeShown checks the version last shown in this private user state.
+// TermsNoticeShown checks the version last shown, creating or protecting the
+// private state directory if needed.
 func TermsNoticeShown(dir, version string) (bool, error) {
 	if err := EnsureDirMode(dir); err != nil {
 		return false, err

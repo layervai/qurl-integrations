@@ -184,3 +184,23 @@ func TestFirstLocalBackgroundPublishCarriesTermsNotice(t *testing.T) {
 		t.Fatal("local notice not recorded")
 	}
 }
+
+func TestInvalidLocalPublishDoesNotConsumeTermsNotice(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			dir := connectorStateTestDir(t)
+			result := runCLI(t, &runOpts{
+				args:             []string{"-o", format, "publish", "http://127.0.0.1:3000"},
+				firstTermsNotice: true, shareStateDir: dir,
+				preflightTarget: func(context.Context, string, int) error { return errors.New("synthetic origin unavailable") },
+			})
+			if result.code == 0 || strings.Contains(result.stderr.String(), termsNotice) {
+				t.Fatal("invalid local publish displayed the Terms notice")
+			}
+			shown, err := connectorstate.TermsNoticeShown(dir, termsVersion)
+			if err != nil || shown {
+				t.Fatalf("invalid local publish consumed notice: %v, %v", shown, err)
+			}
+		})
+	}
+}

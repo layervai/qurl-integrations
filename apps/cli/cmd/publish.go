@@ -129,7 +129,6 @@ owns the share and turns it off when it exits.`,
 						return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", name))
 					}
 				}
-				opts.beginTermsNotice()
 				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access)
 			}
 			if cmd.Flags().Changed("id") {
@@ -239,6 +238,7 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return err
 	}
+	opts.beginTermsNotice()
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
 		return err

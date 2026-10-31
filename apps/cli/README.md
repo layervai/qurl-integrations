@@ -49,7 +49,8 @@ that notice to the user. It needs no prompt and keeps bare stdout unchanged,
 including under `--quiet`. The private user state records the shown Terms
 version (currently 2.0). A new version, or a reset state directory, shows it
 again. If notice state is unavailable, the command still runs and the notice
-can repeat. A failed JSON result does not mark an unseen notice as shown.
+can repeat. Text mode records the notice when stderr accepts it, even if a
+later API call fails. A failed JSON result does not mark an unseen notice as shown.
 
 No account, API key, or browser sign-in is required. The first command creates
 and registers a device identity automatically. Keep its local state to keep
