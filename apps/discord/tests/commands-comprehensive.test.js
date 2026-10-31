@@ -623,6 +623,12 @@ describe('/qurl help subcommand', () => {
     }
   }
 
+  it.each([false, true])('describes verified status for OAuth=%s', async (qurlOAuth) => {
+    const content = await renderHelp({ qurlOAuth, discordInstall: false });
+    expect(content).toContain('`/qurl status` — verify the saved key and show its prefix and scopes (admin only)');
+    expect(content).not.toContain('check if qURL is configured');
+  });
+
   it('replies with help text', async () => {
     const cmd = commands.find(c => c.data.name === 'qurl');
     const interaction = makeInteraction({

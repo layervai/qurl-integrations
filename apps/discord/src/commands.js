@@ -9015,7 +9015,7 @@ const commands = [
       );
       builder.addSubcommand(sub =>
         sub.setName('status')
-          .setDescription('Check if qURL is configured (admin only)')
+          .setDescription('Verify the saved qURL key, prefix, and scopes (admin only)')
       );
       return builder;
     })(),
@@ -9460,11 +9460,11 @@ const commands = [
         } else if (config.isQurlSetupAvailable) {
           oauthSetupSection = '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — connect qURL via OAuth (admin only). Click the link, sign in to layerv.ai, consent. No API key paste.\n'
-            + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+            + '  `/qurl status` — verify the saved key and show its prefix and scopes (admin only)\n\n';
         } else {
           oauthSetupSection = '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — configure your API key (admin only)\n'
-            + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+            + '  `/qurl status` — verify the saved key and show its prefix and scopes (admin only)\n\n';
         }
         const discordInstallSection = config.isDiscordInstallConfigured
           ? '_Adding the bot to a new server?_ Use the "Add to Discord" link on **https://layerv.ai** — '
