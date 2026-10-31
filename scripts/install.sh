@@ -12,7 +12,8 @@
 # Release contract (see .github/workflows/release-please.yml): this monorepo
 # tags most components with a prefix (slack-v*, discord-v*, ...), but CLI
 # releases are the bare `v<semver>` tags, and GoReleaser publishes assets
-# named qurl_<semver>_<os>_<arch>.tar.gz plus checksums.txt on them.
+# named qurl_<semver>_<os>_<arch>.tar.gz, checksums.txt, and its
+# checksums.txt.sigstore.json signature bundle.
 #
 # The whole script is a main() invoked on the last line so a truncated
 # `curl | sh` stream parses to completion or runs nothing.
