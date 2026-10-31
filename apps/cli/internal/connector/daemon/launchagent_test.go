@@ -55,7 +55,7 @@ func (m *recordingJobManager) Status(string) (connectorservice.ServiceStatus, er
 func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T) {
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
-	manager := &recordingJobManager{}
+	manager := &recordingJobManager{status: &connectorservice.ServiceStatus{}}
 	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
@@ -73,8 +73,8 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 	if err := controller.Ensure(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(manager.jobs) != 1 || len(manager.replaced) != 0 || manager.statusCalls != 0 || reloads != 0 {
-		t.Fatalf("absent owner manager ensure/replace/status/reload = %d/%d/%d/%d, want 1/0/0/0", len(manager.jobs), len(manager.replaced), manager.statusCalls, reloads)
+	if len(manager.jobs) != 1 || len(manager.replaced) != 0 || manager.statusCalls != 1 || reloads != 0 {
+		t.Fatalf("absent owner manager ensure/replace/status/reload = %d/%d/%d/%d, want 1/0/1/0", len(manager.jobs), len(manager.replaced), manager.statusCalls, reloads)
 	}
 	for _, job := range manager.jobs {
 		if job.BinaryPath != binaryPath {
@@ -119,7 +119,7 @@ func TestJobControllerPersistsCurrentArtifactInsteadOfOldQURLOnPath(t *testing.T
 		{name: "relative artifact", invocation: relativeInvocation, want: filepath.Join(workingDir, relativeInvocation)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			manager := &recordingJobManager{}
+			manager := &recordingJobManager{status: &connectorservice.ServiceStatus{}}
 			controller := newTestJobController(t, filepath.Join(dir, "state", test.name), filepath.Join(dir, "logs", test.name),
 				"2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
 			controller.Manager = manager
@@ -155,7 +155,7 @@ func TestJobControllerPersistsCurrentArtifactInsteadOfOldQURLOnPath(t *testing.T
 func TestJobControllerResolvesExactBareInvocationName(t *testing.T) {
 	dir := t.TempDir()
 	currentBinary := filepath.Join(dir, "candidate", "qurl-candidate")
-	manager := &recordingJobManager{}
+	manager := &recordingJobManager{status: &connectorservice.ServiceStatus{}}
 	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl-candidate"
@@ -178,7 +178,7 @@ func TestJobControllerResolvesExactBareInvocationName(t *testing.T) {
 
 func TestJobControllerRejectsNonCanonicalInvocationPath(t *testing.T) {
 	dir := t.TempDir()
-	manager := &recordingJobManager{}
+	manager := &recordingJobManager{status: &connectorservice.ServiceStatus{}}
 	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = " qurl"
@@ -229,7 +229,7 @@ func TestJobControllerCompatibleForegroundOwnerReloadsWithoutNativeManager(t *te
 func TestJobControllerInstallsWhenCompatibleOwnerExitsBeforeReload(t *testing.T) {
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
-	manager := &recordingJobManager{}
+	manager := &recordingJobManager{status: &connectorservice.ServiceStatus{}}
 	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
@@ -245,8 +245,8 @@ func TestJobControllerInstallsWhenCompatibleOwnerExitsBeforeReload(t *testing.T)
 	if err := controller.Ensure(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(manager.jobs) != 1 || len(manager.replaced) != 0 || manager.statusCalls != 0 || reloads != 1 {
-		t.Fatalf("exited owner manager ensure/replace/status/reload = %d/%d/%d/%d, want 1/0/0/1", len(manager.jobs), len(manager.replaced), manager.statusCalls, reloads)
+	if len(manager.jobs) != 1 || len(manager.replaced) != 0 || manager.statusCalls != 1 || reloads != 1 {
+		t.Fatalf("exited owner manager ensure/replace/status/reload = %d/%d/%d/%d, want 1/0/1/1", len(manager.jobs), len(manager.replaced), manager.statusCalls, reloads)
 	}
 }
 
@@ -306,7 +306,7 @@ func TestJobControllerRejectsIncompatibleForegroundOwnerWithoutStartingSecondDae
 	}
 }
 
-func TestJobControllerTreatsLoadedJobAsOwnershipBeforeIPCInitialization(t *testing.T) {
+func TestJobControllerDoesNotEvictLoadedJobBeforeIPCInitialization(t *testing.T) {
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
@@ -318,11 +318,11 @@ func TestJobControllerTreatsLoadedJobAsOwnershipBeforeIPCInitialization(t *testi
 	controller.Reload = func(context.Context) (bool, error) { t.Fatal("reload called without IPC"); return false, nil }
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
-	if err := controller.Ensure(ctx); err != nil {
-		t.Fatalf("Ensure waited for initializing daemon IPC: %v", err)
+	if err := controller.Ensure(ctx); err == nil || !strings.Contains(err.Error(), "not-yet-ready socket") {
+		t.Fatalf("Ensure did not protect an unreachable native owner: %v", err)
 	}
-	if len(manager.jobs) != 1 {
-		t.Fatalf("LaunchAgent Ensure calls = %d, want 1", len(manager.jobs))
+	if len(manager.jobs) != 0 || len(manager.replaced) != 0 || manager.statusCalls != 1 {
+		t.Fatalf("native ensure/replace/status = %d/%d/%d, want 0/0/1", len(manager.jobs), len(manager.replaced), manager.statusCalls)
 	}
 }
 
@@ -346,7 +346,7 @@ func TestJobControllerRejectsSecretBearingOrMalformedDeploymentState(t *testing.
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
-			manager := &recordingJobManager{}
+			manager := &recordingJobManager{status: &connectorservice.ServiceStatus{}}
 			controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", test.endpoint, GroupModeSingle, test.resolve)
 			controller.Manager = manager
 			controller.LookPath = func(string) (string, error) {
@@ -508,7 +508,7 @@ func TestJobControllerCarriesTheResolvedRuntimeDir(t *testing.T) {
 	if controller.RuntimeDir != want || controller.IPC.SocketPath != filepath.Join(want, SocketFile) {
 		t.Fatalf("runtime dir %q socket %q, want %q and %q", controller.RuntimeDir, controller.IPC.SocketPath, want, filepath.Join(want, SocketFile))
 	}
-	manager := &recordingJobManager{}
+	manager := &recordingJobManager{status: &connectorservice.ServiceStatus{}}
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return filepath.Join(base, "bin", "qurl"), nil }

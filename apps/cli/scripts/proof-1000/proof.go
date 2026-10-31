@@ -107,7 +107,7 @@ func runPhases(ctx context.Context, opts *options, env *environment, o *origin, 
 	resourceIDs := m.resourceIDs()
 	lg.logf("phase 2: waiting up to %s for %d resources to serve", opts.servingDeadline, len(resourceIDs))
 	waitStart := time.Now()
-	last, all := waitAllServing(ctx, resourceIDs, env.SocketPath, rep.Started, opts.servingDeadline, statusInterval, func(s statusSample) {
+	last, all := waitAllServing(ctx, resourceIDs, env.StateDir, env.SocketPath, rep.Started, opts.servingDeadline, statusInterval, func(s statusSample) {
 		rep.ServingWait.Curve = append(rep.ServingWait.Curve, s)
 		lg.logf("status: serving=%d starting=%d retrying=%d failed=%d stopped=%d absent=%d missing=%d of %d %s",
 			s.Serving, s.Starting, s.Retrying, s.Failed, s.Stopped, s.Absent, s.Missing, s.Total, s.Err)

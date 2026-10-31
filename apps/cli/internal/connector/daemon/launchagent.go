@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	connectorservice "github.com/layervai/qurl-connector/pkg/service"
 	qurl "github.com/layervai/qurl-go/qurl"
@@ -22,6 +23,12 @@ import (
 
 // DaemonJobLabel is the stable per-user background-job identifier.
 const DaemonJobLabel = "ai.layerv.qurl.share-daemon"
+
+// ErrJobRefused reports a held native job that must be replaced before sharing.
+var ErrJobRefused = errors.New("share daemon job is refused; use start, restart or publish with this qURL version to replace it")
+
+// ErrNativeDaemonUnreachable protects a native owner whose socket is unknown or starting.
+var ErrNativeDaemonUnreachable = errors.New("a native share daemon is running at another or not-yet-ready socket; wait for startup or restart its owner before retrying")
 
 // ErrExternalDaemonNotRunning reports a lifecycle command under external
 // supervision whose daemon is absent. The supervisor, not qurl, starts it.
@@ -47,16 +54,14 @@ var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervi
 // 6 carries the validated host product explicitly, including an empty value.
 const daemonJobProtocolVersion = "6"
 
-// TODO(upstream-contract): relocating the socket relies on
-// connectorservice.UserJobManager.Ensure treating a changed argument list as a
-// definition change and booting the old job out. Verified against
-// qurl-connector v0.14.0 (userjob_darwin.go / userjob_linux.go: the rendered
-// definition is compared byte for byte and the loaded job is removed before
-// the replacement is written). If Ensure ever becomes a no-op for an
-// installed-and-running label, an upgrade would leave the old daemon serving
-// the old address while the new CLI reports convergence at the new one.
+// TODO(upstream-contract): UserJobManager.Replace must stop the old process
+// before starting its replacement, so the namespace lease cannot have two
+// owners. Ensure must also replace a changed installed definition.
+// Verified against qurl-connector v0.14.2. An unreachable running job
+// is not relocated automatically: its namespace cannot be confirmed.
 
 // JobController installs, upgrades, and signals the per-user daemon job.
+// Probes refresh its IPC target; one controller must not be used concurrently.
 type JobController struct {
 	Manager connectorservice.UserJobManager
 	IPC     IPCClient
@@ -98,19 +103,32 @@ func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode Gro
 		Manager: withUserServiceManagerDiagnosis(connectorservice.NewUserJobManager(), func() bool {
 			return systemdUserManagerAvailable(lookupEnv)
 		}),
-		IPC:        IPCClient{SocketPath: socket},
+		IPC:        IPCClient{SocketPath: socket, StateDir: stateDir},
 		RuntimeDir: filepath.Dir(socket),
 		StateDir:   stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
 		InvocationPath: os.Args[0], Endpoint: endpoint, ShareGroupMode: mode, Supervision: supervision,
 		ResolveHub: resolveHub, LookPath: exec.LookPath,
 	}
-	controller.ProbeStatus = controller.IPC.Status
-	controller.Reload = controller.IPC.ReloadIfRunning
+	controller.ProbeStatus = func(ctx context.Context) (IPCStatus, bool, error) {
+		// A starting owner may publish its runtime hint after this client was built.
+		socket, err := SocketPathForStateDir(stateDir, lookupEnv)
+		if err != nil {
+			return IPCStatus{}, false, err
+		}
+		controller.IPC.SocketPath = socket
+		controller.RuntimeDir = filepath.Dir(socket)
+		return controller.IPC.Status(ctx)
+	}
+	controller.Reload = func(ctx context.Context) (bool, error) { return controller.IPC.ReloadIfRunning(ctx) }
 	return controller, nil
 }
 
 // Ensure reloads a compatible live daemon or installs the current job definition.
 func (c *JobController) Ensure(ctx context.Context) error {
+	return c.ensure(ctx, true)
+}
+
+func (c *JobController) ensure(ctx context.Context, waitForStartup bool) error {
 	if err := c.prepare(); err != nil {
 		return err
 	}
@@ -154,15 +172,16 @@ func (c *JobController) Ensure(ctx context.Context) error {
 		}
 		return ErrExternalDaemonNotRunning
 	}
-	if running {
-		managed, err := c.Manager.Status(DaemonJobLabel)
-		if err != nil {
-			return fmt.Errorf("inspect native background ownership before replacing incompatible share daemon: %w", err)
+	if err := c.validateNativeOwner(status, running, expectedJobVersion, statusErr); err != nil {
+		if waitForStartup && errors.Is(err, ErrNativeDaemonUnreachable) {
+			if err := c.waitForNativeOwner(ctx); err != nil {
+				return err
+			}
+			return c.ensure(ctx, false)
 		}
-		if !managed.Installed || !managed.Running {
-			return unmanagedDaemonMismatch(status, expectedJobVersion, statusErr)
-		}
+		return err
 	}
+
 	hub, err := c.validatedDeployment()
 	if err != nil {
 		return err
@@ -182,6 +201,48 @@ func (c *JobController) Ensure(ctx context.Context) error {
 	// Native assignment recovery can legitimately outlive a CLI readiness
 	// deadline, so serving convergence is observed through the control plane.
 	return c.Manager.Ensure(job)
+}
+
+// A short startup race must not fail a second command or replace an unknown owner.
+func (c *JobController) waitForNativeOwner(ctx context.Context) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, running, err := c.ProbeStatus(waitCtx)
+		if waitCtx.Err() != nil {
+			return errors.Join(ErrNativeDaemonUnreachable, ctx.Err())
+		}
+		if err != nil && (!running || !errors.Is(err, errIPCStatusIncompatible)) {
+			return err
+		}
+		if running {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return errors.Join(ErrNativeDaemonUnreachable, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *JobController) validateNativeOwner(status IPCStatus, reachable bool, expected string, statusErr error) error {
+	managed, err := c.Manager.Status(DaemonJobLabel)
+	if err != nil {
+		return fmt.Errorf("inspect native background ownership before changing share daemon: %w", err)
+	}
+	if reachable {
+		if !managed.Installed || !managed.Running {
+			return unmanagedDaemonMismatch(status, expected, statusErr)
+		}
+		return nil
+	}
+	if managed.Installed && managed.Running {
+		return ErrNativeDaemonUnreachable
+	}
+	return nil
 }
 
 // The external supervisor owns attribution; another CLI environment must not
