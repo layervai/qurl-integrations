@@ -30,9 +30,8 @@ const REDACT_SUBSTRINGS = [
 
 // Exact-match keys (not substring) — content-hash names where substring
 // would catch `commitHash` / `md5_prefix`, plus `private_key` which has
-// no broad-safe substring rule. Mirrored in AUDIT_SECRET_KEYS below;
-// drift-guarded by tests, consolidation tracked in #221. Go's shared
-// observability test parses this literal until the keys are consolidated.
+// no broad-safe substring rule. AUDIT_SECRET_KEYS extends this set.
+// Go's shared observability test also parses this literal.
 const REDACT_EXACT_KEYS = new Set([
   'hash',
   'md5', 'sha1', 'sha256', 'sha512',
@@ -72,9 +71,10 @@ function isNonEmptyContainer(value) {
 // decorated link-bearing keys are also covered without blanking numeric
 // dimensions such as qurl_link_count.
 const AUDIT_SECRET_KEYS = new Set([
+  ...REDACT_EXACT_KEYS,
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
   'auth_token', 'access_token', 'refresh_token', 'bearer_token',
-  'session_token', 'private_key', 'client_secret', 'webhook_secret',
+  'session_token', 'client_secret', 'webhook_secret',
   // The Discord interaction-webhook token persisted on qurl_send_configs
   // (PR-B view counter) is a live ~15-min bearer cred. The audit path is
   // EXACT-match (not substring like REDACT_SUBSTRINGS), so the bare
@@ -89,15 +89,10 @@ const AUDIT_SECRET_KEYS = new Set([
   // REDACT_SUBSTRINGS' `api_key` already covers it for info/warn/debug.
   'qurl_api_key',
   // Keep canonical qURL link shapes explicit for documentation and so a
-  // scalar under one of these names still emits the secret-shaped-key warning;
+  // scalar under one of these names still emits the sensitive-key warning;
   // redactAuditSecrets additionally covers decorated string/container fields.
   'qurllink', 'qurl_link', 'qurllinkurl', 'qurl_link_url',
   'qurllinks', 'qurl_links',
-  // Content-derived hash names — see REDACT_EXACT_KEYS above for rationale.
-  // Kept in sync by hand today; consolidation tracked in #221.
-  'hash', 'md5', 'sha1', 'sha256', 'sha512',
-  'digest', 'checksum',
-  'content_hash', 'body_hash',
 ]);
 
 function isAuditSecretKey(key) {
@@ -247,7 +242,7 @@ const logger = {
         // offending keys are listed so a caller fixing the first
         // doesn't have to re-run to discover the second.
         const namedKeys = [...secretKeys].map(k => `"${sanitizeMessage(k)}"`).join(', ');
-        console.error(`[${formatTimestamp()}] ERROR: logger.audit received secret-shaped key(s) [${namedKeys}] in event=${sanitizeMessage(event)}; value(s) redacted in emitted payload — caller must remove from meta`);
+        console.error(`[${formatTimestamp()}] ERROR: logger.audit received sensitive key(s) [${namedKeys}] in event=${sanitizeMessage(event)}; value(s) redacted in emitted payload — caller must remove from meta`);
       }
       // Spread cleaned meta first, then pin event + agent last so a
       // caller passing `agent` or `event` in meta cannot overwrite the
