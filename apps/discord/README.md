@@ -286,7 +286,9 @@ Gateway session persistence admits at most 100 in-flight background writes.
 The live in-memory session keeps advancing during backpressure. Look for
 `gateway-session-store: write backpressure`, limited to one warning per minute
 with count-only fields. Skipped checkpoints can require a fresh IDENTIFY after
-restart. Final flush keeps its existing drain behavior.
+restart. A skipped null-clear can leave a rejected session row for Discord to
+validate on the next boot; final flush drains writes but does not retry a
+null-mirror delete. A non-null mirror is persisted after the drain.
 
 ## Troubleshooting
 

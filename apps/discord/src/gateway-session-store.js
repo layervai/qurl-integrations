@@ -18,21 +18,18 @@
 //    changes made by an earlier `updateSessionInfo(null)`. Mirror
 //    is hydrated once at boot; subsequent reads are pure-local.
 //
-// 2. Null-clear respected. When @discordjs/ws calls
-//    `updateSessionInfo(shardId, null)` (Discord rejected the
-//    RESUME), the mirror MUST be set to null AND the DDB row MUST
-//    be deleted. Returning the stale session from the next
-//    `retrieveSessionInfo` produces an infinite RESUME-reject
-//    loop. The DDB delete is load-bearing across processes too:
-//    a crash between IDENTIFY and the next READY would otherwise
-//    leave the dead row visible to the next boot's hydrate().
+// 2. Null-clear respected locally. A rejected RESUME clears the mirror
+//    immediately, so the next retrieve cannot repeat that rejected session.
+//    The cross-process delete is best-effort: failure or write backpressure
+//    can leave stale resume data for Discord to reject on the next boot.
+//    Final flush drains admitted writes; a null mirror does not retry deletes.
 //
-// 3. Write throttling. `updateSessionInfo` fires on every gateway
-//    dispatch (high rate). We write immediately on session_id
-//    change (READY) or when the prior write is older than
-//    WRITE_THROTTLE_MS; other updates defer to a single scheduled
-//    flush. Mirror always reflects the latest dispatch; DDB lags
-//    by at most WRITE_THROTTLE_MS, well inside the resume window.
+// 3. Write throttling. READY or an expired write budget starts a checkpoint;
+//    other updates use one scheduled flush. Mirror always reflects the latest
+//    dispatch. With a healthy backend DDB follows at WRITE_THROTTLE_MS;
+//    failures or the in-flight cap can leave it stale until a later update
+//    or final flush. The cursor deliberately follows attempted writes to
+//    avoid a write storm during an outage.
 //
 // 4. Final flush on SIGTERM. `flushFinal()` cancels any pending
 //    timer and writes the mirror's current state synchronously
@@ -163,6 +160,7 @@ function createGatewaySessionStore({
   // within ~1s. Burst-retrying on every dispatch would amplify
   // a DDB outage into a hot loop without changing the eventual
   // outcome.
+  //
   // Admit a write factory before it starts, then track it until settlement. Two
   // layers of catch by design: callers (firePersist, null-clear)
   // attach an inner .catch that LOGS the rejection — that's the
@@ -175,7 +173,8 @@ function createGatewaySessionStore({
   // would silently break.
   function fireWrite(write) {
     if (inFlightWrites.size >= MAX_IN_FLIGHT_WRITES) {
-      // shortcut: A full queue skips checkpoints and can force IDENTIFY, coalesce the latest state if this recurs.
+      // shortcut: Full queues can force IDENTIFY; coalesce the latest state
+      // if skipped checkpoints recur during sustained backend stalls.
       skippedWrites++;
       const now = clock();
       if (lastBackpressureWarningAt === null || now - lastBackpressureWarningAt >= BACKPRESSURE_LOG_INTERVAL_MS || now < lastBackpressureWarningAt) {

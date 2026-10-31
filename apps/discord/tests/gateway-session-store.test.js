@@ -575,10 +575,9 @@ describe('bounded session write backpressure', () => {
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(MAX_IN_FLIGHT_WRITES);
       expect(store._getInFlightCountForTest()).toBe(MAX_IN_FLIGHT_WRITES);
       expect(store.retrieveSessionInfo('0:1').sequence).toBe(599);
-      expect(warningTimes[0]).toBeLessThan(5 * 60_000);
-      expect(warningTimes.length).toBeGreaterThan(0);
-      expect(warningTimes.length).toBeLessThanOrEqual(10);
-      for (const [, fields] of logger.warn.mock.calls) {
+      expect(warningTimes[0]).toBe(100_000);
+      expect(warningTimes).toHaveLength(9);
+      for (const [, fields] of logger.warn.mock.calls.filter(([message]) => message === 'gateway-session-store: write backpressure')) {
         expect(fields).toEqual({ in_flight_writes: MAX_IN_FLIGHT_WRITES, skipped_writes: expect.any(Number) });
       }
       settle.forEach(resolve => resolve({}));
@@ -610,6 +609,41 @@ describe('bounded session write backpressure', () => {
       expect(store.retrieveSessionInfo('0:1')).toBeNull();
       expect(store._getInFlightCountForTest()).toBe(MAX_IN_FLIGHT_WRITES);
       expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
+      settle.forEach(resolve => resolve({}));
+      await store.flushFinal();
+      expect(store._getInFlightCountForTest()).toBe(0);
+      expect(store.retrieveSessionInfo('0:1')).toBeNull();
+      // A skipped best-effort delete is not retried by final flush.
+      expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(MAX_IN_FLIGHT_WRITES);
+    } finally {
+      settle.forEach(resolve => resolve({}));
+      ddbMock.on(PutCommand).resolves({});
+      await store.flushFinal();
+      ddbMock.restore();
+    }
+  });
+
+  test('a skipped READY remains in the mirror and final flush persists it after drain', async () => {
+    let now = 0;
+    const { store, ddbMock } = makeStore({ clock: () => now });
+    const settle = [];
+    ddbMock.on(PutCommand).callsFake(() => new Promise(resolve => { settle.push(resolve); }));
+    try {
+      for (let index = 0; index < MAX_IN_FLIGHT_WRITES; index++) {
+        now += 1000;
+        store.updateSessionInfo('0:1', sessionInfo({ sequence: index }));
+      }
+      const ready = sessionInfo({ sessionId: 'new-ready-session', sequence: 0 });
+      store.updateSessionInfo('0:1', ready);
+      expect(store.retrieveSessionInfo('0:1')).toEqual(ready);
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(MAX_IN_FLIGHT_WRITES);
+      settle.forEach(resolve => resolve({}));
+      ddbMock.on(PutCommand).resolves({});
+      await store.flushFinal();
+      const calls = ddbMock.commandCalls(PutCommand);
+      expect(calls).toHaveLength(MAX_IN_FLIGHT_WRITES + 1);
+      expect(calls.at(-1).args[0].input.Item).toMatchObject({ session_id: ready.sessionId, sequence: 0 });
     } finally {
       settle.forEach(resolve => resolve({}));
       ddbMock.on(PutCommand).resolves({});
