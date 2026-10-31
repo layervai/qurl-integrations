@@ -17,10 +17,6 @@ personal conversations, and tenant credentials tables. The official Teams SDK
 owns inbound Activity handling, Bot Framework token validation, and outbound
 Connector calls. Its OAuth/Signin features are intentionally not enabled.
 
-The `go.mod` file is a tooling boundary for this TypeScript app. It keeps
-repository-root Go commands from compiling third-party Go sources shipped
-inside `node_modules`; it does not add a Go implementation.
-
 ## Tenant trust boundary
 
 The Teams SDK must remain the only public ingress for `/api/messages`: it
