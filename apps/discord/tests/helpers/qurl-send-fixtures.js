@@ -49,6 +49,7 @@ jest.mock('discord.js', () => {
   }
   mock.ChannelType.DM = 1;
   mock.PermissionFlagsBits.ManageGuild = 32n;
+  mock.PermissionFlagsBits.MentionEveryone = 131072n;
   mock.AttachmentBuilder = jest.fn().mockImplementation((buf, opts) => ({ buf, name: opts?.name }));
   return mock;
 });
