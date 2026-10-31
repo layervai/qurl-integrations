@@ -169,6 +169,16 @@ setup) means required to use that feature.
 | `GUILD_ID` | No | Scope commands to a single server; unset runs the multi-tenant public bot |
 | `PORT` | No | HTTP listen port (default 3000) |
 
+Map autocomplete has a per-user burst budget of ten new Places requests,
+refilling one request per second. Cache hits and shared in-flight results spend
+no tokens. Prefix and guild changes share that budget. Short queries,
+pasted URLs and disabled or unsupported contexts use no tokens. Throttled or
+unidentified interactions receive an empty suggestion list before Places I/O.
+The process keeps at most 10,000 active user budgets; at capacity, new users
+receive empty suggestions until the oldest budget is idle for ten seconds.
+This protects each process; it is not a global multi-replica limit or a billing
+cap. Move to a shared store if cross-replica abuse requires a global budget.
+
 Discord uses `@layervai/qurl/node` to open current `qv2t1` links. Set
 `QURL_ENDPOINT` and `QURL_DEPLOYMENT` for the same environment. The deployment
 settings contain trusted issuer public keys (`kid`, `spki_der_b64`) and cell

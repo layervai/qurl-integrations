@@ -1,3 +1,4 @@
+const { autocompleteBuckets } = require('../src/utils/autocomplete-rate-limit');
 const {
   AUTOCOMPLETE_FAILURE_LOG_BURST,
   _resetAutocompleteFailureBurst,
@@ -9,17 +10,20 @@ describe('handleAutocomplete', () => {
   beforeEach(() => {
     mockSearchPlaces.mockReset().mockResolvedValue([]);
     _resetAutocompleteFailureBurst();
+    autocompleteBuckets.clear();
   });
 
   function makeAutocompleteInteraction({
     subcommand = 'map',
     focused = { name: 'location', value: 'whitehouse' },
     guildId = 'guild-1',
+    userId = 'user-1',
     authorizingIntegrationOwners,
   } = {}) {
     const respond = jest.fn().mockResolvedValue(undefined);
     return {
       commandName: 'qurl',
+      user: { id: userId },
       guildId,
       authorizingIntegrationOwners,
       respond,
@@ -34,6 +38,27 @@ describe('handleAutocomplete', () => {
     const s = String(seed);
     return s.length >= 16 ? s : `ChIJ${'a'.repeat(16 - s.length)}${s}`;
   }
+
+  test('rotating prefixes and guilds share one user budget before Places I/O', async () => {
+    const upstreamRequests = jest.fn();
+    mockSearchPlaces.mockImplementation(async (_query, mayFetch) => { if (mayFetch()) upstreamRequests(); return []; });
+    for (let i = 0; i < 11; i++) {
+      const int = makeAutocompleteInteraction({ guildId: `guild-${i}`, focused: { name: 'location', value: `prefix-${i}` } });
+      await handleAutocomplete(int);
+      expect(int.respond).toHaveBeenCalledWith([]);
+    }
+    expect(upstreamRequests).toHaveBeenCalledTimes(10);
+    await handleAutocomplete(makeAutocompleteInteraction({ userId: 'other-user' }));
+    expect(upstreamRequests).toHaveBeenCalledTimes(11);
+  });
+
+  test('missing user identity fails closed without Places I/O', async () => {
+    const int = makeAutocompleteInteraction();
+    delete int.user;
+    await handleAutocomplete(int);
+    expect(int.respond).toHaveBeenCalledWith([]);
+    expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
 
   test('responds empty for non-qurl commands', async () => {
     const int = makeAutocompleteInteraction();
@@ -94,7 +119,7 @@ describe('handleAutocomplete', () => {
     ]);
     const int = makeAutocompleteInteraction();
     await handleAutocomplete(int);
-    expect(mockSearchPlaces).toHaveBeenCalledWith('whitehouse');
+    expect(mockSearchPlaces).toHaveBeenCalledWith('whitehouse', expect.any(Function));
     expect(int.respond).toHaveBeenCalledTimes(1);
     const choices = int.respond.mock.calls[0][0];
     expect(choices).toHaveLength(2);
@@ -216,10 +241,12 @@ describe('handleAutocomplete', () => {
 
   test('failure burst counter emits one warn per BURST failures (SRE outage signal)', async () => {
     const logger = require('../src/logger');
+    let user = 0;
+    const nextInteraction = () => makeAutocompleteInteraction({ userId: `outage-user-${user++}` });
     logger.warn.mockClear();
     for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST - 1; i++) {
       mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
-      await handleAutocomplete(makeAutocompleteInteraction());
+      await handleAutocomplete(nextInteraction());
     }
     const burstWarns = () => logger.warn.mock.calls.filter(
       (call) => call[0] === 'autocomplete handler failure burst',
@@ -227,7 +254,7 @@ describe('handleAutocomplete', () => {
     expect(burstWarns()).toBe(0);
 
     mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
-    await handleAutocomplete(makeAutocompleteInteraction());
+    await handleAutocomplete(nextInteraction());
     expect(burstWarns()).toBe(1);
     expect(logger.warn).toHaveBeenCalledWith(
       'autocomplete handler failure burst',
@@ -236,7 +263,7 @@ describe('handleAutocomplete', () => {
 
     for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST - 1; i++) {
       mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
-      await handleAutocomplete(makeAutocompleteInteraction());
+      await handleAutocomplete(nextInteraction());
     }
     expect(burstWarns()).toBe(1);
   });
