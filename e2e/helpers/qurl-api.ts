@@ -413,9 +413,7 @@ export async function getQurlResource(
   const base = stripTrailingSlashes(managementUrl);
   const init = { signal, headers: { Authorization: `Bearer ${apiKey}` } };
   const url = `${base}/${encodeURIComponent(id)}`;
-  const res = cleanupRetryBudget
-    ? await fetchWithCleanupRetry(url, init, cleanupRetryBudget)
-    : await fetchWithTransientRetry(url, init);
+  const res = await fetchWithTransientRetry(url, init, { cleanupRetryBudget });
   if (!res.ok) {
     await res.body?.cancel().catch(() => {});
     throw new StatusCheckError(res.status);
@@ -438,9 +436,7 @@ export async function revokeChild(managementUrl: string, apiKey: string, qurlId:
   const url = new URL(managementUrl);
   url.pathname = `/v1/resources/${encodeURIComponent(parent.resource_id)}/qurls/${encodeURIComponent(qurlId)}`;
   const init = { method: 'DELETE', signal, headers: { Authorization: `Bearer ${apiKey}` } };
-  const res = cleanupRetryBudget
-    ? await fetchWithCleanupRetry(url, init, cleanupRetryBudget)
-    : await fetchWithTransientRetry(url, init);
+  const res = await fetchWithTransientRetry(url, init, { cleanupRetryBudget });
   await res.body?.cancel().catch(() => {});
   if (res.status !== 204) {
     throw Object.assign(new Error(`Child cleanup did not confirm revocation: ${res.status}`), { status: res.status });

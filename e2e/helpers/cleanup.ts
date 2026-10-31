@@ -100,7 +100,7 @@ export function trackedQurlResources(env: {
     { confirmPending = true, cleanupRetryBudget }: { confirmPending?: boolean; cleanupRetryBudget?: CleanupRetryBudget } = {},
   ): Promise<boolean> => {
     const ok = await qurl.revokeLink(
-      env.MINT_API_URL, env.QURL_API_KEY, resourceId, { confirmPending, ...(cleanupRetryBudget ? { cleanupRetryBudget } : {}) },
+      env.MINT_API_URL, env.QURL_API_KEY, resourceId, { confirmPending, cleanupRetryBudget },
     );
     if (ok) ids.delete(resourceId);
     return ok;

@@ -98,9 +98,9 @@ test('a source sweep shares ten seconds across entries and retains failures', as
 
 test('child lookup and exact-child DELETE share the source sweep budget', async () => {
   fetchMock.mockResolvedValueOnce(rateLimited('1'))
-    .mockResolvedValueOnce(new Response(JSON.stringify({resource_id:'parent', status:'active'})))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ resource_id: 'parent', status: 'active' })))
     .mockResolvedValueOnce(rateLimited('1'))
-    .mockResolvedValueOnce(new Response(null, {status:204}));
+    .mockResolvedValueOnce(new Response(null, { status: 204 }));
   const tracked = trackedQurlResources({ MINT_API_URL: 'https://api.example.com/v1/qurls', QURL_API_KEY: 'test-key' });
   tracked.trackChild('q_owned');
   const pending = tracked.revokeAll();
@@ -115,17 +115,16 @@ test('child lookup and exact-child DELETE share the source sweep budget', async 
 
 test('message cleanup retries once, warns on persistent limits, and continues without throwing', async () => {
   fetchMock.mockResolvedValueOnce(rateLimited('0.5')).mockResolvedValueOnce(rateLimited('0.5'))
-    .mockResolvedValueOnce(new Response(null, { status:204 }));
-  const tracked = trackedDiscordMessages({ BOT_TOKEN:'test-token' });
-  tracked.track({id:'first', channel_id:'channel'});
-  tracked.track({id:'second', channel_id:'channel'});
+    .mockResolvedValueOnce(new Response(null, { status: 204 }));
+  const tracked = trackedDiscordMessages({ BOT_TOKEN: 'test-token' });
+  tracked.track({ id: 'first', channel_id: 'channel' });
+  tracked.track({ id: 'second', channel_id: 'channel' });
   const pending = tracked.deleteAll();
   await jest.advanceTimersByTimeAsync(750);
   await expect(pending).resolves.toBeUndefined();
   expect(fetchMock).toHaveBeenCalledTimes(3);
   expect(warn).toHaveBeenCalledWith(expect.stringContaining('best-effort delete of message first'));
 });
-
 
 test('the cleanup transport retries against a real local HTTP server', async () => {
   jest.useRealTimers();
@@ -154,4 +153,41 @@ test('the cleanup transport retries against a real local HTTP server', async () 
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+});
+
+
+test.each([502, 503, 504])('child cleanup keeps its transient %s retries', async (status) => {
+  fetchMock.mockResolvedValueOnce(new Response(null, { status }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ resource_id: 'parent', status: 'active' })))
+    .mockResolvedValueOnce(new Response(null, { status }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }));
+  const tracked = trackedQurlResources({ MINT_API_URL: 'https://api.example.com/v1/qurls', QURL_API_KEY: 'test-key' });
+  tracked.trackChild('q_owned');
+  const pending = tracked.revokeAll();
+  await jest.advanceTimersByTimeAsync(2000);
+  await expect(pending).resolves.toBeUndefined();
+  expect(fetchMock).toHaveBeenCalledTimes(4);
+});
+
+
+test('child cleanup retries a persistent 429 only once', async () => {
+  fetchMock.mockImplementation(() => Promise.resolve(rateLimited('1')));
+  const tracked = trackedQurlResources({ MINT_API_URL: 'https://api.example.com/v1/qurls', QURL_API_KEY: 'test-key' });
+  tracked.trackChild('q_owned');
+  const result = tracked.revokeAll().catch((error: Error) => error);
+  await jest.advanceTimersByTimeAsync(1000);
+  expect(await result).toEqual(new Error('Child cleanup failed for: q_owned (HTTP 429)'));
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+test('an abort stops the retry wait and prevents a second request', async () => {
+  fetchMock.mockResolvedValue(rateLimited('5'));
+  const controller = new AbortController();
+  const result = fetchWithCleanupRetry(url, { method: 'DELETE', signal: controller.signal }, {
+    remainingMs: 10_000,
+  }).catch((error: Error) => error);
+  await jest.advanceTimersByTimeAsync(0);
+  controller.abort();
+  expect(await result).toMatchObject({ name: 'AbortError' });
+  expect(fetchMock).toHaveBeenCalledTimes(1);
 });

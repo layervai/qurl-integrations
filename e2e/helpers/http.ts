@@ -107,18 +107,27 @@ function isRetryableStatus(status: number, method: string): boolean {
 export async function fetchWithTransientRetry(
   input: string | URL,
   init?: RequestInit,
-  { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0 }:
-    { maxAttempts?: number; baseDelayMs?: number; maxRetryAfterMs?: number } = {},
+  { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0, cleanupRetryBudget }:
+    { maxAttempts?: number; baseDelayMs?: number; maxRetryAfterMs?: number; cleanupRetryBudget?: CleanupRetryBudget } = {},
 ): Promise<Response> {
   // Clamp once here so the loop never has to defend against a negative ceiling.
   const retryAfterCeilingMs = Math.max(0, maxRetryAfterMs);
   const method = (init?.method ?? 'GET').toUpperCase();
   let res = await fetch(input, init);
+  let retriedCleanupRateLimit = false;
   for (
     let attempt = 1;
     attempt < maxAttempts && !res.ok && isRetryableStatus(res.status, method);
     attempt++
   ) {
+    if (res.status === 429 && cleanupRetryBudget) {
+      if (retriedCleanupRateLimit) return res;
+      const previous = res;
+      res = await retryCleanupRateLimit(input, init ?? {}, cleanupRetryBudget, res);
+      if (res === previous) return res;
+      retriedCleanupRateLimit = true;
+      continue;
+    }
     // TODO(upstream-contract): qurl-service uses delta-seconds, not HTTP dates.
     const retryAfterRaw = res.status === 503 ? res.headers.get('retry-after') ?? '' : '';
     const honorsDirective = retryAfterCeilingMs > 0 && /^\d+$/.test(retryAfterRaw);
@@ -168,7 +177,15 @@ export async function fetchWithCleanupRetry(
   init: RequestInit,
   budget: CleanupRetryBudget,
 ): Promise<Response> {
-  const response = await fetch(input, init);
+  return retryCleanupRateLimit(input, init, budget, await fetch(input, init));
+}
+
+async function retryCleanupRateLimit(
+  input: string | URL,
+  init: RequestInit,
+  budget: CleanupRetryBudget,
+  response: Response,
+): Promise<Response> {
   if (response.status !== 429) return response;
   const raw = response.headers.get('retry-after')?.trim() ?? '';
   // Discord can return fractional seconds; HTTP dates are also valid Retry-After.
@@ -178,12 +195,19 @@ export async function fetchWithCleanupRetry(
     : Number.isFinite(date) ? Math.max(0, date - Date.now()) : 1000;
   const delayMs = Math.max(250, Math.ceil(hintedMs));
   if (!Number.isFinite(delayMs) || delayMs > budget.remainingMs) {
-    console.warn('[cleanup] 429 retry declined: server wait exceeds the sweep budget');
+    console.warn(`[cleanup] 429 retry declined: ${delayMs}ms exceeds the remaining ${budget.remainingMs}ms sweep budget`);
     return response;
   }
   budget.remainingMs -= delayMs;
   await response.body?.cancel().catch(() => {});
   console.warn(`[cleanup] 429: one retry after ${delayMs}ms`);
-  await new Promise((resolve) => setTimeout(resolve, delayMs));
+  await new Promise<void>((resolve, reject) => {
+    const signal = init.signal;
+    const finish = () => { signal?.removeEventListener('abort', abort); resolve(); };
+    const timer = setTimeout(finish, delayMs);
+    const abort = () => { clearTimeout(timer); reject(signal?.reason); };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+  });
   return fetch(input, init);
 }

@@ -15,7 +15,9 @@ Cleanup retries each HTTP 429 once and shares at most ten seconds of retry
 waiting across a resource sweep or a message sweep. It honors `Retry-After`
 (seconds, fractional seconds, or an HTTP date); a hint above the remaining
 budget is reported without an early retry. Missing or invalid hints use a
-one-second delay. Other cleanup failures are not retried. Resource failures
+one-second delay; all retries wait at least 250 ms. Source and message cleanup do not retry other failures. Child cleanup keeps
+its existing three-attempt transient GET/DELETE policy, with at most one
+budgeted retry of a 429. Resource failures
 retain their entries and fail the hook after all entries are attempted;
 message failures warn and continue. This bounds added waiting, not network
 request time; keep suite hook deadlines sized for their fixture count.
