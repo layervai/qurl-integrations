@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -68,6 +69,13 @@ func newFakeAliasStore() *fakeAliasStore {
 
 func (f *fakeAliasStore) key(teamID, channelID string) string {
 	return teamID + "|" + channelID
+}
+
+func (f *fakeAliasStore) LookupChannelAliasConsistent(_ context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rid, found := f.rows[f.key(teamID, channelID)][aliasName]
+	return rid, found, nil
 }
 
 func (f *fakeAliasStore) BindChannelAlias(_ context.Context, teamID, channelID, aliasName, resourceID string) error {
@@ -1172,5 +1180,71 @@ func TestSetAliasStore_NilPassthrough(t *testing.T) {
 	h.SetAliasStore(nil)
 	if h.aliasStore == nil {
 		t.Fatal("SetAliasStore(nil) after wiring should not clear the field")
+	}
+}
+
+func TestSetAlias_Precheck(t *testing.T) {
+	for _, scenario := range []string{"existing", "read failure", "concurrent bind", "new alias"} {
+		t.Run(scenario, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			h := newAdminTestHandler(t, ts)
+			h.SetAliasStore(h.cfg.AdminStore)
+			if scenario == "existing" {
+				ts.seedPolicyAliasBindings(t, testAdminTeamID, testAliasChannelID, map[string]string{testAliasName: "r_original"})
+			}
+			if scenario == "read failure" {
+				ts.ddb.SetGetItemErr(ts.tableNames.channelPolicy, errors.New("private policy failure"))
+			}
+			var lookups atomic.Int32
+			ts.addCustomer(http.MethodGet, testResourcesPath, func(w http.ResponseWriter, _ *http.Request) {
+				lookups.Add(1)
+				if scenario == "concurrent bind" {
+					ts.seedPolicyAliasBindings(t, testAdminTeamID, testAliasChannelID, map[string]string{testAliasName: "r_original"})
+				}
+				writeResourceListFixture(t, w, []map[string]any{{"resource_id": "r_new", "type": "tunnel", "slug": "new-tunnel", "status": "active"}}, "", false)
+			})
+			_, _, reply := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+				invokeAdminAsync("setalias $staging $new-tunnel", testAdminTeamID, testAdminUserID)
+			wantLookups := int32(0)
+			wantCopy := "already bound"
+			switch scenario {
+			case "read failure":
+				wantCopy = "Failed to update alias"
+			case "concurrent bind":
+				wantLookups = 1
+			case "new alias":
+				wantLookups, wantCopy = 1, "now points to"
+			}
+			if lookups.Load() != wantLookups || !strings.Contains(reply, wantCopy) {
+				t.Fatalf("lookups=%d want=%d; reply=%q want=%q", lookups.Load(), wantLookups, reply, wantCopy)
+			}
+			if strings.Contains(reply, "r_original") || strings.Contains(reply, "private policy failure") {
+				t.Fatalf("reply exposes private store data: %q", reply)
+			}
+			if scenario != "read failure" {
+				rid, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testAliasChannelID, testAliasName)
+				want := "r_original"
+				if scenario == "new alias" {
+					want = "r_new"
+				}
+				if err != nil || !found || rid != want {
+					t.Fatalf("binding=%q found=%v err=%v; want=%q", rid, found, err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSetAlias_PrecheckUsesAliasStore(t *testing.T) {
+	store := newFakeAliasStore()
+	if err := store.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testAliasName, "r_private"); err != nil {
+		t.Fatal(err)
+	}
+	// No AdminStore or upstream client: the binding store alone answers the duplicate.
+	h := &Handler{aliasStore: store}
+	result := h.resolveAndBindTunnelSlugAliasResult(context.Background(), slog.Default(), testAliasTeamID, testAliasChannelID, testAliasName, "other-tunnel")
+	if !strings.Contains(result.cardText, "already bound") || strings.Contains(result.cardText, "r_private") {
+		t.Fatalf("reply=%q", result.cardText)
 	}
 }
