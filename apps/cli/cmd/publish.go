@@ -104,7 +104,7 @@ owns the share and turns it off when it exits.`,
   qurl publish https://wiki.example.com/team --allow-requests
   qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
 		Args: exactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (retErr error) {
 			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
 				return exitcode.UsageError(err)
 			}
@@ -123,6 +123,8 @@ owns the share and turns it off when it exits.`,
 			if err != nil {
 				return err
 			}
+			finishNotice := opts.beginTermsNotice()
+			defer func() { finishNotice(retErr) }()
 			if target.kind == publishTargetLocal {
 				for _, name := range []string{"description", "tag", "alias"} {
 					if cmd.Flags().Changed(name) {

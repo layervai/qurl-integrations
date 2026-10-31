@@ -148,6 +148,7 @@ type globalOpts struct {
 	newShareDaemon       func(string, string) (shareDaemonController, error)
 	preflightTarget      func(context.Context, string, int) error
 	resolveShareStateDir func(string) (string, error)
+	pendingTermsNotice   string
 	resolveLocalResource localResourceResolver
 	resolveHubBootstrap  func() (qurl.HubBootstrap, error)
 	resolveSessionConfig func(string) (connectorshare.NativeSessionOperationAuthority, error)
@@ -552,7 +553,9 @@ func (o *globalOpts) requireRuntimeSupervisionIfNamespace() error {
 
 // printer builds the per-invocation Printer from the resolved settings.
 func (o *globalOpts) printer() *output.Printer {
-	return output.New(o.streams, o.resolvedFormat, o.quiet, o.outColor, o.ascii, o.now)
+	printer := output.New(o.streams, o.resolvedFormat, o.quiet, o.outColor, o.ascii, o.now)
+	printer.TermsNotice = o.pendingTermsNotice
+	return printer
 }
 
 // insecureEndpointWarning returns a warning when the endpoint would carry an

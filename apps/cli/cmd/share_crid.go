@@ -60,7 +60,7 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 		Example: "  qurl share " + exampleCRID + "\n" +
 			"  qurl get " + exampleCRID + " --file report.pdf   # download instead of linking",
 		Args: exactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (retErr error) {
 			assessment, err := cridux.Assess(args[0])
 			if err != nil {
 				return err
@@ -82,6 +82,9 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 				return exitcode.UsageError(fmt.Errorf("--session-duration %s must be a positive whole number of seconds", sessionDuration))
 			}
 
+			finishNotice := opts.beginTermsNotice()
+			defer func() { finishNotice(retErr) }()
+			printer.TermsNotice = opts.pendingTermsNotice
 			link, err := opts.shareResource(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
 				TTLSeconds: int(ttl.Seconds()), SessionDurationSeconds: int(sessionDuration / time.Second),
 			})
