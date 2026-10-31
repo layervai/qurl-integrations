@@ -927,3 +927,15 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     }
   });
 });
+
+test('slash-text @everyone shows the dropped-recipient warning before confirmation (#384)', async () => {
+  const guildMembers = Object.fromEntries(Array.from({ length: 26 }, (_, i) => [`4000000000000000${String(i).padStart(2, '0')}`, {}]));
+  const interaction = makeInteraction({ options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' }, guildMembers });
+  interaction.memberPermissions = { has: jest.fn(() => true) };
+  await handleQurlSend(interaction);
+  expect(mockSupersedeOrCreate).toHaveBeenCalledTimes(1);
+  const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+  expect(payload.recipientIds).toHaveLength(25);
+  expect(payload.warningsBlock).toContain('Capped at 25 — 1 recipient(s) past the cap were dropped.');
+  expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain(payload.warningsBlock);
+});
