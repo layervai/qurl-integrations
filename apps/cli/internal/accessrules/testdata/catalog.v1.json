@@ -19,23 +19,23 @@
     },
     "email_capture": {
       "label": "Anyone with a verified email", "summary": "Anyone can open it after confirming an email. You’ll see who.", "level": 2, "level_name": "Basic",
-      "if_forwarded": "Opens once they confirm their own email.", "they_will": "Confirm their email and save a passkey.", "you_will": "Do nothing.", "you_will_see": "Each person’s email."
+      "if_forwarded": "Opens once they confirm their own email.", "they_will": "Confirm their email with a passkey or an emailed link.", "you_will": "Do nothing.", "you_will_see": "Each person’s email."
     },
     "email_domain": {
       "label": "Work or school email", "summary": "Only email addresses at a domain you choose, like studio.com.", "level": 3, "level_name": "Moderate",
-      "if_forwarded": "Opens only with an email at your domain.", "they_will": "Confirm a work or school email and save a passkey.", "you_will": "Choose the domain once.", "you_will_see": "Each person’s email."
+      "if_forwarded": "Opens only with an email at your domain.", "they_will": "Confirm a work or school email with a passkey or an emailed link.", "you_will": "Choose the domain once.", "you_will_see": "Each person’s email."
     },
     "invite_only": {
       "label": "People you invite", "summary": "Only the email addresses you add. Forwarded links won’t open.", "level": 4, "level_name": "Strong",
-      "if_forwarded": "Won’t open.", "they_will": "Confirm the invited email and save a passkey.", "you_will": "Add each person’s email.", "you_will_see": "Each person’s email."
+      "if_forwarded": "Won’t open.", "they_will": "Confirm the invited email with a passkey or an emailed link.", "you_will": "Add each person’s email.", "you_will_see": "Each person’s email."
     },
     "review": {
       "label": "People you approve", "summary": "Anyone can ask. Only people you approve get in.", "level": 4, "level_name": "Strong",
-      "if_forwarded": "They can ask. It stays closed until you approve.", "they_will": "Confirm their email and save a passkey, then wait for you.", "you_will": "Approve or decline each request.", "you_will_see": "Each request, before anyone gets in."
+      "if_forwarded": "They can ask. It stays closed until you approve.", "they_will": "Confirm their email with a passkey or an emailed link, then wait for you.", "you_will": "Approve or decline each request.", "you_will_see": "Each request, before anyone gets in."
     },
     "keys": {
       "label": "Devices you approve", "summary": "Only passkeys and devices you approve. Forwarded links won’t open.", "level": 5, "level_name": "Strongest",
-      "if_forwarded": "Won’t open on their device.", "they_will": "Create a passkey and send you its approval details.", "you_will": "Approve each passkey or device.", "you_will_see": "Each approved device."
+      "if_forwarded": "They can send their own passkey details. It stays closed until you approve.", "they_will": "Create a passkey and send you its approval details.", "you_will": "Approve each passkey or device.", "you_will_see": "Each approved device."
     },
     "contract": {
       "label": "Custom access", "summary": "Your app or service decides who gets in.", "level": null, "level_name": null
