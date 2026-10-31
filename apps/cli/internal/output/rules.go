@@ -60,7 +60,7 @@ func (p *Printer) accessRuleLine(d *accessrules.Definition) error {
 }
 
 // AccessRuleSummary is the contract's one-line rule summary, such as
-// "Anyone with the link · links expire in 1 hour · one browser".
+// "Anyone with the link · links expire in 1 hour · works once".
 func AccessRuleSummary(d *accessrules.Definition) string {
 	parts := []string{accessRuleLabel(d.Mode)}
 	if d.Mode == accessrules.ModeEmailDomain && d.EmailDomain != "" {
@@ -69,7 +69,7 @@ func AccessRuleSummary(d *accessrules.Definition) string {
 	if l := d.LinkLimits; l != nil {
 		parts = append(parts, "links expire in "+ruleDuration(l.ExpiresIn))
 		if l.OneTimeUse != nil && *l.OneTimeUse {
-			parts = append(parts, "one browser")
+			parts = append(parts, "works once")
 		}
 		if l.SessionDuration != nil {
 			parts = append(parts, "sessions last "+ruleDuration(*l.SessionDuration))

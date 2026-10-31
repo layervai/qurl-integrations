@@ -105,7 +105,10 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 				return err
 			}
 			reportClamp(printer, ttl, link)
-			return printer.ShareLink(link)
+			if err := printer.ShareLink(link); err != nil {
+				return err
+			}
+			return printer.WorksOnce(link)
 		},
 	}
 

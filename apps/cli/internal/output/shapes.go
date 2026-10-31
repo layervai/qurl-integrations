@@ -484,6 +484,9 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 		ew.printf("\n")
 		p.requestGuidance(ew, res.CRID, requestAddress(res))
 	}
+	if line := worksOnce(res.LimitedLink); line != "" {
+		ew.printf("\n%s\n", line)
+	}
 	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	return ew.flush(nil)
 }
@@ -586,6 +589,25 @@ func (p *Printer) ShareLink(link *qurlapi.ShareLink) error {
 		ew.printf("%s\n", p.dim("  "+line))
 	}
 	return ew.flush(nil)
+}
+
+// WorksOnce follows a shared single-use link on a terminal with how to get
+// another. Piped, JSON and --quiet output keep their shape.
+func (p *Printer) WorksOnce(link *qurlapi.ShareLink) error {
+	line := worksOnce(link)
+	if line == "" || p.format == FormatJSON || p.quiet || !p.outTTY {
+		return nil
+	}
+	_, err := fmt.Fprintf(p.out, "\n%s\n", line)
+	return err
+}
+
+// worksOnce is the line after a single-use link, or empty.
+func worksOnce(link *qurlapi.ShareLink) string {
+	if link == nil || !link.SingleUse || link.CRID == "" {
+		return ""
+	}
+	return fmt.Sprintf(msgWorksOnce, link.CRID)
 }
 
 func (p *Printer) shareLinkDetail(link *qurlapi.ShareLink) string {

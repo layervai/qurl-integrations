@@ -128,6 +128,9 @@ const (
 	// settings it was created with, not the chosen rule's.
 	msgPublishSettingsDiffer = "This item is already shared with other settings. Use qurl access configure to change it."
 
+	// msgWorksOnce follows a single-use link in a text document; %s is its CRID.
+	msgWorksOnce = "Works once. Run qurl share %s for a new link."
+
 	// msgPublishFoundExisting is the text-document note for that same case:
 	// what happened, then the one next step.
 	msgPublishFoundExisting = "This URL already has an active resource, so its existing CRID is shown. Delete it first to publish the URL as a new resource."

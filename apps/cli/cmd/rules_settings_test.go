@@ -21,6 +21,8 @@ func TestRulesCreateTakesSettingsForItsModeOnly(t *testing.T) {
 	}{
 		{[]string{"Quick look", "--mode", "public", "--expires-in", "1h", "--one-browser", "--session-length", "30m"},
 			accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true), SessionDuration: new("30m")}}},
+		{[]string{"Once", "--mode", "public", "--expires-in", "1h", "--once"},
+			accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}},
 		{[]string{"Reviewers", "--mode", "review", "--approvals-last", "7d"}, accessrules.Definition{Mode: "review", ApprovalExpiresIn: new("7d")}},
 		{[]string{"Laptops", "--mode", "keys", "--approvals-last", "never"}, accessrules.Definition{Mode: "keys"}},
 	} {
@@ -54,7 +56,7 @@ func TestRulesCreateTakesSettingsForItsModeOnly(t *testing.T) {
 		}
 	}
 	listed := runCLI(t, &runOpts{args: []string{"rules", "list"}, env: map[string]string{}, shareStateDir: dir})
-	for _, want := range []string{"Anyone with the link · links expire in 1 hour · one browser · sessions last 30 minutes", "People you approve · approvals last 7 days"} {
+	for _, want := range []string{"Anyone with the link · links expire in 1 hour · works once · sessions last 30 minutes", "People you approve · approvals last 7 days"} {
 		if !strings.Contains(listed.stdout.String(), want) {
 			t.Errorf("list lacks %q:\n%s", want, listed.stdout.String())
 		}
@@ -138,6 +140,19 @@ func TestPublishWithLinkLimitsMintsAndLaterSharesUseThem(t *testing.T) {
 		if got["expires_in"] != want.expires || got["session_duration"] != want.session || got["one_time_use"] != false || got["max_sessions"] != float64(0) {
 			t.Errorf("mint %d sent %v, want expires_in %s and session_duration %s", i, got, want.expires, want.session)
 		}
+	}
+}
+
+func TestPublishSaysASingleUseLinkWorksOnce(t *testing.T) {
+	srv := apitest.NewServer(t)
+	var mints []map[string]any
+	scriptPublish(t, srv, false, false, nil, nil)
+	scriptMint(t, srv, &mints)
+	rule := `{"id":"11111111-1111-4111-8111-111111111111","name":"Once","mode":"public","link_limits":{"expires_in":"1h","one_time_use":true}}`
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--color", "never", "publish", "https://api.example.com", "--rule-file", "-"}, stdin: strings.NewReader(rule), shareStateDir: connectorStateTestDir(t), tty: true})
+	want := "Works once. Run qurl share " + srv.Key.CRID + " for a new link."
+	if result.code != 0 || !strings.Contains(result.stdout.String(), want) || len(mints) != 1 || mints[0]["one_time_use"] != true {
+		t.Fatalf("publish %d mints %v\n%s%s", result.code, mints, result.stdout.String(), result.stderr.String())
 	}
 }
 

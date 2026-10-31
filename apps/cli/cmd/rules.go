@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
@@ -344,9 +345,16 @@ type ruleSettingFlags struct {
 
 func (f *ruleSettingFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.expiresIn, "expires-in", "", "public rules: each shared link expires after this long, such as 1h or 7d (1m to 30d)")
-	cmd.Flags().BoolVar(&f.oneBrowser, "one-browser", false, "public rules: each shared link works for one browser")
+	cmd.Flags().BoolVar(&f.oneBrowser, "one-browser", false, "public rules: each shared link works once (alias --once)")
 	cmd.Flags().StringVar(&f.sessionLength, "session-length", "", "public rules: how long each visit lasts, such as 30m (1s to 24h)")
 	cmd.Flags().StringVar(&f.approvals, "approvals-last", "", "review and keys rules: 1d, 7d, 30d, 90d or never (default: never)")
+	// --once is the short spelling of --one-browser.
+	cmd.Flags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+		if name == "once" {
+			name = "one-browser"
+		}
+		return pflag.NormalizedName(name)
+	})
 }
 
 // apply validates the settings for d.Mode and copies them into d.
