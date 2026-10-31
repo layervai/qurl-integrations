@@ -398,7 +398,7 @@ describe('startActiveGuildCount', () => {
   });
 
   test('skips emission when guilds cache is missing', () => {
-    const client = { ws: {} };
+    const client = { isReady: () => true, ws: {} };
     startActiveGuildCount(client, { intervalMs: 1_000 });
     jest.advanceTimersByTime(1_000);
     expect(logger.audit).not.toHaveBeenCalled();
