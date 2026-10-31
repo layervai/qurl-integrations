@@ -202,6 +202,12 @@ sha256sum --check --ignore-missing checksums.txt   # Linux
 shasum -a 256 --check --ignore-missing checksums.txt  # macOS
 ```
 
+The shell installer runs this signature check automatically when `cosign` is on
+`PATH`. A missing bundle or failed verification stops installation. Without
+`cosign`, it prints a warning that publisher identity was not verified and
+continues with mandatory SHA-256 verification. Install cosign v3 or later before
+running the installer when signer verification is required.
+
 Step 1 prints `Verified OK` on success. A non-zero exit means the
 manifest either isn't signed, wasn't signed by this repo's release
 workflow running on `main`, or the Rekor transparency-log proof doesn't

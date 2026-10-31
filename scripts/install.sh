@@ -150,13 +150,23 @@ $(printf '%s\n' "$PAGE_FLAT" \
 
     download "$ARCHIVE"
 
-    # Verify checksum. No tool, no install: silently skipping verification
-    # would defeat the point of shipping checksums. Trust model: checksums.txt
-    # ships from the same release as the archive, so this verifies integrity
-    # (corruption, truncation), not publisher provenance — real signing is
-    # tracked in #943. awk field-equality avoids treating the archive name as
-    # a regex (its dots would be wildcards).
+    # Authenticate the manifest before trusting its archive digests.
     download checksums.txt
+    if command -v cosign >/dev/null 2>&1; then
+        download checksums.txt.sigstore.json
+        if ! cosign verify-blob \
+            --bundle "${TMP_DIR}/checksums.txt.sigstore.json" \
+            --certificate-identity 'https://github.com/layervai/qurl-integrations/.github/workflows/release-please.yml@refs/heads/main' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${TMP_DIR}/checksums.txt" >/dev/null; then
+            echo "Error: Release signature verification failed; refusing to install. Use cosign v3 or later and check the release signer." >&2
+            exit 1
+        fi
+    else
+        echo "Warning: cosign is not installed; publisher identity is NOT verified. Only the download checksum will be checked. Install cosign v3 or later for signature verification." >&2
+    fi
+    # A checksum tool is required even when the manifest signature is verified.
+    # Field equality avoids treating the archive name's dots as regex wildcards.
     awk -v f="$ARCHIVE" '$2 == f' "${TMP_DIR}/checksums.txt" > "${TMP_DIR}/verify.txt"
     if ! [ -s "${TMP_DIR}/verify.txt" ]; then
         echo "Error: ${ARCHIVE} not found in checksums.txt" >&2
