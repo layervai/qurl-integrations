@@ -1623,6 +1623,7 @@ describe('qurl sends', () => {
     expect(item.personal_message).toBe('hi'); // non-sensitive fields unchanged
     expect(item.attachment_name).toBe('doc.pdf');
     expect(item.recipient_count).toBe(3);
+    expect(ddbMock.commandCalls(PutCommand)[0].args[0].input.ConditionExpression).toBe('attribute_not_exists(send_id)');
   });
 
   test.each([-1, 1.5, '3'])('saveSendConfig: rejects invalid initial capacity %s before writing', async (recipientCount) => {

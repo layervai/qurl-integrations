@@ -84,7 +84,9 @@ proves that every old recipient writer has drained before any counter is
 initialized, or provides a verified reconciliation after the old writers stop.
 Ordinary worker replacement and tests of new workers alone do not prove this.
 
-New sends initialize the counter from their persisted recipient batch. Add
+Initial configuration writes are create-only so a replay preserves the existing
+capacity and revoke barriers. New sends initialize the counter from their
+persisted recipient batch. Add
 Recipients reserves capacity in the same transaction as its new rows. Failed
 DM delivery still consumes that reserved capacity; another committed batch,
 including a retry, consumes additional capacity. Legacy rows use one strongly

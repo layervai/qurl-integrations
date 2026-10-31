@@ -2379,9 +2379,13 @@ async function executeSendPipeline(interaction, {
       recipientCount: qurlLinks.length,
     });
   } catch (err) {
-    logger.error('saveSendConfig failed; Add Recipients will be unavailable for this send', {
-      sendId, error: err.message,
-    });
+    if (err?.name === 'ConditionalCheckFailedException') {
+      logger.warn('Existing send configuration was preserved', { sendId });
+    } else {
+      logger.error('saveSendConfig failed; Add Recipients will be unavailable for this send', {
+        sendId, error: err.message,
+      });
+    }
   }
 
   // Ephemeral confirmation with Add Recipients + Revoke buttons.

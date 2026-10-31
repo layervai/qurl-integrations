@@ -1170,6 +1170,8 @@ async function saveSendConfig({
   const encryptedUrl = attachmentUrl ? encrypt(attachmentUrl) : null;
   await ddb.send(new PutCommand({
     TableName: TABLES.qurl_send_configs,
+    // A replay must not reset capacity or remove a revoke barrier.
+    ConditionExpression: 'attribute_not_exists(send_id)',
     Item: {
       send_id: sendId,
       sender_discord_id: senderDiscordId,
