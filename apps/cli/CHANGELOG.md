@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.7.0](https://github.com/layervai/qurl-integrations/compare/v3.6.1...v3.7.0) (2026-10-31)
+
+
+### Features
+
+* **cli:** let host apps name themselves in the User-Agent ([#1657](https://github.com/layervai/qurl-integrations/issues/1657)) ([80ca51a](https://github.com/layervai/qurl-integrations/commit/80ca51a1e5c69d84f6765a6b21c48e0cb637b955))
+
+
+### Bug Fixes
+
+* **cli:** bind daemon control to its state namespace ([#1747](https://github.com/layervai/qurl-integrations/issues/1747)) ([87a9dfe](https://github.com/layervai/qurl-integrations/commit/87a9dfecf60a0cd6fec90589ab2d935f86a633e7))
+* **cli:** confirm committed revocation after stopping local sharing ([#1708](https://github.com/layervai/qurl-integrations/issues/1708)) ([081f004](https://github.com/layervai/qurl-integrations/commit/081f004dcf7ff774ce3467f8057e1270e176c2c7))
+* **cli:** preserve host product in native daemon jobs ([#1728](https://github.com/layervai/qurl-integrations/issues/1728)) ([7053bb9](https://github.com/layervai/qurl-integrations/commit/7053bb91277502226aa0ee1df2a85f6b867f3b7e)), closes [#1658](https://github.com/layervai/qurl-integrations/issues/1658)
+
 ## [3.6.1](https://github.com/layervai/qurl-integrations/compare/v3.6.0...v3.6.1) (2026-10-24)
 
 
