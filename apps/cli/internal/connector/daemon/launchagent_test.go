@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -86,7 +87,7 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 			"--hub-host", "hub.sandbox.layerv.xyz", "--hub-port", "443",
 			"--hub-server-public-key-b64", testHubKey,
 			"--supervision", "native",
-			"--client-product=",
+			"--client-product-b64=",
 		)
 		wantArguments = append(wantArguments, daemonJobLogArguments(
 			filepath.Join(dir, "logs", "share-daemon.log"), filepath.Join(dir, "logs", "share-daemon.err.log"))...)
@@ -824,7 +825,7 @@ func TestJobArgumentsAreTiedToTheJobProtocolVersion(t *testing.T) {
 	const pinnedProtocol = "6"
 	pinned := []string{
 		"--endpoint", "daemon", "run", "--state-dir", "--runtime-dir", "--job-version", "--share-group-mode",
-		"--hub-host", "--hub-port", "--hub-server-public-key-b64", "--supervision", "--client-product",
+		"--hub-host", "--hub-port", "--hub-server-public-key-b64", "--supervision", "--client-product-b64",
 	}
 	dir := t.TempDir()
 	if len(daemonJobLogArguments("out", "err")) != 0 {
@@ -884,6 +885,7 @@ func TestManagedDaemonReplacedWhenClientProductChangesOrClears(t *testing.T) {
 			manager := &recordingJobManager{status: &connectorservice.ServiceStatus{Installed: true, Running: true}}
 			controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "3.4.1", "https://api.example.test", GroupModeSingle, testHubResolver)
 			controller.ClientProduct = product
+			controller.ClientProductExplicit = true
 			controller.Manager = manager
 			controller.InvocationPath = filepath.Join(dir, "bin", "qurl")
 			previous, err := JobVersion("3.4.1", GroupModeSingle, "host-app/1")
@@ -902,14 +904,14 @@ func TestManagedDaemonReplacedWhenClientProductChangesOrClears(t *testing.T) {
 				t.Fatalf("replaced jobs = %d", len(manager.replaced))
 			}
 			job := manager.replaced[0]
-			if !slices.Contains(job.Arguments, "--client-product="+product) {
+			if !slices.Contains(job.Arguments, "--client-product-b64="+base64.RawURLEncoding.EncodeToString([]byte(product))) {
 				t.Fatalf("job arguments = %q", job.Arguments)
 			}
 			rendered, err := connectorservice.RenderLaunchdUserJob(job)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(rendered, "<string>--client-product="+product+"</string>") {
+			if !strings.Contains(rendered, "<string>--client-product-b64="+base64.RawURLEncoding.EncodeToString([]byte(product))+"</string>") {
 				t.Fatal("rendered job dropped product argument")
 			}
 		})
@@ -917,14 +919,16 @@ func TestManagedDaemonReplacedWhenClientProductChangesOrClears(t *testing.T) {
 }
 
 func TestExternalDaemonAttributionBelongsToItsSupervisor(t *testing.T) {
-	for _, product := range []string{"", "terminal/2"} {
+	for _, tc := range []struct{ incoming, installed string }{{"", "host-app/1"}, {"terminal/2", "host-app/1"}, {"terminal/2", ""}} {
+		product := tc.incoming
 		dir := t.TempDir()
 		controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "3.4.1", "https://api.example.test", GroupModeSingle, testHubResolver)
 		manager := &recordingJobManager{}
 		controller.Manager = manager
 		controller.ClientProduct = product
+		controller.ClientProductExplicit = true
 		controller.Supervision = connectorstate.RuntimeSupervisionExternal
-		installed, err := JobVersion("3.4.1", GroupModeSingle, "host-app/1")
+		installed, err := JobVersion("3.4.1", GroupModeSingle, tc.installed)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -940,6 +944,81 @@ func TestExternalDaemonAttributionBelongsToItsSupervisor(t *testing.T) {
 		controller.BinaryVersion = "3.4.2"
 		if err := controller.Ensure(context.Background()); err == nil {
 			t.Fatal("attribution exemption bypassed the binary contract")
+		}
+	}
+}
+
+func TestNativeDaemonPreservesUnspecifiedAttributionAcrossUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "3.4.1", "https://api.example.test", GroupModeSingle, testHubResolver)
+	manager := &recordingJobManager{status: &connectorservice.ServiceStatus{Installed: true, Running: true}}
+	controller.Manager = manager
+	controller.InvocationPath = filepath.Join(dir, "bin", "qurl")
+	installed, err := JobVersion("3.4.1", GroupModeSingle, "host-app/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{JobVersion: installed}, true, nil }
+	reloads := 0
+	controller.Reload = func(context.Context) (bool, error) { reloads++; return true, nil }
+	for _, value := range []string{"", "invalid value"} {
+		controller.ClientProduct = value
+		if err := controller.Ensure(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reloads != 2 || manager.statusCalls != 0 {
+		t.Fatal("unset/ignored products must not replace the running native daemon")
+	}
+	controller.BinaryVersion = "3.4.2"
+	if err := controller.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.replaced) != 1 || !slices.Contains(manager.replaced[0].Arguments, "--client-product-b64=aG9zdC1hcHAvMQ") {
+		t.Fatal("binary upgrade lost the installed host product")
+	}
+	installed = "5/3.4.2"
+	controller.ClientProduct = ""
+	if err := controller.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.replaced) != 2 || !slices.Contains(manager.replaced[1].Arguments, "--client-product-b64=") {
+		t.Fatal("previous protocol did not upgrade to an explicit empty product")
+	}
+}
+
+func TestJobClientProductEncodingIsSchedulerSafe(t *testing.T) {
+	dir := t.TempDir()
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "3.4.1", "https://api.example.test", GroupModeSingle, testHubResolver)
+	controller.InvocationPath = filepath.Join(dir, "bin", "qurl")
+	hub, err := testHubResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, product := range []string{"", "host/1", "host%PATH%$HOME&^!|/1", strings.Repeat("a", 62) + "/1"} {
+		encoded := base64.RawURLEncoding.EncodeToString([]byte(product))
+		decoded, err := DecodeClientProduct(encoded)
+		if err != nil || decoded != product {
+			t.Fatalf("product round trip = %q, %v", decoded, err)
+		}
+		version, err := JobVersion("3.4.1", GroupModeSingle, product)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ContainsAny(version, "%$&^!|") {
+			t.Fatal("scheduler expansion characters reached job identity")
+		}
+		job, err := controller.jobDefinition(hub, version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(job.Arguments, "--client-product-b64="+encoded) {
+			t.Fatal("job lost encoded product")
+		}
+	}
+	for _, encoded := range []string{"!", "aG9zdC8x\n", "aG9zdC8x=", base64.RawURLEncoding.EncodeToString([]byte("invalid value")), strings.Repeat("a", 87)} {
+		if _, err := DecodeClientProduct(encoded); err == nil {
+			t.Fatal("invalid encoded product accepted")
 		}
 	}
 }

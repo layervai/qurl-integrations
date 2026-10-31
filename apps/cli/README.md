@@ -413,12 +413,14 @@ directory that holds its control socket; see
 identify its product/version, for example `qurl-desktop/1.2.3`. Set it in the
 environment that runs the CLI. Native background jobs carry
 the validated value from installation, including an explicit empty value.
-Changing or clearing it replaces the managed daemon on the next publish/start.
+Setting a valid product or an explicit empty value changes or clears the
+managed daemon on the next publish/start. An unset or invalid value preserves
+a running native daemon's installed attribution.
 External supervisors set it in their own daemon environment; CLI invocations
 can name a different product without restarting that external daemon.
-Native supervision treats a changed or missing value as a job change, so use
-a consistent environment across a host app and terminal commands to avoid
-replacing the managed daemon on each invocation.
+A terminal with no product variable can use the host app's running daemon
+without replacing it. An explicit native product change replaces the job and
+briefly restarts its desired-on shares.
 It must be a single RFC 9110
 `name/version` product with nonempty token-only parts, at most 64 bytes in
 total, and not named `qurl-cli` (case-insensitive). Valid values prefix the User-Agent:

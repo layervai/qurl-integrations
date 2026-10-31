@@ -251,11 +251,15 @@ commands then reload this daemon and never install a background job.`,
 			if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
 				return err
 			}
-			if cmd.Flags().Changed("client-product") {
-				if clientProduct != "" && !qurlapi.ValidClientProduct(clientProduct) {
-					return errors.New("invalid client product")
+
+			if cmd.Flags().Changed("client-product-b64") {
+				decoded, err := connectordaemon.DecodeClientProduct(clientProduct)
+				if err != nil {
+					holdDaemonJobFlagError(cmd, opts, err)
+					return err
 				}
-				opts.resolvedClientProduct = clientProduct
+				opts.resolvedClientProduct = decoded
+				opts.resolvedClientProductExplicit = true
 			}
 			jobVersion, err := admitDaemonJobVersion(cmd.Context(), opts, jobVersion)
 			if err != nil {
@@ -280,7 +284,7 @@ commands then reload this daemon and never install a background job.`,
 	run.Flags().StringVar(&opts.tunnelServerName, "tunnel-server-name", "", "expected tunnel certificate name (default: admitted host)")
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
 	run.Flags().StringVar(&runtimeDir, "runtime-dir", "", "dedicated per-namespace directory for the qURL share daemon control socket (enforced mode 0700)")
-	run.Flags().StringVar(&clientProduct, "client-product", "", "installed job host product")
+	run.Flags().StringVar(&clientProduct, "client-product-b64", "", "encoded installed job host product")
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
 	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
 	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "one-time enrollment credential file for first headless bootstrap")
@@ -300,7 +304,7 @@ commands then reload this daemon and never install a background job.`,
 		holdDaemonJobFlagError(cmd, opts, err)
 		return exitcode.UsageError(err)
 	})
-	for _, name := range []string{"client-product", "hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log", "runtime-dir"} {
+	for _, name := range []string{"client-product-b64", "hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log", "runtime-dir"} {
 		_ = run.Flags().MarkHidden(name)
 	}
 	validateTestCRID := &cobra.Command{

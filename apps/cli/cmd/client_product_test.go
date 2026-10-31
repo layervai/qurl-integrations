@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
@@ -89,15 +90,15 @@ func TestDaemonJobClientProductOverridesItsEnvironment(t *testing.T) {
 		name, env, product, job string
 		explicit                bool
 	}{
-		{"installed", "other/9", "host-app/1", "6/test/client/host-app/1", true},
+		{"installed", "other/9", "host-app/1", "6/test/client/aG9zdC1hcHAvMQ", true},
 		{"cleared", "other/9", "", "6/test", true},
-		{"external environment", "host-app/1", "", "6/test/client/host-app/1", false},
+		{"external environment", "host-app/1", "", "6/test/client/aG9zdC1hcHAvMQ", false},
 		{"previous job format", "host-app/1", "", "5/test", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			args := []string{"daemon", "run", "--state-dir", t.TempDir(), "--job-version", tc.job}
 			if tc.explicit {
-				args = append(args, "--client-product="+tc.product)
+				args = append(args, "--client-product-b64="+base64.RawURLEncoding.EncodeToString([]byte(tc.product)))
 			}
 			res := runCLI(t, &runOpts{args: args, env: map[string]string{clientProductEnv: tc.env}})
 			if res.code == 0 || !strings.Contains(res.stderr.String(), "no durable account owner") {
@@ -105,8 +106,29 @@ func TestDaemonJobClientProductOverridesItsEnvironment(t *testing.T) {
 			}
 		})
 	}
-	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--client-product", "secret value"}})
-	if res.code == 0 || !strings.Contains(res.stderr.String(), "invalid client product") || strings.Contains(res.stderr.String(), "secret value") {
+	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--client-product-b64", "secret value"}})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), "invalid encoded client product") || strings.Contains(res.stderr.String(), "secret value") {
 		t.Fatalf("invalid product = %d, %s", res.code, res.stderr.String())
+	}
+}
+
+func TestClientProductDistinguishesAbsentInvalidAndExplicitEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		value             string
+		present, explicit bool
+	}{{"", false, false}, {"invalid value", true, false}, {"", true, true}, {"host/1", true, true}} {
+		opts := &globalOpts{lookupEnv: func(string) (string, bool) { return tc.value, tc.present }}
+		_ = opts.resolveClientProduct()
+		if opts.resolvedClientProductExplicit != tc.explicit {
+			t.Fatalf("presence=%t value=%q explicit=%t", tc.present, tc.value, opts.resolvedClientProductExplicit)
+		}
+	}
+}
+
+func TestInvalidEncodedProductInNativeJobUsesRefusalHold(t *testing.T) {
+	holds := stubDaemonJobRefusalHold(t)
+	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--job-version", "6/test", "--client-product-b64=!"}})
+	if res.code == 0 || len(*holds) != 1 || !strings.Contains(res.stderr.String(), "invalid encoded client product") {
+		t.Fatalf("invalid installed product = %d holds=%v stderr=%s", res.code, *holds, res.stderr.String())
 	}
 }

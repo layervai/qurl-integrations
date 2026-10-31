@@ -213,6 +213,7 @@ func TestShareDaemonJobCarriesTheResolvedShareGroupMode(t *testing.T) {
 	_, opts := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: io.Discard, Err: io.Discard})
 	opts.resolvedEndpoint = config.DefaultEndpoint
 	opts.resolvedClientProduct = "host-app/1"
+	opts.resolvedClientProductExplicit = true
 	opts.resolvedShareGroupMode = connectordaemon.GroupModePerShare
 	dir := t.TempDir()
 	daemon, err := opts.newShareDaemon(filepath.Join(dir, "state"), filepath.Join(dir, "logs"))
@@ -223,7 +224,7 @@ func TestShareDaemonJobCarriesTheResolvedShareGroupMode(t *testing.T) {
 	if !ok {
 		t.Fatalf("production share daemon controller is %T, want the native job controller", controller)
 	}
-	if controller.ClientProduct != "host-app/1" {
+	if controller.ClientProduct != "host-app/1" || !controller.ClientProductExplicit {
 		t.Fatalf("job product = %q", controller.ClientProduct)
 	}
 	if controller.ShareGroupMode != connectordaemon.GroupModePerShare {

@@ -108,10 +108,12 @@ its job was installed for. Changing the mode is therefore a job-definition
 change: the next `qurl start`, `restart`, or `publish` replaces the resident
 daemon in the new mode, the same path a binary-version change takes.
 
-A validated host product adds `/client/<name>/<product-version>` to the job version.
-The hidden `--client-product` argument carries that value explicitly; an
-empty value clears inherited host attribution. Changing or clearing the
-product replaces a managed daemon, just as a mode change does.
+A validated host product adds `/client/<encoded-product>` to the job version.
+The hidden `--client-product-b64` argument carries the same base64url value
+to prevent task schedulers from expanding product characters; an
+empty value clears inherited host attribution. Explicitly changing or clearing the
+product replaces a managed daemon, just as a mode change does. Unset or invalid
+CLI values preserve a running native daemon's installed product.
 
 A package upgrade replaces the binary without rewriting the job. The upgraded
 daemon still starts from that job when only the version part differs, and the

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -63,13 +64,14 @@ type JobController struct {
 	// explicitly: a daemon under launchd or systemd does not run in the user's
 	// shell environment, so it must listen exactly where the CLI that installed
 	// it, and every later CLI invocation, resolve the socket.
-	RuntimeDir     string
-	StateDir       string
-	LogDir         string
-	BinaryVersion  string
-	InvocationPath string
-	Endpoint       string
-	ClientProduct  string
+	RuntimeDir            string
+	StateDir              string
+	LogDir                string
+	BinaryVersion         string
+	InvocationPath        string
+	Endpoint              string
+	ClientProduct         string
+	ClientProductExplicit bool
 	// ShareGroupMode is part of the job definition: a resident daemon runs in
 	// exactly the mode its job carries, and a changed mode is a definition
 	// change that replaces the daemon just as a binary-version change does.
@@ -186,8 +188,15 @@ func (c *JobController) Ensure(ctx context.Context) error {
 // demand a restart. Native supervision pins the installing CLI's product.
 func (c *JobController) expectedJobVersion(status IPCStatus) (string, error) {
 	product := c.ClientProduct
-	if c.Supervision == connectorstate.RuntimeSupervisionExternal {
-		_, product, _ = strings.Cut(status.JobVersion, "/client/")
+	if c.Supervision == connectorstate.RuntimeSupervisionExternal || !c.ClientProductExplicit {
+		product = ""
+		if _, encoded, found := strings.Cut(status.JobVersion, "/client/"); found {
+			decoded, err := DecodeClientProduct(encoded)
+			if err != nil {
+				return "", err
+			}
+			product = decoded
+		}
 	}
 	return JobVersion(c.BinaryVersion, c.ShareGroupMode, product)
 }
@@ -266,6 +275,7 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 	}
 	stdoutPath := filepath.Join(c.LogDir, "share-daemon.log")
 	stderrPath := filepath.Join(c.LogDir, "share-daemon.err.log")
+	_, encodedProduct, _ := strings.Cut(jobVersion, "/client/")
 	arguments := make([]string, 0, 20)
 	// --job-version stays ahead of any argument a later contract adds: a binary
 	// that cannot parse a later argument holds its exit only once it has read
@@ -281,7 +291,7 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 		"--hub-server-public-key-b64", hub.ServerPublicKeyB64,
 		// Pin native ownership even if the user later selects external in their profile.
 		"--supervision", string(connectorstate.RuntimeSupervisionNative),
-		"--client-product="+c.ClientProduct,
+		"--client-product-b64="+encodedProduct,
 	)
 	arguments = append(arguments, daemonJobLogArguments(stdoutPath, stderrPath)...)
 	return connectorservice.UserJob{
@@ -347,9 +357,23 @@ func JobVersion(binaryVersion string, mode GroupMode, clientProduct string) (str
 		version += "/" + string(mode)
 	}
 	if clientProduct != "" {
-		version += "/client/" + clientProduct
+		version += "/client/" + base64.RawURLEncoding.EncodeToString([]byte(clientProduct))
 	}
 	return version, nil
+}
+
+// DecodeClientProduct reads the scheduler-safe encoding of a validated product.
+func DecodeClientProduct(encoded string) (string, error) {
+	// A valid product has at most 64 bytes: 86 unpadded base64url characters.
+	if len(encoded) > 86 {
+		return "", errors.New("invalid encoded client product")
+	}
+	data, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	product := string(data)
+	if err != nil || base64.RawURLEncoding.EncodeToString(data) != encoded || (product != "" && !qurlapi.ValidClientProduct(product)) {
+		return "", errors.New("invalid encoded client product")
+	}
+	return product, nil
 }
 
 // JobVersionMatch classifies the job version a service manager started the
@@ -390,7 +414,7 @@ func MatchJobVersion(jobVersion, binaryVersion string, mode GroupMode, clientPro
 		suffix = "/" + string(mode)
 	}
 	if clientProduct != "" {
-		suffix += "/client/" + clientProduct
+		suffix += "/client/" + base64.RawURLEncoding.EncodeToString([]byte(clientProduct))
 	}
 	installed, ok := strings.CutPrefix(jobVersion, daemonJobProtocolVersion+"/")
 	if !ok {
