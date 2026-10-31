@@ -4740,6 +4740,10 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
         everyoneCacheCold = true;
         continue;
       }
+      if (!isEveryoneRole && source.size === 0 && !guild?.members?.cache?.size) {
+        namedRoleMembersUnavailable.add(roleId);
+        continue;
+      }
       // Two break conditions, both belt-and-suspenders:
       //  - userMap.size at cap: stops adding new entries once the
       //    downstream partition cap would be hit anyway.
@@ -4799,7 +4803,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
     massMentionDenied,
     droppedFromRoles: droppedFromRolesSet.size,
     everyoneCacheCold,
-    namedRoleMembersUnavailable,
+    unavailableRoleCount: namedRoleMembersUnavailable.size,
     roleMentionsDenied,
   };
 }
@@ -4816,8 +4820,8 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  * (rejection banner vs. warnings block — different UI contexts).
  * Both surface the SAME set of signals (droppedBots,
  * droppedFromRoles, massMentionDenied, everyoneCacheCold,
- * unavailableRoleCount, roleMentionsDeniedNames). When adding or renaming a signal, update
- * BOTH surfaces in lockstep — the helpers don't share a copy table,
+ * unavailableRoleCount, roleMentionsDeniedNames). When adding or renaming a
+ * signal, update BOTH surfaces in lockstep — the helpers don't share a copy table,
  * so a future contributor could easily land one half and not the
  * other.
  *
@@ -6829,7 +6833,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     massMentionDenied,
     droppedFromRoles,
     everyoneCacheCold,
-    namedRoleMembersUnavailable,
+    unavailableRoleCount,
     roleMentionsDenied,
   } = resolveMentionableSelection({
     interaction,
@@ -6845,7 +6849,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     && !massMentionDenied
     && droppedFromRoles === 0
     && !everyoneCacheCold
-    && namedRoleMembersUnavailable.size === 0
+    && unavailableRoleCount === 0
     && roleMentionsDenied.length === 0
   ) {
     // Truly empty pick (no users, no roles, no @everyone, no
@@ -6921,7 +6925,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       mass_mention_denied: massMentionDenied,
       dropped_from_roles: droppedFromRoles,
       everyone_cache_cold: everyoneCacheCold,
-      named_role_members_unavailable_count: namedRoleMembersUnavailable.size,
+      named_role_members_unavailable_count: unavailableRoleCount,
       role_mentions_denied: roleMentionsDenied.length,
     });
     // Reachable cases:
@@ -6953,7 +6957,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
     if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
     if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
-    if (namedRoleMembersUnavailable.size > 0) reasons.push(RECIPIENT_REASON_ROLE_MEMBERS_UNAVAILABLE);
+    if (unavailableRoleCount > 0) reasons.push(RECIPIENT_REASON_ROLE_MEMBERS_UNAVAILABLE);
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
     if (roleMentionsDenied.length > 0) {
       // Condensed copy (count, not per-role) for the rejection banner —
@@ -7001,7 +7005,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     droppedFromRoles,
     massMentionDenied,
     everyoneCacheCold,
-    unavailableRoleCount: namedRoleMembersUnavailable.size,
+    unavailableRoleCount,
     roleMentionsDeniedNames,
   });
   const newRecipientAliases = Object.fromEntries(

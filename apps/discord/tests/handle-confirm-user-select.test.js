@@ -399,8 +399,8 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Mention Everyone/);
   });
 
-  test('unavailable named role gives a retry reason instead of an empty no-op', async () => {
-    const int = makeSelectInteraction({ users: [], roles: [['role-cold', { id: 'role-cold', mentionable: true }]] });
+  test.each([undefined, new Map()])('unavailable named role gives a retry reason instead of an empty no-op (%s)', async members => {
+    const int = makeSelectInteraction({ users: [], roles: [['role-cold', { id: 'role-cold', mentionable: true, members }]] });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Picked role members could not be loaded');
