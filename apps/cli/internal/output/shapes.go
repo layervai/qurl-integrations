@@ -39,6 +39,28 @@ type publishJSON struct {
 	// reconciliation omits the field rather than claiming a fresh publish.
 	FoundExisting *bool         `json:"found_existing,omitempty"`
 	Publisher     publisherJSON `json:"publisher"`
+	// Link is the temporary link minted with an access rule's link limits.
+	Link *limitedLinkJSON `json:"link,omitempty"`
+	// SettingsDiffer is true when an existing share keeps settings other
+	// than the chosen rule's.
+	SettingsDiffer bool `json:"settings_differ,omitempty"`
+}
+
+type limitedLinkJSON struct {
+	QURL      string     `json:"qurl"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	SingleUse bool       `json:"single_use,omitempty"`
+}
+
+func limitedLinkDocument(link *qurlapi.ShareLink) *limitedLinkJSON {
+	if link == nil {
+		return nil
+	}
+	document := &limitedLinkJSON{QURL: link.QURL, SingleUse: link.SingleUse}
+	if !link.ExpiresAt.IsZero() {
+		document.ExpiresAt = &link.ExpiresAt
+	}
+	return document
 }
 
 type shareLinkJSON struct {
@@ -178,6 +200,9 @@ type downloadJSON struct {
 // while --quiet and JSON keep their stdout documents unchanged and note the
 // replay on stderr.
 func (p *Printer) Publish(res *qurlapi.Published) error {
+	if res.OtherSettings {
+		p.Warnf("%s", msgPublishSettingsDiffer)
+	}
 	if p.format == FormatJSON || p.quiet {
 		switch {
 		case res.KeptPublic:
@@ -206,6 +231,8 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			ExpiresAt:      res.ExpiresAt,
 			FoundExisting:  res.FoundExisting,
 			Publisher:      publisherDocument(res.Publisher),
+			Link:           limitedLinkDocument(res.LimitedLink),
+			SettingsDiffer: res.OtherSettings,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, res.CRID)
@@ -428,6 +455,7 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	if res.ExpiresAt != nil {
 		twe.printf("  %s\t%s\n", p.bold("Expires:"), p.formatExpiry(*res.ExpiresAt))
 	}
+	p.limitedLinkRows(twe, res.LimitedLink)
 	if err := twe.flush(tw); err != nil {
 		return err
 	}
@@ -456,8 +484,22 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 		ew.printf("\n")
 		p.requestGuidance(ew, res.CRID, requestAddress(res))
 	}
+	if line := worksOnce(res.LimitedLink); line != "" {
+		ew.printf("\n%s\n", line)
+	}
 	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	return ew.flush(nil)
+}
+
+// limitedLinkRows shows the temporary link a rule with link limits minted.
+func (p *Printer) limitedLinkRows(twe *errWriter, link *qurlapi.ShareLink) {
+	if link == nil {
+		return
+	}
+	twe.printf("  %s\t%s\n", p.bold("Link:"), link.QURL)
+	if !link.ExpiresAt.IsZero() {
+		twe.printf("  %s\t%s\n", p.bold("Link expires:"), p.formatExpiry(link.ExpiresAt))
+	}
 }
 
 // acceptsRequests reports whether the service confirmed that people can ask
@@ -547,6 +589,25 @@ func (p *Printer) ShareLink(link *qurlapi.ShareLink) error {
 		ew.printf("%s\n", p.dim("  "+line))
 	}
 	return ew.flush(nil)
+}
+
+// WorksOnce follows a shared single-use link on a terminal with how to get
+// another. Piped, JSON and --quiet output keep their shape.
+func (p *Printer) WorksOnce(link *qurlapi.ShareLink) error {
+	line := worksOnce(link)
+	if line == "" || p.format == FormatJSON || p.quiet || !p.outTTY {
+		return nil
+	}
+	_, err := fmt.Fprintf(p.out, "\n%s\n", line)
+	return err
+}
+
+// worksOnce is the line after a single-use link, or empty.
+func worksOnce(link *qurlapi.ShareLink) string {
+	if link == nil || !link.SingleUse || link.CRID == "" {
+		return ""
+	}
+	return fmt.Sprintf(msgWorksOnce, link.CRID)
 }
 
 func (p *Printer) shareLinkDetail(link *qurlapi.ShareLink) string {

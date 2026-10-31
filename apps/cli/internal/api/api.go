@@ -23,13 +23,19 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 )
 
 const schemeHTTPS = "https"
 
 // Client is what commands program against.
 type Client interface {
+	AccessRules() accessrules.Remote
 	ConsumerManagement() ConsumerManagementClient
+	// MintLimitedLink mints a temporary link to an existing resource with an
+	// access rule's link limits, so the permanent address is never shared.
+	MintLimitedLink(ctx context.Context, crid string, limits accessrules.LinkLimits) (*ShareLink, error)
 	Preview(ctx context.Context, id string) (*Preview, error)
 	UpdatePreview(ctx context.Context, id string, patch PreviewPatch) (*Preview, error)
 	UploadPreview(ctx context.Context, id, path, alt, replaceID string) (*Preview, error)
@@ -150,6 +156,10 @@ type PublishOptions struct {
 	// of them. They are carried into a conflict, so that its next step can
 	// name the flag to leave out instead of a command line that cannot work.
 	NamedAccessFlags []string
+	// Rule is the access rule the publisher chose, carried for the settings
+	// applied once the resource exists. Publish sends nothing of it; its
+	// policy reaches the request through Public and ConsumerAccess.
+	Rule *accessrules.Definition
 	// ConnectorID selects a tunnel resource instead of a URL.
 	ConnectorID string
 	Description string
@@ -209,6 +219,12 @@ type Published struct {
 	// with no CLI opens it. The service does not send it: the command sets it
 	// when this install knows that site for its deployment.
 	LinkSiteURL string
+	// LimitedLink is the temporary link minted with a public access rule's
+	// link limits; the permanent address is not shared with limits.
+	LimitedLink *ShareLink
+	// OtherSettings is set when the resource already existed and keeps
+	// settings other than the chosen access rule's.
+	OtherSettings bool
 }
 
 // AllowedPasskey is one person the publisher approved for a private resource.
@@ -535,6 +551,38 @@ func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*Shar
 	if access.ResourceCreatedAt != nil && !access.ResourceCreatedAt.IsZero() {
 		createdAt := *access.ResourceCreatedAt
 		link.ResourceCreatedAt = &createdAt
+	}
+	return link, nil
+}
+
+// MintLimitedLink uses POST /v1/resources/{id}/qurls: unlike share by CRID,
+// it can set one_time_use. one_time_use and an unlimited max_sessions are
+// always sent, because a Connector link is single-use when they are omitted.
+func (c *client) MintLimitedLink(ctx context.Context, crid string, limits accessrules.LinkLimits) (*ShareLink, error) {
+	expiresIn, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn)
+	if !ok {
+		return nil, errors.New("access rule link expiry is out of range")
+	}
+	oneBrowser := limits.OneTimeUse != nil && *limits.OneTimeUse
+	use := qurl.Reusable()
+	if oneBrowser {
+		use = qurl.OneTimeUse()
+	}
+	opts := []qurl.PortalOption{qurl.ValidFor(expiresIn), use, qurl.MaxSessions(0)}
+	if limits.SessionDuration != nil {
+		session, ok := accessrules.SessionLength.Parse(*limits.SessionDuration)
+		if !ok {
+			return nil, errors.New("access rule session length is out of range")
+		}
+		opts = append(opts, qurl.WithSessionDuration(session))
+	}
+	portal, err := c.sdk.CreatePortal(ctx, &qurl.Resource{CRID: crid}, opts...)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	link := &ShareLink{QURL: portal.Link, CRID: portal.CRID, SingleUse: oneBrowser}
+	if portal.ExpiresAt != nil {
+		link.ExpiresAt = *portal.ExpiresAt
 	}
 	return link, nil
 }

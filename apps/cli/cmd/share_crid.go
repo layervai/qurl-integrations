@@ -12,6 +12,7 @@ import (
 
 	"github.com/layervai/qurl-go/qurl"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
@@ -41,6 +42,8 @@ share uses this device's identity. It works on the resource owner's devices
 and, for a private resource, on the devices the publisher allowed; any other
 device gets "not found".
 The link expires on its own; share again whenever you need a fresh one.
+A resource you published on this device with an access rule's link limits
+gets links with those limits; --ttl and --session-duration override them.
 
 Before anything is printed, the CLI verifies that the link belongs
 to the CRID you asked for — a mismatched answer is discarded and the
@@ -82,9 +85,18 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 				return exitcode.UsageError(fmt.Errorf("--session-duration %s must be a positive whole number of seconds", sessionDuration))
 			}
 
-			link, err := opts.shareResource(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
-				TTLSeconds: int(ttl.Seconds()), SessionDurationSeconds: int(sessionDuration / time.Second),
-			})
+			limits, err := opts.savedLinkLimits(cmd.Context(), assessment.Input)
+			if err != nil && !errors.Is(err, errNoSavedLinkLimits) {
+				return err
+			}
+			var link *qurlapi.ShareLink
+			if err == nil {
+				link, err = opts.shareWithLimits(cmd, assessment.Input, *limits, ttl, sessionDuration)
+			} else {
+				link, err = opts.shareResource(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
+					TTLSeconds: int(ttl.Seconds()), SessionDurationSeconds: int(sessionDuration / time.Second),
+				})
+			}
 
 			if err := verifyShareLink(assessment, link, err); err != nil {
 				return err
@@ -93,7 +105,10 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 				return err
 			}
 			reportClamp(printer, ttl, link)
-			return printer.ShareLink(link)
+			if err := printer.ShareLink(link); err != nil {
+				return err
+			}
+			return printer.WorksOnce(link)
 		},
 	}
 
@@ -189,4 +204,26 @@ func (opts *globalOpts) shareResource(ctx context.Context, id string, options qu
 		return nil, fmt.Errorf(msgShareNeedsDevice, err)
 	}
 	return client.Share(ctx, id, options)
+}
+
+// shareWithLimits mints a link with the limits the share was published with;
+// --ttl and --session-duration replace their parts.
+func (opts *globalOpts) shareWithLimits(cmd *cobra.Command, id string, limits accessrules.LinkLimits, ttl, sessionDuration time.Duration) (*qurlapi.ShareLink, error) {
+	if cmd.Flags().Changed("ttl") {
+		limits.ExpiresIn = ttl.String()
+		if _, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn); !ok {
+			return nil, exitcode.UsageError(errors.New("--ttl must be from 1m to 30d for this item's link limits"))
+		}
+	}
+	if cmd.Flags().Changed("session-duration") {
+		limits.SessionDuration = new(sessionDuration.String())
+		if !accessrules.ValidSessionLength(*limits.SessionDuration) {
+			return nil, exitcode.UsageError(errors.New("--session-duration must be from 1s to 24h for this item's link limits"))
+		}
+	}
+	client, err := opts.newClient(cmd.Context())
+	if err != nil {
+		return nil, fmt.Errorf(msgShareNeedsDevice, err)
+	}
+	return client.MintLimitedLink(cmd.Context(), id, limits)
 }

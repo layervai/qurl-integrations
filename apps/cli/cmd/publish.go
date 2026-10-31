@@ -15,6 +15,7 @@ import (
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
@@ -24,6 +25,8 @@ import (
 
 func publishCmd(opts *globalOpts) *cobra.Command {
 	var (
+		ruleSelector      string
+		ruleFile          string
 		consumerMode      string
 		contractID        string
 		description       string
@@ -105,6 +108,9 @@ owns the share and turns it off when it exits.`,
   qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateRuleSelectionFlags(cmd); err != nil {
+				return err
+			}
 			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
 				return exitcode.UsageError(err)
 			}
@@ -116,6 +122,9 @@ owns the share and turns it off when it exits.`,
 				KeepExistingPublic: len(named) == 0, NamedAccessFlags: named,
 			}
 			if err := setPublishConsumerPolicy(&access, consumerMode, contractID); err != nil {
+				return err
+			}
+			if err := opts.applyPublishRule(cmd, &access, ruleSelector, ruleFile); err != nil {
 				return err
 			}
 
@@ -146,17 +155,18 @@ owns the share and turns it off when it exits.`,
 			}
 
 			access.Description, access.Tags, access.Alias = description, tags, alias
-			result, err := client.Publish(cmd.Context(), args[0], access)
+			result, err := opts.publishRemote(cmd.Context(), client, args[0], &access)
 			if err != nil {
 				return err
 			}
-			result.LinkSiteURL = opts.resourceAddress(result.CRID)
 
 			printer := opts.printer()
 			return printer.Publish(result)
 		},
 	}
 
+	cmd.Flags().StringVar(&ruleSelector, ruleFlag, "", "access rule ID or exact saved name for this publication")
+	cmd.Flags().StringVar(&ruleFile, ruleFileFlag, "", "use - to publish the access rule snapshot from standard input")
 	cmd.Flags().StringVar(&consumerMode, "access", "", "private access mode: keys, invite_only, email_capture, review or contract")
 	cmd.Flags().StringVar(&contractID, "contract", "", "publisher contract identifier for contract access")
 	cmd.Flags().BoolVar(&public, "public", false, "let anyone who has the CRID open the resource (default: private, only you and the devices you allow)")
@@ -189,7 +199,7 @@ owns the share and turns it off when it exits.`,
 // resource.
 func publishAccessFlags(cmd *cobra.Command) []string {
 	var named []string
-	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", "access", "contract"} {
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerContract, ruleFlag, ruleFileFlag} {
 		flag := cmd.Flags().Lookup(name)
 		if flag == nil || !flag.Changed {
 			continue
@@ -230,6 +240,19 @@ func validatePublishAccessFlags(cmd *cobra.Command, public, private, allowReques
 		return errors.New(msgAllowRequestsWithPublic)
 	}
 	return validateAllowedDeviceKeys(allowedDeviceKeys)
+}
+
+// publishRemote publishes a remote URL and applies the selected access rule.
+func (o *globalOpts) publishRemote(ctx context.Context, client qurlapi.Client, target string, access *qurlapi.PublishOptions) (*qurlapi.Published, error) {
+	result, err := client.Publish(ctx, target, *access)
+	if err != nil {
+		return nil, err
+	}
+	result.LinkSiteURL = o.resourceAddress(result.CRID)
+	if err := o.applyRuleToShare(ctx, client, access.Rule, result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool, access *qurlapi.PublishOptions) (retErr error) {
@@ -300,7 +323,11 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err := registry.Put(ctx, local); err != nil {
 		return compensate(err)
 	}
-	return finishLocalPublish(ctx, opts, client, registry, resolved, local, stateDir, foreground, compensate)
+	shared := &qurlapi.Published{CRID: local.CRID, FoundExisting: resolved.FoundExisting, ConsumerAccess: resolved.ConsumerAccess}
+	if err := opts.applyRuleToShare(ctx, client, access.Rule, shared); err != nil {
+		return compensate(err)
+	}
+	return finishLocalPublish(ctx, opts, client, registry, resolved, local, shared, stateDir, foreground, compensate)
 }
 
 func validateLocalPublishRequest(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool) (string, error) {
@@ -609,12 +636,13 @@ func finishLocalPublish(
 	registry localShareRegistry,
 	resolved *agent.ResolvedResource,
 	local *connectorstate.LocalShare,
+	applied *qurlapi.Published,
 	stateDir string,
 	foreground bool,
 	compensate func(error) error,
 ) error {
 	if foreground {
-		return runForegroundLocalPublish(ctx, opts, client, registry, resolved, local, stateDir)
+		return runForegroundLocalPublish(ctx, opts, client, registry, resolved, local, applied, stateDir)
 	}
 	logDir, err := connectordaemon.DefaultLogDir(stateDir)
 	if err != nil {
@@ -631,7 +659,7 @@ func finishLocalPublish(
 	if err != nil {
 		return err
 	}
-	return printLocalPublishServing(opts, resolved, local, sharing)
+	return printLocalPublishServing(opts, resolved, local, applied, sharing)
 }
 
 func runForegroundLocalPublish(
@@ -641,6 +669,7 @@ func runForegroundLocalPublish(
 	registry localShareRegistry,
 	resolved *agent.ResolvedResource,
 	local *connectorstate.LocalShare,
+	applied *qurlapi.Published,
 	stateDir string,
 ) (retErr error) {
 	var (
@@ -707,7 +736,7 @@ func runForegroundLocalPublish(
 	if err != nil {
 		return err
 	}
-	if err := printLocalPublishServing(opts, resolved, local, sharing); err != nil {
+	if err := printLocalPublishServing(opts, resolved, local, applied, sharing); err != nil {
 		return err
 	}
 	retErr = <-daemonErr
@@ -754,12 +783,15 @@ func withoutExpectedDaemonCancellation(err error) error {
 // unnamed and unverified. The text document deliberately has no publisher
 // row: a first publish stays calm, and the status is shown where a recipient
 // decides (share, get) and where an owner asks (status, inspect, publisher).
-func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource, local *connectorstate.LocalShare, sharing *qurlapi.Sharing) error {
+func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource, local *connectorstate.LocalShare, applied *qurlapi.Published, sharing *qurlapi.Sharing) error {
 	published := &qurlapi.Published{
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
 		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private, ConsumerAccess: resolved.ConsumerAccess,
 		AccessRequests: resolved.AccessRequests, AccessRequestsTurnedOn: resolved.AccessRequestsTurnedOn,
 		KeptPublic: resolved.KeptPublic, LinkSiteURL: opts.resourceAddress(local.CRID),
+	}
+	if applied != nil {
+		published.LimitedLink, published.OtherSettings = applied.LimitedLink, applied.OtherSettings
 	}
 	if sharing != nil {
 		published.Publisher = sharing.Publisher
@@ -847,5 +879,22 @@ func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract str
 		return exitcode.UsageError(errors.New("--access must be keys, invite_only, email_capture, review or contract; --contract is required only for contract mode and must have at most 128 characters"))
 	}
 	access.ConsumerAccess = &qurl.ConsumerAccessPolicy{Mode: mode, Version: 1, ContractID: contract}
+	return nil
+}
+
+func (o *globalOpts) applyPublishRule(cmd *cobra.Command, access *qurlapi.PublishOptions, selector, file string) error {
+	if !cmd.Flags().Changed(ruleFlag) && !cmd.Flags().Changed(ruleFileFlag) {
+		return nil
+	}
+	definition, err := o.selectedRule(cmd, selector, file)
+	if err != nil {
+		return err
+	}
+	access.Rule = &definition
+	access.Public = definition.Mode == accessrules.ModePublic
+	if !access.Public {
+		policy := definition.Policy(1)
+		access.ConsumerAccess = &policy
+	}
 	return nil
 }

@@ -343,6 +343,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 
 	cmd.AddCommand(
 		accountCmd(opts),
+		rulesCmd(opts),
 		publishCmd(opts),
 		shareCmd(opts),
 		grantsCmd(opts),

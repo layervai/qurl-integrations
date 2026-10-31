@@ -18,6 +18,7 @@ import (
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
@@ -37,6 +38,15 @@ var cliSentinels = map[string]struct {
 	err  error
 	code int
 }{
+	"accessrules.ErrConflict":           {accessrules.ErrConflict, Conflict},
+	"accessrules.ErrRuleConflict":       {accessrules.ErrRuleConflict, Conflict},
+	"accessrules.ErrAccountMismatch":    {accessrules.ErrAccountMismatch, Config},
+	"accessrules.ErrUnlinked":           {accessrules.ErrUnlinked, Forbidden},
+	"accessrules.ErrRuleNotFound":       {accessrules.ErrRuleNotFound, NotFound},
+	"accessrules.ErrAmbiguousRule":      {accessrules.ErrAmbiguousRule, Usage},
+	"accessrules.ErrDuplicateName":      {accessrules.ErrDuplicateName, InvalidInput},
+	"accessrules.ErrLibraryLimit":       {accessrules.ErrLibraryLimit, InvalidInput},
+	"state.ErrAccessRulesFile":          {state.ErrAccessRulesFile, Config},
 	"qurlapi.ErrAccountLoad":            {qurlapi.ErrAccountLoad, Unavailable},
 	"qurlapi.ErrAccountUnavailable":     {qurlapi.ErrAccountUnavailable, Unavailable},
 	"qurlapi.ErrAccountExchange":        {qurlapi.ErrAccountExchange, Unavailable},

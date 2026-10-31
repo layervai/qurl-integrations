@@ -56,7 +56,8 @@ func TestShareFromOlderServiceRendersUnverified(t *testing.T) {
 		}
 		want := fixtureShareLink + "\n\n" +
 			"  " + wantUnnamedPublisherRow + "\n" +
-			"  Expires in 5m (single use)\n"
+			"  Expires in 5m (single use)\n\n" +
+			"Single-use. Run qurl share " + srv.Key.CRID + " for a new link.\n"
 		if got := res.stdout.String(); got != want {
 			t.Errorf("terminal share =\n%s\nwant\n%s", got, want)
 		}
@@ -510,7 +511,7 @@ func TestLocalPublishCarriesThePublisherInJSONOnly(t *testing.T) {
 			now:            func() time.Time { return fixedNow },
 		}
 		local := &connectorstate.LocalShare{CRID: "<CRID>", ResourceID: "rid", TargetURL: "http://127.0.0.1:3000"}
-		if err := printLocalPublishServing(opts, &agent.ResolvedResource{}, local, sharing); err != nil {
+		if err := printLocalPublishServing(opts, &agent.ResolvedResource{}, local, nil, sharing); err != nil {
 			t.Fatal(err)
 		}
 		if stderr.Len() != 0 {

@@ -11,19 +11,20 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func consumerAccessCmd(opts *globalOpts) *cobra.Command {
-	var email, mode, contract, cursor, kind, credentialID, key, entitlement, expiry string
+	var email, mode, contract, cursor, kind, credentialID, key, entitlement, expiry, ruleSelector, ruleFile string
 	var version int64
 	var yes bool
 	allowed := map[string][]string{
 		consumerInvite: {"email"}, consumerListInvitations: {consumerCursor}, consumerListGrants: {consumerCursor},
 		consumerResend: {consumerVersion}, consumerRevokeInvitation: {consumerVersion}, consumerDeny: {consumerVersion}, consumerRevokeGrant: {consumerVersion},
-		consumerConfigure: {"mode", consumerContract, consumerVersion},
+		consumerConfigure: {modeFlag, consumerContract, consumerVersion, ruleFlag, ruleFileFlag},
 		consumerApprove:   {consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at"},
 	}
 	cmd := &cobra.Command{
@@ -33,7 +34,9 @@ Actions: invite, list_invitations, list_grants, resend, revoke_invitation,
 approve, deny, revoke_grant, configure.
 Read the version from a listing before a decision. Use --version with that
 version. The first policy on an existing private resource uses --version 0.
-A key opt-in uses decision-id new and --version 0. Contract approval
+A key opt-in uses decision-id new and --version 0. An approval or key opt-in
+lasts as long as the resource's policy says (Approvals last); the service sets
+its end. --expires-at may end it sooner, never later. Contract approval
 requires a trusted publisher entitlement receipt and expiry; it does not
 verify payment. Mailbox verification proves email control, not legal identity.
 If a contract notification is pending, repeat the same receipt, expiry and version.
@@ -50,6 +53,12 @@ Use --access when you publish to choose the initial policy.`,
 			input := consumerAccessInput{action: args[0], email: email, mode: mode, contract: contract, cursor: cursor, version: version, kind: kind, credentialID: credentialID, key: key, entitlement: entitlement, expiry: expiry}
 			if len(args) == 3 {
 				input.decision = args[2]
+			}
+			if err := validateRuleSelectionFlags(cmd); err != nil {
+				return err
+			}
+			if err := opts.applyConsumerRule(cmd, &input, ruleSelector, ruleFile); err != nil {
+				return err
 			}
 			if err := validateConsumerActionFlags(cmd, input.action, allowed); err != nil {
 				return err
@@ -83,8 +92,10 @@ Use --access when you publish to choose the initial policy.`,
 			return opts.printer().ConsumerManagement(result)
 		},
 	}
+	cmd.Flags().StringVar(&ruleSelector, ruleFlag, "", "saved private access rule ID or exact name")
+	cmd.Flags().StringVar(&ruleFile, ruleFileFlag, "", "use - to apply the private rule snapshot from standard input")
 	cmd.Flags().StringVar(&email, "email", "", "email address for an invitation")
-	cmd.Flags().StringVar(&mode, "mode", "", "private access policy")
+	cmd.Flags().StringVar(&mode, modeFlag, "", "private access policy")
 	cmd.Flags().StringVar(&contract, consumerContract, "", "publisher contract identifier")
 	cmd.Flags().StringVar(&cursor, consumerCursor, "", "next page cursor from a listing")
 	cmd.Flags().Int64Var(&version, consumerVersion, -1, "current policy or decision version")
@@ -92,7 +103,7 @@ Use --access when you publish to choose the initial policy.`,
 	cmd.Flags().StringVar(&credentialID, "credential-id", "", "credential id for a key opt-in")
 	cmd.Flags().StringVar(&key, "credential-key", "", "public credential key for a key opt-in")
 	cmd.Flags().StringVar(&entitlement, "entitlement", "", "trusted publisher entitlement receipt")
-	cmd.Flags().StringVar(&expiry, "expires-at", "", "entitlement expiry as an RFC 3339 time")
+	cmd.Flags().StringVar(&expiry, "expires-at", "", "when the approval ends, as an RFC 3339 time (default: the policy's Approvals last; required with --entitlement)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "allow changes to a test CRID on a production endpoint")
 	return cmd
 }
@@ -120,6 +131,7 @@ type consumerAccessInput struct {
 	action, decision, email, mode, contract, cursor, kind, credentialID, key, entitlement, expiry string
 	version                                                                                       int64
 	expiresAt                                                                                     *time.Time
+	policy                                                                                        *qurl.ConsumerAccessPolicy
 }
 
 func validateConsumerActionFlags(cmd *cobra.Command, action string, allowed map[string][]string) error {
@@ -127,7 +139,7 @@ func validateConsumerActionFlags(cmd *cobra.Command, action string, allowed map[
 	if !ok {
 		return exitcode.UsageError(errors.New("unknown access action"))
 	}
-	for _, name := range []string{"email", "mode", consumerContract, consumerCursor, consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at"} {
+	for _, name := range []string{"email", modeFlag, ruleFlag, ruleFileFlag, consumerContract, consumerCursor, consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at"} {
 		if cmd.Flags().Changed(name) && !slices.Contains(flags, name) {
 			return exitcode.UsageError(fmt.Errorf("--%s does not apply to %s", name, action))
 		}
@@ -173,7 +185,7 @@ func validateConsumerFields(input *consumerAccessInput) error {
 		// Exact receipt retries can recover a pending notification after expiry.
 		input.expiresAt = &parsed
 	}
-	if input.action == consumerConfigure && qurlapi.ValidateConsumerPolicyFields(input.mode, input.contract) != nil {
+	if input.action == consumerConfigure && input.policy == nil && qurlapi.ValidateConsumerPolicyFields(input.mode, input.contract) != nil {
 		return exitcode.UsageError(errors.New("choose a valid --mode and a --contract only for contract mode"))
 	}
 	if input.action == consumerApprove {
@@ -191,8 +203,15 @@ func validateConsumerApproval(input *consumerAccessInput) error {
 	if !newKey && hasCredential {
 		return exitcode.UsageError(errors.New("credential flags apply only to decision-id new"))
 	}
-	if (input.entitlement != "") != (input.expiry != "") || (newKey && (input.entitlement != "" || input.expiry != "")) {
+	if input.entitlement != "" && (input.expiry == "" || newKey) {
 		return exitcode.UsageError(errors.New("contract approval requires --entitlement and --expires-at together, without a key opt-in"))
+	}
+	// Without a receipt, --expires-at is when a review approval or key opt-in lapses.
+	// TODO(upstream-contract): qurl-service accepts expires_at up to 365 days ahead.
+	if input.entitlement == "" && input.expiresAt != nil {
+		if lead := time.Until(*input.expiresAt); lead <= 0 || lead > 365*24*time.Hour {
+			return exitcode.UsageError(errors.New("--expires-at must be in the future and within 365 days"))
+		}
 	}
 	return nil
 }
@@ -215,6 +234,9 @@ func executeConsumerAction(ctx context.Context, owner qurlapi.ConsumerManagement
 		result.Grant, err = owner.RevokeConsumerGrant(ctx, crid, input.decision, input.version)
 	case consumerConfigure:
 		policy := qurl.ConsumerAccessPolicy{Mode: input.mode, Version: input.version + 1, ContractID: input.contract}
+		if input.policy != nil {
+			policy = *input.policy
+		}
 		err = owner.UpdateConsumerAccess(ctx, crid, input.version, policy)
 		// TODO(upstream-contract): The SDK must confirm CRID, policy, and version before success.
 		result.Policy = &policy
@@ -237,4 +259,23 @@ func executeConsumerAction(ctx context.Context, owner qurlapi.ConsumerManagement
 		return nil, err
 	}
 	return result, nil
+}
+
+func (o *globalOpts) applyConsumerRule(cmd *cobra.Command, input *consumerAccessInput, selector, file string) error {
+	if !cmd.Flags().Changed(ruleFlag) && !cmd.Flags().Changed(ruleFileFlag) {
+		return nil
+	}
+	if input.action != consumerConfigure {
+		return exitcode.UsageError(errors.New("access rules apply only to configure"))
+	}
+	definition, err := o.selectedRule(cmd, selector, file)
+	if err != nil {
+		return err
+	}
+	if definition.Mode == accessrules.ModePublic {
+		return exitcode.UsageError(errors.New("a public rule cannot change an existing resource's privacy"))
+	}
+	policy := definition.Policy(input.version + 1)
+	input.policy = &policy
+	return nil
 }

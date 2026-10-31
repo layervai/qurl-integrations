@@ -244,6 +244,9 @@ func customerMessages() []string {
 		msgDevicePublicKeyInvalid,
 		msgAccountChooseOwner,
 		msgAccountOwnerDenied,
+		msgRulesFileDamaged, msgRulesRuleConflict, msgRulesChanged, msgRulesOtherAccount, msgRulesNotFound,
+		msgRulesAmbiguous, msgRulesDuplicateName, msgRulesLimit, msgRulesNotSynced, msgRulesLocalOnly,
+		msgRulesUnlinked, msgRulesSignIn, msgRulesUnavailable, msgRulesBusy, msgRulesConflict,
 		msgVerifyMismatch,
 		msgVerifyMissing,
 		msgSavedSkillOutdated,
@@ -297,4 +300,23 @@ const (
 	msgAnonymousSupervisedDevice = "Using a new device identity. Keep its local state; the supervising app can link an account to enable recovery."
 	msgAccountChooseOwner        = "choose resources to recover with --owner; available owners: %s"
 	msgAccountOwnerDenied        = "this account does not own the selected resources"
+)
+
+// Access rule messages. %s in msgRulesFileDamaged is the file's path.
+const (
+	msgRulesFileDamaged   = "Could not read access rules from %s. Move that file aside to start fresh."
+	msgRulesRuleConflict  = "This rule changed here and in your account. Keep one version first with qurl rules resolve <rule> --use local or --use account."
+	msgRulesChanged       = "Access rules changed. Reload the list before retrying."
+	msgRulesOtherAccount  = "These access rules belong to another account or deployment. Use that profile."
+	msgRulesNotFound      = "No access rule has that ID or name. Run qurl rules list to see them."
+	msgRulesAmbiguous     = "More than one access rule has that name. Use its ID from qurl rules list."
+	msgRulesDuplicateName = "An access rule with that name already exists. Choose another name."
+	msgRulesLimit         = "Access rules are limited to 100 rules and about 250 KB in total. Delete rules you no longer need, then try again."
+	msgRulesNotSynced     = "Could not sync access rules with your account. Your saved rules are preserved."
+	msgRulesLocalOnly     = "Access rules are saved on this device only. Run qurl account setup to sync them with an account."
+	msgRulesUnlinked      = "Access rules stay on this device: it is not linked to an active account."
+	msgRulesSignIn        = "Access rules stay on this device until you sign in again with qurl login."
+	msgRulesUnavailable   = "Could not reach your account. Access rules stay on this device; run qurl rules sync later."
+	msgRulesBusy          = "Your account's access rules kept changing. Run qurl rules sync again."
+	msgRulesConflict      = "Some access rules changed here and in your account. Keep one version with qurl rules resolve <rule> --use local or --use account."
 )

@@ -499,6 +499,7 @@ than switching in place.
 | `qurl publish <target-url>` | Publish a remote URL or serve a local app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |
+| `qurl rules list`, `create`, `save`, `delete`, `sync`, `resolve` | Manage saved access rules; works locally before account linking |
 | `qurl access <action> <CRID> [<decision-id>]` | Manage private consumer policies, invitations, and grants |
 | `qurl requests [<CRID>]` | List access requests, or turn them on or off for a private resource |
 | `qurl approve <CRID> <code>` | Approve one person's request for access to a private resource |
@@ -778,6 +779,106 @@ in-flight requests. During session rotation the retiring session can retain
 old headers until replacement promotion and drain, so an update is not
 immediate revocation. See
 [docs/session-groups.md](../../docs/session-groups.md#runtime-request-headers).
+
+### Saved access rules
+
+Access rules are named presets for future shares. The ready-made choices and your
+custom rules work before account linking. `qurl rules sync` merges them with your
+linked account; unrelated edits merge, while different edits to the same rule
+require `qurl rules resolve <id-or-name> --use local|account`.
+Changes and deletions never change existing resources or links: a share keeps
+the settings of the rule it was created with.
+
+```sh
+qurl rules create Team --mode email_domain --email-domain example.com
+qurl publish http://127.0.0.1:3000 --rule Team
+qurl publish http://127.0.0.1:8080 --rule "People you invite"
+qurl rules sync -o json
+```
+
+A rule can also carry settings for its mode:
+
+| Section | Flag | Applies to | Values |
+|---------|------|------------|--------|
+| Links you share | `--expires-in` | public | Expires after, `1m` to `30d` (required with any limit) |
+| Links you share | `--one-browser` (or `--once`) | public | Single-use link: only the first person to open it gets in |
+| Links you share | `--session-length` | public | Session length, `1s` to `24h` |
+| Approvals | `--approvals-last` | review, keys | `1d`, `7d`, `30d`, `90d` or `never` (the default) |
+
+Links you share: the limits apply to links you share from this item. The item's
+permanent address isn't used with limits: `qurl publish --rule` mints a
+temporary link with them and prints it as `Link:` (JSON `link.qurl`,
+`link.expires_at`; a single-use link is followed by `Single-use. Run qurl
+share <CRID> for a new link.`), and saves the limits with the share on this device, so a
+later `qurl share <CRID>` link uses them too (`--ttl` and `--session-duration`
+override). Approvals last travels in the resource's policy
+(`consumer_access.approval_expires_in`) and the service enforces it: each
+review approval or key opt-in ends that long after it is granted, whoever
+approves it, and `qurl access approve --expires-at` may only end it sooner.
+
+Publishing again to an item that is already shared keeps the settings it was
+shared with. If the rule's settings differ, publish prints `This item is
+already shared with other settings. Use qurl access configure to change it.`
+on stderr and JSON carries `"settings_differ": true`.
+
+```sh
+qurl rules create "Quick look" --mode public --expires-in 1h --one-browser
+qurl rules create Reviewers --mode review --approvals-last 7d
+qurl rules create Studio --mode email_domain --email-domain studio.com
+qurl rules list
+# 5f0c…  "Quick look"  Anyone with the link · links expire in 1 hour · single-use
+# 8a21…  "Reviewers"   People you approve · approvals last 7 days
+# 3d9e…  "Studio"      People at studio.com
+```
+
+For a complete JSON snapshot or an edit from a supervising app:
+
+```sh
+version=$(qurl rules list -o json | jq .local_version)
+qurl rules save --version "$version" --file - -o json <<'JSON'
+{"id":"11111111-1111-4111-8111-111111111111","name":"Partners","mode":"email_domain","email_domain":"example.com","allowed_emails":["Partner@outside.example"]}
+JSON
+qurl publish http://127.0.0.1:3000 --rule Partners
+qurl rules sync -o json
+```
+
+`rules create` generates the UUID, lowercases the email domain, and prints only
+the new rule (`-q` prints its ID). Use `--emails-file -` to pipe a JSON array
+of optional additional email addresses without putting them in process
+arguments. `delete` and `resolve` take an ID or exact name and act on the
+current rules; pass `--version` to refuse a stale edit. The JSON bridge requires
+a new UUID for each custom rule and the `local_version` from your last read.
+Built-in IDs are immutable. Names are unique, ignoring case, including the
+ready-made names; rules synced from another device can still share a name, so
+use the ID when a name is ambiguous. The ready-made choices, from least to most
+protection, are Anyone with the link, Anyone with a verified email, People you
+invite, People you approve and Devices you approve. Saved rules can also use
+Work or school email (requires `email_domain`) and Custom access (requires
+`contract_id`). Saving a rule sends no invitation and approves nobody.
+
+Supervising apps use `qurl rules capabilities -o json` offline, and pass complete
+validated snapshots through standard input with `publish --rule-file -` or
+`access configure <CRID> --rule-file - --version <resource_policy_version>`.
+The latter deliberately changes an existing private resource's access. A public
+rule cannot convert private resources; selecting a different rule while publishing
+an already existing target fails without changing it. `--rule`/`--rule-file`
+cannot be combined with other access flags. A snapshot remains valid after its
+saved rule is renamed or deleted. Rule JSON contains policy and the settings
+above only (`link_limits` with `expires_in`, `one_time_use` and `session_duration`;
+`approval_expires_in`), never credentials,
+resource identities, local paths or grants. Each rule decodes strictly: an
+unknown field, a null, or a setting for another mode is refused.
+
+The JSON bridge returns `schema_version`, `local_version`, `items`, `built_ins`,
+`sync` and `conflicts`. Synchronization retains local changes on network or
+authentication failure; `sync` reports `local`, `synced`, `pending`, `offline` or
+`conflict`; in text mode it also prints one warning when rules stay on this
+device. A malformed account response fails explicitly. A damaged rules file
+exits 3 and names the file; move it aside to start fresh. The journal is isolated
+by the selected device state directory, deployment and canonical account; another
+account gets its own cache, preserving pending edits when you switch back. A
+different deployment requires its own state directory. Sync never enrolls or links a
+device. `account setup` attempts reconciliation after successful linking.
 
 ### qurl publish
 

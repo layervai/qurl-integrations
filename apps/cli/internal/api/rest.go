@@ -1195,7 +1195,7 @@ func validateConsumerPolicy(policy *qurl.ConsumerAccessPolicy) error {
 	if policy.Version != 1 {
 		return qurl.ErrInvalidResourceRequest
 	}
-	return ValidateConsumerPolicyFields(policy.Mode, policy.ContractID)
+	return policy.Validate()
 }
 
 // ValidateConsumerPolicyFields checks the shared publish and configure inputs.
@@ -1230,8 +1230,14 @@ func consumerPolicyConfirmed(requested, received *qurl.ConsumerAccessPolicy, fou
 	if requested == nil {
 		return true
 	}
-	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID &&
-		(received.Version == requested.Version || (foundExisting != nil && *foundExisting && received.Version > requested.Version && received.Version < 1<<53))
+	existing := foundExisting != nil && *foundExisting
+	want := *requested
+	if existing && received != nil {
+		// A rule setting that differs is a warning for the caller, not a conflict.
+		want.ApprovalExpiresIn = received.ApprovalExpiresIn
+	}
+	return received != nil && received.Validate() == nil && received.SameDefinition(want) &&
+		(received.Version == requested.Version || (existing && received.Version > requested.Version && received.Version < 1<<53))
 }
 
 func confirmPublishConsumerPolicy(requested *qurl.ConsumerAccessPolicy, published *Published) error {
