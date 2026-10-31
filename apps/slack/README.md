@@ -225,8 +225,9 @@ Running the Secure Access Agent yourself? See [docs/operating.md](docs/operating
 endpoints, environment variables, Slack app configuration, and local
 development.
 
+The HTTP server uses `PORT` (default `8080`). Set it to an integer from `1` through `65535`, and use the same port in the container mapping and load balancer target group. Invalid values stop boot before any infrastructure clients start.
+
 ## License
 
 [MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.
 
-The HTTP server uses `PORT` (default `8080`). Set it to an integer from `1` through `65535`, and use the same port in the container mapping and load balancer target group. Invalid values stop boot before any infrastructure clients start.
