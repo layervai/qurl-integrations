@@ -10,7 +10,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Local hooks and every CI invocation must use the same linter as make.
+// Local hooks and inline workflow invocations must use the same linter as make.
+// Script/composite indirection must add its own pin contract when introduced.
 func TestGolangciLintPinsMatchMakefile(t *testing.T) {
 	t.Parallel()
 	makefile, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
@@ -29,11 +30,6 @@ func TestGolangciLintPinsMatchMakefile(t *testing.T) {
 		workflow := readWorkflow(t, filename)
 		for jobID, job := range workflow.Jobs {
 			installedByAction := false
-			for i := range job.Steps {
-				if strings.HasPrefix(job.Steps[i].Uses, "golangci/golangci-lint-action@") {
-					installedByAction = true
-				}
-			}
 			for i := range job.Steps {
 				current := &job.Steps[i]
 				check := func(pin string) {
@@ -55,6 +51,7 @@ func TestGolangciLintPinsMatchMakefile(t *testing.T) {
 					}
 				}
 				if strings.HasPrefix(current.Uses, "golangci/golangci-lint-action@") {
+					installedByAction = true
 					actions++
 					pin, _ := current.With["version"].(string)
 					check(pin)
@@ -69,8 +66,8 @@ func TestGolangciLintPinsMatchMakefile(t *testing.T) {
 				// Bare run/version probes use the pinned action's installed binary.
 				remaining := runPin.ReplaceAllString(current.Run, "")
 				for _, line := range strings.Split(remaining, "\n") {
-					line = strings.TrimSpace(line)
-					if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "echo ") {
+					line = strings.TrimSuffix(strings.TrimSpace(line), " >&2")
+					if strings.HasPrefix(line, "#") || (strings.HasPrefix(line, "echo ") && !strings.ContainsAny(line, ";&|`") && !strings.Contains(line, "$(")) {
 						continue
 					}
 					if installedByAction {
