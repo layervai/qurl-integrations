@@ -16,7 +16,7 @@ const { isPrivateHost, revokeOrdinaryLinks, REVOKE_BATCH_MAX_IDS } = require('./
 const { sanitizeFilename } = require('./utils/sanitize');
 const { formatSessionDurationSeconds, isPositiveFinite, settlesWithin } = require('./utils/time');
 
-const { MAX_FILE_SIZE, MAX_OVERFLOW_REVOKE_IDS } = require('./constants');
+const { AUDIT_EVENTS, MAX_FILE_SIZE, MAX_OVERFLOW_REVOKE_IDS } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
 // TODO(upstream-contract): infra repo #1551's POST /api/revoke_links
 // processes at most 10 unique ids under one 55s handler deadline. Leave 10s for
@@ -227,6 +227,7 @@ function assertUploadResult(label, result) {
   // `success: false`; report it as such (the no_resource_id message, which the
   // connector alarm counts).
   if (!result || typeof result !== 'object') {
+    logger.audit(AUDIT_EVENTS.CONNECTOR_NO_RESOURCE_ID, { operation: label });
     throw new Error(`${label} returned no resource_id`);
   }
   // `success: false` deliberately stays untyped: the create-failed shape is
@@ -236,6 +237,7 @@ function assertUploadResult(label, result) {
     throw new Error(`${label} returned success: false`);
   }
   if (result.resource_id) return;
+  logger.audit(AUDIT_EVENTS.CONNECTOR_NO_RESOURCE_ID, { operation: label });
   const errStr = typeof result.error === 'string' ? result.error : '';
   if (QURL_CREATION_FAILED_PATTERN.test(errStr)) {
     const err = new Error(`${label} stored the file but upstream qURL creation failed`);

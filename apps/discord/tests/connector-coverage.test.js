@@ -149,6 +149,8 @@ describe('Connector client — coverage boost', () => {
       const err = await run(connector).catch(e => e);
       expect(err).toBeInstanceOf(Error);
       expect(err.message).toBe(`${label} stored the file but upstream qURL creation failed`);
+      expect(require('../src/logger').audit).toHaveBeenCalledWith('connector_no_resource_id', { operation: label });
+      expect(require('../src/logger').audit).toHaveBeenCalledTimes(1);
       expect(err.apiCode).toBe('qurl_creation_failed');
       expect(err.status).toBe(400);
       expect(err.apiDetail).toContain('unknown field "description"');
@@ -190,10 +192,25 @@ describe('Connector client — coverage boost', () => {
       mockUploadReply(pre, null);
       const err = await run(connector).catch(e => e);
       expect(err.message).toBe(`${label} returned no resource_id`);
+      expect(require('../src/logger').audit).toHaveBeenCalledWith('connector_no_resource_id', { operation: label });
+      expect(require('../src/logger').audit).toHaveBeenCalledTimes(1);
     });
 
-    // The connector_no_resource_id infra log filter matches these two exact
-    // phrases (upstream-contract); a rewording must fail here first.
+    it.each(uploaders)('%s audits a malformed success reply without response data', async (label, run, pre) => {
+      mockUploadReply(pre, { success: true, error: 'https://private.example/#secret-token' });
+      await expect(run(connector)).rejects.toThrow(`${label} returned no resource_id`);
+      expect(require('../src/logger').audit).toHaveBeenCalledWith('connector_no_resource_id', { operation: label });
+      expect(require('../src/logger').audit).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(uploaders)('%s does not count an explicit unsuccessful upload as a missing ID', async (label, run, pre) => {
+      mockUploadReply(pre, { success: false });
+      await expect(run(connector)).rejects.toThrow(`${label} returned success: false`);
+      expect(require('../src/logger').audit).not.toHaveBeenCalled();
+    });
+
+    // Keep the legacy filter phrases through the typed-audit producer rollout.
+    // The infra cutover must follow proof of the new event on deployed code.
     it('pins the two phrases the connector alarm filter matches', async () => {
       mockUploadReply([], createFailedBody);
       const created = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
