@@ -4603,7 +4603,7 @@ function partitionRecipients(users, senderId, { excludeSender = false } = {}) {
 //
 // `droppedFromRoles` is the count of DISTINCT bot-user IDs filtered
 // during role expansion (Set-backed) — matches what the user sees
-// rendered as "N bot(s) filtered from picked role(s)." A bot that
+// rendered as "N bot(s) filtered from this selection." A bot that
 // appears in two picked roles, or is directly picked AND also in a
 // picked role, is counted at most once.
 //
@@ -4902,7 +4902,7 @@ function renderRecipientWarnings({
     // recipient count). Distinct copy from droppedBots since the
     // user took a different picker action (selecting a role rather
     // than an individual bot).
-    lines.push(`• ${iterationBoundHit ? 'At least ' : ''}${droppedFromRoles} bot(s) filtered from picked role(s) — skipped.`);
+    lines.push(`• ${iterationBoundHit ? 'At least ' : ''}${droppedFromRoles} bot(s) filtered from this selection — skipped.`);
   }
   if (iterationBoundHit) {
     lines.push('• Picked role(s) could not be fully checked — pick fewer or smaller roles.');

@@ -503,7 +503,7 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Sending file/);
   });
 
-  test('mentionable picker: partial-valid role (humans + bots) → flow advances AND droppedFromRoles warning surfaces', async () => {
+  test.each([false, true])('mixed human/bot selection shows accurate copy: everyone=%s', async (everyone) => {
     const u1 = makeUser('100000000000000001');
     const bot1 = makeUser('100000000000000091', { bot: true });
     const mixedRole = ['role-mixed', {
@@ -515,11 +515,16 @@ describe('handleConfirmUserSelect', () => {
       users: [],
       roles: [mixedRole],
     });
+    if (everyone) {
+      int.roles = new Map([[int.guild.id, { id: int.guild.id }]]);
+      int.guild.members.cache = mixedRole[1].members;
+      int.memberPermissions = { has: () => true };
+    }
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
     expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds).toEqual([u1.id]);
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
-    expect(updated.content).toMatch(/bot\(s\) filtered from picked role/i);
+    expect(updated.content).toContain('1 bot(s) filtered from this selection — skipped.');
     expect(updated.content).toMatch(/Sending file/);
   });
 
