@@ -277,7 +277,9 @@ See `.env.example` for the local-development environment setup.
 
 A gateway-only standby uses leader-tick progress for `/health`. Readiness fails
 if the loop does not enter a tick for more than 15 seconds, including a stuck
-database or handoff operation. The deadline uses a monotonic clock.
+database or handoff operation. Slow calls count too: the default two-second
+tick interval leaves about 13 seconds for each tick. The deadline uses a
+monotonic clock. Confirm the threshold with managed health checks in Sandbox.
 
 ## Troubleshooting
 

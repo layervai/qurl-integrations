@@ -84,6 +84,7 @@ const DEFAULT_TICK_INTERVAL_MS = 2_000;
 // takes over next tick). Makes the leader self-sufficient rather
 // than relying on the WS shim's wiring to enforce a timeout.
 const DEFAULT_INBOUND_CONNECT_TIMEOUT_MS = 5_000;
+// TODO(upstream-contract): Recheck against managed health probes after Sandbox latency tests.
 const MAX_TICK_AGE_MS = 15_000;
 
 // `manager` is conventionally the gateway-ws-shim instance (passed

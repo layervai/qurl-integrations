@@ -1103,6 +1103,8 @@ describe('standby tick freshness', () => {
       await jest.advanceTimersByTimeAsync(MAX_TICK_AGE_MS * 4);
       expect(mocks.peerHeartbeat.writeHeartbeat.mock.calls.length).toBeGreaterThan(10);
       expect(probe()).toBe(true);
+      jest.setSystemTime(Date.now() + 60 * 60_000);
+      expect(probe()).toBe(true);
       jest.setSystemTime(new Date('2000-01-01T00:00:00Z'));
       expect(probe()).toBe(true);
       await jest.advanceTimersByTimeAsync(DEFAULT_TICK_INTERVAL_MS);
