@@ -113,7 +113,7 @@ document.addEventListener('keydown', (event) => {
 
 saveConfigBtn.addEventListener('click', async () => {
   const value = apiBaseInput.value;
-  let confirmation = null;
+  let confirmation;
   try {
     confirmation = getCustomServerPermissionConfirmation(value);
   } catch (err) {
@@ -893,7 +893,7 @@ function copyViaExecCommand(html, text) {
   };
 
   document.addEventListener('copy', listener, { once: true });
-  let copied = false;
+  let copied;
   try {
     copied = document.execCommand('copy');
   } finally {
