@@ -512,13 +512,14 @@ describe('Connector client — coverage boost', () => {
   });
 
   describe('throwConnectorError — quota_exceeded tagging', () => {
-    it('tags quota_exceeded when error string contains "quota exceeded"', async () => {
+    it('tags the structured quota code from the actionable 403 body', async () => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
-        status: 502,
+        status: 403,
         text: async () => JSON.stringify({
           success: false,
-          error: 'QURL API error (403): quota exceeded: token limit per QURL reached (12/10)',
+          error: 'request rejected by upstream',
+          code: 'quota_exceeded',
           links: [],
         }),
       });
@@ -527,10 +528,10 @@ describe('Connector client — coverage boost', () => {
         await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
         throw new Error('expected throw');
       } catch (e) {
-        expect(e.message).toMatch(/Connector mint_link failed \(502\)/);
-        expect(e.status).toBe(502);
+        expect(e.message).toMatch(/Connector mint_link failed \(403\)/);
+        expect(e.status).toBe(403);
         expect(e.apiCode).toBe('quota_exceeded');
-        expect(e.apiDetail).toMatch(/token limit per QURL reached/);
+        expect(e.apiDetail).toBeNull();
       }
     });
 
@@ -550,6 +551,14 @@ describe('Connector client — coverage boost', () => {
       } catch (e) {
         expect(e.apiCode).toBe('quota_exceeded');
       }
+    });
+
+    it('does not override a structured non-quota code with quota-like prose', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false, status: 403,
+        text: async () => JSON.stringify({ success: false, error: 'quota exceeded', code: 'forbidden', links: [] }),
+      });
+      await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 })).rejects.toMatchObject({ status: 403, apiCode: null, apiDetail: null });
     });
 
     it('leaves apiCode null for unknown errors (so callers fall through to generic)', async () => {
