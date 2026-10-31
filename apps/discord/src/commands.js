@@ -2645,11 +2645,14 @@ async function executeSendPipeline(interaction, {
     let revokeShowAll = false;
     let revokeInFlight = false;
     let revokeSucceeded = false;
+    let revokeAttempted = false;
     let revokeResultKnown = false;
 
     collector.on('collect', async (btnInteraction) => {
       if (btnInteraction.customId === `qurl_expand_${sendId}`) {
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+        // The result card has a separate qurl_revoke_expand action.
+        if (revokeAttempted) return;
         showAllRecipients = !showAllRecipients;
         // buildConfirmMsg now returns {content, attachmentText, needsExpand};
         // extract content for the monitor + editReply (string-only).
@@ -2711,6 +2714,7 @@ async function executeSendPipeline(interaction, {
         // collector-setup block; the guard above already proved truthy.
         let revoking;
         try {
+          revokeAttempted = true;
           monitor.stop();
           await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
           let persistedSendConfig;
@@ -2805,8 +2809,8 @@ async function executeSendPipeline(interaction, {
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
           }).catch(logIgnoredDiscordErr);
-          // Release only this collector's retry gate. Durable revoking_at
-          // keeps Add Recipients closed after a partial/external failure.
+          // Allow revoke retries; the stopped management card cannot accept Add.
+          // Durable revoking_at also protects other collectors/processes.
           revokeInFlight = false;
         } finally {
           if (!revoking) revokingSendLocks.delete(revokeLockKey);
@@ -2844,6 +2848,13 @@ async function executeSendPipeline(interaction, {
             }
           }
           await btnInteraction.reply({ content, ephemeral: true }).catch(logIgnoredDiscordErr);
+          return;
+        }
+        if (revokeAttempted) {
+          await btnInteraction.reply({
+            content: 'This management card is closed after a revoke attempt. Run `/qurl revoke` to check the result.',
+            ephemeral: true,
+          }).catch(logIgnoredDiscordErr);
           return;
         }
         if (addRecipientsLocks.has(sendId)) {
