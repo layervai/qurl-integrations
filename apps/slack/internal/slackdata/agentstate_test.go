@@ -29,6 +29,8 @@ type agentFakeDDB struct {
 	queryPageSize int
 	putCalls      int
 	deleteCalls   int
+	batchCalls    int
+	batchFunc     func(context.Context, *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error)
 	lastPutAt     map[string]string // sk -> ttl value, for assertions
 	// lostResponse models the SDK retry seam for ONE PutItem call. The standard
 	// retryer runs inside the DynamoDBClient call this fake replaces, so a write
@@ -152,6 +154,24 @@ func (f *agentFakeDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInpu
 // PurgeWorkspaceAgentState emits pk equality only and pages over the whole
 // partition. It reads the expression values directly rather than parsing the
 // KeyConditionExpression text.
+func (f *agentFakeDDB) BatchWriteItem(ctx context.Context, in *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	f.batchCalls++
+	if f.batchFunc != nil {
+		return f.batchFunc(ctx, in)
+	}
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
+	for _, requests := range in.RequestItems {
+		for _, request := range requests {
+			if _, err := f.DeleteItem(ctx, &dynamodb.DeleteItemInput{Key: request.DeleteRequest.Key}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return &dynamodb.BatchWriteItemOutput{}, nil
+}
+
 func (f *agentFakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
 	if f.queryErr != nil {
 		return nil, f.queryErr
@@ -209,7 +229,7 @@ func (f *agentFakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...fu
 	return &dynamodb.QueryOutput{Items: matched}, nil
 }
 
-func newTestAgentStore(client DynamoDBClient) *AgentStore {
+func newTestAgentStore(client AgentDynamoDBClient) *AgentStore {
 	return &AgentStore{
 		Client:    client,
 		TableName: "agent_state",
@@ -488,8 +508,8 @@ func TestPurgeWorkspaceAgentState(t *testing.T) {
 	if err := s.PurgeWorkspaceAgentState(ctx, "T1"); err != nil {
 		t.Fatalf("PurgeWorkspaceAgentState: %v", err)
 	}
-	if fake.deleteCalls != 7 {
-		t.Fatalf("DeleteItem calls = %d, want 7", fake.deleteCalls)
+	if fake.batchCalls != 4 {
+		t.Fatalf("BatchWriteItem calls = %d, want four two-row query pages", fake.batchCalls)
 	}
 	for key := range fake.items {
 		if strings.HasPrefix(key, "T1|") {
