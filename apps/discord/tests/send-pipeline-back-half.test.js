@@ -2281,15 +2281,24 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
   });
 
-  it('file send: quota_exceeded does NOT emit at the primary site either', async () => {
+  it('file send uses the structured 403 quota code for share-limit copy without a failure alarm', async () => {
     const interaction = makeInteraction();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = jest.fn().mockResolvedValue({
+      ok: false, status: 403,
+      text: async () => JSON.stringify({ success: false, error: 'request rejected by upstream', code: 'quota_exceeded', links: [] }),
+    });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
-    mockMintLinks.mockRejectedValueOnce(Object.assign(new Error('upstream quota'), { apiCode: 'quota_exceeded' }));
-
-    await executeSendPipeline(interaction, makePipelineParams());
-
-    const failureCalls = logger.audit.mock.calls.filter(c => c[0] === 'qurl_send_create_link_failure');
-    expect(failureCalls).toHaveLength(0);
+    mockMintLinks.mockImplementationOnce((...args) => jest.requireActual('../src/connector').mintLinks(...args));
+    try {
+      await executeSendPipeline(interaction, makePipelineParams());
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('has hit its share limit') }));
+      const failureCalls = logger.audit.mock.calls.filter(c => c[0] === 'qurl_send_create_link_failure');
+      expect(failureCalls).toHaveLength(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('preserves empty-string apiCode as forensic dimension (?? null, not || null)', async () => {
