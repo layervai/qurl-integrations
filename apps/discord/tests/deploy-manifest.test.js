@@ -5,6 +5,7 @@ const traverse = require('@babel/traverse').default;
 const manifest = require('../deploy-manifest.json');
 const srcDir = path.join(__dirname, '../src');
 // TODO(upstream-contract): keep schema keys in sync with the managed preflight.
+const INDIRECT_ENV_MODULES = ['process', 'node:process', 'module', 'node:module'];
 const ENV_GROUPS = ['required', 'required_production', 'optional', 'sdk_optional', 'forbidden_production'];
 
 function javascriptFiles(directory) {
@@ -27,8 +28,12 @@ function envReads(files, strict = true) {
       const node = memberPath.node;
       const object = node.object;
       const property = propertyName(node);
-      if (strict && ['process', 'globalThis', 'global'].includes(object?.name) && property === undefined) {
+      if (strict && ['process', 'globalThis', 'global', 'module'].includes(object?.name) && property === undefined) {
         throw new Error('Untracked dynamic process property');
+      }
+      if (strict && ['require', 'getBuiltinModule'].includes(property)
+          && (memberPath.parent.type !== 'CallExpression' || memberPath.parent.callee !== node)) {
+        throw new Error('Untracked module loader alias');
       }
       if (strict && property === 'process') {
         throw new Error('Untracked global process reference');
@@ -53,22 +58,34 @@ function envReads(files, strict = true) {
     };
     traverse(ast, {
       ReferencedIdentifier(reference) {
-        if (!strict || !['process', 'globalThis', 'global'].includes(reference.node.name)) return;
+        if (!strict) return;
+        if (reference.node.name === 'require') {
+          if (reference.parent.type !== 'CallExpression' || reference.parent.callee !== reference.node) {
+            throw new Error('Untracked require alias');
+          }
+          return;
+        }
+        if (!['process', 'globalThis', 'global', 'module'].includes(reference.node.name)) return;
         const parent = reference.parent;
         if (!['MemberExpression', 'OptionalMemberExpression'].includes(parent.type) || parent.object !== reference.node) {
           throw new Error('Untracked process alias or destructuring');
         }
       },
       ImportDeclaration({ node }) {
-        if (strict && ['process', 'node:process'].includes(node.source.value)) {
+        if (strict && INDIRECT_ENV_MODULES.includes(node.source.value)) {
           throw new Error('Untracked process module import');
         }
       },
       MemberExpression: member,
       OptionalMemberExpression: member,
       CallExpression({ node }) {
-        if (strict && node.callee?.name === 'require' && ['process', 'node:process'].includes(node.arguments[0]?.value)) {
-          throw new Error('Untracked process module import');
+        const callee = node.callee;
+        const loader = callee?.name === 'require' || callee?.type === 'Import'
+          || (['MemberExpression', 'OptionalMemberExpression'].includes(callee?.type)
+            && ['require', 'getBuiltinModule'].includes(propertyName(callee)));
+        if (strict && loader && (node.arguments[0]?.type !== 'StringLiteral'
+            || INDIRECT_ENV_MODULES.includes(node.arguments[0].value))) {
+          throw new Error('Untracked module import');
         }
         if (file === path.join(srcDir, 'config.js') && node.callee?.name === 'intEnv') {
           if (node.arguments[0]?.type !== 'StringLiteral') throw new Error('intEnv must name its environment key');
@@ -103,6 +120,17 @@ test.each([
   'const { env } = global["process"]; env.UNTRACKED;',
   'const g = globalThis; const { env } = g.process; env.UNTRACKED;',
   'const key = "process"; const { env } = globalThis[key]; env.UNTRACKED;',
+  'async function load() { const { env } = await import("node:process"); return env.UNTRACKED; } void load;',
+  'const m = "node:process"; const { env } = require(m); env.UNTRACKED;',
+  'const { env } = require(`node:process`); env.UNTRACKED;',
+  'const r = require; const { env } = r("node:process"); env.UNTRACKED;',
+  'const { env } = module.require("node:process"); env.UNTRACKED;',
+  'const { env } = process.getBuiltinModule("process"); env.UNTRACKED;',
+  'const { createRequire: cr } = require("node:module"); const r = cr(__filename); const { env } = r("node:process"); env.UNTRACKED;',
+  'import { createRequire } from "node:module"; const r = createRequire(import.meta.url); const { env } = r("node:process"); env.UNTRACKED;',
+  'async function load(m) { const { env } = await import(m); return env.UNTRACKED; } void load;',
+  'const r = module.require; const { env } = r("node:process"); env.UNTRACKED;',
+
 ])('untracked environment access fails closed: %s', source => {
   const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'discord-env-contract-'));
   const file = path.join(directory, 'config.js');
