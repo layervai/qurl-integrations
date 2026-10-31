@@ -821,6 +821,22 @@ describe('revokeAllLinks', () => {
     recipient_discord_id: `user-${i + 1}`,
   }));
 
+  it('finalizes before DM updates and returns at the deadline even if the REST queue ignores abort', async () => {
+    jest.useFakeTimers();
+    mockDb.getSendItems.mockResolvedValueOnce([{ resource_id: 'res-1', qurl_id: 'q_one', recipient_discord_id: 'u-1', dm_channel_id: 'c-1', dm_message_id: 'm-1', dm_status: 'sent' }]);
+    mockEditDM.mockImplementationOnce(() => new Promise(() => {}));
+    try {
+      const revoking = revokeAllLinks('send-1', 'sender-1', 'apikey');
+      await waitForMicrotaskExpectation(() => expect(mockEditDM).toHaveBeenCalledTimes(1));
+      expect(mockDb.markSendRevoked.mock.invocationCallOrder[0]).toBeLessThan(mockEditDM.mock.invocationCallOrder[0]);
+      await jest.advanceTimersByTimeAsync(12 * 60 * 1000);
+      await expect(revoking).resolves.toMatchObject({ success: 1, total: 1, finalizationFailed: false });
+      expect(logger.info).toHaveBeenCalledWith('Revoke DM updates reached work deadline', { sendId: 'send-1' });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('stops queued resources at the shared work deadline and keeps the send retryable', async () => {
     const budget = new AbortController();
     const timeout = jest.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {

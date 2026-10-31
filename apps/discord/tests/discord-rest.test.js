@@ -298,7 +298,8 @@ describe('editInteractionReply via webhook token (cross-replica view-counter pri
 it('does not edit a DM after the revoke work deadline', async () => {
   const budget = new AbortController();
   budget.abort();
-  expect(await editDM('c', 'm', { components: [] }, { signal: budget.signal })).toMatchObject({ ok: false });
+  expect(await editDM('c', 'm', { components: [] }, { signal: budget.signal })).toEqual({ ok: false, expected: true });
+  expect(logger.warn).not.toHaveBeenCalled();
   expect(restMock.patch).not.toHaveBeenCalled();
 });
 

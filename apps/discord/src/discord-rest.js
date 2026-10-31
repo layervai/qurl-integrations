@@ -139,6 +139,7 @@ async function editDM(channelId, messageId, message, { signal } = {}) {
     await client.rest.patch(Routes.channelMessage(channelId, messageId), { body: message, ...(signal ? { signal } : {}) });
     return { ok: true };
   } catch (error) {
+    if (signal?.aborted) return { ok: false, expected: true };
     // Map.get(undefined) returns undefined, which falls through to the
     // unexpected (warn-level) branch. Intentional: an error with no
     // API code (e.g., revoked-token 403 with no JSON body, synthetic
