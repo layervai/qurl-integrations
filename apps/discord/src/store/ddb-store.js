@@ -1154,10 +1154,9 @@ async function getSendConfig(sendId, senderDiscordId) {
 // field remains the commit-after-edit floor: the sharded total can run
 // ahead when a view records but the Discord edit is coalesced or fails.
 //
-// `terminal` is derived (not stored as one flag): the display is dead
-// once the sender revoked (revoked_at) OR a window-close/expired path
-// set confirm_terminal — either way a late fast-path edit must NOT
-// resurrect a live-looking counter. `qurlIds` is an optional inline cache
+// `fastPathOff` disarms token edits after revoke, window close or add-degrade.
+// It does not describe display liveness: polling may still own a bare display.
+// Read the old flag while rows and replicas migrate. `qurlIds` is an optional inline cache
 // of minted qurl_ids for small sends; large sends deliberately store []
 // so the row stays well below DDB's item limit and the rare fallback reads
 // recipient rows via getSendItems instead.
@@ -1207,7 +1206,7 @@ async function getSendRenderState(sendId) {
     qurlIds: Array.isArray(row.confirm_qurl_ids) ? row.confirm_qurl_ids : [],
     // revoking_at is intent, not completion: a failed DELETE may leave links
     // live, so view updates must continue until revoked_at is confirmed.
-    terminal: Boolean(row.revoked_at) || row.confirm_terminal === true,
+    fastPathOff: Boolean(row.revoked_at) || row.confirm_fast_path_off === true || row.confirm_terminal === true,
   };
 }
 
@@ -1401,13 +1400,13 @@ async function tryClaimRenderAttempt(sendId, staleBeforeMs) {
 // Sticky fast-path kill-switch. Revoke/window-close use it for frozen
 // displays; mid-life /qurl add degrade uses it for an alive-but-bare poll
 // display. New code that needs display liveness must add its own signal,
-// not infer it from confirm_terminal. Follow-up #875 renames this to the
-// mechanism it actually gates: confirm_fast_path_off.
-async function markConfirmTerminal(sendId) {
+// not infer it from confirm_fast_path_off.
+// shortcut: dual-write the legacy flag until every deployed replica reads the new flag (#875).
+async function markConfirmFastPathOff(sendId) {
   await ddb.send(new UpdateCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
-    UpdateExpression: 'SET confirm_terminal = :t',
+    UpdateExpression: 'SET confirm_fast_path_off = :t, confirm_terminal = :t',
     ExpressionAttributeValues: { ':t': true },
   }));
 }
@@ -2094,7 +2093,7 @@ module.exports = {
   // View-counter render state (cross-replica fast-path, PR-B)
   saveSendConfirmState,
   getSendRenderState, incrementSendViewedCount, getSendViewedCount,
-  getSendRenderedCount, tryAdvanceRenderedCount, touchRenderedAt, tryClaimRenderAttempt, markConfirmTerminal,
+  getSendRenderedCount, tryAdvanceRenderedCount, touchRenderedAt, tryClaimRenderAttempt, markConfirmFastPathOff,
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs

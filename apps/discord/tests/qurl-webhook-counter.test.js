@@ -150,7 +150,7 @@ function armedState(overrides = {}) {
     lastRenderedAt: 0,
     baseMsg: 'Sent to 3 users',
     qurlIds: [QURL_ID],
-    terminal: false,
+    fastPathOff: false,
     ...overrides,
   };
 }
@@ -318,7 +318,7 @@ describe('sender view-counter fast-path — content-only (buttons preserved)', (
 
 describe('sender view-counter fast-path — terminal skip', () => {
   it('a terminal (revoked/closed) confirmation is NOT resurrected', async () => {
-    mockGetSendRenderState.mockResolvedValue(armedState({ terminal: true }));
+    mockGetSendRenderState.mockResolvedValue(armedState({ fastPathOff: true }));
     await signedRequest();
     await flushCounter();
     expect(mockEditInteractionReply).not.toHaveBeenCalled();
@@ -590,7 +590,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
         lastRenderedAt: Date.now(),
         viewedCount: 2,
         qurlIds: ['q_a', 'q_b'],
-        terminal: true,
+        fastPathOff: true,
       }));
 
     await signedRequest();
@@ -603,7 +603,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     expect(mockGetSendRenderState).toHaveBeenCalledTimes(2);
     expect(mockEditInteractionReply).not.toHaveBeenCalled();
     expect(logger.debug).toHaveBeenCalledWith(
-      'qURL webhook sender-counter: skip — terminal',
+      'qURL webhook sender-counter: skip — fast path off',
       expect.objectContaining({ send_id: SEND_ID }),
     );
   });
