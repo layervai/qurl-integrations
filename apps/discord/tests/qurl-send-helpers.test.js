@@ -46,6 +46,7 @@ const {
   selfDestructOptionToSeconds,
   sendCooldowns,
   setCooldown,
+  setDetectCooldown,
   sweepCooldowns,
 } = require('./helpers/qurl-send-fixtures');
 
@@ -2428,5 +2429,42 @@ describe('constants + exports', () => {
       if (leaked) throw err;
     }
     expect(leaked).toBe(false);
+  });
+});
+
+describe.each([
+  ['send', sendCooldowns, setCooldown, id => id],
+  ['detect', detectCooldowns, id => setDetectCooldown('guild', id), id => `guild:${id}`],
+])('%s cooldown eviction work', (_name, map, set, key) => {
+  beforeEach(() => map.clear());
+  afterEach(() => map.clear());
+
+  test('keeps live entries when sustained above half the cap', () => {
+    for (let i = 0; i < 12000; i++) map.set(key(`old-${i}`), Date.now());
+    const remove = jest.spyOn(map, 'delete');
+    try {
+      for (let i = 0; i < 500; i++) set(`new-${i}`);
+      expect(map.size).toBe(12500);
+      expect(map.has(key('old-0'))).toBe(true);
+      expect(remove.mock.calls.length).toBeLessThanOrEqual(1000);
+    } finally {
+      remove.mockRestore();
+    }
+  });
+
+  test('evicts only the oldest excess entry per insertion at the cap', () => {
+    for (let i = 0; i < 20000; i++) map.set(key(`old-${i}`), Date.now());
+    set('old-0'); // Refreshing an existing cooldown does not consume capacity.
+    const remove = jest.spyOn(map, 'delete');
+    try {
+      for (let i = 0; i < 100; i++) set(`new-${i}`);
+      expect(map.size).toBe(20000);
+      expect(map.has(key('old-0'))).toBe(true);
+      expect(map.has(key('old-100'))).toBe(false);
+      expect(map.has(key('old-101'))).toBe(true);
+      expect(remove).toHaveBeenCalledTimes(200); // Refresh delete + one eviction.
+    } finally {
+      remove.mockRestore();
+    }
   });
 });
