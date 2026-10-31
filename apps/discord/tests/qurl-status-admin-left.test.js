@@ -42,7 +42,7 @@ jest.mock('../src/store', () => ({
 const mockGetIdentity = jest.fn();
 jest.mock('../src/qurl', () => ({
   ...jest.requireActual('../src/qurl'),
-  deleteLink: jest.fn(),
+  revokeResource: jest.fn(),
   getIdentity: mockGetIdentity,
   isPrivateHost: jest.fn(),
 }));

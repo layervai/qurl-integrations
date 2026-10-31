@@ -1217,7 +1217,7 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
         .mockResolvedValue(refusal(429, { code: 'request_rate_limited' }));
 
       const outcome = await settle(connector.revokeMintedLinks('res-1', ids, 'guild-key'), 1000);
-      expect(outcome).toMatchObject({ status: 429 });
+      expect(outcome).toMatchObject({ status: 429, confirmedQurlIds: ids.slice(0, 10) });
       expect(revokeOrdinaryLinks.mock.calls).toEqual([['res-1', ids.slice(0, 10), 'guild-key']]);
       expect(globalThis.fetch).toHaveBeenCalledTimes(3);
       expect(logger.warn).toHaveBeenCalledWith('Minted link revoke incomplete', expect.objectContaining({
@@ -1310,6 +1310,36 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     expect(logger.info).toHaveBeenCalledWith('Revoked minted links', expect.objectContaining({
       route_absent: false, fallback_count: 1,
     }));
+  });
+
+  it('retains connector and SDK child confirmations when a handoff is partial', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(okJson({ success: true, results: [
+      { qurl_id: 'q_direct', status: 'revoked' },
+      { qurl_id: 'q_sdk_ok', status: 'not_connector_managed' },
+      { qurl_id: 'q_sdk_fail', status: 'not_connector_managed' },
+    ] }));
+    revokeOrdinaryLinks.mockRejectedValueOnce(Object.assign(new Error('partial SDK failure'), {
+      failedCount: 1, confirmedQurlIds: ['q_sdk_ok', 'q_foreign'],
+    }));
+    await expect(connector.revokeMintedLinks('res-1', ['q_direct', 'q_sdk_ok', 'q_sdk_fail'], 'guild-key'))
+      .rejects.toMatchObject({ confirmedQurlIds: ['q_direct', 'q_sdk_ok'] });
+    expect(revokeOrdinaryLinks).toHaveBeenCalledWith('res-1', ['q_sdk_ok', 'q_sdk_fail'], 'guild-key');
+  });
+
+  it('retains a known terminal child when the response omits a sibling', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(revoked('q_ok'));
+    await expect(connector.revokeMintedLinks('res-1', ['q_ok', 'q_unknown'], 'guild-key'))
+      .rejects.toMatchObject({ confirmedQurlIds: ['q_ok'] });
+    expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [[{ qurl_id: 'q_ok', status: 'revoked' }, { qurl_id: 'q_foreign', status: 'revoked' }]],
+    [[{ qurl_id: 'q_ok', status: 'revoked' }, { qurl_id: 'q_ok', status: 'revoked' }]],
+  ])('does not infer confirmations from a foreign or duplicated result set: %p', async results => {
+    globalThis.fetch = jest.fn().mockResolvedValue(okJson({ success: true, results }));
+    await expect(connector.revokeMintedLinks('res-1', ['q_ok', 'q_other'], 'guild-key'))
+      .rejects.toMatchObject({ confirmedQurlIds: [] });
   });
 
   it('rethrows the connector 5xx error, carrying the SDK fallback diagnosis, when both fail', async () => {
@@ -1571,12 +1601,45 @@ describe('revokeMintedLinks — real SDK fallback seam', () => {
     ));
     expect(resourceDeletes).toEqual([]);
   });
+  it('preserves exact child progress through the real SDK fallback', async () => {
+    const connector = require('../src/connector');
+    const json = (status, body) => ({
+      ok: status < 300, status, headers: { get: () => null }, json: async () => body,
+    });
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: false, status: 404 })
+      .mockResolvedValueOnce(json(200, { data: { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID, qurls: [] } }))
+      .mockResolvedValueOnce(json(204))
+      .mockResolvedValueOnce(json(404, { error: { status: 404, code: 'not_found', title: 'not found' } }));
+    await expect(connector.revokeMintedLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2'], 'guild-key'))
+      .rejects.toMatchObject({ failedCount: 1, confirmedQurlIds: ['q_aaaaaaaaaa1'] });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(4);
+  });
+
 });
 
 describe('revoke chunk size', () => {
   afterEach(() => {
     jest.dontMock('../src/qurl');
     jest.resetModules();
+  });
+
+  it.each([undefined, NaN, 0, -1, 0.5])('rejects an unusable SDK revoke cap %p at module load', cap => {
+    jest.resetModules();
+    jest.doMock('../src/qurl', () => ({ ...jest.requireActual('../src/qurl'), REVOKE_BATCH_MAX_IDS: cap }));
+    expect(() => require('../src/connector')).toThrow('Invalid connector revoke chunk size');
+  });
+
+  it.each([0, -1, 1.5, 101, NaN])('rejects invalid mint count %p before network work or an over-mint alarm', async n => {
+    jest.resetModules();
+    jest.dontMock('../src/qurl');
+    const connector = require('../src/connector');
+    const logger = require('../src/logger');
+    logger.error.mockClear();
+    globalThis.fetch = jest.fn();
+    await expect(connector.mintLinks('res-1', { n })).rejects.toThrow('Invalid link count');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
   });
 
   it('never hands the SDK fallback a chunk larger than its cap', async () => {

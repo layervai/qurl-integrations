@@ -132,7 +132,7 @@ function cacheSet(key, results) {
   autocompleteCache.set(key, { results: results.slice(), expiresAt: Date.now() + AUTOCOMPLETE_CACHE_TTL_MS });
 }
 
-async function searchPlaces(query) {
+async function searchPlaces(query, mayFetch = () => true) {
   if (!config.GOOGLE_MAPS_API_KEY) {
     // Debug, not warn: fires per keystroke on a misconfigured deploy.
     // The send-time path surfaces RESOLVE_REASON.NO_API_KEY as a single
@@ -146,6 +146,8 @@ async function searchPlaces(query) {
   if (cached) return cached;
   const inflight = autocompleteInflight.get(key);
   if (inflight) return inflight;
+  // Cached and shared in-flight results spend no new upstream request budget.
+  if (!mayFetch()) return [];
   const promise = (async () => {
     const data = await placesFetch(PLACES_AUTOCOMPLETE_URL, {
       input: safeQuery,

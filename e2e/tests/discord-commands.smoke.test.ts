@@ -9,10 +9,19 @@ const SUBCOMMAND_OPTION_TYPE = 1;
 // https://discord.com/developers/docs/interactions/application-commands#application-command-object-application-command-types
 const CHAT_INPUT_COMMAND_TYPE = 1;
 
+interface ApplicationCommandOption {
+  type: number;
+  name: string;
+  options?: ApplicationCommandOption[];
+  required?: boolean;
+  max_length?: number;
+  choices?: Array<{ name: string; value: string | number }>;
+}
+
 interface ApplicationCommand {
   name: string;
   type?: number;
-  options?: Array<{ type: number; name: string }>;
+  options?: ApplicationCommandOption[];
 }
 
 // Tag every fetched registration with the scope it came from. Guild-
@@ -125,7 +134,7 @@ describe('Discord command registration (smoke)', () => {
       // scope regressed in the Jest failure header.
       //
       // `'map'` is conditional on the deploy-time MAP_COMMAND_ENABLED
-      // toggle (see apps/discord/src/config.js + the commands.js IIFE).
+      // toggle (see apps/discord/src/config.js + buildQurlCommandData).
       // The smoke runner has to read the same flag the bot reads.
       // Strict shape check: require the env var to be exactly "true"
       // or "false" — if a workflow regression drops the "Resolve
@@ -165,6 +174,15 @@ describe('Discord command registration (smoke)', () => {
       expectedSubcommands.sort();
       expect({ scope: qurl._scope, subcommands })
         .toEqual({ scope: qurl._scope, subcommands: expectedSubcommands });
+      if (mapEnabled) {
+        const sharedNames = ['recipients', 'expires-in', 'self-destruct', 'personal-message'];
+        const sharedOptions = (name: string) => (qurl.options?.find(option => option.name === name)?.options ?? [])
+          .filter(option => sharedNames.includes(option.name));
+        const sendOptions = sharedOptions('send');
+        expect(sendOptions.map(option => option.name)).toEqual(sharedNames);
+        expect({ scope: qurl._scope, options: sharedOptions('map') })
+          .toEqual({ scope: qurl._scope, options: sendOptions });
+      }
     }
   });
 

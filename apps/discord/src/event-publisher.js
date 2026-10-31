@@ -1,6 +1,6 @@
 // SQS-driven event publisher for the gateway tier (zero-downtime
-// design, Pillar 1). Wired as a `client.on('raw', publish)` listener
-// in src/index.js; every Discord dispatch lands here. The handler
+// design, Queue delivery). Wired by src/index.js through the legacy
+// client raw listener or the RESUME shim dispatch hook. The handler
 // filters to `INTERACTION_CREATE` (the only event type the worker
 // tier handles today — see event-consumer.js's `unhandled
 // eventType` branch) and forwards the raw payload to SQS as the
@@ -86,7 +86,8 @@
 // event-consumer.js's stop()/drain shape — different state, same
 // contract.
 
-const { SQSClient, SendMessageCommand } = require('@aws-sdk/client-sqs');
+const { SendMessageCommand } = require('@aws-sdk/client-sqs');
+const { createSqsClient } = require('./utils/sqs');
 const config = require('./config');
 const logger = require('./logger');
 const { GATEWAY_DISPATCH_TYPES, LOG_KINDS } = require('./constants');
@@ -106,7 +107,7 @@ const { GATEWAY_DISPATCH_TYPES, LOG_KINDS } = require('./constants');
 // key. Re-IDENTIFY (post-reconnect) resets `s` to 1; the LRU
 // tolerates the collision because (a) interactions from the prior
 // session are already expired by Discord (3s TTL), and (b)
-// flow-state OCC owns correctness.
+// flow-state OCC guards row transitions; external effects need their own guards.
 //
 // TODO(sharding-pr): replace the literal '0' with the per-shard
 // value supplied by `@discordjs/ws`'s dispatch callback once PR 13
@@ -148,22 +149,10 @@ function _setSqsClientForTest(client) {
   sqsClient = client;
 }
 
-function createSqsClient() {
-  // Lazy AWS_REGION read mirrors event-consumer.js — see that file's
-  // createSqsClient comment for the rationale (defensive against
-  // shim bootstrappers that set AWS_REGION after module load; also
-  // makes a missing region land in the publish error path rather
-  // than as a sync boot throw inside start()).
-  const region = (process.env.AWS_REGION ?? '').trim();
-  if (!region) {
-    throw new Error('AWS_REGION is required to use the event publisher. Set it in the deployment template (e.g. `us-east-2`).');
-  }
-  return new SQSClient({ region });
-}
 
 /**
- * Handle a raw gateway dispatch. Wired as the `raw` listener on the
- * Discord client in src/index.js. Filters to INTERACTION_CREATE and
+ * Handle a Gateway dispatch from the legacy raw listener or RESUME shim
+ * hook in src/index.js. Filters to INTERACTION_CREATE and
  * forwards as an SQS envelope; everything else is a no-op (single
  * `op` / `t` comparison, no allocation).
  *
@@ -172,8 +161,8 @@ function createSqsClient() {
  * explicitly so a future reader doesn't add an `await` that would
  * stall the WebSocket frame poll.
  *
- * @param {object} packet - The raw gateway packet (discord.js
- *   `raw` event payload). Shape: `{ op, t, s, d }`.
+ * @param {object} packet - Gateway packet from either dispatch path.
+ *   Shape: `{ op, t, s, d }`.
  */
 function publish(packet) {
   // Defense against a falsy packet (a future discord.js refactor or
@@ -189,8 +178,7 @@ function publish(packet) {
     return;
   }
   // Drop dispatches that arrive before start() (race window during
-  // boot: the `raw` listener is registered at module-top, but
-  // start() runs inside index.js's start(); a dispatch that
+  // boot: input wiring precedes publisher startup; a dispatch that
   // sneaked in before start() would have no sqsClient to call).
   // Logged at debug so a real boot bug surfaces but a one-shot
   // race doesn't flood. `running` is also flipped false by stop()
@@ -267,9 +255,8 @@ function publish(packet) {
 /**
  * Initialize the publisher. Idempotent: a second call while already
  * running is a no-op (warn-logged so an accidental double-start is
- * visible). Must be called BEFORE `client.login()` so the `raw`
- * listener registered at module-top in index.js has a live sqsClient
- * by the time the first frame arrives.
+ * visible). Start before either Gateway connection so the raw listener
+ * or shim dispatch hook has a live sqsClient for its first frame.
  */
 function start() {
   if (running) {
@@ -287,7 +274,7 @@ function start() {
     throw new Error('Event publisher: QURL_BOT_EVENTS_QUEUE_URL is not set');
   }
   if (!sqsClient) {
-    sqsClient = createSqsClient();
+    sqsClient = createSqsClient('event publisher');
   }
   running = true;
   logger.info('Event publisher: starting', {

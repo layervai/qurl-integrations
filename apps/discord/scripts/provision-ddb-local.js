@@ -8,12 +8,6 @@
 // prod that's handled by terraform; locally we provision via this
 // script.
 //
-// Schemas mirror the live shape `ddb-store.js` expects — keys, GSIs,
-// and TTL attributes. `qurl_sends`, `qurl_send_configs` and
-// `guild_configs` match the `modules/qurl-bot-ddb/main.tf` definitions
-// in the infrastructure repository; `qurl_views` is inferred from
-// `ddb-store.js` call sites (key + TTL usage).
-//
 // SCOPE: this provisioner covers the Store-contract tables only (those
 // in `src/store/ddb-store.js`'s TABLES map). Other modules use their
 // own dedicated tables that this script does NOT create:
@@ -27,11 +21,11 @@
 // provision them via terraform against localhost or `aws dynamodb
 // create-table --endpoint-url http://localhost:8000`.
 //
-// Drift caveat: this is a parallel schema source from the terraform
-// module. If `ddb-store.js` adds a new GSI / changes a key, this
-// script must follow. The contract test in `tests/ddb-store.test.js`
-// pins call-site shape against the real bot code, so a drift surfaces
-// as a failed local boot — not as a silent prod mismatch.
+// TODO(upstream-contract): infrastructure CI reads scripts/ddb-local-schema.json.
+// It compares the data with mocked infrastructure plans, including
+// keys, GSIs, projections and TTL. Update both sides in a coordinated change.
+// Existing local tables are not migrated: recreate only your disposable local
+// tables when a schema change requires it. This script never drops tables.
 //
 // Usage:
 //   docker compose up -d dynamodb-local
@@ -41,10 +35,8 @@
 //   AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local \
 //   node scripts/provision-ddb-local.js
 //
-// Re-running after a `docker compose up` (which flushes in-memory DDB)
-// is fine — every CreateTable call is wrapped in a
-// `ResourceInUseException` catch that treats the table as already
-// present.
+// Re-running reuses local tables after checking required GSI names.
+// The provisioner never migrates or drops local tables or rows.
 
 const {
   DynamoDBClient,
@@ -135,53 +127,8 @@ function makeClient({ region, endpoint }) {
   });
 }
 
-// Schemas mirror what `ddb-store.js` expects at runtime. KeySchema is
-// PK (HASH) + optional SK (RANGE); GSIs project ALL by default unless
-// the call site only reads keys (KEYS_ONLY). TTL attribute name is
-// listed separately — DDB requires a follow-up UpdateTimeToLive call.
-const tables = [
-  {
-    name: 'qurl-sends',
-    keySchema: [
-      { AttributeName: 'send_id', KeyType: 'HASH' },
-      { AttributeName: 'recipient_discord_id', KeyType: 'RANGE' },
-    ],
-    attributes: [
-      { AttributeName: 'send_id', AttributeType: 'S' },
-      { AttributeName: 'recipient_discord_id', AttributeType: 'S' },
-      { AttributeName: 'sender_discord_id', AttributeType: 'S' },
-      { AttributeName: 'created_at', AttributeType: 'S' },
-    ],
-    gsis: [{
-      IndexName: 'sender_discord_id-created_at-index',
-      KeySchema: [
-        { AttributeName: 'sender_discord_id', KeyType: 'HASH' },
-        { AttributeName: 'created_at', KeyType: 'RANGE' },
-      ],
-      Projection: { ProjectionType: 'ALL' },
-    }],
-  },
-  {
-    name: 'qurl-send-configs',
-    keySchema: [{ AttributeName: 'send_id', KeyType: 'HASH' }],
-    attributes: [{ AttributeName: 'send_id', AttributeType: 'S' }],
-  },
-  {
-    // Webhook-fed view counter; multi-instance bridge between the
-    // /webhooks/qurl receiver and the per-send monitor. No GSI —
-    // read path is BatchGet by qurlLinks set. 30d TTL on `expires_at`
-    // (canonical attribute name) refreshed on every webhook write.
-    name: 'qurl-views',
-    keySchema: [{ AttributeName: 'qurl_id', KeyType: 'HASH' }],
-    attributes: [{ AttributeName: 'qurl_id', AttributeType: 'S' }],
-    ttlAttribute: 'expires_at',
-  },
-  {
-    name: 'guild-configs',
-    keySchema: [{ AttributeName: 'guild_id', KeyType: 'HASH' }],
-    attributes: [{ AttributeName: 'guild_id', AttributeType: 'S' }],
-  },
-];
+// Data-only schema: consumed here and compared with the infrastructure plan in CI.
+const tables = require('./ddb-local-schema.json');
 
 async function ensureTable(client, prefix, spec) {
   const TableName = `${prefix}${spec.name}`;
@@ -201,6 +148,14 @@ async function ensureTable(client, prefix, spec) {
     // breaking instanceof). The SDK always sets `err.name` to the
     // service-side exception name, so this is the canonical check.
     if (err.name === 'ResourceInUseException') {
+      if (spec.gsis?.length) {
+        const { Table } = await client.send(new DescribeTableCommand({ TableName }));
+        const indexes = new Set((Table.GlobalSecondaryIndexes || []).map(index => index.IndexName));
+        const missing = spec.gsis.filter(index => !indexes.has(index.IndexName));
+        if (missing.length) {
+          throw new Error(`Local table ${TableName} lacks GSI ${missing.map(index => index.IndexName).join(', ')}; recreate only this disposable local table. No data was deleted.`);
+        }
+      }
       console.log(`exists   ${TableName}`);
     } else {
       throw err;
@@ -249,12 +204,9 @@ async function main() {
   console.log('Done.');
 }
 
-// `tables` is exported so `tests/provisioner-schema-parity.test.js` can
-// pin parity with `ddb-store.js`'s `TABLES` map at PR time (rather than
-// surfacing as a runtime `ResourceNotFoundException` on first local
-// boot). The `require.main === module` guard keeps the script's
-// validation + main() from firing under `require()` in jest.
-module.exports = { tables };
+// Export the schema and one-table helper for schema/provisioning tests.
+// Requiring this module never validates the environment or calls DynamoDB.
+module.exports = { tables, ensureTable };
 
 if (require.main === module) {
   main().catch(err => {

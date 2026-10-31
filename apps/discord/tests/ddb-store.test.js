@@ -1035,6 +1035,34 @@ describe('qurl sends', () => {
     expect(input.ExpressionAttributeValues[':s']).toBe('sent');
   });
 
+  describe.each([
+    ['updateSendDMStatus', ['s1', 'rcpt', 'sent'], { ':s': 'sent' }],
+    ['markSendDMDelivered', ['s1', 'rcpt', 'channel', 'message'], { ':s': 'sent', ':c': 'channel', ':m': 'message' }],
+  ])('%s only updates an existing recipient', (method, args, expectedValues) => {
+    test('preserves the composite key and all delivery fields in one conditional write', async () => {
+      ddbMock.on(UpdateCommand).resolves({});
+      await store[method](...args);
+      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
+      const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+      expect(input.Key).toEqual({ send_id: 's1', recipient_discord_id: 'rcpt' });
+      expect(input.ConditionExpression).toBe('attribute_exists(send_id)');
+      expect(input.ExpressionAttributeValues).toEqual(expectedValues);
+    });
+
+    test('a missing recipient is a quiet no-op without a fallback upsert', async () => {
+      ddbMock.on(UpdateCommand).rejects(Object.assign(new Error('missing row'), { name: 'ConditionalCheckFailedException' }));
+      await expect(store[method](...args)).resolves.toBeUndefined();
+      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
+      expect(logger.debug).toHaveBeenCalledWith(`${method}: recipient row no longer exists`);
+    });
+
+    test('real storage failures still reach the dispatch persistence handler', async () => {
+      const failure = Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' });
+      ddbMock.on(UpdateCommand).rejects(failure);
+      await expect(store[method](...args)).rejects.toBe(failure);
+    });
+  });
+
   test('getRecentSends: uses base-table Query per send for accurate recipient_count', async () => {
     ddbMock.on(QueryCommand).callsFake((input) => {
       const cmd = input;

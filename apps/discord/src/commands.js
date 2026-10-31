@@ -20,6 +20,7 @@ const {
   InteractionContextType,
 } = require('discord-api-types/v10');
 const crypto = require('crypto');
+const { takeAutocompleteToken } = require('./utils/autocomplete-rate-limit');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
@@ -789,7 +790,7 @@ function resolveRoleNames(guild, ids) {
 
 // --- Shared DM delivery payload builder ---
 // Builds the {embeds, components} payload for a per-recipient DM. The
-// embed copy is intentionally evocative ("opened a door", "Closes")
+// embed copy is intentionally evocative ("opened a door", "Closing time")
 // rather than literal ("shared a file with you") — the brand goal is to
 // convey the qURL hidden-layer model, not just announce a file transfer.
 // Links within Discord's 512-character component limit render as the
@@ -814,7 +815,7 @@ function resolveRoleNames(guild, ids) {
 //     │                                                             │
 //     │  Vik opened a door for you.                                 │  (description, line 1)
 //     │  > "Quarterly numbers — for your eyes only."                │  (description, line 2 — optional italic blockquote)
-//     │  🕐 Closes in 1 day                                         │  (description, line 3 — Discord <t:N:R>, auto-updates
+//     │  🕐 Closing time: in 1 day                                  │  (description, line 3 — Discord <t:N:R>, auto-updates
 //     │                                                             │   client-side to "in 16 hours" / "in 1 hour" / "1 hour ago")
 //     │                                                             │
 //     │  ┌──────────────────────────┐                               │
@@ -1131,10 +1132,8 @@ function buildDeliveryEmbed({
   // between description and expiry. Folding also strips addFields'
   // vertical padding, keeping the Step Through button close.
   //
-  // `<t:N:R>` is Discord's client-side relative-time markdown. Pick
-  // the verb at render time so already-expired rows read naturally
-  // ("Closed 3 days ago") while future rows keep the live countdown
-  // copy ("Closes in 1 day").
+  // A noun label stays grammatical when Discord's relative timestamp flips
+  // from future to past, even if no expiry webhook edit reaches this DM.
   //
   // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl send`
   // and `/qurl map` pipe raw input through `sanitizeMessage`
@@ -1180,8 +1179,7 @@ function buildDeliveryEmbed({
     const capped = Array.from(personalMessage).slice(0, 280).join('').replace(/[\r\n]+/g, ' ').trim();
     if (capped) descLines.push(`> *"${capped}"*`);
   }
-  const expiryVerb = expiresAt <= Math.floor(Date.now() / 1000) ? 'Closed' : 'Closes';
-  descLines.push(`🕐 ${expiryVerb} <t:${expiresAt}:R>`);
+  descLines.push(`🕐 Closing time: <t:${expiresAt}:R>`);
   if (renderActionsAsMarkdown) {
     descLines.push(`[🚪 Step Through](${qurlLink}) · [🛡️ What is qURL?](${TRUST.LANDING_URL})`);
   }
@@ -1246,10 +1244,10 @@ function buildRevokedDMPayload({ senderAlias }) {
 //
 // CALLER INVARIANT: every call site MUST await db.recordQURLSendBatch
 // before invoking the dispatch loop that calls this function. The
-// underlying UpdateCommand has no attribute_exists guard (#366), so
-// without that ordering a stale recipient_discord_id would create an
-// orphan row. executeSendPipeline + handleAddRecipients both honor
-// this — recordQURLSendBatch awaits to completion (with an early-
+// store ignores status writes for missing recipient rows. Persisting
+// first keeps valid delivery status from being dropped. executeSendPipeline
+// + handleAddRecipients both honor this — recordQURLSendBatch awaits
+// completion (with an early-
 // return on throw) before the batchSettled dispatch loop starts.
 async function persistDispatchResult(sendId, recipientDiscordId, result) {
   // Wraps the DDB call so a write failure can't propagate up as a
@@ -1508,8 +1506,8 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // handler; never decreases.
 
   // No explicit `expired` state in the rendered counter: qurl.accessed
-  // is the only event we receive, and the 1h monitor cap covers the
-  // practical "user never opened it" window. Pre-PR-455 modelled
+  // is the only event we receive. The interaction-token edit window
+  // bounds the 14-min monitor cap (#465). Pre-PR-455 modelled
   // expired explicitly via upstream polling; the webhook-only world
   // can't observe expiration without a separate qurl.expired
   // subscription (out of scope).
@@ -4403,6 +4401,7 @@ function normalizeRecipientMode(mode) {
 // hoisted here so all the user-visible strings live in one place
 // rather than being scattered through 800+ lines of handler code.
 const RECIPIENT_REASON_BOTS_DROPPED = 'Cannot send to bots';
+const RECIPIENT_REASON_ROLE_MEMBERS_UNAVAILABLE = 'Could not confirm all members of the picked roles. Select individual users instead';
 const VOICE_REJECT_CHANNEL_UNREADABLE = `⚠\u{FE0F} Couldn't read the voice channel — it may have been deleted. Pick recipients below.\n\n`;
 const VOICE_REJECT_EMPTY_CHANNEL = `⚠\u{FE0F} No one is connected to that voice channel right now. Pick recipients below.\n\n`;
 const VOICE_REJECT_CONTEXT_LOST = `⚠\u{FE0F} Voice channel context was lost — use the picker below to choose recipients.\n\n`;
@@ -4648,6 +4647,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
   // silent deferUpdate-only no-op the user-visible path would
   // otherwise hit.
   let everyoneCacheCold = false;
+  const namedRoleMembersUnavailable = new Set();
   // Per-role denied list (issue #326): a picked role that's not
   // `mentionable: true` AND the sender lacks MENTION_EVERYONE lands
   // here as `roleId`. Dedup via parallel Set so a future picker that
@@ -4734,11 +4734,21 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
       //     chunk-on-startup completion).
       if (!source || typeof source.entries !== 'function') {
         if (isEveryoneRole) everyoneCacheCold = true;
+        else namedRoleMembersUnavailable.add(roleId);
         continue;
       }
       if (isEveryoneRole && source.size === 0) {
         everyoneCacheCold = true;
         continue;
+      }
+      if (!isEveryoneRole) {
+        // Role.members filters the guild cache; cached members can be incomplete.
+        const cachedMembers = guild?.members?.cache?.size ?? 0;
+        const knownIncomplete = Number.isSafeInteger(guild?.memberCount) && cachedMembers < guild.memberCount;
+        if ((source.size === 0 && cachedMembers === 0) || knownIncomplete) {
+          namedRoleMembersUnavailable.add(roleId);
+          if (source.size === 0) continue;
+        }
       }
       // Two break conditions, both belt-and-suspenders:
       //  - userMap.size at cap: stops adding new entries once the
@@ -4799,6 +4809,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
     massMentionDenied,
     droppedFromRoles: droppedFromRolesSet.size,
     everyoneCacheCold,
+    unavailableRoleCount: namedRoleMembersUnavailable.size,
     roleMentionsDenied,
   };
 }
@@ -4815,8 +4826,8 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  * (rejection banner vs. warnings block — different UI contexts).
  * Both surface the SAME set of signals (droppedBots,
  * droppedFromRoles, massMentionDenied, everyoneCacheCold,
- * roleMentionsDeniedNames). When adding or renaming a signal, update
- * BOTH surfaces in lockstep — the helpers don't share a copy table,
+ * unavailableRoleCount, roleMentionsDeniedNames). When adding or renaming a
+ * signal, update BOTH surfaces in lockstep — the helpers don't share a copy table,
  * so a future contributor could easily land one half and not the
  * other.
  *
@@ -4839,6 +4850,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  *   droppedFromRoles?: number,
  *   massMentionDenied?: boolean,
  *   everyoneCacheCold?: boolean,
+ *   unavailableRoleCount?: number,
  *   roleMentionsDeniedNames?: string[],
  * }} [opts]
  */
@@ -4851,6 +4863,7 @@ function renderRecipientWarnings({
   droppedFromRoles = 0,
   massMentionDenied = false,
   everyoneCacheCold = false,
+  unavailableRoleCount = 0,
   roleMentionsDeniedNames = [],
 } = {}) {
   const lines = [];
@@ -4914,6 +4927,7 @@ function renderRecipientWarnings({
     // otherwise have no way to know).
     lines.push('• Member cache not yet ready — `@everyone` expanded to 0 members. Try again in a few seconds.');
   }
+  if (unavailableRoleCount > 0) lines.push(`• ${RECIPIENT_REASON_ROLE_MEMBERS_UNAVAILABLE}.`);
   if (massMentionDenied) {
     // Specific copy beats the generic "couldn't parse" path so the
     // user knows it's a PERMISSION issue, not a typo. Mirrors
@@ -6825,6 +6839,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     massMentionDenied,
     droppedFromRoles,
     everyoneCacheCold,
+    unavailableRoleCount,
     roleMentionsDenied,
   } = resolveMentionableSelection({
     interaction,
@@ -6840,6 +6855,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     && !massMentionDenied
     && droppedFromRoles === 0
     && !everyoneCacheCold
+    && unavailableRoleCount === 0
     && roleMentionsDenied.length === 0
   ) {
     // Truly empty pick (no users, no roles, no @everyone, no
@@ -6915,6 +6931,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       mass_mention_denied: massMentionDenied,
       dropped_from_roles: droppedFromRoles,
       everyone_cache_cold: everyoneCacheCold,
+      named_role_members_unavailable_count: unavailableRoleCount,
       role_mentions_denied: roleMentionsDenied.length,
     });
     // Reachable cases:
@@ -6938,14 +6955,15 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // When adding a new reason, update BOTH surfaces.
     // Reason ordering mirrors renderRecipientWarnings's bullet
     // ordering (droppedBots → droppedFromRoles → everyoneCacheCold →
-    // massMentionDenied → roleMentionsDenied) so the two surfaces
+    // unavailable roles → massMentionDenied → roleMentionsDenied) so the two surfaces
     // present multi-signal picks in the same sequence. Most picks
     // hit at most one signal so ordering is rarely user-visible,
     // but pin the parity here against future drift.
     const reasons = [];
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
-    if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
+    if (droppedFromRoles > 0) reasons.push('Bot accounts from picked roles were excluded');
     if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
+    if (unavailableRoleCount > 0) reasons.push(RECIPIENT_REASON_ROLE_MEMBERS_UNAVAILABLE);
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
     if (roleMentionsDenied.length > 0) {
       // Condensed copy (count, not per-role) for the rejection banner —
@@ -6993,6 +7011,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     droppedFromRoles,
     massMentionDenied,
     everyoneCacheCold,
+    unavailableRoleCount,
     roleMentionsDeniedNames,
   });
   const newRecipientAliases = Object.fromEntries(
@@ -8588,8 +8607,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // step skips them.
   const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true });
 
-  // Revoke each resource's children in one call per unique resource_id and
-  // fan the result out to every recipient sharing it (mintLinksInBatches packs
+  // Revoke each resource's children together, retaining per-child confirmations
+  // even if a sibling fails (mintLinksInBatches packs
   // up to TOKENS_PER_RESOURCE recipients per resource).
   // A row without a usable qurl_id cannot be revoked: a watermarked child lives
   // on the connector's tunnel, so deleting the shared parent would neither
@@ -8637,7 +8656,12 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     if (results[i].status === 'fulfilled') {
       for (const id of recipientIds) seenSuccess.add(id);
     } else {
-      for (const id of recipientIds) seenFailure.add(id);
+      const confirmed = new Set(Array.isArray(results[i].reason?.confirmedQurlIds)
+        ? results[i].reason.confirmedQurlIds : []);
+      for (const child of children) {
+        if (confirmed.has(child.qurlId)) seenSuccess.add(child.recipientId);
+        else seenFailure.add(child.recipientId);
+      }
       logger.error('Failed to revoke qURL', {
         resource_ref: resourceIdLogRef(resourceId),
         error: results[i].reason?.message,
@@ -8870,141 +8894,127 @@ function sweepCooldowns() {
 }
 setInterval(sweepCooldowns, 60 * 1000).unref();
 
+// Split so map can insert location-name between recipients and delivery options.
+function addSendRecipients(sub) {
+  return sub
+    .addStringOption(opt =>
+      opt.setName('recipients')
+        .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+        .setRequired(false)
+        .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
+    );
+}
+
+function addSendDeliveryOptions(sub) {
+  return sub
+    .addStringOption(opt =>
+      opt.setName('expires-in')
+        .setDescription('How long the qURL links stay valid (default: 24 hours)')
+        .setRequired(false)
+        .addChoices(...EXPIRY_CHOICES)
+    )
+    .addStringOption(opt =>
+      opt.setName('self-destruct')
+        .setDescription('Optional countdown after first open (default: no timer)')
+        .setRequired(false)
+        .addChoices(...SELF_DESTRUCT_CHOICES)
+    )
+    .addStringOption(opt =>
+      opt.setName('personal-message')
+        .setDescription('Optional note included in each recipient\'s DM')
+        .setRequired(false)
+        .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
+    );
+}
+
+function buildQurlCommandData(cfg) {
+  const builder = new SlashCommandBuilder()
+    .setName('qurl')
+    .setDescription('Share resources securely via qURL')
+    .addSubcommand(sub => {
+      sub.setName('send')
+        .setDescription('Share a file via one-time qURL links')
+        .addAttachmentOption(opt =>
+          opt.setName('attachment')
+            .setDescription('The file to share')
+            .setRequired(true)
+        );
+      addSendRecipients(sub);
+      return addSendDeliveryOptions(sub);
+    });
+  // /qurl detect — watermark attribution (#1101). Gated behind
+  // DETECT_COMMAND_ENABLED (default OFF), like /qurl map: the connector
+  // /api/detect backend 503/404s until the watermark stack is ACTIVATED (a
+  // separate gated step AFTER the connector deploys), so detect stays DARK
+  // until an operator flips the flag at activation — no visible-but-failing
+  // command in the interim. The smoke test (e2e/tests/discord-commands.smoke.test.ts)
+  // reads the same flag and asserts detect present-when-enabled / absent-when-off.
+  if (cfg.DETECT_COMMAND_ENABLED) {
+    builder.addSubcommand(sub =>
+      sub.setName('detect')
+        .setDescription('Find which recipient an image was watermarked for (this server)')
+        .addAttachmentOption(opt =>
+          opt.setName('image')
+            .setDescription('The image to check for a qURL watermark')
+            .setRequired(true)
+        )
+    );
+  }
+  if (cfg.MAP_COMMAND_ENABLED) {
+    builder.addSubcommand(sub => {
+      sub.setName('map')
+        .setDescription('Share a Google Maps location via one-time qURL links')
+        .addStringOption(opt =>
+          opt.setName('location')
+            .setDescription('Google Maps URL, or a place / address to search')
+            .setRequired(true)
+            // Picking a suggestion sends a `qurl_place:<id>` sentinel;
+            // free text is resolved server-side via resolveLocation.
+            .setAutocomplete(true)
+            // 500 chars covers full Google Maps URLs (which can be
+            // 200-400 chars after place params + coordinates) plus
+            // headroom; not tied to the recipients-parser cap because
+            // location is a single URL/address, not a token list.
+            .setMaxLength(500)
+        );
+      addSendRecipients(sub)
+        .addStringOption(opt =>
+          opt.setName('location-name')
+            .setDescription('Override the label shown to recipients (defaults to URL/address)')
+            .setRequired(false)
+            .setMaxLength(256)
+        );
+      return addSendDeliveryOptions(sub);
+    });
+  }
+  builder.addSubcommand(sub =>
+    sub.setName('revoke')
+      .setDescription('Revoke links from a previous send')
+  );
+  builder.addSubcommand(sub =>
+    sub.setName('help')
+      .setDescription('Show qURL bot help')
+  );
+  builder.addSubcommand(sub =>
+    sub.setName('setup')
+      .setDescription('Configure your qURL API key for this server (admin only)')
+  );
+  builder.addSubcommand(sub =>
+    sub.setName('status')
+      .setDescription('Check if qURL is configured (admin only)')
+  );
+  return builder;
+}
+
 // Command definitions
 const commands = [
   {
     // NOTE: adding/removing/renaming a `/qurl` subcommand? Update the
     // expected-set assertion in
     // `e2e/tests/discord-commands.smoke.test.ts` too — the smoke test
-    // pins the subcommand NAME set (not option types, requiredness, or
-    // descriptions) to catch registration regressions at deploy time.
-    // IIFE so the `/qurl map` subcommand can be conditionally added
-    // based on config.MAP_COMMAND_ENABLED — a plain fluent chain
-    // can't host an `if`. The order of `addSubcommand` calls below
-    // matches the chain we'd write inline, with `map` inserted
-    // between `send` and `revoke` when the flag is on.
-    data: (() => {
-      const builder = new SlashCommandBuilder()
-        .setName('qurl')
-        .setDescription('Share resources securely via qURL')
-        .addSubcommand(sub =>
-          sub.setName('send')
-            .setDescription('Share a file via one-time qURL links')
-            .addAttachmentOption(opt =>
-              opt.setName('attachment')
-                .setDescription('The file to share')
-                .setRequired(true)
-            )
-            .addStringOption(opt =>
-              opt.setName('recipients')
-                .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
-                .setRequired(false)
-                .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
-            )
-            .addStringOption(opt =>
-              opt.setName('expires-in')
-                .setDescription('How long the qURL links stay valid (default: 24 hours)')
-                .setRequired(false)
-                .addChoices(...EXPIRY_CHOICES)
-            )
-            .addStringOption(opt =>
-              opt.setName('self-destruct')
-                .setDescription('Optional countdown after first open (default: no timer)')
-                .setRequired(false)
-                .addChoices(...SELF_DESTRUCT_CHOICES)
-            )
-            .addStringOption(opt =>
-              opt.setName('personal-message')
-                .setDescription('Optional note included in each recipient\'s DM')
-                .setRequired(false)
-                .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
-            )
-        );
-      // /qurl detect — watermark attribution (#1101). Gated behind
-      // DETECT_COMMAND_ENABLED (default OFF), like /qurl map: the connector
-      // /api/detect backend 503/404s until the watermark stack is ACTIVATED (a
-      // separate gated step AFTER the connector deploys), so detect stays DARK
-      // until an operator flips the flag at activation — no visible-but-failing
-      // command in the interim. The smoke test (e2e/tests/discord-commands.smoke.test.ts)
-      // reads the same flag and asserts detect present-when-enabled / absent-when-off.
-      if (config.DETECT_COMMAND_ENABLED) {
-        builder.addSubcommand(sub =>
-          sub.setName('detect')
-            .setDescription('Find which recipient an image was watermarked for (this server)')
-            .addAttachmentOption(opt =>
-              opt.setName('image')
-                .setDescription('The image to check for a qURL watermark')
-                .setRequired(true)
-            )
-        );
-      }
-      if (config.MAP_COMMAND_ENABLED) {
-        builder.addSubcommand(sub =>
-          sub.setName('map')
-            .setDescription('Share a Google Maps location via one-time qURL links')
-            .addStringOption(opt =>
-              opt.setName('location')
-                .setDescription('Google Maps URL, or a place / address to search')
-                .setRequired(true)
-                // Picking a suggestion sends a `qurl_place:<id>` sentinel;
-                // free text is resolved server-side via resolveLocation.
-                .setAutocomplete(true)
-                // 500 chars covers full Google Maps URLs (which can be
-                // 200-400 chars after place params + coordinates) plus
-                // headroom; not tied to the recipients-parser cap because
-                // location is a single URL/address, not a token list.
-                .setMaxLength(500)
-            )
-            .addStringOption(opt =>
-              opt.setName('recipients')
-                .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
-                .setRequired(false)
-                .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
-            )
-            .addStringOption(opt =>
-              opt.setName('location-name')
-                .setDescription('Override the label shown to recipients (defaults to URL/address)')
-                .setRequired(false)
-                .setMaxLength(256)
-            )
-            .addStringOption(opt =>
-              opt.setName('expires-in')
-                .setDescription('How long the qURL links stay valid (default: 24 hours)')
-                .setRequired(false)
-                .addChoices(...EXPIRY_CHOICES)
-            )
-            .addStringOption(opt =>
-              opt.setName('self-destruct')
-                .setDescription('Optional countdown after first open (default: no timer)')
-                .setRequired(false)
-                .addChoices(...SELF_DESTRUCT_CHOICES)
-            )
-            .addStringOption(opt =>
-              opt.setName('personal-message')
-                .setDescription('Optional note included in each recipient\'s DM')
-                .setRequired(false)
-                .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
-            )
-        );
-      }
-      builder.addSubcommand(sub =>
-        sub.setName('revoke')
-          .setDescription('Revoke links from a previous send')
-      );
-      builder.addSubcommand(sub =>
-        sub.setName('help')
-          .setDescription('Show qURL bot help')
-      );
-      builder.addSubcommand(sub =>
-        sub.setName('setup')
-          .setDescription('Configure your qURL API key for this server (admin only)')
-      );
-      builder.addSubcommand(sub =>
-        sub.setName('status')
-          .setDescription('Check if qURL is configured (admin only)')
-      );
-      return builder;
-    })(),
+    // checks the subcommand names and, when map is enabled, that send and map
+    // register identical shared options.
+    data: buildQurlCommandData(config),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
 
@@ -9680,9 +9690,12 @@ async function handleAutocomplete(interaction) {
       return await interaction.respond([]);
     }
 
+    const userId = interaction.user?.id;
+    if (typeof userId !== 'string' || userId.length === 0 || userId.length > 64) return await interaction.respond([]);
+
     let results;
     try {
-      results = await searchPlaces(rawQuery);
+      results = await searchPlaces(rawQuery, () => takeAutocompleteToken(userId));
     } catch (err) {
       // Per-call log at debug so keystroke-rate failures don't spam.
       logger.debug('autocomplete handler failed', {
@@ -9935,7 +9948,7 @@ registerFlow(CONFIRM_USER_SELECT_CUSTOM_ID, {
 // keyed by stage (not by customId), so the message registered on
 // USER_SELECT above is reachable from any of the three customIds
 // at SEND_STAGE_AWAITING_CONFIRM. The "siblingMessage keyed by stage"
-// test in qurl-send-map.test.js pins this contract.
+// test in qurl-send-helpers.test.js pins this contract.
 registerFlow(CONFIRM_SEND_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmSendClick,
@@ -10012,6 +10025,7 @@ module.exports = {
   // NODE_ENV=test (jest's default); production deploys set NODE_ENV=production.
   ...(process.env.NODE_ENV !== 'production' && {
     _test: {
+      buildQurlCommandData,
       logSafeApiDetail,
       isGoogleMapsURL,
       sanitizeFilename,
@@ -10143,7 +10157,7 @@ module.exports = {
       safeDecodeURIComponent,
       SEND_STAGE_AWAITING_CONFIRM,
       // Every confirm-card customId is exported so the contract test
-      // in qurl-send-map.test.js can pin every wire value — a typo
+      // in qurl-send-helpers.test.js can pin every wire value — a typo
       // in any of these silently breaks routing for in-flight confirm
       // cards, so they need to be test-asserted.
       CONFIRM_USER_SELECT_CUSTOM_ID,

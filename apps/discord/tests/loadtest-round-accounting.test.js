@@ -13,7 +13,7 @@ jest.mock('../src/connector', () => ({
 const mockCreateOneTimeLink = jest.fn();
 jest.mock('../src/qurl', () => ({
   createOneTimeLink: mockCreateOneTimeLink,
-  deleteLink: jest.fn().mockResolvedValue({}),
+  revokeResource: jest.fn().mockResolvedValue({}),
 }));
 
 const TOKENS = 10; // TOKENS_PER_RESOURCE, asserted against the export below.

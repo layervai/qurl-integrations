@@ -150,7 +150,9 @@ jest.mock('../src/connector', () => ({
 }));
 
 jest.mock('../src/qurl', () => ({
+  REVOKE_BATCH_MAX_IDS: jest.requireActual('../src/qurl').REVOKE_BATCH_MAX_IDS,
   createOneTimeLink: jest.fn(),
+  revokeResource: jest.fn(),
 }));
 
 jest.mock('../src/places', () => ({ searchPlaces: jest.fn().mockResolvedValue([]) }));
@@ -748,15 +750,35 @@ describe('monitorLinkStatus — duration cap + activeMonitors LRU', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
 
-  it('stops + posts final after MAX_MONITOR_DURATION_MS (14min cap matches interaction-token TTL)', async () => {
+  it('keeps the 14min view window, then posts final and stops polling (#331, #465)', async () => {
+    const interaction = makeInteraction();
     const monitor = monitorLinkStatus(
-      'send-1', makeInteraction(),
+      'send-1', interaction,
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
       '7d', 'Sent', { components: [] }, 1,
     );
-    await jest.advanceTimersByTimeAsync(14 * 60 * 1000 + 60 * 1000);
-    monitor.stop();
+    try {
+      await jest.advanceTimersByTimeAsync(13 * 60 * 1000);
+      const beforeLastMinute = mockDb.getQurlViews.mock.calls.length;
+      expect(beforeLastMinute).toBeGreaterThan(0);
+      await jest.advanceTimersByTimeAsync(60 * 1000);
+      expect(mockDb.getQurlViews.mock.calls.length).toBeGreaterThan(beforeLastMinute);
+      expect(interaction.editReply).not.toHaveBeenCalled();
+      // Expiration is observed on the next scheduled tick, within one minute.
+      await jest.advanceTimersByTimeAsync(60 * 1000);
+      expect(interaction.editReply).toHaveBeenCalledTimes(1);
+      expect(interaction.editReply).toHaveBeenCalledWith({
+        content: expect.stringContaining('Use `/qurl revoke` to revoke later'),
+        components: [],
+      });
+      const reads = mockDb.getQurlViews.mock.calls.length;
+      await jest.advanceTimersByTimeAsync(60 * 60 * 1000);
+      expect(mockDb.getQurlViews).toHaveBeenCalledTimes(reads);
+      expect(interaction.editReply).toHaveBeenCalledTimes(1);
+    } finally {
+      monitor.stop();
+    }
   });
 
   it('LRU bookkeeping: activeMonitors grows by N when N monitors start under the cap', () => {
@@ -809,7 +831,7 @@ describe('revokeAllLinks', () => {
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaa', 'q_bbb'], 'apikey');
-    expect(require('../src/qurl').deleteLink).toBeUndefined();
+    expect(require('../src/qurl').revokeResource).not.toHaveBeenCalled();
     expect(result.success).toBe(2);
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
   });
@@ -1122,6 +1144,28 @@ describe('revokeAllLinks', () => {
       'Failed to finalize revoked send state',
       { sendId: 'send-finalize-rejected', error: 'finalization was not confirmed' },
     );
+  });
+
+  it('confirms children individually and keeps mixed-outcome recipients retryable', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-shared', recipient_discord_id: 'u-ok', qurl_id: 'q_ok' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-mixed', qurl_id: 'q_mixed_ok' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-mixed', qurl_id: 'q_failed' },
+      { resource_id: 'res-other', recipient_discord_id: 'u-foreign', qurl_id: 'q_foreign' },
+    ]);
+    mockRevokeMintedLinks
+      .mockRejectedValueOnce(Object.assign(new Error('one child failed'), {
+        confirmedQurlIds: ['q_ok', 'q_mixed_ok', 'q_foreign'],
+      }))
+      .mockRejectedValueOnce(new Error('other resource failed'));
+    const result = await revokeAllLinks('send-partial-children', 'sender-1', 'apikey');
+    expect(result).toMatchObject({ success: 1, total: 3, successUserIds: ['u-ok'] });
+    expect(result.failureUserIds.sort()).toEqual(['u-foreign', 'u-mixed']);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
+      send_id: 'send-partial-children', success: 0, total: 2, unresolvable_recipients: 0,
+    });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('q_mixed_ok');
   });
 
   it('groups items by resource_id — shared-resource recipients all land in successUserIds on a single DELETE', async () => {
@@ -2484,6 +2528,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     return {
       collect: collectHandlers.collect,
+      end: collectHandlers.end,
       finishRevoke,
       interaction,
       makeClick,
@@ -2491,6 +2536,68 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       sendId,
     };
   }
+
+  it('collector time expiry preserves the successful revoke result instead of restoring the management banner', async () => {
+    const { collect, end, finishRevoke, interaction, makeClick } = await setupRevocableSend();
+    try {
+      finishRevoke.resolve();
+      await collect(makeClick('revoke'));
+      const revoked = interaction.editReply.mock.calls.at(-1)[0];
+      expect(revoked.content).toContain('Revoked 1/1 user.');
+      expect(revoked.content).toContain('Alice');
+      interaction.editReply.mockClear();
+      await end(null, 'time');
+      const final = interaction.editReply.mock.calls.at(-1)[0];
+      expect(final.content).toBe(revoked.content);
+      expect(final.components).toEqual([]);
+      expect(final.content).not.toContain('Management window');
+    } finally {
+      clearCooldown('sender-1');
+    }
+  });
+
+  it('Add selection extends the later inline revoke names in original recipient order', async () => {
+    const { collect, end, interaction, makeClick } = await setupRevocableSend();
+    const selection = {
+      users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
+    };
+    const add = makeClick('add');
+    add.reply.mockResolvedValueOnce({ awaitMessageComponent: jest.fn().mockResolvedValue(selection) });
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-initial', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/added', qurl_id: 'q_added', resource_id: 'res-added' }]);
+    try {
+      await collect(add);
+      expect(selection.editReply).toHaveBeenCalledWith({ content: 'Added 1 recipient', components: [] });
+      // Discard the original fixture response; the durable rows now include Add.
+      mockDb.getSendItems.mockReset();
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { recipient_discord_id: 'u2', resource_id: 'res-added', qurl_id: 'q_added' },
+        { recipient_discord_id: 'u1', resource_id: 'res-initial', qurl_id: 'q_u1' },
+      ]);
+      mockRevokeMintedLinks.mockReset();
+      mockRevokeMintedLinks.mockResolvedValue(undefined);
+      await collect(makeClick('revoke'));
+      const revoked = interaction.editReply.mock.calls.at(-1)[0];
+      expect(revoked.content).toContain('Revoked 2/2 users.');
+      expect(revoked.content).toContain('Alice');
+      expect(revoked.content).toContain('Bob');
+      expect(revoked.content.indexOf('Alice')).toBeLessThan(revoked.content.indexOf('Bob'));
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(2);
+      expect(mockRevokeMintedLinks.mock.calls.map(([resource, ids]) => [resource, ids])).toEqual(expect.arrayContaining([
+        ['res-initial', ['q_u1']], ['res-added', ['q_added']],
+      ]));
+      await end(null, 'time');
+    } finally {
+      clearCooldown('sender-1');
+    }
+  });
 
   it('bounds button result waiting and keeps the lock until background revoke finishes', async () => {
     jest.useFakeTimers();

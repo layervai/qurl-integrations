@@ -17,9 +17,8 @@
 //      A worker advancing a flow MUST pass the version it loaded;
 //      a concurrent worker that already advanced the row will lose
 //      the conditional check and the caller can decide to retry,
-//      drop, or escalate. SQS at-least-once + the OCC gate gives
-//      the system exactly-once-application semantics without a
-//      FIFO queue.
+//      drop, or escalate. The condition protects that row version;
+//      external effects still need their own idempotency and recovery.
 //
 //   2. TTL-driven cleanup. Every row has an `expires_at` Number
 //      (epoch-seconds — DDB TTL is asynchronous and only reaps

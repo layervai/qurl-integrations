@@ -128,8 +128,9 @@
 // (fatal log + process.exit(1) so ECS surfaces the misconfig in
 // deploy-time monitoring), and transient (log + POLL_ERROR_BACKOFF_MS
 // backoff). Permanent codes are typo'd queue URL, missing IAM perm,
-// region drift, and bad creds — anything a retry won't fix. See
-// PERMANENT_AWS_ERROR_CODES for the full set.
+// region drift, bad creds, and an exhausted credential provider chain. See
+// PERMANENT_AWS_ERROR_CODES for the full set. Provider failures after a
+// successful poll retain backoff so a transient ECS refresh can recover.
 //
 // How tracking works without coupling to handler internals: the
 // consumer sets `isWorkerDispatch = true` synchronously around the
@@ -141,7 +142,8 @@
 // runs inside the synchronous emit window; the decrement fires
 // whenever the dispatch promise settles, however much later.
 
-const { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
+const { ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
+const { createSqsClient } = require('./utils/sqs');
 const config = require('./config');
 const logger = require('./logger');
 const { GATEWAY_DISPATCH_TYPES, LOG_KINDS } = require('./constants');
@@ -434,25 +436,6 @@ function _setSqsClientForTest(client) {
   sqsClient = client;
 }
 
-function createSqsClient() {
-  // Note: AWS credential resolution (IAM task role, env vars,
-  // credential-chain) happens lazily on first `.send()`, NOT at
-  // SQSClient construction. A missing/invalid task role will
-  // surface as a ReceiveMessageCommand failure inside pollLoop —
-  // landing in the error-backoff path rather than as a boot
-  // failure. Treated as acceptable because (a) the bot's task
-  // execution role is required for the rest of the AWS surface
-  // (DDB flow-state, etc.) and would fail those too, and (b) ops
-  // monitoring on the pollLoop error log catches the case. If we
-  // ever need explicit boot-time credential resolution, the
-  // pattern is `await sqsClient.config.credentials()` inside
-  // start() and propagate any throw.
-  const region = (process.env.AWS_REGION ?? '').trim();
-  if (!region) {
-    throw new Error('AWS_REGION is required to use the event consumer. Set it in the deployment template (e.g. `us-east-2`).');
-  }
-  return new SQSClient({ region });
-}
 
 // Every terminal path in processMessage deletes the message (success,
 // malformed body, unknown eventType, reconstruction throw — see the
@@ -951,6 +934,7 @@ function isAbortError(err) {
 // dominates over deploy-time IAM eventual-consistency gaps. If prod
 // telemetry ever shows AccessDenied spikes correlated with deploys
 // rather than config changes, demote it back to transient.
+const CREDENTIAL_PROVIDER_ERROR_CODES = new Set(['CredentialsProviderError', 'CredentialsError']);
 const PERMANENT_AWS_ERROR_CODES = new Set([
   // Queue doesn't exist (typo'd URL or wrong region in queue URL).
   'QueueDoesNotExist',
@@ -966,6 +950,8 @@ const PERMANENT_AWS_ERROR_CODES = new Set([
   // Bad/expired credentials.
   'UnrecognizedClientException',
   'InvalidClientTokenId',
+  // No credential provider could supply credentials.
+  ...CREDENTIAL_PROVIDER_ERROR_CODES,
 ]);
 
 // Returns the matched permanent-error code from anywhere in err's
@@ -978,14 +964,18 @@ const PERMANENT_AWS_ERROR_CODES = new Set([
 function permanentAwsErrorCode(err) {
   const visited = new Set();
   let current = err;
+  let providerCode = null;
   while (current && typeof current === 'object' && !visited.has(current)) {
     visited.add(current);
-    if (PERMANENT_AWS_ERROR_CODES.has(current.name)) return current.name;
-    if (PERMANENT_AWS_ERROR_CODES.has(current.code)) return current.code;
-    if (PERMANENT_AWS_ERROR_CODES.has(current.Code)) return current.Code;
+    for (const code of [current.name, current.code, current.Code]) {
+      if (!PERMANENT_AWS_ERROR_CODES.has(code)) continue;
+      // A retryable provider wrapper must not hide a fatal cause or alias.
+      if (!CREDENTIAL_PROVIDER_ERROR_CODES.has(code)) return code;
+      providerCode ??= code;
+    }
     current = current.cause;
   }
-  return null;
+  return providerCode;
 }
 
 // Sleep that resolves either when the timeout fires OR when
@@ -1073,9 +1063,11 @@ async function pollLoop(client) {
   // a real path: start() always assigns stopController before invoking
   // pollLoop, and stop() nulls it only after `await loopPromise`
   // resolves (by which point pollLoop has already exited).
+  let hasPolledSuccessfully = false;
   while (stopController && !stopController.signal.aborted) {
     try {
       await pollOnce(client);
+      hasPolledSuccessfully = true;
     } catch (err) {
       if (isAbortError(err)) {
         // stop() aborted the in-flight receive. The while-loop's
@@ -1084,7 +1076,10 @@ async function pollLoop(client) {
         continue;
       }
       const permanentCode = permanentAwsErrorCode(err);
-      if (permanentCode) {
+      // Provider errors also wrap transient ECS metadata refresh failures.
+      const credentialRefreshFailure = hasPolledSuccessfully
+        && CREDENTIAL_PROVIDER_ERROR_CODES.has(permanentCode);
+      if (permanentCode && !credentialRefreshFailure) {
         // Permanent AWS misconfig (typo'd queue URL, missing IAM
         // perm, region drift, bad creds). Surface to the caller so
         // ECS sees a high task-restart rate in deploy-time monitoring
@@ -1167,7 +1162,7 @@ function start(client, { onFatal } = {}) {
     throw new Error('Event consumer: QURL_BOT_EVENTS_QUEUE_URL is not set');
   }
   if (!sqsClient) {
-    sqsClient = createSqsClient();
+    sqsClient = createSqsClient('event consumer');
   }
   running = true;
   stopController = new AbortController();

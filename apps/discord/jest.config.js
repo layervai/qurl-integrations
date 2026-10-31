@@ -19,11 +19,10 @@ module.exports = {
   ],
   coverageDirectory: 'coverage',
   coverageThreshold: {
-    // 78/68/78/78 floors. Current commands.js coverage: 81.23/77.27/
-    // 83.93/81.98 — held by five files, each owning a distinct slice:
-    //   - qurl-send-map.test.js: /qurl send + /qurl map front-half
-    //     (slash-option parsing, recipient resolution, confirm-card
-    //     render/dispatch, forgery-rejection gates).
+    // 78/68/78/78 floors. These suites hold the commands.js coverage:
+    //   - qurl-send-{entry,helpers}, qurl-map-{entry,autocomplete}, qurl-detect,
+    //     handle-confirm-* and rerender-confirm-card: slash-option parsing,
+    //     recipient resolution, confirm render/dispatch, and forgery gates.
     //   - send-pipeline-back-half.test.js: executeSendPipeline + back-half
     //     unit tests (monitorLinkStatus polling/transitions/stop()-race/
     //     LRU eviction, revokeAllLinks per-link failures,

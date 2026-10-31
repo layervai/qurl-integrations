@@ -113,6 +113,16 @@ share a process-local guard for each sender and send. The guard remains active
 after the 13-minute result wait while revocation continues. Store checks still
 enforce ownership and prevent new recipients across processes.
 
+While the connector route is off, each resource re-probes it on every retry.
+The SDK then tries up to ten child GETs to find a parent. Watermarked children
+all return 404 through this fallback, so a retry can repeat all ten GETs per
+resource, across five resources at once. An ordinary batch can also need up to
+ten sequential child DELETEs after its parent is found. Each SDK operation
+may retry once on a transient failure. Do not stop parent lookup after a few 404s: a later ordinary child can still identify the parent.
+The 13-minute message bounds the interaction wait, not total background work.
+Enable the connector route through its normal validation and rollout gates;
+measure large-send throughput separately (#1489).
+
 Before deployment, configure alarms for `Connector mint_link returned a link
 without a valid qurl_id`, `Connector mint_link over-minted`, `Connector mint_link
 returned more partial links than requested`, `Minted link revoke incomplete`,
@@ -168,6 +178,16 @@ setup) means required to use that feature.
 | `GOOGLE_MAPS_API_KEY` | `/qurl map` | Google Maps key for location autocomplete (needed when map is enabled) |
 | `GUILD_ID` | No | Scope commands to a single server; unset runs the multi-tenant public bot |
 | `PORT` | No | HTTP listen port (default 3000) |
+
+Map autocomplete has a per-user burst budget of ten new Places requests,
+refilling one request per second. Cache hits and shared in-flight results spend
+no tokens. Prefix and guild changes share that budget. Short queries,
+pasted URLs and disabled or unsupported contexts use no tokens. Throttled or
+unidentified interactions receive an empty suggestion list before Places I/O.
+The process keeps at most 10,000 active user budgets; at capacity, new users
+receive empty suggestions until the oldest budget is idle for ten seconds.
+This protects each process; it is not a global multi-replica limit or a billing
+cap. Move to a shared store if cross-replica abuse requires a global budget.
 
 Discord uses `@layervai/qurl/node` to open current `qv2t1` links. Set
 `QURL_ENDPOINT` and `QURL_DEPLOYMENT` for the same environment. The deployment
@@ -262,6 +282,13 @@ locally (`npm run dev`) needs a DynamoDB endpoint — `docker-compose.yml` spins
 up a local DynamoDB and `scripts/provision-ddb-local.js` creates the tables.
 See `.env.example` for the local-development environment setup.
 
+The provisioner reads `scripts/ddb-local-schema.json`. Infrastructure CI compares
+that data file from upstream `main` with mocked Sandbox and production plans:
+table names, keys and types, GSIs and projections, and TTL. Schema changes need
+a paired infrastructure check. Existing local tables are not migrated; recreate
+only your disposable local tables when needed. The provisioner fails with a
+repair instruction if an existing table lacks a required GSI. It never drops data.
+
 ## Architecture
 
 - **Multi-tenant by default** — the bot serves every server it's invited to.
@@ -274,6 +301,14 @@ See `.env.example` for the local-development environment setup.
 - **HTTP surface** — `/health` for load-balancer probes, `/metrics` (bearer
   authenticated), `/oauth/discord/install` plus its callback for customer
   installs, and the qURL OAuth start/callback routes used by `/qurl setup`.
+
+Gateway session persistence admits at most 100 in-flight background writes.
+The live in-memory session keeps advancing during backpressure. Look for
+`gateway-session-store: write backpressure`, limited to one warning per minute
+with count-only fields. Skipped checkpoints can require a fresh IDENTIFY after
+restart. A skipped null-clear can leave a rejected session row for Discord to
+validate on the next boot; final flush drains writes but does not retry a
+null-mirror delete. A non-null mirror is persisted after the drain.
 
 ## Troubleshooting
 
