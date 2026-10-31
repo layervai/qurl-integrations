@@ -2063,7 +2063,7 @@ describe('handleAddRecipients — file path failure modes', () => {
     );
   });
 
-  it('CDN re-download failure (no err.status) emits reason=unknown + shows the expired message', async () => {
+  it('an untyped 403 keeps reason=unknown and does not imply a CDN expiry', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
@@ -2076,7 +2076,7 @@ describe('handleAddRecipients — file path failure modes', () => {
       makeInteraction(), 'apikey',
     );
 
-    expect(result.msg).toMatch(/expired/i);
+    expect(result.msg).toMatch(/try again/i);
     expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
       send_id: 'send-cdn', kind: 'file', reason: 'unknown',
     }));
@@ -2393,6 +2393,33 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
       reason: 'upstream_4xx',
       status_code: 422,
     }));
+  });
+});
+
+describe('handleAddRecipients — attachment failure copy', () => {
+  it.each([
+    [Object.assign(new Error('Failed to download from Discord CDN: 403'), { cdnStatus: 403 }), true],
+    [Object.assign(new Error('Failed to download from Discord CDN: 404'), { cdnStatus: 404 }), true],
+    [Object.assign(new Error('Failed to download from Discord CDN: 410'), { cdnStatus: 410 }), true],
+    [new Error('network connection failed'), false],
+    [Object.assign(new Error('Connector upload failed (403)'), { status: 403 }), false],
+    [Object.assign(new Error('Failed to download from Discord CDN: 503'), { cdnStatus: 503 }), false],
+  ])('distinguishes a missing source from a retryable failure: %s', async (error, sourceUnavailable) => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockRejectedValueOnce(error);
+    const result = await handleAddRecipients('send-1', makeUsersCollection([
+      { id: 'u1', username: 'Alice', bot: false },
+    ]), makeInteraction(), 'apikey');
+    expect(result.msg).toBe(sourceUnavailable
+      ? 'Original attachment is no longer available. Please create a new send.'
+      : 'Failed to prepare links. Please try again, or create a new send if the issue persists.');
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(result.newLinks).toEqual([]);
   });
 });
 

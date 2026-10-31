@@ -695,14 +695,15 @@ describe('Connector client', () => {
       expect(result.resource_id).toBe('conn-res-1');
     });
 
-    it('throws when Discord CDN download fails', async () => {
+    it.each(['uploadToConnector', 'downloadAndUpload'])('%s records the CDN status without attempting an upload', async (method) => {
       globalThis.fetch = jest.fn().mockResolvedValueOnce({
         ok: false,
         status: 403,
       });
 
-      await expect(connector.uploadToConnector('https://cdn.discordapp.com/file.png', 'f.png', 'image/png'))
-        .rejects.toThrow(/Failed to download from Discord CDN: 403/);
+      await expect(connector[method]('https://cdn.discordapp.com/file.png', 'f.png', 'image/png'))
+        .rejects.toMatchObject({ cdnStatus: 403, message: 'Failed to download from Discord CDN: 403' });
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     });
 
     it('throws when connector upload fails', async () => {

@@ -377,7 +377,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
 
   const downloadResponse = await cdnFetchFollowSafe(sourceUrl);
   if (!downloadResponse.ok) {
-    throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
+    throw Object.assign(new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`), { cdnStatus: downloadResponse.status });
   }
 
   const contentLengthHeader = downloadResponse.headers.get('content-length');
@@ -470,7 +470,7 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
 
   const downloadResponse = await cdnFetchFollowSafe(sourceUrl);
   if (!downloadResponse.ok) {
-    throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
+    throw Object.assign(new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`), { cdnStatus: downloadResponse.status });
   }
 
   const contentLengthHeader = downloadResponse.headers.get('content-length');
