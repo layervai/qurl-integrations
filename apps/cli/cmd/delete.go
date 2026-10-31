@@ -18,6 +18,7 @@ import (
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func deleteCmd(opts *globalOpts) *cobra.Command {
@@ -111,6 +112,9 @@ func confirmPendingDelete(ctx context.Context, opts *globalOpts, client qurlapi.
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, errors.Join(firstError, err)
+	}
+	if !opts.quiet && opts.resolvedFormat != output.FormatJSON {
+		opts.printer().Notef("Revocation is saved. Waiting %d seconds before checking that access is closed.", pending.RetryAfter)
 	}
 	delay := time.Duration(pending.RetryAfter) * time.Second
 	if opts.sleep != nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -121,7 +122,7 @@ func TestDeleteConfirmationCancellationKeepsCommitEvidence(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	original := &qurlapi.Error{StatusCode: 503, Code: "revocation_pending", RetryAfter: 30}
-	opts := &globalOpts{sleep: func(time.Duration) { cancel() }}
+	opts := &globalOpts{quiet: true, sleep: func(time.Duration) { cancel() }}
 	_, err := confirmPendingDelete(ctx, opts, nil, "unused", original)
 	var pending *qurlapi.Error
 	if !errors.Is(err, context.Canceled) || !errors.As(err, &pending) || pending != original {
@@ -151,5 +152,34 @@ func TestDeleteLostConfirmationKeepsCommitExplanation(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("confirmation disconnect replayed: %d DELETEs", calls)
+	}
+}
+
+func TestDeleteConfirmationProgressKeepsMachineOutputClean(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		flags  []string
+		notice bool
+	}{
+		{"text", nil, true},
+		{"quiet", []string{"--quiet"}, false},
+		{"json", []string{"-o", "json"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID, pendingDeleteResponse(t, "revocation_pending", "30"), func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
+			args := append([]string{"--endpoint", srv.URL}, tc.flags...)
+			args = append(args, "delete", srv.Key.CRID, "--yes")
+			res := runCLI(t, &runOpts{args: args})
+			if res.code != 0 {
+				t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+			}
+			if got := strings.Contains(res.stderr.String(), "Waiting 30 seconds"); got != tc.notice {
+				t.Fatalf("progress notice=%v want %v: %s", got, tc.notice, res.stderr.String())
+			}
+			if tc.name == "json" && !json.Valid(res.stdout.Bytes()) {
+				t.Fatalf("progress broke JSON: %s", res.stdout.String())
+			}
+		})
 	}
 }
