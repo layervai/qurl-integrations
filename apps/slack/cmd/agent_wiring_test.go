@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
@@ -361,4 +364,25 @@ func TestLogAgentSurfaceState_ConfirmMode(t *testing.T) {
 func with(s agentSurfaceState, fn func(*agentSurfaceState)) agentSurfaceState {
 	fn(&s)
 	return s
+}
+
+func TestLifecycleCleanupAgentStoreReusesClientWhenAgentDisabled(t *testing.T) {
+	t.Setenv(slackdata.EnvAgentStateTable, "agent-metadata-fixture")
+	db := dynamodb.NewFromConfig(aws.Config{Region: "us-east-2"})
+	admin := &slackdata.Store{Client: db}
+	store, err := lifecycleCleanupAgentStore(admin, nil, true)
+	if err != nil || store == nil || store.Client != db || store.TableName != "agent-metadata-fixture" {
+		t.Fatalf("cleanup metadata was not wired: %v", err)
+	}
+	if _, err := lifecycleCleanupAgentStore(admin, nil, false); err == nil {
+		t.Fatal("enabled agent silently accepted missing store")
+	}
+	existing := &slackdata.AgentStore{Client: db, TableName: "existing"}
+	if got, err := lifecycleCleanupAgentStore(admin, existing, false); err != nil || got != existing {
+		t.Fatal("existing agent store replaced")
+	}
+	t.Setenv(slackdata.EnvAgentStateTable, "")
+	if _, err := lifecycleCleanupAgentStore(admin, nil, true); err == nil {
+		t.Fatal("disabled agent accepted missing cleanup table")
+	}
 }

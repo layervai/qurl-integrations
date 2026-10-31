@@ -105,6 +105,7 @@ func newLifecycleTestHandlerForWorkspace(t *testing.T, workspaceID string) (*Han
 	h.cfg.AuthProvider = provider
 	h.cfg.AgentStore = &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
 	seedLifecycleAgentState(t, h.cfg.AgentStore, workspaceID)
+	attachLifecycleTestQueue(h)
 	return h, provider, ts
 }
 
@@ -297,7 +298,7 @@ func TestHandleLifecycleEvent_MultipleWorkspaceIDsPurgeEachID(t *testing.T) {
 	ts.seedPolicyAliasBindings(t, secondTeamID, "C_three", map[string]string{"jenkins": "r_ccc"})
 	seedLifecycleAgentState(t, h.cfg.AgentStore, secondTeamID)
 
-	h.handleLifecycleEvent(&slackEventEnvelope{
+	_ = h.handleLifecycleEvent(context.Background(), &slackEventEnvelope{
 		Type:         slackEnvelopeTypeEventCallback,
 		TeamID:       testAdminTeamID,
 		EnterpriseID: testEnterpriseID,
@@ -379,7 +380,7 @@ func TestHandleLifecycleEvent_PassesEventCutoffToWorkspacePurge(t *testing.T) {
 	eventAt := time.Date(2026, 7, 8, 12, 29, 0, 0, time.UTC)
 	h.now = func() time.Time { return observedAt }
 
-	h.handleLifecycleEvent(&slackEventEnvelope{
+	_ = h.handleLifecycleEvent(context.Background(), &slackEventEnvelope{
 		Type:      slackEnvelopeTypeEventCallback,
 		TeamID:    testAdminTeamID,
 		EventID:   "EvCutoff",
@@ -399,6 +400,7 @@ func TestHandleLifecycleEvent_PassesEventCutoffToWorkspacePurge(t *testing.T) {
 func TestHandleLifecycleEvent_RetainsRowsUpdatedAfterEventCutoff(t *testing.T) {
 	ts := newAdminTestServers(t)
 	h := newAdminTestHandler(t, ts)
+	attachLifecycleTestQueue(h)
 	provider := &recordingStateDeleter{recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"}}
 	h.cfg.AuthProvider = provider
 	h.cfg.AgentStore = &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
@@ -419,7 +421,7 @@ func TestHandleLifecycleEvent_RetainsRowsUpdatedAfterEventCutoff(t *testing.T) {
 		t.Fatalf("ExposeResourceToChannel fresh row: %v", err)
 	}
 
-	h.handleLifecycleEvent(&slackEventEnvelope{
+	_ = h.handleLifecycleEvent(context.Background(), &slackEventEnvelope{
 		Type:      slackEnvelopeTypeEventCallback,
 		TeamID:    testAdminTeamID,
 		EventID:   "EvDelayedUninstall",
@@ -565,7 +567,7 @@ func TestRetryLifecyclePurgeStopsOnNonRetryableStoreError(t *testing.T) {
 	var attempts int
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	retryLifecyclePurge(context.Background(), log, "testPurge", func(*slog.Logger) error {
+	_ = retryLifecyclePurge(context.Background(), log, "testPurge", func(*slog.Logger) error {
 		attempts++
 		return &slackdata.Error{
 			StatusCode: http.StatusInternalServerError,

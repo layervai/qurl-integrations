@@ -228,3 +228,30 @@ development.
 ## License
 
 [MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.
+
+## Durable lifecycle cleanup
+
+Managed runtimes require `SLACK_LIFECYCLE_QUEUE_URL` (an HTTPS FIFO SQS queue)
+and the workspace mapping, channel policy and agent state tables, even when
+agent events are disabled. Lifecycle callbacks return success only after SQS
+accepts a metadata-only job. Publish failure returns 503 so Slack can retry.
+Jobs contain partition IDs and the original event cutoff; they contain no
+Slack tokens, qURL credentials or event bodies.
+
+Two workers use one-message receives, a 90-second work budget and a 120-second
+visibility lease. A job is completed only after all required local stores
+report success. Replays use the original cutoff. FIFO deduplication is a
+five-minute service window, not a permanent exactly-once guarantee. Failed
+jobs retry, then remain in the dead-letter queue for operator repair and
+redrive; both queues retain work for 14 days. Monitor dead letters and queue
+age. Very large partitions can require repair or smaller persisted work units.
+
+The rate-counter reader requires the sparse `rate-limit-partition` index.
+Deploy the index-writing and timestamp preparation first, drain all old writer
+tasks, create the index, and backfill legacy counter metadata. A fresh complete
+verification scan must find zero eligible or malformed counters before this
+consumer is deployed. Keep the old image's Scan permission until those tasks
+are gone. The reader queries 16 workspace shards with bounded pages and keeps
+the conditional timestamp check on each delete. Index reads are eventually
+consistent; TTL remains the backstop for transient counter residue. This does
+not complete upstream key revocation or the separate late-writer fence work.
