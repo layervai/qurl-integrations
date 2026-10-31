@@ -2641,7 +2641,6 @@ async function executeSendPipeline(interaction, {
     // `recipients[]`.
     let revokeResultSuccess = 0;
     let revokeResultFinalizationFailed = false;
-    let revokeResultExpired = 0;
     let revokeShowAll = false;
     let revokeInFlight = false;
     let revokeSucceeded = false;
@@ -2684,7 +2683,6 @@ async function executeSendPipeline(interaction, {
           revokeShowAll,
           revokeResultSuccess,
           revokeResultFinalizationFailed,
-          revokeResultExpired,
         );
         await btnInteraction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
         return;
@@ -2727,7 +2725,6 @@ async function executeSendPipeline(interaction, {
             revokeResultTotal = 0;
             revokeResultSuccess = 0;
             revokeResultFinalizationFailed = false;
-            revokeResultExpired = 0;
             revokeShowAll = false;
             revokeResultKnown = false;
             // Keep revokeInFlight true after success as the collector-local
@@ -2751,7 +2748,6 @@ async function executeSendPipeline(interaction, {
             revokeResultTotal = 0;
             revokeResultSuccess = 0;
             revokeResultFinalizationFailed = false;
-            revokeResultExpired = 0;
             revokeShowAll = false;
             revokeResultKnown = false;
             // Terminal for this collector even though the exact reason is
@@ -2775,7 +2771,6 @@ async function executeSendPipeline(interaction, {
           revokeResultTotal = revoked.total;
           revokeResultSuccess = revoked.success;
           revokeResultFinalizationFailed = revoked.finalizationFailed;
-          revokeResultExpired = revoked.expired ?? 0;
           revokeShowAll = false;
           revokeResultKnown = true;
           const initial = renderRevokeMsg(
@@ -2785,7 +2780,6 @@ async function executeSendPipeline(interaction, {
             false,
             revokeResultSuccess,
             revokeResultFinalizationFailed,
-            revokeResultExpired,
           );
           await btnInteraction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
           // Keep revokeInFlight true after success as the collector-local
@@ -2842,10 +2836,8 @@ async function executeSendPipeline(interaction, {
               content = 'Links were revoked, but qURL could not save the final state. Add Recipients is disabled; retry `/qurl revoke`.';
             } else if (revokeResultTotal === 0) {
               content = 'No live links remain for this send.';
-            } else if (revokeResultSuccess + revokeResultExpired < revokeResultTotal) {
+            } else if (revokeResultSuccess < revokeResultTotal) {
               content = 'Revocation is incomplete for this send. Add Recipients is disabled; retry `/qurl revoke`.';
-            } else if (revokeResultExpired > 0) {
-              content = 'No live links remain for this send. Add Recipients is disabled.';
             } else {
               content = 'Links for this send have already been revoked.';
             }
@@ -3007,7 +2999,6 @@ async function executeSendPipeline(interaction, {
             revokeShowAll,
             revokeResultSuccess,
             revokeResultFinalizationFailed,
-            revokeResultExpired,
           );
           interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
@@ -3903,7 +3894,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   // to resolve names → no "Revoked for: …" line here. Operators
   // wanting names should use the inline button after a send.
   await interaction.editReply({
-    content: safeRevokeHeader(sendId, revoked.success, revoked.total, revoked.finalizationFailed, revoked.expired),
+    content: safeRevokeHeader(sendId, revoked.success, revoked.total, revoked.finalizationFailed),
     components: [],
   }).catch(logIgnoredDiscordErr);
 }
@@ -8494,10 +8485,10 @@ function revokeReplyPayload(rendered) {
 // Recipients toggle on the post-revoke "Revoked for: ..." list.
 // All wording assertions live against `renderRevokeContent` directly
 // (see `apps/discord/src/revoke-render.js` + the e2e smoke).
-function renderRevokeMsg(sendId, names, total, showAll, success, finalizationFailed = false, expired = 0) {
+function renderRevokeMsg(sendId, names, total, showAll, success, finalizationFailed = false) {
   let data;
   try {
-    data = renderRevokeContent({ names, total, showAll, success, finalizationFailed, expired });
+    data = renderRevokeContent({ names, total, showAll, success, finalizationFailed });
   } catch (err) {
     data = {
       content: revokeRenderFallback(sendId, success, total, err),
@@ -8528,9 +8519,9 @@ function revokeRenderFallback(sendId, success, total, err) {
   return 'qURL could not display the revocation result. If this send still appears in `/qurl revoke`, retry it there.';
 }
 
-function safeRevokeHeader(sendId, success, total, finalizationFailed = false, expired = 0) {
+function safeRevokeHeader(sendId, success, total, finalizationFailed = false) {
   try {
-    return buildRevokeHeader(success, total, { finalizationFailed, expired });
+    return buildRevokeHeader(success, total, { finalizationFailed });
   } catch (err) {
     return revokeRenderFallback(sendId, success, total, err);
   }
@@ -8592,15 +8583,6 @@ function renderSendConfirm({
 // always pass resolveSenderAlias(interaction), which has its own
 // DISPLAY_NAME_FALLBACK, so a forgotten 4th arg still renders
 // gracefully on the recipient side.
-function isExpiredLegacySendRow(item, now) {
-  if (item.qurl_id != null && item.qurl_id !== '') return false;
-  if (typeof item.expires_in !== 'string' || !isValidExpiry(item.expires_in)) return false;
-  if (typeof item.created_at !== 'string') return false;
-  const created = Date.parse(item.created_at);
-  if (!Number.isFinite(created) || new Date(created).toISOString() !== item.created_at) return false;
-  return created + expiryToMs(item.expires_in) <= now;
-}
-
 async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DISPLAY_NAME_FALLBACK) {
   // Stop destructive work before the 13-minute interaction result deadline.
   const workDeadline = Date.now() + REVOKE_WORK_DEADLINE_MS;
@@ -8632,26 +8614,15 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // Revoke each resource's children together, retaining per-child confirmations
   // even if a sibling fails (mintLinksInBatches packs
   // up to TOKENS_PER_RESOURCE recipients per resource).
-  // An id-less legacy row may finalize only after its recorded expiry is proven.
-  // Other rows without a usable qurl_id cannot be revoked: a watermarked child lives
+  // A row without a usable qurl_id cannot be revoked: a watermarked child lives
   // on the connector's tunnel, so deleting the shared parent would neither
   // reach it nor be safe for other sends. Only that row's recipient fails;
   // identifiable siblings on the same resource still revoke and succeed.
   const byResource = new Map();
   const invalidResourceRecipientIds = new Set();
-  const expiredLegacyRecipients = new Set();
-  const now = Date.now();
   for (const item of items) {
     const qurlId = qurlIdForCleanup(item.qurl_id);
-    if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0) {
-      invalidResourceRecipientIds.add(item.recipient_discord_id);
-      continue;
-    }
-    if (qurlId === null && isExpiredLegacySendRow(item, now)) {
-      expiredLegacyRecipients.add(item.recipient_discord_id);
-      continue;
-    }
-    if (qurlId === null) {
+    if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0 || qurlId === null) {
       invalidResourceRecipientIds.add(item.recipient_discord_id);
       continue;
     }
@@ -8712,9 +8683,6 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
 
   const success = successUserIds.length;
   const total = totalUsers;
-  const expired = [...expiredLegacyRecipients].filter(id => !seenSuccess.has(id) && !seenFailure.has(id)).length;
-  const expiryAudit = expiredLegacyRecipients.size > 0
-    ? { expired_legacy_recipients: expiredLegacyRecipients.size } : {};
   // Audit success/total describe actual per-resource revoke confirmations.
   // Malformed rows never fabricate a revoke denominator; report their
   // affected recipients in a separate field while keeping finalization
@@ -8734,7 +8702,6 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       success: auditSuccess,
       total: auditTotal,
       unresolvable_recipients: unresolvableRecipients,
-      ...expiryAudit,
     });
   }
 
@@ -8745,7 +8712,6 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     success: auditSuccess,
     total: auditTotal,
     unresolvable_recipients: unresolvableRecipients,
-    ...expiryAudit,
     users: { success, total },
   });
 
@@ -8903,7 +8869,6 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     total,
     successUserIds,
     failureUserIds,
-    ...(expired > 0 ? { expired } : {}),
   };
 }
 

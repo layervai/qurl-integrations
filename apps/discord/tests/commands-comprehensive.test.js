@@ -898,21 +898,6 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     );
   });
 
-  it('reports an expired legacy send truthfully and saves its final state', async () => {
-    mockDb.getSendItems.mockResolvedValueOnce([{
-      resource_id: 'res-legacy', recipient_discord_id: 'u-legacy',
-      created_at: '2000-01-01T00:00:00.000Z', expires_in: '24h',
-    }]);
-    const interaction = makeSelectInteraction();
-    await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
-    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
-    expect(mockDb.markSendRevoked).toHaveBeenCalled();
-    expect(interaction.editReply).toHaveBeenCalledWith({
-      content: 'Revoked 0/1 user. Links for 1 user had already expired. Sessions already opened may remain active.',
-      components: [],
-    });
-  });
-
   it('replaces the progress message once when revoke fails before fan-out', async () => {
     const failure = new Error('DDB unavailable');
     mockDb.markSendRevoking.mockRejectedValueOnce(failure);

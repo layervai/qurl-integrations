@@ -105,12 +105,9 @@ native state store; the bot does not use producer state.
 Deploy and validate the connector revoke endpoint before deploying this
 consumer. Until that endpoint is enabled, ordinary children use the SDK
 fallback. Watermarked children cannot be confirmed through that fallback;
-the send stays available for retry. A legacy row with an absent child ID can
-finalize as already expired only when its canonical stored creation time and
-supported expiry duration prove its link lifetime ended. The result reports
-expired users separately and sends no revoked DM edit for them. Missing or
-invalid evidence remains unconfirmed after endpoint activation; deleting the
-shared parent is not a safe recovery. A repeated connector 429 fails closed
+the send stays available for retry. Legacy send rows with no usable `qurl_id`
+also remain unconfirmed after endpoint activation; deleting their shared parent
+is not a safe recovery. A repeated connector 429 fails closed
 after one bounded retry, without an SDK fallback. Revoke buttons and selects
 share a process-local guard for each sender and send. The guard remains active
 until the work settles, including after the 13-minute result wait if needed.
@@ -344,3 +341,48 @@ Setup and install cookies use `__Host-` names with `Secure`, `HttpOnly`,
 `SameSite=Lax`, and `Path=/`. Use HTTPS (or browser-supported localhost) for
 local setup tests. Deploying this change invalidates older setup cookies;
 admins with an in-flight setup must start again.
+
+### Recover an id-less legacy send
+
+The original send time and duration do not prove current expiry: an owner can
+extend a link. If a legacy row has no child ID, keep it unconfirmed until an
+operator independently verifies that every upstream link for that send is
+closed. Do not use a recipient resolve/knock as a read-only expiry check.
+
+After that verification, use the bounded one-shot tool below from the repo
+root. First confirm the approved AWS account/profile, region and table prefix.
+The deployed bot must enforce the durable `revoking_at` guard on Add Recipients
+writes. These commands use normal AWS credentials; no bot or qURL API key is
+needed.
+
+```sh
+export AWS_PROFILE='<approved-profile>'
+export AWS_REGION='<region>'
+export DDB_TABLE_PREFIX='<env-prefix-ending-in-dash>'
+aws sts get-caller-identity
+node apps/discord/scripts/finalize-legacy-send.js --send-id '<send-id>' --sender-id '<sender-id>'
+```
+
+The default dry run reports aggregate local eligibility only. It does not
+verify upstream closure. After reviewing that result and the independent
+upstream evidence, repeat the same command with both write flags:
+
+```sh
+node apps/discord/scripts/finalize-legacy-send.js --send-id '<send-id>' --sender-id '<sender-id>' --apply --confirm-upstream-closed
+```
+
+The tool reads one send partition with strong consistency. Each snapshot is
+bounded to 200 pages of 100 evaluated rows; apply takes two snapshots within
+one 60-second operation budget. It rejects foreign,
+malformed or identified rows, establishes the existing no-more-recipients
+barrier, then re-reads the same rows before a conditional finalization. It only
+updates the send-config bookkeeping and records
+`legacy_close_reason=operator_attested_upstream_closed`. It leaves recipient
+rows and upstream resources unchanged. It reads no bearer links or encrypted
+config fields and prints no participant identifiers.
+
+A failure can leave the intent barrier set, and a lost write response can mean
+the finalization committed. Re-run the dry run against the same target. Do not
+remove the barrier blindly; use normal revoke/repair when the rows changed.
+A `local_record_already_closed` result describes local bookkeeping, not
+upstream proof.
