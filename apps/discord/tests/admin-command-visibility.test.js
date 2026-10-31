@@ -19,6 +19,12 @@ test.each([undefined, '123456789012345678'])('registration separates admin actio
   expect(user.options.map(option => option.name)).not.toContain('status');
   const admin = data.find(command => command.name === 'qurl-admin');
   expect(admin.default_member_permissions).toBe('32');
+  if (guildId) {
+    expect(admin.integration_types).toBeUndefined();
+    expect(admin.contexts).toBeUndefined();
+  } else {
+    expect(admin).toMatchObject({ integration_types: [0], contexts: [0] });
+  }
   expect(admin.options.map(option => option.name)).toEqual(['setup', 'status']);
   expect(user.default_member_permissions ?? null).toBeNull();
 });

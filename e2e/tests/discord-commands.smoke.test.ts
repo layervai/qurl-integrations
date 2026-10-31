@@ -41,7 +41,7 @@ type ScopedCommand = ApplicationCommand & { _scope: 'global' | 'guild' };
 // becomes observed rather than theoretical.
 describe('Discord command registration (smoke)', () => {
   const env = loadEnv();
-  // Shared across both assertions so we only hit the Discord API twice per
+  // Shared across the assertions so we only hit the Discord API twice per
   // run instead of four times (halves rate-limit exposure). Initialized
   // to `[]` so the type doesn't lie during the pre-beforeAll window.
   let registrations: ScopedCommand[] = [];

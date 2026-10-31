@@ -350,13 +350,15 @@ describe('handleCommand dispatch-time filter', () => {
   );
 
   it.each([
-    ['DM', { guildId: null, user: { id: 'user-1' } }],
-    ['user install inside a guild', {
-      guildId: 'guild-1',
-      authorizingIntegrationOwners: { 1: 'user-1' },
-      user: { id: 'user-1' },
+    ['qurl', 'DM', { guildId: null, user: { id: 'user-1' } }],
+    ['qurl-admin', 'DM', { guildId: null, user: { id: 'user-1' } }],
+    ['qurl', 'user install inside a guild', {
+      guildId: 'guild-1', authorizingIntegrationOwners: { 1: 'user-1' }, user: { id: 'user-1' },
     }],
-  ])('rejects a stale %s /qurl interaction before subcommand dispatch', async (_label, context) => {
+    ['qurl-admin', 'user install inside a guild', {
+      guildId: 'guild-1', authorizingIntegrationOwners: { 1: 'user-1' }, user: { id: 'user-1' },
+    }],
+  ])('rejects stale %s in %s before subcommand dispatch', async (commandName, _label, context) => {
     jest.doMock('../src/store', () => ({}));
     jest.doMock('../src/discord', () => ({
       sendDM: jest.fn(),
@@ -368,7 +370,7 @@ describe('handleCommand dispatch-time filter', () => {
     const interaction = {
       isAutocomplete: () => false,
       isChatInputCommand: () => true,
-      commandName: 'qurl',
+      commandName,
       options: { getSubcommand: jest.fn(() => 'help') },
       reply,
       ...context,

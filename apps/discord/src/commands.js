@@ -9029,6 +9029,7 @@ const commands = [
     // checks the subcommand names and, when map is enabled, that send and map
     // register identical shared options.
     data: buildQurlCommandData(config),
+    // Shared admin handlers also accept guarded, unregistered cached aliases.
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
 
