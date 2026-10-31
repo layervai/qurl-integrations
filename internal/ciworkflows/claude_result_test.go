@@ -46,10 +46,15 @@ func TestClaudeExecutionRequiresTerminalSuccess(t *testing.T) {
 				t.Fatalf("missing job %s", workflow.job)
 			}
 			var run string
+			found := 0
 			for _, step := range job.Steps {
 				if step.Name == workflow.step {
 					run = step.Run
+					found++
 				}
+			}
+			if found != 1 {
+				t.Fatalf("expected one %q step, got %d", workflow.step, found)
 			}
 			matches := filterPattern.FindAllStringSubmatch(run, -1)
 			if len(matches) != 1 {

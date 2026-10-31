@@ -539,6 +539,9 @@ jobs:
           # had otherwise completed. Publish the terminal message from here so
           # the marker is emitted by the workflow rather than retyped, and keep
           # proving that this run published this review.
+          # TODO(upstream-contract): recheck the action's execution-file.ts array
+          # and SDK terminal-result fields when either upstream version changes.
+          # Both filters are exercised by internal/ciworkflows/claude_result_test.go.
           if ! review_body="$(jq -ers '
             select(length == 1) | .[0] | select(type == "array") |
             [ .[] | select(type == "object") | select(.type == "result") ] | last |

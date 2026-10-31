@@ -361,6 +361,11 @@ jobs:
           fi
           # A file alone is not proof: require the last terminal result to
           # declare success and contain final text, independent of action status.
+          # Commands need a final disposition: tool-only activity is not a
+          # completed review, even when individual tool calls succeeded.
+          # TODO(upstream-contract): recheck the action's execution-file.ts array
+          # and SDK terminal-result fields when either upstream version changes.
+          # Both filters are exercised by internal/ciworkflows/claude_result_test.go.
           if ! jq -ers '
             select(length == 1) | .[0] | select(type == "array") |
             [ .[] | select(type == "object") | select(.type == "result") ] | last |
