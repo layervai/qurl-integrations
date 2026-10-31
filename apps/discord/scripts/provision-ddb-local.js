@@ -8,11 +8,8 @@
 // prod that's handled by terraform; locally we provision via this
 // script.
 //
-// Schemas mirror the live shape `ddb-store.js` expects — keys, GSIs,
-// and TTL attributes. `qurl_sends`, `qurl_send_configs` and
-// `guild_configs` match the `modules/qurl-bot-ddb/main.tf` definitions
-// in the infrastructure repository; `qurl_views` is inferred from
-// `ddb-store.js` call sites (key + TTL usage).
+// Keys, GSIs and TTL for all four Store tables match the infrastructure
+// module; CI compares its mocked plans with the data-only schema below.
 //
 // SCOPE: this provisioner covers the Store-contract tables only (those
 // in `src/store/ddb-store.js`'s TABLES map). Other modules use their
@@ -27,11 +24,10 @@
 // provision them via terraform against localhost or `aws dynamodb
 // create-table --endpoint-url http://localhost:8000`.
 //
-// Drift caveat: this is a parallel schema source from the terraform
-// module. If `ddb-store.js` adds a new GSI / changes a key, this
-// script must follow. The contract test in `tests/ddb-store.test.js`
-// pins call-site shape against the real bot code, so a drift surfaces
-// as a failed local boot — not as a silent prod mismatch.
+// CI compares the data-only schema with a mocked infrastructure plan, including
+// keys, GSIs, projections and TTL. Update both sides in a coordinated change.
+// Existing local tables are not migrated: recreate only your disposable local
+// tables when a schema change requires it. This script never drops tables.
 //
 // Usage:
 //   docker compose up -d dynamodb-local
@@ -135,53 +131,8 @@ function makeClient({ region, endpoint }) {
   });
 }
 
-// Schemas mirror what `ddb-store.js` expects at runtime. KeySchema is
-// PK (HASH) + optional SK (RANGE); GSIs project ALL by default unless
-// the call site only reads keys (KEYS_ONLY). TTL attribute name is
-// listed separately — DDB requires a follow-up UpdateTimeToLive call.
-const tables = [
-  {
-    name: 'qurl-sends',
-    keySchema: [
-      { AttributeName: 'send_id', KeyType: 'HASH' },
-      { AttributeName: 'recipient_discord_id', KeyType: 'RANGE' },
-    ],
-    attributes: [
-      { AttributeName: 'send_id', AttributeType: 'S' },
-      { AttributeName: 'recipient_discord_id', AttributeType: 'S' },
-      { AttributeName: 'sender_discord_id', AttributeType: 'S' },
-      { AttributeName: 'created_at', AttributeType: 'S' },
-    ],
-    gsis: [{
-      IndexName: 'sender_discord_id-created_at-index',
-      KeySchema: [
-        { AttributeName: 'sender_discord_id', KeyType: 'HASH' },
-        { AttributeName: 'created_at', KeyType: 'RANGE' },
-      ],
-      Projection: { ProjectionType: 'ALL' },
-    }],
-  },
-  {
-    name: 'qurl-send-configs',
-    keySchema: [{ AttributeName: 'send_id', KeyType: 'HASH' }],
-    attributes: [{ AttributeName: 'send_id', AttributeType: 'S' }],
-  },
-  {
-    // Webhook-fed view counter; multi-instance bridge between the
-    // /webhooks/qurl receiver and the per-send monitor. No GSI —
-    // read path is BatchGet by qurlLinks set. 30d TTL on `expires_at`
-    // (canonical attribute name) refreshed on every webhook write.
-    name: 'qurl-views',
-    keySchema: [{ AttributeName: 'qurl_id', KeyType: 'HASH' }],
-    attributes: [{ AttributeName: 'qurl_id', AttributeType: 'S' }],
-    ttlAttribute: 'expires_at',
-  },
-  {
-    name: 'guild-configs',
-    keySchema: [{ AttributeName: 'guild_id', KeyType: 'HASH' }],
-    attributes: [{ AttributeName: 'guild_id', AttributeType: 'S' }],
-  },
-];
+// Data-only schema: consumed here and compared with the infrastructure plan in CI.
+const tables = require('./ddb-local-schema.json');
 
 async function ensureTable(client, prefix, spec) {
   const TableName = `${prefix}${spec.name}`;
