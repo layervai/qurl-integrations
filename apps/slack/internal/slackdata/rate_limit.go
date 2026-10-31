@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,6 +19,7 @@ type dynamoDBScanner interface {
 }
 
 const (
+	attrRateLimitPartition = "rate_limit_partition"
 	defaultRateLimitLimit  = 30
 	defaultRateLimitWindow = time.Hour
 	rateLimitKeyPrefix     = "__slack_rate_limit#"
@@ -61,7 +63,9 @@ func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) 
 	retry = windowStart.Add(window).Sub(now)
 
 	counterKey := rateLimitKey(teamID, slackUserID)
-	ok, item, updateErr := s.incrementCurrentRateLimitWindow(ctx, counterKey, now, windowUnix, limit)
+	userScope := strings.TrimPrefix(counterKey, rateLimitTeamPrefix(teamID))
+	partition := rateLimitPartition(teamID, userScope[:1])
+	ok, item, updateErr := s.incrementCurrentRateLimitWindow(ctx, counterKey, partition, now, windowUnix, limit)
 	if updateErr != nil || ok {
 		return ok, 0, updateErr
 	}
@@ -72,9 +76,9 @@ func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) 
 
 	var resetOK bool
 	if hasWindow {
-		resetOK, updateErr = s.resetRateLimitWindow(ctx, counterKey, now, windowUnix, storedWindow)
+		resetOK, updateErr = s.resetRateLimitWindow(ctx, counterKey, partition, now, windowUnix, storedWindow)
 	} else {
-		resetOK, updateErr = s.initializeRateLimitWindow(ctx, counterKey, now, windowUnix)
+		resetOK, updateErr = s.initializeRateLimitWindow(ctx, counterKey, partition, now, windowUnix)
 	}
 	if updateErr != nil || resetOK {
 		return resetOK, 0, updateErr
@@ -82,7 +86,7 @@ func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) 
 
 	// Another worker initialized/reset the window between our condition failure
 	// and our repair write. Retry the normal current-window increment once.
-	ok, item, updateErr = s.incrementCurrentRateLimitWindow(ctx, counterKey, now, windowUnix, limit)
+	ok, item, updateErr = s.incrementCurrentRateLimitWindow(ctx, counterKey, partition, now, windowUnix, limit)
 	if updateErr != nil || ok {
 		return ok, 0, updateErr
 	}
@@ -121,6 +125,11 @@ func rateLimitTeamPrefix(teamID string) string {
 	return rateLimitKeyPrefix + teamID + "#"
 }
 
+func rateLimitPartition(teamID, shard string) string {
+	sum := sha256.Sum256([]byte(teamID))
+	return hex.EncodeToString(sum[:]) + "#" + shard
+}
+
 func (s *Store) ensureRateLimitWorkspaceBound(ctx context.Context, teamID string) error {
 	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:            aws.String(s.WorkspaceMappingsName),
@@ -142,24 +151,26 @@ func (s *Store) ensureRateLimitWorkspaceBound(ctx context.Context, teamID string
 	return nil
 }
 
-func (s *Store) incrementCurrentRateLimitWindow(ctx context.Context, counterKey string, now time.Time, windowUnix int64, limit int) (allowed bool, item map[string]ddbtypes.AttributeValue, err error) {
+func (s *Store) incrementCurrentRateLimitWindow(ctx context.Context, counterKey, partition string, now time.Time, windowUnix int64, limit int) (allowed bool, item map[string]ddbtypes.AttributeValue, err error) {
 	_, err = s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(counterKey),
 		},
-		UpdateExpression:    aws.String("SET " + exprUpdatedAtNano + " = " + exprNowNano + " ADD #count " + exprOne),
+		UpdateExpression:    aws.String("SET " + exprUpdatedAtNano + " = " + exprNowNano + ", #partition = :partition ADD #count " + exprOne),
 		ConditionExpression: aws.String("#window = :window AND #count < :limit"),
 		ExpressionAttributeNames: map[string]string{
 			"#count":          attrRateLimitCount,
+			"#partition":      attrRateLimitPartition,
 			exprUpdatedAtNano: attrUpdatedAtNano,
 			"#window":         attrRateLimitWindow,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			exprOne:     numberAttr(1),
-			":now_nano": unixNanoAttr(now),
-			":window":   numberAttr(windowUnix),
-			":limit":    numberAttr(int64(limit)),
+			exprOne:      numberAttr(1),
+			":now_nano":  unixNanoAttr(now),
+			":partition": stringAttr(partition),
+			":window":    numberAttr(windowUnix),
+			":limit":     numberAttr(int64(limit)),
 		},
 		ReturnValuesOnConditionCheckFailure: ddbtypes.ReturnValuesOnConditionCheckFailureAllOld,
 	})
@@ -173,20 +184,21 @@ func (s *Store) incrementCurrentRateLimitWindow(ctx context.Context, counterKey 
 	return false, nil, ddbToError("CheckRateLimit", err)
 }
 
-func (s *Store) initializeRateLimitWindow(ctx context.Context, counterKey string, now time.Time, windowUnix int64) (bool, error) {
-	return s.setRateLimitWindow(ctx, counterKey, now, windowUnix, "attribute_not_exists(#window)", nil)
+func (s *Store) initializeRateLimitWindow(ctx context.Context, counterKey, partition string, now time.Time, windowUnix int64) (bool, error) {
+	return s.setRateLimitWindow(ctx, counterKey, partition, now, windowUnix, "attribute_not_exists(#window)", nil)
 }
 
-func (s *Store) resetRateLimitWindow(ctx context.Context, counterKey string, now time.Time, windowUnix, oldWindow int64) (bool, error) {
-	return s.setRateLimitWindow(ctx, counterKey, now, windowUnix, "#window = :old_window", map[string]ddbtypes.AttributeValue{
+func (s *Store) resetRateLimitWindow(ctx context.Context, counterKey, partition string, now time.Time, windowUnix, oldWindow int64) (bool, error) {
+	return s.setRateLimitWindow(ctx, counterKey, partition, now, windowUnix, "#window = :old_window", map[string]ddbtypes.AttributeValue{
 		":old_window": numberAttr(oldWindow),
 	})
 }
 
-func (s *Store) setRateLimitWindow(ctx context.Context, counterKey string, now time.Time, windowUnix int64, condition string, extra map[string]ddbtypes.AttributeValue) (bool, error) {
+func (s *Store) setRateLimitWindow(ctx context.Context, counterKey, partition string, now time.Time, windowUnix int64, condition string, extra map[string]ddbtypes.AttributeValue) (bool, error) {
 	values := map[string]ddbtypes.AttributeValue{
 		":expires_at": numberAttr(time.Unix(windowUnix, 0).Add(2 * s.rateLimitWindow()).Unix()),
 		":now_nano":   unixNanoAttr(now),
+		":partition":  stringAttr(partition),
 		exprOne:       numberAttr(1),
 		":window":     numberAttr(windowUnix),
 	}
@@ -198,10 +210,11 @@ func (s *Store) setRateLimitWindow(ctx context.Context, counterKey string, now t
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(counterKey),
 		},
-		UpdateExpression:    aws.String("SET #window = :window, #count = " + exprOne + ", #expires_at = :expires_at, " + exprUpdatedAtNano + " = " + exprNowNano),
+		UpdateExpression:    aws.String("SET #window = :window, #count = " + exprOne + ", #expires_at = :expires_at, " + exprUpdatedAtNano + " = " + exprNowNano + ", #partition = :partition"),
 		ConditionExpression: aws.String(condition),
 		ExpressionAttributeNames: map[string]string{
 			"#count":          attrRateLimitCount,
+			"#partition":      attrRateLimitPartition,
 			"#expires_at":     attrRateLimitExpiresAt,
 			exprUpdatedAtNano: attrUpdatedAtNano,
 			"#window":         attrRateLimitWindow,

@@ -2,8 +2,10 @@ package slackdata
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -391,14 +393,16 @@ func (f *rateLimitDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInpu
 		item = map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(key)}
 	}
 	switch aws.ToString(in.UpdateExpression) {
-	case "SET #updated_at_nano = :now_nano ADD #count :one":
+	case "SET #updated_at_nano = :now_nano, #partition = :partition ADD #count :one":
 		item[attrRateLimitCount] = numberAttr(readNumber(item, attrRateLimitCount) + 1)
 		item[attrUpdatedAtNano] = in.ExpressionAttributeValues[":now_nano"]
-	case "SET #window = :window, #count = :one, #expires_at = :expires_at, #updated_at_nano = :now_nano":
+		item[attrRateLimitPartition] = in.ExpressionAttributeValues[":partition"]
+	case "SET #window = :window, #count = :one, #expires_at = :expires_at, #updated_at_nano = :now_nano, #partition = :partition":
 		item[attrRateLimitWindow] = in.ExpressionAttributeValues[":window"]
 		item[attrRateLimitCount] = in.ExpressionAttributeValues[":one"]
 		item[attrRateLimitExpiresAt] = in.ExpressionAttributeValues[":expires_at"]
 		item[attrUpdatedAtNano] = in.ExpressionAttributeValues[":now_nano"]
+		item[attrRateLimitPartition] = in.ExpressionAttributeValues[":partition"]
 	default:
 		return nil, errors.New("unexpected UpdateExpression: " + aws.ToString(in.UpdateExpression))
 	}
@@ -447,4 +451,27 @@ func cloneRateLimitTestItem(item map[string]ddbtypes.AttributeValue) map[string]
 		out[k] = v
 	}
 	return out
+}
+
+func TestRateLimitIndexGoldenProtocol(t *testing.T) {
+	data, err := os.ReadFile("testdata/rate-limit-partitions.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		TeamID     string `json:"team_id"`
+		UserID     string `json:"user_id"`
+		CounterKey string `json:"counter_key"`
+		Partition  string `json:"index_partition"`
+	}
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range cases {
+		key := rateLimitKey(fixture.TeamID, fixture.UserID)
+		scope := strings.TrimPrefix(key, rateLimitTeamPrefix(fixture.TeamID))
+		if key != fixture.CounterKey || rateLimitPartition(fixture.TeamID, scope[:1]) != fixture.Partition {
+			t.Fatal("rate index protocol drifted from its migration vectors")
+		}
+	}
 }
