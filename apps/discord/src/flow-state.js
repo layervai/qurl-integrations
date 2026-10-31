@@ -744,7 +744,8 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
 // behavior is exactly the pre-existing stage-gate-only delete
 // (the only path used by terminal-flow callers, where there
 // is no concurrent advancement to race against).
-async function deleteFlow(flow_id, { stage, reason, expectedVersion } = {}) {
+// expiredOnly adds an atomic TTL check for recovery across different stages.
+async function deleteFlow(flow_id, { stage, reason, expectedVersion, expiredOnly = false } = {}) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.deleteFlow: flow_id must be a non-empty string');
   }
@@ -753,6 +754,9 @@ async function deleteFlow(flow_id, { stage, reason, expectedVersion } = {}) {
   }
   if (reason !== 'terminal' && reason !== 'abort' && reason !== 'admin_cleanup') {
     throw new TypeError(`flow-state.deleteFlow: reason must be one of 'terminal'|'abort'|'admin_cleanup' (got ${JSON.stringify(reason)})`);
+  }
+  if (typeof expiredOnly !== 'boolean') {
+    throw new TypeError('flow-state.deleteFlow: expiredOnly must be a boolean');
   }
   if (expectedVersion !== undefined) {
     if (typeof expectedVersion !== 'number' || !Number.isInteger(expectedVersion) || expectedVersion < 1) {
@@ -781,6 +785,13 @@ async function deleteFlow(flow_id, { stage, reason, expectedVersion } = {}) {
     conditionParts.push('#v = :expected');
     exprNames['#v'] = 'version';
     exprValues[':expected'] = expectedVersion;
+  }
+
+  if (expiredOnly) {
+    // A new live row can reuse the old stage and version after creation resets it.
+    conditionParts.push('#e <= :expired_now');
+    exprNames['#e'] = 'expires_at';
+    exprValues[':expired_now'] = nowEpochSeconds();
   }
 
   try {
@@ -840,7 +851,7 @@ async function deleteFlow(flow_id, { stage, reason, expectedVersion } = {}) {
 }
 
 // Open a fresh flow row, superseding a same-flow_id predecessor at
-// the SAME stage if one exists. The supersede-and-retry pattern was
+// the same stage, or an expired predecessor at another stage. The pattern was
 // duplicated across /qurl revoke and /qurl setup (and recurs in
 // /qurl send + /qurl map); extracting it here closes #272 (OCC on
 // deleteFlow against the prior version), #273 (include_expired so
@@ -923,11 +934,10 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
     return { created: false, surviving: null };
   }
 
-  // Same-stage predecessor: we can attempt to claim it via stage +
-  // version gate. A sibling flow (different stage) is unreachable
-  // by deleteFlow's stage check — return it unchanged so the caller
-  // can surface the sibling-flow message.
-  if (surviving.stage !== stage) {
+  // Live sibling flows retain their slot. An expired sibling can be recovered,
+  // but the delete must check expiry atomically in case a new live row replaced it.
+  const expiredSibling = surviving.stage !== stage && surviving.expires_at <= nowEpochSeconds();
+  if (surviving.stage !== stage && !expiredSibling) {
     return { created: false, surviving };
   }
 
@@ -940,6 +950,7 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
     stage: surviving.stage,
     reason: 'admin_cleanup',
     expectedVersion: surviving.version,
+    expiredOnly: expiredSibling,
   });
   if (!claimed.deleted) {
     // Lost the OCC race or the row evaporated. Re-peek so the
