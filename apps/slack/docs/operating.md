@@ -1148,7 +1148,7 @@ window-expired prompts.
 
 ## Async pool pressure
 
-A rejected worker in the shared async pool emits `event=async_pool_rejected`. This includes slash commands, interactions, and conversation turns; each caller chooses its reply. Use this CloudWatch Logs Insights query to find sustained pressure without a full-text scan:
+A rejected worker in the shared async pool emits `event=async_pool_rejected`. This includes slash commands, interactions, and conversation turns; each caller chooses its reply. Use this CloudWatch Logs Insights query to find sustained pressure without matching on message text:
 
 ```text
 filter event = "async_pool_rejected"
@@ -1156,4 +1156,4 @@ filter event = "async_pool_rejected"
 | filter drops >= 3
 ```
 
-This event counts shared-pool rejections, including the slash-command busy acknowledgment. It does not count every command failure or rejection from a separate follow-up gate. Group by `command` when you need the slash-command breakdown. Check request latency and dependency health before raising concurrency limits.
+This event counts shared-pool rejections, including the slash-command busy acknowledgment. It does not count every command failure or rejection from a separate follow-up gate. Group by `command` when you need the slash-command breakdown; rejections without that field appear in an empty group. Check request latency and dependency health before raising concurrency limits.
