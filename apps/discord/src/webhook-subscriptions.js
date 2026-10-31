@@ -34,6 +34,7 @@ const OWNER_DISCOVERY_WARN_PAGE = Math.floor(MAX_OWNER_DISCOVERY_PAGES / 2);
 // Wall-clock budget for one discovery walk, so a degraded qurl-service fails
 // fast with its own code instead of parking work for tens of minutes.
 const OWNER_DISCOVERY_BUDGET_MS = 60_000;
+// Maximum age of a pending walk; completed results are never reused.
 const LINK_OWNER_DISCOVERY_JOIN_MS = 3_000;
 const QURL_PER_REQUEST_TIMEOUT_MS = 10_000;
 // Node/undici network error codes that are transient despite carrying a code.
@@ -403,7 +404,8 @@ async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
     throw err;
   }
 
-  // Join only a walk started within 3s. Completed results are never reused:
+  // Join only a walk started within 3s; pages may be that old. Errors are
+  // shared and callers only read them. Completed results are never reused:
   // the last subscription may be deleted out of band. Background refresh uses
   // different malformed-row rules and must keep its own discovery walk.
   const ownerId = await discoverDefaultOwnerForLink(bridgeUrl);
