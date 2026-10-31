@@ -245,6 +245,7 @@ export const REVOKE_CONFIRM_WAIT_MS = 35_000;
 /** Revoke the resource. A successful DELETE confirms the protection update.
  * Repeated DELETEs retry the same committed epoch (qurl-service RevokeQurl).
  * A management status of `revoked` alone does not confirm that update.
+ * A confirmation 404 succeeds only after the dedicated committed-revocation code.
  * Cleanup retries only a 429 within the sweep's shared wait budget.
  * cleanupRetryBudget is reserved for cleanup with confirmPending=false. */
 export async function revokeLink(
@@ -256,16 +257,31 @@ export async function revokeLink(
   const url = new URL(baseUrl);
   url.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
   const init = { method: 'DELETE', headers: { Authorization: `Bearer ${apiKey}` } };
+  let committed = false;
   const res = cleanupRetryBudget
     ? await fetchWithCleanupRetry(url, init, cleanupRetryBudget)
-    : await fetchWithTransientRetry(url, init, confirmPending
-      ? { maxAttempts: 2, maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS }
-      : { maxAttempts: 1 });
+    : await fetchWithTransientRetry(url, init, confirmPending ? {
+      maxAttempts: 2,
+      maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS,
+      shouldRetry: async (response) => {
+        if (response.status !== 503) return true;
+        const raw = response.headers.get('retry-after')?.trim() ?? '';
+        const waitMs = /^\d+$/.test(raw) ? Number(raw) * 1000 : NaN;
+        // Never shorten a server directive to fit this caller's wait budget.
+        if (waitMs > REVOKE_CONFIRM_WAIT_MS) return false;
+        // This caller needs only the status; the retry response body is discarded.
+        const problem = await response.json().catch(() => null) as { error?: { code?: unknown } } | null;
+        // TODO(upstream-contract): qurl-service#1998 reserves this code for a saved revoke.
+        committed = problem?.error?.code === 'revocation_pending';
+        return !committed || waitMs > 0;
+      },
+    } : { maxAttempts: 1 });
   await res.body?.cancel().catch(() => {});
-  if (!res.ok && confirmPending) {
+  const confirmed = res.status === 204 || (committed && res.status === 404);
+  if (!confirmed && confirmPending) {
     console.warn(`[revokeLink] DELETE returned ${res.status}; protection update not confirmed`);
   }
-  return res.ok;
+  return confirmed;
 }
 
 export interface LinkStatus {
