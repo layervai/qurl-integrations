@@ -1312,7 +1312,7 @@ func TestBuildOAuthConfigFailsFastOnInvalidStateStore(t *testing.T) {
 // tests that only need a non-nil to flip the JWKS fail-fast branch.
 type fakeAdminStore struct{}
 
-func (*fakeAdminStore) BindWorkspace(_ context.Context, _ *oauth.WorkspaceMapping, _ string) error {
+func (*fakeAdminStore) BindWorkspace(_ context.Context, _ *oauth.WorkspaceMapping) error {
 	return nil
 }
 

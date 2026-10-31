@@ -72,10 +72,10 @@ func TestAdminStoreAdapterForwardsAllFields(t *testing.T) {
 	adapter := NewOAuthAdminStoreAdapter(captured)
 	want := oauth.WorkspaceMapping{
 		TeamID:    "T_capture",
-		OwnerID:   "auth0|capture-owner",
+		OwnerID:   "UCAPTURE01",
 		CreatedAt: mustParseTime(t, "2026-05-20T12:34:56Z"),
 	}
-	if err := adapter.BindWorkspace(context.Background(), &want, "U_seed"); err != nil {
+	if err := adapter.BindWorkspace(context.Background(), &want); err != nil {
 		t.Fatalf("BindWorkspace: %v", err)
 	}
 	if captured.gotMapping == nil {
@@ -88,22 +88,17 @@ func TestAdminStoreAdapterForwardsAllFields(t *testing.T) {
 			want.TeamID, want.OwnerID, want.CreatedAt,
 			captured.gotMapping.TeamID, captured.gotMapping.OwnerID, captured.gotMapping.CreatedAt)
 	}
-	if captured.gotSeedAdmin != "U_seed" {
-		t.Errorf("seedAdmin: got %q want %q", captured.gotSeedAdmin, "U_seed")
-	}
 }
 
 // capturingSlackdataStore satisfies SlackdataBinder so the production OAuth
 // admin-store adapter can be exercised without standing up a real slackdata.Store.
 type capturingSlackdataStore struct {
-	gotMapping   *slackdata.WorkspaceMapping
-	gotSeedAdmin string
+	gotMapping *slackdata.WorkspaceMapping
 }
 
-// BindWorkspace records the mapping and seed admin passed by the adapter.
-func (c *capturingSlackdataStore) BindWorkspace(_ context.Context, m *slackdata.WorkspaceMapping, seedAdmin string) error {
+// BindWorkspace records the mapping passed by the adapter.
+func (c *capturingSlackdataStore) BindWorkspace(_ context.Context, m *slackdata.WorkspaceMapping) error {
 	c.gotMapping = m
-	c.gotSeedAdmin = seedAdmin
 	return nil
 }
 
