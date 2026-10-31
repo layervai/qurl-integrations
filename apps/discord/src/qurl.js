@@ -380,7 +380,8 @@ async function deleteLink(resourceId, apiKey) {
 //
 // Throws the first failure with `failedCount`: children not confirmed revoked,
 // including any skipped after an auth failure or a budget abort, so it is an
-// upper bound on still-live children rather than a measurement.
+// upper bound on still-live children rather than a measurement. confirmedQurlIds
+// contains only successful child DELETEs under the verified parent.
 async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
   validateResourceId(resourceId);
   if (!Array.isArray(rawQurlIds) || rawQurlIds.length > REVOKE_BATCH_MAX_IDS) {
@@ -424,9 +425,11 @@ async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
   // every child before failing so one stale child cannot shield live siblings.
   let firstFailure;
   let failedCount = 0;
+  const confirmedQurlIds = [];
   for (const [i, qurlId] of qurlIds.entries()) {
     try {
       await callQurl('DELETE', RESOURCE_QURL_LOG_PATH, () => client.revokeResourceQurl(parent.crid, qurlId));
+      confirmedQurlIds.push(qurlId);
     } catch (err) {
       failedCount++;
       firstFailure ??= err;
@@ -441,6 +444,7 @@ async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
   }
   if (firstFailure) {
     firstFailure.failedCount = failedCount;
+    firstFailure.confirmedQurlIds = confirmedQurlIds;
     throw firstFailure;
   }
 }
