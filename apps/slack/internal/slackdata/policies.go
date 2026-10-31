@@ -154,6 +154,15 @@ func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID
 // `/qurl aliases` to see what's available here, or contact your
 // Slack admin to add it." copy for all three.
 func (s *Store) LookupChannelAlias(ctx context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error) {
+	return s.lookupChannelAlias(ctx, teamID, channelID, aliasName, false)
+}
+
+// LookupChannelAliasConsistent observes a completed unbind before refusing a new bind.
+func (s *Store) LookupChannelAliasConsistent(ctx context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error) {
+	return s.lookupChannelAlias(ctx, teamID, channelID, aliasName, true)
+}
+
+func (s *Store) lookupChannelAlias(ctx context.Context, teamID, channelID, aliasName string, consistent bool) (resourceID string, found bool, err error) {
 	if teamID == "" || channelID == "" || aliasName == "" {
 		return "", false, &Error{
 			StatusCode: http.StatusBadRequest,
@@ -161,7 +170,8 @@ func (s *Store) LookupChannelAlias(ctx context.Context, teamID, channelID, alias
 		}
 	}
 	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
+		TableName:      aws.String(s.ChannelPoliciesName),
+		ConsistentRead: aws.Bool(consistent),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),

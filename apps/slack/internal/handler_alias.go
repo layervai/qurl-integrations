@@ -32,6 +32,8 @@ import (
 // existing PK/SK; no GSI, no SK reshape, no data migration (the table
 // is empty pending Slack bot sandbox deploy).
 type AliasStore interface {
+	// LookupChannelAliasConsistent reads the current binding; missing is not an error.
+	LookupChannelAliasConsistent(ctx context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error)
 	// BindChannelAlias atomically binds aliasName→resourceID on
 	// (teamID, channelID). Implementations issue a DynamoDB UpdateItem
 	// `SET alias_bindings.#a = :rid` with
@@ -392,6 +394,15 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 }
 
 func (h *Handler) resolveAndBindTunnelSlugAliasResult(ctx context.Context, log *slog.Logger, teamID, channelID, alias, slug string) actionCoreResult {
+	// Avoid upstream lookup for known duplicates; the conditional bind still owns races.
+	_, found, err := h.aliasStore.LookupChannelAliasConsistent(ctx, teamID, channelID, alias)
+	if err != nil {
+		log.Error("setalias precheck failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
+		return newActionCoreResult(false, "Failed to update alias. Please try again.", "Alias could not be updated.")
+	}
+	if found {
+		return aliasAlreadyBoundResult(alias)
+	}
 	resourceID, err := h.resolveTunnelSlugAliasTarget(ctx, teamID, slug)
 	if err != nil {
 		log.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias, "slug", slug)
@@ -410,7 +421,7 @@ func (h *Handler) resolveAndBindTunnelSlugAliasResult(ctx context.Context, log *
 	// narrow — claude-bot review #5 on the prior single-alias version.
 	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID)
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
-		return newActionCoreResult(false, fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias), "Alias is already bound in this channel.")
+		return aliasAlreadyBoundResult(alias)
 	}
 	if err != nil {
 		log.Error("setalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
@@ -424,6 +435,10 @@ func (h *Handler) resolveAndBindTunnelSlugAliasResult(ctx context.Context, log *
 	// redaction is needed.
 	logAliasBound(teamID, channelID, alias, slug, resourceID)
 	return newActionCoreResult(true, fmt.Sprintf("Alias `$%s` now points to qURL Connector `$%s` in this channel.", alias, slug), "Alias now points to the qURL Connector in this channel.")
+}
+
+func aliasAlreadyBoundResult(alias string) actionCoreResult {
+	return newActionCoreResult(false, fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias), "Alias is already bound in this channel.")
 }
 
 func logAliasBound(teamID, channelID, alias, slug, resourceID string) {
