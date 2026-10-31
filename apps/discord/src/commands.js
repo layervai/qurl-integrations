@@ -2455,10 +2455,8 @@ async function executeSendPipeline(interaction, {
   // cap, attach the full lists as `recipients.txt` on this initial
   // editReply. Subsequent monitor ticks / Add Recipients edits don't
   // pass `files`, so Discord keeps the existing attachment without
-  // re-uploading. Add Recipients does NOT regenerate the attachment;
-  // the newly-added users surface in the post-revoke "Revoked for: …"
-  // list (with its own overflow path) and in monitor link-status
-  // updates.
+  // re-uploading. Add Recipients labels the retained file as the
+  // original list; the post-revoke list includes later recipients.
   // Hoisted above editReply so the initial confirmation can render the
   // `👀 0 of N viewed` baseline via monitor.getFullMsg(); without the
   // hoist the sender sees no counter until the first poll + at least
@@ -2920,6 +2918,9 @@ async function executeSendPipeline(interaction, {
               const totalSent = delivered + addRecipientsCount;
               confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | ${formatSelfDestructSegment(selfDestructSeconds)}`;
               if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
+              if (confirmRendered.attachmentText) {
+                confirmMsg += `\nAttached recipients.txt lists only the original recipients; newly added recipients are not listed.`;
+              }
               monitor.updateBaseMsg(confirmMsg);
               await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
               // Mid-life degrade: an added link missing its qurl_id flips
