@@ -1,258 +1,143 @@
 # Zero-downtime upgrades for the qURL Discord bot
 
-**Status:** front-half analysis superseded by PR 7b.3 — see banner; full
-rewrite tracked in [#314](https://github.com/layervai/qurl-integrations/issues/314). Gateway-tier RESUME design (PR 10–15) still applies.
-> ⚠️ This doc still references the legacy multi-step `/qurl send` wizard and
-> the `await*Component` / `awaitMessages` patterns. As of PR 7b.3 those are
-> gone — the live entry points are `/qurl send` (renamed from `/qurl file`)
-> and `/qurl map`, and the flow is flow_state-backed (no in-process
-> Promise-on-Gateway-event coupling). The MESSAGE_CREATE-on-DM constraint
-> cited below is no longer load-bearing. NOTE: the live `/qurl send` is
-> distinct from the legacy `/qurl send` wizard — same name, different
-> implementation.
-
-**Tracking:** `infra repo #122` (deploy outage), `qurl-integrations#TBD` (this PR)
-**Owners:** posey + reviewers
-
 ## Summary
 
-Every deploy of `bot_gateway` today causes a 30–90 s outage. Three independent
-user-visible surfaces break: slash command initiation, in-flight `/qurl send`
-flows (button clicks, file drops, modals), and the bot's presence indicator. To
-meet an enterprise availability bar, all three must survive a deploy with no
-user-observable impact.
+The bot separates interaction state from Gateway connection state. The current
+`/qurl send` takes its attachment as a slash-command option; `/qurl map` takes a
+location. Their confirmation interactions, setup and revoke menus use the
+persisted flow dispatcher. They do not wait for a later DM file drop or depend
+on a wizard Promise stored in the Gateway process.
 
-The redesign collapses to one architectural decision (event-shipper split) plus
-three implementation pillars. After this work, deploying business logic is a
-standard rolling deploy with zero user impact, and the rarely-deployed gateway
-tier uses Discord's own session-resume primitive plus a hot-standby with direct
-push-handoff to keep its own outage sub-second.
+A process restart can still interrupt work already in progress, miss an
+interaction ACK deadline or break a Gateway session. Persisted flow state makes
+later interactions resumable; it does not make arbitrary HTTP work, child-link
+minting or DM delivery exactly once. Those paths need their own conditional
+writes, compensation and delivery records.
 
-## Why the current design can't get there
+This document describes the source contracts and the Gateway RESUME/handoff
+design. It does not establish which flags are enabled in a managed environment
+or promise a measured outage duration. Deployment, replay, cleanup and rollback
+checks must establish that behavior on the selected image and task bindings.
 
-Three independent layers break during a deploy of the current `bot_gateway`
-service (singleton, `desired_count=1`, `deployment_minimum_healthy_percent=0`):
+## What a deploy must preserve
 
-1. **Slash command initiation.** Discord enforces a 3 s ACK deadline on every
-   interaction. While the gateway task is being replaced, slash commands
-   return "interaction failed" in the user's Discord client.
-2. **In-flight `/qurl send` flows.** The send flow uses `awaitMessageComponent`,
-   `awaitMessages` (file drop in DM), and `awaitModalSubmit` in nine distinct
-   sites across `apps/discord/src/commands.js`. Each is a Promise resolved by
-   an event the Gateway delivers to *this process*. SIGTERM = those Promises
-   never resolve = the user's flow silently dies. This is a bug today even
-   outside of deploys (any process crash mid-flow drops the user).
-3. **Bot presence.** The green dot in Discord member lists flips off for the
-   same window.
+1. **Interaction admission.** An incoming slash command, component or modal must
+   reach a handler and be acknowledged within its deadline.
+2. **Flow continuity.** The next interaction must load the surviving row and
+   validate its stage, version, identity and expiry before it acts.
+3. **Gateway continuity.** The new active process must recover the session and
+   dispatch checkpoint, or use the explicit fresh-session fallback. Presence and
+   replay behavior need a real handoff check.
 
-Two Discord constraints make these hard:
+The flow-state work addresses the second requirement. The event queue separates
+business handlers from the Gateway connection. The remaining session and
+leadership requirements are covered by Pillars 2 and 3 below.
 
-- **One active Gateway WebSocket per bot token.** A second `IDENTIFY` on the
-  same token invalidates the first session. Rules out the naive
-  `desired_count=2` rolling deploy. Already enforced in
-  the infra repo's `qurl-bot-discord/terraform/variables.tf` via a
-  validation block rejecting `gateway_desired_count != 1`.
-- **`MESSAGE_CREATE` is Gateway-only.** Discord's HTTPS Interactions endpoint
-  (an alternative interaction delivery surface) carries interaction events but
-  *not* regular DM messages. Users dropping a file as a DM message is the
-  load-bearing step of `/qurl send`; switching to HTTPS Interactions would
-  break that step. We considered and rejected this approach.
+## Process roles
 
-## The redesign at a glance
+With the event-shipper split enabled:
 
-Two tiers:
-
-```
-                     Discord Gateway WS
-                            │
-                            ▼
-      ┌─────────────────────────────────────────┐
-      │  GATEWAY TIER (bot_gateway)             │
-      │  - Maintains Discord Gateway WebSocket  │
-      │  - Forwards every dispatch to SQS       │
-      │  - Zero business logic                  │
-      │  - Hot-standby + leader-election lock   │
-      │  - Cross-process RESUME via DDB         │
-      │  - Deployed rarely (Node/discord.js     │
-      │    version bumps, sharding changes)     │
-      └────────────────┬────────────────────────┘
-                       │
-              SQS Standard Queue (DLQ,
-              autoscaling signal for
-              workers; ordering enforced
-              at the DDB layer)
-                       │
-                       ▼
-      ┌─────────────────────────────────────────┐
-      │  WORKER TIER (extends today's bot_http) │
-      │  - Stateless queue consumer             │
-      │  - All /qurl command logic              │
-      │  - All flow-state transitions in DDB    │
-      │  - Discord REST for outbound responses  │
-      │  - Standard rolling deploys (min=100,   │
-      │    max=200, ALB drain) — 0-downtime     │
-      │    trivially because stateless          │
-      │  - Auto-scales on queue depth           │
-      └─────────────────────────────────────────┘
+```text
+Discord Gateway
+    │
+    ▼
+Gateway process ── SQS Standard ──► worker process
+    │                                  │
+    │ session/checkpoint and lease      │ flow/recipient state
+    ▼                                  ▼
+DynamoDB                            DynamoDB
+                                       │
+                                       ▼
+                                Discord REST replies
 ```
 
-The user-visible deploy story becomes:
+The producer in [`event-publisher.js`](../src/event-publisher.js) emits a
+shard-qualified event ID. The consumer in
+[`event-consumer.js`](../src/event-consumer.js) currently reconstructs
+`INTERACTION_CREATE` through discord.js and the shared interaction listener.
+Other event types are logged and deleted; there is no DM-file-capture consumer.
+A Gateway connection is still needed for the selected transport and presence.
 
-- **Worker tier deploy (the common case — every PR):** rolling deploy, standard
-  ECS `deployment_minimum_healthy_percent = 100`, `maximum = 200`. New tasks
-  reach steady state before old tasks stop. ALB target-group `deregistration_delay = 90`
-  matches `idle_timeout` so in-flight HTTP requests drain. Workers are stateless
-  so there's no transferable per-process state to worry about. **0 downtime.**
-- **Gateway tier deploy (rare):** hot-standby pair + DDB leader-election lock.
-  Only the lock holder calls `WebSocketManager.connect()`. SIGTERM on the
-  active replica pushes a "you're up" notification to the standby over an
-  internal HTTP control channel, then releases the lock and closes the WS with
-  code 1000. The standby was pre-booted (Node up, code loaded, DDB connected,
-  control listener bound, just no Gateway connection) so handoff is hundreds
-  of milliseconds. The standby reads session state from DDB and `RESUME`s on
-  Discord's gateway-resume URL — Discord buffers events on the previous
-  session for ~60 s and replays them on resume, so no events are lost across
-  the handoff. **Sub-second slash command and presence gap; no event loss.**
+Worker rolling replacement must admit the replacement before stopping the old
+worker and allow bounded in-flight work to drain. Gateway replacement also
+needs the lease, session snapshot, dispatch checkpoint and handoff rules below.
+A warm replacement alone does not transfer those states. Configuration and
+normal CI determine the deployed roles and rollout order.
 
 ## The three pillars
 
-### Pillar 1 — Persistent flow state (replaces in-memory `await*`)
+### Pillar 1 — Persistent interaction state
 
-Every in-memory `await*` site becomes a transition on a row in a new DDB table
-`qurl_bot_flow_state`. The schema is shard-aware from day one (the `shard_id`
-prefix is `"0:1"` while we have a single shard; the schema generalizes when
-sharding lands later).
+[`flow-state.js`](../src/flow-state.js) provides `createFlow`, `loadFlow`,
+`transitionFlow` and `deleteFlow`. [`flow-id.js`](../src/flow-id.js) builds and
+parses the canonical `<shard_id>#<guild_id>#<channel_id>#<user_id>` key.
+[`flow-dispatch.js`](../src/flow-dispatch.js) resolves component/modal routing
+from the interaction context and loads the matching row before invoking a
+registered handler. A custom ID selects a route; it is not an authorization
+identity.
 
-| Attribute | Type | Notes |
-|---|---|---|
-| `flow_id` (PK) | string | `<shard_id>#<guild_id>#<channel_id>#<user_id>` |
-| `stage` | string | `awaiting_button`, `awaiting_file`, `awaiting_modal`, … |
-| `payload` | map | flow-specific data (send_nonce, attachment metadata, recipient list) |
-| `version` | number | optimistic concurrency control |
-| `created_at` | number | epoch seconds |
-| `expires_at` | number | DDB TTL; matches the longest existing `await*` timeout |
+| Attribute | Purpose |
+|---|---|
+| `flow_id` | Canonical shard, guild, channel and user key |
+| `stage` | Registered handler stage, such as `awaiting_send_confirm` |
+| `payload` | Encrypted flow data needed by a later interaction |
+| `version` | Expected-version condition for a transition |
+| `created_at` | Creation time |
+| `expires_at` | Application expiry and asynchronous DynamoDB TTL cleanup |
 
-The state-machine harness `apps/discord/src/flow-state.js` (PR 4) provides
-`createFlow`, `loadFlow`, `transitionFlow` (DDB conditional `UpdateItem` with
-`version = :expected` for OCC), and `deleteFlow`. Every transition emits a
-metric `qurl_bot_flow_transition_total{stage_from,stage_to,result,terminal}`
-(materialized by the event-shipper observability Phase 1.0 PR's audit-event
-reservation plus the matching CloudWatch metric filter in
-the infrastructure repository).
+The reader enforces expiry; TTL removal is not the authorization boundary.
+Payload encryption requires the configured encryption key. A transition must
+use the loaded version, and a conditional failure must be handled before
+sending a message or doing another external action. A row can survive process
+replacement while the interaction token and any in-flight request still have
+their own deadlines.
 
-**Application-level concurrency rule:** a user with an existing non-expired
-flow row in a given `(channel_id)` cannot start a second flow there. The second
-`/qurl send` returns `"You already have a /qurl send in progress — finish or
-cancel it first."` This avoids needing a GSI on the flow table and keeps the
-state model simple.
+The current command registrations use `awaiting_send_confirm`,
+`awaiting_revoke_select`, `awaiting_setup_button` and `awaiting_setup_modal`.
+Send/map confirmation state replaces the old attachment-capture wizard. Do not
+restore an `awaiting_file` flow or route regular DM messages to that removed
+front half.
 
-**Per-command override matrix.** The block-second-flow rule above is the
-default. Two commands carry intentional exceptions because their UX shape
-makes blocking the wrong call:
+| Command | Existing-flow policy |
+|---|---|
+| `/qurl revoke` | Supersede the prior revoke menu through the guarded delete/recreate path. |
+| `/qurl setup` | Supersede the pre-modal button stage; preserve an active setup modal. |
 
-| Command | Behavior on existing flow | Rationale |
-|---|---|---|
-| `/qurl revoke` | **Supersede** (admin_cleanup + recreate) | The menu is a stateless listing of recent sends; an admin who can't remember whether they cancelled the prior dropdown shouldn't be told "finish your existing dropdown first." Re-running shows a fresh menu and the orphan menu's selection lands on `loadFlow → null → "superseded"`. |
-| `/qurl setup` | **Supersede if pre-modal, block if mid-modal** | Two-stage flow (`awaiting_setup_button` → `awaiting_setup_modal`). The supersede call passes `stage: 'awaiting_setup_button'` to `deleteFlow`; the harness's stage gate succeeds when the prior flow is still on the button (admin walked away — give them a fresh one) and fails when the prior flow has advanced to `awaiting_setup_modal` (admin is actively pasting a key — don't yank their modal). The retry `createFlow` then returns `created: false` on the mid-modal case and the user sees "you already have a modal open — finish it." The OAuth path is unchanged — it has no `await*` to convert, so it doesn't enter the flow_state ledger at all. |
-| `/qurl send` | Block (default) | Multi-step send flow (recipient picker, attachment capture, confirm); abandoning mid-flow because a duplicate `/qurl send` slipped through would lose user input. |
+Send/map confirmation uses its current guarded flow creation and dispatcher
+handlers. The deleted multi-step send wizard is not a separate command or a
+second flow contract. Stage/version guards prevent one command from deleting a
+sibling command's surviving row.
 
-The supersede semantics are **enforced at the harness level** by `deleteFlow`'s
-conditional `stage = :expected` gate (see `apps/discord/src/flow-state.js`).
-A revoke command can only supersede a revoke flow; it cannot accidentally
-admin_cleanup a sibling setup or send flow that happens to share the same
-`flow_id` keying.
+### Queue delivery and side effects
 
-**MESSAGE_CREATE handler.** Today the file-drop step uses
-`captureChannel.awaitMessages({...})` on a DM channel. Under the redesign,
-**workers** subscribe to a `MESSAGE_CREATE` event class from the queue. The
-handler:
+SQS Standard can redeliver an event. The consumer's recent-event LRU is a
+telemetry hint, not a correctness gate: a repeated event may be the first
+attempt that can finish. The publisher already uses
+`<SHARD_ID>:<sequence>` as the event ID, rather than an unqualified sequence.
 
-1. Reads message metadata: `(channel_id, author_id, attachments)`.
-2. Constructs `flow_id` candidate keys from the metadata.
-3. Looks up the flow row in DDB. **Every** `MESSAGE_CREATE` does a single
-   `GetItem` against the flow table by composite key. No in-process cache —
-   the earlier draft had a per-worker positive cache that would only have
-   been populated on whichever worker handled the matching flow-create
-   event, leaving every other worker with stale-no-flow assumptions. With
-   SQS Standard, each message is delivered to one worker; there's no
-   natural affinity between flow-create and the user's subsequent
-   file-drop landing on the same worker. A coherent cache would require
-   a separate broadcast channel (Redis pubsub or DDB Streams), which is
-   more infrastructure for marginal cost savings.
-   The volume math says the DDB cost is bounded: at ~thousands of guilds
-   and the bot's invite-only-beta DM patterns, GetItem-on-every-non-flow-
-   DM is tens-to-hundreds of reads per second, fully within DDB's
-   on-demand pricing without provisioned capacity tuning. Revisit only if
-   the volume crosses an order of magnitude.
-4. If matched, advances the flow via OCC. If two events race (e.g., user
-   uploads twice quickly), one OCC retry path wins, the other gets a clear
-   `"flow already advanced"` error.
+The worker tracks the asynchronous handler after discord.js reconstructs the
+interaction. Queue deletion and shutdown draining follow that handler lifecycle;
+a synchronous event emission is not completion. See the executable consumer
+tests for dispatch failures, stale messages, duplicate observations and drain
+behavior.
 
-### Queue: SQS Standard + application-layer idempotency
+Flow OCC, guarded recipient writes and endpoint-specific handling must protect
+side effects. A second interaction callback rejection alone does not establish
+exactly-once minting or delivery. A crash after a remote effect but before local
+confirmation remains a path that needs an explicit recovery check.
 
-The queue between the gateway tier and the worker tier is SQS Standard, not
-FIFO. The rationale is that the ordering FIFO would enforce isn't load-
-bearing — the source of truth for "did this flow advance" is the DDB flow
-row, not the order in which events were processed — and FIFO's per-queue
-throughput ceiling (300 TPS, 3000 with high-throughput mode) is a real
-cliff at sharding scale that Standard doesn't have.
+#### Trust boundary
 
-Standard's at-least-once delivery means duplicate events. Application-layer
-idempotency covers it:
+The queue carries interaction identities and permission context into the same
+handlers used by Gateway events. Treat its publisher permissions as a trust
+boundary. The deployed queue policy and task roles must restrict publishing to
+the intended Gateway role and restrict consumption/deletion to the worker role.
+Verify the selected infrastructure plan and bindings; source layout alone does
+not establish those live grants.
 
-- **`INTERACTION_CREATE` duplicates** are naturally idempotent at Discord:
-  `/callback` returns "Unknown interaction" on the second call because the
-  interaction token has already been ACK'd. The worker's only real cost on
-  a duplicate is a wasted REST call and a logged 4xx.
-- **`MESSAGE_CREATE` duplicates** are blocked by OCC at `transitionFlow`:
-  the second arrival reads the same `version`, attempts the same transition,
-  and the conditional `UpdateItem` fails with `ConditionalCheckFailedException`.
-  The handler treats this as "another worker already advanced this flow"
-  and exits without acting.
-- **`GUILD_CREATE` / `GUILD_DELETE` duplicates** are audit-only; duplicate
-  log lines are tolerable.
-
-Producer-side dedup hint: the gateway sets `MessageAttributes.event_id`
-from Discord's per-dispatch `s` (sequence) field as a defense-in-depth —
-workers log when they see an `event_id` they processed within the last
-5 minutes (in-process LRU, ~10k entries) so a real-world dup rate can
-be quantified. The LRU is best-effort; OCC is the correctness primitive.
-
-Sharding caveat: Discord's `s` is **per-shard** monotonic, not global.
-At single-shard (today) it's a usable event_id. At the sharding
-inflection (~2,500 guilds), `s` alone will collide across shards and
-the LRU will incorrectly drop legitimate events from sibling shards.
-Migrate the producer-side `event_id` to `${shard_id}:${s}` in the
-sharding PR; the worker-side LRU shape doesn't change.
-
-#### Trust boundary — SQS queue policy + envelope authenticity
-
-The worker tier treats every SQS message body as trusted input to
-`client.actions.InteractionCreate.handle`. Anyone who can
-`sqs:SendMessage` on `qurl-bot-events` can spoof an interaction
-payload (including `user.id`, `member.permissions`, etc.) and route
-it through the same dispatcher path as a real Discord-originated
-event. This is acceptable ONLY because the queue is locked down at
-the IAM layer:
-
-- The queue policy on `qurl-bot-events` (defined in the infra PR B
-  module) grants `sqs:SendMessage` exclusively to the gateway task
-  role's principal. No human IAM users have publish rights, and no
-  cross-account access is granted.
-- The gateway task role is itself locked to the gateway service's
-  ECS task definition; it can't be assumed from outside that
-  execution context.
-- `sqs:ReceiveMessage` + `sqs:DeleteMessage` are granted to the
-  worker task role only.
-
-If any of those constraints loosen (e.g., adding a queue publisher
-to a sibling service for shared event-shipping), the worker MUST
-gain envelope-shape validation + signature verification before the
-new publisher's messages reach `handle()`. Today's "trust the
-queue" shape is contingent on the closed publisher set.
-
-Tracked in the infra-side `qurl-bot-events` module README; this
-section is the consumer-side reminder of the contract.
+Do not add another publisher without reviewing envelope validation and
+identity/authenticity requirements first. Worker reconstruction must not turn
+untrusted queue fields into trusted user identity or permissions.
 
 ### Pillar 2 — Cross-process Gateway session resume
 
@@ -686,18 +571,16 @@ stays.
 
 ## Why not other approaches
 
-We evaluated three alternatives and rejected each:
+The current design makes these transport and deployment choices:
 
-- **Discord HTTPS Interactions endpoint** (have Discord POST interactions to
-  the ALB instead of delivering via the Gateway). Rejected because file drops
-  arrive as regular `MESSAGE_CREATE` events, which the HTTPS surface does not
-  carry. Switching would break the `/qurl send` file-capture step entirely
-  without a separate UX redesign.
-- **`min_healthy=100/max=200` on the gateway service alone.** Rejected because
-  Discord's one-active-WS-per-token rule means two simultaneously-IDENTIFY'd
-  replicas cause session-identity flap (the second IDENTIFY invalidates the
-  first; the first's reconnect loop then invalidates the second; both keep
-  flapping).
+- **Discord HTTPS Interactions endpoint.** The removed DM file-drop wizard
+  no longer rules this out. It is a separate transport choice that needs review
+  of signature validation, ACK handling, command registration and presence. This
+  design retains Gateway delivery and does not implement that migration.
+- **Rolling overlap on the gateway service alone.** A replacement task does not
+  by itself transfer lease ownership, the session or the dispatch checkpoint.
+  Keep explicit leadership and RESUME/handoff rather than assuming that two
+  ready tasks provide continuity.
 - **Pre-warmed gateway pool on ECS-EC2 instead of Fargate** (so `IDENTIFY` is
   fast enough to be acceptable as the no-resume fallback). Rejected because it
   adds significant infra complexity (AMI pipeline, instance lifecycle,
