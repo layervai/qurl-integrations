@@ -204,3 +204,27 @@ func TestRepublishWithOtherSettingsWarns(t *testing.T) {
 		})
 	}
 }
+
+func TestRepublishTreatsAnExplicitDefaultAsTheSameSettings(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	var mints []map[string]any
+	scriptMint(t, srv, &mints)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": false}, map[string]any{"found_existing": false})
+	}, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": false}, map[string]any{"found_existing": true})
+	})
+	for _, rule := range []string{
+		`{"id":"11111111-1111-4111-8111-111111111111","name":"Hour","mode":"public","link_limits":{"expires_in":"1h","one_time_use":false}}`,
+		`{"id":"22222222-2222-4222-8222-222222222222","name":"Also hour","mode":"public","link_limits":{"expires_in":"1h"}}`,
+	} {
+		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(rule), shareStateDir: dir})
+		if result.code != 0 || strings.Contains(result.stdout.String(), "settings_differ") || strings.Contains(result.stderr.String(), "other settings") {
+			t.Fatalf("publish %d %s %s", result.code, result.stdout.String(), result.stderr.String())
+		}
+	}
+	if len(mints) != 2 {
+		t.Fatalf("mints = %d, want the first link and the existing share's link", len(mints))
+	}
+}

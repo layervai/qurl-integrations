@@ -519,7 +519,7 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 			approvals = published.ConsumerAccess.ApprovalExpiresIn
 		}
 		policy := rule.Policy(1)
-		published.OtherSettings = !accessrules.SameLinkLimits(kept, limits) || approvals != policy.ApprovalExpiresIn
+		published.OtherSettings = !accessrules.SameEffectiveLinkLimits(kept, limits) || approvals != policy.ApprovalExpiresIn
 		limits = kept
 	} else if limits != nil {
 		store, err := o.shareRuleStore()

@@ -267,3 +267,24 @@ func TestParseDurationMatchesServiceGrammar(t *testing.T) {
 		}
 	}
 }
+
+func TestSameEffectiveLinkLimitsIgnoresExplicitDefaults(t *testing.T) {
+	omitted := &LinkLimits{ExpiresIn: "1h"}
+	for _, tc := range []struct {
+		other *LinkLimits
+		same  bool
+	}{
+		{&LinkLimits{ExpiresIn: "1h", OneTimeUse: new(false)}, true},
+		{&LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}, false},
+		{&LinkLimits{ExpiresIn: "1h", SessionDuration: new("30m")}, false},
+		{&LinkLimits{ExpiresIn: "2h"}, false},
+		{nil, false},
+	} {
+		if got := SameEffectiveLinkLimits(omitted, tc.other); got != tc.same {
+			t.Errorf("SameEffectiveLinkLimits(%+v, %+v) = %v", omitted, tc.other, got)
+		}
+	}
+	if SameLinkLimits(omitted, &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(false)}) {
+		t.Error("library comparison must keep an explicit false")
+	}
+}
