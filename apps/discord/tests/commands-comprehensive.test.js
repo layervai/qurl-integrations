@@ -959,7 +959,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
     await expect(handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' })).resolves.toBeUndefined();
 
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_u_1'], expect.anything());
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_u_1'], expect.anything(), { signal: expect.any(AbortSignal) });
     expect(require('../src/logger').warn).toHaveBeenCalledWith(
       'Revoke select acknowledgement failed; revoking without a result message',
       { sendId: 'send-1', error: 'Unknown interaction' },
@@ -1076,7 +1076,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
       content: expect.stringContaining('Revoked 2/2 users.'),
     }));
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(4);
-    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-retry', 'user-1');
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-retry', 'user-1', { signal: expect.any(AbortSignal) });
   });
 });
 

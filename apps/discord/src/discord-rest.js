@@ -133,11 +133,13 @@ const DM_EDIT_EXPECTED_API_CODE_DESCRIPTIONS = new Map([
  * Accept as a known limitation; the revoke success/total counts are
  * not affected (those track the DELETE, not the edit).
  */
-async function editDM(channelId, messageId, message) {
+async function editDM(channelId, messageId, message, { signal } = {}) {
   try {
-    await client.rest.patch(Routes.channelMessage(channelId, messageId), { body: message });
+    signal?.throwIfAborted();
+    await client.rest.patch(Routes.channelMessage(channelId, messageId), { body: message, ...(signal ? { signal } : {}) });
     return { ok: true };
   } catch (error) {
+    if (signal?.aborted) return { ok: false, expected: true };
     // Map.get(undefined) returns undefined, which falls through to the
     // unexpected (warn-level) branch. Intentional: an error with no
     // API code (e.g., revoked-token 403 with no JSON body, synthetic
