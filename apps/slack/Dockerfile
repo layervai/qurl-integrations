@@ -34,9 +34,8 @@ FROM gcr.io/distroless/static-debian12:nonroot@sha256:a9329520abc449e3b14d5bc3a6
 
 COPY --from=build /out/qurl-bot-slack /usr/local/bin/qurl-bot-slack
 
-# Documentation-only — actual port comes from `listenAddr` in
-# apps/slack/cmd/main.go. If that constant moves, update both.
-EXPOSE 8080
+ENV PORT=8080
+EXPOSE ${PORT}
 
 USER nonroot:nonroot
 
