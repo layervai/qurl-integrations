@@ -3,29 +3,32 @@ import { probeScopedSibling } from '../helpers/tunnelView';
 const origin = 'https://q-' + 'a'.repeat(52) + '.qurl.site';
 const own = origin + '/views/' + '1'.repeat(32);
 const sibling = '/views/' + '2'.repeat(32);
-function client(statuses: number[]) {
+function client(statuses: number[], body = 'Resource not found\n') {
   const dispose = jest.fn().mockResolvedValue(undefined);
   const get = jest.fn();
-  for (const status of statuses) get.mockResolvedValueOnce({ status: () => status, dispose });
-  return { get, dispose, request: { get } as unknown as APIRequestContext };
+  for (const status of statuses) get.mockResolvedValueOnce({status:()=>status,dispose,body:async()=>Buffer.from(body),headers:()=>({'cache-control':'no-store'})});
+  return {get,dispose,request:{get} as unknown as APIRequestContext};
 }
-test('existing session requests same origin own200 sibling403 own200 with no redirect or knock', async () => {
-  const c = client([200,403,200]);
-  await expect(probeScopedSibling(c.request, own, sibling)).resolves.toEqual({ownBefore:200,sibling:403,ownAfter:200});
-  expect(c.get.mock.calls.map(x=>x[0])).toEqual([own,origin+sibling,own]);
-  expect(c.get.mock.calls.every(x=>x[1].maxRedirects===0 && x[1].timeout===10000)).toBe(true);
-  expect(c.dispose).toHaveBeenCalledTimes(3);
+test('records converged denial only as pending internal403 evidence',async()=>{
+ const c=client([200,404,200]);const result=await probeScopedSibling(c.request,own,sibling);
+ expect(result).toMatchObject({ownBefore:200,siblingWireStatus:404,ownAfter:200,siblingWireOutcome:'CONVERGED_NOT_FOUND_PENDING_INTERNAL_403'});
+ expect(c.get.mock.calls.map(x=>x[0])).toEqual([own,origin+sibling,own]);
+ expect(c.get.mock.calls.every(x=>x[1].maxRedirects===0 && x[1].maxRetries===0)).toBe(true);
+ const ids=c.get.mock.calls.map(x=>x[1].headers['X-Request-ID']);expect(new Set(ids).size).toBe(3);expect(ids).toEqual([result.requestIDs.ownBefore,result.requestIDs.sibling,result.requestIDs.ownAfter]);
 });
-test.each([[403,403,403],[200,404,200],[200,503,200],[200,403,401],[200,200,200]])('rejects ambiguous response sequence %j', async (...statuses: number[]) => {
-  await expect(probeScopedSibling(client(statuses).request,own,sibling)).rejects.toThrow(/requires own200 sibling403 own200/);
+test.each([403,503,200,302])('HTTP%s is not the converged denial',async status=>{
+ await expect(probeScopedSibling(client([200,status,200]).request,own,sibling)).rejects.toThrow(/qualified router denial/);
 });
-test.each(['https://elsewhere.example/','/views/'+ '1'.repeat(32),'/views/../sibling','/views/'+ '2'.repeat(32)+'?token=bad'])('invalid target fails before request', async path => {
-  const c=client([]);await expect(probeScopedSibling(c.request,own,path)).rejects.toThrow(/canonical/);expect(c.get).not.toHaveBeenCalled();
+test('arbitrary404 body is not the converged denial',async()=>{
+ await expect(probeScopedSibling(client([200,404,200],'WAF denied').request,own,sibling)).rejects.toThrow(/qualified router denial/);
 });
-test('transport failure is not a denied-scope pass', async ()=>{
-  const c=client([]);c.get.mockRejectedValueOnce(new Error('secret'));await expect(probeScopedSibling(c.request,own,sibling)).rejects.toThrow('scope probe request failed');
+test.each(['timeout','ENOTFOUND','secret'])('unqualified transport error never passes',async message=>{
+ const c=client([200]);c.get.mockRejectedValueOnce(new Error(message));await expect(probeScopedSibling(c.request,own,sibling)).rejects.toThrow();
 });
-
-test('untrusted view origin fails before request',async()=>{
-  const c=client([]);await expect(probeScopedSibling(c.request,own.replace('.site','.site.evil.example'),sibling)).rejects.toThrow(/canonical/);expect(c.get).not.toHaveBeenCalled();
+test('exact connection-close class still records pending internal proof only',async()=>{
+ const c=client([]);c.get.mockResolvedValueOnce({status:()=>200,dispose:async()=>{}}).mockRejectedValueOnce(new Error('socket hang up')).mockResolvedValueOnce({status:()=>200,dispose:async()=>{}});
+ const result=await probeScopedSibling(c.request,own,sibling);expect(result.siblingWireStatus).toBeNull();expect(result.siblingWireOutcome).toBe('CONNECTION_CLOSED_PENDING_INTERNAL_403');
 });
+test('own control failure is not scope proof',async()=>{await expect(probeScopedSibling(client([403]).request,own,sibling)).rejects.toThrow(/own controls/)});
+test.each(['https://elsewhere.example/','/views/'+ '1'.repeat(32),'/views/../sibling','/views/'+ '2'.repeat(32)+'?token=bad'])('invalid target fails before request',async path=>{const c=client([]);await expect(probeScopedSibling(c.request,own,path)).rejects.toThrow(/canonical/);expect(c.get).not.toHaveBeenCalled()});
+test('untrusted origin fails before request',async()=>{const c=client([]);await expect(probeScopedSibling(c.request,own.replace('.site','.site.evil.example'),sibling)).rejects.toThrow(/canonical/);expect(c.get).not.toHaveBeenCalled()});

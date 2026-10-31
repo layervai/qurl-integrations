@@ -30,7 +30,7 @@
 import { chromium, type Browser, type APIRequestContext } from 'playwright';
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, accessSync, constants } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fetchWithTransientRetry } from './http';
 
 /** Matches the tunnel view URL on ANY environment:
@@ -164,7 +164,10 @@ export async function viewViaQurlLink(
         event: 'owned_scope_boundary_probe', resource_id: opts.ownership.resource_id,
         qurl_id: opts.ownership.qurl_id, observed_at: new Date().toISOString(),
         expected_target_path: new URL(resp.url()).pathname, sibling_target_path: opts.siblingViewPath,
-        own_before_status: probe.ownBefore, sibling_status: probe.sibling, own_after_status: probe.ownAfter,
+        own_before_status: probe.ownBefore, sibling_wire_status: probe.siblingWireStatus,
+        sibling_wire_outcome: probe.siblingWireOutcome, own_after_status: probe.ownAfter,
+        request_ids: probe.requestIDs,
+        internal_authorize_403: 'pending_exact_request_id_readback_not_proved_by_wire_denial',
         persisted_target_path: 'pending_independent_native_state_readback',
       }) + '\n', { mode: 0o600 });
     }
@@ -236,15 +239,41 @@ export async function probeScopedSibling(request: APIRequestContext, ownViewURL:
       !/^\/views\/[0-9a-f]{32}$/.test(siblingPath) || siblingPath === own.pathname)
     throw new Error('scope probe requires two distinct canonical recipient view paths');
   const sibling = new URL(siblingPath, own.origin);
-  const statuses: number[] = [];
-  for (const target of [own, sibling, own]) {
-    let response;
-    try { response = await request.get(target.href, { maxRedirects: 0, timeout: 10_000 }); }
-    catch { throw new Error('scope probe request failed'); }
-    statuses.push(response.status());
-    await response.dispose();
+  const prefix = 'scope-' + randomUUID();
+  const requestIDs = { ownBefore: prefix + '-pre', sibling: prefix + '-sib', ownAfter: prefix + '-post' };
+  async function get(target: URL, requestID: string) {
+    return request.get(target.href, { maxRedirects: 0, maxRetries: 0, timeout: 10_000,
+      headers: { 'X-Request-ID': requestID } });
   }
-  if (statuses[0] !== 200 || statuses[1] !== 403 || statuses[2] !== 200)
-    throw new Error('same-session scope probe requires own200 sibling403 own200');
-  return { ownBefore: statuses[0], sibling: statuses[1], ownAfter: statuses[2] };
+  async function ownControl(requestID: string) {
+    let response;
+    try { response = await get(own, requestID); }
+    catch { throw new Error('scope probe own control request failed'); }
+    const status = response.status();
+    await response.dispose();
+    if (status !== 200) throw new Error('scope probe own controls require HTTP 200');
+    return status;
+  }
+  const ownBefore = await ownControl(requestIDs.ownBefore);
+  let siblingWireStatus: number | null = null;
+  let siblingWireOutcome: string;
+  try {
+    const response = await get(sibling, requestIDs.sibling);
+    try {
+      siblingWireStatus = response.status();
+      const body = await response.body();
+      if (siblingWireStatus !== 404 || body.length > 1024 || body.toString('utf8') !== 'Resource not found\n' ||
+          response.headers()['cache-control'] !== 'no-store')
+        throw new Error('scope probe sibling lacks the converged router denial shape');
+      siblingWireOutcome = 'CONVERGED_NOT_FOUND_PENDING_INTERNAL_403';
+    } finally { await response.dispose(); }
+  } catch (err) {
+    // Only the router's known connection-close class is an observed candidate.
+    // Even this outcome is NOT authorizer403 proof; root must join requestID.
+    if (!(err instanceof Error) || !/ECONNRESET|socket hang up|net::ERR_EMPTY_RESPONSE|net::ERR_CONNECTION_RESET/.test(err.message))
+      throw new Error('scope probe sibling is not a qualified router denial observation');
+    siblingWireOutcome = 'CONNECTION_CLOSED_PENDING_INTERNAL_403';
+  }
+  const ownAfter = await ownControl(requestIDs.ownAfter);
+  return { ownBefore, siblingWireStatus, siblingWireOutcome, ownAfter, requestIDs };
 }

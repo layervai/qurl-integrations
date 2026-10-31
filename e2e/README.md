@@ -105,14 +105,20 @@ never fail the run).
 ### Scoped recipient path check
 
 The existing distinct-recipient file test opens B, then opens A and keeps A's
-browser context for three direct requests: A's path must return 200, B's existing
-path on A's origin must return 403, and A's path must still return 200. It does
-not follow B's link or issue another knock. Redirects, transport failures, 404,
-and 5xx do not prove scoped denial.
+browser context for three direct requests: own200, an observed converged router
+denial for B's existing path on A's origin, and own200 again. It does not follow
+B's link or issue another knock. Each request has a unique non-secret
+X-Request-ID. The router intentionally hides the internal authorizer403 behind
+its not-found response or connection close. The receipt marks that observation
+as PENDING internal403 evidence; a404 or reset alone never completes API1474.
+Other bodies, HTTP403/5xx, DNS failures and timeouts fail this observation.
 
-The ownership receipt records the observed expected path and child identity.
-This is not stored-path proof. For API1474 acceptance, the operator must compare
-that expected path with the exact source-bound native admission STATE row using
-the existing read-only collector. Pair this actual result with the deployed
-API's shared target-path vector contract. A passing browser check alone does not
-complete the ledger task or prove production activation or native CLOSED state.
+For full API1474 acceptance, root must join the sibling request ID to the exact
+internal resource-authorize HTTP403 access record. Positive own-path requests
+can hit the router cache and need not create fresh backend access records. Root
+must also compare the receipt's expected path and exact child/public identity
+with the matching native admission STATE row using the existing read-only
+collector. Pair the actual result with deployed API/router source and the shared
+target-path vectors. No public header or body identifies a pure scope mismatch.
+This check alone does not prove stored scope, production activation, or native
+CLOSED state.
