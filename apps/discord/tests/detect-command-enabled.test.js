@@ -64,9 +64,13 @@ describe('qURL command data builder', () => {
         'revoke', 'help', 'setup', 'status',
       ]);
       const send = data.options.find(option => option.name === 'send');
+      expect(send.options.map(option => option.name))
+        .toEqual(['attachment', 'recipients', 'expires-in', 'self-destruct', 'personal-message']);
       expect(send.options[0]).toMatchObject({ name: 'attachment', type: 11, required: true });
       if (map) {
         const location = data.options.find(option => option.name === 'map');
+        expect(location.options.map(option => option.name))
+          .toEqual(['location', 'recipients', 'location-name', 'expires-in', 'self-destruct', 'personal-message']);
         expect(location.options[0]).toMatchObject({ name: 'location', type: 3, required: true, autocomplete: true });
         const shared = ['recipients', 'expires-in', 'self-destruct', 'personal-message'];
         expect(location.options.filter(option => shared.includes(option.name)))
