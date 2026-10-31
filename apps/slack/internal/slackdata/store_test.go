@@ -158,7 +158,7 @@ func TestError_ErrorsAsRoundTrip(t *testing.T) {
 }
 
 // TestBindWorkspace_ValidationGuards fences the input-validation
-// surface: zero/missing team_id / owner_id / seed_admin produce a
+// surface: missing fields or malformed owner IDs produce a
 // 400 [*Error] before the DDB call. Without this, the DDB request
 // would land a ValidationException whose error string is less
 // actionable for the handler.
@@ -168,8 +168,10 @@ func TestBindWorkspace_ValidationGuards(t *testing.T) {
 		mapping *WorkspaceMapping
 	}{
 		{"nil mapping", nil},
-		{"empty team_id", &WorkspaceMapping{OwnerID: "u_owner"}},
+		{"empty team_id", &WorkspaceMapping{OwnerID: "UOWNER001"}},
 		{"empty owner_id", &WorkspaceMapping{TeamID: "T"}},
+		{"Auth0 owner_id", &WorkspaceMapping{TeamID: "T", OwnerID: "auth0|legacy"}},
+		{"malformed Slack owner_id", &WorkspaceMapping{TeamID: "T", OwnerID: "U1234567>"}},
 	}
 	store := newStore(&stubDDB{
 		putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
@@ -338,7 +340,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				}}, nil
 			},
 		})
-		_ = store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"})
+		_ = store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		if !disambigConsistent {
 			t.Errorf("disambig GetItem ConsistentRead = false, want true (regression would replay the eventual-consistency race)")
 		}
@@ -360,7 +362,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				return nil, errors.New("transport blip")
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"})
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -515,7 +517,7 @@ func TestBindWorkspace_WritesSeedAdminAttribute(t *testing.T) {
 	const (
 		teamID    = "T_seed"
 		ownerID   = "USEEDADMIN"
-		seedAdmin = "USEEDADMIN"
+		seedAdmin = ownerID
 	)
 	if err := store.BindWorkspace(context.Background(),
 		&WorkspaceMapping{TeamID: teamID, OwnerID: ownerID}); err != nil {
@@ -545,7 +547,7 @@ func TestBindWorkspace_TransportErrorMapsTo503(t *testing.T) {
 			return nil, errors.New("dial tcp: timeout")
 		},
 	})
-	err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"})
+	err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 	var ae *Error
 	if !errors.As(err, &ae) {
 		t.Fatalf("got %v, want *Error", err)
