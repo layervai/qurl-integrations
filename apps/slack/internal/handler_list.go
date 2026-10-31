@@ -442,12 +442,16 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	}
 
 	// Map each resource_id to its channel-bound `$alias` shortcuts so each row
-	// can show them next to the resource's primary token. Best-effort: a fetch
-	// failure renders without the channel alias extras. Built BEFORE the sort
-	// because the sort keys on [resourceDisplayTokenForList], including tunnel
+	// can show them next to the resource's primary token. The alias snapshot
+	// must load before choosing tokens: channel aliases can shadow slugs. Built
+	// before the sort, which keys on [resourceDisplayTokenForList], including tunnel
 	// rows whose first bound alias becomes the primary token when they have no
 	// intrinsic token — the sort key must match what the row renders.
 	aliasMap := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
+	if aliasMap == nil {
+		_ = h.postResponse(log, responseURL, serviceUnreachableMessage)
+		return
+	}
 	channelAliasOwners := channelAliasOwnersByAlias(aliasMap)
 	sharedAliases := sharedResourceAliases(resources)
 	tunnelSlugOwners := tunnelSlugOwnersBySlug(resources)
@@ -749,8 +753,8 @@ func resourceDisplayToken(r *client.Resource, boundAliases []string) string {
 	return tunnelDisplayToken(r, boundAliases)
 }
 
-// resourceDisplayTokenForList mirrors /qurl get precedence so list rows never
-// advertise a Create qURL token that would resolve to a different resource.
+// resourceDisplayTokenForList applies get precedence to the list snapshot.
+// The click handler resolves the token again against current channel policy.
 func resourceDisplayTokenForList(r *client.Resource, boundAliases []string, sharedResourceAliases map[string]struct{}, channelAliasOwners, tunnelSlugOwners map[string]string) (token, blockedAlias string) {
 	if isURLResource(r) && r.Alias != "" {
 		_, shared := sharedResourceAliases[r.Alias]
@@ -770,7 +774,19 @@ func resourceDisplayTokenForList(r *client.Resource, boundAliases []string, shar
 			return "", r.Alias
 		}
 	}
-	return resourceDisplayToken(r, boundAliases), ""
+	token = resourceDisplayToken(r, boundAliases)
+	if isTunnelResource(r) && token != "" {
+		owner, found := channelAliasOwners[token]
+		if !found {
+			owner, found = tunnelSlugOwners[token]
+		}
+		// Channel aliases win over slugs; an unbound tunnel resource alias
+		// is not part of get's URL-only resource-alias fallback.
+		if (found && owner != r.ResourceID) || (!found && r.Slug == "" && r.Alias != "" && token == r.Alias) {
+			return firstAliasOtherThan(boundAliases, token), token
+		}
+	}
+	return token, ""
 }
 
 func tunnelSlugOwnersBySlug(resources []client.Resource) map[string]string {
@@ -832,7 +848,7 @@ func formatResourceListLineWithToken(r *client.Resource, boundAliases []string, 
 	if isURLResource(r) {
 		return formatURLListLineWithToken(r, boundAliases, token, blockedAlias)
 	}
-	return formatTunnelListLine(r, boundAliases)
+	return formatTunnelListLine(r, boundAliases, token, blockedAlias)
 }
 
 // formatTunnelListLine renders one tunnel resource as a single text
@@ -867,13 +883,19 @@ func formatResourceListLineWithToken(r *client.Resource, boundAliases []string, 
 // always set — install seeds a default and admins refine it with
 // `/qurl-admin set-display-name` — so it normally renders. The empty guard
 // is defensive only.
-func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
-	token := tunnelDisplayToken(r, boundAliases)
+func formatTunnelListLine(r *client.Resource, boundAliases []string, token, blockedAlias string) string {
 	var line string
 	if token == "" {
-		line = "• " + mrkdwnCodeSpan(r.ResourceID) + " (no ID — ask your Slack admin to set one)"
+		if blockedAlias != "" {
+			line = "• " + mrkdwnCodeSpan(r.ResourceID) + " (ID " + mrkdwnTokenSpan(blockedAlias) + " cannot select this resource here — ask your Slack admin to set a channel alias)"
+		} else {
+			line = "• " + mrkdwnCodeSpan(r.ResourceID) + " (no ID — ask your Slack admin to set one)"
+		}
 	} else {
 		line = "• " + mrkdwnTokenSpan(token)
+		if blockedAlias != "" {
+			line += " (ID " + mrkdwnTokenSpan(blockedAlias) + " cannot select this resource here)"
+		}
 	}
 	if extras := extraAliasTokens(boundAliases, token); len(extras) > 0 {
 		line += " (" + aliasNoun(len(extras)) + ": " + strings.Join(extras, ", ") + ")"
@@ -915,7 +937,7 @@ func formatResourceListSectionWithToken(r *client.Resource, boundAliases []strin
 	if isURLResource(r) {
 		return formatURLListSectionWithToken(r, boundAliases, token, blockedAlias)
 	}
-	return formatTunnelListSection(r, boundAliases, token)
+	return formatTunnelListSection(r, boundAliases, token, blockedAlias)
 }
 
 // formatTunnelListSection renders one tunnel as the mrkdwn body of a `section`
@@ -930,17 +952,24 @@ func formatResourceListSectionWithToken(r *client.Resource, boundAliases []strin
 // keeps the Display Name (the only human-readable handle such a row has), and
 // spells out that it can't be used until an admin sets an ID — matching the
 // fallback's "(no ID …)" honesty, which also retains the Display Name.
-func formatTunnelListSection(r *client.Resource, boundAliases []string, token string) string {
+func formatTunnelListSection(r *client.Resource, boundAliases []string, token, blockedAlias string) string {
 	var b strings.Builder
 	if token == "" {
 		b.WriteString("*" + mrkdwnCodeSpan(r.ResourceID) + "*")
 		if r.Description != "" {
 			b.WriteString("\n" + escapeMrkdwnText(r.Description))
 		}
-		b.WriteString("\n_No ID set — ask your Slack admin to set one._")
+		if blockedAlias != "" {
+			b.WriteString("\n_ID " + mrkdwnTokenSpan(blockedAlias) + " cannot select this resource here — ask your Slack admin to set a channel alias._")
+		} else {
+			b.WriteString("\n_No ID set — ask your Slack admin to set one._")
+		}
 		return b.String()
 	}
 	b.WriteString("*" + mrkdwnTokenSpan(token) + "*")
+	if blockedAlias != "" {
+		b.WriteString("\n_ID " + mrkdwnTokenSpan(blockedAlias) + " cannot select this resource here._")
+	}
 	if r.Description != "" {
 		b.WriteString("\n" + escapeMrkdwnText(r.Description))
 	}
@@ -1012,27 +1041,18 @@ func mrkdwnCodeSpan(text string) string {
 	return "`" + escapeMrkdwnCode(text) + "`"
 }
 
-// channelAliasesByResourceID builds resource_id → sorted channel-bound
-// `$alias` shortcuts from the channel's policy entries, so /qurl list
-// can show every alias that resolves to each tunnel. Best-effort:
-// AdminStore-nil, empty channel, or a fetch failure yields nil (rows
-// render slug-only) — the listing must still render.
-//
-// Cost: one GetChannelPolicy (GetItem) per /qurl list, purely for the
-// cosmetic alias display — a second point read of the same channel_policies
-// row the scope gate already read via ChannelScopedResourceIDs. The two
-// have different shapes (this returns alias→resource entries; the gate returns
-// the membership set), so they're kept as separate reads rather than folded;
-// both are cheap GetItems on a tiny row behind the dominant upstream
-// ListResources call. Acceptable for the discovery surface; fold into one read
-// if this path ever gets hot.
+// channelAliasesByResourceID returns the verified channel aliases grouped by
+// resource. Nil means unavailable; a non-nil empty map is a successful read.
+// List needs this snapshot for token ownership as well as alias display.
+// This keeps the existing second GetItem after the membership read; it adds
+// no store or upstream calls.
 func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logger, teamID, channelID string) map[string][]string {
 	if h.cfg.AdminStore == nil || channelID == "" {
 		return nil
 	}
 	entries, err := h.cfg.AdminStore.GetChannelPolicy(ctx, teamID, channelID)
 	if err != nil {
-		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelDebug), "list: channel-policy fetch for alias display failed — rendering slug-only",
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelDebug), "list: channel-policy fetch for alias display failed",
 			"error", err, "team_id", teamID, "channel_id", channelID)
 		return nil
 	}

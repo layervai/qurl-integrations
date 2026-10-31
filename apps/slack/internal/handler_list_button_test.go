@@ -3,11 +3,13 @@ package internal
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -584,4 +586,82 @@ func TestHandleList_PrimaryCreateScopedToAdminRows(t *testing.T) {
 			t.Errorf("Create qURL accessory missing on create-only row: %v", vals)
 		}
 	})
+}
+
+func TestHandleList_TunnelTokenShadowedByChannelAlias(t *testing.T) {
+	const slugID, boundID = "r_slug_docs", "r_bound_docs"
+	for _, alternate := range []bool{false, true} {
+		t.Run(strconv.FormatBool(alternate), func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			bindings := map[string]string{"docs": boundID}
+			if alternate {
+				bindings["kb"] = slugID
+			}
+			policy := seedChannelPolicySet(testAdminTeamID, "C_test", "", []string{slugID, boundID})
+			policy[fAttrAliasBindings] = seedChannelPolicyAliasBindings(testAdminTeamID, "C_test", bindings)[fAttrAliasBindings]
+			ts.ddb.seedItem(t, ts.tableNames.channelPolicy, policy)
+			ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+				writeResourceListFixture(t, w, []map[string]any{
+					{testKeyResourceID: slugID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "docs", testKeyDescription: "Original tunnel"},
+					{testKeyResourceID: boundID, testKeyType: client.ResourceTypeTunnel, testKeyDescription: "Channel alias target"},
+				}, "", false)
+			})
+			h := newAdminTestHandler(t, ts)
+			inv := newAdminSlashInvoker(t, h)
+			if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+				t.Fatal(status)
+			}
+			body := inv.captured.waitForBody(t, 2*time.Second)
+			values := createQurlButtonValues(t, parseSlackBlocks(t, body))
+			want := []string{"docs"}
+			if alternate {
+				want = append(want, "kb")
+			}
+			if fmt.Sprint(values) != fmt.Sprint(want) {
+				t.Fatalf("buttons=%v, want %v", values, want)
+			}
+			for _, token := range values {
+				got, err := h.resolveTokenForGet(t.Context(), slog.Default(), testAdminTeamID, "C_test", testAdminUserID, token)
+				expected := boundID
+				if token == "kb" {
+					expected = slugID
+				}
+				if err != nil || got != expected {
+					t.Fatalf("get %s = %s, %v; want %s", token, got, err, expected)
+				}
+			}
+			for _, rawBlock := range parseSlackBlocks(t, body) {
+				block, _ := rawBlock.(map[string]any)
+				text, _ := block["text"].(map[string]any)
+				value, _ := text["text"].(string)
+				if strings.Contains(value, "Original tunnel") && (strings.Contains(value, "*`$docs`*") || !strings.Contains(value, "cannot select this resource here")) {
+					t.Fatalf("section advertises the shadowed token: %s", value)
+				}
+			}
+			fallback := parseSlackText(t, body)
+			if !strings.Contains(fallback, "cannot select this resource here") {
+				t.Fatalf("missing collision guidance: %s", fallback)
+			}
+			if strings.Contains(fallback, "• `$docs` — Original tunnel") {
+				t.Fatalf("fallback advertises shadowed tunnel: %s", fallback)
+			}
+		})
+	}
+}
+
+func TestHandleList_AliasSnapshotFailureDoesNotAdvertiseTokens(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: "docs"}}, "", false)
+	})
+	ts.ddb.SetGetItemErrAfter(ts.tableNames.channelPolicy, 1, errors.New("alias snapshot unavailable"))
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+	_, _, reply := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, serviceUnreachableMessage) {
+		t.Fatalf("unverified alias snapshot rendered: %s", reply)
+	}
 }

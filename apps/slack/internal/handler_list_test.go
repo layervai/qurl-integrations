@@ -192,7 +192,7 @@ func TestFormatTunnelListLine(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := formatTunnelListLine(tc.resource, tc.boundAliases); got != tc.want {
+			if got := formatTunnelListLine(tc.resource, tc.boundAliases, tunnelDisplayToken(tc.resource, tc.boundAliases), ""); got != tc.want {
 				t.Errorf("formatTunnelListLine = %q, want %q", got, tc.want)
 			}
 		})
@@ -274,7 +274,7 @@ func TestFormatTunnelListSection(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			token := tunnelDisplayToken(tc.resource, tc.boundAliases)
-			if got := formatTunnelListSection(tc.resource, tc.boundAliases, token); got != tc.want {
+			if got := formatTunnelListSection(tc.resource, tc.boundAliases, token, ""); got != tc.want {
 				t.Errorf("formatTunnelListSection = %q, want %q", got, tc.want)
 			}
 		})
@@ -1064,21 +1064,17 @@ func TestHandleList_StableSortByToken(t *testing.T) {
 	}
 }
 
-// TestHandleList_SortTiebreakerOnTokenCollision exercises the
-// resource_id tiebreaker directly: two tunnels yield the SAME
-// tunnelToken (`$dup`) — one via its slug, one via a resource-level
-// alias with no slug — so the comparator falls through to comparing
-// resource_id. The row with the lexicographically-smaller resource_id
-// must sort first, deterministically, rather than inheriting unstable
-// upstream order. Descriptions disambiguate the two identical tokens.
+// TestHandleList_SortTiebreakerOnTokenCollision checks the resource_id
+// tiebreaker for two tokenless rows. Their empty token keys must sort by ID,
+// rather than retaining the reversed upstream order.
 func TestHandleList_SortTiebreakerOnTokenCollision(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		// Returned in reverse resource_id order; both render `$dup`.
+		// Returned in reverse resource_id order; neither has a usable token.
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_bbb_dup", fAttrAlias: "dup", testKeyType: client.ResourceTypeTunnel, testKeyDescription: "beta-desc"},
-			{testKeyResourceID: "r_aaa_dup", testKeyType: client.ResourceTypeTunnel, testKeySlug: "dup", testKeyDescription: "alpha-desc"},
+			{testKeyResourceID: "r_bbb_dup", testKeyType: client.ResourceTypeTunnel, testKeyDescription: "beta-desc"},
+			{testKeyResourceID: "r_aaa_dup", testKeyType: client.ResourceTypeTunnel, testKeyDescription: "alpha-desc"},
 		}, "", false)
 	})
 	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_bbb_dup", "r_aaa_dup")
@@ -1218,6 +1214,30 @@ func TestHandleList_StaleAliasesEmptyState(t *testing.T) {
 				if strings.Contains(async, notWant) {
 					t.Errorf("stale empty-state should not contain %q: %q", notWant, async)
 				}
+			}
+		})
+	}
+}
+
+func TestResourceDisplayTokenForList_TunnelAliasResolution(t *testing.T) {
+	cases := []struct {
+		name           string
+		alias          string
+		bound          []string
+		channel, slugs map[string]string
+		want, blocked  string
+	}{
+		{name: "channel binding wins over another tunnel slug", alias: "docs", channel: map[string]string{"docs": "mine"}, slugs: map[string]string{"docs": "other"}, want: "docs"},
+		{name: "resource alias shadowed by tunnel slug", alias: "docs", slugs: map[string]string{"docs": "other"}, blocked: "docs"},
+		{name: "unbound tunnel resource alias cannot use URL fallback", alias: "docs", blocked: "docs"},
+		{name: "safe channel alias replaces unresolvable resource alias", alias: "docs", bound: []string{"kb"}, channel: map[string]string{"kb": "mine"}, want: "kb", blocked: "docs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &client.Resource{ResourceID: "mine", Type: client.ResourceTypeTunnel, Alias: tc.alias}
+			token, blocked := resourceDisplayTokenForList(r, tc.bound, nil, tc.channel, tc.slugs)
+			if token != tc.want || blocked != tc.blocked {
+				t.Fatalf("token=%q blocked=%q, want %q/%q", token, blocked, tc.want, tc.blocked)
 			}
 		})
 	}
