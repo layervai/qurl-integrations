@@ -539,9 +539,12 @@ jobs:
           # had otherwise completed. Publish the terminal message from here so
           # the marker is emitted by the workflow rather than retyped, and keep
           # proving that this run published this review.
-          if ! review_body="$(jq -er '
-            [ .[]? | select(.type == "result" and .subtype == "success" and .is_error != true) ] |
-            last | .result // empty
+          if ! review_body="$(jq -ers '
+            select(length == 1) | .[0] | select(type == "array") |
+            [ .[] | select(type == "object") | select(.type == "result") ] | last |
+            select(.subtype == "success" and .is_error == false) |
+            .result | select(type == "string") |
+            select((gsub("[[:space:]]"; "") | length) > 0)
           ' "${EXECUTION_FILE}")"; then
             echo "::error::Claude produced no terminal review message; failing closed."
             exit 1

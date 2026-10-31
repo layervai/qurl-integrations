@@ -359,6 +359,19 @@ jobs:
             echo "::error::Claude did not produce a completed execution artifact; failing closed."
             exit 1
           fi
+          # A file alone is not proof: require the last terminal result to
+          # declare success and contain final text, independent of action status.
+          if ! jq -ers '
+            select(length == 1) | .[0] | select(type == "array") |
+            [ .[] | select(type == "object") | select(.type == "result") ] | last |
+            select(.subtype == "success" and .is_error == false) |
+            .result | select(type == "string") |
+            select((gsub("[[:space:]]"; "") | length) > 0)
+          ' "${EXECUTION_FILE}" >/dev/null; then
+            echo "::error::Claude produced no successful terminal message; failing closed."
+            exit 1
+          fi
+
           if [[ "${HEAD_REF}" == "@" || ! "${HEAD_REF}" =~ ^[A-Za-z0-9@_][A-Za-z0-9/_.#+,@-]*$ ]] ||
              ! git check-ref-format --branch "${HEAD_REF}" >/dev/null 2>&1 ||
              [[ "${BASE_REF}" == "@" || ! "${BASE_REF}" =~ ^[A-Za-z0-9@_][A-Za-z0-9/_.#+,@-]*$ ]] ||
