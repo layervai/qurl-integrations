@@ -4400,6 +4400,7 @@ function normalizeRecipientMode(mode) {
 // hoisted here so all the user-visible strings live in one place
 // rather than being scattered through 800+ lines of handler code.
 const RECIPIENT_REASON_BOTS_DROPPED = 'Cannot send to bots';
+const RECIPIENT_REASON_ROLE_MEMBERS_UNAVAILABLE = 'Could not confirm all members of the picked roles. Select individual users instead';
 const VOICE_REJECT_CHANNEL_UNREADABLE = `⚠\u{FE0F} Couldn't read the voice channel — it may have been deleted. Pick recipients below.\n\n`;
 const VOICE_REJECT_EMPTY_CHANNEL = `⚠\u{FE0F} No one is connected to that voice channel right now. Pick recipients below.\n\n`;
 const VOICE_REJECT_CONTEXT_LOST = `⚠\u{FE0F} Voice channel context was lost — use the picker below to choose recipients.\n\n`;
@@ -4645,6 +4646,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
   // silent deferUpdate-only no-op the user-visible path would
   // otherwise hit.
   let everyoneCacheCold = false;
+  const namedRoleMembersUnavailable = new Set();
   // Per-role denied list (issue #326): a picked role that's not
   // `mentionable: true` AND the sender lacks MENTION_EVERYONE lands
   // here as `roleId`. Dedup via parallel Set so a future picker that
@@ -4731,11 +4733,21 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
       //     chunk-on-startup completion).
       if (!source || typeof source.entries !== 'function') {
         if (isEveryoneRole) everyoneCacheCold = true;
+        else namedRoleMembersUnavailable.add(roleId);
         continue;
       }
       if (isEveryoneRole && source.size === 0) {
         everyoneCacheCold = true;
         continue;
+      }
+      if (!isEveryoneRole) {
+        // Role.members filters the guild cache; cached members can be incomplete.
+        const cachedMembers = guild?.members?.cache?.size ?? 0;
+        const knownIncomplete = Number.isSafeInteger(guild?.memberCount) && cachedMembers < guild.memberCount;
+        if ((source.size === 0 && cachedMembers === 0) || knownIncomplete) {
+          namedRoleMembersUnavailable.add(roleId);
+          if (source.size === 0) continue;
+        }
       }
       // Two break conditions, both belt-and-suspenders:
       //  - userMap.size at cap: stops adding new entries once the
@@ -4796,6 +4808,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
     massMentionDenied,
     droppedFromRoles: droppedFromRolesSet.size,
     everyoneCacheCold,
+    unavailableRoleCount: namedRoleMembersUnavailable.size,
     roleMentionsDenied,
   };
 }
@@ -4812,8 +4825,8 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  * (rejection banner vs. warnings block — different UI contexts).
  * Both surface the SAME set of signals (droppedBots,
  * droppedFromRoles, massMentionDenied, everyoneCacheCold,
- * roleMentionsDeniedNames). When adding or renaming a signal, update
- * BOTH surfaces in lockstep — the helpers don't share a copy table,
+ * unavailableRoleCount, roleMentionsDeniedNames). When adding or renaming a
+ * signal, update BOTH surfaces in lockstep — the helpers don't share a copy table,
  * so a future contributor could easily land one half and not the
  * other.
  *
@@ -4836,6 +4849,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  *   droppedFromRoles?: number,
  *   massMentionDenied?: boolean,
  *   everyoneCacheCold?: boolean,
+ *   unavailableRoleCount?: number,
  *   roleMentionsDeniedNames?: string[],
  * }} [opts]
  */
@@ -4848,6 +4862,7 @@ function renderRecipientWarnings({
   droppedFromRoles = 0,
   massMentionDenied = false,
   everyoneCacheCold = false,
+  unavailableRoleCount = 0,
   roleMentionsDeniedNames = [],
 } = {}) {
   const lines = [];
@@ -4911,6 +4926,7 @@ function renderRecipientWarnings({
     // otherwise have no way to know).
     lines.push('• Member cache not yet ready — `@everyone` expanded to 0 members. Try again in a few seconds.');
   }
+  if (unavailableRoleCount > 0) lines.push(`• ${RECIPIENT_REASON_ROLE_MEMBERS_UNAVAILABLE}.`);
   if (massMentionDenied) {
     // Specific copy beats the generic "couldn't parse" path so the
     // user knows it's a PERMISSION issue, not a typo. Mirrors
@@ -6822,6 +6838,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     massMentionDenied,
     droppedFromRoles,
     everyoneCacheCold,
+    unavailableRoleCount,
     roleMentionsDenied,
   } = resolveMentionableSelection({
     interaction,
@@ -6837,6 +6854,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     && !massMentionDenied
     && droppedFromRoles === 0
     && !everyoneCacheCold
+    && unavailableRoleCount === 0
     && roleMentionsDenied.length === 0
   ) {
     // Truly empty pick (no users, no roles, no @everyone, no
@@ -6912,6 +6930,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       mass_mention_denied: massMentionDenied,
       dropped_from_roles: droppedFromRoles,
       everyone_cache_cold: everyoneCacheCold,
+      named_role_members_unavailable_count: unavailableRoleCount,
       role_mentions_denied: roleMentionsDenied.length,
     });
     // Reachable cases:
@@ -6935,14 +6954,15 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // When adding a new reason, update BOTH surfaces.
     // Reason ordering mirrors renderRecipientWarnings's bullet
     // ordering (droppedBots → droppedFromRoles → everyoneCacheCold →
-    // massMentionDenied → roleMentionsDenied) so the two surfaces
+    // unavailable roles → massMentionDenied → roleMentionsDenied) so the two surfaces
     // present multi-signal picks in the same sequence. Most picks
     // hit at most one signal so ordering is rarely user-visible,
     // but pin the parity here against future drift.
     const reasons = [];
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
-    if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
+    if (droppedFromRoles > 0) reasons.push('Bot accounts from picked roles were excluded');
     if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
+    if (unavailableRoleCount > 0) reasons.push(RECIPIENT_REASON_ROLE_MEMBERS_UNAVAILABLE);
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
     if (roleMentionsDenied.length > 0) {
       // Condensed copy (count, not per-role) for the rejection banner —
@@ -6990,6 +7010,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     droppedFromRoles,
     massMentionDenied,
     everyoneCacheCold,
+    unavailableRoleCount,
     roleMentionsDeniedNames,
   });
   const newRecipientAliases = Object.fromEntries(

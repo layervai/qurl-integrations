@@ -339,7 +339,7 @@ describe('handleConfirmUserSelect', () => {
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
-    expect(updated.content).toMatch(/no non-bot members/i);
+    expect(updated.content).toContain('Bot accounts from picked roles were excluded');
     expect(updated.content).toMatch(/Sending file/);
   });
 
@@ -397,6 +397,52 @@ describe('handleConfirmUserSelect', () => {
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/@everyone/);
     expect(updated.content).toMatch(/Mention Everyone/);
+  });
+
+  test('partially cached role with a human advances and keeps the membership warning', async () => {
+    const member = { user: makeUser(u1) };
+    const cache = new Map([[u1, member]]);
+    const int = makeSelectInteraction({ users: [], guildMemberCache: cache,
+      roles: [['role-partial', { id: 'role-partial', mentionable: true, members: cache }]],
+    });
+    int.guild.memberCount = 10;
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ recipientIds: [u1], warningsBlock: expect.stringContaining('Select individual users instead') }),
+    }));
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Select individual users instead');
+  });
+
+  test('partially cached role with only a bot does not claim that all role members are bots', async () => {
+    const bot = makeUser('100000000000000099', { bot: true });
+    const cache = new Map([[bot.id, { user: bot }]]);
+    const int = makeSelectInteraction({ users: [], guildMemberCache: cache,
+      roles: [['role-partial', { id: 'role-partial', mentionable: true, members: cache }]],
+    });
+    int.guild.memberCount = 10;
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const content = int.editReply.mock.calls.at(-1)[0].content;
+    expect(content).toContain('Bot accounts from picked roles were excluded');
+    expect(content).toContain('Select individual users instead');
+    expect(content).not.toMatch(/no non-bot members/i);
+  });
+
+  test.each([undefined, new Map()])('unavailable named role gives individual-user guidance instead of an empty no-op (%s)', async members => {
+    const int = makeSelectInteraction({ users: [], roles: [['role-cold', { id: 'role-cold', mentionable: true, members }]] });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Could not confirm all members of the picked roles. Select individual users instead');
+    expect(int.editReply.mock.calls.at(-1)[0].content).not.toContain('Try again in a few seconds');
+  });
+
+  test('valid user plus unavailable named role advances with a visible warning', async () => {
+    const int = makeSelectInteraction({ roles: [['role-cold', { id: 'role-cold', mentionable: true }]] });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ recipientIds: [u1], warningsBlock: expect.stringContaining('Could not confirm all members of the picked roles. Select individual users instead') }),
+    }));
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Could not confirm all members of the picked roles. Select individual users instead');
   });
 
   test('mentionable picker: partial-valid pick with cold-cache @everyone → flow advances AND everyoneCacheCold warning surfaces', async () => {
@@ -469,7 +515,7 @@ describe('handleConfirmUserSelect', () => {
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Cannot send to bots/);
-    expect(updated.content).toMatch(/no non-bot members/i);
+    expect(updated.content).toContain('Bot accounts from picked roles were excluded');
   });
 
   test('mentionable picker: multi-signal pick (bot user + denied non-mentionable role) → banner reasons follow renderRecipientWarnings ordering', async () => {
