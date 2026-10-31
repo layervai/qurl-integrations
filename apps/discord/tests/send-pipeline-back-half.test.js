@@ -150,6 +150,7 @@ jest.mock('../src/connector', () => ({
 }));
 
 jest.mock('../src/qurl', () => ({
+  REVOKE_BATCH_MAX_IDS: jest.requireActual('../src/qurl').REVOKE_BATCH_MAX_IDS,
   createOneTimeLink: jest.fn(),
   revokeResource: jest.fn(),
 }));

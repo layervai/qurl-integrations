@@ -113,6 +113,16 @@ share a process-local guard for each sender and send. The guard remains active
 after the 13-minute result wait while revocation continues. Store checks still
 enforce ownership and prevent new recipients across processes.
 
+While the connector route is off, each resource re-probes it on every retry.
+The SDK then tries up to ten child GETs to find a parent. Watermarked children
+all return 404 through this fallback, so a retry can repeat all ten GETs per
+resource, across five resources at once. An ordinary batch can also need up to
+ten sequential child DELETEs after its parent is found. Each SDK operation
+may retry once on a transient failure. Do not stop parent lookup after a few 404s: a later ordinary child can still identify the parent.
+The 13-minute message bounds the interaction wait, not total background work.
+Enable the connector route through its normal validation and rollout gates;
+measure large-send throughput separately (#1489).
+
 Before deployment, configure alarms for `Connector mint_link returned a link
 without a valid qurl_id`, `Connector mint_link over-minted`, `Connector mint_link
 returned more partial links than requested`, `Minted link revoke incomplete`,
