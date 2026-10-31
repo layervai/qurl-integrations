@@ -190,7 +190,9 @@ async function retryCleanupRateLimit(
   const raw = response.headers.get('retry-after')?.trim() ?? '';
   // Discord can return fractional seconds; HTTP dates are also valid Retry-After.
   const seconds = /^(?:\d+(?:\.\d+)?|\.\d+)$/.test(raw) ? Number(raw) : undefined;
-  const date = seconds === undefined && raw ? Date.parse(raw) : NaN;
+  // Date.parse alone treats numeric junk such as '-1' as a calendar date.
+  const startsWithWeekday = /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:, | )|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), )/.test(raw);
+  const date = seconds === undefined && startsWithWeekday ? Date.parse(raw) : NaN;
   const hintedMs = seconds !== undefined ? seconds * 1000
     : Number.isFinite(date) ? Math.max(0, date - Date.now()) : 1000;
   const delayMs = Math.max(250, Math.ceil(hintedMs));

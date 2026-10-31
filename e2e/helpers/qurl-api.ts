@@ -258,8 +258,8 @@ export async function revokeLink(
   const res = cleanupRetryBudget
     ? await fetchWithCleanupRetry(url, init, cleanupRetryBudget)
     : await fetchWithTransientRetry(url, init, confirmPending
-    ? { maxAttempts: 2, maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS }
-    : { maxAttempts: 1 });
+      ? { maxAttempts: 2, maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS }
+      : { maxAttempts: 1 });
   await res.body?.cancel().catch(() => {});
   if (!res.ok && confirmPending) {
     console.warn(`[revokeLink] DELETE returned ${res.status}; protection update not confirmed`);

@@ -23,7 +23,7 @@ afterEach(() => {
 
 test.each([
   ['2', 2000], ['0.5', 500], ['0', 250], ['.25', 250],
-  [undefined, 1000], ['invalid', 1000],
+  [undefined, 1000], ['invalid', 1000], ['-1', 1000], ['12x', 1000], ['1e3', 1000],
 ])('honors Retry-After %s, releases the body, and reuses the exact request', async (hint, delay) => {
   const response = rateLimited(hint);
   const cancel = jest.spyOn(response.body!, 'cancel');
