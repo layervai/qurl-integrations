@@ -1,4 +1,5 @@
-
+// Require this before other project modules: it installs mocks and the shared
+// beforeEach before loading commands.
 jest.mock('../../src/config', () => ({
   QURL_API_KEY: 'test-api-key',
   QURL_ENDPOINT: 'https://api.test.local',

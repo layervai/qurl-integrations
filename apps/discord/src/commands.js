@@ -9935,7 +9935,7 @@ registerFlow(CONFIRM_USER_SELECT_CUSTOM_ID, {
 // keyed by stage (not by customId), so the message registered on
 // USER_SELECT above is reachable from any of the three customIds
 // at SEND_STAGE_AWAITING_CONFIRM. The "siblingMessage keyed by stage"
-// test in qurl-send-map.test.js pins this contract.
+// test in qurl-send-helpers.test.js pins this contract.
 registerFlow(CONFIRM_SEND_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmSendClick,
@@ -10143,7 +10143,7 @@ module.exports = {
       safeDecodeURIComponent,
       SEND_STAGE_AWAITING_CONFIRM,
       // Every confirm-card customId is exported so the contract test
-      // in qurl-send-map.test.js can pin every wire value — a typo
+      // in qurl-send-helpers.test.js can pin every wire value — a typo
       // in any of these silently breaks routing for in-flight confirm
       // cards, so they need to be test-asserted.
       CONFIRM_USER_SELECT_CUSTOM_ID,
