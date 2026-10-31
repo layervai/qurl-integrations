@@ -27,8 +27,11 @@ function envReads(files, strict = true) {
       const node = memberPath.node;
       const object = node.object;
       const property = propertyName(node);
-      if (strict && object?.name === 'process' && property === undefined) {
+      if (strict && ['process', 'globalThis', 'global'].includes(object?.name) && property === undefined) {
         throw new Error('Untracked dynamic process property');
+      }
+      if (strict && property === 'process') {
+        throw new Error('Untracked global process reference');
       }
       if (strict && property === 'env' && object?.name !== 'process') {
         throw new Error('Untracked environment object');
@@ -50,7 +53,7 @@ function envReads(files, strict = true) {
     };
     traverse(ast, {
       ReferencedIdentifier(reference) {
-        if (!strict || reference.node.name !== 'process') return;
+        if (!strict || !['process', 'globalThis', 'global'].includes(reference.node.name)) return;
         const parent = reference.parent;
         if (!['MemberExpression', 'OptionalMemberExpression'].includes(parent.type) || parent.object !== reference.node) {
           throw new Error('Untracked process alias or destructuring');
@@ -95,6 +98,11 @@ test.each([
   'process[`env`].UNTRACKED;',
   'const k = "env"; process[k].UNTRACKED;',
   'process["e" + "nv"].UNTRACKED;',
+  'const { env } = globalThis.process; env.UNTRACKED;',
+  'const p = globalThis.process; const { env } = p; env.UNTRACKED;',
+  'const { env } = global["process"]; env.UNTRACKED;',
+  'const g = globalThis; const { env } = g.process; env.UNTRACKED;',
+  'const key = "process"; const { env } = globalThis[key]; env.UNTRACKED;',
 ])('untracked environment access fails closed: %s', source => {
   const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'discord-env-contract-'));
   const file = path.join(directory, 'config.js');
