@@ -18,6 +18,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -467,6 +468,22 @@ func (f *fakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*d
 	table, _, err := f.tableAndSchema(name)
 	if err != nil {
 		return nil, err
+	}
+	if aws.ToString(in.IndexName) == "rate-limit-partition" {
+		partition, ok := in.ExpressionAttributeValues[":partition"].(*ddbtypes.AttributeValueMemberS)
+		prefix, prefixOK := in.ExpressionAttributeValues[":prefix"].(*ddbtypes.AttributeValueMemberS)
+		if !ok || !prefixOK {
+			return nil, errors.New("fakeDDB.Query: missing rate index scope")
+		}
+		var items []map[string]ddbtypes.AttributeValue
+		for _, item := range table {
+			indexed, hasIndex := item["rate_limit_partition"].(*ddbtypes.AttributeValueMemberS)
+			key, hasKey := item[fAttrSlackTeamID].(*ddbtypes.AttributeValueMemberS)
+			if hasIndex && hasKey && indexed.Value == partition.Value && strings.HasPrefix(key.Value, prefix.Value) {
+				items = append(items, map[string]ddbtypes.AttributeValue{fAttrSlackTeamID: stringMember(key.Value)})
+			}
+		}
+		return &dynamodb.QueryOutput{Items: items}, nil
 	}
 	want, ok := in.ExpressionAttributeValues[":tid"].(*ddbtypes.AttributeValueMemberS)
 	if !ok {

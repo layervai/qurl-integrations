@@ -319,9 +319,10 @@ const errEnvelopeKey = "error"
 // [Handler.SetOAuthSetup]); do not add a "swap PostDM / OpenView at
 // runtime" path without that same posture.
 type Config struct {
-	AuthProvider       auth.Provider
-	SlackSigningSecret string
-	NewClient          func(apiKey string) *client.Client
+	LifecyclePurgeQueue LifecyclePurgeQueue
+	AuthProvider        auth.Provider
+	SlackSigningSecret  string
+	NewClient           func(apiKey string) *client.Client
 	// ConnectorAPIURL is the qURL platform API base including /v1. Guided
 	// tunnel setup writes it into every rendered runtime definition so sandbox
 	// installs never silently fall back to production.
@@ -775,7 +776,8 @@ type ReactionPort interface {
 
 // Handler processes Slack events and commands.
 type Handler struct {
-	cfg Config
+	lifecycleWorkersOnce sync.Once
+	cfg                  Config
 	// now is injected so tests can pin the clock for timestamp-skew checks
 	// without touching a package global. Defaults to time.Now.
 	now func() time.Time
@@ -2016,7 +2018,7 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 			}
 			for _, workspaceID := range ids {
 				purgeCtx, purgeCancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
-				h.purgeWorkspaceWithRetry(purgeCtx, purgeLog.With("workspace_id", workspaceID), workspaceID, purgeCutoff, purgeScopeDisconnect)
+				_ = h.purgeWorkspaceWithRetry(purgeCtx, purgeLog.With("workspace_id", workspaceID), workspaceID, purgeCutoff, purgeScopeDisconnect)
 				purgeCancel()
 			}
 		})
@@ -2526,10 +2528,12 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	case env.Type == slackEnvelopeTypeEventCallback && isLifecycleEvent(&env.Event, h.cfg.SlackBotTokenRotationEnabled):
 		// App uninstall / token revoke. Routed here BEFORE handleAgentEvent
 		// because the cascade must run regardless of conversation-mode wiring
-		// (handleAgentEvent returns early when the agent is disabled). It only
-		// schedules the async purge; the 200 below is the ack Slack needs to stop
-		// retrying.
-		h.handleLifecycleEvent(&env)
+		// (handleAgentEvent returns early when the agent is disabled). Persist
+		// cleanup before the 200 below; failure must remain retryable.
+		if err := h.handleLifecycleEvent(h.baseCtx, &env); err != nil {
+			http.Error(w, "Lifecycle cleanup unavailable; retry delivery", http.StatusServiceUnavailable)
+			return
+		}
 	case env.Type == slackEnvelopeTypeEventCallback:
 		// Conversation mode. handleAgentEvent only schedules async work (or
 		// no-ops when disabled/filtered); we always ack 200 below so Slack

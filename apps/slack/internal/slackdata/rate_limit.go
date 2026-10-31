@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -14,12 +15,12 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-type dynamoDBScanner interface {
-	Scan(ctx context.Context, params *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
-}
-
 const (
+	exprRatePartition      = "#partition"
+	exprRatePartitionValue = ":partition"
+	rateLimitIndexName     = "rate-limit-partition"
 	attrRateLimitPartition = "rate_limit_partition"
+	rateLimitShardCount    = 16
 	defaultRateLimitLimit  = 30
 	defaultRateLimitWindow = time.Hour
 	rateLimitKeyPrefix     = "__slack_rate_limit#"
@@ -161,16 +162,16 @@ func (s *Store) incrementCurrentRateLimitWindow(ctx context.Context, counterKey,
 		ConditionExpression: aws.String("#window = :window AND #count < :limit"),
 		ExpressionAttributeNames: map[string]string{
 			"#count":          attrRateLimitCount,
-			"#partition":      attrRateLimitPartition,
+			exprRatePartition: attrRateLimitPartition,
 			exprUpdatedAtNano: attrUpdatedAtNano,
 			"#window":         attrRateLimitWindow,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			exprOne:      numberAttr(1),
-			":now_nano":  unixNanoAttr(now),
-			":partition": stringAttr(partition),
-			":window":    numberAttr(windowUnix),
-			":limit":     numberAttr(int64(limit)),
+			exprOne:                numberAttr(1),
+			":now_nano":            unixNanoAttr(now),
+			exprRatePartitionValue: stringAttr(partition),
+			":window":              numberAttr(windowUnix),
+			":limit":               numberAttr(int64(limit)),
 		},
 		ReturnValuesOnConditionCheckFailure: ddbtypes.ReturnValuesOnConditionCheckFailureAllOld,
 	})
@@ -196,11 +197,11 @@ func (s *Store) resetRateLimitWindow(ctx context.Context, counterKey, partition 
 
 func (s *Store) setRateLimitWindow(ctx context.Context, counterKey, partition string, now time.Time, windowUnix int64, condition string, extra map[string]ddbtypes.AttributeValue) (bool, error) {
 	values := map[string]ddbtypes.AttributeValue{
-		":expires_at": numberAttr(time.Unix(windowUnix, 0).Add(2 * s.rateLimitWindow()).Unix()),
-		":now_nano":   unixNanoAttr(now),
-		":partition":  stringAttr(partition),
-		exprOne:       numberAttr(1),
-		":window":     numberAttr(windowUnix),
+		":expires_at":          numberAttr(time.Unix(windowUnix, 0).Add(2 * s.rateLimitWindow()).Unix()),
+		":now_nano":            unixNanoAttr(now),
+		exprRatePartitionValue: stringAttr(partition),
+		exprOne:                numberAttr(1),
+		":window":              numberAttr(windowUnix),
 	}
 	for k, v := range extra {
 		values[k] = v
@@ -214,7 +215,7 @@ func (s *Store) setRateLimitWindow(ctx context.Context, counterKey, partition st
 		ConditionExpression: aws.String(condition),
 		ExpressionAttributeNames: map[string]string{
 			"#count":          attrRateLimitCount,
-			"#partition":      attrRateLimitPartition,
+			exprRatePartition: attrRateLimitPartition,
 			"#expires_at":     attrRateLimitExpiresAt,
 			exprUpdatedAtNano: attrUpdatedAtNano,
 			"#window":         attrRateLimitWindow,
@@ -231,18 +232,10 @@ func (s *Store) setRateLimitWindow(ctx context.Context, counterKey, partition st
 	return false, ddbToError("CheckRateLimit", err)
 }
 
-// PurgeTeamRateLimitCountersBefore explicitly removes synthetic per-user slash
-// command throttle rows for teamID. Those rows are TTL-backed, but purging them
-// here keeps the uninstall/delete cascade from waiting on DynamoDB TTL for
-// user-scoped counter residue in workspace_mappings.
-//
-// workspace_mappings is PK-only, so there is no partition Query for the
-// __slack_rate_limit#<team># prefix. Use a projected, paginated Scan with a
-// tight begins_with filter, then DeleteItem each observed key. This is O(table
-// size), not O(matching counters), so it runs only when the rate-limit feature is
-// enabled. The row count is bounded by users who recently hit slash-command
-// gates, and TTL remains the backstop if this best-effort scan is interrupted or
-// rate limiting is disabled.
+// PurgeTeamRateLimitCountersBefore queries only this workspace's sparse index
+// shards. The original cutoff still protects counters from a newer install.
+// TODO(upstream-contract): deploy/backfill rate-limit-partition before this
+// reader; old images may still create unindexed counters until drained (#930).
 func (s *Store) PurgeTeamRateLimitCountersBefore(ctx context.Context, teamID string, cutoff time.Time) error {
 	if teamID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeTeamRateLimitCounters: team_id is required"}
@@ -250,36 +243,40 @@ func (s *Store) PurgeTeamRateLimitCountersBefore(ctx context.Context, teamID str
 	if !s.RateLimitEnabled {
 		return nil
 	}
-	scanner, ok := s.Client.(dynamoDBScanner)
-	if !ok {
-		return &Error{StatusCode: http.StatusServiceUnavailable, Code: "ddb_scan_unsupported", Title: "PurgeTeamRateLimitCounters: DDB client does not support Scan"}
+	var failures []error
+	for shard := 0; shard < rateLimitShardCount; shard++ {
+		if err := s.purgeRateLimitShard(ctx, teamID, fmt.Sprintf("%x", shard), cutoff); err != nil {
+			failures = append(failures, err)
+		}
 	}
+	return errors.Join(failures...)
+}
 
+func (s *Store) purgeRateLimitShard(ctx context.Context, teamID, shard string, cutoff time.Time) error {
 	prefix := rateLimitTeamPrefix(teamID)
-	var startKey map[string]ddbtypes.AttributeValue
 	var deleteErrs []error
+	var startKey map[string]ddbtypes.AttributeValue
 	for {
-		out, err := scanner.Scan(ctx, &dynamodb.ScanInput{
-			TableName:            aws.String(s.WorkspaceMappingsName),
-			FilterExpression:     aws.String("begins_with(#tid, :prefix)"),
-			ProjectionExpression: aws.String("#tid"),
-			ExpressionAttributeNames: map[string]string{
-				"#tid": attrSlackTeamID,
-			},
-			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-				":prefix": stringAttr(prefix),
-			},
-			ExclusiveStartKey: startKey,
+		out, err := s.Client.Query(ctx, &dynamodb.QueryInput{
+			TableName: aws.String(s.WorkspaceMappingsName), IndexName: aws.String(rateLimitIndexName),
+			KeyConditionExpression: aws.String("#partition = :partition AND begins_with(#tid, :prefix)"),
+			ProjectionExpression:   aws.String("#tid"), Limit: aws.Int32(100),
+			ExpressionAttributeNames:  map[string]string{exprRatePartition: attrRateLimitPartition, "#tid": attrSlackTeamID},
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{exprRatePartitionValue: stringAttr(rateLimitPartition(teamID, shard)), ":prefix": stringAttr(prefix)},
+			ExclusiveStartKey:         startKey,
 		})
 		if err != nil {
 			return joinSweepErrors(deleteErrs, ddbToError("PurgeTeamRateLimitCounters", err))
 		}
+		if out == nil {
+			return joinSweepErrors(deleteErrs, &Error{StatusCode: http.StatusServiceUnavailable, Title: "PurgeTeamRateLimitCounters: index returned no response"})
+		}
 		for _, item := range out.Items {
 			counterKey := readString(item, attrSlackTeamID)
-			if counterKey == "" {
+			if !strings.HasPrefix(counterKey, prefix) {
 				deleteErrs = append(deleteErrs, &Error{
 					StatusCode: http.StatusInternalServerError,
-					Title:      "PurgeTeamRateLimitCounters: scanned row missing slack_team_id",
+					Title:      "PurgeTeamRateLimitCounters: index returned a counter outside the requested workspace",
 				})
 				continue
 			}
