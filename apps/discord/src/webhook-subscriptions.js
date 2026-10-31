@@ -34,6 +34,7 @@ const OWNER_DISCOVERY_WARN_PAGE = Math.floor(MAX_OWNER_DISCOVERY_PAGES / 2);
 // Wall-clock budget for one discovery walk, so a degraded qurl-service fails
 // fast with its own code instead of parking work for tens of minutes.
 const OWNER_DISCOVERY_BUDGET_MS = 60_000;
+const LINK_OWNER_DISCOVERY_JOIN_MS = 3_000;
 const QURL_PER_REQUEST_TIMEOUT_MS = 10_000;
 // Node/undici network error codes that are transient despite carrying a code.
 const TRANSIENT_NETWORK_CODE_RE = /^(E(CONNRESET|CONNREFUSED|TIMEDOUT|NOTFOUND|AI_AGAIN|PIPE)|UND_ERR_)/;
@@ -355,10 +356,13 @@ async function discoverDefaultOwnerId(options) {
 function discoverDefaultOwnerForLink(bridgeUrl) {
   const { QURL_API_KEY: apiKey, QURL_ENDPOINT: endpoint } = config;
   const pending = linkOwnerDiscoveryInFlight;
-  if (pending && pending.apiKey === apiKey && pending.endpoint === endpoint && pending.bridgeUrl === bridgeUrl) {
+  const startedAt = Date.now();
+  const age = pending ? startedAt - pending.startedAt : -1;
+  if (pending && age >= 0 && age < LINK_OWNER_DISCOVERY_JOIN_MS
+      && pending.apiKey === apiKey && pending.endpoint === endpoint && pending.bridgeUrl === bridgeUrl) {
     return pending.promise;
   }
-  const discovery = { apiKey, endpoint, bridgeUrl };
+  const discovery = { apiKey, endpoint, bridgeUrl, startedAt };
   discovery.promise = discoverDefaultOwnerId({ requiredUrl: bridgeUrl }).finally(() => {
     if (linkOwnerDiscoveryInFlight === discovery) linkOwnerDiscoveryInFlight = null;
   });
@@ -399,8 +403,9 @@ async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
     throw err;
   }
 
-  // Share only an active walk. Completed results are never reused: the last
-  // subscription may be deleted out of band, making a cached owner unsafe.
+  // Join only a walk started within 3s. Completed results are never reused:
+  // the last subscription may be deleted out of band. Background refresh uses
+  // different malformed-row rules and must keep its own discovery walk.
   const ownerId = await discoverDefaultOwnerForLink(bridgeUrl);
   if (!ownerId) {
     const err = new Error('resolveDefaultOwnerForApiKey: default subscription owner could not be discovered');

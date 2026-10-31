@@ -872,6 +872,28 @@ describe('link default-owner single-flight', () => {
     expect(global.fetch).toHaveBeenCalledTimes(3);
   });
 
+  it('starts a fresh walk once the pending walk is three seconds old', async () => {
+    let now = 10_000;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const releases = [];
+    global.fetch = jest.fn(() => new Promise(resolve => { releases.push(resolve); }));
+    try {
+      const first = subs.resolveDefaultOwnerForApiKey('lv_test_abc');
+      now += 2_999;
+      const joined = subs.resolveDefaultOwnerForApiKey('lv_test_abc');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      now++;
+      const fresh = subs.resolveDefaultOwnerForApiKey('lv_test_abc');
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      releases[0](page({ data: [{ owner_id: 'usr_old' }] }));
+      await expect(Promise.all([first, joined])).resolves.toEqual(['usr_old', 'usr_old']);
+      releases[1](page({ data: [{ owner_id: 'usr_new' }] }));
+      await expect(fresh).resolves.toBe('usr_new');
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('shares failures but does not cache them', async () => {
     let release;
     global.fetch = jest.fn().mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
