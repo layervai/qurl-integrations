@@ -282,6 +282,14 @@ repair instruction if an existing table lacks a required GSI. It never drops dat
   authenticated), `/oauth/discord/install` plus its callback for customer
   installs, and the qURL OAuth start/callback routes used by `/qurl setup`.
 
+Gateway session persistence admits at most 100 in-flight background writes.
+The live in-memory session keeps advancing during backpressure. Look for
+`gateway-session-store: write backpressure`, limited to one warning per minute
+with count-only fields. Skipped checkpoints can require a fresh IDENTIFY after
+restart. A skipped null-clear can leave a rejected session row for Discord to
+validate on the next boot; final flush drains writes but does not retry a
+null-mirror delete. A non-null mirror is persisted after the drain.
+
 ## Troubleshooting
 
 **"qURL is not configured"** — an admin needs to run `/qurl setup` on this
