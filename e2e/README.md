@@ -11,6 +11,15 @@ CommonJS, Jest + ts-jest.
 > resources in `afterAll` (see `helpers/cleanup.ts`), so runs clean up
 > after themselves.
 
+Cleanup retries each HTTP 429 once and shares at most ten seconds of retry
+waiting across a resource sweep or a message sweep. It honors `Retry-After`
+(seconds, fractional seconds, or an HTTP date); a hint above the remaining
+budget is reported without an early retry. Missing or invalid hints use a
+one-second delay. Other cleanup failures are not retried. Resource failures
+retain their entries and fail the hook after all entries are attempted;
+message failures warn and continue. This bounds added waiting, not network
+request time; keep suite hook deadlines sized for their fixture count.
+
 ## Setup
 
 ```sh

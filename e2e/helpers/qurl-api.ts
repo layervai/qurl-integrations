@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { fetchWithTransientRetry } from './http';
+import { CleanupRetryBudget, fetchWithCleanupRetry, fetchWithTransientRetry } from './http';
 
 export interface MintResult {
   resource_id: string;
@@ -245,19 +245,19 @@ export const REVOKE_CONFIRM_WAIT_MS = 35_000;
 /** Revoke the resource. A successful DELETE confirms the protection update.
  * Repeated DELETEs retry the same committed epoch (qurl-service RevokeQurl).
  * A management status of `revoked` alone does not confirm that update.
- * Cleanup skips the retry so a bulk sweep keeps its existing time budget. */
+ * Cleanup retries only a 429 within the sweep's shared wait budget. */
 export async function revokeLink(
   baseUrl: string,
   apiKey: string,
   resourceId: string,
-  { confirmPending = true }: { confirmPending?: boolean } = {},
+  { confirmPending = true, cleanupRetryBudget }: { confirmPending?: boolean; cleanupRetryBudget?: CleanupRetryBudget } = {},
 ): Promise<boolean> {
   const url = new URL(baseUrl);
   url.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
-  const res = await fetchWithTransientRetry(url, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${apiKey}` },
-  }, confirmPending
+  const init = { method: 'DELETE', headers: { Authorization: `Bearer ${apiKey}` } };
+  const res = cleanupRetryBudget
+    ? await fetchWithCleanupRetry(url, init, cleanupRetryBudget)
+    : await fetchWithTransientRetry(url, init, confirmPending
     ? { maxAttempts: 2, maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS }
     : { maxAttempts: 1 });
   await res.body?.cancel().catch(() => {});
@@ -408,13 +408,18 @@ export async function getQurlResource(
   apiKey: string,
   id: string,
   signal?: AbortSignal,
+  cleanupRetryBudget?: CleanupRetryBudget,
 ): Promise<ResourceStatus> {
   const base = stripTrailingSlashes(managementUrl);
-  const res = await fetchWithTransientRetry(`${base}/${encodeURIComponent(id)}`, {
-    signal,
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
-  if (!res.ok) throw new StatusCheckError(res.status);
+  const init = { signal, headers: { Authorization: `Bearer ${apiKey}` } };
+  const url = `${base}/${encodeURIComponent(id)}`;
+  const res = cleanupRetryBudget
+    ? await fetchWithCleanupRetry(url, init, cleanupRetryBudget)
+    : await fetchWithTransientRetry(url, init);
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    throw new StatusCheckError(res.status);
+  }
 
   const body = await res.json() as unknown;
   const resource = parseBareOrEnveloped(body, (value) => parseResourceStatus(value, id));
@@ -426,17 +431,16 @@ export async function getQurlResource(
  * TODO(upstream-contract): GET /v1/qurls/{child} returns its canonical parent;
  * child DELETE enforces that parent binding and repeated revocation succeeds.
  * This confirms API revocation, not native session CLOSED. */
-export async function revokeChild(managementUrl: string, apiKey: string, qurlId: string, signal?: AbortSignal): Promise<void> {
+export async function revokeChild(managementUrl: string, apiKey: string, qurlId: string, signal?: AbortSignal, cleanupRetryBudget?: CleanupRetryBudget): Promise<void> {
   if (!/^q_[a-zA-Z0-9]+$/.test(qurlId)) throw new TypeError('Child cleanup requires a qurl_id');
-  const parent = await getQurlResource(managementUrl, apiKey, qurlId, signal);
+  const parent = await getQurlResource(managementUrl, apiKey, qurlId, signal, cleanupRetryBudget);
   if (!parent.resource_id) throw new Error('Child cleanup requires a canonical parent');
   const url = new URL(managementUrl);
   url.pathname = `/v1/resources/${encodeURIComponent(parent.resource_id)}/qurls/${encodeURIComponent(qurlId)}`;
-  const res = await fetchWithTransientRetry(url, {
-    method: 'DELETE',
-    signal,
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
+  const init = { method: 'DELETE', signal, headers: { Authorization: `Bearer ${apiKey}` } };
+  const res = cleanupRetryBudget
+    ? await fetchWithCleanupRetry(url, init, cleanupRetryBudget)
+    : await fetchWithTransientRetry(url, init);
   await res.body?.cancel().catch(() => {});
   if (res.status !== 204) {
     throw Object.assign(new Error(`Child cleanup did not confirm revocation: ${res.status}`), { status: res.status });

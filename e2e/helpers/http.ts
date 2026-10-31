@@ -156,3 +156,34 @@ export async function fetchWithTransientRetry(
   }
   return res;
 }
+
+/** One sweep shares this wait budget across all owned resources or messages. */
+export interface CleanupRetryBudget { remainingMs: number }
+
+/** Retry one rejected DELETE/read after a 429, without retrying other failures.
+ * A long server hint is never shortened to fit the sweep's remaining budget.
+ * shortcut: only retry waiting is bounded here; callers still own request/hook deadlines. */
+export async function fetchWithCleanupRetry(
+  input: string | URL,
+  init: RequestInit,
+  budget: CleanupRetryBudget,
+): Promise<Response> {
+  const response = await fetch(input, init);
+  if (response.status !== 429) return response;
+  const raw = response.headers.get('retry-after')?.trim() ?? '';
+  // Discord can return fractional seconds; HTTP dates are also valid Retry-After.
+  const seconds = /^(?:\d+(?:\.\d+)?|\.\d+)$/.test(raw) ? Number(raw) : undefined;
+  const date = seconds === undefined && raw ? Date.parse(raw) : NaN;
+  const hintedMs = seconds !== undefined ? seconds * 1000
+    : Number.isFinite(date) ? Math.max(0, date - Date.now()) : 1000;
+  const delayMs = Math.max(250, Math.ceil(hintedMs));
+  if (!Number.isFinite(delayMs) || delayMs > budget.remainingMs) {
+    console.warn('[cleanup] 429 retry declined: server wait exceeds the sweep budget');
+    return response;
+  }
+  budget.remainingMs -= delayMs;
+  await response.body?.cancel().catch(() => {});
+  console.warn(`[cleanup] 429: one retry after ${delayMs}ms`);
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+  return fetch(input, init);
+}
