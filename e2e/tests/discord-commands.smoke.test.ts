@@ -1,5 +1,5 @@
 import { loadEnv } from '../helpers/env';
-import { api, getMe } from '../helpers/discord-api';
+import { api, getMe, DiscordApiError } from '../helpers/discord-api';
 
 // Discord application-command option type for a subcommand.
 // https://discord.com/developers/docs/interactions/application-commands#application-command-object-application-command-option-type
@@ -70,17 +70,10 @@ describe('Discord command registration (smoke)', () => {
     // Discord reflects the new set via this API immediately; only the
     // user-visible autocomplete cache is what takes up to an hour.
     const [globalCommands, guildCommands] = await Promise.all([
-      api(env.BOT_TOKEN, 'GET', `/applications/${env.BOT_CLIENT_ID}/commands`) as Promise<ApplicationCommand[]>,
-      (api(env.BOT_TOKEN, 'GET', `/applications/${env.BOT_CLIENT_ID}/guilds/${env.GUILD_ID}/commands`) as Promise<ApplicationCommand[]>)
-        .catch((err: Error) => {
-          // Match the exact error-message format from `helpers/discord-api.ts`:
-          //   `Discord API GET /path: ${status} ${body}`
-          // Matching `: <status> ` (with space-separator on both sides) avoids
-          // false-matching 403/404 that appear inside the response `${body}`
-          // as an unrelated snowflake ID or Discord error code.
-          // (Issue #104 tracks switching this to a structured `err.status`
-          // on the thrown error so the regex can go away.)
-          if (/:\s(403|404)\s/.test(err.message)) {
+      api<ApplicationCommand[]>(env.BOT_TOKEN, 'GET', `/applications/${env.BOT_CLIENT_ID}/commands`),
+      api<ApplicationCommand[]>(env.BOT_TOKEN, 'GET', `/applications/${env.BOT_CLIENT_ID}/guilds/${env.GUILD_ID}/commands`)
+        .catch((err: unknown) => {
+          if (err instanceof DiscordApiError && (err.status === 403 || err.status === 404)) {
             // Surface the fall-through in CI logs so a silently-dropped
             // guild-scope coverage doesn't look identical to a bot that
             // legitimately has no guild-scoped registrations. The Kevin
