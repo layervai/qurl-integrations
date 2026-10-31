@@ -181,7 +181,7 @@ const LOG_EVENTS = Object.freeze({
 // Justin's review comment on infra repo #309.
 //
 // SECRETS CONTRACT: callers SHOULD pass only non-sensitive meta values
-// from a small, pre-vetted vocabulary: `send_id`, `kind`, `count`,
+// from a small, pre-vetted vocabulary: `send_id`, `kind`, `count`, `link_count`,
 // `expires_in`, `api_code`, `success`, `total`. logger.audit()
 // defends in two layers if a caller still slips a secret-shaped key
 // in (top-level OR nested):
@@ -210,8 +210,11 @@ const AUDIT_EVENTS = {
   // from handleAddRecipients on a sendConfig that has both file +
   // location.
   UPLOAD_SUCCESS: 'upload_success',
-  // Counts failed record writes before DMs, not confirmed orphan resources.
-  // link_count is attempted links; cleanup or a lost response may change row state.
+  // Failed record writes before DMs from initial send and Add Recipients;
+  // expected revoked-send rejections are excluded. link_count is attempted
+  // links, not confirmed orphans. send_id must stay out of metric dimensions.
+  // TODO(upstream-contract): keep the SendPersistFailed JSON metric filter
+  // on this exact event/agent pair; substring matching also finds dispatch_persist_failed.
   PERSIST_FAILED: 'persist_failed',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',
