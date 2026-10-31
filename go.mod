@@ -143,3 +143,5 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 // Go does not inherit dependency replacements. This reviewed FRP revision adds
 // system CA verification and retains the lifecycle fixes and InitialRunID.
 replace github.com/fatedier/frp => github.com/layervai/frp v1.0.5-0.20260926021043-5570a4205458
+
+ignore node_modules
