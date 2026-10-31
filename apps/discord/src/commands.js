@@ -814,7 +814,7 @@ function resolveRoleNames(guild, ids) {
 //     │                                                             │
 //     │  Vik opened a door for you.                                 │  (description, line 1)
 //     │  > "Quarterly numbers — for your eyes only."                │  (description, line 2 — optional italic blockquote)
-//     │  🕐 Expiry: in 1 day                                         │  (description, line 3 — Discord <t:N:R>, auto-updates
+//     │  🕐 Expiry: in 1 day                                        │  (description, line 3 — Discord <t:N:R>, auto-updates
 //     │                                                             │   client-side to "in 16 hours" / "in 1 hour" / "1 hour ago")
 //     │                                                             │
 //     │  ┌──────────────────────────┐                               │

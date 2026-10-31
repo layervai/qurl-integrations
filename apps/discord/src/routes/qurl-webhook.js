@@ -472,8 +472,7 @@ async function flipRecipientDMToClosed({ qurlId, eventId, label, skipIfAttr, bui
 // qurl.expired handler — the upstream fires this when a qURL reaches
 // expires_at (regardless of prior revoke/consume state). The bot looks
 // the recipient row up via the qurl_id-index GSI and PATCHes the DM body
-// so Discord's <t:UNIX:R> relative-time marker flips tense from
-// "Closes in N" to "Closed N ago" without further edits.
+// from the neutral expiry label to the explicit closed-state message.
 //
 // Status policy:
 //   - 200 on permanent can't-action conditions (no matching row, send
@@ -522,7 +521,7 @@ async function handleQurlExpired(req, res, { data, eventId }) {
 // dead for them even though its 30m TTL hasn't elapsed. Flip their DM
 // from the neutral "🕐 Expiry: <t:...:R>" embed to the closed-state
 // "🔒 You opened this one-time qURL … no longer active" copy so they
-// don't see "Closes in ~25m" on a link they can no longer reach.
+// don't see "Expiry: in 25 minutes" on a link they can no longer reach.
 //
 // FIRE-AND-FORGET by design (mirrors the view-counter publish above, NOT
 // handleQurlExpired's response coupling): the view is already recorded

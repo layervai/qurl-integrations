@@ -224,7 +224,7 @@ describe('buildDeliveryPayload — senderAlias sanitization (author row)', () =>
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
     const desc = capturedEmbeds[0]._description;
     expect(desc).toMatch(/🕐 Expiry: <t:1735689600:R>/);
-    expect(desc).not.toMatch(/Closes in \*\*\d/);
+    expect(desc).not.toMatch(/🕐 (?:Closes|Closed) /);
   });
 
   it.each([TEST_NOW_SECONDS - 60, TEST_NOW_SECONDS, TEST_NOW_SECONDS + 60])('uses neutral expiry copy at %i before and after the deadline (#375)', (expiresAt) => {
