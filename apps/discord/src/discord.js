@@ -195,8 +195,8 @@ client.once('ready', async () => {
   logger.info(`Watching guild: ${guild?.name}`);
 });
 
-// discord.js seeds guilds from READY and emits guildAvailable for existing
-// guilds, so re-IDENTIFY does not emit duplicate installs (see gateway test).
+// TODO(upstream-contract): discord.js READY seeds its guild cache before
+// GUILD_CREATE; tests/guild-install-gateway.test.js pins that replay behavior (#195).
 // Keep the readiness tag as a defensive startup signal.
 client.on('guildCreate', (guild) => {
   try {

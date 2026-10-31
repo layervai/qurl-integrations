@@ -1,5 +1,6 @@
 const path = require('node:path');
 const { Client } = require('discord.js');
+// Intentionally use the exact pinned library's internals; recheck #195 on upgrades.
 const discordSource = path.dirname(require.resolve('discord.js'));
 const handleReady = require(path.join(discordSource, 'client/websocket/handlers/READY'));
 const handleGuildCreate = require(path.join(discordSource, 'client/websocket/handlers/GUILD_CREATE'));
@@ -11,7 +12,7 @@ test('real gateway handlers distinguish re-IDENTIFY from a new guild install (#1
     client.user = { _patch() {} };
     client.application = { _patch() {} };
     client.ws.status = Status.Ready;
-    client.readyTimestamp = 1;
+    client.readyTimestamp = 1; // Simulate an already-ready client during reconnect.
     const installed = jest.fn();
     const available = jest.fn();
     client.on('guildCreate', installed);
@@ -25,12 +26,13 @@ test('real gateway handlers distinguish re-IDENTIFY from a new guild install (#1
     } });
     // Real READY seeds the cache even while isReady remains true on reconnect.
     expect(client.isReady()).toBe(true);
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (const clearCache of [false, false, true]) {
+      if (clearCache) client.guilds.cache.clear();
       handleReady(client, packet, shard);
       handleGuildCreate(client, guildPacket(existingID), shard);
     }
     expect(installed).not.toHaveBeenCalled();
-    expect(available).toHaveBeenCalledTimes(2);
+    expect(available).toHaveBeenCalledTimes(3);
     handleGuildCreate(client, guildPacket('100000000000000002'), shard);
     expect(installed).toHaveBeenCalledTimes(1);
   } finally {
