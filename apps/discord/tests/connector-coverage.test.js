@@ -1624,6 +1624,24 @@ describe('revoke chunk size', () => {
     jest.resetModules();
   });
 
+  it.each([undefined, NaN, 0, -1, 0.5])('rejects an unusable SDK revoke cap %p at module load', cap => {
+    jest.resetModules();
+    jest.doMock('../src/qurl', () => ({ ...jest.requireActual('../src/qurl'), REVOKE_BATCH_MAX_IDS: cap }));
+    expect(() => require('../src/connector')).toThrow('Invalid connector revoke chunk size');
+  });
+
+  it.each([0, -1, 1.5, 101, NaN])('rejects invalid mint count %p before network work or an over-mint alarm', async n => {
+    jest.resetModules();
+    jest.dontMock('../src/qurl');
+    const connector = require('../src/connector');
+    const logger = require('../src/logger');
+    logger.error.mockClear();
+    globalThis.fetch = jest.fn();
+    await expect(connector.mintLinks('res-1', { n })).rejects.toThrow('Invalid link count');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
   it('never hands the SDK fallback a chunk larger than its cap', async () => {
     jest.resetModules();
     const revokeOrdinaryLinks = jest.fn().mockResolvedValue(undefined);

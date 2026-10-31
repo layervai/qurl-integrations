@@ -27,11 +27,11 @@ const MAX_CDN_REDIRECTS = 3;
 // is remembered only within one call, so each resource re-probes the route on
 // purpose: a process-wide negative cache would hide the route once enabled.
 const REVOKE_LINKS_TIMEOUT_MS = 65_000;
-// Chunk size: #1551's 10-id request cap, bounded by construction by the SDK
-// fallback's per-call cap because every chunk may be handed to it whole. (A
-// missing import yields NaN, which the coverage check in revokeMintedLinks
-// turns into a throw, never a false success.)
+// Each chunk may be handed to the SDK whole, so both caps must hold.
 const CONNECTOR_REVOKE_MAX_IDS = Math.min(10, REVOKE_BATCH_MAX_IDS);
+if (!Number.isSafeInteger(CONNECTOR_REVOKE_MAX_IDS) || CONNECTOR_REVOKE_MAX_IDS < 1) {
+  throw new Error('Invalid connector revoke chunk size');
+}
 const REVOKE_RETRY_AFTER_MAX_SECONDS = 2;
 // Waiting budget for inline partial-mint cleanup before the mint error is
 // rethrown: one connector revoke chunk plus slack. Larger partial sets (up to
@@ -120,9 +120,8 @@ function partialQurlIdsFromLinks(links, n) {
   if (!Array.isArray(links)) {
     return { partialQurlIds: [], unrevokedQurlIds: [], unidentifiedCount: 0, overMintedCount: 0, cappedCount: 0 };
   }
-  // This runs while reporting a failed mint: never let a bad `n` replace that
-  // error. Skip cleanup instead and let the capped count below surface it.
-  const cap = Number.isInteger(n) && n > 0 ? n + MAX_OVERFLOW_REVOKE_IDS : 0;
+  // mintLinks validates n before any network call.
+  const cap = n + MAX_OVERFLOW_REVOKE_IDS;
   const normalized = links.map(link => qurlIdForCleanup(link?.qurl_id));
   const identified = [...new Set(normalized.filter(id => id !== null))];
   return {
@@ -130,7 +129,7 @@ function partialQurlIdsFromLinks(links, n) {
     // Bounded, non-secret slice of ids left for hand reconciliation.
     unrevokedQurlIds: identified.slice(cap, cap + MAX_OVERFLOW_REVOKE_IDS),
     unidentifiedCount: normalized.filter(id => id === null).length,
-    overMintedCount: cap ? Math.max(0, identified.length - n) : 0,
+    overMintedCount: Math.max(0, identified.length - n),
     cappedCount: Math.max(0, identified.length - cap),
   };
 }
