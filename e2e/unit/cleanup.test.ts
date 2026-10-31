@@ -38,7 +38,7 @@ test('the afterAll sweep does not confirm', async () => {
 
   expect(revokeLinkMock).toHaveBeenCalledTimes(2);
   for (const call of revokeLinkMock.mock.calls) {
-    expect(call[3]).toEqual({ confirmPending: false });
+    expect(call[3]).toEqual({ confirmPending: false, cleanupRetryBudget: { remainingMs: 10_000 } });
   }
 });
 
@@ -140,13 +140,13 @@ test('child cleanup deduplicates, continues on failure, fails the hook and retai
   tracked.track('source');
   await expect(tracked.revokeAll()).rejects.toThrow(/^Child cleanup failed for: q_first \(HTTP 403\)$/);
   expect(childMock.mock.calls).toEqual([
-    [env.MINT_API_URL, env.QURL_API_KEY, 'q_first'],
-    [env.MINT_API_URL, env.QURL_API_KEY, 'q_second'],
+    [env.MINT_API_URL, env.QURL_API_KEY, 'q_first', undefined, { remainingMs: 10_000 }],
+    [env.MINT_API_URL, env.QURL_API_KEY, 'q_second', undefined, { remainingMs: 10_000 }],
   ]);
-  expect(revokeLinkMock).toHaveBeenCalledWith(env.MINT_API_URL, env.QURL_API_KEY, 'source', { confirmPending: false });
+  expect(revokeLinkMock).toHaveBeenCalledWith(env.MINT_API_URL, env.QURL_API_KEY, 'source', { confirmPending: false, cleanupRetryBudget: { remainingMs: 10_000 } });
   childMock.mockClear();
   await expect(tracked.revokeAll()).resolves.toBeUndefined();
-  expect(childMock.mock.calls).toEqual([[env.MINT_API_URL, env.QURL_API_KEY, 'q_first']]);
+  expect(childMock.mock.calls).toEqual([[env.MINT_API_URL, env.QURL_API_KEY, 'q_first', undefined, { remainingMs: 10_000 }]]);
 });
 
 test('mixed child and source failures are reported after every owned entry is attempted', async () => {

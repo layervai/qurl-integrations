@@ -11,6 +11,19 @@ CommonJS, Jest + ts-jest.
 > resources in `afterAll` (see `helpers/cleanup.ts`), so runs clean up
 > after themselves.
 
+Cleanup retries each HTTP 429 once and shares at most ten seconds of retry
+waiting across a resource sweep or a message sweep. It honors `Retry-After`
+(seconds, fractional seconds, or an HTTP date); a hint above the remaining
+budget is reported without an early retry. Missing or invalid hints use a
+one-second delay; all retries wait at least 250 ms. Source and message cleanup
+do not retry other failures. Child cleanup keeps
+its existing three-attempt transient GET/DELETE policy, with at most one
+budgeted retry of a 429. Once the budget is spent, further 429s are reported
+without a retry. Resource failures
+retain their entries and fail the hook after all entries are attempted;
+message failures warn and continue. This bounds added waiting, not network
+request time; keep suite hook deadlines sized for their fixture count.
+
 ## Setup
 
 ```sh
@@ -101,3 +114,68 @@ share Discord channel state. Their config alone loads
 sandbox-health embed. After each live run the reporter posts a per-file
 pass/fail rollup to the test channel (missing env or Discord errors warn,
 never fail the run).
+
+### Scoped recipient path check
+
+The distinct-recipient file test opens recipient B's view, then recipient A's
+view. It keeps A's browser context for three direct requests. The own-path
+requests must return HTTP 200 before and after the sibling-path request. The
+probe does not follow B's link or issue another knock. All requests share the
+viewer's remaining wall-clock deadline. Each request uses at most ten seconds
+and has a unique, non-secret `X-Request-ID`.
+
+The router hides an internal authorization refusal with its not-found response
+or a connection close. A 404 or reset alone does not prove that the internal
+authorizer returned HTTP 403. Resets can also come from an edge or TLS layer.
+The receipt marks these observations as pending proof. Unexpected responses,
+DNS failures and timeouts fail the probe. A sibling response in the 2xx range
+reports an explicit cross-recipient breach with the numeric status only.
+
+One final receipt is written on success or failure. It retains all three request
+IDs, known numeric statuses and a fixed failure code. It contains no raw error
+or response body. A failed receipt cannot qualify the ledger check.
+
+To complete the [Connector target-path check](https://github.com/layervai/qurl-service/blob/main/docs/runbooks/prod-rollout-ledger/2026-09-05-pr-1474-target-path-cutover.md),
+the operator must match the sibling request ID to the exact internal
+resource-authorize HTTP 403 access record. Positive own-path requests can hit
+the router cache and need not create fresh backend access records. The operator
+must also compare the expected path and exact child/public identity with the
+matching native admission STATE row using the read-only collector. Pair these
+results with the deployed API/router source and shared target-path vectors.
+There is no public header or body that identifies a pure scope mismatch.
+
+This probe only allows the reviewed public and LayerV environment domains.
+Adding an environment suffix requires source review. The probe alone does not
+prove stored scope, production activation, or native CLOSED state.
+
+### Owned target-path input probe (operator opt-in)
+
+`QURL_TARGET_PATH_INPUT_PROBE=1` adds the input-only API1474 matrix to the normal
+`tests/file-revoke.test.ts` run. It uses the first successful file case's existing
+owned child to read its canonical active Connector parent with the same API key.
+It creates no additional upload, identity, browser, or NHP admission. Both API
+mint routes receive three valid and three invalid input cases. Six new child
+qURLs are revoked through the existing child-only helper; each DELETE requires
+204 and each owner read must show revoked. The shared parent is never deleted.
+
+Run through the reviewed normal Sandbox file workflow and shared lock, with the
+existing key. Use `--reporters=default`. The wrapper must explicitly pass the
+opt-in, retain `e2e/owned-target-path-input-journal.jsonl` on every outcome, and
+retain its lock if that file is missing or its status is not
+`INPUT_MATRIX_AND_CHILD_CLEANUP_COMPLETE`. This source does not activate the
+workflow opt-in or replace that guard. Never enable it before the guard exists.
+
+The append-only JSONL journal is created exclusively with mode0600 and every
+snapshot is fsynced before a POST. Earlier known IDs survive an interrupted write.
+The receipt gate requires a newline-terminated final complete record; malformed
+or truncated records keep the result unresolved.
+Returned child IDs are checkpointed before assertions. A lost or ambiguous POST
+response is never retried; the pending intent and journal remain for recovery.
+Known children are still cleaned up. The journal contains no API key or access
+link. Each HTTP call has a ten-second caller abort; the test has a fifteen-minute
+outer limit for the fixed request count and existing bounded read/DELETE retries.
+
+This proves only input responses, stored paths, and API child cleanup. Root must
+separately bind the deployed API/config, six rejected requests' bounded metric
+labels and redacted DEBUG records, and normal flag restoration. It proves no
+NHP/native-session cleanup, Connector object lookup, or production result.

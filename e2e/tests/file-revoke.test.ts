@@ -53,6 +53,9 @@ import { randomUUID } from 'crypto';
 import { trackedQurlResources } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';
 import * as qurl from '../helpers/qurl-api';
+import { runTargetPathInput } from '../helpers/targetPathInput';
+import { resolve } from 'node:path';
+let targetPathInputSeedChild = '';
 import { mintIdFromTunnelViewUrl, viewViaQurlLink, checkOwnershipConfig } from '../helpers/tunnelView';
 
 const env = loadEnv();
@@ -150,6 +153,7 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
+    targetPathInputSeedChild = minted.qurl_id;
     // Preserve the 90s upload/browser budget and add one confirmation wait.
   }, 90_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 
@@ -191,8 +195,13 @@ describe('File Revoke', () => {
     // cold chromium and these run on a single jest worker (maxWorkers:1) — serial
     // keeps peak memory to one browser and avoids the two knocks racing for the
     // shared CI egress IP's WAF budget.
-    const viewA = await viewViaQurlLink(mintedA.qurl_link, { ownership: { resource_id: upload.resource_id, qurl_id: mintedA.qurl_id, expires_at: mintedA.expires_at } });
+    // Open B first so its real existing object path is known. Its browser closes
+    // before A opens; A's same-session probe never follows B's admission link.
     const viewB = await viewViaQurlLink(mintedB.qurl_link, { ownership: { resource_id: upload.resource_id, qurl_id: mintedB.qurl_id, expires_at: mintedB.expires_at } });
+    const viewA = await viewViaQurlLink(mintedA.qurl_link, {
+      ownership: { resource_id: upload.resource_id, qurl_id: mintedA.qurl_id, expires_at: mintedA.expires_at },
+      siblingViewPath: new URL(viewB.url).pathname,
+    });
 
     // Both recipients get a served (200) per-recipient object end-to-end.
     expect(viewA.status).toBe(200);
@@ -322,3 +331,11 @@ describe('File Revoke', () => {
     // Measured 9.8s without a retry, 48.0s with a retry in the earlier run.
   }, 85_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
 });
+
+// Only the reviewed normal file workflow enables this operator probe.
+(process.env.QURL_TARGET_PATH_INPUT_PROBE === '1' ? test : test.skip)(
+  'both target-path mint routes on the existing owned Connector parent', async () => {
+    await runTargetPathInput(targetPathInputSeedChild, env.QURL_API_KEY,
+      resolve('owned-target-path-input-journal.jsonl'));
+  }, 900_000,
+);
