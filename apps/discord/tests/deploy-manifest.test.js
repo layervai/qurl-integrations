@@ -10,7 +10,7 @@ const ENV_GROUPS = ['required', 'required_production', 'optional', 'sdk_optional
 function javascriptFiles(directory) {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
     const file = path.join(directory, entry.name);
-    return entry.isDirectory() ? javascriptFiles(file) : entry.name.endsWith('.js') ? [file] : [];
+    return entry.isDirectory() ? javascriptFiles(file) : /\.(c|m)?js$/.test(entry.name) ? [file] : [];
   });
 }
 
@@ -41,6 +41,18 @@ function envReads(files, strict = true) {
       }
     };
     traverse(ast, {
+      ReferencedIdentifier(reference) {
+        if (!strict || reference.node.name !== 'process') return;
+        const parent = reference.parent;
+        if (!['MemberExpression', 'OptionalMemberExpression'].includes(parent.type) || parent.object !== reference.node) {
+          throw new Error('Untracked process alias or destructuring');
+        }
+      },
+      ImportDeclaration({ node }) {
+        if (strict && ['process', 'node:process'].includes(node.source.value)) {
+          throw new Error('Untracked process module import');
+        }
+      },
       MemberExpression: member,
       OptionalMemberExpression: member,
       CallExpression({ node }) {
@@ -67,6 +79,11 @@ test.each([
   'const { env } = require("node:process"); env.UNTRACKED;',
   'globalThis.process.env.UNTRACKED;',
   'globalThis.process["env"].UNTRACKED;',
+  'const { env } = process; env.UNTRACKED;',
+  'const { env: e } = process; e.UNTRACKED;',
+  'const p = process; p.env.UNTRACKED;',
+  'Reflect.get(process, "env").UNTRACKED;',
+  'import { env } from "node:process"; env.UNTRACKED;',
 ])('untracked environment access fails closed: %s', source => {
   const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'discord-env-contract-'));
   const file = path.join(directory, 'config.js');
