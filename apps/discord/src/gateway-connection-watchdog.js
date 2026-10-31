@@ -12,8 +12,8 @@
 //   1. If connected → reset attempts/recovery; continue. When local lock
 //      ownership is false, strongly read the holder first and exit only if a
 //      peer owner confirms split brain.
-//   2. If @discordjs/ws is automatically recovering from Closed,
-//      wait for Ready/Resumed. Never race it with manager.connect().
+//   2. If @discordjs/ws is recovering or an inbound connect is pending,
+//      wait for settlement. Never race it with manager.connect().
 //      A recovery that stays stuck for maxRecoveryMs releases the lock,
 //      when held, and exits so ECS can replace the process. This limit
 //      also runs on a non-lock-holder, so a stale standby latch cannot
@@ -21,9 +21,7 @@
 //      timer, so lock flapping cannot extend the bound.
 //   3. If not holding the lock → reset attempts; continue. The standby
 //      loop no-ops until promotion, but recovery in step 2 stays bounded.
-//   4. If the leader is already connecting → reset attempts; continue.
-//      This prevents concurrent connect() calls.
-//   5. Otherwise: attempts++, try `manager.connect()`. On success,
+//   4. Otherwise: attempts++, try `manager.connect()`. On success,
 //      reset attempts. On failure, log + exponential backoff sleep
 //      (200 ms, 400 ms, 800 ms, 1.6 s — capped at 5 s, see below).
 //      At `attempts >= maxAttempts` (default 5), release the lock
@@ -60,8 +58,8 @@ const { performance } = require('node:perf_hooks');
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
-// Give @discordjs/ws 20 seconds to finish its own reconnect loops. This
-// covers the library's 500 ms reconnect delay, Invalid Session backoff,
+// Give @discordjs/ws 20 seconds to finish reconnect or inbound-handoff
+// connect work. This covers the library's 500 ms reconnect delay, Invalid Session backoff,
 // and an IDENTIFY bucket wait, while staying well inside Discord's
 // resumable-session window. Terminal close codes bypass this timer in the
 // shim and enter the explicit-connect failure ladder immediately.
@@ -75,15 +73,10 @@ const BACKOFF_CAP_MS = 5_000;
 // ~200 ms client-side cap in gateway-leader.js's pushHandoff). A
 // stuck standby holding the failover slot is what these protect
 // against; worst-case watchdog tick at exhaustion is CONNECT +
-// RELEASE_LOCK ≈ 11 s, well inside the 30 s ECS graceful-stop.
+// RELEASE_LOCK × 2 ≈ 14 s, well inside the 30 s ECS graceful-stop.
 //
-// Hard ceiling on the releaseLock-during-exit call. The leader's
-// releaseLockForImmediateExit awaits through `runSerialized`, so a
-// hung inbound-handoff (parked inside manager.connect() with
-// `connecting=true` latched per gateway-leader.js's bounded-
-// settlement comment, tracked in #415) would otherwise block the
-// chain forever and exit(1) would never fire. 3 s is generous
-// vs. the 1 s expected DDB RTT; on miss we log and exit anyway.
+// Bound each DDB cleanup call during exit. If lock release or peer-row
+// deletion hangs, replace the process; the lease/TTL supplies the backstop.
 const RELEASE_LOCK_CEILING_MS = 3_000;
 // Hard ceiling on the watchdog's `manager.connect()` await. Mirrors
 // the leader's `inboundConnectTimeoutMs` (5 s default) — a hung
@@ -108,8 +101,9 @@ function createConnectionWatchdog({
   manager,
   isHoldingLock,
   // REQUIRED. Returns true when the leader is itself mid-
-  // `manager.connect()` (inbound-handoff path); the watchdog backs
-  // off rather than race a second concurrent connect. Required
+  // `manager.connect()` (inbound-handoff path); wait within maxRecoveryMs
+  // rather than race another connect. A standby stuck before adopting
+  // the lock is also replaced. Required
   // because the race is otherwise silent: an inbound-handoff connect
   // taking >1 s would produce overlapping connect() calls against
   // the non-concurrency-safe WebSocketManager. A wiring oversight
@@ -257,7 +251,7 @@ function createConnectionWatchdog({
     // Remove this process from peer discovery before ECS replaces it.
     if (typeof deleteOwnRow === 'function') {
       try {
-        await deleteOwnRow();
+        await raceWithCeiling(deleteOwnRow(), releaseLockCeilingMs, 'delete_own_row_ceiling');
       } catch (derr) {
         logger.warn('connection-watchdog: deleteOwnRow failed during exhaustion-exit', {
           error: derr.message,
@@ -333,24 +327,28 @@ function createConnectionWatchdog({
     // A Closed event makes @discordjs/ws reconnect internally. Its
     // implementation has a 500 ms Idle gap before internalConnect(),
     // so manager.connect() here can create a second live shard. Wait
-    // for the library's reconnect. Track this before the lock and
-    // leader-connect guards: recovery belongs to the process, and must
-    // remain bounded even while this replica is a standby or a leader
-    // connect promise is still settling.
-    if (manager.isRecovering()) {
+    // for the library's reconnect. Track this before the ownership guard:
+    // recovery belongs to the process. A pending inbound
+    // connect uses the same deadline without starting a second connect.
+    const recovering = manager.isRecovering();
+    if (recovering || isConnecting()) {
+      const mode = recovering ? 'automatic reconnect' : 'inbound handoff connect';
       attempts = 0;
+      // One timer spans both modes; the timeout log names the current mode.
       const currentTime = now();
       if (recoveryStartedAt === null) {
         recoveryStartedAt = currentTime;
-        logger.warn('connection-watchdog: automatic reconnect in progress; standing down', {
-          max_recovery_ms: maxRecoveryMs,
-        });
+        if (recovering) {
+          logger.warn('connection-watchdog: automatic reconnect in progress; standing down', {
+            max_recovery_ms: maxRecoveryMs,
+          });
+        }
       }
       const recoveryElapsedMs = Math.max(0, currentTime - recoveryStartedAt);
       if (recoveryElapsedMs >= maxRecoveryMs) {
         await exitAfterExhaustion({
-          reason: 'automatic reconnect did not reach Ready/Resumed',
-          mode: 'automatic reconnect',
+          reason: `${mode} did not reach Ready/Resumed`,
+          mode,
           outcome: 'timed out',
           details: { recovery_elapsed_ms: recoveryElapsedMs },
           releaseOwnedLock: holdingLock,
@@ -364,17 +362,6 @@ function createConnectionWatchdog({
       attempts = 0;
       return;
     }
-    // Leader is mid-connect (inbound-handoff path). Stand down —
-    // don't race a second concurrent connect against the same
-    // WebSocketManager. Reset attempts so the leader's eventual
-    // success doesn't leave a stale failure ladder behind. A connect
-    // that never settles without emitting Closed remains the existing
-    // issue #415 case; the automatic-recovery timer above cannot see it.
-    if (isConnecting()) {
-      attempts = 0;
-      return;
-    }
-
     attempts += 1;
     try {
       // Bounded by CONNECT_CEILING_MS — a hung connect would otherwise

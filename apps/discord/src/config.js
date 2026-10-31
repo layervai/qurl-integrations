@@ -511,7 +511,7 @@ module.exports = {
   // back to localhost so a missing .env file doesn't silently hit prod APIs.
   //
   // QURL_ENDPOINT can't be missing — the
-  // ternary below always yields a value. QURL_API_KEY is only the
+  // ternary below always yields a value. QURL_API_KEY supplies detect and the
   // global fallback for /qurl send + /qurl map; every deployment shape
   // configures a per-guild key through /qurl setup, so it is
   // absent from prodRequired(). The separate production webhook gate requires
@@ -527,10 +527,10 @@ module.exports = {
   // for the bot's current IP — immediately before each /api/detect POST. No
   // pre-seeded access token: the bot mints per call with its own QURL_API_KEY.
   // A plain NON-secret env (e.g. `detect-sandbox` / `detect-prod`), read
-  // verbatim; no default. When unset, /qurl detect surfaces a clear
+  // trimmed; no default. When unset, /qurl detect surfaces a clear
   // configured-error (resolveDetectTarget throws) rather than silently failing.
   // Set at detect activation, the same gated step that flips DETECT_COMMAND_ENABLED.
-  DETECT_TUNNEL_SLUG: process.env.DETECT_TUNNEL_SLUG,
+  DETECT_TUNNEL_SLUG: process.env.DETECT_TUNNEL_SLUG?.trim(),
 
   // Env-extendable additions to connector.js's non-prod detect-tunnel
   // allowlist — see the parsing + fail-fast validation above. Empty

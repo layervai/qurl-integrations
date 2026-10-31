@@ -214,3 +214,10 @@ test('conditional dependency flags use the same literal true rule as config', ()
     });
   }
 });
+
+test('detect deployment prerequisites cover its actual boot requirements', () => {
+  const { missingDetectCommandKeys } = require('../src/boot-requirements');
+  expect(manifest.env.required_if_enabled.DETECT_COMMAND_ENABLED).toEqual(
+    expect.arrayContaining(missingDetectCommandKeys({ DETECT_COMMAND_ENABLED: true }))
+  );
+});

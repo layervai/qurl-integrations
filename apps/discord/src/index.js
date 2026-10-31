@@ -37,6 +37,7 @@ const {
   baseUrlHttpsProblem,
   missingEventShipperKeys,
   missingMapCommandKeys,
+  missingDetectCommandKeys,
   missingWebhookSecretKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
@@ -153,10 +154,9 @@ if (isMultiTenant) {
 // workflows stay convenient. Keep this list in sync with the production
 // comments in .env.example.
 if (process.env.NODE_ENV === 'production') {
-  // QURL_API_KEY is deliberately NOT required: it is only the global
-  // fallback for /qurl send + /qurl map, and every deployment shape
-  // relies on per-guild /qurl setup. List is in boot-requirements.js
-  // for testability.
+  // QURL_API_KEY is not unconditional: send/map can use per-guild setup.
+  // Detect and default-webhook discovery check their own key requirements.
+  // The unconditional list lives in boot-requirements.js for testability.
   const prodMissing = missingProdKeys(process.env);
   if (prodMissing.length > 0) {
     logger.error(`NODE_ENV=production but missing required env vars: ${prodMissing.join(', ')}`);
@@ -356,6 +356,15 @@ if (mapCommandMissing.length > 0) {
     `MAP_COMMAND_ENABLED=true but ${mapCommandMissing.join(', ')} is missing or still the literal "PLACEHOLDER" sentinel. ` +
     'Seed a real Google Maps Platform API key (Places API enabled, no HTTP-referrer restriction) into the ' +
     '/qurl-bot-discord/GOOGLE_MAPS_API_KEY SSM parameter before re-flipping the toggle.'
+  );
+  process.exit(1);
+}
+
+const detectCommandMissing = missingDetectCommandKeys(config);
+if (detectCommandMissing.length > 0) {
+  logger.error(
+    `DETECT_COMMAND_ENABLED=true but required settings are invalid (missing/blank, or a padded/PLACEHOLDER QURL_API_KEY): ${detectCommandMissing.join(', ')}. ` +
+    'Seed the bot API key and detect tunnel slug before enabling detect.'
   );
   process.exit(1);
 }

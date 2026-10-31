@@ -158,6 +158,14 @@ before deployment; this is stricter than a feature failing only when called.
 Dependency flags enable only on the literal string `true`, matching config.
 `DDB_TABLE_PREFIX` is required because DynamoDB is the only supported store.
 
+Enabled detect also fails boot if the bot API key is missing, blank or the seed
+sentinel, or if the target tunnel slug is missing/blank. The native detect flow
+uses that key and slug; it does not require the retired static access token.
+
+While the gateway is disconnected, a pending inbound handoff connect uses the
+watchdog's existing 20-second recovery budget. On expiry, it releases the owned lock, bounds peer-row cleanup
+and takes the fatal shutdown path. It never starts a second overlapping connect.
+
 The bot is a Node.js service (**Node ≥ 22**) backed by DynamoDB. Copy
 `.env.example` to `.env` and fill it in — every variable is documented inline.
 The variables below are the ones most deployments need; see `.env.example` for
