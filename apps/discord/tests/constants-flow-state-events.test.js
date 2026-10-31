@@ -18,7 +18,7 @@ describe('AUDIT_EVENTS — event-shipper Pillar 1 (flow_state)', () => {
     expect(AUDIT_EVENTS.FLOW_REAPED).not.toBe(AUDIT_EVENTS.FLOW_DELETED);
   });
 
-  test('AUDIT_EVENTS remains frozen' , () => {
+  test('AUDIT_EVENTS remains frozen', () => {
     expect(Object.isFrozen(AUDIT_EVENTS)).toBe(true);
   });
 

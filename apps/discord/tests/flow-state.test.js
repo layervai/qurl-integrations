@@ -1095,6 +1095,9 @@ describe('flow-state.supersedeOrCreate', () => {
     const result = await flowState.supersedeOrCreate({ flow_id: FLOW_ID,
       stage: 'awaiting_setup_button', payload: null, ttl_seconds: 120 });
     expect(result).toEqual({ created: false, surviving: active });
+    expect(ddbMock.commandCalls(DeleteCommand)[0].args[0].input.ConditionExpression)
+      .toContain('#e < :expired_now');
+    expect(logger.audit).not.toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_REAPED, expect.anything());
     expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(1);
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
     expect(logger.audit).not.toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_DELETED, expect.anything());

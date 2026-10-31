@@ -742,8 +742,10 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
 // behavior is exactly the pre-existing stage-gate-only delete
 // (the only path used by terminal-flow callers, where there
 // is no concurrent advancement to race against).
+//
 // expiredOnly is used by supersedeOrCreate for expired predecessors. The
 // atomic TTL check protects live replacements even when stage/version repeat.
+// Successful expired-only deletion emits FLOW_REAPED instead of FLOW_DELETED.
 async function deleteFlow(flow_id, { stage, reason, expectedVersion, expiredOnly = false } = {}) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.deleteFlow: flow_id must be a non-empty string');
