@@ -27,7 +27,7 @@ import (
 // must be wired because the buttons open modals — without it the picker would
 // be dead, so it's checked up front (and adminHelpMessage only advertises
 // `protect` when OpenView is configured).
-func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleExpose(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	teamID, channelID, ok := h.aliasValidate(w, values, "protect")
 	if !ok {
 		return
@@ -36,7 +36,7 @@ func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, "Guided setup is not configured on this Secure Access Agent deployment. Use `/qurl-admin protect-connector <id>` or `/qurl-admin protect-url $<alias>` instead.")
 		return
 	}
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionExpose) {
+	if !h.requireAliasAdminGate(requestCtx, w, teamID, values, AdminActionExpose) {
 		return
 	}
 	respondSlackBlocks(w, "What do you want to protect in this channel?", exposeChooserBlocks(channelID))

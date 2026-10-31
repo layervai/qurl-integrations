@@ -17,7 +17,7 @@ import (
 // slackTriggerOpenViewBudget stays comfortably inside Slack's ~3s trigger
 // window, and opening inline lets an open failure surface as an immediate
 // ephemeral instead of a response_url follow-up.
-func (h *Handler) handleFeedback(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleFeedback(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	// Both seams must be wired for feedback to work end-to-end: OpenView to
 	// show the modal, PostFeedback to deliver the submission. Gate on both so
 	// a user never fills in a form that has nowhere to go.
@@ -49,7 +49,7 @@ func (h *Handler) handleFeedback(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	log := slog.With("command", "feedback", "team_id", teamID, "user_id", meta.UserID)
-	ctx, cancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
+	ctx, cancel := context.WithTimeout(requestCtx, slackTriggerOpenViewBudget)
 	defer cancel()
 	// openViewWithGridFallback retries with the Enterprise Grid org token when
 	// the workspace itself has none — the same token-owner fallback as the

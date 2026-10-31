@@ -1204,7 +1204,7 @@ func TestTunnelInstallBareWithoutTriggerIDFallsBackToTypedInstall(t *testing.T) 
 	}
 	w := httptest.NewRecorder()
 
-	h.handleExposeConnector(w, values)
+	h.handleExposeConnector(h.baseCtx, w, values)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -1231,7 +1231,7 @@ func TestTunnelInstallBareWithoutOpenViewFallsBackToTypedInstall(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 
-	h.handleExposeConnector(w, values)
+	h.handleExposeConnector(h.baseCtx, w, values)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)

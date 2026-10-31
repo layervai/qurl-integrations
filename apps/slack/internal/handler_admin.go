@@ -29,7 +29,7 @@ import (
 // distinction is intentional — parser errors are useful feedback regardless
 // of DDB wiring, and reordering the checks would mask shape errors behind the
 // not-configured surface.
-func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleAdmin(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	cmd, err := Parse(text)
 	if err != nil {
@@ -59,13 +59,13 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	}
 	switch cmd.AdminAction { //nolint:exhaustive // dispatch handles only the membership actions Parse produces here; gate-audit labels never reach here, default covers the rest
 	case AdminAdd:
-		h.handleAdminAdd(w, teamID, userID, cmd)
+		h.handleAdminAdd(requestCtx, w, teamID, userID, cmd)
 	case AdminRemove:
-		h.handleAdminRemove(w, teamID, userID, cmd)
+		h.handleAdminRemove(requestCtx, w, teamID, userID, cmd)
 	case AdminList:
-		h.handleAdminList(w, teamID, userID)
+		h.handleAdminList(requestCtx, w, teamID, userID)
 	case AdminTransferOwnership:
-		h.handleAdminTransferOwnership(w, teamID, enterpriseID, userID, cmd)
+		h.handleAdminTransferOwnership(requestCtx, w, teamID, enterpriseID, userID, cmd)
 	default:
 		// Unreachable in practice — Parse only produces the AdminAction values
 		// switched above on verbs routed here. Kept for refactor safety. The
@@ -183,12 +183,12 @@ const adminTransferSyncBudget = 2400 * time.Millisecond
 // causes live in CloudWatch where on-call can read them; the wire
 // surface never includes upstream message bodies that could carry
 // request IDs or stack-frame fragments.
-func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string, action AdminAction) bool {
+func (h *Handler) requireAdminSync(requestCtx context.Context, w http.ResponseWriter, teamID, userID string, action AdminAction) bool {
 	if teamID == "" || userID == "" {
 		respondSlack(w, ":warning: missing team_id or user_id in slash command payload")
 		return false
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+	ctx, cancel := context.WithTimeout(requestCtx, adminGateBudget)
 	defer cancel()
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
 	if err != nil {
@@ -248,8 +248,8 @@ func (h *Handler) requireAdminForClick(log *slog.Logger, responseURL, teamID, us
 //   - 404 workspace_not_bound  → "run /qurl setup <email> first" nudge
 //
 // Other store errors surface as the generic upstream-error reply.
-func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
-	if !h.requireAdminSync(w, teamID, callerUserID, AdminAdd) {
+func (h *Handler) handleAdminAdd(requestCtx context.Context, w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
+	if !h.requireAdminSync(requestCtx, w, teamID, callerUserID, AdminAdd) {
 		return
 	}
 	target := cmd.UserID
@@ -262,7 +262,7 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 		respondSlack(w, "You're already an admin — nothing to do.")
 		return
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
+	ctx, cancel := context.WithTimeout(requestCtx, adminSyncVerbBudget)
 	defer cancel()
 	if err := h.cfg.AdminStore.AddAdmin(ctx, teamID, target); err != nil {
 		var se *slackdata.Error
@@ -313,8 +313,8 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 //   - 404 workspace_not_bound → "run /qurl setup <email> first" nudge
 //
 // Other store errors surface as the generic upstream-error reply.
-func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
-	if !h.requireAdminSync(w, teamID, callerUserID, AdminRemove) {
+func (h *Handler) handleAdminRemove(requestCtx context.Context, w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
+	if !h.requireAdminSync(requestCtx, w, teamID, callerUserID, AdminRemove) {
 		return
 	}
 	target := cmd.UserID
@@ -326,7 +326,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 		respondSlack(w, "You can't remove yourself — ask another admin.")
 		return
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
+	ctx, cancel := context.WithTimeout(requestCtx, adminSyncVerbBudget)
 	defer cancel()
 	if err := h.cfg.AdminStore.RemoveAdmin(ctx, teamID, target); err != nil {
 		var se *slackdata.Error
@@ -364,11 +364,11 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 //   - 404 workspace_not_bound → "run /qurl setup <email> first" nudge
 //
 // Other store errors surface as the generic upstream-error reply.
-func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID string) {
-	if !h.requireAdminSync(w, teamID, callerUserID, AdminList) {
+func (h *Handler) handleAdminList(requestCtx context.Context, w http.ResponseWriter, teamID, callerUserID string) {
+	if !h.requireAdminSync(requestCtx, w, teamID, callerUserID, AdminList) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
+	ctx, cancel := context.WithTimeout(requestCtx, adminSyncVerbBudget)
 	defer cancel()
 	ownerID, admins, err := h.cfg.AdminStore.ListAdmins(ctx, teamID)
 	if err != nil {
@@ -439,8 +439,8 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	respondSlack(w, body)
 }
 
-func (h *Handler) handleAdminTransferOwnership(w http.ResponseWriter, teamID, enterpriseID, callerUserID string, cmd *Command) {
-	transferCtx, transferCancel := context.WithTimeout(h.baseCtx, adminTransferSyncBudget)
+func (h *Handler) handleAdminTransferOwnership(requestCtx context.Context, w http.ResponseWriter, teamID, enterpriseID, callerUserID string, cmd *Command) {
+	transferCtx, transferCancel := context.WithTimeout(requestCtx, adminTransferSyncBudget)
 	defer transferCancel()
 	if !h.requireTransferOwnerSync(transferCtx, w, teamID, callerUserID) {
 		return

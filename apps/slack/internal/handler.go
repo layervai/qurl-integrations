@@ -327,12 +327,9 @@ type Config struct {
 	// installs never silently fall back to production.
 	ConnectorAPIURL string
 
-	// BaseContext is the server-lifetime parent of every async work
-	// goroutine's context. SIGTERM cancels it, which propagates to
-	// in-flight qURL API calls and response_url POSTs so they release
-	// the worker slot promptly during shutdown. Defaults to
-	// context.Background() if nil — fine for tests, not for production
-	// (cmd/main.go threads the signal-canceled context).
+	// BaseContext is the process-lifetime parent of accepted jobs and an
+	// additional cancellation source for synchronous slash commands. Main
+	// cancels it after the HTTP drain. Defaults to context.Background().
 	BaseContext context.Context
 
 	// MaxConcurrentAsync caps in-flight async goroutines. Zero or
@@ -1159,11 +1156,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.URL.Path {
 	case pathSlackCommands:
-		// r.Context() is intentionally NOT threaded into the slash-command
-		// dispatch: handleGet/handleListResources spawn goroutines that outlive
-		// the HTTP response, and r.Context() cancels as soon as ServeHTTP
-		// returns. Async work uses h.baseCtx instead.
-		h.handleSlashCommand(w, body)
+		// Synchronous work follows the request; accepted jobs use h.baseCtx.
+		h.handleSlashCommand(r.Context(), w, body)
 	case pathSlackEvents:
 		h.handleEvent(w, body)
 	case pathSlackInteractions:
@@ -1378,7 +1372,7 @@ func stripUnsetDisplayNamePrefix(text string) string {
 	return rest
 }
 
-func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
+func (h *Handler) handleSlashCommand(requestCtx context.Context, w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]string{errEnvelopeKey: "invalid form body"})
@@ -1393,6 +1387,14 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	if strings.TrimSpace(values.Get(fieldTeamID)) == "" {
 		respondSlack(w, "Internal error: missing Slack workspace ID. Please contact your Slack admin.")
 		return
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(requestCtx)
+	stopBaseCancel := context.AfterFunc(h.baseCtx, cancelRequest)
+	defer stopBaseCancel()
+	defer cancelRequest()
+	if h.baseCtx.Err() != nil {
+		cancelRequest()
 	}
 
 	command := values.Get(fieldCommand)
@@ -1430,7 +1432,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	// `/qurl-sandbox-admin` down the user path, making every admin verb
 	// unreachable in that env.
 	if isAdminCommand(command) {
-		h.dispatchAdminCommand(w, command, text, values)
+		h.dispatchAdminCommand(requestCtx, w, command, text, values)
 	} else {
 		// The user command and any unrecognized command land here.
 		// Unrecognized is defensive — Slack only sends the commands the app
@@ -1442,7 +1444,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// command from a valid non-prod env command (`/qurl-sandbox`)
 		// without a registry, so this is left as-is; it's unreachable given
 		// Slack only dispatches registered commands.
-		h.dispatchUserCommand(w, command, text, values, setupCmd, setupMatched, setupErr)
+		h.dispatchUserCommand(requestCtx, w, command, text, values, setupCmd, setupMatched, setupErr)
 	}
 }
 
@@ -1450,7 +1452,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 // list, aliases, feedback, help. Admin verbs typed on `/qurl` get a redirect to
 // `/qurl-admin` instead of the generic unknown-subcommand reply, so an
 // admin who fat-fingers the command gets a direct correction.
-func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text string, values url.Values, setupCmd setupCommand, setupMatched bool, setupErr error) {
+func (h *Handler) dispatchUserCommand(requestCtx context.Context, w http.ResponseWriter, command, text string, values url.Values, setupCmd setupCommand, setupMatched bool, setupErr error) {
 	switch {
 	case text == "" || text == "help":
 		respondSlack(w, h.userHelpMessage(command))
@@ -1465,12 +1467,12 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		}
 		// setup is a `/qurl` verb, not admin-gated — first-come-claims;
 		// see handleSetup for why it lives on the open user surface.
-		h.handleSetup(w, values, setupCmd)
+		h.handleSetup(requestCtx, w, values, setupCmd)
 	case text == uninstallVerb:
 		// uninstall stays on the user command as a lifecycle sibling of setup,
 		// but gates to the recorded workspace owner or explicit qURL admins
 		// before removing the key.
-		h.handleUninstall(w, values)
+		h.handleUninstall(requestCtx, w, values)
 	case slashSubcommand(text, uninstallVerb):
 		// Bare `/qurl uninstall` is handled above so unsupported deployments can
 		// explain that operator-managed installs are not self-service. Argument
@@ -1478,7 +1480,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// keep the same unsupported-deployment message as the bare verb. This
 		// deliberately pays the owner/admin read before printing Usage so
 		// unauthorized callers do not get a command-existence oracle.
-		if _, _, ok := h.requireUninstallAvailableAndAuthorized(w, values); !ok {
+		if _, _, ok := h.requireUninstallAvailableAndAuthorized(requestCtx, w, values); !ok {
 			return
 		}
 		respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
@@ -1512,7 +1514,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// admin gate, no qURL setup required (it never calls qurl-service).
 		// slashSubcommand (not exact match) so `feedback <stray text>` still
 		// opens the form rather than falling through to "unknown subcommand".
-		h.handleFeedback(w, values)
+		h.handleFeedback(requestCtx, w, values)
 	case isAdminVerb(text):
 		// An admin verb typed on `/qurl` — redirect to `/qurl-admin` rather
 		// than the generic unknown reply. firstWord(text) is the classified
@@ -1542,7 +1544,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 // redundant. Listing admins is `admins` (a plural noun) rather than `list` so
 // it doesn't collide with `/qurl list` (which lists resources). The legacy
 // `admin <verb>` prefix gets a one-line redirect to the flat form below.
-func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text string, values url.Values) {
+func (h *Handler) dispatchAdminCommand(requestCtx context.Context, w http.ResponseWriter, command, text string, values url.Values) {
 	// Verb-match order is defensive, not load-bearing today: the
 	// membership/tunnel/alias matches come before the isUserVerb fall-through.
 	// slashVerb requires an exact token or a `verb ` prefix, so `admins`
@@ -1564,13 +1566,13 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// Resource-scoped — replaces the former `admin revoke <qurl_id>`
 		// per-link kill. Runs async (multi-hop resolve+delete); see
 		// handleRevoke.
-		h.handleRevoke(w, values)
+		h.handleRevoke(requestCtx, w, values)
 	case slashSubcommand(text, adminVerbAdd), slashSubcommand(text, adminVerbRemove), slashSubcommand(text, adminVerbAdmins), slashSubcommand(text, adminVerbTransferOwnership):
 		// Flat bot-admin membership/ownership verbs. handleAdmin parses the flat form
 		// (Parse maps add/remove/admins/transfer-ownership → SubcmdAdmin + AdminAction) and gates
 		// each in its own handler (requireAdminSync). Bare `add`/`remove`
 		// surface ErrMissingUserMention; `admins` takes no args.
-		h.handleAdmin(w, values)
+		h.handleAdmin(requestCtx, w, values)
 	case slashSubcommand(text, "admin"):
 		// Deprecated `admin <verb>` prefix — the word is redundant on an
 		// already-admin command. Redirect to the flat verbs rather than
@@ -1584,20 +1586,20 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 	// when given arguments (handleExposeConnector / handleExposeURL).
 	case slashSubcommand(text, adminVerbAgent):
 		// Per-workspace conversation-mode toggle: `agent on|off` (bare shows state).
-		h.handleAgentToggle(w, values)
+		h.handleAgentToggle(requestCtx, w, values)
 	case slashSubcommand(text, adminVerbProtectConnector):
-		h.handleExposeConnector(w, values)
+		h.handleExposeConnector(requestCtx, w, values)
 	case slashSubcommand(text, adminVerbProtectURL):
-		h.handleExposeURL(w, values)
+		h.handleExposeURL(requestCtx, w, values)
 	case slashSubcommand(text, adminVerbProtect):
-		h.handleExpose(w, values)
+		h.handleExpose(requestCtx, w, values)
 	case setAliasSubcommand(text):
 		// Bare `set-alias` falls through too — parseAliasArgs renders
 		// the usage hint, so the user gets the right grammar without
 		// a separate "missing args" branch here.
-		h.handleSetAlias(w, values)
+		h.handleSetAlias(requestCtx, w, values)
 	case unsetAliasSubcommand(text):
-		h.handleUnsetAlias(w, values)
+		h.handleUnsetAlias(requestCtx, w, values)
 	// Use slashSubcommand directly here (unlike set-alias's dedicated
 	// helper): the verb has a single canonical spelling, and the
 	// cross-repo dispatcher-drift check (the infrastructure repository) only
@@ -1608,9 +1610,9 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// A bare `set-display-name` (no args) matches this arm too; the
 		// handler then renders the usage hint, so the user gets the right
 		// grammar without a separate "missing args" branch here.
-		h.handleSetDisplayName(w, values)
+		h.handleSetDisplayName(requestCtx, w, values)
 	case slashSubcommand(text, "unset-display-name"):
-		h.handleUnsetDisplayName(w, values)
+		h.handleUnsetDisplayName(requestCtx, w, values)
 	case isUserVerb(text):
 		// A user verb typed on the admin command — redirect to the user one.
 		// Echoed text has backticks stripped (see the /qurl-side redirect).
@@ -1748,7 +1750,7 @@ func setupModeAction(mode oauth.SetupMode) string {
 // the oauthSetup==nil check below, which is the branch that returns "qURL
 // OAuth is not configured" (and which fires first, before AdminStore is
 // consulted).
-func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd setupCommand) {
+func (h *Handler) handleSetup(requestCtx context.Context, w http.ResponseWriter, values url.Values, setupCmd setupCommand) {
 	if h.oauthSetup == nil {
 		respondSlack(w, "qURL OAuth is not configured on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
@@ -1769,12 +1771,10 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 	// and whether it's the invoking user. CheckAdmin returns (isAdmin, ownerID,
 	// err); we only consume ownerID here — the admin-set membership
 	// is irrelevant for /setup specifically (added admins can't rerun
-	// /setup, only the owner can). Times the read off h.baseCtx (not the
-	// request ctx) so a Slack-side connection-close can't truncate the
-	// gate read mid-flight; adminGateBudget is the only bound — same
-	// posture as requireAdminSync.
+	// /setup, only the owner can). The read follows the request and
+	// adminGateBudget, as in requireAdminSync.
 	if h.cfg.AdminStore != nil {
-		gateCtx, gateCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+		gateCtx, gateCancel := context.WithTimeout(requestCtx, adminGateBudget)
 		defer gateCancel()
 		_, ownerID, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
 		if err != nil {
@@ -1857,7 +1857,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		respondSlack(w, fmt.Sprintf(":warning: You have generated several qURL setup links recently. Wait %s, then run %s again.", humanizeRetry(retry), retryCommand))
 		return
 	}
-	mintCtx, mintCancel := context.WithTimeout(h.baseCtx, setupStateMintBudget)
+	mintCtx, mintCancel := context.WithTimeout(requestCtx, setupStateMintBudget)
 	defer mintCancel()
 	state, err := oauth.MintStoredStateWithEmailMode(mintCtx, h.oauthSetup.StateStore, teamID, userID, setupCmd.email, setupCmd.mode, now)
 	if err != nil {
@@ -1870,8 +1870,8 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 	respondSlack(w, "Continue "+action+" for `"+echoText(setupCmd.email)+"`: <"+setupURL+"|Continue "+action+">\n\nAuth0 will ask you to sign in with that email after you continue. This link is valid for 5 minutes and only works for you.")
 }
 
-func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
-	teamID, _, ok := h.requireUninstallAvailableAndAuthorized(w, values)
+func (h *Handler) handleUninstall(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
+	teamID, _, ok := h.requireUninstallAvailableAndAuthorized(requestCtx, w, values)
 	if !ok {
 		return
 	}
@@ -1906,7 +1906,7 @@ func slashUninstallPurgeWorkspaceIDs(values url.Values, teamID string) []string 
 
 // requireUninstallAvailableAndAuthorized is the single precondition path for
 // both bare uninstall and uninstall argument variants.
-func (h *Handler) requireUninstallAvailableAndAuthorized(w http.ResponseWriter, values url.Values) (teamID, userID string, ok bool) {
+func (h *Handler) requireUninstallAvailableAndAuthorized(requestCtx context.Context, w http.ResponseWriter, values url.Values) (teamID, userID string, ok bool) {
 	teamID = strings.TrimSpace(values.Get(fieldTeamID))
 	if teamID == "" {
 		respondSlack(w, "Could not read your Slack workspace ID from the command payload.")
@@ -1930,7 +1930,7 @@ func (h *Handler) requireUninstallAvailableAndAuthorized(w http.ResponseWriter, 
 		respondUninstallUnavailable(w, uninstallUnavailableOwnerVerification)
 		return "", "", false
 	}
-	if !h.requireUninstallAdminOrOwner(w, teamID, userID) {
+	if !h.requireUninstallAdminOrOwner(requestCtx, w, teamID, userID) {
 		return "", "", false
 	}
 	return teamID, userID, true
@@ -2243,7 +2243,7 @@ func (h *Handler) canAdvertiseUninstall() bool {
 	return h.cfg.AdminStore != nil && h.cfg.AuthProvider != nil && h.cfg.AuthProvider.SupportsDeleteAPIKey()
 }
 
-func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, userID string) bool {
+func (h *Handler) requireUninstallAdminOrOwner(requestCtx context.Context, w http.ResponseWriter, teamID, userID string) bool {
 	if userID == "" {
 		respondSlack(w, ":warning: missing user_id in slash command payload")
 		return false
@@ -2251,7 +2251,7 @@ func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, us
 	// CheckAdmin intentionally uses the same low-latency admin-store read as
 	// other Slack admin verbs; uninstall can be reconnected by the recorded
 	// owner/operator if a just-revoked admin races DynamoDB replication.
-	ctx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+	ctx, cancel := context.WithTimeout(requestCtx, adminGateBudget)
 	defer cancel()
 	isAdmin, ownerID, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
 	if err != nil {

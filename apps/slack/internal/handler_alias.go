@@ -277,13 +277,13 @@ func (h *Handler) aliasValidate(w http.ResponseWriter, values url.Values, verb s
 // qurl-service before the DDB write, so it runs on [runAsync]'s own ctx
 // (~25s) and calls [aliasValidate] directly — it never needs the sync
 // timer this helper layers on.
-func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb string) (ctx context.Context, cancel context.CancelFunc, teamID, channelID string, ok bool) {
+func (h *Handler) aliasPreamble(requestCtx context.Context, w http.ResponseWriter, values url.Values, verb string) (ctx context.Context, cancel context.CancelFunc, teamID, channelID string, ok bool) {
 	cancel = func() {}
 	teamID, channelID, ok = h.aliasValidate(w, values, verb)
 	if !ok {
 		return
 	}
-	ctx, cancel = context.WithTimeout(h.baseCtx, aliasSyncTimeout)
+	ctx, cancel = context.WithTimeout(requestCtx, aliasSyncTimeout)
 	return
 }
 
@@ -294,11 +294,11 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 // prod per cmd/main.go SetAliasStore, is non-nil for CheckAdmin) and that
 // the caller is a qURL admin (requireAdminSync). Returns false (and has
 // written the reply) when either fails; callers `if !h.requireAliasAdminGate(...) { return }`.
-func (h *Handler) requireAliasAdminGate(w http.ResponseWriter, teamID string, values url.Values, action AdminAction) bool {
+func (h *Handler) requireAliasAdminGate(requestCtx context.Context, w http.ResponseWriter, teamID string, values url.Values, action AdminAction) bool {
 	if !h.requireAdminStoreSync(w) {
 		return false
 	}
-	return h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), action)
+	return h.requireAdminSync(requestCtx, w, teamID, strings.TrimSpace(values.Get(fieldUserID)), action)
 }
 
 // handleSetAlias routes `/qurl-admin set-alias $<alias> <target>`.
@@ -321,7 +321,7 @@ func (h *Handler) requireAliasAdminGate(w http.ResponseWriter, teamID string, va
 // Slug targets do a qurl-service lookup before the DDB write, so they
 // ack immediately and post the final result (ephemerally — admin-verb
 // feedback is admin-only) via response_url.
-func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleSetAlias(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	rest := stripSetAliasPrefix(text)
 
@@ -353,7 +353,7 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// the usage reply rather than a bare denial. The gate's guarantee is "no
 	// slug resolve or store mutation before the admin check," not "no parser
 	// feedback to non-admins."
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionSetAlias) {
+	if !h.requireAliasAdminGate(requestCtx, w, teamID, values, AdminActionSetAlias) {
 		return
 	}
 	slug := strings.TrimPrefix(args.Target, "$")
@@ -474,7 +474,7 @@ func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug
 // isn't bound surfaces as slackdata.ErrAliasNotFound and is rendered as
 // "no such alias on this channel." Other aliases on the same channel
 // are untouched.
-func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleUnsetAlias(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	rest := stripUnsetAliasPrefix(text)
 
@@ -484,7 +484,7 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
-	ctx, cancel, teamID, channelID, ok := h.aliasPreamble(w, values, "unsetalias")
+	ctx, cancel, teamID, channelID, ok := h.aliasPreamble(requestCtx, w, values, "unsetalias")
 	if !ok {
 		return
 	}
@@ -493,7 +493,7 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 	// Admin gate, in code (see requireAliasAdminGate). Runs after
 	// aliasPreamble (IDs + store-wired check) but before UnbindChannelAlias,
 	// so a non-admin is denied before any store write.
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionUnsetAlias) {
+	if !h.requireAliasAdminGate(requestCtx, w, teamID, values, AdminActionUnsetAlias) {
 		return
 	}
 
