@@ -324,11 +324,8 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
 
-  // `seen` is the canonical post-filter unique-candidate set (every
-  // ID we considered, regardless of cap). `ids` is the cap-bounded
-  // subset returned to the caller. `cappedCount` is computed post-hoc
-  // as `seen.size - ids.size` — accurate even when role expansion is
-  // the source of the overflow.
+  // seen dedupes explicit expansions and accepted cache IDs; ids is bounded.
+  // Cache-only overflow is counted separately because cache keys are unique.
   const seen = new Set();
   const ids = new Set();
   const invalidTokens = [];
@@ -615,20 +612,22 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // first, and @everyone fills the remainder. Reversing this order
   // silently drops explicit mentions when the cache is partial.
   let massMentionExpanded = false;
+  let everyoneOverflow = 0;
   const seenBeforeEveryone = seen.size;
   if (everyonePresent && allowMassMention) {
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
-      // The loaded cache can be a partial guild snapshot. Scan all of it so
-      // cappedCount includes excluded IDs; consider() still bounds the output.
-      // Explicit mentions keep priority, then cache insertion order wins.
-      // No await occurs here, so gateway events cannot mutate this snapshot.
+      // TODO(upstream-contract): Discord's keyed member Collection has unique IDs.
+      // Count the loaded snapshot without retaining cache-only overflow IDs.
+      // Explicit mentions keep priority; this synchronous walk cannot see joins.
       const hadCapacityForEveryone = ids.size < cap;
       for (const [memberId, member] of everyoneMembers) {
         if (isBotMember(member)) continue;
-        consider(memberId);
         // Preserve mode selection when explicit mentions already filled the cap.
         if (hadCapacityForEveryone) massMentionExpanded = true;
+        if (seen.has(memberId)) continue;
+        if (ids.size < cap) consider(memberId);
+        else everyoneOverflow++;
       }
     }
   }
@@ -694,33 +693,24 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     invalidTokens.push(escaped);
   }
 
-  // Cap was enforced inline during the two passes (`ids` never
-  // exceeds `cap`; over-cap candidates live in `seen` but not `ids`).
+  // Explicit overflow stays in seen; cache-only overflow is counted without
+  // retaining IDs. The output never exceeds cap.
   // The back-half re-enforces the cap too; surfacing `cappedCount`
   // here lets the caller say "I kept N of M — drop these or split"
   // before they hit Send rather than waiting for the back-half error.
   const finalIds = [...ids];
-  const cappedCount = seen.size - ids.size;
+  const cappedCount = seen.size - ids.size + everyoneOverflow;
   if (cappedCount > 0) {
     const logFn = seenBeforeEveryone > cap * MASSIVE_OVERSHOOT_MULTIPLIER
       ? logger.warn
       : logger.debug;
     logFn('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
-      uniqueCount: seen.size, cap, cappedCount,
+      uniqueCount: seen.size + everyoneOverflow, cap, cappedCount,
     });
   }
 
-  // `massMentionExpanded` was set inside the @everyone walk above
-  // (true iff the walk iterated at least one non-bot member —
-  // `consider()` dedups internally, so a mixed-mentions input still
-  // sets the flag). Surfacing it lets callers route the slash-text
-  // "@everyone" path into RECIPIENT_MODE_EVERYONE without duplicating
-  // the regex-match-and-permission-check (or reaching past the parser
-  // to detect the `<@&{guildId}>` wire form). False when the user typed
-  // @everyone but lacked permission (the denied path lands on
-  // `massMentionDenied` instead) or when the cache was cold /
-  // cap-saturated by the time the walk reached it (caller's
-  // `valid.length` check still catches that downstream).
+  // Preserve mode selection: @everyone had room and the cache had a human.
+  // Denied, cold, or already-full explicit selections leave this false.
   return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, roleMentionsDenied };
 }
 
