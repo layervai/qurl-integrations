@@ -28,7 +28,7 @@ const (
 )
 
 // seedWorkspaceAdmin returns a workspace_mappings row that marks
-// `slackUserID` as admin for `teamID`. Used by the admin-check
+// `slackUserID` and the owner as admins for `teamID`. Used by the admin-check
 // surfaces that pre-pivot exercised `/internal/v1/admin/check`.
 func seedWorkspaceAdmin(teamID, ownerID, slackUserID string, configuredAt time.Time) map[string]ddbtypes.AttributeValue {
 	return seedWorkspaceAdmins(teamID, ownerID, []string{slackUserID}, configuredAt)
@@ -57,7 +57,7 @@ func seedWorkspaceAdmins(teamID, ownerID string, adminUserIDs []string, configur
 }
 
 // seedWorkspaceNonAdmin returns a workspace_mappings row that
-// exists for `teamID` but does NOT name `slackUserID` as admin.
+// names only U_someone_else and the owner as admins for teamID.
 // Used by the admin-check-no surfaces.
 //
 // `U_someone_else` violates the post-PR userMentionPattern (`[UW][A-Z0-9]{8,}`)
