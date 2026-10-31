@@ -748,15 +748,32 @@ describe('monitorLinkStatus — duration cap + activeMonitors LRU', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
 
-  it('stops + posts final after MAX_MONITOR_DURATION_MS (14min cap matches interaction-token TTL)', async () => {
+  it('keeps the 14min view window, then posts final and stops polling (#331, #465)', async () => {
+    const interaction = makeInteraction();
     const monitor = monitorLinkStatus(
-      'send-1', makeInteraction(),
+      'send-1', interaction,
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
       '7d', 'Sent', { components: [] }, 1,
     );
-    await jest.advanceTimersByTimeAsync(14 * 60 * 1000 + 60 * 1000);
-    monitor.stop();
+    try {
+      await jest.advanceTimersByTimeAsync(14 * 60 * 1000);
+      expect(mockDb.getQurlViews).toHaveBeenCalled();
+      expect(interaction.editReply).not.toHaveBeenCalled();
+      // Expiration is observed on the next scheduled tick, within one minute.
+      await jest.advanceTimersByTimeAsync(60 * 1000);
+      expect(interaction.editReply).toHaveBeenCalledTimes(1);
+      expect(interaction.editReply).toHaveBeenCalledWith({
+        content: expect.stringContaining('Use `/qurl revoke` to revoke later'),
+        components: [],
+      });
+      const reads = mockDb.getQurlViews.mock.calls.length;
+      await jest.advanceTimersByTimeAsync(60 * 60 * 1000);
+      expect(mockDb.getQurlViews).toHaveBeenCalledTimes(reads);
+      expect(interaction.editReply).toHaveBeenCalledTimes(1);
+    } finally {
+      monitor.stop();
+    }
   });
 
   it('LRU bookkeeping: activeMonitors grows by N when N monitors start under the cap', () => {

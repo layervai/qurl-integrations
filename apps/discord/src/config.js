@@ -590,13 +590,9 @@ module.exports = {
   // Operational implications a max-size send carries:
   //   - up to ceil(20000/TOKENS_PER_RESOURCE) = 2000 re-uploads to
   //     qurl-service per send (`mintLinksInBatches`).
-  //   - DM delivery is bounded by Discord's per-bot DM rate limit
-  //     (~5/sec); a 20k send takes >1 hour to finish DM fan-out, and
-  //     `monitorLinkStatus`'s interval-based progress tracking must
-  //     survive that duration. A regression test pinning that
-  //     lifetime is tracked in issue #331 — open against any change
-  //     that touches `monitorLinkStatus`'s interval/cleanup logic
-  //     until it lands.
+  //   - Large DM fan-outs can outlast the ephemeral status edit window.
+  //     The sender's view monitor stays capped at 14 minutes (#465),
+  //     independently of the recipient cap; stored view tracking continues.
   // Per-guild operators can dial this down via the env override if
   // their qurl-service plan or DM-throughput posture demands it.
   QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 20000, { minPositive: true }),
