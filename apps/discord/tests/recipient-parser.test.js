@@ -736,6 +736,7 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
     expect(res.ids.length).toBe(25);
     expect(res.ids).toContain(explicitId);
     expect(res.massMentionDenied).toBe(false);
+    expect(res.cappedCount).toBe(6);
   });
 
   test('@everyone + <@&role> combined: dedupe across sources, cap applies', () => {
@@ -753,13 +754,13 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
     expect(res.massMentionDenied).toBe(false);
   });
 
-  test('allowed: cap short-circuits the cache scan (large guild cap behavior)', () => {
+  test('allowed: output stays capped while the full cache overflow is counted', () => {
     const users = {};
     for (let i = 0; i < 40; i++) users[`u${String(i).padStart(18, '0')}`] = {};
     const int = makeInteraction({ users });
     const res = parseRecipientMentions('@everyone', int, { allowMassMention: true });
     expect(res.ids.length).toBe(25);
-    expect(res.cappedCount).toBe(0);
+    expect(res.cappedCount).toBe(15);
   });
 
   test('mixed `@everyone @here` in one input: @everyone gated separately, @here defuses', () => {
@@ -1093,4 +1094,72 @@ describe('parseRecipientMentions — cap + length safety', () => {
     );
     expect(logger.debug).not.toHaveBeenCalled();
   });
+});
+
+describe('@everyone reports overflow instead of silently truncating (#384)', () => {
+  test.each([24, 25, 26])('%i humans with bots first keeps the exact cap warning', (humans) => {
+    const users = {};
+    for (let i = 0; i < 10; i++) users[String(1000 + i)] = { bot: true };
+    for (let i = 0; i < humans; i++) users[String(2000 + i)] = {};
+    const result = parseRecipientMentions('@everyone', makeInteraction({ users }), { allowMassMention: true });
+    expect(result.ids).toHaveLength(Math.min(humans, 25));
+    expect(result.cappedCount).toBe(Math.max(0, humans - 25));
+    expect(result.massMentionExpanded).toBe(true);
+  });
+
+  test.each([false, true])('large everyone expansion preserves explicit overshoot signal: %s', (largeExplicitList) => {
+    const users = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [String(2000 + i), {}]));
+    const explicit = largeExplicitList ? Object.keys(users).slice(0, 60).map(id => `<@${id}>`).join(' ') : '';
+    logger.warn.mockClear();
+    logger.debug.mockClear();
+    const result = parseRecipientMentions(explicit + ' @everyone', makeInteraction({ users }), { allowMassMention: true });
+    expect(result.cappedCount).toBe(75);
+    expect(logger.warn).toHaveBeenCalledTimes(largeExplicitList ? 1 : 0);
+    expect(logger.debug).toHaveBeenCalledTimes(largeExplicitList ? 0 : 1);
+  });
+
+  test('full explicit selection keeps its mode while everyone overflow is counted', () => {
+    const users = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [String(2000 + i), {}]));
+    const explicit = Object.keys(users).slice(0, 25);
+    const result = parseRecipientMentions(explicit.map(id => `<@${id}>`).join(' ') + ' @everyone', makeInteraction({ users }), { allowMassMention: true });
+    expect(result.ids).toEqual(expect.arrayContaining(explicit));
+    expect(result.ids).toHaveLength(25);
+    expect(result.cappedCount).toBe(5);
+    expect(result.massMentionExpanded).toBe(false);
+  });
+});
+
+
+test('everyone overflow dedupes an overlapping role and external explicit mention', () => {
+  logger.debug.mockClear();
+  const users = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [String(2000 + i), {}]));
+  const interaction = makeInteraction({ users, roles: { '7000': { members: Object.keys(users).slice(0, 30), mentionable: true } } });
+  const result = parseRecipientMentions('<@900000000000000002> <@&7000> @everyone', interaction, { allowMassMention: true });
+  expect(result.ids).toHaveLength(25);
+  expect(result.ids).toContain('900000000000000002');
+  expect(result.cappedCount).toBe(16);
+  expect(result.massMentionExpanded).toBe(false);
+  expect(logger.debug).toHaveBeenCalledWith('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
+    uniqueCount: 41, cap: 25, cappedCount: 16,
+  });
+});
+
+test('large everyone snapshots do not retain overflow IDs', () => {
+  const users = Object.fromEntries(Array.from({ length: 100000 }, (_, i) => [String(2000 + i), {}]));
+  const interaction = makeInteraction({ users });
+  const originalAdd = Set.prototype.add;
+  let additions = 0;
+  const addSpy = jest.spyOn(Set.prototype, 'add').mockImplementation(function (value) {
+    additions++;
+    return originalAdd.call(this, value);
+  });
+  let result;
+  try {
+    result = parseRecipientMentions('@everyone', interaction, { allowMassMention: true });
+  } finally {
+    addSpy.mockRestore();
+  }
+  expect(result.ids).toHaveLength(25);
+  expect(result.cappedCount).toBe(99975);
+  expect(additions).toBeLessThanOrEqual(100);
 });
