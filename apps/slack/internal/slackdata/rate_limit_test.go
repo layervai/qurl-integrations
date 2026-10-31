@@ -75,6 +75,9 @@ func TestCheckRateLimit_UsesSyntheticCounterItemAndResetsWindow(t *testing.T) {
 		if !allowed || retry != 0 {
 			t.Fatalf("CheckRateLimit call %d = allowed %v retry %s, want allowed/no retry", i, allowed, retry)
 		}
+		if got := readString(ddb.items[rateLimitKey(testRateLimitTeamID, testRateLimitUserID)], attrRateLimitPartition); got != "7083a9b052bfa93936e9d6bdd90eb21cf52832dad031599bb7e6c507ba927385#a" {
+			t.Fatalf("stored partition on call %d = %q", i, got)
+		}
 	}
 
 	allowed, retry, err := store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
@@ -108,6 +111,9 @@ func TestCheckRateLimit_UsesSyntheticCounterItemAndResetsWindow(t *testing.T) {
 	}
 	if !allowed || retry != 0 {
 		t.Fatalf("CheckRateLimit after rollover = allowed %v retry %s, want allowed/no retry", allowed, retry)
+	}
+	if got := readString(ddb.items[counterKey], attrRateLimitPartition); got != "7083a9b052bfa93936e9d6bdd90eb21cf52832dad031599bb7e6c507ba927385#a" {
+		t.Fatalf("stored partition after reset = %q", got)
 	}
 	if got := readNumber(ddb.items[counterKey], attrRateLimitCount); got != 1 {
 		t.Fatalf("counter after rollover = %d, want reset to 1", got)
@@ -467,11 +473,14 @@ func TestRateLimitIndexGoldenProtocol(t *testing.T) {
 	if err := json.Unmarshal(data, &cases); err != nil {
 		t.Fatal(err)
 	}
+	if len(cases) == 0 {
+		t.Fatal("migration vectors are empty")
+	}
 	for _, fixture := range cases {
 		key := rateLimitKey(fixture.TeamID, fixture.UserID)
 		scope := strings.TrimPrefix(key, rateLimitTeamPrefix(fixture.TeamID))
 		if key != fixture.CounterKey || rateLimitPartition(fixture.TeamID, scope[:1]) != fixture.Partition {
-			t.Fatal("rate index protocol drifted from its migration vectors")
+			t.Errorf("%s/%s: key=%q partition=%q, want %q / %q", fixture.TeamID, fixture.UserID, key, rateLimitPartition(fixture.TeamID, scope[:1]), fixture.CounterKey, fixture.Partition)
 		}
 	}
 }
