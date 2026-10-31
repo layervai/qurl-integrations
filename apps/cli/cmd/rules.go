@@ -139,8 +139,11 @@ func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file, flag string)
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("access rule JSON is too large"))
 	}
 	var definition accessrules.Definition
-	if connectorstate.DecodeStrictJSON(body, &definition) != nil || definition.Validate(strings.HasPrefix(definition.ID, "builtin.")) != nil {
+	if connectorstate.DecodeStrictJSON(body, &definition) != nil {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("invalid access rule definition"))
+	}
+	if err := definition.Validate(strings.HasPrefix(definition.ID, "builtin.")); err != nil {
+		return accessrules.Definition{}, exitcode.UsageError(fmt.Errorf("invalid access rule definition: %w", err))
 	}
 	return definition, nil
 }
@@ -330,9 +333,88 @@ func (o *globalOpts) reconcileRulesAfterLink(ctx context.Context) {
 	}
 }
 
+// approvalsLast maps --approvals-last choices to approval_expires_in; never is empty.
+var approvalsLast = map[string]string{"1d": "1d", "7d": "7d", "30d": "30d", "90d": "90d", "never": ""}
+
+// ruleSettingFlags are the rule settings typed on the command line.
+type ruleSettingFlags struct {
+	expiresIn, sessionLength, approvals string
+	oneBrowser, allowDownload           bool
+	maxSessions                         int
+}
+
+func (f *ruleSettingFlags) register(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&f.expiresIn, "expires-in", "", "public rules: each shared link expires after this long, such as 1h or 7d (1m to 30d)")
+	cmd.Flags().BoolVar(&f.oneBrowser, "one-browser", false, "public rules: each shared link works for one browser")
+	cmd.Flags().IntVar(&f.maxSessions, "max-sessions", 0, "public rules: total times a shared link can be opened (default: no limit)")
+	cmd.Flags().StringVar(&f.sessionLength, "session-length", "", "public rules: how long each visit lasts, such as 30m (1s to 24h)")
+	cmd.Flags().StringVar(&f.approvals, "approvals-last", "", "review and keys rules: 1d, 7d, 30d, 90d or never (default: never)")
+	cmd.Flags().BoolVar(&f.allowDownload, "allow-download", false, "let people download files you share with this rule")
+}
+
+// apply validates the settings for d.Mode and copies them into d.
+func (f *ruleSettingFlags) apply(cmd *cobra.Command, d *accessrules.Definition) error {
+	changed := func(names ...string) bool {
+		return slices.ContainsFunc(names, func(name string) bool { return cmd.Flags().Changed(name) })
+	}
+	if changed("expires-in", "one-browser", "max-sessions", "session-length") {
+		if d.Mode != accessrules.ModePublic {
+			return errors.New("--expires-in, --one-browser, --max-sessions and --session-length apply only to --mode public")
+		}
+		if !changed("expires-in") {
+			return errors.New("link limits need --expires-in, such as --expires-in 1h")
+		}
+		if _, ok := accessrules.LinkExpiry.Parse(f.expiresIn); !ok {
+			return errors.New("--expires-in must be from 1m to 30d, such as 1h or 7d")
+		}
+		if f.maxSessions < 0 || f.maxSessions > accessrules.MaxLinkSessions {
+			return errors.New("--max-sessions must be from 0 to 1000; 0 means no limit")
+		}
+		if changed("session-length") && !accessrules.ValidSessionLength(f.sessionLength) {
+			return errors.New("--session-length must be whole seconds from 1s to 24h, such as 30m")
+		}
+		// Only flags given are stored, so an unset limit stays absent.
+		d.LinkLimits = &accessrules.LinkLimits{ExpiresIn: f.expiresIn}
+		if changed("one-browser") {
+			d.LinkLimits.OneTimeUse = new(f.oneBrowser)
+		}
+		if changed("max-sessions") {
+			d.LinkLimits.MaxSessions = new(f.maxSessions)
+		}
+		if changed("session-length") {
+			d.LinkLimits.SessionDuration = new(f.sessionLength)
+		}
+	}
+	if changed("approvals-last") {
+		if !accessrules.ApprovalsApply(d.Mode) {
+			return errors.New("--approvals-last applies only to --mode review or keys")
+		}
+		value, ok := approvalsLast[f.approvals]
+		if !ok {
+			return errors.New("--approvals-last must be one of: 1d, 7d, 30d, 90d, never")
+		}
+		if value != "" {
+			d.ApprovalExpiresIn = new(value)
+		}
+	}
+	if changed("allow-download") {
+		d.AllowDownload = new(f.allowDownload)
+	}
+	return nil
+}
+
 func ruleCreateCmd(opts *globalOpts) *cobra.Command {
 	var mode, domain, contract, emailsFile string
-	cmd := &cobra.Command{Use: "create <name>", Short: "Create a named access rule", Example: "  qurl rules create Team --mode keys\n  qurl rules create Colleagues --mode email_domain --email-domain example.com", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	var settings ruleSettingFlags
+	cmd := &cobra.Command{Use: "create <name>", Short: "Create a named access rule", Long: `Create a named access rule for future shares.
+
+Limits (public rules) apply to the links you share. The item's permanent
+address isn't used with limits: each share gets a temporary link instead.
+Approvals (review and keys rules) set how long each approval lasts.
+Allow downloads applies to files you share.`, Example: `  qurl rules create Team --mode keys --approvals-last 30d
+  qurl rules create Colleagues --mode email_domain --email-domain example.com
+  qurl rules create "Quick look" --mode public --expires-in 1h --one-browser
+  qurl rules create Reviewers --mode review --approvals-last 7d --allow-download`, Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if cmd.Flags().Changed(consumerContract) && mode != accessrules.ModeContract {
 			return exitcode.UsageError(errors.New("--contract applies only to --mode contract"))
 		}
@@ -347,19 +429,14 @@ func ruleCreateCmd(opts *globalOpts) *cobra.Command {
 		id[8] = (id[8] & 63) | 128
 		definition := accessrules.Definition{ID: fmt.Sprintf("%x-%x-%x-%x-%x", id[:4], id[4:6], id[6:8], id[8:10], id[10:]), Name: strings.TrimSpace(args[0]), Mode: mode, EmailDomain: strings.ToLower(strings.TrimSpace(domain)), ContractID: contract}
 		if cmd.Flags().Changed("emails-file") {
-			if emailsFile != "-" {
-				return exitcode.UsageError(errors.New("use --emails-file - to read a JSON array of additional email addresses"))
-			}
-			body, err := readRequestBody(cmd.Context(), opts.streams, http.MethodPut)
+			emails, err := readAllowedEmails(cmd, opts, emailsFile)
 			if err != nil {
 				return err
 			}
-			if connectorstate.DecodeStrictJSON(body, &definition.AllowedEmails) != nil || definition.AllowedEmails == nil {
-				return exitcode.UsageError(errors.New("additional email addresses must be a JSON array"))
-			}
-			for i, email := range definition.AllowedEmails {
-				definition.AllowedEmails[i] = normalizeEmail(email)
-			}
+			definition.AllowedEmails = emails
+		}
+		if err := settings.apply(cmd, &definition); err != nil {
+			return exitcode.UsageError(err)
 		}
 		if definition.Validate(false) != nil {
 			return exitcode.UsageError(ruleInputError(&definition))
@@ -377,7 +454,27 @@ func ruleCreateCmd(opts *globalOpts) *cobra.Command {
 	cmd.Flags().StringVar(&domain, "email-domain", "", "email domain for domain access, such as example.com")
 	cmd.Flags().StringVar(&contract, consumerContract, "", "integration reference for Custom access, where your service decides who gets in")
 	cmd.Flags().StringVar(&emailsFile, "emails-file", "", "use - to read optional additional email addresses as a JSON array")
+	settings.register(cmd)
 	return cmd
+}
+
+// readAllowedEmails reads --emails-file - as a JSON array of normalized addresses.
+func readAllowedEmails(cmd *cobra.Command, opts *globalOpts, file string) ([]string, error) {
+	if file != "-" {
+		return nil, exitcode.UsageError(errors.New("use --emails-file - to read a JSON array of additional email addresses"))
+	}
+	body, err := readRequestBody(cmd.Context(), opts.streams, http.MethodPut)
+	if err != nil {
+		return nil, err
+	}
+	var emails []string
+	if connectorstate.DecodeStrictJSON(body, &emails) != nil || emails == nil {
+		return nil, exitcode.UsageError(errors.New("additional email addresses must be a JSON array"))
+	}
+	for i, email := range emails {
+		emails[i] = normalizeEmail(email)
+	}
+	return emails, nil
 }
 
 // normalizeEmail trims an address and lowercases its domain; the part before
@@ -411,4 +508,53 @@ func ruleInputError(d *accessrules.Definition) error {
 	default:
 		return errors.New("--contract must be 1 to 128 letters, digits, hyphens or underscores")
 	}
+}
+
+// applyRuleToShare runs once the resource exists. A new share keeps the
+// rule's approval and download settings; a public rule with link limits gets
+// a minted temporary link in published.LimitedLink.
+func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, published *qurlapi.Published) error {
+	if rule == nil {
+		return nil
+	}
+	id := published.CRID
+	// Settings are copied at creation, so republishing keeps the first rule's.
+	if published.FoundExisting == nil || !*published.FoundExisting {
+		if err := o.recordShareRule(ctx, id, rule); err != nil {
+			return fmt.Errorf("published %s, but could not save its access rule settings on this device: %w", id, err)
+		}
+	}
+	if rule.LinkLimits == nil {
+		return nil
+	}
+	link, err := client.MintLimitedLink(ctx, id, *rule.LinkLimits)
+	if err != nil {
+		return fmt.Errorf("published %s, but could not create its link with the rule's limits; run the same publish again: %w", id, err)
+	}
+	published.LimitedLink = link
+	return nil
+}
+
+// recordShareRule stores what the share keeps from rule, or forgets an
+// earlier record when rule is nil or carries nothing to keep.
+func (o *globalOpts) recordShareRule(ctx context.Context, id string, rule *accessrules.Definition) error {
+	store, err := o.shareRuleStore()
+	if err != nil {
+		return err
+	}
+	var kept *connectorstate.ShareRule
+	if rule != nil {
+		if snapshot, ok := connectorstate.ShareRuleFrom(rule); ok {
+			kept = &snapshot
+		}
+	}
+	return store.Set(ctx, id, kept)
+}
+
+func (o *globalOpts) shareRuleStore() (*connectorstate.ShareRuleStore, error) {
+	dir, err := o.resolveShareStateDir("")
+	if err != nil {
+		return nil, err
+	}
+	return connectorstate.OpenShareRules(dir)
 }

@@ -39,6 +39,25 @@ type publishJSON struct {
 	// reconciliation omits the field rather than claiming a fresh publish.
 	FoundExisting *bool         `json:"found_existing,omitempty"`
 	Publisher     publisherJSON `json:"publisher"`
+	// Link is the temporary link minted with an access rule's link limits.
+	Link *limitedLinkJSON `json:"link,omitempty"`
+}
+
+type limitedLinkJSON struct {
+	QURL      string     `json:"qurl"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	SingleUse bool       `json:"single_use,omitempty"`
+}
+
+func limitedLinkDocument(link *qurlapi.ShareLink) *limitedLinkJSON {
+	if link == nil {
+		return nil
+	}
+	document := &limitedLinkJSON{QURL: link.QURL, SingleUse: link.SingleUse}
+	if !link.ExpiresAt.IsZero() {
+		document.ExpiresAt = &link.ExpiresAt
+	}
+	return document
 }
 
 type shareLinkJSON struct {
@@ -206,6 +225,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			ExpiresAt:      res.ExpiresAt,
 			FoundExisting:  res.FoundExisting,
 			Publisher:      publisherDocument(res.Publisher),
+			Link:           limitedLinkDocument(res.LimitedLink),
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, res.CRID)
@@ -428,6 +448,7 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	if res.ExpiresAt != nil {
 		twe.printf("  %s\t%s\n", p.bold("Expires:"), p.formatExpiry(*res.ExpiresAt))
 	}
+	p.limitedLinkRows(twe, res.LimitedLink)
 	if err := twe.flush(tw); err != nil {
 		return err
 	}
@@ -458,6 +479,17 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	}
 	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	return ew.flush(nil)
+}
+
+// limitedLinkRows shows the temporary link a rule with link limits minted.
+func (p *Printer) limitedLinkRows(twe *errWriter, link *qurlapi.ShareLink) {
+	if link == nil {
+		return
+	}
+	twe.printf("  %s\t%s\n", p.bold("Link:"), link.QURL)
+	if !link.ExpiresAt.IsZero() {
+		twe.printf("  %s\t%s\n", p.bold("Link expires:"), p.formatExpiry(link.ExpiresAt))
+	}
 }
 
 // acceptsRequests reports whether the service confirmed that people can ask

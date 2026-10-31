@@ -774,14 +774,42 @@ Access rules are named presets for future shares. The ready-made choices and you
 custom rules work before account linking. `qurl rules sync` merges them with your
 linked account; unrelated edits merge, while different edits to the same rule
 require `qurl rules resolve <id-or-name> --use local|account`.
-Changes and deletions never change existing resources or links. Link expiry and
-session limits remain separate.
+Changes and deletions never change existing resources or links: a share keeps
+the settings of the rule it was created with.
 
 ```sh
 qurl rules create Team --mode email_domain --email-domain example.com
 qurl publish http://127.0.0.1:3000 --rule Team
 qurl publish http://127.0.0.1:8080 --rule "People you invite"
 qurl rules sync -o json
+```
+
+A rule can also carry settings for its mode:
+
+| Section | Flag | Applies to | Values |
+|---------|------|------------|--------|
+| Limits | `--expires-in` | public | Link expires after, `1m` to `30d` (required with any limit) |
+| Limits | `--one-browser` | public | Works for one browser |
+| Limits | `--max-sessions` | public | Total times the link can be opened; leave unset for no limit (`0` to `1000`) |
+| Limits | `--session-length` | public | Session length, `1s` to `24h` |
+| Approvals | `--approvals-last` | review, keys | `1d`, `7d`, `30d`, `90d` or `never` (the default) |
+| Files | `--allow-download` | any | Allow downloads; applies to files you share |
+
+Limits apply to the links you share. The item's permanent address isn't used
+with limits: `qurl publish --rule` mints a temporary link with them and prints
+it as `Link:` (JSON `link.qurl`, `link.expires_at`). With Approvals last,
+`qurl access approve` ends each review approval or key opt-in that long after
+you approve it; `--expires-at` sets another end. The CLI serves no files, so
+Allow downloads is only kept with the share for the apps that do.
+
+```sh
+qurl rules create "Quick look" --mode public --expires-in 1h --one-browser
+qurl rules create Reviewers --mode review --approvals-last 7d
+qurl rules create Studio --mode email_domain --email-domain studio.com
+qurl rules list
+# 5f0c…  "Quick look"  Anyone with the link · expires in 1 hour · one browser
+# 8a21…  "Reviewers"   People you approve · approvals last 7 days
+# 3d9e…  "Studio"      People at studio.com
 ```
 
 For a complete JSON snapshot or an edit from a supervising app:
@@ -816,8 +844,11 @@ The latter deliberately changes an existing private resource's access. A public
 rule cannot convert private resources; selecting a different rule while publishing
 an already existing target fails without changing it. `--rule`/`--rule-file`
 cannot be combined with other access flags. A snapshot remains valid after its
-saved rule is renamed or deleted. Rule JSON contains policy only, never credentials,
-resource identities, local paths, grants or per-link settings.
+saved rule is renamed or deleted. Rule JSON contains policy and the settings
+above only (`link_limits` with `expires_in`, `one_time_use`, `max_sessions` and
+`session_duration`; `approval_expires_in`; `allow_download`), never credentials,
+resource identities, local paths or grants. Each rule decodes strictly: an
+unknown field, a null, or a setting for another mode is refused.
 
 The JSON bridge returns `schema_version`, `local_version`, `items`, `built_ins`,
 `sync` and `conflicts`. Synchronization retains local changes on network or

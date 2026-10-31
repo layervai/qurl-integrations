@@ -3,6 +3,7 @@ package output
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -72,13 +73,7 @@ func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResul
 		return ew.flush(nil)
 	}
 	if result.Grant != nil {
-		value := result.Grant
-		ew := &errWriter{w: p.out}
-		ew.printf("Consumer: %s\nStatus: %s\nVersion: %d\n", consumerTerminalText(value.ID), consumerTerminalText(value.Status), value.Version)
-		if value.SessionCleanup != "" {
-			ew.printf("Connection cleanup: %s\n", consumerTerminalText(value.SessionCleanup))
-		}
-		return ew.flush(nil)
+		return p.consumerGrantText(result.Grant)
 	}
 	for _, invitation := range result.Invitations {
 		if _, err := fmt.Fprintf(p.out, "%s  %s  version %d  %q\n", consumerTerminalText(invitation.ID), consumerTerminalText(invitation.Status), invitation.Version, invitation.Email); err != nil {
@@ -90,6 +85,9 @@ func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResul
 		contact := ""
 		if grant.Email != "" {
 			contact = fmt.Sprintf("  %q", grant.Email)
+		}
+		if grant.ExpiresAt != nil {
+			contact += "  " + strings.ToLower(p.grantExpiryLabel(*grant.ExpiresAt)) + " " + grant.ExpiresAt.UTC().Format(time.RFC3339)
 		}
 		if _, err := fmt.Fprintf(p.out, "%s  %s  version %d%s\n", consumerTerminalText(grant.ID), consumerTerminalText(grant.Status), grant.Version, contact); err != nil {
 			return err
@@ -193,6 +191,27 @@ func policyDocument(policy *qurl.ConsumerAccessPolicy) *consumerAccessJSON {
 		return nil
 	}
 	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID, EmailDomain: policy.EmailDomain, AllowedEmails: policy.AllowedEmails}
+}
+
+func (p *Printer) consumerGrantText(value *qurl.ConsumerGrant) error {
+	ew := &errWriter{w: p.out}
+	ew.printf("Consumer: %s\nStatus: %s\nVersion: %d\n", consumerTerminalText(value.ID), consumerTerminalText(value.Status), value.Version)
+	if value.ExpiresAt != nil {
+		ew.printf("%s: %s\n", p.grantExpiryLabel(*value.ExpiresAt), value.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	if value.SessionCleanup != "" {
+		ew.printf("Connection cleanup: %s\n", consumerTerminalText(value.SessionCleanup))
+	}
+	return ew.flush(nil)
+}
+
+// grantExpiryLabel tells a lapsed grant apart: the service keeps its status
+// "active" after expires_at, so only the time says it no longer admits.
+func (p *Printer) grantExpiryLabel(expiresAt time.Time) string {
+	if !expiresAt.After(p.now()) {
+		return "Expired"
+	}
+	return "Expires"
 }
 
 func consumerTerminalText(value string) string {

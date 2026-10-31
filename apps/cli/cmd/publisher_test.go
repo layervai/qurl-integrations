@@ -510,7 +510,7 @@ func TestLocalPublishCarriesThePublisherInJSONOnly(t *testing.T) {
 			now:            func() time.Time { return fixedNow },
 		}
 		local := &connectorstate.LocalShare{CRID: "<CRID>", ResourceID: "rid", TargetURL: "http://127.0.0.1:3000"}
-		if err := printLocalPublishServing(opts, &agent.ResolvedResource{}, local, sharing); err != nil {
+		if err := printLocalPublishServing(opts, &agent.ResolvedResource{}, local, nil, sharing); err != nil {
 			t.Fatal(err)
 		}
 		if stderr.Len() != 0 {

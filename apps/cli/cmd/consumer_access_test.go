@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-go/qurl"
 
@@ -113,7 +114,8 @@ func TestConsumerAccessRejectsBadDecisionsBeforeRequest(t *testing.T) {
 		{"approve", srv.Key.CRID, "new", "--version", "1", "--credential-kind", "device", "--credential-id", "agent-consumer01", "--credential-key", "public-key"},
 		{"approve", srv.Key.CRID, "new", "--version", "0", "--credential-kind", "unknown", "--credential-id", "id", "--credential-key", "key"},
 		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--entitlement", "receipt"},
-		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--expires-at", "2027-01-01T00:00:00Z"},
+		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--expires-at", "2020-01-01T00:00:00Z"},
+		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--expires-at", time.Now().AddDate(1, 0, 2).UTC().Format(time.RFC3339)},
 		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--credential-id", "id"},
 		{"invite", srv.Key.CRID},
 		{"invite", srv.Key.CRID, "--email", "ana@example.com", "--version", "1"},
