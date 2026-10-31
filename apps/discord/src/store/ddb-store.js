@@ -502,6 +502,8 @@ async function getQurlViews(qurlIds) {
   const keys = [...new Set(qurlIds.filter(Boolean))].map(id => ({ qurl_id: id }));
   if (keys.length === 0) return new Map();
   const CHUNK = 100;
+  const MAX_RETRIES = 3;
+  let unprocessedKeys = 0;
   const out = new Map();
   const collect = (res) => {
     for (const item of (res.Responses && res.Responses[TABLES.qurl_views]) || []) {
@@ -513,19 +515,23 @@ async function getQurlViews(qurlIds) {
   };
   for (let i = 0; i < keys.length; i += CHUNK) {
     let request = { Keys: keys.slice(i, i + CHUNK) };
-    const MAX_RETRIES = 3;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const res = await ddb.send(new BatchGetCommand({
         RequestItems: { [TABLES.qurl_views]: request },
       }));
       collect(res);
       const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
-      if (!unprocessed?.Keys?.length || attempt === MAX_RETRIES) break;
+      if (!unprocessed?.Keys?.length) break;
+      if (attempt === MAX_RETRIES) {
+        unprocessedKeys += unprocessed.Keys.length;
+        break;
+      }
       // Retry only unfinished keys; bounded 50/100/200ms waits per chunk.
       await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
       request = unprocessed;
     }
   }
+  if (unprocessedKeys > 0) logger.warn('qurl view read retries exhausted', { unprocessed_keys: unprocessedKeys });
   return out;
 }
 

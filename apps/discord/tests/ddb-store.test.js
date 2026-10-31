@@ -2310,6 +2310,8 @@ describe('qurl views', () => {
       ]);
       expect(ddbMock.commandCalls(BatchGetCommand)[3].args[0].input.RequestItems['test-prefix-qurl-views'].ConsistentRead).toBe(true);
       expect(views.get('q_a')).toEqual({ accessCount: 1, consumed: false });
+      expect(logger.warn.mock.calls).toEqual(exhausted
+        ? [['qurl view read retries exhausted', { unprocessed_keys: 1 }]] : []);
       if (exhausted) expect(views.has('q_b')).toBe(false);
       else expect(views.get('q_b')).toEqual({ accessCount: 2, consumed: true });
     } finally {
