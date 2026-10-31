@@ -7,7 +7,7 @@ import (
 
 type loggerContextKey struct{}
 
-// WithLogger carries request correlation through delivery seams without changing their signatures.
+// WithLogger carries the existing redacting request logger through delivery seams.
 func WithLogger(ctx context.Context, logger *slog.Logger) context.Context {
 	return context.WithValue(ctx, loggerContextKey{}, logger)
 }

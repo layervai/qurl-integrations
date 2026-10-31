@@ -1229,7 +1229,7 @@ func TestSlackReadResponseLimits(t *testing.T) {
 
 func TestSlackPostMessageGridFallbackKeepsRequestCorrelation(t *testing.T) {
 	var logs bytes.Buffer
-	logger := slog.New(observability.NewRedactingJSONHandler(&logs, nil)).With("surface", "agent", "event_id", "event-test")
+	logger := slog.New(observability.NewRedactingJSONHandler(&logs, nil)).With("surface", "agent", "event_id", "event-test", "team_id", "T12345678", "enterprise_id", "E12345678")
 	ctx := observability.WithLogger(context.Background(), logger)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true,"ts":"1700000000.000100"}`))
@@ -1251,6 +1251,30 @@ func TestSlackPostMessageGridFallbackKeepsRequestCorrelation(t *testing.T) {
 	for key, want := range map[string]string{"surface": "agent", "event_id": "event-test", "team_id": "T12345678", "enterprise_id": "E12345678", "level": "WARN"} {
 		if record[key] != want {
 			t.Errorf("%s = %v, want %s", key, record[key], want)
+		}
+	}
+	lookup, ok := record["slack_api"].(map[string]any)
+	if !ok || lookup["team_id"] != "T12345678" || lookup["enterprise_id"] != "E12345678" {
+		t.Fatalf("missing grouped lookup metadata: %v", record["slack_api"])
+	}
+	decoder := json.NewDecoder(bytes.NewReader(logs.Bytes()))
+	if _, err := decoder.Token(); err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]bool{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := token.(string)
+		if keys[key] {
+			t.Fatalf("duplicate top-level log key %q", key)
+		}
+		keys[key] = true
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			t.Fatal(err)
 		}
 	}
 	if strings.Contains(logs.String(), testSlackValidationToken) {

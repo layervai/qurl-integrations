@@ -349,6 +349,16 @@ func newSlackWebAPIPoster(lookup slackBotTokenLookup, userAgent, url, op string,
 	return &slackWebAPIPoster{lookup: lookup, invalidate: invalidate, userAgent: userAgent, url: url, op: op, respErr: respErr, httpClient: httpClient}
 }
 
+// Keep request correlation at the root and lookup metadata in its own group.
+// Outside a request, preserve the existing flat process-log fields.
+func slackWebAPILogger(ctx context.Context) *slog.Logger {
+	logger := observability.Logger(ctx)
+	if logger != slog.Default() {
+		return logger.WithGroup("slack_api")
+	}
+	return logger
+}
+
 // postOnce resolves one owner's bot token (workspace team or, on the Grid fallback,
 // the enterprise org) and POSTs the already-marshaled body, returning the (size-bounded)
 // response body alongside the parsed error. Most seams ignore the body (via post); only
@@ -406,7 +416,7 @@ func (p *slackWebAPIPoster) gridPost(ctx context.Context, teamID, enterpriseID s
 	// Keep exact Slack owner IDs for diagnostics when they match Slack's owner ID
 	// alphabet; malformed IDs are replaced so this shared warning does not log
 	// arbitrary caller-controlled strings.
-	observability.Logger(ctx).LogAttrs(
+	slackWebAPILogger(ctx).LogAttrs(
 		ctx,
 		slog.LevelWarn,
 		"workspace Slack bot token missing; retrying with Enterprise Grid install token",
@@ -589,9 +599,9 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 			slog.Any("error", err),
 		}
 		if fallbackLogAlreadySeen {
-			observability.Logger(ctx).LogAttrs(ctx, slog.LevelDebug, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
+			slackWebAPILogger(ctx).LogAttrs(ctx, slog.LevelDebug, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
 		} else {
-			observability.Logger(ctx).LogAttrs(ctx, slog.LevelInfo, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
+			slackWebAPILogger(ctx).LogAttrs(ctx, slog.LevelInfo, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
 		}
 		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {
