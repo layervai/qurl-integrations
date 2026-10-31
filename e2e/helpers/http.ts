@@ -107,18 +107,28 @@ function isRetryableStatus(status: number, method: string): boolean {
 export async function fetchWithTransientRetry(
   input: string | URL,
   init?: RequestInit,
-  { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0 }:
-    { maxAttempts?: number; baseDelayMs?: number; maxRetryAfterMs?: number } = {},
+  { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0, cleanupRetryBudget }:
+    { maxAttempts?: number; baseDelayMs?: number; maxRetryAfterMs?: number; cleanupRetryBudget?: CleanupRetryBudget } = {},
 ): Promise<Response> {
   // Clamp once here so the loop never has to defend against a negative ceiling.
   const retryAfterCeilingMs = Math.max(0, maxRetryAfterMs);
   const method = (init?.method ?? 'GET').toUpperCase();
   let res = await fetch(input, init);
+  let retriedCleanupRateLimit = false;
   for (
     let attempt = 1;
     attempt < maxAttempts && !res.ok && isRetryableStatus(res.status, method);
     attempt++
   ) {
+    if (res.status === 429 && cleanupRetryBudget) {
+      if (retriedCleanupRateLimit) return res;
+      const previous = res;
+      res = await retryCleanupRateLimit(input, init ?? {}, cleanupRetryBudget, res);
+      // No local fallback: it could retry before the server permits it.
+      if (res === previous) return res;
+      retriedCleanupRateLimit = true;
+      continue;
+    }
     // TODO(upstream-contract): qurl-service uses delta-seconds, not HTTP dates.
     const retryAfterRaw = res.status === 503 ? res.headers.get('retry-after') ?? '' : '';
     const honorsDirective = retryAfterCeilingMs > 0 && /^\d+$/.test(retryAfterRaw);
@@ -155,4 +165,53 @@ export async function fetchWithTransientRetry(
     res = await fetch(input, init);
   }
   return res;
+}
+
+/** One sweep shares this wait budget across all owned resources or messages. */
+export interface CleanupRetryBudget { remainingMs: number }
+
+/** Retry one rejected DELETE/read after a 429, without retrying other failures.
+ * A long server hint is never shortened to fit the sweep's remaining budget.
+ * shortcut: only retry waiting is bounded here; callers still own request/hook deadlines. */
+export async function fetchWithCleanupRetry(
+  input: string | URL,
+  init: RequestInit,
+  budget: CleanupRetryBudget,
+): Promise<Response> {
+  return retryCleanupRateLimit(input, init, budget, await fetch(input, init));
+}
+
+async function retryCleanupRateLimit(
+  input: string | URL,
+  init: RequestInit,
+  budget: CleanupRetryBudget,
+  response: Response,
+): Promise<Response> {
+  if (response.status !== 429) return response;
+  const raw = response.headers.get('retry-after')?.trim() ?? '';
+  // TODO(upstream-contract): Discord Retry-After can carry fractional seconds;
+  // retain seconds and HTTP-date support when its contract changes.
+  const seconds = /^(?:\d+(?:\.\d+)?|\.\d+)$/.test(raw) ? Number(raw) : undefined;
+  // Date.parse alone treats numeric junk such as '-1' as a calendar date.
+  const startsWithWeekday = /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:, | )|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), )/.test(raw);
+  const date = seconds === undefined && startsWithWeekday ? Date.parse(raw) : NaN;
+  const hintedMs = seconds !== undefined ? seconds * 1000
+    : Number.isFinite(date) ? Math.max(0, date - Date.now()) : 1000;
+  const delayMs = Math.max(250, Math.ceil(hintedMs));
+  if (!Number.isFinite(delayMs) || delayMs > budget.remainingMs) {
+    console.warn(`[cleanup] 429 retry declined: ${delayMs}ms exceeds the remaining ${budget.remainingMs}ms sweep budget`);
+    return response;
+  }
+  budget.remainingMs -= delayMs;
+  await response.body?.cancel().catch(() => {});
+  console.warn(`[cleanup] 429: one retry after ${delayMs}ms`);
+  await new Promise<void>((resolve, reject) => {
+    const signal = init.signal;
+    const finish = () => { signal?.removeEventListener('abort', abort); resolve(); };
+    const timer = setTimeout(finish, delayMs);
+    const abort = () => { clearTimeout(timer); reject(signal?.reason); };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+  });
+  return fetch(input, init);
 }
