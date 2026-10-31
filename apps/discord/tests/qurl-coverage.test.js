@@ -528,6 +528,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
       .rejects.toMatchObject({
         message: 'qURL API DELETE /resources/:resourceId/qurls/:qurlId failed (404)',
         failedCount: 1,
+        confirmedQurlIds: ['q_aaaaaaaaaa2'],
       });
     expect(globalThis.fetch.mock.calls.map(([url, init]) => [init?.method || 'GET', String(url)]).slice(2)).toEqual([
       ['DELETE', `https://api.test.local/v1/resources/${CRID_RESOURCE_ID}/qurls/q_aaaaaaaaaa1`],
