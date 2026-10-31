@@ -145,11 +145,15 @@ The manifest lists unconditional and production requirements, optional app and
 SDK settings, forbidden production hooks, and dependencies of enabled features.
 Tests check declarations against actual runtime environment reads and the
 installed SDK. New settings must update this file with the code that reads them.
-Boot validators still check actual secret values and value-dependent OAuth
-setup rules; a matching name or secret reference does not prove valid credentials.
+Use direct `process.env.NAME` or literal-key reads and `intEnv`; a new access
+style also needs a scanner update.
+Boot validators still check actual secret values, OAuth setup, default-webhook/
+BYOK rules and role/resume/shipper combinations. A matching name or secret
+reference does not prove valid credentials.
 The preflight requires an explicit `NODE_ENV=production` task binding even though
 the image also defaults to it. Enabled features must have their listed dependencies
 before deployment; this is stricter than a feature failing only when called.
+Dependency flags enable only on the literal string `true`, matching config.
 `DDB_TABLE_PREFIX` is required because DynamoDB is the only supported store.
 
 The bot is a Node.js service (**Node ≥ 22**) backed by DynamoDB. Copy

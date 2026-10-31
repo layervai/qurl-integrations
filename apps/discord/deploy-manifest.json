@@ -86,7 +86,8 @@
       ],
       "DETECT_COMMAND_ENABLED": [
         "DETECT_TUNNEL_SLUG",
-        "QURL_DEPLOYMENT"
+        "QURL_DEPLOYMENT",
+        "QURL_API_KEY"
       ],
       "ENABLE_EVENT_SHIPPER": [
         "QURL_BOT_EVENTS_QUEUE_URL"

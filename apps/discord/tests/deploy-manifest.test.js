@@ -124,3 +124,18 @@ test('the image bundles its contract and matches the configured port and health 
     expect(source).toContain(`'${manifest.healthcheck.path}'`);
   }
 });
+
+test('conditional dependency flags use the same literal true rule as config', () => {
+  const flags = new Map();
+  traverse(parser.parse(fs.readFileSync(path.join(srcDir, 'config.js'), 'utf8')), {
+    ObjectProperty({ node }) {
+      if (Object.hasOwn(manifest.env.required_if_enabled, node.key.name)) flags.set(node.key.name, node.value);
+    },
+  });
+  for (const flag of Object.keys(manifest.env.required_if_enabled)) {
+    expect(flags.get(flag)).toMatchObject({
+      type: 'BinaryExpression', operator: '===', right: { type: 'StringLiteral', value: 'true' },
+      left: { type: 'MemberExpression', property: { name: flag }, object: { type: 'MemberExpression', object: { name: 'process' }, property: { name: 'env' } } },
+    });
+  }
+});
