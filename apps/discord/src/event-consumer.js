@@ -934,6 +934,7 @@ function isAbortError(err) {
 // dominates over deploy-time IAM eventual-consistency gaps. If prod
 // telemetry ever shows AccessDenied spikes correlated with deploys
 // rather than config changes, demote it back to transient.
+const CREDENTIAL_PROVIDER_ERROR_CODES = new Set(['CredentialsProviderError', 'CredentialsError']);
 const PERMANENT_AWS_ERROR_CODES = new Set([
   // Queue doesn't exist (typo'd URL or wrong region in queue URL).
   'QueueDoesNotExist',
@@ -950,8 +951,7 @@ const PERMANENT_AWS_ERROR_CODES = new Set([
   'UnrecognizedClientException',
   'InvalidClientTokenId',
   // No credential provider could supply credentials.
-  'CredentialsProviderError',
-  'CredentialsError',
+  ...CREDENTIAL_PROVIDER_ERROR_CODES,
 ]);
 
 // Returns the matched permanent-error code from anywhere in err's
@@ -964,14 +964,18 @@ const PERMANENT_AWS_ERROR_CODES = new Set([
 function permanentAwsErrorCode(err) {
   const visited = new Set();
   let current = err;
+  let providerCode = null;
   while (current && typeof current === 'object' && !visited.has(current)) {
     visited.add(current);
-    if (PERMANENT_AWS_ERROR_CODES.has(current.name)) return current.name;
-    if (PERMANENT_AWS_ERROR_CODES.has(current.code)) return current.code;
-    if (PERMANENT_AWS_ERROR_CODES.has(current.Code)) return current.Code;
+    for (const code of [current.name, current.code, current.Code]) {
+      if (!PERMANENT_AWS_ERROR_CODES.has(code)) continue;
+      // A retryable provider wrapper must not hide a fatal cause or alias.
+      if (!CREDENTIAL_PROVIDER_ERROR_CODES.has(code)) return code;
+      providerCode ??= code;
+    }
     current = current.cause;
   }
-  return null;
+  return providerCode;
 }
 
 // Sleep that resolves either when the timeout fires OR when
@@ -1074,7 +1078,7 @@ async function pollLoop(client) {
       const permanentCode = permanentAwsErrorCode(err);
       // Provider errors also wrap transient ECS metadata refresh failures.
       const credentialRefreshFailure = hasPolledSuccessfully
-        && ['CredentialsProviderError', 'CredentialsError'].includes(permanentCode);
+        && CREDENTIAL_PROVIDER_ERROR_CODES.has(permanentCode);
       if (permanentCode && !credentialRefreshFailure) {
         // Permanent AWS misconfig (typo'd queue URL, missing IAM
         // perm, region drift, bad creds). Surface to the caller so
