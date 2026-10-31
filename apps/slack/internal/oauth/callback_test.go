@@ -24,7 +24,7 @@ const (
 	testTeamID            = "T123ABCDEF"
 	testUserID            = "U_ADMIN1"
 	testAuth0ClientID     = "client-id"
-	testKeyID             = "k_1"
+	testKeyID             = "key_Aa0123456789"
 	testKeyPrefix         = "lv_live_abcd"
 	testAPIKey            = "lv_live_abcd1234"
 	testOldAPIKey         = "lv_live_oldkey1234"
