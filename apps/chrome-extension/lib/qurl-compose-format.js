@@ -33,7 +33,7 @@
       if (parsed.protocol === 'https:') {
         return parsed.toString();
       }
-    } catch (e) {
+    } catch {
       return null;
     }
 

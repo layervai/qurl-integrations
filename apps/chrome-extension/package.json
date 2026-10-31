@@ -4,7 +4,7 @@
   "version": "1.1.0",
   "description": "Chrome extension for Gmail: upload files to qURL and insert access links into compose drafts.",
   "engines": {
-    "node": ">=20.9.0"
+    "node": "^20.19.0 || ^22.13.0 || >=24"
   },
   "scripts": {
     "icons": "node scripts/generate-icons.js",
@@ -20,7 +20,9 @@
     "publish:major": "node scripts/bump-version.js major && node scripts/package-release.js"
   },
   "devDependencies": {
-    "eslint": "^8.57.1",
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.13.0",
+    "globals": "^16.5.0",
     "sharp": "^0.35.5"
   }
 }
