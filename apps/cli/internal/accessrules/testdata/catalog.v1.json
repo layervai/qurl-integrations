@@ -14,23 +14,23 @@
   ],
   "presentation": {
     "public": {
-      "label": "Anyone with the link", "summary": "Opens for anyone who has the link.", "level": 1, "level_name": "Open",
+      "label": "Anyone with the link", "summary": "Opens for anyone who has the link.", "level": 1, "level_name": "Minimal",
       "if_forwarded": "Opens for them too.", "they_will": "Just open the link.", "you_will": "Do nothing.", "you_will_see": "Not who opened it."
     },
     "email_capture": {
-      "label": "Anyone with a verified email", "summary": "Anyone can open it after confirming an email. You’ll see who.", "level": 2, "level_name": "Verified",
+      "label": "Anyone with a verified email", "summary": "Anyone can open it after confirming an email. You’ll see who.", "level": 2, "level_name": "Basic",
       "if_forwarded": "Opens once they confirm their own email.", "they_will": "Enter a code from their email.", "you_will": "Do nothing.", "you_will_see": "Each person’s email."
     },
     "email_domain": {
-      "label": "Work or school email", "summary": "Only email addresses at a domain you choose, like studio.com.", "level": 3, "level_name": "Limited",
+      "label": "Work or school email", "summary": "Only email addresses at a domain you choose, like studio.com.", "level": 3, "level_name": "Moderate",
       "if_forwarded": "Opens only with an email at your domain.", "they_will": "Enter a code from their work or school email.", "you_will": "Choose the domain once.", "you_will_see": "Each person’s email."
     },
     "invite_only": {
-      "label": "People you invite", "summary": "Only the email addresses you add. Forwarded links won’t open.", "level": 4, "level_name": "Private",
+      "label": "People you invite", "summary": "Only the email addresses you add. Forwarded links won’t open.", "level": 4, "level_name": "Strong",
       "if_forwarded": "Won’t open.", "they_will": "Confirm the invited email with a code.", "you_will": "Add each person’s email.", "you_will_see": "Each person’s email."
     },
     "review": {
-      "label": "People you approve", "summary": "Anyone can ask. Only people you approve get in.", "level": 4, "level_name": "Private",
+      "label": "People you approve", "summary": "Anyone can ask. Only people you approve get in.", "level": 4, "level_name": "Strong",
       "if_forwarded": "They can ask. It stays closed until you approve.", "they_will": "Confirm their email, then wait for you.", "you_will": "Approve or decline each request.", "you_will_see": "Each request, before anyone gets in."
     },
     "keys": {
