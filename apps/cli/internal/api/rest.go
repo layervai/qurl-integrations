@@ -859,9 +859,6 @@ func validateSharingRow(row *sharingRow) error {
 	return nil
 }
 
-// Local wait budget; the service currently requests 30 seconds for revocation proof.
-const maxRevocationConfirmWaitSeconds = 35
-
 // Delete revokes a resource by CRID or public-key identifier. qurl-go
 // v0.5.3's delete validates connector-only identifiers (which reject CRIDs),
 // so this is a direct call; the service dual-accepts both forms in the path.
@@ -885,25 +882,6 @@ func (c *client) Delete(ctx context.Context, id string) (*DeleteResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	var pending *Error
-	// TODO(upstream-contract): only revocation_pending proves that this write committed.
-	// Generic service_unavailable also covers disabled features and must never replay DELETE.
-	if reply.status == http.StatusServiceUnavailable && errors.As(reply.problem(), &pending) && pending.Code == "revocation_pending" {
-		seconds, valid := parseRetryAfterSeconds(reply.header.Get("Retry-After"))
-		if !valid || seconds == 0 || seconds > maxRevocationConfirmWaitSeconds {
-			return nil, pending
-		}
-		if err := c.transport.backoff(ctx, time.Duration(seconds)*time.Second); err != nil {
-			return nil, errors.Join(pending, err)
-		}
-		reply, err = c.doRESTOnce(ctx, http.MethodDelete, "/v1/resources/"+url.PathEscape(id), nil)
-		if err != nil {
-			return nil, errors.Join(pending, err)
-		}
-	} else {
-		pending = nil
-	}
-
 	switch reply.status {
 	case http.StatusNoContent:
 		return &DeleteResult{}, nil
@@ -912,9 +890,6 @@ func (c *client) Delete(ctx context.Context, id string) (*DeleteResult, error) {
 		// "nothing left to delete", which is the requested outcome.
 		return &DeleteResult{AlreadyGone: true}, nil
 	default:
-		if pending != nil {
-			return nil, errors.Join(pending, reply.problem())
-		}
 		return nil, reply.problem()
 	}
 }
