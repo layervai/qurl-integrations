@@ -296,3 +296,24 @@ Setup and install cookies use `__Host-` names with `Secure`, `HttpOnly`,
 `SameSite=Lax`, and `Path=/`. Use HTTPS (or browser-supported localhost) for
 local setup tests. Deploying this change invalidates older setup cookies;
 admins with an in-flight setup must start again.
+
+
+## Command registration scope changes
+
+Set `GUILD_ID` to a guild snowflake for single-guild commands, or leave it
+unset for global commands. During a change from a single guild, also set
+`PREVIOUS_GUILD_ID` to the old guild ID. The infra runtime must forward that
+value before the new bot starts; it works for cache-free gateways too.
+
+Boot registers the new active scope first. Single-guild mode then clears old
+global commands. If the previous guild differs from the active guild, it clears
+that one old namespace. It never scans every joined guild's command API.
+Keep the previous value until the old namespace is verified empty, then clear
+it. Cleanup errors are logged and the next boot retries the configured scope.
+Before this first bounded-cleanup rollout, identify any known historical guild
+namespace that still needs cleanup and carry it as the previous value.
+
+Verify the active global/guild registration and the previous guild namespace
+after old tasks drain in the approved deployment. Old tasks can register old
+commands again while running. Discord clients may cache prior registrations;
+the dispatch-time command filter remains in place.
