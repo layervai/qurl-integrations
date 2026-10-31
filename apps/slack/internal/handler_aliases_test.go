@@ -346,6 +346,7 @@ func TestHandleAliases_CompleteListingLogsNoWarning(t *testing.T) {
 	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
 		"bastion": "r_resolved01",
 		"":        "r_hidden_without_alias",
+		"legacy":  "https://legacy.example.com/private?token=do-not-render",
 	})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
@@ -360,6 +361,9 @@ func TestHandleAliases_CompleteListingLogsNoWarning(t *testing.T) {
 	}
 	if strings.Contains(rendered, "Some resource details") {
 		t.Errorf("detail note on complete resolution: %q", rendered)
+	}
+	if !strings.Contains(rendered, "broken binding") || strings.Contains(rendered, "do-not-render") {
+		t.Errorf("legacy binding lost its private repair-only rendering: %q", rendered)
 	}
 }
 

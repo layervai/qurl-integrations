@@ -119,7 +119,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		// Empty IDs and direct-URL bindings never join. A missing real resource
 		// degrades to aliases only and counts toward the pagination-gap signal.
 		var r client.Resource
-		if rid := groups[i].resourceID; rid != "" && !isLegacyDirectURLBinding(rid) {
+		if rid := groups[i].resourceID; isJoinableAliasResourceID(rid) {
 			var ok bool
 			if r, ok = byID[rid]; !ok {
 				unresolved++
@@ -165,11 +165,15 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	_ = h.postResponse(log, responseURL, body)
 }
 
+func isJoinableAliasResourceID(id string) bool {
+	return id != "" && !isLegacyDirectURLBinding(id)
+}
+
 // groupsNeedResolution reports whether any group has a joinable resource ID.
 // Empty IDs and legacy direct-URL bindings cannot join the resource list.
 func groupsNeedResolution(groups []aliasGroup) bool {
 	for i := range groups {
-		if groups[i].resourceID != "" && !isLegacyDirectURLBinding(groups[i].resourceID) {
+		if isJoinableAliasResourceID(groups[i].resourceID) {
 			return true
 		}
 	}
