@@ -140,7 +140,7 @@ function assertExpiresAt(expiresAt) {
   // message that contradicts the failed comparison.
   const now = nowEpochSeconds();
   // Note on `==` boundary: this writer rejects `expires_at == now`
-  // (strict `<=`), while loadFlow and the transitionFlow recheck
+  // (strict `<=`), while loadFlow and the transitionFlow failure check
   // treat `expires_at == now` as alive (their `now > exp` checks
   // are strict, and the Update condition is `#e >= :now`). The
   // writer is intentionally STRICTER — a row whose TTL is exactly
@@ -329,7 +329,7 @@ async function createFlow({ flow_id, stage, payload, expires_at }) {
 // (DDB physical reap is async, minutes-to-hours, and meanwhile the
 // row's stored stage is the only key that can unlock the matching
 // `deleteFlow`). The default stays `false` so existing callers
-// (the dispatcher, OCC pre-reads) keep the "logically expired ==
+// (the dispatcher and other readers) keep the "logically expired ==
 // absent" contract — flipping the default would silently surface
 // stale rows to every reader.
 //
@@ -489,85 +489,14 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   // "Strictly in the future" is enforced at call time, NOT at the
   // DDB-write time. A caller passing `set_expires_at: now + 1` can
   // validate clean, then have the row's expires_at land in the past
-  // by the time DDB sees the UpdateCommand (the pre-read network
-  // round-trip is between the two). Non-fatal — the row is just
+  // by the time DDB sees the UpdateCommand. Non-fatal — the row is just
   // born expired, same shape as the createFlow foot-gun — but with
   // sane TTLs (minutes-to-hours) the window is irrelevant.
   if (set_expires_at !== undefined) assertExpiresAt(set_expires_at);
 
-  // Read stage_from for the audit emission. The Update below is
-  // the authoritative write — a concurrent transition between this
-  // Get and the Update is detected by OCC and reported as conflict;
-  // the stale stage_from in the audit emission is acceptable
-  // (forensic field, not used for SLI math).
-  //
-  // TODO(#253): collapse this pre-read into the UpdateCommand via
-  // `ReturnValues: 'ALL_OLD'` (and `ReturnValuesOnConditionCheckFailure:
-  // 'ALL_OLD'` on the CCFE branch) to drop from 2 DDB calls → 1 on
-  // the happy path and 3 → 1 on the conflict path. Deliberately
-  // deferred from the harness's first ship — performance-only refactor,
-  // the simpler 2-call shape is correct and the optimization is the
-  // right scope for a focused follow-up.
-  //
-  // ConsistentRead doubles the RCU cost vs eventually-consistent,
-  // accepted here because a worker that just transitioned and is
-  // re-checking needs strong consistency. Same rationale as
-  // loadFlow's ConsistentRead choice.
+  // The conditional write returns the exact prior stage/expiry for audit.
   let stage_from = null;
-  // `extended` is computed against the row's PRIOR `expires_at`, not
-  // just "did the caller pass `set_expires_at`". The name reads as
-  // "the deadline was extended", and a forensic `count_by(extended=
-  // true)` should answer that question honestly — a caller passing
-  // a value EARLIER than the current expires_at (shortening the
-  // row's lifetime) must NOT count as extended. The pre-read
-  // projects `stage, expires_at` to give us the prior value.
   let extended = false;
-  try {
-    const got = await ddb.send(new GetCommand({
-      TableName: TABLE_NAME,
-      Key: { flow_id },
-      ProjectionExpression: 'stage, expires_at',
-      ConsistentRead: true,
-    }));
-    if (!got?.Item) {
-      logger.audit(AUDIT_EVENTS.FLOW_TRANSITION, {
-        flow_id,
-        stage_from: null,
-        stage_to,
-        result: 'not_found',
-        terminal: false,
-        // `extended` is meaningless when there's no row to extend.
-        // Stay false (the boolean default) rather than emitting a
-        // mixed-type `null` for a dimensionable-style field.
-        extended: false,
-        version: expectedVersion,
-      });
-      return { result: 'not_found', version: null };
-    }
-    stage_from = got.Item.stage ?? null;
-    if (set_expires_at !== undefined) {
-      const priorExpires = got.Item.expires_at;
-      // Strict comparison `>`: set_expires_at == priorExpires is a
-      // no-op rewrite, not an extension. Corrupted/missing prior
-      // expires_at can't be compared meaningfully — emit
-      // extended=false (a row with a missing expires_at can't be
-      // "extended" in any honest sense; downstream forensic queries
-      // would surface the corruption via the recheck warn anyway).
-      extended = typeof priorExpires === 'number' && Number.isFinite(priorExpires) && set_expires_at > priorExpires;
-    }
-  } catch (err) {
-    logger.error('flow-state.transitionFlow: pre-read failed', { flow_id, reason: err && err.message });
-    logger.audit(AUDIT_EVENTS.FLOW_TRANSITION, {
-      flow_id,
-      stage_from: null,
-      stage_to,
-      result: 'error',
-      terminal: false,
-      extended,
-      version: expectedVersion,
-    });
-    throw err;
-  }
 
   // Cache `now` once: the same value gates the condition AND lands
   // in `:updated_at`. Reading `nowEpochSeconds()` separately for
@@ -612,17 +541,22 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       // stage rewritten — even though loadFlow would then return
       // null for it. The next FLOW_DELETED would never fire and
       // `silently_dropped = created - deleted` would inflate. The
-      // condition fires CCFE on expired rows, and the post-CCFE
-      // recheck below maps that to result='not_found' (symmetric
+      // condition fires CCFE on expired rows, and the returned old
+      // item maps that to result='not_found' (symmetric
       // with loadFlow's own expiry filter). A missing or non-
       // numeric `expires_at` (corrupted row) also fails the
       // comparison — fail-safe, matching loadFlow's treatment.
       ConditionExpression: 'attribute_exists(flow_id) AND #v = :expected AND #e >= :now',
       ExpressionAttributeNames: exprNames,
       ExpressionAttributeValues: exprValues,
-      ReturnValues: 'UPDATED_NEW',
+      ReturnValues: 'ALL_OLD',
+      ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
     }));
-    const newVersion = res?.Attributes?.version ?? expectedVersion + 1;
+    const prior = res?.Attributes;
+    stage_from = prior?.stage ?? null;
+    extended = set_expires_at !== undefined && typeof prior?.expires_at === 'number'
+      && Number.isFinite(prior.expires_at) && set_expires_at > prior.expires_at;
+    const newVersion = expectedVersion + 1;
     logger.audit(AUDIT_EVENTS.FLOW_TRANSITION, {
       flow_id,
       stage_from,
@@ -635,58 +569,20 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
     return { result: 'success', version: newVersion };
   } catch (err) {
     if (isConditionalCheckFailed(err)) {
-      // The OCC gate. Could be (a) row disappeared between pre-read
-      // and Update (TTL reap or concurrent delete) → not_found, or
-      // (b) row is logically expired but DDB hasn't reaped yet →
-      // not_found (same retry semantics as physical absence — a
-      // caller retrying conflict on an expired row is wasted work),
-      // or (c) version mismatch (concurrent transition) → conflict.
-      // Distinguish with a second Get so the caller can pick the
-      // right retry strategy.
-      let result = 'conflict';
-      try {
-        const recheck = await ddb.send(new GetCommand({
-          TableName: TABLE_NAME,
-          Key: { flow_id },
-          // We only need expires_at — `flow_id` is the lookup key
-          // and we never read it back from the recheck result.
-          // (Note: with ProjectionExpression set, the v3 SDK does
-          // NOT auto-include the partition key, contrary to a
-          // common assumption.)
-          ProjectionExpression: 'expires_at',
-          ConsistentRead: true,
-        }));
-        if (!recheck?.Item) {
-          result = 'not_found';
-        } else {
-          // Apply the same logical-expiry filter as loadFlow — a row
-          // present in DDB but already past expires_at should report
-          // not_found, not conflict. Symmetric with the reader.
-          // Also treats missing/non-numeric `expires_at` as expired
-          // (the corrupted-row fail-safe — same posture as loadFlow).
-          const exp = recheck.Item.expires_at;
-          const isValidExpires = typeof exp === 'number' && Number.isFinite(exp) && Math.floor(exp) === exp;
-          if (!isValidExpires) {
-            // Symmetric with loadFlow's warn — a corrupted row should
-            // be grepable from both the read and the transition path.
-            logger.warn('flow-state.transitionFlow: row has missing or non-numeric expires_at on recheck; treating as expired', {
-              flow_id,
-              expires_at_type: typeof exp,
-            });
-            result = 'not_found';
-          } else if (exp < nowEpochSeconds()) {
-            result = 'not_found';
-          }
-        }
-      } catch (recheckErr) {
-        // Recheck failure — stay conservative and report conflict
-        // (the original Update failed due to a conditional check,
-        // not an availability issue). Warn so a DDB availability
-        // blip masked by the conservative fallback still surfaces
-        // in CloudWatch — silent fallback would hide a real signal.
-        logger.warn('flow-state.transitionFlow: post-CCFE recheck failed; defaulting to result=conflict', {
+      // TODO(upstream-contract): installed AWS DocumentClient returns failure
+      // Item as raw AttributeValues, unlike native success Attributes (#253).
+      // Read only audit fields; never decrypt or log the returned payload.
+      const prior = err.Item;
+      stage_from = prior?.stage?.S ?? null;
+      const rawExpires = prior?.expires_at?.N;
+      const expires = typeof rawExpires === 'string' ? Number(rawExpires) : NaN;
+      const validExpires = Number.isFinite(expires) && Number.isInteger(expires);
+      extended = set_expires_at !== undefined && validExpires && set_expires_at > expires;
+      const result = prior && validExpires && expires >= nowEpochSeconds() ? 'conflict' : 'not_found';
+      if (prior && !validExpires) {
+        logger.warn('flow-state.transitionFlow: row has missing or non-numeric expires_at; treating as expired', {
           flow_id,
-          reason: recheckErr && recheckErr.message,
+          expires_at_type: prior.expires_at?.N === undefined ? 'non-number' : 'number',
         });
       }
       logger.audit(AUDIT_EVENTS.FLOW_TRANSITION, {
