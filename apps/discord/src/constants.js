@@ -210,6 +210,8 @@ const AUDIT_EVENTS = {
   // from handleAddRecipients on a sendConfig that has both file +
   // location.
   UPLOAD_SUCCESS: 'upload_success',
+  // Entry or atomic slot-claim rejection, once per attempt (including retries).
+  // Payload counts are forensic only; the paired alarm counts both gates together.
   // TODO(upstream-contract): paired UploadRejectedCapacityCount filter in infra.
   UPLOAD_REJECTED_CAPACITY: 'upload_rejected_capacity',
   DISPATCH_SENT: 'dispatch_sent',
