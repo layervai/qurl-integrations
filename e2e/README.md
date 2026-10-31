@@ -104,21 +104,33 @@ never fail the run).
 
 ### Scoped recipient path check
 
-The existing distinct-recipient file test opens B, then opens A and keeps A's
-browser context for three direct requests: own200, an observed converged router
-denial for B's existing path on A's origin, and own200 again. It does not follow
-B's link or issue another knock. Each request has a unique non-secret
-X-Request-ID. The router intentionally hides the internal authorizer403 behind
-its not-found response or connection close. The receipt marks that observation
-as PENDING internal403 evidence; a404 or reset alone never completes API1474.
-Other bodies, HTTP403/5xx, DNS failures and timeouts fail this observation.
+The distinct-recipient file test opens recipient B's view, then recipient A's
+view. It keeps A's browser context for three direct requests. The own-path
+requests must return HTTP 200 before and after the sibling-path request. The
+probe does not follow B's link or issue another knock. All requests share the
+viewer's remaining wall-clock deadline. Each request uses at most ten seconds
+and has a unique, non-secret `X-Request-ID`.
 
-For full API1474 acceptance, root must join the sibling request ID to the exact
-internal resource-authorize HTTP403 access record. Positive own-path requests
-can hit the router cache and need not create fresh backend access records. Root
-must also compare the receipt's expected path and exact child/public identity
-with the matching native admission STATE row using the existing read-only
-collector. Pair the actual result with deployed API/router source and the shared
-target-path vectors. No public header or body identifies a pure scope mismatch.
-This check alone does not prove stored scope, production activation, or native
-CLOSED state.
+The router hides an internal authorization refusal with its not-found response
+or a connection close. A 404 or reset alone does not prove that the internal
+authorizer returned HTTP 403. Resets can also come from an edge or TLS layer.
+The receipt marks these observations as pending proof. Unexpected responses,
+DNS failures and timeouts fail the probe. A sibling response in the 2xx range
+reports an explicit cross-recipient breach with the numeric status only.
+
+One final receipt is written on success or failure. It retains all three request
+IDs, known numeric statuses and a fixed failure code. It contains no raw error
+or response body. A failed receipt cannot qualify the ledger check.
+
+To complete the [Connector target-path check](https://github.com/layervai/qurl-service/blob/main/docs/runbooks/prod-rollout-ledger/2026-09-05-pr-1474-target-path-cutover.md),
+the operator must match the sibling request ID to the exact internal
+resource-authorize HTTP 403 access record. Positive own-path requests can hit
+the router cache and need not create fresh backend access records. The operator
+must also compare the expected path and exact child/public identity with the
+matching native admission STATE row using the read-only collector. Pair these
+results with the deployed API/router source and shared target-path vectors.
+There is no public header or body that identifies a pure scope mismatch.
+
+This probe only allows the reviewed public and LayerV environment domains.
+Adding an environment suffix requires source review. The probe alone does not
+prove stored scope, production activation, or native CLOSED state.

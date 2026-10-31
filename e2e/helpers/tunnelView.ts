@@ -66,7 +66,7 @@ export interface ViewViaQurlLinkOptions {
   /** Probe a known existing sibling through THIS session, without another knock. */
   siblingViewPath?: string;
   ownership: { resource_id: string; qurl_id: string; expires_at: string };
-  /** Wall-clock budget for navigation + knock + response + optional iframe check, in ms.
+  /** Wall-clock budget for navigation + knock + response + optional iframe and scope checks, in ms.
    *  Default 30_000. */
   timeoutMs?: number;
 }
@@ -159,17 +159,19 @@ export async function viewViaQurlLink(
       }
     }
     if (opts.siblingViewPath !== undefined) {
-      const probe = await probeScopedSibling(page.context().request, resp.url(), opts.siblingViewPath);
-      appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS!, JSON.stringify({
-        event: 'owned_scope_boundary_probe', resource_id: opts.ownership.resource_id,
-        qurl_id: opts.ownership.qurl_id, observed_at: new Date().toISOString(),
-        expected_target_path: new URL(resp.url()).pathname, sibling_target_path: opts.siblingViewPath,
-        own_before_status: probe.ownBefore, sibling_wire_status: probe.siblingWireStatus,
-        sibling_wire_outcome: probe.siblingWireOutcome, own_after_status: probe.ownAfter,
-        request_ids: probe.requestIDs,
-        internal_authorize_403: 'pending_exact_request_id_readback_not_proved_by_wire_denial',
-        persisted_target_path: 'pending_independent_native_state_readback',
-      }) + '\n', { mode: 0o600 });
+      await probeScopedSibling(page.context().request, resp.url(), opts.siblingViewPath, deadline, (probe) => {
+        appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS!, JSON.stringify({
+          event: 'owned_scope_boundary_probe', resource_id: opts.ownership.resource_id,
+          qurl_id: opts.ownership.qurl_id, observed_at: new Date().toISOString(),
+          expected_target_path: new URL(resp.url()).pathname, sibling_target_path: opts.siblingViewPath,
+          probe_status: probe.probeStatus, failure_code: probe.failureCode,
+          own_before_status: probe.ownBefore, sibling_wire_status: probe.siblingWireStatus,
+          sibling_wire_outcome: probe.siblingWireOutcome, own_after_status: probe.ownAfter,
+          request_ids: probe.requestIDs,
+          internal_authorize_403: 'pending_exact_request_id_readback_not_proved_by_wire_denial',
+          persisted_target_path: 'pending_independent_native_state_readback',
+        }) + '\n', { mode: 0o600 });
+      });
     }
     return { status: resp.status(), url: resp.url() };
   } finally {
@@ -230,50 +232,146 @@ export async function checkOwnershipConfig(): Promise<void> {
   await readOwner();
 }
 
-/** The browser context supplies its existing origin cookie. All three requests
- * go directly to one authorized origin; no qURL link or admission is reopened. */
-export async function probeScopedSibling(request: APIRequestContext, ownViewURL: string, siblingPath: string) {
-  const own = new URL(ownViewURL);
-  if (own.protocol !== 'https:' || !/^q-[a-z2-7]{52}\.qurl\.site(?:\.layerv\.(?:xyz|ai))?$/.test(own.hostname) ||
-      !/^\/views\/[0-9a-f]{32}$/.test(own.pathname) || own.search || own.hash || own.username || own.password ||
-      !/^\/views\/[0-9a-f]{32}$/.test(siblingPath) || siblingPath === own.pathname)
-    throw new Error('scope probe requires two distinct canonical recipient view paths');
-  const sibling = new URL(siblingPath, own.origin);
+export interface ScopedSiblingProbeReceipt {
+  probeStatus: 'PASS' | 'FAILED';
+  failureCode: string | null;
+  ownBefore: number | null;
+  siblingWireStatus: number | null;
+  siblingWireOutcome: string | null;
+  ownAfter: number | null;
+  requestIDs: { ownBefore: string; sibling: string; ownAfter: string };
+}
+
+/** Reuse the browser context's existing cookie on one admitted origin.
+ * The final callback runs once on success or failure, before the error escapes. */
+export async function probeScopedSibling(
+  request: APIRequestContext,
+  ownViewURL: string,
+  siblingPath: string,
+  deadline = Date.now() + 30_000,
+  onFinal?: (receipt: ScopedSiblingProbeReceipt) => void,
+): Promise<ScopedSiblingProbeReceipt> {
   const prefix = 'scope-' + randomUUID();
-  const requestIDs = { ownBefore: prefix + '-pre', sibling: prefix + '-sib', ownAfter: prefix + '-post' };
-  async function get(target: URL, requestID: string) {
-    return request.get(target.href, { maxRedirects: 0, maxRetries: 0, timeout: 10_000,
-      headers: { 'X-Request-ID': requestID } });
+  const receipt: ScopedSiblingProbeReceipt = {
+    probeStatus: 'FAILED',
+    failureCode: null,
+    ownBefore: null,
+    siblingWireStatus: null,
+    siblingWireOutcome: null,
+    ownAfter: null,
+    requestIDs: {
+      ownBefore: prefix + '-pre',
+      sibling: prefix + '-sib',
+      ownAfter: prefix + '-post',
+    },
+  };
+  let failureMessage: string | undefined;
+  function fail(code: string, message: string): never {
+    receipt.failureCode = code;
+    failureMessage = message;
+    throw new Error(message);
   }
-  async function ownControl(requestID: string) {
-    let response;
-    try { response = await get(own, requestID); }
-    catch { throw new Error('scope probe own control request failed'); }
-    const status = response.status();
-    await response.dispose();
-    if (status !== 200) throw new Error('scope probe own controls require HTTP 200');
-    return status;
+  function remaining() {
+    const left = Math.floor(deadline - Date.now());
+    if (!Number.isFinite(left) || left <= 0)
+      fail('DEADLINE_EXHAUSTED', 'scope probe deadline exhausted');
+    return left;
   }
-  const ownBefore = await ownControl(requestIDs.ownBefore);
-  let siblingWireStatus: number | null = null;
-  let siblingWireOutcome: string;
   try {
-    const response = await get(sibling, requestIDs.sibling);
+    const own = new URL(ownViewURL);
+    // Reviewed domains only; adding a suffix requires source review.
+    if (
+      own.protocol !== 'https:' ||
+      !/^q-[a-z2-7]{52}\.qurl\.site(?:\.layerv\.(?:xyz|ai))?$/.test(own.hostname) ||
+      !/^\/views\/[0-9a-f]{32}$/.test(own.pathname) ||
+      own.search ||
+      own.hash ||
+      own.username ||
+      own.password ||
+      !/^\/views\/[0-9a-f]{32}$/.test(siblingPath) ||
+      siblingPath === own.pathname
+    )
+      fail('INVALID_TARGET', 'scope probe requires two distinct canonical recipient view paths');
+    const sibling = new URL(siblingPath, own.origin);
+    async function get(target: URL, requestID: string) {
+      return request.get(target.href, {
+        maxRedirects: 0,
+        maxRetries: 0,
+        timeout: Math.min(10_000, remaining()),
+        headers: { 'X-Request-ID': requestID },
+      });
+    }
+    async function ownControl(which: 'ownBefore' | 'ownAfter') {
+      let response;
+      try {
+        response = await get(own, receipt.requestIDs[which]);
+      } catch {
+        if (receipt.failureCode) throw new Error(failureMessage);
+        fail('OWN_REQUEST_FAILED', 'scope probe own control request failed');
+      }
+      try {
+        receipt[which] = response.status();
+        remaining();
+        if (receipt[which] !== 200)
+          fail(
+            'OWN_STATUS',
+            `scope probe own control requires HTTP 200 (received ${receipt[which]})`,
+          );
+      } finally {
+        await response.dispose();
+      }
+    }
+    await ownControl('ownBefore');
     try {
-      siblingWireStatus = response.status();
-      const body = await response.body();
-      if (siblingWireStatus !== 404 || body.length > 1024 || body.toString('utf8') !== 'Resource not found\n' ||
-          response.headers()['cache-control'] !== 'no-store')
-        throw new Error('scope probe sibling lacks the converged router denial shape');
-      siblingWireOutcome = 'CONVERGED_NOT_FOUND_PENDING_INTERNAL_403';
-    } finally { await response.dispose(); }
+      const response = await get(sibling, receipt.requestIDs.sibling);
+      try {
+        receipt.siblingWireStatus = response.status();
+        if (receipt.siblingWireStatus >= 200 && receipt.siblingWireStatus < 300)
+          fail(
+            'CROSS_RECIPIENT_2XX',
+            `scope probe: sibling object SERVED to another recipient's session (HTTP ${receipt.siblingWireStatus})`,
+          );
+        remaining();
+        const body = await response.body();
+        remaining();
+        // TODO(upstream-contract): router silentDrop owns this canonical 404 body/cache shape.
+        if (
+          receipt.siblingWireStatus !== 404 ||
+          body.length > 1024 ||
+          body.toString('utf8') !== 'Resource not found\n' ||
+          response.headers()['cache-control'] !== 'no-store'
+        )
+          fail(
+            'UNEXPECTED_SIBLING_RESPONSE',
+            `scope probe sibling lacks the converged router denial shape (HTTP ${receipt.siblingWireStatus})`,
+          );
+        receipt.siblingWireOutcome = 'CONVERGED_NOT_FOUND_PENDING_INTERNAL_403';
+      } finally {
+        await response.dispose();
+      }
+    } catch (err) {
+      if (receipt.failureCode) throw new Error(failureMessage);
+      // APIRequestContext uses Node errors. A reset can come from an edge as
+      // well as the router, so this remains pending exact internal-403 proof.
+      if (
+        receipt.siblingWireStatus !== null ||
+        !(err instanceof Error) ||
+        !/ECONNRESET|socket hang up/.test(err.message)
+      )
+        fail(
+          'SIBLING_REQUEST_FAILED',
+          `scope probe sibling request failed (HTTP ${receipt.siblingWireStatus ?? 'unavailable'})`,
+        );
+      remaining();
+      receipt.siblingWireOutcome = 'CONNECTION_CLOSED_PENDING_INTERNAL_403';
+    }
+    await ownControl('ownAfter');
+    receipt.probeStatus = 'PASS';
+    return receipt;
   } catch (err) {
-    // Only the router's known connection-close class is an observed candidate.
-    // Even this outcome is NOT authorizer403 proof; root must join requestID.
-    if (siblingWireStatus !== null || !(err instanceof Error) || !/ECONNRESET|socket hang up|net::ERR_EMPTY_RESPONSE|net::ERR_CONNECTION_RESET/.test(err.message))
-      throw new Error('scope probe sibling is not a qualified router denial observation');
-    siblingWireOutcome = 'CONNECTION_CLOSED_PENDING_INTERNAL_403';
+    if (receipt.failureCode) throw new Error(failureMessage);
+    return fail('UNEXPECTED_FAILURE', 'scope probe failed; see its status-only receipt');
+  } finally {
+    onFinal?.(receipt);
   }
-  const ownAfter = await ownControl(requestIDs.ownAfter);
-  return { ownBefore, siblingWireStatus, siblingWireOutcome, ownAfter, requestIDs };
 }
