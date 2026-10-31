@@ -536,11 +536,11 @@ describe('qURL client', () => {
     });
   });
 
-  describe('deleteLink', () => {
+  describe('revokeResource', () => {
     it('revokes a CRID through DELETE /v1/resources/{id}', async () => {
       globalThis.fetch = jest.fn().mockImplementation(async () => new Response(null, { status: 204 }));
 
-      await qurl.deleteLink(CRID_RESOURCE_ID);
+      await qurl.revokeResource(CRID_RESOURCE_ID);
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
@@ -566,7 +566,7 @@ describe('qURL client', () => {
         }),
       });
 
-      await expect(qurl.deleteLink(CRID_RESOURCE_ID)).rejects.toThrow(/401/);
+      await expect(qurl.revokeResource(CRID_RESOURCE_ID)).rejects.toThrow(/401/);
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       expect(logger.audit).toHaveBeenCalledWith(
         AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
@@ -586,7 +586,7 @@ describe('qURL client', () => {
     it('rejects a legacy private ID before network work', async () => {
       globalThis.fetch = jest.fn();
 
-      await expect(qurl.deleteLink('r_legacy42')).rejects.toThrow(/qURL API DELETE.*failed \(client_validation\)/);
+      await expect(qurl.revokeResource('r_legacy42')).rejects.toThrow(/qURL API DELETE.*failed \(client_validation\)/);
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
@@ -596,7 +596,7 @@ describe('qURL client', () => {
     ])('rejects %s before network work', async (_kind, resourceId) => {
       globalThis.fetch = jest.fn();
 
-      await expect(qurl.deleteLink(resourceId)).rejects.toThrow(/Invalid resource ID format/);
+      await expect(qurl.revokeResource(resourceId)).rejects.toThrow(/Invalid resource ID format/);
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
@@ -615,7 +615,7 @@ describe('qURL client', () => {
         }),
       });
 
-      const thrown = await qurl.deleteLink(CRID_RESOURCE_ID).then(
+      const thrown = await qurl.revokeResource(CRID_RESOURCE_ID).then(
         () => null,
         (error) => error,
       );
@@ -1073,7 +1073,7 @@ describe('handleAddRecipients', () => {
     mockCreateOneTimeLink = jest.fn();
     jest.mock('../src/qurl', () => ({
       createOneTimeLink: mockCreateOneTimeLink,
-      deleteLink: jest.fn(),
+      revokeResource: jest.fn(),
     }));
 
     mockMintLinks = jest.fn();

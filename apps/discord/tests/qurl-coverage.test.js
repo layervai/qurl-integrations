@@ -256,7 +256,7 @@ describe('qURL client — getResourceStatus', () => {
 
   it.each([
     ['GET status', resourceId => qurl.getResourceStatus(resourceId)],
-    ['DELETE revoke', resourceId => qurl.deleteLink(resourceId)],
+    ['DELETE revoke', resourceId => qurl.revokeResource(resourceId)],
   ])('rejects an access token passed as a resource ID without logging or echoing it (%s)', async (_label, invoke) => {
     const logger = require('../src/logger');
     const accessToken = ['at', 'sensitive-access-marker'].join('_');
@@ -308,7 +308,7 @@ describe('qURL client — getResourceStatus', () => {
 
   it.each([
     ['GET status', resourceId => qurl.getResourceStatus(resourceId)],
-    ['DELETE revoke', resourceId => qurl.deleteLink(resourceId)],
+    ['DELETE revoke', resourceId => qurl.revokeResource(resourceId)],
   ])('rejects a public-key resource ID before network work, as SDK 2.x requires a CRID (%s)', async (_label, invoke) => {
     globalThis.fetch = jest.fn();
 
@@ -327,7 +327,7 @@ describe('qURL client — getResourceStatus', () => {
     const deleteSpy = jest.spyOn(QURLClient.prototype, 'deleteResource').mockRejectedValueOnce(clientError);
 
     try {
-      const thrown = await qurl.deleteLink(unknownCredential).catch(error => error);
+      const thrown = await qurl.revokeResource(unknownCredential).catch(error => error);
 
       expect(thrown.message).toBe(
         'qURL API DELETE /resources/:resourceId failed (client_validation)',
@@ -347,7 +347,7 @@ describe('qURL client — getResourceStatus', () => {
       .mockRejectedValueOnce(new TypeError(`delete rejected ${unknownCredential}`));
 
     try {
-      const thrown = await qurl.deleteLink(unknownCredential).catch(error => error);
+      const thrown = await qurl.revokeResource(unknownCredential).catch(error => error);
 
       expect(thrown.message).toBe(
         'qURL API DELETE /resources/:resourceId failed (unknown_error)',
@@ -754,7 +754,7 @@ describe('qURL client — retry + audit behavior', () => {
 
   it('does not replay DELETE on 503 because the mutation outcome is unknown', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
-    await expect(qurl.deleteLink(CRID_RESOURCE_ID)).rejects.toThrow(/503/);
+    await expect(qurl.revokeResource(CRID_RESOURCE_ID)).rejects.toThrow(/503/);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -764,7 +764,7 @@ describe('qURL client — retry + audit behavior', () => {
     const { resourceIdLogRef } = require('../src/utils/resource-id');
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(401));
 
-    const thrown = await qurl.deleteLink(CRID_RESOURCE_ID).then(
+    const thrown = await qurl.revokeResource(CRID_RESOURCE_ID).then(
       () => { throw new Error('expected rejection'); },
       error => error,
     );

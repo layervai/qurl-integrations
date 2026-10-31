@@ -123,7 +123,6 @@ const mockDb = {
   getLinkedDiscordIds: jest.fn(() => new Set()),
   createPendingLink: jest.fn(),
   getLinkByGithub: jest.fn(),
-  deleteLink: jest.fn().mockReturnValue({ changes: 1 }),
   getContributions: jest.fn(() => []),
   getBadges: jest.fn(() => []),
   getStreak: jest.fn(() => null),
@@ -175,11 +174,11 @@ jest.mock('../src/connector', () => ({
 }));
 
 const mockCreateOneTimeLink = jest.fn();
-const mockDeleteLink = jest.fn();
+const mockRevokeResource = jest.fn();
 const mockGetResourceStatus = jest.fn();
 jest.mock('../src/qurl', () => ({
   createOneTimeLink: mockCreateOneTimeLink,
-  deleteLink: mockDeleteLink,
+  revokeResource: mockRevokeResource,
   getResourceStatus: mockGetResourceStatus,
 }));
 

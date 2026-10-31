@@ -113,7 +113,7 @@ jest.mock('../src/store', () => ({
 
 jest.mock('../src/qurl', () => ({
   mintLinks: jest.fn(), revokeAllLinks: jest.fn(),
-  getResourceStatus: jest.fn(), deleteLink: jest.fn(),
+  getResourceStatus: jest.fn(), revokeResource: jest.fn(),
 }));
 
 jest.mock('../src/connector', () => ({ uploadJsonToConnector: jest.fn() }));
