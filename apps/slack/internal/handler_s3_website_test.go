@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2366,5 +2367,68 @@ func TestS3WebsiteInstallRejectsWhenClaimNotEchoed(t *testing.T) {
 	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
 	if len(*dmPosts) != 0 || revokeHits != 1 || !strings.Contains(strings.Join(*bodies, "\n"), kindFirstUnconfirmedInstallMessage) {
 		t.Fatalf("DM posts = %d, revokes = %d, bodies = %q; want no DM, one revoke, shared copy", len(*dmPosts), revokeHits, *bodies)
+	}
+}
+
+func TestS3WebsiteInstallPanicRevokesBeforeUnexpectedFailureNotice(t *testing.T) {
+	for _, stage := range []string{"build", "dm"} {
+		t.Run(stage, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			var unusedRevokeHits int
+			s3WebsiteInstallFakes(t, ts, map[string]any{
+				"target": client.CredentialTargetAgent,
+				"claims": []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+			}, &unusedRevokeHits)
+			var revoked atomic.Int32
+			ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+				revoked.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			})
+			var notices atomic.Int32
+			responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read failure notice: %v", err)
+				}
+				if revoked.Load() != 1 {
+					t.Error("unexpected-failure notice arrived before the minted token was revoked")
+				}
+				text := parseSlackText(t, body)
+				if text != s3WebsiteUnexpectedFailureNotice {
+					t.Errorf("failure notice = %q", text)
+				}
+				if strings.Contains(string(body), testTunnelModalKey) || strings.Contains(string(body), testInstallBlockLead) {
+					t.Error("panic exposed the token or public install instructions")
+				}
+				notices.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(responseURL.Close)
+			h := newAdminTestHandler(t, ts)
+			freezeTunnelBootstrapNow(t, h, fixedNow)
+			h.cfg.TunnelImage = testTunnelImageRef
+			h.cfg.S3OriginImage = testS3OriginImageRef
+			var dmCalls int
+			h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+				dmCalls++
+				panic("test DM delivery panic")
+			}
+			if stage == "build" {
+				h.now = func() time.Time { panic("test render panic after mint") }
+			}
+			h.SetAliasStore(h.cfg.AdminStore)
+			h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
+			if revoked.Load() != 1 || notices.Load() != 1 {
+				t.Fatalf("revokes = %d, notices = %d; want one each", revoked.Load(), notices.Load())
+			}
+			wantDMCalls := 1
+			if stage == "build" {
+				wantDMCalls = 0
+			}
+			if dmCalls != wantDMCalls {
+				t.Fatalf("DM calls = %d, want %d", dmCalls, wantDMCalls)
+			}
+		})
 	}
 }
