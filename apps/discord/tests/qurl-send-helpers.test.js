@@ -1002,6 +1002,25 @@ describe('renderConfirmCardContent', () => {
     needsPicker: false,
   };
 
+  test.each([
+    ['over cap', 26, 26, true, RECIPIENT_MODE_PICKER, true],
+    ['at cap', 25, 25, true, RECIPIENT_MODE_PICKER, false],
+    ['below cap', 24, 24, true, RECIPIENT_MODE_PICKER, false],
+    ['cold cache', 26, 1, true, RECIPIENT_MODE_PICKER, false],
+    ['empty cache', 0, 0, true, RECIPIENT_MODE_PICKER, false],
+    ['no permission', 26, 26, false, RECIPIENT_MODE_PICKER, false],
+    ['voice mode', 26, 26, true, RECIPIENT_MODE_VOICE, false],
+  ])('@everyone cap hint: %s', (_label, memberCount, cachedCount, permitted, recipientMode, expected) => {
+    const cache = new Map(Array.from({ length: cachedCount }, (_, i) => [String(i), { user: { bot: false } }]));
+    const interaction = {
+      guild: { memberCount, members: { cache } },
+      memberPermissions: { has: (permission) => permitted && permission === 131072n },
+    };
+    const out = renderConfirmCardContent({ ...baseProps, interaction, recipientMode });
+    expect(out.includes('@everyone is unavailable:')).toBe(expected);
+    if (expected) expect(out).toContain('26 human recipients, above the 25-recipient limit. Pick individual recipients or a smaller role.');
+  });
+
   test('file path shows file glyph + label', () => {
     const out = renderConfirmCardContent(baseProps);
     expect(out).toMatch(/Sending file/);
