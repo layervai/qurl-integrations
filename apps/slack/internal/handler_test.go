@@ -870,11 +870,6 @@ func TestSlashCommandUninstallLegacyRowWithoutKeyIDDisconnectsLocally(t *testing
 	}
 }
 
-// TestSlashCommandUninstallRevokeForbiddenFallsBackToLocalOnly pins the confirmed
-// qurl-service contract (#805): a live workspace key authenticates the self-revoke
-// with API-key auth, which qurl-service categorically forbids (403), so this is
-// the universal prod outcome for a live key — the upstream revoke degrades to a
-// local-only disconnect and the reply keeps the "not revoked outside Slack" caveat.
 func TestSlashCommandUninstallMalformedStoredKeyIDDisconnectsLocally(t *testing.T) {
 	for _, keyID := range []string{"key_invalid", " \t"} {
 		provider := &revokingAuthProvider{recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"}, keyID: keyID}
@@ -895,6 +890,11 @@ func TestSlashCommandUninstallMalformedStoredKeyIDDisconnectsLocally(t *testing.
 	}
 }
 
+// TestSlashCommandUninstallRevokeForbiddenFallsBackToLocalOnly pins the confirmed
+// qurl-service contract (#805): a live workspace key authenticates the self-revoke
+// with API-key auth, which qurl-service categorically forbids (403), so this is
+// the universal prod outcome for a live key — the upstream revoke degrades to a
+// local-only disconnect and the reply keeps the "not revoked outside Slack" caveat.
 func TestSlashCommandUninstallRevokeForbiddenFallsBackToLocalOnly(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
