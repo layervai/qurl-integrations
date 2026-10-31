@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	mathrand "math/rand/v2"
 	"net/http"
 	"os"
 	"strconv"
@@ -22,6 +23,9 @@ import (
 // conversation-mode state. Provisioned in the infra repo; the table is unused
 // until conversation mode is wired.
 const EnvAgentStateTable = "QURL_AGENT_STATE_TABLE"
+
+// DynamoDB BatchWriteItem accepts at most 25 writes per request.
+const agentPurgeBatchSize = 25
 
 // Agent-state table attribute names. The table is a single partition-keyed
 // store holding several item types under one (pk, sk) schema, discriminated by
@@ -108,6 +112,12 @@ const (
 // production, and a permanently zero one says this machinery is unearned.
 const markerLostResponseRecoveredMsg = "agent-state: marker write recovered after a lost response"
 
+// AgentDynamoDBClient includes the bulk delete capability used by teardown.
+type AgentDynamoDBClient interface {
+	DynamoDBClient
+	BatchWriteItem(context.Context, *dynamodb.BatchWriteItemInput, ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
+}
+
 // AgentStore is the DDB-direct accessor for conversation-mode state. It owns one
 // table (EnvAgentStateTable), separate from the [Store] tables, so the
 // conversation surface's lifecycle and IAM grants stay independent of the
@@ -116,7 +126,7 @@ const markerLostResponseRecoveredMsg = "agent-state: marker write recovered afte
 // The zero value is not usable — construct via [NewAgentStore] or set Client +
 // TableName explicitly in tests.
 type AgentStore struct {
-	Client    DynamoDBClient
+	Client    AgentDynamoDBClient
 	TableName string
 
 	// Now is injected so tests can pin the clock. Defaults to time.Now.
@@ -133,7 +143,7 @@ type AgentStore struct {
 // NewAgentStore constructs an [AgentStore]. The table name falls back to
 // EnvAgentStateTable (trimmed) when empty; a missing or whitespace-only name is
 // an error (there is no safe default for which environment's data to write).
-func NewAgentStore(client DynamoDBClient, tableName string) (*AgentStore, error) {
+func NewAgentStore(client AgentDynamoDBClient, tableName string) (*AgentStore, error) {
 	if tableName == "" {
 		// Trim here too, not just in NewAgentStoreFromEnv: a whitespace-only
 		// QURL_AGENT_STATE_TABLE must be rejected as empty for every caller,
@@ -634,8 +644,8 @@ func (s *AgentStore) ClaimPendingAction(ctx context.Context, partition, id strin
 // intentionally not reinstall-cutoff guarded, so delayed teardown can remove
 // fresh agent metadata or pane context but cannot remove credentials or
 // policy. The method attempts every delete in a page even after an individual
-// DeleteItem error, then returns the joined errors so the lifecycle retry path
-// can retry any residue.
+// batch error, then returns joined errors so the lifecycle retry path can
+// retry residue. Each request deletes at most 25 keys.
 func (s *AgentStore) PurgeWorkspaceAgentState(ctx context.Context, partition string) error {
 	if partition == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeWorkspaceAgentState: partition is required"}
@@ -643,6 +653,9 @@ func (s *AgentStore) PurgeWorkspaceAgentState(ctx context.Context, partition str
 	var startKey map[string]ddbtypes.AttributeValue
 	var deleteErrs []error
 	for {
+		if err := ctx.Err(); err != nil {
+			return joinSweepErrors(deleteErrs, err)
+		}
 		out, err := s.Client.Query(ctx, &dynamodb.QueryInput{
 			TableName:              aws.String(s.TableName),
 			KeyConditionExpression: aws.String("#pk = :pk"),
@@ -660,6 +673,7 @@ func (s *AgentStore) PurgeWorkspaceAgentState(ctx context.Context, partition str
 		if err != nil {
 			return joinSweepErrors(deleteErrs, ddbToError("PurgeWorkspaceAgentState", err))
 		}
+		requests := make([]ddbtypes.WriteRequest, 0, len(out.Items))
 		for _, item := range out.Items {
 			sk := readString(item, attrAgentSK)
 			if sk == "" {
@@ -669,14 +683,17 @@ func (s *AgentStore) PurgeWorkspaceAgentState(ctx context.Context, partition str
 				})
 				continue
 			}
-			if _, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-				TableName: aws.String(s.TableName),
-				Key: map[string]ddbtypes.AttributeValue{
-					attrAgentPK: stringAttr(partition),
-					attrAgentSK: stringAttr(sk),
-				},
-			}); err != nil {
-				deleteErrs = append(deleteErrs, ddbToError("PurgeWorkspaceAgentState", err))
+			requests = append(requests, ddbtypes.WriteRequest{DeleteRequest: &ddbtypes.DeleteRequest{
+				Key: map[string]ddbtypes.AttributeValue{attrAgentPK: stringAttr(partition), attrAgentSK: stringAttr(sk)},
+			}})
+		}
+		for start := 0; start < len(requests); start += agentPurgeBatchSize {
+			end := min(start+agentPurgeBatchSize, len(requests))
+			if err := s.deleteAgentStateBatch(ctx, requests[start:end]); err != nil {
+				deleteErrs = append(deleteErrs, err)
+				if ctx.Err() != nil {
+					return joinSweepErrors(deleteErrs, nil)
+				}
 			}
 		}
 		if len(out.LastEvaluatedKey) == 0 {
@@ -704,4 +721,38 @@ func readNumber(item map[string]ddbtypes.AttributeValue, key string) int64 {
 		return 0
 	}
 	return n
+}
+
+// Deletes are idempotent; retry only unfinished requests with bounded backoff.
+func (s *AgentStore) deleteAgentStateBatch(ctx context.Context, pending []ddbtypes.WriteRequest) error {
+	// The caller retries the whole purge within its deadline; keep this budget short.
+	const maxRetries = 3
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("PurgeWorkspaceAgentState: %d deletes unfinished: %w", len(pending), err)
+		}
+		out, err := s.Client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]ddbtypes.WriteRequest{s.TableName: pending}})
+		if err != nil {
+			return ddbToError(fmt.Sprintf("PurgeWorkspaceAgentState: batch of %d deletes", len(pending)), err)
+		}
+		if out == nil {
+			return &Error{StatusCode: http.StatusServiceUnavailable, Title: "PurgeWorkspaceAgentState: empty batch response"}
+		}
+		pending = out.UnprocessedItems[s.TableName]
+		if len(pending) == 0 {
+			return nil
+		}
+		if attempt == maxRetries {
+			return &Error{StatusCode: http.StatusServiceUnavailable, Title: fmt.Sprintf("PurgeWorkspaceAgentState: %d deletes unprocessed after %d attempts", len(pending), maxRetries+1)}
+		}
+		// Full jitter below 50/100/200ms avoids synchronized purge retries.
+		//nolint:gosec // Scheduling jitter is not a credential or security primitive.
+		timer := time.NewTimer(time.Duration(mathrand.Int64N(int64(50*time.Millisecond) << attempt)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("PurgeWorkspaceAgentState: %d deletes unfinished: %w", len(pending), ctx.Err())
+		case <-timer.C:
+		}
+	}
 }

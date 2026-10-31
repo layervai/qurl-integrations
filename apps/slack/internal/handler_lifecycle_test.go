@@ -1156,3 +1156,28 @@ func TestUninstallConfirmFailedTeardownReportsNoCleanup(t *testing.T) {
 		t.Fatalf("failed teardown leaked the left-behind-data caveat: %q", got)
 	}
 }
+
+func TestAgentPurgeContextErrorsReachLifecycleClassifier(t *testing.T) {
+	for _, name := range []string{"canceled", "deadline"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			want := context.Canceled
+			if name == "deadline" {
+				cancel()
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				want = context.DeadlineExceeded
+			} else {
+				cancel()
+			}
+			defer cancel()
+			h := &Handler{cfg: Config{AgentStore: &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}}}
+			err := h.purgeAgentStatePartition(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), testAdminTeamID)
+			if !errors.Is(err, want) {
+				t.Fatalf("purge error = %v, want %v", err, want)
+			}
+			if lifecyclePurgeErrorIsNonRetryable(err) {
+				t.Fatalf("context error was classified as permanent: %v", err)
+			}
+		})
+	}
+}
