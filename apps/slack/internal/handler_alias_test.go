@@ -1174,3 +1174,56 @@ func TestSetAliasStore_NilPassthrough(t *testing.T) {
 		t.Fatal("SetAliasStore(nil) after wiring should not clear the field")
 	}
 }
+
+func TestSetAlias_Precheck(t *testing.T) {
+	for _, scenario := range []string{"existing", "read failure", "concurrent bind", "new alias"} {
+		t.Run(scenario, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			h := newAdminTestHandler(t, ts)
+			h.SetAliasStore(h.cfg.AdminStore)
+			if scenario == "existing" {
+				ts.seedPolicyAliasBindings(t, testAdminTeamID, testAliasChannelID, map[string]string{testAliasName: "r_original"})
+			}
+			if scenario == "read failure" {
+				ts.ddb.SetGetItemErr(ts.tableNames.channelPolicy, errors.New("private policy failure"))
+			}
+			var lookups atomic.Int32
+			ts.addCustomer(http.MethodGet, testResourcesPath, func(w http.ResponseWriter, _ *http.Request) {
+				lookups.Add(1)
+				if scenario == "concurrent bind" {
+					ts.seedPolicyAliasBindings(t, testAdminTeamID, testAliasChannelID, map[string]string{testAliasName: "r_original"})
+				}
+				writeResourceListFixture(t, w, []map[string]any{{"resource_id": "r_new", "type": "tunnel", "slug": "new-tunnel", "status": "active"}}, "", false)
+			})
+			_, _, reply := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+				invokeAdminAsync("setalias $staging $new-tunnel", testAdminTeamID, testAdminUserID)
+			wantLookups := int32(0)
+			wantCopy := "already bound"
+			switch scenario {
+			case "read failure":
+				wantCopy = "Failed to update alias"
+			case "concurrent bind":
+				wantLookups = 1
+			case "new alias":
+				wantLookups, wantCopy = 1, "now points to"
+			}
+			if lookups.Load() != wantLookups || !strings.Contains(reply, wantCopy) {
+				t.Fatalf("lookups=%d want=%d; reply=%q want=%q", lookups.Load(), wantLookups, reply, wantCopy)
+			}
+			if strings.Contains(reply, "r_original") || strings.Contains(reply, "private policy failure") {
+				t.Fatalf("reply exposes private store data: %q", reply)
+			}
+			if scenario != "read failure" {
+				rid, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testAliasChannelID, testAliasName)
+				want := "r_original"
+				if scenario == "new alias" {
+					want = "r_new"
+				}
+				if err != nil || !found || rid != want {
+					t.Fatalf("binding=%q found=%v err=%v; want=%q", rid, found, err, want)
+				}
+			}
+		})
+	}
+}
