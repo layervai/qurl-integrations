@@ -361,7 +361,7 @@ describe('revokeLink retry path', () => {
     warnSpy.mockRestore();
   });
 
-  const pending503 = () => new Response('protection update pending', {
+  const pending503 = () => new Response(JSON.stringify({ error: { code: 'revocation_pending' } }), {
     status: 503, headers: { 'Retry-After': '30' },
   });
 
@@ -383,7 +383,7 @@ describe('revokeLink retry path', () => {
     });
   });
 
-  test.each([400, 401, 403, 404, 409, 410, 429, 500, 502, 503, 504])(
+  test.each([200, 201, 202, 206, 400, 401, 403, 409, 410, 429, 500, 502, 503, 504])(
     'does not accept a failed confirmation (%s) or substitute a management read', async (status) => {
       fetchMock.mockImplementationOnce(pending503)
         .mockImplementation(() => new Response(null, { status }));
@@ -412,12 +412,57 @@ describe('revokeLink retry path', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  test('accepts 404 only after a structurally committed pending response', async () => {
+    fetchMock.mockImplementationOnce(pending503)
+      .mockResolvedValueOnce(new Response(null, { status: 404 }));
+    const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
+    await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WAIT_MS);
+    await expect(pending).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([undefined, 'service_unavailable', 'unknown'])('does not confirm a generic 503 with code %s', async (code) => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: { code } }), {
+      status: 503, headers: { 'Retry-After': '30' },
+    })).mockResolvedValueOnce(new Response(null, { status: 404 }));
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test.each([200, 201, 202, 206])('an uncontracted immediate %s is not confirmation', async (status) => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status }));
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('a malformed pending response is not confirmation', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('not JSON', { status: 503, headers: { 'Retry-After': '30' } }));
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('an immediate 404 does not prove a revoke succeeded', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 404 }));
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['36', '0', '-1', '', 'not-a-delay'])('declines a pending directive outside the wait contract: %s', async (value) => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'revocation_pending' } }), {
+      status: 503, headers: { 'Retry-After': value },
+    }));
+    await expect(qurl.revokeLink(mintUrl, apiKey, publicResourceId)).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
   test('the confirmation delay stays within the exported budget', async () => {
     const startedAt = Date.now();
     const firedAt: number[] = [];
     fetchMock.mockImplementation(() => {
       firedAt.push(Date.now() - startedAt);
-      return new Response(null, { status: 503, headers: { 'Retry-After': '35' } });
+      return new Response(JSON.stringify({ error: { code: 'revocation_pending' } }), { status: 503, headers: { 'Retry-After': '35' } });
     });
     const pending = qurl.revokeLink(mintUrl, apiKey, publicResourceId);
     await jest.advanceTimersByTimeAsync(qurl.REVOKE_CONFIRM_WAIT_MS);
