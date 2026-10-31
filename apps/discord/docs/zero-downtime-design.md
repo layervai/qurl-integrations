@@ -74,6 +74,22 @@ Pillars 2 and 3 retain the Gateway design and its spike history. The current
 with RESUME enabled. Check the actual role and flag bindings before choosing
 which path applies; old PR numbers and spike examples are not rollout receipts.
 
+### Recipient-cap migration hold (#873)
+
+The atomic recipient counter requires a separate rollout gate. Older workers
+can add recipient rows without updating the counter. An overlapping rollout
+can therefore leave a new counter below the actual recipient total, even after
+the old workers stop. Keep this change unreleased until the deployment plan
+proves that every old recipient writer has drained before any counter is
+initialized, or provides a verified reconciliation after the old writers stop.
+Ordinary worker replacement and tests of new workers alone do not prove this.
+
+New sends initialize the counter from their persisted recipient batch. Add
+Recipients reserves capacity in the same transaction as its new rows. Failed
+DM delivery still consumes that reserved capacity; another committed batch,
+including a retry, consumes additional capacity. Legacy rows use one strongly
+consistent, bounded count of saved recipient rows before counter initialization.
+
 ## The three pillars
 
 ### Pillar 1 — Persistent interaction state

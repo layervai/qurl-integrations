@@ -838,6 +838,97 @@ describe('qurl sends', () => {
     expect('guild_id' in writes[2]).toBe(false);
   });
 
+  test('recordQURLSendBatch: reserves recipient capacity in the same transaction as new rows', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { sender_discord_id: 'sender', recipient_count: 48 } });
+    ddbMock.on(TransactWriteCommand).resolves({});
+    await store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1', resourceId: 'res', resourceType: 'file', expiresIn: '24h' },
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r2', resourceId: 'res', resourceType: 'file', expiresIn: '24h' },
+    ], { requireSendConfigUnrevoked: true, maxRecipients: 50 });
+    const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems;
+    expect(items).toHaveLength(3);
+    expect(items[0].Update).toEqual(expect.objectContaining({
+      TableName: 'test-prefix-qurl-send-configs', Key: { send_id: 's1' },
+      UpdateExpression: 'ADD recipient_count :adding',
+      ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND recipient_count <= :remaining',
+      ExpressionAttributeValues: { ':sender': 'sender', ':adding': 2, ':remaining': 48 },
+    }));
+  });
+
+  test('recordQURLSendBatch: reports capacity instead of revocation when another collector fills the send', async () => {
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { sender_discord_id: 'sender', recipient_count: 49 } })
+      .resolves({ Item: { sender_discord_id: 'sender', recipient_count: 50 } });
+    ddbMock.on(TransactWriteCommand).rejects(Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+    }));
+    await expect(store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1', resourceId: 'res', resourceType: 'file', expiresIn: '24h' },
+    ], { requireSendConfigUnrevoked: true, maxRecipients: 50 })).rejects.toMatchObject({
+      code: 'SEND_RECIPIENT_LIMIT', remaining: 0,
+    });
+  });
+
+  test('recordQURLSendBatch: counts legacy rows strongly before initializing their capacity once', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { sender_discord_id: 'sender' } });
+    ddbMock.on(QueryCommand)
+      .resolvesOnce({ Count: 46, LastEvaluatedKey: { send_id: 's1', recipient_discord_id: 'page-2' } })
+      .resolves({ Count: 2, LastEvaluatedKey: {} });
+    ddbMock.on(UpdateCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
+    await store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1', resourceId: 'res', resourceType: 'file', expiresIn: '24h' },
+    ], { requireSendConfigUnrevoked: true, maxRecipients: 50 });
+    expect(ddbMock.commandCalls(QueryCommand)[0].args[0].input).toEqual(expect.objectContaining({
+      TableName: 'test-prefix-qurl-sends', Select: 'COUNT', ConsistentRead: true,
+      KeyConditionExpression: 'send_id = :sid', ExpressionAttributeValues: { ':sid': 's1' },
+    }));
+    expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input).toEqual(expect.objectContaining({
+      ConditionExpression: expect.stringContaining('attribute_not_exists(recipient_count)'),
+      ExpressionAttributeValues: expect.objectContaining({ ':count': 48 }),
+    }));
+    expect(ddbMock.commandCalls(QueryCommand)[1].args[0].input.ExclusiveStartKey).toEqual({ send_id: 's1', recipient_discord_id: 'page-2' });
+  });
+
+  test.each([-1, 1.5, '48', null])('recordQURLSendBatch: refuses malformed stored recipient capacity %s', async (count) => {
+    ddbMock.on(GetCommand).resolves({ Item: { sender_discord_id: 'sender', recipient_count: count } });
+    await expect(store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1', resourceId: 'res', resourceType: 'file', expiresIn: '24h' },
+    ], { requireSendConfigUnrevoked: true, maxRecipients: 50 })).rejects.toThrow('capacity is invalid');
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test.each([[0, true], ['50', true], [1.5, true], [50, false]])('recordQURLSendBatch: validates capacity %s and guarded mode %s before DDB', async (limit, guarded) => {
+    await expect(store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1', resourceId: 'res', resourceType: 'file', expiresIn: '24h' },
+    ], { requireSendConfigUnrevoked: guarded, maxRecipients: limit })).rejects.toThrow('maxRecipients requires');
+    expect(ddbMock.calls()).toHaveLength(0);
+  });
+
+  test('recordQURLSendBatch: a legacy initializer cannot overwrite another writer count', async () => {
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { sender_discord_id: 'sender' } })
+      .resolves({ Item: { sender_discord_id: 'sender', recipient_count: 50 } });
+    ddbMock.on(QueryCommand).resolves({ Count: 48 });
+    ddbMock.on(UpdateCommand).rejects(Object.assign(new Error('race'), { name: 'ConditionalCheckFailedException' }));
+    await expect(store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1', resourceId: 'res', resourceType: 'file', expiresIn: '24h' },
+    ], { requireSendConfigUnrevoked: true, maxRecipients: 50 })).rejects.toMatchObject({ code: 'SEND_RECIPIENT_LIMIT', remaining: 0 });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  test('recordQURLSendBatch: stops a legacy count at its page budget without initializing from a partial count', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { sender_discord_id: 'sender' } });
+    ddbMock.on(QueryCommand).resolves({ Count: 0, LastEvaluatedKey: { send_id: 's1', recipient_discord_id: 'next' } });
+    await expect(store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1', resourceId: 'res', resourceType: 'file', expiresIn: '24h' },
+    ], { requireSendConfigUnrevoked: true, maxRecipients: 50 })).rejects.toThrow('read budget');
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(100);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
   test('recordQURLSendBatch: allows guarded writes at the 100-action limit', async () => {
     ddbMock.on(TransactWriteCommand).resolves({});
     const sends = Array.from({ length: 99 }, (_, i) => ({
@@ -1524,13 +1615,20 @@ describe('qurl sends', () => {
       connectorResourceId: 'conn', actualUrl: 'https://…',
       expiresIn: '24h', personalMessage: 'hi', locationName: null,
       attachmentName: 'doc.pdf', attachmentContentType: 'application/pdf',
-      attachmentUrl: 'https://cdn.discord/attachment/xyz',
+      attachmentUrl: 'https://cdn.discord/attachment/xyz', recipientCount: 3,
     });
     const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
     expect(item.attachment_url).toMatch(/^enc:v1:/);
     expect(item.attachment_url).not.toContain('discord/attachment/xyz');
     expect(item.personal_message).toBe('hi'); // non-sensitive fields unchanged
     expect(item.attachment_name).toBe('doc.pdf');
+    expect(item.recipient_count).toBe(3);
+  });
+
+  test.each([-1, 1.5, '3'])('saveSendConfig: rejects invalid initial capacity %s before writing', async (recipientCount) => {
+    await expect(store.saveSendConfig({ sendId: 's1', senderDiscordId: 'sender', recipientCount }))
+      .rejects.toThrow('recipientCount must be');
+    expect(ddbMock.calls()).toHaveLength(0);
   });
 
   test('saveSendConfig: persists self_destruct_seconds across the preset range', async () => {

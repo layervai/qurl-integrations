@@ -65,7 +65,7 @@ class SendConfigRevokedError extends Error {
 
 function transactionGuardConditionFailed(err, guardCount) {
   // CancellationReasons are positional. recordQURLSendBatch builds guarded
-  // transactions with all ConditionCheck items first, so only the first
+  // transactions with all config guard items first, so only the first
   // guardCount reasons may represent revoked/deleted/sender-mismatch state.
   return err?.name === 'TransactionCanceledException'
     && Array.isArray(err.CancellationReasons)
@@ -297,6 +297,67 @@ function qurlSendBatchItem(s, createdAt) {
   return Item;
 }
 
+class SendRecipientLimitError extends Error {
+  constructor(sendId, limit, count) {
+    super('This send has reached its recipient capacity');
+    this.name = 'SendRecipientLimitError';
+    this.code = 'SEND_RECIPIENT_LIMIT';
+    this.sendId = sendId;
+    this.remaining = Math.max(0, limit - count);
+  }
+}
+
+async function readSendRecipientCount(sendId, sender, signal) {
+  const { Item: row } = await ddb.send(new GetCommand({
+    TableName: TABLES.qurl_send_configs, Key: { send_id: sendId }, ConsistentRead: true,
+    ProjectionExpression: 'sender_discord_id, recipient_count, revoking_at, revoked_at',
+  }), { abortSignal: signal });
+  if (!row || row.sender_discord_id !== sender || Object.hasOwn(row, 'revoking_at') || Object.hasOwn(row, 'revoked_at')) {
+    throw new SendConfigRevokedError(sendId);
+  }
+  if (!Object.hasOwn(row, 'recipient_count')) return undefined;
+  if (!Number.isSafeInteger(row.recipient_count) || row.recipient_count < 0) {
+    throw new Error('Send recipient capacity is invalid');
+  }
+  return row.recipient_count;
+}
+
+async function ensureSendRecipientCount(sendId, sender, limit) {
+  const signal = AbortSignal.timeout(10_000);
+  const existing = await readSendRecipientCount(sendId, sender, signal);
+  if (existing !== undefined) return existing;
+  let count = 0;
+  let key;
+  // Legacy rows need one strong count, not a retained array of recipient data.
+  // shortcut: stop after 100 pages; migrate larger legacy sends offline.
+  for (let page = 0; page < 100; page++) {
+    const result = await ddb.send(new QueryCommand({
+      TableName: TABLES.qurl_sends, ConsistentRead: true, Select: 'COUNT',
+      KeyConditionExpression: 'send_id = :sid', ExpressionAttributeValues: { ':sid': sendId },
+      Limit: Math.min(1000, limit - count + 1), ...(key ? { ExclusiveStartKey: key } : {}),
+    }), { abortSignal: signal });
+    if (!Number.isSafeInteger(result.Count) || result.Count < 0) throw new Error('Send recipient count could not be confirmed');
+    count += result.Count;
+    key = result.LastEvaluatedKey && Object.keys(result.LastEvaluatedKey).length ? result.LastEvaluatedKey : undefined;
+    if (!key || count > limit) break;
+  }
+  if (key && count <= limit) throw new Error('Legacy send recipient count exceeded its read budget');
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_send_configs, Key: { send_id: sendId },
+      UpdateExpression: 'SET recipient_count = :count',
+      ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(recipient_count)',
+      ExpressionAttributeValues: { ':sender': sender, ':count': count },
+    }), { abortSignal: signal });
+    return count;
+  } catch (err) {
+    if (err?.name !== 'ConditionalCheckFailedException') throw err;
+    const current = await readSendRecipientCount(sendId, sender, signal);
+    if (current === undefined) throw new Error('Send recipient capacity could not be initialized');
+    return current;
+  }
+}
+
 async function recordQURLSendBatch(sends, options = {}) {
   if (!sends || sends.length === 0) return;
   const MAX_RETRIES = 5;
@@ -311,6 +372,10 @@ async function recordQURLSendBatch(sends, options = {}) {
   // look like several distinct events to consumers.
   const now = nowIso();
   const requireSendConfigUnrevoked = options.requireSendConfigUnrevoked === true;
+  const maxRecipients = options.maxRecipients;
+  if (maxRecipients !== undefined && (!requireSendConfigUnrevoked || !Number.isSafeInteger(maxRecipients) || maxRecipients < 1)) {
+    throw new Error('maxRecipients requires a positive safe integer and a guarded send');
+  }
 
   if (!requireSendConfigUnrevoked) {
     // Default path for initial sends: keep the cheaper BatchWriteItem flow.
@@ -366,21 +431,31 @@ async function recordQURLSendBatch(sends, options = {}) {
   }
 
   const sendIds = [...senderMap.keys()];
-  // Keep ConditionChecks before Puts. The cancellation-reason parser above
+  const recipientAdds = new Map(sendIds.map(id => [id, sends.filter(row => row.sendId === id).length]));
+  if (maxRecipients !== undefined) {
+    for (const sendId of sendIds) {
+      const count = await ensureSendRecipientCount(sendId, senderMap.get(sendId), maxRecipients);
+      if (count > maxRecipients - recipientAdds.get(sendId)) throw new SendRecipientLimitError(sendId, maxRecipients, count);
+    }
+  }
+  // Keep config guards before Puts. The cancellation-reason parser above
   // relies on this guard-first order to map ConditionalCheckFailed reasons
   // back to the send ids that lost the revoke/delete/sender-mismatch race.
   const TransactItems = [
-    ...sendIds.map(sendId => ({
-      ConditionCheck: {
-        TableName: TABLES.qurl_send_configs,
-        Key: { send_id: sendId },
-        // Missing config rows, revoking/revoked rows, and sender mismatches all
-        // fail closed here. Add Recipients already read the config row; if
-        // it disappears before persistence, do not create recipient rows.
+    ...sendIds.map(sendId => {
+      const guard = {
+        TableName: TABLES.qurl_send_configs, Key: { send_id: sendId },
         ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at)',
         ExpressionAttributeValues: { ':sender': senderMap.get(sendId) },
-      },
-    })),
+      };
+      if (maxRecipients === undefined) return { ConditionCheck: guard };
+      return { Update: {
+        ...guard, UpdateExpression: 'ADD recipient_count :adding',
+        ConditionExpression: guard.ConditionExpression + ' AND recipient_count <= :remaining',
+        ExpressionAttributeValues: { ...guard.ExpressionAttributeValues,
+          ':adding': recipientAdds.get(sendId), ':remaining': maxRecipients - recipientAdds.get(sendId) },
+      } };
+    }),
     ...sends.map(s => ({
       Put: {
         TableName: TABLES.qurl_sends,
@@ -398,7 +473,15 @@ async function recordQURLSendBatch(sends, options = {}) {
       // the config guard means revoked/deleted/sender-mismatch state won the
       // race, even if other transaction items also report transient reasons.
       if (transactionGuardConditionFailed(err, sendIds.length)) {
-        throw new SendConfigRevokedError(transactionConditionFailedSendIds(err, sendIds));
+        const failed = transactionConditionFailedSendIds(err, sendIds);
+        if (maxRecipients !== undefined) {
+          for (const sendId of failed) {
+            const count = await readSendRecipientCount(sendId, senderMap.get(sendId), AbortSignal.timeout(3000));
+            if (count === undefined) throw new Error('Send recipient capacity could not be confirmed');
+            if (count > maxRecipients - recipientAdds.get(sendId)) throw new SendRecipientLimitError(sendId, maxRecipients, count);
+          }
+        }
+        throw new SendConfigRevokedError(failed);
       }
       if (attempt < MAX_RETRIES && transactionWriteRetryable(err)) {
         await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
@@ -1079,8 +1162,11 @@ async function markSendRevoked(sendId, senderDiscordId, { signal } = {}) {
 async function saveSendConfig({
   sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl,
   expiresIn, personalMessage, locationName, attachmentName,
-  attachmentContentType, attachmentUrl, selfDestructSeconds,
+  attachmentContentType, attachmentUrl, selfDestructSeconds, recipientCount,
 }) {
+  if (recipientCount !== undefined && (!Number.isSafeInteger(recipientCount) || recipientCount < 0)) {
+    throw new Error('recipientCount must be a non-negative safe integer');
+  }
   const encryptedUrl = attachmentUrl ? encrypt(attachmentUrl) : null;
   await ddb.send(new PutCommand({
     TableName: TABLES.qurl_send_configs,
@@ -1097,6 +1183,7 @@ async function saveSendConfig({
       attachment_content_type: attachmentContentType ?? null,
       attachment_url: encryptedUrl,
       self_destruct_seconds: selfDestructSeconds ?? null,
+      ...(recipientCount === undefined ? {} : { recipient_count: recipientCount }),
       // The view-counter render state (interaction_token, expected_count,
       // confirm_base_msg, confirm_expires_at, confirm_qurl_ids) is written
       // SEPARATELY by saveSendConfirmState AFTER the initial editReply —
