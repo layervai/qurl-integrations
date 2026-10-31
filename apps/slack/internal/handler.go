@@ -1390,6 +1390,11 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		return
 	}
 
+	if strings.TrimSpace(values.Get(fieldTeamID)) == "" {
+		respondSlack(w, "Internal error: missing Slack workspace ID. Please contact your Slack admin.")
+		return
+	}
+
 	command := values.Get(fieldCommand)
 	text := strings.TrimSpace(values.Get(fieldText))
 	// Parse before dispatch so setup emails are redacted even when a user types
