@@ -43,6 +43,14 @@ Using another package format? See [Install](#install).
 
 ### 2. Start your app, then publish it
 
+The first `publish` or `share` shows the LayerV Terms notice on stderr.
+With `-o json`, the result carries `terms_notice` instead; agents must relay
+that notice to the user. It needs no prompt and keeps bare stdout unchanged,
+including under `--quiet`. The private user state records the shown Terms
+version (currently 2.0). A new version, or a reset state directory, shows it
+again. If notice state is unavailable, the command still runs and the notice
+can repeat. A failed JSON result does not mark an unseen notice as shown.
+
 No account, API key, or browser sign-in is required. The first command creates
 and registers a device identity automatically. Keep its local state to keep
 control of your resources. <!-- TODO(upstream-contract): qurl-service owns the anonymous resource and link caps. -->

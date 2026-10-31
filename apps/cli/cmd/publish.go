@@ -104,7 +104,7 @@ owns the share and turns it off when it exits.`,
   qurl publish https://wiki.example.com/team --allow-requests
   qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
 		Args: exactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) (retErr error) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
 				return exitcode.UsageError(err)
 			}
@@ -123,8 +123,7 @@ owns the share and turns it off when it exits.`,
 			if err != nil {
 				return err
 			}
-			finishNotice := opts.beginTermsNotice()
-			defer func() { finishNotice(retErr) }()
+			opts.beginTermsNotice()
 			if target.kind == publishTargetLocal {
 				for _, name := range []string{"description", "tag", "alias"} {
 					if cmd.Flags().Changed(name) {
@@ -155,7 +154,7 @@ owns the share and turns it off when it exits.`,
 			result.LinkSiteURL = opts.resourceAddress(result.CRID)
 
 			printer := opts.printer()
-			return printer.Publish(result)
+			return opts.finishTermsNotice(printer.Publish(result))
 		},
 	}
 
@@ -766,7 +765,7 @@ func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource
 	if sharing != nil {
 		published.Publisher = sharing.Publisher
 	}
-	return opts.printer().Publish(published)
+	return opts.finishTermsNotice(opts.printer().Publish(published))
 }
 
 func resolveLocalConnectorID(opts *globalOpts, flagID string) string {

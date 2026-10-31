@@ -149,6 +149,8 @@ type globalOpts struct {
 	preflightTarget      func(context.Context, string, int) error
 	resolveShareStateDir func(string) (string, error)
 	pendingTermsNotice   string
+	termsNoticeHandled   bool
+	saveTermsNotice      func()
 	resolveLocalResource localResourceResolver
 	resolveHubBootstrap  func() (qurl.HubBootstrap, error)
 	resolveSessionConfig func(string) (connectorshare.NativeSessionOperationAuthority, error)

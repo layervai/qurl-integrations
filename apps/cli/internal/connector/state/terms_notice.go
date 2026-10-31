@@ -24,7 +24,7 @@ func TermsNoticeShown(dir, version string) (bool, error) {
 		return false, err
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return false, errors.New("Terms notice state must be a regular non-symlink file")
+		return false, errors.New("terms notice state must be a regular non-symlink file")
 	}
 	if err := validateConnectorResourceFile(path, info); err != nil {
 		return false, err
@@ -36,7 +36,7 @@ func TermsNoticeShown(dir, version string) (bool, error) {
 	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) {
-		return false, errors.New("Terms notice state changed while opening")
+		return false, errors.New("terms notice state changed while opening")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, 65))
 	return string(data) == version+"\n", err
