@@ -650,3 +650,25 @@ func TestHandleAliases_LabelsOnlyLegacyDirectURLBindings(t *testing.T) {
 		t.Errorf("legacy raw URL leaked: %q", reply)
 	}
 }
+
+func TestHandleAliases_LegacyOnlySkipsResourceLookup(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"old-url": "https://old.example.com/private",
+	})
+	var reads atomic.Int32
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		reads.Add(1)
+		writeResourceListFixture(t, w, nil, "next-page", true)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+	_, _, reply := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if reads.Load() != 0 {
+		t.Errorf("legacy-only bindings made %d resource lookups", reads.Load())
+	}
+	if !strings.Contains(reply, "`$old-url`") || !strings.Contains(reply, "broken binding") {
+		t.Errorf("missing legacy binding repair copy: %q", reply)
+	}
+}
