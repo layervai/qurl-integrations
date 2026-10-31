@@ -3,10 +3,16 @@ package internal
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
 func TestSlashSynchronousWorkCancellation(t *testing.T) {
@@ -104,7 +110,7 @@ func TestSlashAcceptedJobOutlivesRequest(t *testing.T) {
 	if jobCtx.Err() != nil {
 		t.Fatalf("request canceled accepted job: %v", jobCtx.Err())
 	}
-	if w.Code != 200 {
+	if w.Code != http.StatusOK {
 		t.Fatalf("ack status=%d", w.Code)
 	}
 	cancelBase()
@@ -114,4 +120,38 @@ func TestSlashAcceptedJobOutlivesRequest(t *testing.T) {
 		t.Fatal("shutdown did not cancel job")
 	}
 	h.Wait()
+}
+
+type requestContextDDB struct {
+	slackdata.DynamoDBClient
+	observed context.Context
+}
+
+func (d *requestContextDDB) GetItem(ctx context.Context, _ *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	d.observed = ctx
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func TestSlashAdminReadUsesRequestContext(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	ddb := &requestContextDDB{}
+	store, err := slackdata.NewStore(context.Background(), slackdata.WithDynamoDBClient(ddb), slackdata.WithTableNames("workspace_mappings", "channel_policies"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.cfg.AdminStore = store
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	body := url.Values{fieldCommand: {commandAdmin}, fieldText: {testAdminListCmd}, fieldTeamID: {testAdminTeamID}, fieldUserID: {testAdminUserID}}.Encode()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body).WithContext(ctx))
+	if ddb.observed == nil {
+		t.Fatal("admin read not reached")
+	}
+	if !errors.Is(ddb.observed.Err(), context.Canceled) {
+		t.Errorf("admin read error=%v, want request cancellation", ddb.observed.Err())
+	}
+	if !strings.Contains(w.Body.String(), "failed to verify admin status") {
+		t.Errorf("canceled gate must fail closed: %s", w.Body.String())
+	}
 }

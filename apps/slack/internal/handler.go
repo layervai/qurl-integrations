@@ -329,7 +329,7 @@ type Config struct {
 
 	// BaseContext is the process-lifetime parent of accepted jobs and an
 	// additional cancellation source for synchronous slash commands. Main
-	// cancels it after the HTTP drain. Defaults to context.Background().
+	// cancels it after lameduck, before HTTP shutdown. Defaults to context.Background().
 	BaseContext context.Context
 
 	// MaxConcurrentAsync caps in-flight async goroutines. Zero or
