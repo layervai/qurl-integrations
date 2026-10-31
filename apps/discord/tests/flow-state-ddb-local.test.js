@@ -38,12 +38,20 @@ localTest('real SDK flow transitions retain success/conflict/absence with one up
       payload: 'synthetic-ciphertext-must-not-be-decrypted-or-logged' } }));
     await doc.send(new PutCommand({ TableName: table, Item: { flow_id: 'expired', version: 1,
       stage: 'expired-stage', expires_at: Math.floor(Date.now() / 1000) - 30 } }));
+    const logger = require('../src/logger');
+    const sameExpiry = Math.floor(Date.now() / 1000) + 600;
+    await doc.send(new PutCommand({ TableName: table, Item: { flow_id: 'same', version: 1,
+      stage: 'same-stage', expires_at: sameExpiry } }));
+    send.mockClear();
+    expect(await transitionFlow('same', 1, { stage_to: 'same-stage', terminal: false, set_expires_at: sameExpiry })).toEqual({ result: 'success', version: 2 });
+    expect(send.mock.calls.map(([command]) => command.constructor.name)).toEqual(['UpdateCommand']);
+    expect(logger.audit).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ stage_from: 'same-stage', extended: false }));
+    logger.audit.mockClear();
     for (const [id, result, version] of [['row', 'success', 2], ['row', 'conflict', null], ['missing', 'not_found', null], ['expired', 'not_found', null]]) {
       send.mockClear();
       expect(await transitionFlow(id, 1, { stage_to: 'new', terminal: false })).toEqual({ result, version });
       expect(send.mock.calls.map(([command]) => command.constructor.name)).toEqual(['UpdateCommand']);
     }
-    const logger = require('../src/logger');
     expect(logger.audit.mock.calls.map(([, event]) => event.stage_from)).toEqual(['old', 'new', null, 'expired-stage']);
     expect(JSON.stringify(logger.audit.mock.calls)).not.toContain('synthetic-ciphertext');
   } finally {

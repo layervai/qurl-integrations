@@ -619,6 +619,22 @@ describe('flow-state.transitionFlow', () => {
       expect.objectContaining({ result: 'success', stage_from: 'a', extended: false }));
   });
 
+  test('failure classification uses the condition timestamp across a second boundary', async () => {
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(2_000_000_000_000);
+    const error = ccfe();
+    error.Item = { stage: { S: 'a' }, expires_at: { N: '2000000000' } };
+    ddbMock.on(UpdateCommand).callsFake(async () => {
+      clock.mockReturnValue(2_000_000_001_000);
+      throw error;
+    });
+    try {
+      await expect(flowState.transitionFlow('id', 1, { stage_to: 'b', terminal: false })).resolves.toEqual({ result: 'conflict', version: null });
+      expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues[':now']).toBe(2_000_000_000);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   test('a conflict audit uses the exact rejected row instead of a stale pre-read', async () => {
     const error = ccfe();
     error.Item = { stage: { S: 'concurrent-stage' }, expires_at: { N: String(futureExpiry(30)) }, payload: { S: 'synthetic-sensitive-ciphertext' } };

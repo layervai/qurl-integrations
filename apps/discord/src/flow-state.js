@@ -579,7 +579,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
         : typeof rawExpires === 'string' ? Number(rawExpires) : NaN;
       const validExpires = Number.isFinite(expires) && Number.isInteger(expires);
       extended = false;
-      const result = prior && validExpires && expires >= nowEpochSeconds() ? 'conflict' : 'not_found';
+      const result = prior && validExpires && expires >= updateNow ? 'conflict' : 'not_found';
       if (prior && !validExpires) {
         logger.warn('flow-state.transitionFlow: row has missing or non-numeric expires_at; treating as expired', {
           flow_id,
