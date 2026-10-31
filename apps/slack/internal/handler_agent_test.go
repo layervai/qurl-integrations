@@ -2974,3 +2974,22 @@ func TestDeliverAgentResult_MarkdownSeamFallsBackToText(t *testing.T) {
 		t.Fatalf("want the answer delivered via the text seam, got %+v", *posts)
 	}
 }
+
+func TestAgentReplyDeliveryCarriesRequestLogger(t *testing.T) {
+	h := &Handler{baseCtx: context.Background()}
+	logger := slog.Default().With("surface", "agent", "event_id", "event-test")
+	called := false
+	h.deliverAgentText(logger, &slackEventEnvelope{}, "100.1", "reply", func(ctx context.Context, _, _, _, _, _ string) error {
+		called = true
+		if observability.Logger(ctx) != logger {
+			t.Error("delivery seam lost request correlation")
+		}
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) <= 0 || time.Until(deadline) > agentDeliveryBudget {
+			t.Error("delivery seam lost fresh bounded context")
+		}
+		return nil
+	})
+	if !called {
+		t.Fatal("reply seam not called")
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 // Slack Events API event types this handler reacts to.
@@ -1965,7 +1966,7 @@ func (h *Handler) postAgentMarkdownReply(log *slog.Logger, env *slackEventEnvelo
 // turn that spent its deadline still delivers its reply. Failures are logged, not
 // surfaced.
 func (h *Handler) deliverAgentText(log *slog.Logger, env *slackEventEnvelope, threadTS, text string, post PostMessageFunc) {
-	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
+	ctx, cancel := context.WithTimeout(observability.WithLogger(h.baseCtx, log), agentDeliveryBudget)
 	defer cancel()
 	if err := post(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, text); err != nil {
 		log.Error("agent: post reply failed", "error", err)

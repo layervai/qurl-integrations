@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 const (
@@ -68,7 +70,7 @@ func (h *Handler) postAgentGeneratedReply(log *slog.Logger, env *slackEventEnvel
 		h.deliverAgentText(log, env, threadTS, text, fallback)
 		return
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
+	ctx, cancel := context.WithTimeout(observability.WithLogger(h.baseCtx, log), agentDeliveryBudget)
 	defer cancel()
 	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, agentGeneratedReplyBlocks(text), strings.TrimSpace(text)); err != nil {
 		log.Warn("agent: post generated reply with feedback failed; falling back to text", "error", err)
@@ -85,7 +87,7 @@ func (h *Handler) postAgentProposalPreview(log *slog.Logger, env *slackEventEnve
 		h.deliverAgentText(log, env, threadTS, fallbackText, h.cfg.PostMessage)
 		return
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
+	ctx, cancel := context.WithTimeout(observability.WithLogger(h.baseCtx, log), agentDeliveryBudget)
 	defer cancel()
 	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, agentGeneratedReplyBlocks(agentProposalMarkdownPreview(summary)), fallbackText); err != nil {
 		log.Warn("agent: post proposal preview with feedback failed; falling back to text", "error", err)

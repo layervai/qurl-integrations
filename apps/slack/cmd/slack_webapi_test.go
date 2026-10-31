@@ -21,6 +21,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/shared/auth"
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 const (
@@ -1223,5 +1224,36 @@ func TestSlackReadResponseLimits(t *testing.T) {
 				t.Fatalf("oversized response = %v, want %q", err, want)
 			}
 		})
+	}
+}
+
+func TestSlackPostMessageGridFallbackKeepsRequestCorrelation(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(observability.NewRedactingJSONHandler(&logs, nil)).With("surface", "agent", "event_id", "event-test")
+	ctx := observability.WithLogger(context.Background(), logger)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"1700000000.000100"}`))
+	}))
+	t.Cleanup(srv.Close)
+	post := newSlackPostMessageFuncWithTokenLookup(func(_ context.Context, ownerID string) (string, error) {
+		if ownerID == "E12345678" {
+			return testSlackValidationToken, nil
+		}
+		return "", auth.ErrSlackBotTokenNotConfigured
+	}, testSlackValidationUA, srv.URL, slackWebAPITestClient(srv), nil)
+	if err := post(ctx, "T12345678", "E12345678", "C12345678", "100.1", "reply"); err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("one structured warning required: %v", err)
+	}
+	for key, want := range map[string]string{"surface": "agent", "event_id": "event-test", "team_id": "T12345678", "enterprise_id": "E12345678", "level": "WARN"} {
+		if record[key] != want {
+			t.Errorf("%s = %v, want %s", key, record[key], want)
+		}
+	}
+	if strings.Contains(logs.String(), testSlackValidationToken) {
+		t.Fatal("fallback log exposed a token")
 	}
 }
