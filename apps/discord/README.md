@@ -133,6 +133,28 @@ resource can take about 17 minutes. Check completion logs before manual cleanup.
 Load-test upload records rejected by SDK 2.x stay in the cleanup ledger;
 remove them only after cleanup or link expiry is confirmed.
 
+## Command registration scope changes
+
+Set `GUILD_ID` to a guild snowflake for single-guild commands, or leave it
+unset for global commands. Set `PREVIOUS_COMMAND_SCOPE` only during a reviewed
+scope change: `global` for an old global namespace, or the old guild snowflake.
+The infra runtime must forward it before startup. It works without a guild cache.
+
+Boot registers the active scope first, then clears the explicitly named inactive
+scope. It never clears the active scope or scans every joined guild's command API.
+A normal single-guild boot leaves global commands alone. Global commands belong
+to the application: deployments with different command modes must use separate
+Discord applications. Never clear a namespace still used by another deployment.
+
+Before the first rollout, identify known historical namespaces that need cleanup.
+Carry each as the previous scope in turn; arbitrary guild leftovers are no longer
+cleared automatically. Keep the setting until that namespace is verified empty,
+then clear it. Cleanup failures are logged and a later boot retries the setting.
+
+Verify active and inactive namespaces after old tasks drain. Old tasks can
+register old commands again while running. Discord clients may cache prior
+registrations; the dispatch-time command filter remains in place.
+
 ## Configuration
 
 The bot is a Node.js service (**Node ≥ 22**) backed by DynamoDB. Copy
@@ -167,6 +189,7 @@ setup) means required to use that feature.
 | `DETECT_EXTRA_NON_PROD_HOST_SUFFIXES` | No | Comma-separated extra `qurl_site` suffixes granted for the hosts above; each entry must start with `.` |
 | `GOOGLE_MAPS_API_KEY` | `/qurl map` | Google Maps key for location autocomplete (needed when map is enabled) |
 | `GUILD_ID` | No | Scope commands to a single server; unset runs the multi-tenant public bot |
+| `PREVIOUS_COMMAND_SCOPE` | No | Inactive namespace to clear during a scope change: `global` or the old guild snowflake; unset by default |
 | `PORT` | No | HTTP listen port (default 3000) |
 
 Discord uses `@layervai/qurl/node` to open current `qv2t1` links. Set
@@ -296,24 +319,3 @@ Setup and install cookies use `__Host-` names with `Secure`, `HttpOnly`,
 `SameSite=Lax`, and `Path=/`. Use HTTPS (or browser-supported localhost) for
 local setup tests. Deploying this change invalidates older setup cookies;
 admins with an in-flight setup must start again.
-
-
-## Command registration scope changes
-
-Set `GUILD_ID` to a guild snowflake for single-guild commands, or leave it
-unset for global commands. During a change from a single guild, also set
-`PREVIOUS_GUILD_ID` to the old guild ID. The infra runtime must forward that
-value before the new bot starts; it works for cache-free gateways too.
-
-Boot registers the new active scope first. Single-guild mode then clears old
-global commands. If the previous guild differs from the active guild, it clears
-that one old namespace. It never scans every joined guild's command API.
-Keep the previous value until the old namespace is verified empty, then clear
-it. Cleanup errors are logged and the next boot retries the configured scope.
-Before this first bounded-cleanup rollout, identify any known historical guild
-namespace that still needs cleanup and carry it as the previous value.
-
-Verify the active global/guild registration and the previous guild namespace
-after old tasks drain in the approved deployment. Old tasks can register old
-commands again while running. Discord clients may cache prior registrations;
-the dispatch-time command filter remains in place.
