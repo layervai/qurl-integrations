@@ -8888,43 +8888,54 @@ function sweepCooldowns() {
 }
 setInterval(sweepCooldowns, 60 * 1000).unref();
 
+// Split so map can insert location-name between recipients and delivery options.
+function addSendRecipients(sub) {
+  return sub
+    .addStringOption(opt =>
+      opt.setName('recipients')
+        .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+        .setRequired(false)
+        .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
+    );
+}
+
+function addSendDeliveryOptions(sub) {
+  return sub
+    .addStringOption(opt =>
+      opt.setName('expires-in')
+        .setDescription('How long the qURL links stay valid (default: 24 hours)')
+        .setRequired(false)
+        .addChoices(...EXPIRY_CHOICES)
+    )
+    .addStringOption(opt =>
+      opt.setName('self-destruct')
+        .setDescription('Optional countdown after first open (default: no timer)')
+        .setRequired(false)
+        .addChoices(...SELF_DESTRUCT_CHOICES)
+    )
+    .addStringOption(opt =>
+      opt.setName('personal-message')
+        .setDescription('Optional note included in each recipient\'s DM')
+        .setRequired(false)
+        .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
+    );
+}
+
 function buildQurlCommandData(cfg) {
   const builder = new SlashCommandBuilder()
     .setName('qurl')
     .setDescription('Share resources securely via qURL')
-    .addSubcommand(sub =>
+    .addSubcommand(sub => {
       sub.setName('send')
         .setDescription('Share a file via one-time qURL links')
         .addAttachmentOption(opt =>
           opt.setName('attachment')
             .setDescription('The file to share')
             .setRequired(true)
-        )
-        .addStringOption(opt =>
-          opt.setName('recipients')
-            .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
-            .setRequired(false)
-            .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
-        )
-        .addStringOption(opt =>
-          opt.setName('expires-in')
-            .setDescription('How long the qURL links stay valid (default: 24 hours)')
-            .setRequired(false)
-            .addChoices(...EXPIRY_CHOICES)
-        )
-        .addStringOption(opt =>
-          opt.setName('self-destruct')
-            .setDescription('Optional countdown after first open (default: no timer)')
-            .setRequired(false)
-            .addChoices(...SELF_DESTRUCT_CHOICES)
-        )
-        .addStringOption(opt =>
-          opt.setName('personal-message')
-            .setDescription('Optional note included in each recipient\'s DM')
-            .setRequired(false)
-            .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
-        )
-    );
+        );
+      addSendRecipients(sub);
+      return addSendDeliveryOptions(sub);
+    });
   // /qurl detect — watermark attribution (#1101). Gated behind
   // DETECT_COMMAND_ENABLED (default OFF), like /qurl map: the connector
   // /api/detect backend 503/404s until the watermark stack is ACTIVATED (a
@@ -8944,7 +8955,7 @@ function buildQurlCommandData(cfg) {
     );
   }
   if (cfg.MAP_COMMAND_ENABLED) {
-    builder.addSubcommand(sub =>
+    builder.addSubcommand(sub => {
       sub.setName('map')
         .setDescription('Share a Google Maps location via one-time qURL links')
         .addStringOption(opt =>
@@ -8959,38 +8970,16 @@ function buildQurlCommandData(cfg) {
             // headroom; not tied to the recipients-parser cap because
             // location is a single URL/address, not a token list.
             .setMaxLength(500)
-        )
-        .addStringOption(opt =>
-          opt.setName('recipients')
-            .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
-            .setRequired(false)
-            .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
-        )
+        );
+      addSendRecipients(sub)
         .addStringOption(opt =>
           opt.setName('location-name')
             .setDescription('Override the label shown to recipients (defaults to URL/address)')
             .setRequired(false)
             .setMaxLength(256)
-        )
-        .addStringOption(opt =>
-          opt.setName('expires-in')
-            .setDescription('How long the qURL links stay valid (default: 24 hours)')
-            .setRequired(false)
-            .addChoices(...EXPIRY_CHOICES)
-        )
-        .addStringOption(opt =>
-          opt.setName('self-destruct')
-            .setDescription('Optional countdown after first open (default: no timer)')
-            .setRequired(false)
-            .addChoices(...SELF_DESTRUCT_CHOICES)
-        )
-        .addStringOption(opt =>
-          opt.setName('personal-message')
-            .setDescription('Optional note included in each recipient\'s DM')
-            .setRequired(false)
-            .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
-        )
-    );
+        );
+      return addSendDeliveryOptions(sub);
+    });
   }
   builder.addSubcommand(sub =>
     sub.setName('revoke')
@@ -9017,8 +9006,8 @@ const commands = [
     // NOTE: adding/removing/renaming a `/qurl` subcommand? Update the
     // expected-set assertion in
     // `e2e/tests/discord-commands.smoke.test.ts` too — the smoke test
-    // pins the subcommand NAME set (not option types, requiredness, or
-    // descriptions) to catch registration regressions at deploy time.
+    // checks the subcommand names and, when map is enabled, that send and map
+    // register identical shared options.
     data: buildQurlCommandData(config),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
