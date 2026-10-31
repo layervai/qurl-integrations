@@ -598,7 +598,7 @@ func TestRevokeResource_PurgesChannelBindings(t *testing.T) {
 		t.Errorf("unrelated alias %q was wrongly removed (rid=%q, found=%v, err=%v)", keepAlias, rid, found, err)
 	}
 	// C_test's allow-set no longer carries the revoked id, but still carries the survivor.
-	cTest, err := store.AllowedResourceIDsForChannel(ctx, testAdminTeamID, "C_test")
+	cTest, err := store.ChannelScopedResourceIDs(ctx, testAdminTeamID, "C_test")
 	if err != nil {
 		t.Fatalf("allow-set read (C_test): %v", err)
 	}
@@ -609,7 +609,7 @@ func TestRevokeResource_PurgesChannelBindings(t *testing.T) {
 		t.Errorf("survivor id missing from C_test allow-set: %v", cTest)
 	}
 	// The team-wide sweep reached the other channel and cleared its SS membership.
-	cOther, err := store.AllowedResourceIDsForChannel(ctx, testAdminTeamID, otherChannelID)
+	cOther, err := store.ChannelScopedResourceIDs(ctx, testAdminTeamID, otherChannelID)
 	if err != nil {
 		t.Fatalf("allow-set read (%s): %v", otherChannelID, err)
 	}

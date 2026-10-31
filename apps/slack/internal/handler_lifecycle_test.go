@@ -438,9 +438,9 @@ func TestHandleLifecycleEvent_RetainsRowsUpdatedAfterEventCutoff(t *testing.T) {
 	if !slices.Contains(admins, testAdminUserID) {
 		t.Fatalf("admins after delayed purge = %v, want %q retained", admins, testAdminUserID)
 	}
-	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, "C_fresh")
+	allowed, err := h.cfg.AdminStore.ChannelScopedResourceIDs(context.Background(), testAdminTeamID, "C_fresh")
 	if err != nil {
-		t.Fatalf("AllowedResourceIDsForChannel after delayed purge: %v", err)
+		t.Fatalf("ChannelScopedResourceIDs after delayed purge: %v", err)
 	}
 	if _, ok := allowed["r_fresh"]; !ok {
 		t.Fatalf("fresh policy after delayed purge = %v, want r_fresh retained", allowed)
