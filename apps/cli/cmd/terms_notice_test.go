@@ -91,7 +91,7 @@ func TestTermsNoticeStateFailureDoesNotFailPublish(t *testing.T) {
 	for _, format := range []string{"text", "json"} {
 		t.Run(format, func(t *testing.T) {
 			srv := apitest.NewServer(t)
-			dir := t.TempDir()
+			dir := connectorStateTestDir(t)
 			if err := connectorstate.EnsureDirMode(dir); err != nil {
 				t.Fatal(err)
 			}
@@ -121,7 +121,7 @@ func TestTermsNoticeStateFailureDoesNotFailPublish(t *testing.T) {
 }
 
 func TestTermsNoticeJSONIsRecordedAtOutputRatherThanCommandExit(t *testing.T) {
-	dir := t.TempDir()
+	dir := connectorStateTestDir(t)
 	var stdout, stderr bytes.Buffer
 	opts := &globalOpts{streams: &output.Streams{Out: &stdout, Err: &stderr}, resolvedFormat: output.FormatJSON, resolveShareStateDir: func(string) (string, error) { return dir, nil }}
 	opts.beginTermsNotice()
@@ -147,7 +147,7 @@ func TestTermsNoticeJSONIsRecordedAtOutputRatherThanCommandExit(t *testing.T) {
 }
 
 func TestTermsNoticeBrokenStderrIsNotRecorded(t *testing.T) {
-	dir := t.TempDir()
+	dir := connectorStateTestDir(t)
 	reader, writer := io.Pipe()
 	_ = reader.Close()
 	defer func() { _ = writer.Close() }()

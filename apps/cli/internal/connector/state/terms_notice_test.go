@@ -35,7 +35,7 @@ func TestTermsNoticeVersionUsesPrivateState(t *testing.T) {
 }
 
 func TestTermsNoticeRefusesUnsafeMarker(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := EnsureDirMode(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestTermsNoticeRefusesUnsafeMarker(t *testing.T) {
 }
 
 func TestTermsNoticeDoesNotFollowSymlink(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := EnsureDirMode(dir); err != nil {
 		t.Fatal(err)
 	}
