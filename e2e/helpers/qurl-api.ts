@@ -268,6 +268,7 @@ export async function revokeLink(
 }
 
 export interface LinkStatus {
+  target_path?: string;
   qurl_id: string;
   use_count: number;
   status: string;
@@ -275,6 +276,7 @@ export interface LinkStatus {
 }
 
 export interface ResourceStatus {
+  type?: string;
   resource_id: string;
   status: string;
   expires_at?: string;
@@ -329,13 +331,15 @@ function parseLinkStatus(value: unknown, resourceId: string, index: number): Lin
     typeof value.qurl_id !== 'string' ||
     typeof value.use_count !== 'number' ||
     typeof value.status !== 'string' ||
-    (value.expires_at !== undefined && typeof value.expires_at !== 'string')
+    (value.expires_at !== undefined && typeof value.expires_at !== 'string') ||
+    (value.target_path !== undefined && typeof value.target_path !== 'string')
   ) {
     throw new Error(
       `qURL lookup returned an invalid token status shape for resource ${resourceId} at qurls[${index}]`,
     );
   }
   return {
+    ...(value.target_path === undefined ? {} : { target_path: value.target_path }),
     qurl_id: value.qurl_id,
     use_count: value.use_count,
     status: value.status,
@@ -351,6 +355,7 @@ function parseResourceStatus(value: unknown, id: string): ResourceStatus | null 
   ) {
     return null;
   }
+  if (value.type !== undefined && typeof value.type !== 'string') throw new Error('Invalid resource type');
   if (value.expires_at !== undefined && typeof value.expires_at !== 'string') {
     throw new Error(`qURL lookup returned an invalid expires_at for resource ${id}`);
   }
@@ -366,6 +371,7 @@ function parseResourceStatus(value: unknown, id: string): ResourceStatus | null 
     parseLinkStatus(qurl, resourceId, index)
   ));
   return {
+    ...(value.type === undefined ? {} : { type: value.type }),
     resource_id: resourceId,
     status: value.status,
     ...(value.expires_at === undefined ? {} : { expires_at: value.expires_at }),
@@ -397,13 +403,15 @@ class TokenSummaryNotVisibleError extends Error {
  * either a public resource ID or a q_ display ID and returns the parent
  * resource. There is no `/status` sub-route: per-qURL status lives in the
  * response's `qurls` summaries. */
-async function getQurlResource(
+export async function getQurlResource(
   managementUrl: string,
   apiKey: string,
   id: string,
+  signal?: AbortSignal,
 ): Promise<ResourceStatus> {
   const base = stripTrailingSlashes(managementUrl);
   const res = await fetchWithTransientRetry(`${base}/${encodeURIComponent(id)}`, {
+    signal,
     headers: { Authorization: `Bearer ${apiKey}` },
   });
   if (!res.ok) throw new StatusCheckError(res.status);
@@ -418,14 +426,15 @@ async function getQurlResource(
  * TODO(upstream-contract): GET /v1/qurls/{child} returns its canonical parent;
  * child DELETE enforces that parent binding and repeated revocation succeeds.
  * This confirms API revocation, not native session CLOSED. */
-export async function revokeChild(managementUrl: string, apiKey: string, qurlId: string): Promise<void> {
+export async function revokeChild(managementUrl: string, apiKey: string, qurlId: string, signal?: AbortSignal): Promise<void> {
   if (!/^q_[a-zA-Z0-9]+$/.test(qurlId)) throw new TypeError('Child cleanup requires a qurl_id');
-  const parent = await getQurlResource(managementUrl, apiKey, qurlId);
+  const parent = await getQurlResource(managementUrl, apiKey, qurlId, signal);
   if (!parent.resource_id) throw new Error('Child cleanup requires a canonical parent');
   const url = new URL(managementUrl);
   url.pathname = `/v1/resources/${encodeURIComponent(parent.resource_id)}/qurls/${encodeURIComponent(qurlId)}`;
   const res = await fetchWithTransientRetry(url, {
     method: 'DELETE',
+    signal,
     headers: { Authorization: `Bearer ${apiKey}` },
   });
   await res.body?.cancel().catch(() => {});
@@ -445,13 +454,14 @@ export async function getLinkStatus(
   managementUrl: string,
   apiKey: string,
   qurlId: string,
+  signal?: AbortSignal,
 ): Promise<LinkStatus> {
   // TODO(upstream-contract): layervai/qurl-service#1233 tracks whether `q_`
   // remains the stable discriminator between qurl_id and opaque resource_id.
   if (!qurlId.startsWith('q_')) {
     throw new TypeError('qURL token lookup requires a qurl_id; use getResourceStatus for resource IDs');
   }
-  const resource = await getQurlResource(managementUrl, apiKey, qurlId);
+  const resource = await getQurlResource(managementUrl, apiKey, qurlId, signal);
   const status = resource.qurls?.find((qurl) => qurl.qurl_id === qurlId);
   if (!status) {
     throw new TokenSummaryNotVisibleError(qurlId, resource.resource_id);
@@ -464,8 +474,9 @@ export async function getResourceStatus(
   managementUrl: string,
   apiKey: string,
   resourceId: string,
+  signal?: AbortSignal,
 ): Promise<ResourceStatus> {
-  const resource = await getQurlResource(managementUrl, apiKey, resourceId);
+  const resource = await getQurlResource(managementUrl, apiKey, resourceId, signal);
   // Resource-level callers pass the canonical public resource_id, never a qURL
   // display ID; require the management response to echo that encoding exactly.
   if (resource.resource_id !== resourceId) {

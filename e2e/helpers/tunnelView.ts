@@ -27,10 +27,10 @@
  * (the knock) → `200 r_<id>.qurl.site…/views/<mint-id>` (the tunnel view).
  */
 
-import { chromium, type Browser } from 'playwright';
+import { chromium, type Browser, type APIRequestContext } from 'playwright';
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, accessSync, constants } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fetchWithTransientRetry } from './http';
 
 /** Matches the tunnel view URL on ANY environment:
@@ -63,8 +63,10 @@ export interface ViewViaQurlLinkOptions {
   headless?: boolean;
   /** Require the sole iframe in the main document to be visible with this exact target in markup. */
   expectedIframeSrc?: string;
+  /** Probe a known existing sibling through THIS session, without another knock. */
+  siblingViewPath?: string;
   ownership: { resource_id: string; qurl_id: string; expires_at: string };
-  /** Wall-clock budget for navigation + knock + response + optional iframe check, in ms.
+  /** Wall-clock budget for navigation + knock + response + optional iframe and scope checks, in ms.
    *  Default 30_000. */
   timeoutMs?: number;
 }
@@ -156,6 +158,21 @@ export async function viewViaQurlLink(
         throw new Error('viewViaQurlLink: iframe target differs from the uploaded URL');
       }
     }
+    if (opts.siblingViewPath !== undefined) {
+      await probeScopedSibling(page.context().request, resp.url(), opts.siblingViewPath, deadline, (probe) => {
+        appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS!, JSON.stringify({
+          event: 'owned_scope_boundary_probe', resource_id: opts.ownership.resource_id,
+          qurl_id: opts.ownership.qurl_id, observed_at: new Date().toISOString(),
+          expected_target_path: new URL(resp.url()).pathname, sibling_target_path: opts.siblingViewPath,
+          probe_status: probe.probeStatus, failure_code: probe.failureCode,
+          own_before_status: probe.ownBefore, sibling_wire_status: probe.siblingWireStatus,
+          sibling_wire_outcome: probe.siblingWireOutcome, own_after_status: probe.ownAfter,
+          request_ids: probe.requestIDs,
+          internal_authorize_403: 'pending_exact_request_id_readback_not_proved_by_wire_denial',
+          persisted_target_path: 'pending_independent_native_state_readback',
+        }) + '\n', { mode: 0o600 });
+      });
+    }
     return { status: resp.status(), url: resp.url() };
   } finally {
     // Always tear the browser down — a leaked chromium would hang jest's worker exit.
@@ -213,4 +230,148 @@ export async function checkOwnershipConfig(): Promise<void> {
   const result = spawnSync(process.env.QURL_OWNERSHIP_VERIFIER!, ['--check-config'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 16_384 });
   if (result.error || result.status !== 0) throw new Error('public ownership configuration failed');
   await readOwner();
+}
+
+export interface ScopedSiblingProbeReceipt {
+  probeStatus: 'PASS' | 'FAILED';
+  failureCode: string | null;
+  ownBefore: number | null;
+  siblingWireStatus: number | null;
+  siblingWireOutcome: string | null;
+  ownAfter: number | null;
+  requestIDs: { ownBefore: string; sibling: string; ownAfter: string };
+}
+
+/** Reuse the browser context's existing cookie on one admitted origin.
+ * The final callback runs once on success or failure, before the error escapes. */
+export async function probeScopedSibling(
+  request: APIRequestContext,
+  ownViewURL: string,
+  siblingPath: string,
+  deadline = Date.now() + 30_000,
+  onFinal?: (receipt: ScopedSiblingProbeReceipt) => void,
+): Promise<ScopedSiblingProbeReceipt> {
+  const prefix = 'scope-' + randomUUID();
+  const receipt: ScopedSiblingProbeReceipt = {
+    probeStatus: 'FAILED',
+    failureCode: null,
+    ownBefore: null,
+    siblingWireStatus: null,
+    siblingWireOutcome: null,
+    ownAfter: null,
+    requestIDs: {
+      ownBefore: prefix + '-pre',
+      sibling: prefix + '-sib',
+      ownAfter: prefix + '-post',
+    },
+  };
+  let failureMessage: string | undefined;
+  function fail(code: string, message: string): never {
+    receipt.failureCode = code;
+    failureMessage = message;
+    throw new Error(message);
+  }
+  function remaining() {
+    const left = Math.floor(deadline - Date.now());
+    if (!Number.isFinite(left) || left <= 0)
+      fail('DEADLINE_EXHAUSTED', 'scope probe deadline exhausted');
+    return left;
+  }
+  try {
+    const own = new URL(ownViewURL);
+    // Reviewed domains only; adding a suffix requires source review.
+    if (
+      own.protocol !== 'https:' ||
+      !/^q-[a-z2-7]{52}\.qurl\.site(?:\.layerv\.(?:xyz|ai))?$/.test(own.hostname) ||
+      !/^\/views\/[0-9a-f]{32}$/.test(own.pathname) ||
+      own.search ||
+      own.hash ||
+      own.username ||
+      own.password ||
+      !/^\/views\/[0-9a-f]{32}$/.test(siblingPath) ||
+      siblingPath === own.pathname
+    )
+      fail('INVALID_TARGET', 'scope probe requires two distinct canonical recipient view paths');
+    const sibling = new URL(siblingPath, own.origin);
+    async function get(target: URL, requestID: string) {
+      return request.get(target.href, {
+        maxRedirects: 0,
+        maxRetries: 0,
+        timeout: Math.min(10_000, remaining()),
+        headers: { 'X-Request-ID': requestID },
+      });
+    }
+    async function ownControl(which: 'ownBefore' | 'ownAfter') {
+      let response;
+      try {
+        response = await get(own, receipt.requestIDs[which]);
+      } catch {
+        if (receipt.failureCode) throw new Error(failureMessage);
+        fail('OWN_REQUEST_FAILED', 'scope probe own control request failed');
+      }
+      try {
+        receipt[which] = response.status();
+        remaining();
+        if (receipt[which] !== 200)
+          fail(
+            'OWN_STATUS',
+            `scope probe own control requires HTTP 200 (received ${receipt[which]})`,
+          );
+      } finally {
+        await response.dispose();
+      }
+    }
+    await ownControl('ownBefore');
+    try {
+      const response = await get(sibling, receipt.requestIDs.sibling);
+      try {
+        receipt.siblingWireStatus = response.status();
+        if (receipt.siblingWireStatus >= 200 && receipt.siblingWireStatus < 300)
+          fail(
+            'CROSS_RECIPIENT_2XX',
+            `scope probe: sibling object SERVED to another recipient's session (HTTP ${receipt.siblingWireStatus})`,
+          );
+        remaining();
+        const body = await response.body();
+        remaining();
+        // TODO(upstream-contract): router silentDrop owns this canonical 404 body/cache shape.
+        if (
+          receipt.siblingWireStatus !== 404 ||
+          body.length > 1024 ||
+          body.toString('utf8') !== 'Resource not found\n' ||
+          response.headers()['cache-control'] !== 'no-store'
+        )
+          fail(
+            'UNEXPECTED_SIBLING_RESPONSE',
+            `scope probe sibling lacks the converged router denial shape (HTTP ${receipt.siblingWireStatus})`,
+          );
+        receipt.siblingWireOutcome = 'CONVERGED_NOT_FOUND_PENDING_INTERNAL_403';
+      } finally {
+        await response.dispose();
+      }
+    } catch (err) {
+      if (receipt.failureCode) throw new Error(failureMessage);
+      // APIRequestContext uses Node errors. A reset can come from an edge as
+      // well as the router, so this remains pending exact internal-403 proof.
+      if (
+        receipt.siblingWireStatus !== null ||
+        !(err instanceof Error) ||
+        !/ECONNRESET|socket hang up/.test(err.message)
+      )
+        fail(
+          'SIBLING_REQUEST_FAILED',
+          `scope probe sibling request failed (HTTP ${receipt.siblingWireStatus ?? 'unavailable'})`,
+        );
+      remaining();
+      receipt.siblingWireOutcome = 'CONNECTION_CLOSED_PENDING_INTERNAL_403';
+    }
+    await ownControl('ownAfter');
+    receipt.probeStatus = 'PASS';
+    return receipt;
+  } catch (err) {
+    if (receipt.failureCode) throw new Error(failureMessage);
+    return fail('UNEXPECTED_FAILURE', 'scope probe failed; see its status-only receipt');
+  } finally {
+    onFinal?.(receipt);
+  }
 }
