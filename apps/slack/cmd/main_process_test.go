@@ -59,12 +59,14 @@ func TestSlackProcessSIGTERM(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	waited := false
-	t.Cleanup(func() {
+	stopChild := func() {
 		if !waited {
 			_ = cmd.Process.Kill()
 			<-done
+			waited = true
 		}
-	})
+	}
+	t.Cleanup(stopChild)
 	transport := &http.Transport{}
 	t.Cleanup(transport.CloseIdleConnections)
 	client := &http.Client{Transport: transport, Timeout: 200 * time.Millisecond}
@@ -91,7 +93,8 @@ func TestSlackProcessSIGTERM(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	if !healthy {
-		t.Fatal("process health never became ready")
+		stopChild()
+		t.Fatalf("process health never became ready\n%s", output.String())
 	}
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
@@ -103,7 +106,8 @@ func TestSlackProcessSIGTERM(t *testing.T) {
 			t.Fatalf("SIGTERM exit: %v\n%s", err, output.String())
 		}
 	case <-time.After(shutdownTimeout + time.Second):
-		t.Fatal("SIGTERM exceeded shutdown budget")
+		stopChild()
+		t.Fatalf("SIGTERM exceeded shutdown budget\n%s", output.String())
 	}
 	for _, message := range []string{"received shutdown signal", "server stopped cleanly"} {
 		if !strings.Contains(output.String(), message) {
