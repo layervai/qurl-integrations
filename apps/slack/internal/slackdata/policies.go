@@ -280,8 +280,7 @@ func (s *Store) updateChannelResourceSet(ctx context.Context, operation, updateV
 			Title:      operation + ": team_id, channel_id, and resource_id are required",
 		}
 	}
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -291,8 +290,8 @@ func (s *Store) updateChannelResourceSet(ctx context.Context, operation, updateV
 		UpdateExpression: aws.String("SET " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " " + updateVerb + " " + attrAllowedResourceIDs + " :rids"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":rids":     &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
-			exprNow:     stringAttr(nowISO),
-			exprNowNano: unixNanoAttr(now),
+			exprNow:     updatedAt,
+			exprNowNano: updatedAtNano,
 		},
 	})
 	if err != nil {
@@ -379,8 +378,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	// alias_bindings key that pointed at it. The DELETE uses the literal attribute
 	// name (matching RevokeResourceFromChannel); only the user-controlled alias
 	// keys are name-aliased.
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	expr := "SET #updated_at = " + exprNow + ", " + exprUpdatedAtNano + " = " + exprNowNano
 	names := map[string]string{
 		"#updated_at":     attrUpdatedAt,
@@ -407,8 +405,8 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 		UpdateExpression: aws.String(expr),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":rid":      &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
-			exprNow:     stringAttr(nowISO),
-			exprNowNano: unixNanoAttr(now),
+			exprNow:     updatedAt,
+			exprNowNano: updatedAtNano,
 		},
 		ExpressionAttributeNames: names,
 	}
