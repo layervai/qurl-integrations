@@ -6,6 +6,7 @@ const config = require('./config');
 const { assertConfiguredWebhookSecret } = require('./utils/webhook-secret');
 const db = require('./store');
 const logger = require('./logger');
+const eventConsumer = require('./event-consumer');
 const { LOG_EVENTS } = require('./constants');
 const { renderPage } = require('./templates/page');
 const { isPositiveFinite } = require('./utils/time');
@@ -182,6 +183,7 @@ app.get('/metrics', metricsRateLimit, async (req, res) => {
     uptime: process.uptime(),
     memory: process.memoryUsage(),
     stats,
+    eventConsumer: eventConsumer.getMetrics(),
   });
 });
 

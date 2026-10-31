@@ -72,6 +72,7 @@ describe('Server', () => {
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('ok');
       expect(res.body.stats).toBeDefined();
+      expect(res.body.eventConsumer).toEqual(require('../src/event-consumer').getMetrics());
       expect(res.body.uptime).toBeDefined();
     });
 

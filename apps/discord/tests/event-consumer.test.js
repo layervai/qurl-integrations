@@ -1195,6 +1195,7 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
 
     withWorkerDispatch(() => eventConsumer.trackDispatch(handlerPromise));
 
+    expect(eventConsumer.getMetrics().qurl_bot_event_inflight).toBe(1);
     expect(eventConsumer._test.getInFlightCount()).toBe(1);
     resolveHandler('done');
     await handlerPromise;
@@ -1233,6 +1234,7 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
 
     await flushMicrotasks();
 
+    expect(eventConsumer.getMetrics().qurl_bot_event_dispatch_handler_rejections_total).toBe(1);
     expect(logger.error).toHaveBeenCalledWith(
       'Event consumer: dispatch handler rejected',
       expect.objectContaining({
@@ -1311,6 +1313,14 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
       await pollOnceFast(client);
       await pollOnceFast(client);
 
+      expect(eventConsumer.getMetrics()).toEqual({
+        running: false,
+        qurl_bot_event_inflight: cap,
+        qurl_bot_event_inflight_limit: cap,
+        qurl_bot_event_polls_total: 3,
+        qurl_bot_event_atcap_polls_total: 3,
+        qurl_bot_event_dispatch_handler_rejections_total: 0,
+      });
       expect(logger.warn.mock.calls.length - warnBaseline).toBe(1);
       expect(logger.debug.mock.calls.length - debugBaseline).toBe(0);
     } finally {
@@ -1393,6 +1403,7 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
 
     await withMockedSqs(() => eventConsumer._test.pollOnce(client));
     expect(eventConsumer._test.isAtCapPauseLogged()).toBe(true);
+    expect(eventConsumer.getMetrics().qurl_bot_event_atcap_polls_total).toBe(1);
     expect(eventConsumer._test.getCurrentBackoffMs()).toBe(200);
 
     resolvers.forEach((r) => r('done'));
@@ -1400,6 +1411,9 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
 
     await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(eventConsumer.getMetrics().qurl_bot_event_inflight).toBe(0);
+    expect(eventConsumer.getMetrics().qurl_bot_event_polls_total).toBe(2);
+    expect(eventConsumer.getMetrics().qurl_bot_event_atcap_polls_total).toBe(1);
     expect(logger.info).toHaveBeenCalledWith(
       eventConsumer._test.AT_CAP_RELEASED_INFO_MSG,
       expect.objectContaining({ cap }),

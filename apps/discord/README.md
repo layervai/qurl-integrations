@@ -335,6 +335,23 @@ repair instruction if an existing table lacks a required GSI. It never drops dat
   authenticated), `/oauth/discord/install` plus its callback for customer
   installs, and the qURL OAuth start/callback routes used by `/qurl setup`.
 
+The authenticated JSON `/metrics` response includes `eventConsumer` for this
+process: `running`, `qurl_bot_event_inflight`, `qurl_bot_event_inflight_limit`,
+`qurl_bot_event_polls_total`, `qurl_bot_event_atcap_polls_total`, and
+`qurl_bot_event_dispatch_handler_rejections_total`. The in-flight gauge reads the
+current handler set, including changes between polls. Counters last for the
+process lifetime and reset on restart; an inactive consumer reports `running:
+false`. No message, user, or shard IDs are retained for these metrics. Workers
+can consume events from multiple gateway shards, so these are worker metrics.
+
+For a dashboard, scrape each worker as a stable target; a load-balanced URL
+mixes replicas and cannot supply valid counter deltas. Chart in-flight / limit
+for utilization and delta(atcap_polls_total) / delta(polls_total) for the fraction
+of polls at capacity. Ignore reset intervals and zero denominators. This is a
+poll fraction, not elapsed time at capacity: capped polls back off. Use
+rejections_total deltas for handler failure rate. These source fields do not
+establish a deployed dashboard or observed capacity.
+
 Gateway session persistence admits at most 100 in-flight background writes.
 The live in-memory session keeps advancing during backpressure. Look for
 `gateway-session-store: write backpressure`, limited to one warning per minute
