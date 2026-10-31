@@ -520,7 +520,7 @@ async function handleQurlExpired(req, res, { data, eventId }) {
 // Consumed-flip for the qurl.accessed path: when a recipient opens a
 // ONE-TIME qURL and consumes it (`data.consumed === true`), the link is
 // dead for them even though its 30m TTL hasn't elapsed. Flip their DM
-// from the present-tense "🕐 Closes <t:...:R>" embed to the past-tense
+// from the neutral "🕐 Expiry: <t:...:R>" embed to the closed-state
 // "🔒 You opened this one-time qURL … no longer active" copy so they
 // don't see "Closes in ~25m" on a link they can no longer reach.
 //
