@@ -12,11 +12,11 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Cancel superseded runs on the same PR branch — the reusable workflow
+# Cancel superseded runs on the same PR — the reusable workflow
 # makes sequential registry calls; no reason to let two race for an
 # outdated diff.
 concurrency:
-  group: dep-age-actions-${{ github.head_ref || github.ref_name }}
+  group: dep-age-actions-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
