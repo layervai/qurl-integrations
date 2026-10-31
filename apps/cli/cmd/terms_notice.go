@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
@@ -8,7 +10,7 @@ import (
 const termsVersion = "2.0"
 const termsNotice = "By publishing you agree to the LayerV Terms: https://layerv.ai/terms\nYou are letting the people you approve reach this app on your computer. You choose who."
 
-// beginTermsNotice keeps stdout scriptable and never blocks a command on state I/O.
+// beginTermsNotice shows text or stages JSON; notice-state errors never fail the command.
 func (o *globalOpts) beginTermsNotice() {
 	if o.termsNoticeHandled {
 		return
@@ -33,8 +35,9 @@ func (o *globalOpts) beginTermsNotice() {
 		}
 	}
 	if o.resolvedFormat != output.FormatJSON {
-		o.printer().Notef("%s", termsNotice)
-		save()
+		if _, writeErr := fmt.Fprintln(o.streams.Err, termsNotice); writeErr == nil {
+			save()
+		}
 		return
 	}
 	o.pendingTermsNotice = termsNotice

@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -141,5 +143,44 @@ func TestTermsNoticeJSONIsRecordedAtOutputRatherThanCommandExit(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "terms_notice") || stderr.Len() != 0 {
 		t.Fatal("JSON notice used wrong stream")
+	}
+}
+
+func TestTermsNoticeBrokenStderrIsNotRecorded(t *testing.T) {
+	dir := t.TempDir()
+	reader, writer := io.Pipe()
+	_ = reader.Close()
+	defer func() { _ = writer.Close() }()
+	opts := &globalOpts{streams: &output.Streams{Out: io.Discard, Err: writer}, resolvedFormat: output.FormatText, resolveShareStateDir: func(string) (string, error) { return dir, nil }}
+	opts.beginTermsNotice()
+	if shown, err := connectorstate.TermsNoticeShown(dir, termsVersion); err != nil || shown {
+		t.Fatal("undelivered stderr notice was recorded")
+	}
+}
+
+func TestFirstLocalBackgroundPublishCarriesTermsNotice(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := foregroundLifecycleStateDir(t, "qurl-terms-bg-")
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "off", 0, "stopped"))
+	srv.Script(http.MethodPut, path, sharingResponse(t, srv, "on", 1, "connecting"))
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", 1, "serving"))
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-o", "json", "publish", "http://127.0.0.1:3000"}, firstTermsNotice: true, shareRegistry: registry, shareStateDir: stateDir, shareDaemon: &recordingShareDaemon{}, preflightTarget: func(context.Context, string, int) error { return nil }, localResource: resolvedLocalResource(srv, false)})
+	if res.code != 0 {
+		t.Fatalf("local publish = %d %s", res.code, res.stderr.String())
+	}
+	var document map[string]any
+	if err := json.Unmarshal(res.stdout.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if document["terms_notice"] != termsNotice {
+		t.Fatal("local JSON lost notice")
+	}
+	if shown, err := connectorstate.TermsNoticeShown(stateDir, termsVersion); err != nil || !shown {
+		t.Fatal("local notice not recorded")
 	}
 }

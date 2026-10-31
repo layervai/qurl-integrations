@@ -83,7 +83,7 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 			}
 
 			opts.beginTermsNotice()
-			printer.TermsNotice = opts.pendingTermsNotice
+			printer = opts.printer()
 			link, err := opts.shareResource(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
 				TTLSeconds: int(ttl.Seconds()), SessionDurationSeconds: int(sessionDuration / time.Second),
 			})

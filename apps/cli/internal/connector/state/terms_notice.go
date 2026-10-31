@@ -39,7 +39,10 @@ func TermsNoticeShown(dir, version string) (bool, error) {
 		return false, errors.New("terms notice state changed while opening")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, 65))
-	return string(data) == version+"\n", err
+	if err != nil {
+		return false, err
+	}
+	return string(data) == version+"\n", nil
 }
 
 // MarkTermsNoticeShown records a displayed notice without touching credentials.
