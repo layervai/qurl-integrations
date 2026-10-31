@@ -212,6 +212,9 @@ const AUDIT_EVENTS = {
   UPLOAD_SUCCESS: 'upload_success',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',
+  // One rejected batch before upload/DM work; multiple invalid fields count once.
+  // TODO(upstream-contract): DispatchBlocked matches this exact event/agent pair.
+  DISPATCH_BLOCKED: 'dispatch_blocked',
   // DISPATCH_SENT_NO_REFS fires when sendDM resolved ok:true but the
   // channelId / messageId came back missing — the audit-vs-DDB
   // divergence persistDispatchResult records as `failed`. Distinct

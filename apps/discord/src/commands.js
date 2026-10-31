@@ -1959,18 +1959,9 @@ async function executeSendPipeline(interaction, {
     components: [],
   }).catch(logIgnoredDiscordErr);
 
-  // Nested so it closes over `interaction` + `cancelEdit` without
-  // parameter sprawl at the call sites. The `@returns {never}`
-  // annotation lets static analysis treat the call as terminating.
-  /**
-   * @param {new (msg: string) => Error} ErrorCtor
-   * @param {string} msg
-   * @returns {never}
-   */
-  function failGate(ErrorCtor, msg) {
-    clearCooldown(interaction.user.id);
-    cancelEdit();
-    throw new ErrorCtor(msg);
+  const failures = [];
+  function addGateFailure(ErrorCtor, msg, reason) {
+    failures.push({ ErrorCtor, msg, reason });
   }
 
   // Defense-in-depth SSRF re-check. `/qurl send`'s front-half
@@ -1979,7 +1970,7 @@ async function executeSendPipeline(interaction, {
   // forgets.
   // FILE-only because location sends carry no attacker-controlled
   // URL (locationUrl is built from sanitized user-text via
-  // google.com/maps/search). logger.warn fires before failGate so
+  // google.com/maps/search). logger.warn fires before validation finishes so
   // the breadcrumb lands even if cancelEdit later throws.
   if (resourceType === RESOURCE_TYPES.FILE) {
     if (!attachment || typeof attachment.url !== 'string' || !isAllowedSourceUrl(attachment.url)) {
@@ -1988,7 +1979,7 @@ async function executeSendPipeline(interaction, {
         send_nonce: sendNonce,
         host: attachment?.url && safeUrlHost(attachment.url),
       });
-      failGate(Error, `executeSendPipeline: attachment.url failed SSRF re-validation (resourceType=${String(resourceType)})`);
+      addGateFailure(Error, `executeSendPipeline: attachment.url failed SSRF re-validation (resourceType=${String(resourceType)})`, 'attachment_url_ssrf');
     }
   }
 
@@ -1999,7 +1990,7 @@ async function executeSendPipeline(interaction, {
   // DB and trips downstream when `expiryToISO` / `expiryToMs`
   // hit it. Validate at the boundary instead.
   if (!isValidExpiry(expiresIn)) {
-    failGate(TypeError, `executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${truncForLog(expiresIn)})`);
+    addGateFailure(TypeError, `executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${truncForLog(expiresIn)})`, 'invalid_expires_in');
   }
 
   // `personalMessage` shape gate. The DM-embed renderer expects
@@ -2010,7 +2001,7 @@ async function executeSendPipeline(interaction, {
   // here would be user-authored DM prose; we don't want even a
   // truncated 64-char prefix of that landing in prod logs.
   if (personalMessage !== null && typeof personalMessage !== 'string') {
-    failGate(TypeError, `executeSendPipeline: personalMessage must be null or string (got typeof=${typeof personalMessage})`);
+    addGateFailure(TypeError, `executeSendPipeline: personalMessage must be null or string (got typeof=${typeof personalMessage})`, 'invalid_personal_message');
   }
 
   // `recipients` shape + cap gates. The docstring's "non-empty,
@@ -2032,10 +2023,20 @@ async function executeSendPipeline(interaction, {
     const detail = Array.isArray(recipients)
       ? 'typeof=object, value=<empty array>'
       : `typeof=${typeof recipients}, value=${truncForLog(recipients)}`;
-    failGate(TypeError, `executeSendPipeline: recipients must be a non-empty array (got ${detail})`);
+    addGateFailure(TypeError, `executeSendPipeline: recipients must be a non-empty array (got ${detail})`, 'invalid_recipients');
+  } else if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    addGateFailure(RangeError, `executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`, 'recipient_cap_exceeded');
   }
-  if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
-    failGate(RangeError, `executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
+  if (failures.length > 0) {
+    logger.audit(AUDIT_EVENTS.DISPATCH_BLOCKED, {
+      reason: failures.length === 1 ? failures[0].reason : 'multiple_invalid_inputs',
+    });
+    clearCooldown(interaction.user.id);
+    cancelEdit();
+    const ErrorCtor = failures.length === 1 ? failures[0].ErrorCtor : TypeError;
+    const message = failures.length === 1 ? failures[0].msg
+      : `executeSendPipeline: ${failures.length} input gates failed: ${failures.map(failure => failure.msg).join('; ')}`;
+    throw new ErrorCtor(message);
   }
   // Operator-visibility hook for big sends. Fires when a single send
   // crosses `largeSendThreshold()` so the operational cost (qurl-
@@ -3141,21 +3142,22 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   }
 
   // #352 entry gate. Shares the same `EXPIRY_LABELS` membership
-  // predicate as the executeSendPipeline failGate
+  // predicate as the executeSendPipeline validation gate
   // (`grep "expiresIn must be one of"`), closing the unprotected
   // path where a stale/regressed sendConfig row could ship an
   // off-set value. Protects BOTH downstream `expiryToMs` AND
   // `expiryToISO` (each used below for mint + DM dispatch) from
   // their shared silent-24h-default fallback. Failure shape
-  // diverges from failGate intentionally: failGate throws (caller
-  // catches at the slash-command boundary), while this gate returns
+  // differs from initial-send validation, which throws at the slash-command
+  // boundary. This gate returns
   // an error object — handleAddRecipients's caller renders the
   // string on the post-send confirm card, where a throw would land
   // as a generic "Internal error" with no actionable message.
   if (!isValidExpiry(sendConfig.expires_in)) {
     // warn (not error): a stale/corrupted DDB row is user-recoverable
     // (re-send), not paging-worthy. Matches renderConfirmCardRows's
-    // analogous off-EXPIRY_LABELS log level. Forensics-only signal.
+    // analogous off-EXPIRY_LABELS log level. Diagnostic metric; no paging alarm is attached.
+    logger.audit(AUDIT_EVENTS.DISPATCH_BLOCKED, { send_id: sendId, reason: 'invalid_expires_in' });
     logger.warn('addRecipients refused invalid expires_in', { sendId, expiresIn: truncForLog(sendConfig.expires_in) });
     return {
       msg: `Cannot add recipients — this send's saved expiry is invalid (the original send's links still work; create a new send to reach additional recipients).`,
