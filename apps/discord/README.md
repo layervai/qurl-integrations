@@ -343,10 +343,14 @@ current handler set, including changes between polls. Counters last for the
 process lifetime and reset on restart; an inactive consumer reports `running:
 false`. No message, user, or shard IDs are retained for these metrics. Workers
 can consume events from multiple gateway shards, so these are worker metrics.
+Workers are HTTP-role processes with `ENABLE_EVENT_SHIPPER` enabled; they serve
+this same listener. Gateway-only tasks serve a separate health listener.
 
 The consumer-only view omits aggregate store stats and performs no table scan.
 The default `/metrics` response retains its legacy totals, which scan tables;
-use the consumer-only view for routine pressure scrapes.
+use the consumer-only view for routine pressure scrapes. Unknown or repeated
+`view` values return 400 without scans. These are JSON fields, not Prometheus
+exposition text.
 
 For a dashboard, scrape each worker as a stable target; a load-balanced URL
 mixes replicas and cannot supply valid counter deltas. Chart

@@ -92,6 +92,13 @@ describe('Server', () => {
       expect(db.getStats).not.toHaveBeenCalled();
     });
 
+    it.each(['Consumer', 'unknown', 'consumer&view=other'])('rejects unsupported metrics view %s without scans', async view => {
+      process.env.METRICS_TOKEN = 'secret-token';
+      const res = await request(app).get(`/metrics?view=${view}`).set('Authorization', 'Bearer secret-token');
+      expect(res.status).toBe(400);
+      expect(db.getStats).not.toHaveBeenCalled();
+    });
+
     it('returns 429 after exceeding the per-IP rate limit', async () => {
       process.env.METRICS_TOKEN = 'secret-token';
       let last;

@@ -177,6 +177,9 @@ app.get('/metrics', metricsRateLimit, async (req, res) => {
   if (!crypto.timingSafeEqual(authHash, expectedHash)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
+  if (req.query.view !== undefined && req.query.view !== 'consumer') {
+    return res.status(400).json({ error: 'Unsupported metrics view' });
+  }
   // Routine worker scrapes must not scan the aggregate tables.
   const stats = req.query.view === 'consumer' ? undefined : await db.getStats();
   res.json({
