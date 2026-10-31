@@ -39,9 +39,11 @@ func TestValidClientProduct(t *testing.T) {
 		{name: "quoted", value: "desktop/\"1\""},
 		{name: "backslash", value: "desktop/1\\2"},
 	} {
-		if got := ValidClientProduct(tc.value); got != tc.valid {
-			t.Errorf("%s: ValidClientProduct(%q) = %t, want %t", tc.name, tc.value, got, tc.valid)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ValidClientProduct(tc.value); got != tc.valid {
+				t.Errorf("ValidClientProduct(%q) = %t, want %t", tc.value, got, tc.valid)
+			}
+		})
 	}
 }
 

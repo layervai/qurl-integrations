@@ -230,8 +230,10 @@ func TestTransportClientProductUserAgent(t *testing.T) {
 		{"desktop/1\r\nInjected: yes", "qurl-cli/test"},
 		{"qurl-cli/9", "qurl-cli/test"},
 	} {
-		if got := newTransport(&Config{Version: "test", ClientProduct: tc.product}).userAgent; got != tc.want {
-			t.Errorf("ClientProduct %q: User-Agent = %q, want %q", tc.product, got, tc.want)
-		}
+		t.Run(tc.want, func(t *testing.T) {
+			if got := newTransport(&Config{Version: "test", ClientProduct: tc.product}).userAgent; got != tc.want {
+				t.Errorf("ClientProduct %q: User-Agent = %q, want %q", tc.product, got, tc.want)
+			}
+		})
 	}
 }
