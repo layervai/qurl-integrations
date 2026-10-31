@@ -1,6 +1,6 @@
 // SQS-driven event publisher for the gateway tier (zero-downtime
-// design, Pillar 1). Wired as a `client.on('raw', publish)` listener
-// in src/index.js; every Discord dispatch lands here. The handler
+// design, Queue delivery). Wired by src/index.js through the legacy
+// client raw listener or the RESUME shim dispatch hook. The handler
 // filters to `INTERACTION_CREATE` (the only event type the worker
 // tier handles today — see event-consumer.js's `unhandled
 // eventType` branch) and forwards the raw payload to SQS as the
@@ -107,7 +107,7 @@ const { GATEWAY_DISPATCH_TYPES, LOG_KINDS } = require('./constants');
 // key. Re-IDENTIFY (post-reconnect) resets `s` to 1; the LRU
 // tolerates the collision because (a) interactions from the prior
 // session are already expired by Discord (3s TTL), and (b)
-// flow-state OCC owns correctness.
+// flow-state OCC guards row transitions; external effects need their own guards.
 //
 // TODO(sharding-pr): replace the literal '0' with the per-shard
 // value supplied by `@discordjs/ws`'s dispatch callback once PR 13
@@ -151,8 +151,8 @@ function _setSqsClientForTest(client) {
 
 
 /**
- * Handle a raw gateway dispatch. Wired as the `raw` listener on the
- * Discord client in src/index.js. Filters to INTERACTION_CREATE and
+ * Handle a Gateway dispatch from the legacy raw listener or RESUME shim
+ * hook in src/index.js. Filters to INTERACTION_CREATE and
  * forwards as an SQS envelope; everything else is a no-op (single
  * `op` / `t` comparison, no allocation).
  *
@@ -161,8 +161,8 @@ function _setSqsClientForTest(client) {
  * explicitly so a future reader doesn't add an `await` that would
  * stall the WebSocket frame poll.
  *
- * @param {object} packet - The raw gateway packet (discord.js
- *   `raw` event payload). Shape: `{ op, t, s, d }`.
+ * @param {object} packet - Gateway packet from either dispatch path.
+ *   Shape: `{ op, t, s, d }`.
  */
 function publish(packet) {
   // Defense against a falsy packet (a future discord.js refactor or
@@ -178,8 +178,7 @@ function publish(packet) {
     return;
   }
   // Drop dispatches that arrive before start() (race window during
-  // boot: the `raw` listener is registered at module-top, but
-  // start() runs inside index.js's start(); a dispatch that
+  // boot: input wiring precedes publisher startup; a dispatch that
   // sneaked in before start() would have no sqsClient to call).
   // Logged at debug so a real boot bug surfaces but a one-shot
   // race doesn't flood. `running` is also flipped false by stop()
@@ -256,9 +255,8 @@ function publish(packet) {
 /**
  * Initialize the publisher. Idempotent: a second call while already
  * running is a no-op (warn-logged so an accidental double-start is
- * visible). Must be called BEFORE `client.login()` so the `raw`
- * listener registered at module-top in index.js has a live sqsClient
- * by the time the first frame arrives.
+ * visible). Start before either Gateway connection so the raw listener
+ * or shim dispatch hook has a live sqsClient for its first frame.
  */
 function start() {
   if (running) {
