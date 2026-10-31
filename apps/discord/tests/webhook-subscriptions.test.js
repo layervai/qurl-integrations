@@ -851,3 +851,87 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
     expect(subs.getSecretForOwner('usr_x')).toBe('sec1');
   });
 });
+
+
+describe('link default-owner single-flight', () => {
+  const page = body => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+
+  it('shares the full paginated walk across concurrent links, then rechecks deletion', async () => {
+    let release;
+    global.fetch = jest.fn()
+      .mockImplementationOnce(() => new Promise(resolve => { release = resolve; }))
+      .mockResolvedValueOnce(page({ data: [{ owner_id: 'usr_default' }] }));
+    const links = Promise.all(Array.from({ length: 20 }, () => subs.resolveDefaultOwnerForApiKey('lv_test_abc')));
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    release(page({ data: [{ owner_id: 'usr_default' }], meta: { next_cursor: 'page-2' } }));
+    await expect(links).resolves.toEqual(Array(20).fill('usr_default'));
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    global.fetch.mockResolvedValueOnce(page({ data: [] }));
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc'))
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED' });
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('shares failures but does not cache them', async () => {
+    let release;
+    global.fetch = jest.fn().mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const links = Promise.allSettled(Array.from({ length: 20 }, () => subs.resolveDefaultOwnerForApiKey('lv_test_abc')));
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    release({ ok: false, status: 401, text: async () => 'unauthorized' });
+    for (const result of await links) {
+      expect(result).toMatchObject({ status: 'rejected', reason: { status: 401 } });
+    }
+    global.fetch.mockResolvedValueOnce(page({ data: [{ owner_id: 'usr_default' }] }));
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc')).resolves.toBe('usr_default');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not share discovery between receiver URLs', async () => {
+    const releases = [];
+    global.fetch = jest.fn(() => new Promise(resolve => { releases.push(resolve); }));
+    const a = subs.resolveDefaultOwnerForApiKey('lv_test_abc', { bridgeUrl: 'https://a.example/webhook' });
+    const b = subs.resolveDefaultOwnerForApiKey('lv_test_abc', { bridgeUrl: 'https://b.example/webhook' });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    releases[0](page({ data: [{ owner_id: 'usr_default', url: 'https://a.example/webhook' }] }));
+    releases[1](page({ data: [{ owner_id: 'usr_default', url: 'https://b.example/webhook' }] }));
+    await expect(Promise.all([a, b])).resolves.toEqual(['usr_default', 'usr_default']);
+  });
+
+  it('still discovers each candidate key independently', async () => {
+    let release;
+    global.fetch = jest.fn((_url, options) => {
+      const key = options.headers.Authorization;
+      if (key === 'Bearer lv_test_abc') return new Promise(resolve => { release = resolve; });
+      return Promise.resolve(page({ data: [{ owner_id: key === 'Bearer lv_alias' ? 'usr_default' : 'usr_other' }] }));
+    });
+    const alias = subs.resolveDefaultOwnerForApiKey('lv_alias');
+    const other = subs.resolveDefaultOwnerForApiKey('lv_other');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    release(page({ data: [{ owner_id: 'usr_default' }] }));
+    await expect(Promise.all([alias, other])).resolves.toEqual(['usr_default', null]);
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(global.fetch.mock.calls.slice(1).map(([, options]) => options.headers.Authorization).sort())
+      .toEqual(['Bearer lv_alias', 'Bearer lv_other']);
+  });
+
+  it.each(['QURL_API_KEY', 'QURL_ENDPOINT'])('isolates changed %s and keeps a newer pending walk', async key => {
+    const config = require('../src/config');
+    const original = config[key];
+    const releases = [];
+    global.fetch = jest.fn(() => new Promise(resolve => { releases.push(resolve); }));
+    try {
+      const old = subs.resolveDefaultOwnerForApiKey(config.QURL_API_KEY);
+      config[key] = key === 'QURL_API_KEY' ? 'lv_other_default' : 'https://other.example';
+      const current = subs.resolveDefaultOwnerForApiKey(config.QURL_API_KEY);
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      releases[0](page({ data: [{ owner_id: 'usr_old' }] }));
+      await expect(old).resolves.toBe('usr_old');
+      const joined = subs.resolveDefaultOwnerForApiKey(config.QURL_API_KEY);
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      releases[1](page({ data: [{ owner_id: 'usr_new' }] }));
+      await expect(Promise.all([current, joined])).resolves.toEqual(['usr_new', 'usr_new']);
+    } finally {
+      config[key] = original;
+    }
+  });
+});

@@ -77,6 +77,7 @@ let timer = null;
 // at least one) on every refresh tick. Storing the discovered owner_id
 // here keeps the discover/refresh fold idempotent.
 let defaultOwnerId = null;
+let linkOwnerDiscoveryInFlight = null;
 
 // Owners whose entries must survive scanOnce's clear-and-repopulate
 // swap. .clear()'d at the top of each scan; re-applied after the
@@ -351,6 +352,20 @@ async function discoverDefaultOwnerId(options) {
   return discoverOwnerId(config.QURL_API_KEY, options);
 }
 
+function discoverDefaultOwnerForLink(bridgeUrl) {
+  const { QURL_API_KEY: apiKey, QURL_ENDPOINT: endpoint } = config;
+  const pending = linkOwnerDiscoveryInFlight;
+  if (pending && pending.apiKey === apiKey && pending.endpoint === endpoint && pending.bridgeUrl === bridgeUrl) {
+    return pending.promise;
+  }
+  const discovery = { apiKey, endpoint, bridgeUrl };
+  discovery.promise = discoverDefaultOwnerId({ requiredUrl: bridgeUrl }).finally(() => {
+    if (linkOwnerDiscoveryInFlight === discovery) linkOwnerDiscoveryInFlight = null;
+  });
+  linkOwnerDiscoveryInFlight = discovery;
+  return discovery.promise;
+}
+
 // Resolve whether a guild API key belongs to the bot's default owner. This is
 // lazy because gateway-only processes and the one-shot backfill never start
 // the HTTP receiver's registry scan. When a default subscription is expected
@@ -371,23 +386,22 @@ async function discoverDefaultOwnerId(options) {
 // URL match, and skipping it here would report `reused` for a subscription
 // that delivers to another deployment.
 async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
+  const defaultApiKey = config.QURL_API_KEY;
   if (!config.QURL_WEBHOOK_SECRET) {
     if (config.QURL_WEBHOOK_PURE_BYOK) return null;
     const err = new Error('resolveDefaultOwnerForApiKey: QURL_WEBHOOK_SECRET is required unless QURL_WEBHOOK_PURE_BYOK=true');
     err.code = 'DEFAULT_WEBHOOK_OWNER_CONFIG';
     throw err;
   }
-  if (!config.QURL_API_KEY || !config.QURL_ENDPOINT) {
+  if (!defaultApiKey || !config.QURL_ENDPOINT) {
     const err = new Error('resolveDefaultOwnerForApiKey: default subscription discovery config is incomplete');
     err.code = 'DEFAULT_WEBHOOK_OWNER_CONFIG';
     throw err;
   }
 
-  // Re-list on every link even when the registry cached the owner. The owner is
-  // stable, but its last subscription can be deleted out of band; accepting a
-  // stale cache would let the per-guild registrar recreate the default path
-  // with a guild-owned secret.
-  const ownerId = await discoverDefaultOwnerId({ requiredUrl: bridgeUrl });
+  // Share only an active walk. Completed results are never reused: the last
+  // subscription may be deleted out of band, making a cached owner unsafe.
+  const ownerId = await discoverDefaultOwnerForLink(bridgeUrl);
   if (!ownerId) {
     const err = new Error('resolveDefaultOwnerForApiKey: default subscription owner could not be discovered');
     err.code = 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED';
@@ -399,7 +413,7 @@ async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
   // entry; the next tick restores it (bounded, self-healing).
   defaultOwnerId = ownerId;
 
-  const candidateOwnerId = apiKey === config.QURL_API_KEY
+  const candidateOwnerId = apiKey === defaultApiKey
     ? ownerId
     : await discoverOwnerId(apiKey, { subject: 'CANDIDATE' });
   return candidateOwnerId === ownerId ? ownerId : null;
@@ -669,6 +683,7 @@ function _resetForTesting() {
   consecutiveFailures = 0;
   discoveryConsecutiveFailures = 0;
   defaultOwnerId = null;
+  linkOwnerDiscoveryInFlight = null;
   upsertsDuringScan.clear();
   scanInFlight = false;
   lastScanCompletedAt = 0;
