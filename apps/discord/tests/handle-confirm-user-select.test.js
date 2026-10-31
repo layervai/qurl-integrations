@@ -399,6 +399,24 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Mention Everyone/);
   });
 
+  test.each([false, true])('bounded role expansion: partial valid=%s', async (partialValid) => {
+    const members = new Map(Array.from({ length: 101 }, (_, i) => {
+      const bot = makeUser(String(200000000000000000n + BigInt(i)), { bot: true });
+      return [bot.id, { user: bot }];
+    }));
+    const int = makeSelectInteraction({
+      users: partialValid ? [makeUser(u1)] : [],
+      roles: [['large-role', { id: 'large-role', mentionable: true, members }]],
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    if (partialValid) expect(mockTransitionFlow).toHaveBeenCalled();
+    else expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const updated = int.editReply.mock.calls.at(-1)[0];
+    expect(updated.content).toContain('Picked role(s) could not be fully checked — pick fewer or smaller roles');
+    expect(updated.content).not.toContain('have no non-bot members');
+    if (partialValid) expect(updated.content).toContain('At least 100 bot(s)');
+  });
+
   test('partially cached role with a human advances and keeps the membership warning', async () => {
     const member = { user: makeUser(u1) };
     const cache = new Map([[u1, member]]);
