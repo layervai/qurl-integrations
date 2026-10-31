@@ -1056,7 +1056,7 @@ function capUtf16Units(s, maxUtf16Units) {
 // single-path call sites use buildDeliveryPayload below.
 function buildDeliveryEmbed({
   senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage,
-  renderActionsAsMarkdown = false,
+  renderActionsAsMarkdown = false, destinationDomain = TRUST.DESTINATION_DOMAIN,
 }) {
   // Discord's `<t:N:R>` markdown wants a positive integer Unix-seconds
   // value; anything else renders a misleading recipient surface (e.g.
@@ -1170,21 +1170,17 @@ function buildDeliveryEmbed({
     .setColor(COLORS.QURL_BRAND)
     .setAuthor(authorOpts)
     .setDescription(descLines.join('\n'))
-    // Footer reinforces the destination domain — same trust idea as a
-    // browser showing where a link points before you click. Literal
-    // string (not interpolated from qurlLink) keeps the recipient
-    // surface stable even if a future minted link uses a subdomain.
-    .setFooter({ text: `opens ${TRUST.DESTINATION_DOMAIN}` });
+    .setFooter({ text: `opens ${destinationDomain}` });
 }
 
 // Convenience wrapper used by executeSendPipeline. Short links preserve
 // the original [Step Through, What is qURL?] ActionRow; long qv2 links
 // place both actions in the embed and return no components.
-function buildDeliveryPayload({ senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage }) {
+function buildDeliveryPayload({ senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage, destinationDomain = new URL(qurlLink).hostname }) {
   const renderActionsAsMarkdown = requiresMarkdownDeliveryActions(qurlLink);
   const embed = buildDeliveryEmbed({
     senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage,
-    renderActionsAsMarkdown,
+    renderActionsAsMarkdown, destinationDomain,
   });
   const components = renderActionsAsMarkdown
     ? []
@@ -3520,16 +3516,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     let result = { ok: false };
     try {
       // links.slice(0, 10) caps at Discord's 10-embed-per-message
-      // limit. Short links share one identical EmbedBuilder and keep
-      // the original packed buttons. Long qv2 links need their own
-      // Markdown action in each embed and send no components.
-      // packBulkDeliveryComponents enforces 1 <= len <= 10 with
-      // fail-loud throws; the upstream guard at line 2372 above
-      // (`if (!links || links.length === 0)`) is what keeps us out
-      // of the lower-bound throw. If a future refactor splits this
-      // dispatch loop or drops that guard, the throw will surface
-      // here at the helper boundary — see packBulkDeliveryComponents
-      // docstring for the contract.
+      // limit. Each embed names its link's host. Long qv2 links put
+      // actions in the embed instead of Discord components.
       const cappedLinks = links.slice(0, 10);
       const renderActionsAsMarkdown = cappedLinks.some(
         link => requiresMarkdownDeliveryActions(link.qurlLink),
@@ -3541,13 +3529,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         expiresAt,
         personalMessage: sendConfig.personal_message,
       };
-      const allEmbeds = renderActionsAsMarkdown
-        ? cappedLinks.map(link => buildDeliveryEmbed({
-          ...embedArgs,
-          qurlLink: link.qurlLink,
-          renderActionsAsMarkdown: true,
-        }))
-        : Array(cappedLinks.length).fill(buildDeliveryEmbed(embedArgs));
+      const allEmbeds = cappedLinks.map(link => buildDeliveryEmbed({
+        ...embedArgs,
+        qurlLink: link.qurlLink,
+        destinationDomain: new URL(link.qurlLink).hostname,
+        renderActionsAsMarkdown,
+      }));
       const allComponents = renderActionsAsMarkdown
         ? []
         : packBulkDeliveryComponents(cappedLinks.map(link => link.qurlLink));

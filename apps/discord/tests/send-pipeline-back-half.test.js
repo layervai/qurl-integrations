@@ -186,8 +186,6 @@ const {
   renderViewCounter,
   REVOKE_TRUNC_LIMIT,
   handleAddRecipients,
-  buildDeliveryEmbed,
-  packBulkDeliveryComponents,
   mintLinksInBatches,
   cleanupFreshAddRecipientResources,
   activeMonitors,
@@ -3306,6 +3304,7 @@ describe('handleAddRecipients — happy path (location)', () => {
 
     expect(mockSendDM).toHaveBeenCalledTimes(1);
     const [, payload] = mockSendDM.mock.calls[0];
+    expect(payload.embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens q.test' });
     expect(payload.components).toHaveLength(1);
     const buttons = payload.components[0].components;
     expect(buttons).toHaveLength(2);
@@ -3335,36 +3334,6 @@ describe('handleAddRecipients — happy path (location)', () => {
     const description = payload.embeds[0].setDescription.mock.calls[0][0];
     expect(description).toContain(`[🚪 Step Through](${qv2Link})`);
     expect(description).toContain('[🛡️ What is qURL?](https://layerv.ai/qurl/)');
-  });
-
-  it('shares one EmbedBuilder reference across N>1 embeds in the bulk payload primitives', () => {
-    const qurlLinks = ['https://q.test/share-file', 'https://q.test/share-loc'];
-    const embed = buildDeliveryEmbed({
-      senderAlias: 'Sender',
-      guildName: 'Guild',
-      guildIconUrl: null,
-      expiresAt: Math.floor(Date.now() / 1000) + 3600,
-      personalMessage: null,
-    });
-    const payload = {
-      embeds: Array(qurlLinks.length).fill(embed),
-      components: packBulkDeliveryComponents(qurlLinks),
-    };
-
-    expect(payload.embeds).toHaveLength(2);
-    expect(payload.embeds[0]).toBe(payload.embeds[1]);
-    if (typeof payload.embeds[0].toJSON === 'function') {
-      expect(payload.embeds[0].toJSON()).toEqual(payload.embeds[1].toJSON());
-    }
-    const urls = payload.components
-      .flatMap(row => row.components)
-      .map(b => b.setURL.mock.calls[0]?.[0])
-      .filter(Boolean);
-    expect(urls).toEqual([
-      'https://q.test/share-file',
-      'https://q.test/share-loc',
-      'https://layerv.ai/qurl/',
-    ]);
   });
 
   it('does not emit upload_success for unsupported mixed file + location configs', async () => {
@@ -3601,12 +3570,13 @@ describe('executeSendPipeline — guild_id threading (#1101)', () => {
   it('threads interaction.guildId into BOTH mintLinks and recordQURLSendBatch (file send)', async () => {
     const interaction = makeInteraction({ guildId: 'guild-1' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://door.acme.com/#at_test', resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
     await executeSendPipeline(interaction, makePipelineParams());
 
+    expect(mockSendDM.mock.calls[0][1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens door.acme.com' });
     expect(mockMintLinks).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ guildId: 'guild-1' }),
