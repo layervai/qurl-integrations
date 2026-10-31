@@ -5642,6 +5642,16 @@ async function handleQurlSlashSend(interaction, params) {
       roleMentionsDeniedNames,
     });
     if (!recipientsOmitted && valid.length === 0) {
+      logger.debug('handleQurlSlashSend: all-invalid mention input', {
+        resource_type: params.resourceType,
+        dropped_bots: droppedBots,
+        unresolved_ids: resolved.unresolvedIds.length,
+        transient_failure_ids: resolved.transientFailureIds.length,
+        invalid_tokens: parsed.invalidTokens.length,
+        capped_count: parsed.cappedCount,
+        mass_mention_denied: parsed.massMentionDenied,
+        role_mentions_denied: parsed.roleMentionsDenied.length,
+      });
       clearCooldown(interaction.user.id);
       // Transient-only: every mentioned ID hit a 429 / gateway blip in
       // members.fetch. Generic "no valid recipients" misleads — the
