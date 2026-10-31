@@ -2326,6 +2326,11 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       ([message]) => message === 'recordQURLSendBatch failed; aborting send to keep state consistent',
     );
     expect(failureLog).toBeDefined();
+    expect(logger.audit).toHaveBeenCalledWith('persist_failed', {
+      send_id: mockDb.recordQURLSendBatch.mock.calls[0][0][0].sendId,
+      link_count: 2,
+    });
+    expect(logger.audit.mock.calls.filter(([event]) => event === 'persist_failed')).toHaveLength(1);
     expect(failureLog[1].orphanedResources).toEqual([
       { resourceId: 'resource-public-id', qurlId: 'q_orphaned_link_one' },
       { resourceId: 'resource-public-id', qurlId: 'q_orphaned_link_two' },
@@ -2881,6 +2886,8 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       makeInteraction(), 'apikey',
     );
 
+    expect(logger.audit).toHaveBeenCalledWith('persist_failed', { send_id: 'send-1', link_count: 1 });
+    expect(logger.audit.mock.calls.filter(([event]) => event === 'persist_failed')).toHaveLength(1);
     expect(result.msg).toMatch(/Failed to save link records/);
     expect(result.delivered).toBe(0);
     expect(mockSendDM).not.toHaveBeenCalled();
@@ -2973,6 +2980,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       makeInteraction(), 'apikey',
     );
 
+    expect(logger.audit).not.toHaveBeenCalledWith('persist_failed', expect.anything());
     expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
     expect(result.delivered).toBe(0);
     expect(result.newRecipients).toEqual([]);
@@ -2999,6 +3007,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       makeInteraction(), 'apikey',
     );
 
+    expect(logger.audit).not.toHaveBeenCalledWith('persist_failed', expect.anything());
     expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
     expect(result.newRecipients).toEqual([]);
     expect(logger.error).toHaveBeenCalledWith(

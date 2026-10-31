@@ -210,6 +210,9 @@ const AUDIT_EVENTS = {
   // from handleAddRecipients on a sendConfig that has both file +
   // location.
   UPLOAD_SUCCESS: 'upload_success',
+  // Counts failed record writes before DMs, not confirmed orphan resources.
+  // link_count is attempted links; cleanup or a lost response may change row state.
+  PERSIST_FAILED: 'persist_failed',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',
   // DISPATCH_SENT_NO_REFS fires when sendDM resolved ok:true but the
