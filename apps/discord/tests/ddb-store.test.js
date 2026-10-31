@@ -2262,7 +2262,7 @@ describe('qurl views', () => {
     expect(keys).toHaveLength(2);
   });
 
-  test('getQurlViews: retries once on UnprocessedKeys', async () => {
+  test('getQurlViews: stops retrying when unfinished keys succeed', async () => {
     let attempt = 0;
     ddbMock.on(BatchGetCommand).callsFake(() => {
       attempt++;
@@ -2280,6 +2280,44 @@ describe('qurl views', () => {
     expect(attempt).toBe(2);
     expect(views.size).toBe(2);
   });
+
+  test.each([false, true])('getQurlViews: bounded backoff preserves completed rows (exhausted=%s)', async (exhausted) => {
+    jest.useFakeTimers();
+    const timeout = jest.spyOn(global, 'setTimeout');
+    try {
+      let attempt = 0;
+      const requested = [];
+      ddbMock.on(BatchGetCommand).callsFake((input) => {
+        requested.push(input.RequestItems['test-prefix-qurl-views'].Keys);
+        attempt++;
+        return {
+          Responses: { 'test-prefix-qurl-views': attempt === 1
+            ? [{ qurl_id: 'q_a', access_count: 1 }]
+            : (!exhausted && attempt === 4 ? [{ qurl_id: 'q_b', access_count: 2, consumed: true }] : []) },
+          ...((exhausted || attempt < 4) ? {
+            UnprocessedKeys: { 'test-prefix-qurl-views': { Keys: [{ qurl_id: 'q_b' }], ConsistentRead: true } },
+          } : {}),
+        };
+      });
+      const pending = store.getQurlViews(['q_a', 'q_b']);
+      await jest.runAllTimersAsync();
+      const views = await pending;
+      expect(attempt).toBe(4);
+      expect(timeout.mock.calls.map(([, ms]) => ms)).toEqual([50, 100, 200]);
+      expect(requested).toEqual([
+        [{ qurl_id: 'q_a' }, { qurl_id: 'q_b' }],
+        [{ qurl_id: 'q_b' }], [{ qurl_id: 'q_b' }], [{ qurl_id: 'q_b' }],
+      ]);
+      expect(ddbMock.commandCalls(BatchGetCommand)[3].args[0].input.RequestItems['test-prefix-qurl-views'].ConsistentRead).toBe(true);
+      expect(views.get('q_a')).toEqual({ accessCount: 1, consumed: false });
+      if (exhausted) expect(views.has('q_b')).toBe(false);
+      else expect(views.get('q_b')).toEqual({ accessCount: 2, consumed: true });
+    } finally {
+      timeout.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
 });
 
 describe('stats', () => {

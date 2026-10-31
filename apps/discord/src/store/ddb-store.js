@@ -512,16 +512,18 @@ async function getQurlViews(qurlIds) {
     }
   };
   for (let i = 0; i < keys.length; i += CHUNK) {
-    const slice = keys.slice(i, i + CHUNK);
-    const res = await ddb.send(new BatchGetCommand({
-      RequestItems: { [TABLES.qurl_views]: { Keys: slice } },
-    }));
-    collect(res);
-    // Single retry on UnprocessedKeys — persistent throttle is an oncall
-    // signal, not a per-call retry loop.
-    const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
-    if (unprocessed && unprocessed.Keys && unprocessed.Keys.length > 0) {
-      collect(await ddb.send(new BatchGetCommand({ RequestItems: { [TABLES.qurl_views]: unprocessed } })));
+    let request = { Keys: keys.slice(i, i + CHUNK) };
+    const MAX_RETRIES = 3;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const res = await ddb.send(new BatchGetCommand({
+        RequestItems: { [TABLES.qurl_views]: request },
+      }));
+      collect(res);
+      const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
+      if (!unprocessed?.Keys?.length || attempt === MAX_RETRIES) break;
+      // Retry only unfinished keys; bounded 50/100/200ms waits per chunk.
+      await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+      request = unprocessed;
     }
   }
   return out;
