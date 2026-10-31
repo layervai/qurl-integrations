@@ -52,6 +52,18 @@ async function main() {
     });
     assert.equal(await store.getGuildApiKey('smoke-guild'), 'smoke-key-three');
     assert.equal((await read()).qurl_owner_id, 'synthetic-owner');
+    const { prepareGuildOwnerBinding } = require('../src/guild-owner');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { throw new Error('A bound owner must not revalidate its saved key'); };
+    try {
+      assert.deepEqual(await prepareGuildOwnerBinding('smoke-guild', 'synthetic-owner'), {
+        ownerId: 'synthetic-owner', expectedApiKey: 'smoke-key-three',
+      });
+      await assert.rejects(prepareGuildOwnerBinding('smoke-guild', 'another-owner'),
+        { code: 'GUILD_OWNER_CONFLICT' });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
     await assert.rejects(store.setGuildApiKey('smoke-guild', 'wrong-owner-key', 'admin-two', 'oauth', {
       ownerId: 'another-owner', expectedApiKey: 'smoke-key-three',
     }), { name: 'ConditionalCheckFailedException' });
