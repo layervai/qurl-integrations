@@ -104,86 +104,50 @@ function isAuditSecretKey(key) {
   return AUDIT_SECRET_KEYS.has(String(key).toLowerCase());
 }
 
-// Returns a cloned meta value with any object key in AUDIT_SECRET_KEYS
-// replaced by '[REDACTED]'. Recurses to depth 5 with redact()'s array
-// handling so a buried `{ context: { auth_token } }` is also covered.
-// Also returns `secretKeys`, an array of every offending key observed
-// (deduped, in encounter order) so audit() can name all of them in
-// the warn line — partial reporting would let a caller fix one key
-// and re-run only to discover another the next time.
-//
-// General secrets use exact-match so legitimate dimensions like
-// `tokens_minted` survive. qURL access-link strings/containers additionally
-// use isQurlAccessLinkKey so decorated field names cannot bypass audit
-// redaction; non-string scalar dimensions still survive. Recurses into most
-// matched-key non-null object/array values (depth-5 cap inherited from the
-// function body); qURL access-link containers are suppressed as a unit because
-// bare strings inside them have no inner key to match.
-function redactAuditSecrets(value, depth = 0, secretKeys = []) {
-  if (depth > 5 || value == null || typeof value !== 'object') {
-    return { value, secretKeys };
+// Keep matched-key descendants secret even when inner keys are generic (value,
+// data) or absent (array elements). Audit key reporting keeps encounter order.
+function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecret = false) {
+  if (insideSecret && typeof value === 'string' && value.length > 0) {
+    return { value: '[REDACTED]', secretKeys };
   }
+  // Never invoke caller-provided toJSON hooks during serialization.
+  if (typeof value === 'function') return { value: '[UNSUPPORTED]', secretKeys };
+  if (value == null || typeof value !== 'object') return { value, secretKeys };
+  // Returning the original object at the depth limit could expose its secrets.
+  if (depth > 5) return { value: '[TRUNCATED]', secretKeys };
   if (Array.isArray(value)) {
-    const arr = value.map((v) => redactAuditSecrets(v, depth + 1, secretKeys).value);
-    return { value: arr, secretKeys };
+    return {
+      value: value.map(v => redactAuditSecrets(v, depth + 1, secretKeys, insideSecret).value),
+      secretKeys,
+    };
   }
   const out = {};
   for (const [k, v] of Object.entries(value)) {
-    const decoratedQurlLinkValue = isQurlAccessLinkKey(k)
-      && ((typeof v === 'string' && v.length > 0) || isNonEmptyContainer(v));
-    if (isAuditSecretKey(k) || decoratedQurlLinkValue) {
-      // Blank non-empty strings; recurse into non-null objects/arrays so a
-      // `{ auth_token: { ... } }` accident still has its inner sensitive
-      // keys examined. General-secret recursion uses exact-match — legit audit
-      // dimensions like `tokens_minted` survive (pinned by test). Push outer key
-      // BEFORE recursing for parent-first warn-line order. qURL link
-      // containers are the exception and are suppressed as a unit below.
-      if (!secretKeys.includes(k)) secretKeys.push(k);
-      if (typeof v === 'string' && v.length > 0) {
-        out[k] = '[REDACTED]';
-      } else if (isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
-        // A qurlLinks container semantically consists of live bearer links;
-        // inner keys are not guaranteed to describe bearer values (for
-        // example, a user-id-to-link map), so suppress the whole non-empty
-        // container instead of risking a leak. Empty containers are safe.
-        out[k] = '[REDACTED]';
-      } else if (v != null && typeof v === 'object') {
-        out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
-      } else {
-        out[k] = v;
-      }
+    const secret = isAuditSecretKey(k) || (isQurlAccessLinkKey(k)
+      && ((typeof v === 'string' && v.length > 0) || isNonEmptyContainer(v)));
+    if (secret) secretKeys.add(k);
+    if (secret && isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
+      out[k] = '[REDACTED]';
     } else {
-      out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
+      out[k] = redactAuditSecrets(v, depth + 1, secretKeys, insideSecret || secret).value;
     }
   }
   return { value: out, secretKeys };
 }
 
-function redact(value, depth = 0) {
-  if (depth > 5 || value == null) return value;
-  if (Array.isArray(value)) return value.map(v => redact(v, depth + 1));
-  if (typeof value !== 'object') return value;
+function redact(value, depth = 0, insideSecret = false) {
+  if (insideSecret && typeof value === 'string' && value.length > 0) return '[REDACTED]';
+  if (typeof value === 'function') return '[UNSUPPORTED]';
+  if (value == null || typeof value !== 'object') return value;
+  if (depth > 5) return '[TRUNCATED]';
+  if (Array.isArray(value)) return value.map(v => redact(v, depth + 1, insideSecret));
   const out = {};
   for (const [k, v] of Object.entries(value)) {
-    if (shouldRedact(k)) {
-      // Blank non-empty strings; recurse into non-null objects/arrays so
-      // a `{ hash: { token: 'real' } }` accident still has its inner keys
-      // examined. qURL link containers are suppressed as a unit; other
-      // primitives pass through.
-      // Asymmetry note: see redactAuditSecrets() — this recursion uses the
-      // wider substring rule; the audit pathway uses exact-match except for
-      // narrowly identified qURL access-link values.
-      if (typeof v === 'string' && v.length > 0) {
-        out[k] = '[REDACTED]';
-      } else if (isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
-        out[k] = '[REDACTED]';
-      } else if (v != null && typeof v === 'object') {
-        out[k] = redact(v, depth + 1);
-      } else {
-        out[k] = v;
-      }
+    const secret = shouldRedact(k);
+    if (secret && isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
+      out[k] = '[REDACTED]';
     } else {
-      out[k] = redact(v, depth + 1);
+      out[k] = redact(v, depth + 1, insideSecret || secret);
     }
   }
   return out;
@@ -200,8 +164,14 @@ function sanitizeMessage(message) {
   return message.replace(CONTROL_CHARS_RE, ' ');
 }
 function formatMessage(level, message, meta = {}) {
-  const safe = redact(meta);
-  const metaStr = Object.keys(safe).length > 0 ? ` ${JSON.stringify(safe)}` : '';
+  let metaStr = '';
+  try {
+    const safe = redact(meta);
+    if (safe != null && Object.keys(safe).length > 0) metaStr = ` ${JSON.stringify(safe)}`;
+  } catch {
+    // The metadata and exception message can both contain secrets.
+    metaStr = ' [meta_serialization_failed]';
+  }
   return `[${formatTimestamp()}] ${level.toUpperCase()}: ${sanitizeMessage(message)}${metaStr}`;
 }
 
@@ -263,33 +233,33 @@ const logger = {
     // offending key name so the operator log below can name it. Safe
     // to redact because exact-match doesn't false-positive on
     // legitimate dimensions (proven by the tokens_minted test).
-    const { value: cleanedMeta, secretKeys } = redactAuditSecrets(meta);
-    if (secretKeys.length > 0) {
-      // Logged via console.error so it surfaces at error level in
-      // CloudWatch (the logger has no separate warn channel that
-      // emits at error severity). Defense-in-depth alongside the
-      // value redaction above — the redacted payload still emits,
-      // but the operator can grep the error log to find every
-      // misbehaving call site and remove the key from meta. ALL
-      // offending keys are listed so a caller fixing the first
-      // doesn't have to re-run to discover the second.
-      const namedKeys = secretKeys.map(k => `"${sanitizeMessage(k)}"`).join(', ');
-      console.error(`[${formatTimestamp()}] ERROR: logger.audit received secret-shaped key(s) [${namedKeys}] in event=${sanitizeMessage(event)}; value(s) redacted in emitted payload — caller must remove from meta`);
-    }
-    // Spread cleaned meta first, then pin event + agent last so a
-    // caller passing `agent` or `event` in meta cannot overwrite the
-    // canonical value the CloudWatch filters key off of.
-    const auditPayload = { ...cleanedMeta, event, agent: 'discord' };
-    // Single-line JSON, parseable by `{ $.audit.event = "..." }`
-    // CloudWatch filter syntax. No timestamp prefix — the JSON has
-    // its own ts field. console.log adds a trailing newline.
-    //
-    // Wrap JSON.stringify in try/catch — a circular reference, BigInt,
-    // or other non-serializable value in meta would otherwise throw
-    // out of audit() and into the caller, which on the per-recipient
-    // batchSettled callback would fail an entire DM. Audit must never
-    // break the user-visible flow; degrade to an error log instead.
     try {
+      const { value: cleanedMeta, secretKeys } = redactAuditSecrets(meta);
+      if (secretKeys.size > 0) {
+        // Logged via console.error so it surfaces at error level in
+        // CloudWatch (the logger has no separate warn channel that
+        // emits at error severity). Defense-in-depth alongside the
+        // value redaction above — the redacted payload still emits,
+        // but the operator can grep the error log to find every
+        // misbehaving call site and remove the key from meta. ALL
+        // offending keys are listed so a caller fixing the first
+        // doesn't have to re-run to discover the second.
+        const namedKeys = [...secretKeys].map(k => `"${sanitizeMessage(k)}"`).join(', ');
+        console.error(`[${formatTimestamp()}] ERROR: logger.audit received secret-shaped key(s) [${namedKeys}] in event=${sanitizeMessage(event)}; value(s) redacted in emitted payload — caller must remove from meta`);
+      }
+      // Spread cleaned meta first, then pin event + agent last so a
+      // caller passing `agent` or `event` in meta cannot overwrite the
+      // canonical value the CloudWatch filters key off of.
+      const auditPayload = { ...cleanedMeta, event, agent: 'discord' };
+      // Single-line JSON, parseable by `{ $.audit.event = "..." }`
+      // CloudWatch filter syntax. No timestamp prefix — the JSON has
+      // its own ts field. console.log adds a trailing newline.
+      //
+      // Wrap JSON.stringify in try/catch — a circular reference, BigInt,
+      // or other non-serializable value in meta would otherwise throw
+      // out of audit() and into the caller, which on the per-recipient
+      // batchSettled callback would fail an entire DM. Audit must never
+      // break the user-visible flow; degrade to an error log instead.
       console.log(JSON.stringify({
         audit: auditPayload,
         ts: formatTimestamp(),
@@ -308,12 +278,12 @@ const logger = {
             event: 'audit_serialization_failed',
             agent: 'discord',
             original_event: String(event),
-            reason: sanitizeMessage(err && err.message),
+            reason: 'metadata serialization failed',
           },
           ts: formatTimestamp(),
         }));
       } catch (fallbackErr) {
-        console.error(`[${formatTimestamp()}] ERROR: logger.audit serialization failed event=${sanitizeMessage(event)} reason=${sanitizeMessage(err && err.message)} fallback_reason=${sanitizeMessage(fallbackErr && fallbackErr.message)}`);
+        console.error(`[${formatTimestamp()}] ERROR: logger.audit serialization failed event=${sanitizeMessage(event)} reason=metadata_serialization_failed fallback_reason=serialization_failed`);
       }
     }
   },
