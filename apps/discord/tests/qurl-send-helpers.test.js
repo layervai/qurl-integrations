@@ -458,7 +458,7 @@ describe('resolveMentionableSelection', () => {
     const bot = { ...makeUser('100000000000000099'), bot: true };
     const int = makeMentionableInteraction({ pickedRoles: [
       ['role-cold', { id: 'role-cold', mentionable: true }],
-      makeRole({ id: 'role-live', members: [{ user: human }, { user: bot }] }),
+      makeRole({ mentionable: true, id: 'role-live', members: [{ user: human }, { user: bot }] }),
     ] });
     const result = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
     expect(result.users).toEqual([human]);
@@ -467,11 +467,29 @@ describe('resolveMentionableSelection', () => {
   });
 
   test('empty named-role collection is unavailable only when the guild cache is cold', () => {
-    const role = makeRole({ id: 'role-cold', members: [] });
+    const role = makeRole({ mentionable: true, id: 'role-cold', members: [] });
     const cold = makeMentionableInteraction({ pickedRoles: [role] });
     expect(resolveMentionableSelection({ interaction: cold, canMentionEveryone: false }).unavailableRoleCount).toBe(1);
     const warm = makeMentionableInteraction({ pickedRoles: [role], guildMemberCache: new Map([['cached-user', { user: makeUser('cached-user') }]]) });
     expect(resolveMentionableSelection({ interaction: warm, canMentionEveryone: false }).unavailableRoleCount).toBe(0);
+  });
+
+  test.each([1, 10])('actual SDK role getter with one cached bot and memberCount=%i', memberCount => {
+    const { Role, Collection } = jest.requireActual('discord.js');
+    const bot = makeUser('100000000000000099', { bot: true });
+    const interaction = makeMentionableInteraction({
+      guildMemberCache: new Collection([[bot.id, { user: bot, _roles: [] }]]),
+    });
+    interaction.guild.memberCount = memberCount;
+    const role = new Role({}, { id: '200000000000000001', name: 'Empty cached role', mentionable: true }, interaction.guild);
+    interaction.roles.set(role.id, role);
+    interaction.guild.roles.cache.set(role.id, role);
+    expect(role.members.size).toBe(0);
+    expect(interaction.guild.members.cache.size).toBe(1);
+    const result = resolveMentionableSelection({ interaction, canMentionEveryone: false });
+    expect(result.users).toEqual([]);
+    expect(result.unavailableRoleCount).toBe(memberCount > 1 ? 1 : 0);
+    expect(result.droppedFromRoles).toBe(0);
   });
 
   test('everyoneCacheCold: @everyone WITH perm but missing guild.members.cache → flag set, no expansion', () => {

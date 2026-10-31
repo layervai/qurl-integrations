@@ -4740,9 +4740,13 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
         everyoneCacheCold = true;
         continue;
       }
-      if (!isEveryoneRole && source.size === 0 && !guild?.members?.cache?.size) {
-        namedRoleMembersUnavailable.add(roleId);
-        continue;
+      if (!isEveryoneRole && source.size === 0) {
+        // Role.members filters the guild cache; a cached bot alone is not warm.
+        const cachedMembers = guild?.members?.cache?.size ?? 0;
+        if (cachedMembers === 0 || (Number.isSafeInteger(guild?.memberCount) && cachedMembers < guild.memberCount)) {
+          namedRoleMembersUnavailable.add(roleId);
+          continue;
+        }
       }
       // Two break conditions, both belt-and-suspenders:
       //  - userMap.size at cap: stops adding new entries once the
