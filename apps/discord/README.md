@@ -146,7 +146,9 @@ SDK settings, forbidden production hooks, and dependencies of enabled features.
 Tests check declarations against actual runtime environment reads and the
 installed SDK. New settings must update this file with the code that reads them.
 Use direct `process.env.NAME` or literal-key reads and `intEnv`; a new access
-style also needs a scanner update.
+style also needs a scanner update. Undeclared Node or SDK settings such as
+`NODE_OPTIONS` and `AWS_MAX_ATTEMPTS` also fail the managed preflight; declare
+and test them deliberately before adding task bindings.
 Boot validators still check actual secret values, OAuth setup, default-webhook/
 BYOK rules and role/resume/shipper combinations. A matching name or secret
 reference does not prove valid credentials.
