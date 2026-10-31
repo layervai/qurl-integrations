@@ -141,7 +141,8 @@
 // runs inside the synchronous emit window; the decrement fires
 // whenever the dispatch promise settles, however much later.
 
-const { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
+const { ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
+const { createSqsClient } = require('./utils/sqs');
 const config = require('./config');
 const logger = require('./logger');
 const { GATEWAY_DISPATCH_TYPES, LOG_KINDS } = require('./constants');
@@ -434,25 +435,6 @@ function _setSqsClientForTest(client) {
   sqsClient = client;
 }
 
-function createSqsClient() {
-  // Note: AWS credential resolution (IAM task role, env vars,
-  // credential-chain) happens lazily on first `.send()`, NOT at
-  // SQSClient construction. A missing/invalid task role will
-  // surface as a ReceiveMessageCommand failure inside pollLoop —
-  // landing in the error-backoff path rather than as a boot
-  // failure. Treated as acceptable because (a) the bot's task
-  // execution role is required for the rest of the AWS surface
-  // (DDB flow-state, etc.) and would fail those too, and (b) ops
-  // monitoring on the pollLoop error log catches the case. If we
-  // ever need explicit boot-time credential resolution, the
-  // pattern is `await sqsClient.config.credentials()` inside
-  // start() and propagate any throw.
-  const region = (process.env.AWS_REGION ?? '').trim();
-  if (!region) {
-    throw new Error('AWS_REGION is required to use the event consumer. Set it in the deployment template (e.g. `us-east-2`).');
-  }
-  return new SQSClient({ region });
-}
 
 // Every terminal path in processMessage deletes the message (success,
 // malformed body, unknown eventType, reconstruction throw — see the
@@ -1167,7 +1149,7 @@ function start(client, { onFatal } = {}) {
     throw new Error('Event consumer: QURL_BOT_EVENTS_QUEUE_URL is not set');
   }
   if (!sqsClient) {
-    sqsClient = createSqsClient();
+    sqsClient = createSqsClient('event consumer');
   }
   running = true;
   stopController = new AbortController();
