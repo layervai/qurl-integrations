@@ -71,3 +71,27 @@ describe('verifyAuth0IdToken — Auth0 not configured', () => {
     }
   });
 });
+
+describe('fresh setup identity', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const binding = { nonce: 'bound-nonce', startedAt: now - 60 };
+  it.each([
+    { nonce: 'another', sub: 'owner', auth_time: now },
+    { sub: 'owner', auth_time: now },
+    { nonce: 'bound-nonce', auth_time: now },
+    { nonce: 'bound-nonce', sub: 'owner' },
+    { nonce: 'bound-nonce', sub: 'owner', auth_time: now - 66 },
+    { nonce: 'bound-nonce', sub: 'owner', auth_time: now + 60 },
+    { nonce: 'bound-nonce', sub: 'owner', auth_time: String(now) },
+  ])('refuses a validly signed but unbound or stale identity: %p', async (payload) => {
+    jose.jwtVerify.mockResolvedValueOnce({ payload });
+    await expect(verifyAuth0IdToken('signed.jwt', binding)).resolves.toEqual({
+      ok: false, reason: 'setup_identity_not_bound_or_fresh',
+    });
+  });
+  it('accepts the nonce-bound identity authenticated since setup began', async () => {
+    const payload = { nonce: binding.nonce, sub: 'owner', auth_time: now };
+    jose.jwtVerify.mockResolvedValueOnce({ payload });
+    await expect(verifyAuth0IdToken('signed.jwt', binding)).resolves.toEqual({ ok: true, payload });
+  });
+});

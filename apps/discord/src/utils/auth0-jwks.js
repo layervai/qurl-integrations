@@ -46,7 +46,7 @@ function getJwks() {
  * are audienced to the OAuth client, NOT to the API audience the
  * access_token uses).
  */
-async function verifyAuth0IdToken(idToken) {
+async function verifyAuth0IdToken(idToken, binding) {
   if (typeof idToken !== 'string' || !idToken) {
     return { ok: false, reason: 'no_token' };
   }
@@ -61,7 +61,17 @@ async function verifyAuth0IdToken(idToken) {
       // negligible. Explicit so a future "tolerate skew?" question has
       // a clear answer site.
       clockTolerance: 0,
+      ...(binding ? { requiredClaims: ['sub', 'exp', 'iat', 'nonce', 'auth_time'] } : {}),
     });
+    if (binding && (!Number.isSafeInteger(binding.startedAt)
+        || typeof binding.nonce !== 'string' || !binding.nonce
+        || payload.nonce !== binding.nonce
+        || typeof payload.sub !== 'string' || !payload.sub
+        || !Number.isSafeInteger(payload.auth_time)
+        || payload.auth_time < binding.startedAt - 5
+        || payload.auth_time > Math.floor(Date.now() / 1000) + 5)) {
+      return { ok: false, reason: 'setup_identity_not_bound_or_fresh' };
+    }
     return { ok: true, payload };
   } catch (err) {
     // Severity split: signature/claim/JWKS failures are the only signal

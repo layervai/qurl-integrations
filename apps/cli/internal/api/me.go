@@ -37,7 +37,10 @@ type KeyIdentity struct {
 	ExpiresAt *time.Time
 }
 
-// meData mirrors the GET /v1/me response document this CLI consumes.
+// TODO(upstream-contract): meData mirrors GET /v1/me. Like Discord's identity
+// reader, it requires nonblank owner_id and treats display fields as optional.
+// This general reader also accepts JWT identities without api_key; Discord's
+// saved-key reader requires that block because it authenticates with an API key.
 type meData struct {
 	OwnerID  string `json:"owner_id"`
 	AuthType string `json:"auth_type"`

@@ -147,6 +147,14 @@ describe('qURL client — getIdentity', () => {
     });
   });
 
+  it.each([undefined, '', '   '])('rejects a missing or blank owner identity (%p)', async (ownerId) => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
+      owner_id: ownerId, api_key: {},
+    }));
+    await expect(qurl.getIdentity('stored-guild-key'))
+      .rejects.toThrow('qURL API GET /me failed (unknown_error)');
+  });
+
   it('rejects an identity response missing the API-key identity block', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
       owner_id: 'owner-123',

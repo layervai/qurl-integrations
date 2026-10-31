@@ -25,21 +25,12 @@ function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
   // no refresh-token use, so offline_access is deliberately absent.
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
-  // OIDC nonce is deliberately absent: the id_token comes from the
-  // client-secret-authenticated back-channel exchange, and its claims feed
-  // only the success-page readout and an audit fingerprint—not authorization.
-  // State + same-browser cookie + PKCE bind the setup itself. Add and verify a
-  // nonce if an id_token claim ever becomes an authorization input.
+  authorizeUrl.searchParams.set('nonce', state);
+  authorizeUrl.searchParams.set('max_age', '0');
   authorizeUrl.searchParams.set('state', state);
   authorizeUrl.searchParams.set('code_challenge', codeChallenge);
   authorizeUrl.searchParams.set('code_challenge_method', 'S256');
-  // `login` is a best-effort policy hint requesting fresh Auth0
-  // authentication instead of ambient-session reuse. The client does not
-  // independently attest that freshness; #1366 owns the verifiable,
-  // nonce-bound max_age/auth_time guarantee. Until #1365 pins the passwordless
-  // connection, a live upstream social/enterprise IdP session can still select
-  // an account. `consent` lets a setup re-run mint a new key instead of
-  // silently reusing an earlier grant.
+  // Force fresh authentication; the callback checks nonce and auth_time.
   authorizeUrl.searchParams.set('prompt', 'login consent');
 
   // Discord is deliberately unpinned until #1365 enables passwordless on each
