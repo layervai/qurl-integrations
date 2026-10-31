@@ -1,6 +1,6 @@
 const config = require('../config');
 
-// Both /qurl setup and Add to Discord end at the same callback and bind a
+// Both /qurl-admin setup and Add to Discord end at the same callback and bind a
 // guild to the Auth0 account selected here. Keep every security-relevant
 // authorize parameter in one builder so the entry paths cannot drift.
 function qurlOAuthCallbackUrl() {

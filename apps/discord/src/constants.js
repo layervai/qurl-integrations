@@ -468,7 +468,7 @@ const AUDIT_EVENTS = {
   DEPENDENCY_AUTH_FAILURE: 'dependency_auth_failure',
 
   // Emitted by setGuildApiKey when a successful guild setup (OAuth callback or
-  // `/qurl setup` paste) rebinds an existing guild to a different configured_by
+  // `/qurl-admin setup` paste) rebinds an existing guild to a different configured_by
   // admin. TODO(upstream-contract): keep the infra repo's
   // qurl_setup_admin_changed CloudWatch filter/alarm in sync with this string
   // (pinned literally in ddb-store.test.js). Scope: an administrator change
@@ -534,7 +534,7 @@ const AUDIT_EVENTS = {
   // Per-row decrypt failure during scanGuildSubscriptions. Sustained
   // rate = KMS key rotation drift, partial migration, or manual DDB
   // tamper — a guild's secret is unrecoverable from the cache until
-  // re-encrypted via backfill or /qurl setup.
+  // re-encrypted via backfill or /qurl-admin setup.
   QURL_WEBHOOK_CACHE_ROW_DECRYPT_FAIL: 'qurl_webhook_cache_row_decrypt_fail',
   // Mass-decrypt-fail escalation. Fires once per scan when >50% of
   // provisioned rows fail decrypt (min 3 rows). Distinguishes a KMS-
@@ -649,7 +649,7 @@ const AUDIT_EVENTS = {
   //                            abuse signal; the one rejection that keeps
   //                            the cooldown). No connector call.
   //   - `result: 'unconfigured'` — the guild has no qURL API key (no
-  //                            /qurl setup). No connector call.
+  //                            /qurl-admin setup). No connector call.
   //   - `result: 'rate_limited'` — the connector 429'd this guild (an abuse
   //                            signal that KEEPS the cooldown, mirroring
   //                            'rejected'); the connector call was throttled.
@@ -702,7 +702,7 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
 // qurl-service subscription description (`via=<value>`; the backfill script
 // writes its own `via=backfill-script`). Renaming a value forks both. An enum
 // so a typo cannot silently split a grouping. OAUTH deliberately covers both
-// /oauth/qurl/callback entries (`/qurl setup` and the install link): the signed
+// /oauth/qurl/callback entries (`/qurl-admin setup` and the install link): the signed
 // state carries no stage marker.
 const SETUP_VIA = Object.freeze({
   OAUTH: 'oauth',

@@ -128,7 +128,7 @@ describe('qurl-oauth routes', () => {
       expect(loc.searchParams.get('scope')).toContain('qurl:read');
       expect(loc.searchParams.get('scope')).not.toContain('offline_access');
       // `login` asks Auth0 not to reuse its ambient session; `consent` is
-      // load-bearing for key rotation — re-running /qurl setup must actually
+      // load-bearing for key rotation — re-running /qurl-admin setup must actually
       // re-prompt. Pin both so a future refactor can't drop either.
       expect(loc.searchParams.get('prompt')).toBe('login consent');
       expect(loc.searchParams.get('connection')).toBe('email');

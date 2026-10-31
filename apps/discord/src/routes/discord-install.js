@@ -86,7 +86,7 @@ function renderError(res, statusCode, headline, detail) {
     title: 'Discord Install Failed',
     icon: '❌',
     heading: headline,
-    message: `If the bot is already in your server, run /qurl setup there. If it is not, start again from Add to Discord. Details: ${detail}`,
+    message: `If the bot is already in your server, run /qurl-admin setup there. If it is not, start again from Add to Discord. Details: ${detail}`,
     type: 'error',
   }));
 }
@@ -231,7 +231,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
 
   // The shared Auth0 builder requests fresh login + consent on this path and
-  // /qurl setup alike. Neither parameter depends on prior guild config, so no
+  // /qurl-admin setup alike. Neither parameter depends on prior guild config, so no
   // DDB read is needed before exchanging the Discord code.
 
   // 1. Exchange code at Discord for an access_token and authoritative
@@ -288,7 +288,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     // 2. /users/@me — minimal-scope identity probe. The install request's
     //    explicit `identify` scope authorizes this call and gives us the
     //    admin's Discord user ID so the qURL OAuth
-    //    state can bind to it (matches the existing /qurl setup state).
+    //    state can bind to it (matches the existing /qurl-admin setup state).
     const userResp = await fetch('https://discord.com/api/users/@me', {
       headers: { 'Authorization': `Bearer ${accessToken}` },
       signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
@@ -316,7 +316,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
 
   // 3. Now we have (guildId, discordUserId) — the same shape as the
-  //    /qurl setup slash-command state. Mint a qURL OAuth state and
+  //    /qurl-admin setup slash-command state. Mint a qURL OAuth state and
   //    redirect to Auth0; the existing /oauth/qurl/callback will finish
   //    the flow (mint qurl-service API key, persist, DM admin).
   const qurlState = signQurlOAuthState(guildId, discordUserId);

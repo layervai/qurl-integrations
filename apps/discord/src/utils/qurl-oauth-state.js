@@ -1,4 +1,4 @@
-// State token for the qURL OAuth flow (/qurl setup → Auth0 → mint API key).
+// State token for the qURL OAuth flow (/qurl-admin setup → Auth0 → mint API key).
 //
 // Distinct from the GitHub OAuth state in commands.js because the binding
 // shape is different: GitHub state binds discord_id only; qURL state binds

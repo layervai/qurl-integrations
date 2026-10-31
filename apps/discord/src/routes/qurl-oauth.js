@@ -1,4 +1,4 @@
-// qURL OAuth routes — Stage 1 entry (/oauth/qurl/start via /qurl setup)
+// qURL OAuth routes — Stage 1 entry (/oauth/qurl/start via /qurl-admin setup)
 // and the shared callback (/oauth/qurl/callback) that Stage 2
 // (routes/discord-install.js) also chains into. Step-by-step user
 // experience and CSRF posture live in the PR #177 description; Stage-2
@@ -48,7 +48,7 @@ const readyCommandsMarkdown = config.MAP_COMMAND_ENABLED
 
 // Browser-session cookie binding (parallel to /auth/github's qurl_oauth_session
 // pattern). /start sets a HttpOnly cookie holding a random 16-byte token;
-// /callback re-checks it. If a leaked /qurl setup ephemeral URL is opened
+// /callback re-checks it. If a leaked /qurl-admin setup ephemeral URL is opened
 // in a different browser, the cookie won't match and the callback rejects
 // before reaching Auth0 — narrows the leaked-URL window from "the state TTL
 // to anyone with a layerv.ai login" to "the state TTL AND the same browser
@@ -109,7 +109,7 @@ function renderError(res, statusCode, headline, detail) {
     title: 'qURL Setup Failed',
     icon: '❌',
     heading: headline,
-    message: detail + ' Run /qurl setup in Discord to start over.',
+    message: detail + ' Run /qurl-admin setup in Discord to start over.',
     type: 'error',
   }));
 }
@@ -120,7 +120,7 @@ function clearQurlOAuthCookies(res) {
 }
 
 // /oauth/qurl/start — admin lands here after clicking the link in
-// /qurl setup's ephemeral reply. Validate the state, set a session-bound
+// /qurl-admin setup's ephemeral reply. Validate the state, set a session-bound
 // cookie carrying the same state, then 302 to Auth0 with the state in
 // the URL. The /callback handler re-checks cookie === query.state — a
 // classic double-submit CSRF binding. If the link leaks and is opened
@@ -148,7 +148,7 @@ router.get('/start', rateLimit, async (req, res) => {
   const verified = verifyQurlOAuthState(state);
   if (!verified.ok) {
     logger.warn('qURL OAuth start rejected invalid state', { reason: verified.reason });
-    return renderError(res, 400, 'Invalid setup link', 'This setup link is invalid or has expired (links last 15 minutes). Run /qurl setup again, or start again from Add to Discord.');
+    return renderError(res, 400, 'Invalid setup link', 'This setup link is invalid or has expired (links last 15 minutes). Run /qurl-admin setup again, or start again from Add to Discord.');
   }
   // Double-submit CSRF cookie: value is the same state token the URL
   // carries to Auth0. /callback re-checks cookie === query.state.
@@ -221,13 +221,13 @@ router.get('/callback', rateLimit, async (req, res) => {
   if (!cookieState) {
     logger.warn('qURL OAuth callback missing session cookie', { ip: req.ip });
     clearQurlOAuthCookies(res);
-    return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
+    return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl-admin setup was clicked.');
   }
   const cookieMatches = timingSafeStringEqual(cookieState, state);
   if (!cookieMatches) {
     logger.warn('qURL OAuth callback cookie/state mismatch', { ip: req.ip });
     clearQurlOAuthCookies(res);
-    return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
+    return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl-admin setup was clicked.');
   }
   const codeVerifier = readCookie(req, QURL_OAUTH_PKCE_COOKIE);
   // Shape check keeps malformed cookies out of Auth0; Auth0's stored
@@ -276,7 +276,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       // Drain for connection reuse; upstream errors can reflect OAuth credentials.
       await tokenResp.text().catch(() => undefined);
       logger.error('Auth0 token exchange failed', { status: tokenResp.status });
-      return renderError(res, 502, 'Authorization failed', 'Could not complete the Auth0 handshake. Please run /qurl setup again.');
+      return renderError(res, 502, 'Authorization failed', 'Could not complete the Auth0 handshake. Please run /qurl-admin setup again.');
     }
     const tokenJson = await tokenResp.json();
     accessToken = tokenJson.access_token;
@@ -288,7 +288,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     // round 9 item #4.
     if (typeof accessToken !== 'string' || !accessToken) {
       logger.error('Auth0 token response missing or non-string access_token');
-      return renderError(res, 502, 'Authorization failed', 'Auth0 returned an unexpected response. Please run /qurl setup again.');
+      return renderError(res, 502, 'Authorization failed', 'Auth0 returned an unexpected response. Please run /qurl-admin setup again.');
     }
     // id_token email extraction with full JWKS verification. The email
     // is the load-bearing visual cue against the Stage-2 confused-
@@ -335,7 +335,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     }
   } catch (err) {
     logger.error('Auth0 token exchange threw', { error: err?.message });
-    return renderError(res, 502, 'Authorization failed', 'A network error occurred during the Auth0 handshake. Please run /qurl setup again.');
+    return renderError(res, 502, 'Authorization failed', 'A network error occurred during the Auth0 handshake. Please run /qurl-admin setup again.');
   }
 
   // 2. Mint a guild-scoped qURL API key via POST /v1/api-keys, owned by
@@ -376,14 +376,14 @@ router.get('/callback', rateLimit, async (req, res) => {
           status: mintResp.status, problemCode, guildId,
         });
         return renderError(res, 429, 'qURL API key limit reached',
-          'Your qURL account has hit its API key limit. Delete an unused key in your layerv.ai dashboard, or upgrade your plan, then run /qurl setup again.');
+          'Your qURL account has hit its API key limit. Delete an unused key in your layerv.ai dashboard, or upgrade your plan, then run /qurl-admin setup again.');
       }
 
       logger.error('qURL API key mint failed', {
         status: mintResp.status, problemCode, body: errBody.slice(0, 500), guildId,
       });
       return renderError(res, 502, 'Could not provision qURL key',
-        'qurl-service rejected the API-key request. Please run /qurl setup again, or contact your layerv.ai admin.');
+        'qurl-service rejected the API-key request. Please run /qurl-admin setup again, or contact your layerv.ai admin.');
     }
     const mintJson = await mintResp.json();
     apiKey = mintJson?.data?.api_key;
@@ -416,7 +416,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   } catch (err) {
     logger.error('qURL API key mint threw', { error: err?.message, guildId });
     return renderError(res, 502, 'Could not provision qURL key',
-      'A network error occurred while provisioning your qURL key. Please run /qurl setup again.');
+      'A network error occurred while provisioning your qURL key. Please run /qurl-admin setup again.');
   }
 
   // 3. Persist the key. setGuildApiKey is idempotent (upsert) — the
@@ -433,7 +433,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     // Key was minted but not stored. Best-effort delete on qurl-service
     // so retries don't pile up orphan keys under the admin's account.
     // Fire-and-forget — even if the cleanup fails, the user-facing 500
-    // response below is the right outcome (admin runs /qurl setup
+    // response below is the right outcome (admin runs /qurl-admin setup
     // again to retry; the orphan only persists if delete also fails).
     // `keyId` is guaranteed non-empty here — the missing-key_id 502
     // earlier in the handler returned before this block can run, so
@@ -454,7 +454,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         error: dErr?.message, keyId, guildId,
       }));
     return renderError(res, 500, 'qURL key provisioned but not stored',
-      'Your qURL API key was created but the bot could not save it. Please run /qurl setup again. '
+      'Your qURL API key was created but the bot could not save it. Please run /qurl-admin setup again. '
       + 'If this keeps happening, contact your layerv.ai admin.');
   }
   logger.info('qURL OAuth setup complete', {
@@ -513,7 +513,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    the success page (DMs may be disabled by the admin's privacy
   //    settings, in which case the bot already has the working key).
   //    Include the key prefix so the admin can match it against
-  //    `/qurl status` and against the layerv.ai dashboard, which
+  //    `/qurl-admin status` and against the layerv.ai dashboard, which
   //    matters for spotting binding mismatches in the rare confused-
   //    deputy edge case (see PR #177 review item 3).
   const dmLines = [`✅ **qURL is connected to your Discord server.** Your team can now use ${readyCommandsMarkdown}. All usage will be billed to your qURL account.`];

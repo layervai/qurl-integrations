@@ -1870,11 +1870,11 @@ describe('buildRevokeHeader (slash-command revoke path)', () => {
   });
 
   it('plural: "Revoked 3/5 users." distinguishes failures from the existing-session caveat', () => {
-    expect(buildRevokeHeader(3, 5)).toBe('Revoked 3/5 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl setup` and reconnect. Revocation blocks new link access; sessions already opened may remain active.');
+    expect(buildRevokeHeader(3, 5)).toBe('Revoked 3/5 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl-admin setup` and reconnect. Revocation blocks new link access; sessions already opened may remain active.');
   });
 
   it('full failure reports unconfirmed revocation without claiming any existing sessions', () => {
-    expect(buildRevokeHeader(0, 2)).toBe('Revoked 0/2 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl setup` and reconnect.');
+    expect(buildRevokeHeader(0, 2)).toBe('Revoked 0/2 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl-admin setup` and reconnect.');
   });
 
   it.each([

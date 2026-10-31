@@ -222,7 +222,7 @@ function decryptPayload(ciphertext) {
 //
 // Why caller-supplied `expires_at` rather than computing it here:
 // different flow types have different lifecycle bounds (a
-// `/qurl setup` modal has a 15-minute window; a `/qurl send` or
+// `/qurl-admin setup` modal has a 15-minute window; a `/qurl send` or
 // `/qurl map` confirm card has a 3-minute window). The caller knows;
 // this module just persists.
 //
@@ -724,7 +724,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
 // caller-supplied value. This prevents cross-flow contamination
 // across commands that share a `flow_id` shape: when /qurl revoke
 // supersedes its own `awaiting_revoke_select` row, it must not be
-// able to admin_cleanup an in-flight /qurl setup row keyed at the
+// able to admin_cleanup an in-flight /qurl-admin setup row keyed at the
 // same (user, channel). The stage gate enforces "delete the flow
 // I expect, not whatever flow happens to live at this key."
 //
@@ -840,7 +840,7 @@ async function deleteFlow(flow_id, { stage, reason, expectedVersion } = {}) {
 
 // Open a fresh flow row, superseding a same-flow_id predecessor at
 // the SAME stage if one exists. The supersede-and-retry pattern was
-// duplicated across /qurl revoke and /qurl setup (and recurs in
+// duplicated across /qurl revoke and /qurl-admin setup (and recurs in
 // /qurl send + /qurl map); extracting it here closes #272 (OCC on
 // deleteFlow against the prior version), #273 (include_expired so
 // a stuck-orphan past its logical TTL is still observable), and

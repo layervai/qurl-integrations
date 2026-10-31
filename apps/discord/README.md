@@ -24,8 +24,8 @@ revocable at any time.
 | `/qurl map` | Share a Google Maps location as one-time qURL links *(where enabled)* |
 | `/qurl revoke` | Revoke every link from a previous send |
 | `/qurl help` | Show the command reference |
-| `/qurl setup` | *(admin)* Connect this server to qURL |
-| `/qurl status` | *(admin)* Verify the stored key and show its prefix and scopes |
+| `/qurl-admin setup` | *(admin)* Connect this server to qURL |
+| `/qurl-admin status` | *(admin)* Verify the stored key and show its prefix and scopes |
 
 ### `/qurl send` options
 
@@ -76,11 +76,11 @@ legacy static invite links do not complete installation after it is enabled.
 
 The Add to Discord flow prompts the installing admin to sign in to qURL and
 connects the server automatically. For a bot that is already installed, a
-server admin can run `/qurl setup` to complete or replace that connection. The
-key is stored **encrypted at rest** and scoped to the server. Run `/qurl status`
+server admin can run `/qurl-admin setup` to complete or replace that connection. The
+key is stored **encrypted at rest** and scoped to the server. Run `/qurl-admin status`
 to confirm the connection.
 
-Every Add to Discord and `/qurl setup` asks for a fresh qURL sign-in, even if
+Every Add to Discord and `/qurl-admin setup` asks for a fresh qURL sign-in, even if
 the browser is already signed in, so a guild is never silently bound to
 whichever qURL account that browser session belongs to.
 
@@ -191,13 +191,13 @@ setup) means required to use that feature.
 | `DISCORD_TOKEN` | Yes | Discord bot token |
 | `DISCORD_CLIENT_ID` | Customer install | Numeric Discord application ID for the one-click Add to Discord flow; `PLACEHOLDER` or a malformed value disables that flow |
 | `DISCORD_CLIENT_SECRET` | Customer install | Discord OAuth2 client secret for the one-click Add to Discord flow |
-| `QURL_API_KEY` | `/qurl detect`; Production when `QURL_WEBHOOK_SECRET` is set | Requires `qurl:read` and `qurl:write` for detect; also the fallback for send operations without a server key from `/qurl setup`. |
+| `QURL_API_KEY` | `/qurl detect`; Production when `QURL_WEBHOOK_SECRET` is set | Requires `qurl:read` and `qurl:write` for detect; also the fallback for send operations without a server key from `/qurl-admin setup`. |
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `QURL_WEBHOOK_SECRET` | Default webhook | Shared HMAC secret written by the registrar Lambda; required in every process that links guild webhooks when a default subscription exists. |
 | `QURL_WEBHOOK_PURE_BYOK` | No | Set to `true` only when the deployment intentionally has no default webhook subscription. |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
 | `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete OAuth setup (defaults to `http://localhost:3000`). Local customer-install testing must use `localhost` or HTTPS because its `__Host-` session cookie is always `Secure`. |
-| `AUTH0_EMAIL_CONNECTION` | No | Auth0 connection pinned on setup/install authorize redirects (e.g. `email`). Unset or `PLACEHOLDER` sends no pin; a malformed value blocks every `/qurl setup` entry path until corrected. |
+| `AUTH0_EMAIL_CONNECTION` | No | Auth0 connection pinned on setup/install authorize redirects (e.g. `email`). Unset or `PLACEHOLDER` sends no pin; a malformed value blocks every `/qurl-admin setup` entry path until corrected. |
 | `RATE_LIMIT_INSTALL_MAX_REQUESTS` | No | Per-IP ceiling for the public `/oauth/discord/install` page per rate-limit window (default 120). Completed installs are still bounded by `RATE_LIMIT_MAX_REQUESTS` (two callback slots per install). Both limits are per bot task, not global. |
 | `KEY_ENCRYPTION_KEY` | Production | 32 random bytes, base64 — encrypts stored keys at rest |
 | `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
@@ -310,6 +310,11 @@ npm run lint  # eslint, zero warnings
 
 Slash commands register automatically when the bot starts.
 
+Setup and status are registered under `/qurl-admin`, with the Manage Server
+permission. `/qurl` keeps send, revoke, help and enabled optional user actions.
+Old cached `/qurl setup` and `/qurl status` submissions still reach the same
+runtime permission checks; they are absent from the new public command list.
+
 `npm test` mocks the AWS SDK and needs no external services. Running the bot
 locally (`npm run dev`) needs a DynamoDB endpoint — `docker-compose.yml` spins
 up a local DynamoDB and `scripts/provision-ddb-local.js` creates the tables.
@@ -325,7 +330,7 @@ repair instruction if an existing table lacks a required GSI. It never drops dat
 ## Architecture
 
 - **Multi-tenant by default** — the bot serves every server it's invited to.
-  Each server connects its own qURL account via `/qurl setup`; keys are
+  Each server connects its own qURL account via `/qurl-admin setup`; keys are
   envelope-encrypted (AES-256-GCM) at rest in DynamoDB.
 - **qURL API client** — creates one-time links and revokes them, with an
   SSRF guard on target URLs.
@@ -333,7 +338,7 @@ repair instruction if an existing table lacks a required GSI. It never drops dat
   behind an SSRF-guarded fetch.
 - **HTTP surface** — `/health` for load-balancer probes, `/metrics` (bearer
   authenticated), `/oauth/discord/install` plus its callback for customer
-  installs, and the qURL OAuth start/callback routes used by `/qurl setup`.
+  installs, and the qURL OAuth start/callback routes used by `/qurl-admin setup`.
 
 The authenticated JSON `/metrics?view=consumer` response includes `eventConsumer` for this
 process: `running`, `qurl_bot_event_inflight`, `qurl_bot_event_inflight_limit`,
@@ -373,8 +378,8 @@ null-mirror delete. A non-null mirror is persisted after the drain.
 
 ## Troubleshooting
 
-**"qURL is not configured"** — an admin needs to run `/qurl setup` on this
-server. Check the current state with `/qurl status`.
+**"qURL is not configured"** — an admin needs to run `/qurl-admin setup` on this
+server. Check the current state with `/qurl-admin status`.
 
 **Recipients didn't get a DM** — each recipient must allow direct messages from
 server members. The link is delivered privately, never in the channel.

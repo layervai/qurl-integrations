@@ -534,7 +534,7 @@ describe('/qurl help subcommand', () => {
   it('does not advertise Add to Discord when only qURL OAuth is configured', async () => {
     const content = await renderHelp({ qurlOAuth: true, discordInstall: false });
 
-    expect(content).toContain('`/qurl setup` — connect qURL via OAuth');
+    expect(content).toContain('`/qurl-admin setup` — connect qURL via OAuth');
     expect(content).not.toContain('Adding the bot to a new server');
     expect(content).not.toContain('Add to Discord');
   });
@@ -542,7 +542,7 @@ describe('/qurl help subcommand', () => {
   it('keeps legacy setup copy and no install CTA before qURL OAuth is configured', async () => {
     const content = await renderHelp({ qurlOAuth: false, discordInstall: false });
 
-    expect(content).toContain('`/qurl setup` — configure your API key');
+    expect(content).toContain('`/qurl-admin setup` — configure your API key');
     expect(content).not.toContain('connect qURL via OAuth');
     expect(content).not.toContain('Add to Discord');
   });
@@ -743,7 +743,7 @@ describe('/qurl revoke subcommand', () => {
     await cmd.execute(interaction);
 
     const siblingCall = interaction.editReply.mock.calls.find(
-      (c) => /qurl setup/.test(c[0]?.content || ''),
+      (c) => /qurl-admin setup/.test(c[0]?.content || ''),
     );
     expect(siblingCall).toBeDefined();
   });
@@ -777,7 +777,7 @@ describe('/qurl revoke subcommand', () => {
     await cmd.execute(interaction);
 
     const siblingCall = interaction.editReply.mock.calls.find(
-      (c) => /qurl setup.*button/.test(c[0]?.content || ''),
+      (c) => /qurl-admin setup.*button/.test(c[0]?.content || ''),
     );
     expect(siblingCall).toBeDefined();
   });
@@ -1080,7 +1080,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
   });
 });
 
-describe('/qurl setup subcommand (legacy modal-paste path)', () => {
+describe('/qurl-admin setup subcommand (legacy modal-paste path)', () => {
   const originalKEK = process.env.KEY_ENCRYPTION_KEY;
   const originalAuthDomain = process.env.AUTH0_DOMAIN;
   beforeAll(() => {
@@ -1169,7 +1169,7 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
         .not.toContain('AUTH0_EMAIL_CONNECTION');
       const logger = require('../src/logger');
       expect(logger.warn).toHaveBeenCalledWith(
-        'Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot',
+        'Refusing /qurl-admin setup: AUTH0_EMAIL_CONNECTION was rejected at boot',
       );
       expect(logger.error).not.toHaveBeenCalled();
     } finally {
@@ -1259,7 +1259,7 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
     await cmd.execute(interaction);
 
     const blockedCall = interaction.editReply.mock.calls.find(
-      (c) => /already have a `\/qurl setup` modal open/.test(c[0]?.content || ''),
+      (c) => /already have a `\/qurl-admin setup` modal open/.test(c[0]?.content || ''),
     );
     expect(blockedCall).toBeDefined();
   });
@@ -1477,7 +1477,7 @@ describe('handleSetupButton (dispatcher path)', () => {
     );
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining('please run `/qurl setup` again'),
+        content: expect.stringContaining('please run `/qurl-admin setup` again'),
       }),
     );
   });
@@ -1615,7 +1615,7 @@ describe('handleSetupModal (dispatcher path)', () => {
     expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
     const replyArg = interaction.reply.mock.calls.at(-1)[0];
     expect(replyArg.content).toContain('Invalid API key format');
-    expect(replyArg.content).toContain('Run `/qurl setup` again');
+    expect(replyArg.content).toContain('Run `/qurl-admin setup` again');
   });
 
   it('surfaces 401 from qURL API as invalid-key message', async () => {

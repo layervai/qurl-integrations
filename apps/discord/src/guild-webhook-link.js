@@ -1,7 +1,7 @@
 // Per-guild qurl-service webhook linking. Default-owner guilds reuse the
 // Lambda-managed subscription; different owners get a BYOK subscription.
 // Called from the two setGuildApiKey call sites + the backfill script.
-// Never re-throws to the caller: the OAuth callback / /qurl setup
+// Never re-throws to the caller: the OAuth callback / /qurl-admin setup
 // should succeed for key linking even when view-counter wiring fails
 // (the polling fallback covers it until the link is retried or remediated).
 
@@ -310,12 +310,12 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
 }
 
 // Fire-and-forget wrapper for the two splice points (commands.js
-// `/qurl setup` paste flow + qurl-oauth.js OAuth callback). Centralizes
+// `/qurl-admin setup` paste flow + qurl-oauth.js OAuth callback). Centralizes
 // the .catch + descriptionContext format so the two call sites stay
 // in sync — a future audit-log shape change should touch one place.
 //
 // KNOWN QUIRK (tracked in issue #487): SIGTERM mid-link drops the
-// in-flight work. The operator runs /qurl setup again; the backfill script
+// in-flight work. The operator runs /qurl-admin setup again; the backfill script
 // also catches first-time API-key-only rows. Polling fallback covers correctness.
 // Returns the settled promise for tests; production setup must not await it.
 function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, configuredBy }) {

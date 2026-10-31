@@ -1848,7 +1848,7 @@ async function setGuildDefaultWebhookOwner(
     if (!onlyKeyReencrypted) throw defaultOwnerKeyChangedError();
     // Retry once for unchanged plaintext with new encryption randomness. Keep
     // every webhook CAS predicate; a second concurrent mutation still fails,
-    // under the documented KEY_CHANGED code (recovery: re-run /qurl setup).
+    // under the documented KEY_CHANGED code (recovery: re-run /qurl-admin setup).
     await ddb.send(new UpdateCommand({
       ...update,
       ExpressionAttributeValues: { ...values, ':storedApiKey': latestRow.qurl_api_key },
@@ -1881,7 +1881,7 @@ async function clearGuildWebhookSubscription(guildId) {
 // propagation that fixes rotate-drift. RCU cost is acceptable on a
 // low-cardinality table.
 // TODO(#486): replace scanAll with a Query on the webhook_owner_id
-// GSI when guild_configs > ~10k rows. Every `/qurl setup` and OAuth
+// GSI when guild_configs > ~10k rows. Every `/qurl-admin setup` and OAuth
 // callback hits this via propagateGuildWebhookSubscription, so the
 // link-path cost is O(table_size) per call — same fix as the
 // 30s priming scan, single migration covers both.
@@ -1968,7 +1968,7 @@ async function propagateGuildWebhookSubscription(
 // Per-row decrypt-fail alarm-once tracker. A permanently-corrupt row
 // would otherwise emit 2880 audits/day (30s tick × 2 replicas).
 // Cleared per guildId on its next successful decrypt — so a row that
-// recovers (operator re-encrypts via /qurl setup or backfill) resets
+// recovers (operator re-encrypts via /qurl-admin setup or backfill) resets
 // and re-alarms if it breaks again.
 const _decryptAlarmedGuilds = new Set();
 
@@ -1996,7 +1996,7 @@ async function scanGuildSubscriptions() {
       // stay unprimed and every inbound webhook would 401. Log + emit
       // an audit so a CloudWatch metric-filter alarm can fire on
       // sustained decrypt failures (KMS key drift); backfill or
-      // /qurl setup re-encrypts the row.
+      // /qurl-admin setup re-encrypts the row.
       //
       // Alarm-once per guild_id per "outage": the audit fires on the
       // FIRST decrypt failure for this row and stays silent until a

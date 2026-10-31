@@ -112,7 +112,7 @@ front half.
 | Command | Existing-flow policy |
 |---|---|
 | `/qurl revoke` | Supersede the prior revoke menu through the guarded delete/recreate path. |
-| `/qurl setup` | Supersede the pre-modal button stage; preserve an active setup modal. |
+| `/qurl-admin setup` | Supersede the pre-modal button stage; preserve an active setup modal. |
 | Send/map confirmation | Supersede a prior `awaiting_send_confirm` row through its stage/version-guarded claim; return a surviving sibling stage without deleting it. |
 
 `supersedeOrCreate` tries creation, reads a conflicting row, conditionally
