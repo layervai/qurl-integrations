@@ -2505,6 +2505,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     return {
       collect: collectHandlers.collect,
+      end: collectHandlers.end,
       finishRevoke,
       interaction,
       makeClick,
@@ -2512,6 +2513,68 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       sendId,
     };
   }
+
+  it('collector time expiry preserves the successful revoke result instead of restoring the management banner', async () => {
+    const { collect, end, finishRevoke, interaction, makeClick } = await setupRevocableSend();
+    try {
+      finishRevoke.resolve();
+      await collect(makeClick('revoke'));
+      const revoked = interaction.editReply.mock.calls.at(-1)[0];
+      expect(revoked.content).toContain('Revoked 1/1 user.');
+      expect(revoked.content).toContain('Alice');
+      interaction.editReply.mockClear();
+      await end(null, 'time');
+      const final = interaction.editReply.mock.calls.at(-1)[0];
+      expect(final.content).toBe(revoked.content);
+      expect(final.components).toEqual([]);
+      expect(final.content).not.toContain('Management window');
+    } finally {
+      clearCooldown('sender-1');
+    }
+  });
+
+  it('Add selection extends the later inline revoke names in original recipient order', async () => {
+    const { collect, end, interaction, makeClick } = await setupRevocableSend();
+    const selection = {
+      users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
+    };
+    const add = makeClick('add');
+    add.reply.mockResolvedValueOnce({ awaitMessageComponent: jest.fn().mockResolvedValue(selection) });
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-initial', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/added', qurl_id: 'q_added', resource_id: 'res-added' }]);
+    try {
+      await collect(add);
+      expect(selection.editReply).toHaveBeenCalledWith({ content: 'Added 1 recipient', components: [] });
+      // Discard the original fixture response; the durable rows now include Add.
+      mockDb.getSendItems.mockReset();
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { recipient_discord_id: 'u2', resource_id: 'res-added', qurl_id: 'q_added' },
+        { recipient_discord_id: 'u1', resource_id: 'res-initial', qurl_id: 'q_u1' },
+      ]);
+      mockRevokeMintedLinks.mockReset();
+      mockRevokeMintedLinks.mockResolvedValue(undefined);
+      await collect(makeClick('revoke'));
+      const revoked = interaction.editReply.mock.calls.at(-1)[0];
+      expect(revoked.content).toContain('Revoked 2/2 users.');
+      expect(revoked.content).toContain('Alice');
+      expect(revoked.content).toContain('Bob');
+      expect(revoked.content.indexOf('Alice')).toBeLessThan(revoked.content.indexOf('Bob'));
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(2);
+      expect(mockRevokeMintedLinks.mock.calls.map(([resource, ids]) => [resource, ids])).toEqual(expect.arrayContaining([
+        ['res-initial', ['q_u1']], ['res-added', ['q_added']],
+      ]));
+      await end(null, 'time');
+    } finally {
+      clearCooldown('sender-1');
+    }
+  });
 
   it('bounds button result waiting and keeps the lock until background revoke finishes', async () => {
     jest.useFakeTimers();
