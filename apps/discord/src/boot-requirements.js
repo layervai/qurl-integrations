@@ -354,6 +354,7 @@ function unsupportedRoleHotStandbyCombo(role, hotStandbyEnabled, resumeEnabled) 
       'gateway task def, or leave ENABLE_GATEWAY_HOT_STANDBY unset on http/combined.'
     );
   }
+  // Deployment mirror: bot_gateway precondition rule 2; maintenance reference: #424.
   if (!resumeEnabled) {
     return (
       'ENABLE_GATEWAY_HOT_STANDBY=true requires ENABLE_GATEWAY_RESUME=true. ' +
