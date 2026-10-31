@@ -124,6 +124,7 @@ export async function fetchWithTransientRetry(
       if (retriedCleanupRateLimit) return res;
       const previous = res;
       res = await retryCleanupRateLimit(input, init ?? {}, cleanupRetryBudget, res);
+      // No local fallback: it could retry before the server permits it.
       if (res === previous) return res;
       retriedCleanupRateLimit = true;
       continue;
@@ -188,7 +189,8 @@ async function retryCleanupRateLimit(
 ): Promise<Response> {
   if (response.status !== 429) return response;
   const raw = response.headers.get('retry-after')?.trim() ?? '';
-  // Discord can return fractional seconds; HTTP dates are also valid Retry-After.
+  // TODO(upstream-contract): Discord Retry-After can carry fractional seconds;
+  // retain seconds and HTTP-date support when its contract changes.
   const seconds = /^(?:\d+(?:\.\d+)?|\.\d+)$/.test(raw) ? Number(raw) : undefined;
   // Date.parse alone treats numeric junk such as '-1' as a calendar date.
   const startsWithWeekday = /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:, | )|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), )/.test(raw);

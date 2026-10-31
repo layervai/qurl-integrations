@@ -245,7 +245,8 @@ export const REVOKE_CONFIRM_WAIT_MS = 35_000;
 /** Revoke the resource. A successful DELETE confirms the protection update.
  * Repeated DELETEs retry the same committed epoch (qurl-service RevokeQurl).
  * A management status of `revoked` alone does not confirm that update.
- * Cleanup retries only a 429 within the sweep's shared wait budget. */
+ * Cleanup retries only a 429 within the sweep's shared wait budget.
+ * cleanupRetryBudget is reserved for cleanup with confirmPending=false. */
 export async function revokeLink(
   baseUrl: string,
   apiKey: string,
