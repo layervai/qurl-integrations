@@ -270,7 +270,7 @@ export async function probeScopedSibling(request: APIRequestContext, ownViewURL:
   } catch (err) {
     // Only the router's known connection-close class is an observed candidate.
     // Even this outcome is NOT authorizer403 proof; root must join requestID.
-    if (!(err instanceof Error) || !/ECONNRESET|socket hang up|net::ERR_EMPTY_RESPONSE|net::ERR_CONNECTION_RESET/.test(err.message))
+    if (siblingWireStatus !== null || !(err instanceof Error) || !/ECONNRESET|socket hang up|net::ERR_EMPTY_RESPONSE|net::ERR_CONNECTION_RESET/.test(err.message))
       throw new Error('scope probe sibling is not a qualified router denial observation');
     siblingWireOutcome = 'CONNECTION_CLOSED_PENDING_INTERNAL_403';
   }

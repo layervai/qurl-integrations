@@ -32,3 +32,17 @@ test('exact connection-close class still records pending internal proof only',as
 test('own control failure is not scope proof',async()=>{await expect(probeScopedSibling(client([403]).request,own,sibling)).rejects.toThrow(/own controls/)});
 test.each(['https://elsewhere.example/','/views/'+ '1'.repeat(32),'/views/../sibling','/views/'+ '2'.repeat(32)+'?token=bad'])('invalid target fails before request',async path=>{const c=client([]);await expect(probeScopedSibling(c.request,own,path)).rejects.toThrow(/canonical/);expect(c.get).not.toHaveBeenCalled()});
 test('untrusted origin fails before request',async()=>{const c=client([]);await expect(probeScopedSibling(c.request,own.replace('.site','.site.evil.example'),sibling)).rejects.toThrow(/canonical/);expect(c.get).not.toHaveBeenCalled()});
+
+// Receiving headers makes a later body reset a failed response, not a denial.
+test.each([200, 403, 404, 503])('HTTP%s with a body reset cannot pass', async status => {
+  const c = client([]);
+  c.get.mockResolvedValueOnce({ status: () => 200, dispose: async () => {} });
+  c.get.mockResolvedValueOnce({
+    status: () => status,
+    body: async () => { throw new Error('socket hang up'); },
+    headers: () => ({ 'cache-control': 'no-store' }),
+    dispose: async () => {},
+  });
+  await expect(probeScopedSibling(c.request, own, sibling)).rejects.toThrow(/qualified router denial/);
+  expect(c.get).toHaveBeenCalledTimes(2);
+});
