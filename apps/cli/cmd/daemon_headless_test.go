@@ -363,6 +363,9 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 			apiConfig.Verbose == nil || apiConfig.Sleep == nil || apiConfig.NewRequestID == nil {
 			t.Fatalf("headless registered-client config = %+v, want endpoint, version, and observability hooks", apiConfig)
 		}
+		if apiConfig.ClientProduct != "qurl-desktop/1.2.3" {
+			t.Fatalf("headless registered-client ClientProduct = %q, want %q", apiConfig.ClientProduct, "qurl-desktop/1.2.3")
+		}
 		if cfg.EnrollmentCredential != credential {
 			t.Fatalf("attempt %d enrollment credential = %q", attempts.Load()+1, cfg.EnrollmentCredential)
 		}
@@ -383,6 +386,9 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	waitHeadlessNativeRetry = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {}, verbose: true,
+		// Set directly: the daemon command shares the root PersistentPreRunE, so
+		// resolveSettings wiring is covered by TestClientProductReachesRequestsThroughRoot.
+		resolvedClientProduct:  "qurl-desktop/1.2.3",
 		resolvedShareGroupMode: connectordaemon.GroupModeSingle, resolvedSupervision: connectorstate.RuntimeSupervisionNative,
 		sleep: func(time.Duration) {}, newRequestID: func() string { return "headless-test-request" },
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
