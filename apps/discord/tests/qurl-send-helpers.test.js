@@ -310,6 +310,7 @@ describe('resolveMentionableSelection', () => {
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
     expect(r.users).toEqual([]);
     expect(r.droppedFromRoles).toBe(ITER_BOUND);
+    expect(r.iterationBoundHit).toBe(true);
   });
 
   test('ITER_BOUND accumulates ACROSS roles (function-scoped, not per-role)', () => {
@@ -330,6 +331,7 @@ describe('resolveMentionableSelection', () => {
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
     expect(r.users).toEqual([]);
     expect(r.droppedFromRoles).toBe(ITER_BOUND);
+    expect(r.iterationBoundHit).toBe(true);
   });
 
   test('iteration cost vs count semantic: counter-before-dedupe causes overlap to consume an iter slot, blocking a later human', () => {
@@ -493,7 +495,7 @@ describe('resolveMentionableSelection', () => {
   test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold, roleMentionsDenied }', () => {
     const int = makeMentionableInteraction({});
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
-    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'massMentionDenied', 'namedRoleMembersUnavailable', 'roleMentionsDenied', 'users']);
+    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'iterationBoundHit', 'massMentionDenied', 'namedRoleMembersUnavailable', 'roleMentionsDenied', 'users']);
   });
 
   describe('role-mention permission gate (#326)', () => {
