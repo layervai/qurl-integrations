@@ -423,12 +423,14 @@ describe('flushFinal', () => {
     jest.useRealTimers();
   });
 
-  it('is a no-op when mirror is null (already cleared)', async () => {
+  it('does not write or delete when this instance has no mirrored session', async () => {
     const { store, ddbMock } = makeStore();
-    ddbMock.on(PutCommand).resolves({});
-
+    ddbMock.on(GetCommand).resolves({});
+    await store.hydrate();
     await store.flushFinal();
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    // A cold standby cannot delete a shared row that an active peer may write.
+    expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
   });
 
   it('is idempotent — a second call does not re-write the mirror', async () => {

@@ -422,6 +422,8 @@ function createGatewaySessionStore({
       // Inner .catch handlers in firePersist/null-clear already
       // logged each error.
       await Promise.allSettled([...inFlightWrites]);
+      // Null also means a cold replica with no snapshot, not authority to delete
+      // the shared shard row. A retry needs explicit clear/ownership tracking.
       if (!mirror) return;
       try {
         await persistRow(mirror);
