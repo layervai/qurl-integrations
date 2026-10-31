@@ -71,7 +71,9 @@ body:
         - edge-extension
         - origins
         - shared
+        - infra
         - ci
+        - deps
         - other
     validations:
       required: true
