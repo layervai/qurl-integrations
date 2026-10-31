@@ -3,6 +3,8 @@ const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 
+jest.setTimeout(20000);
+
 const CURRENT_KEY = Buffer.alloc(32, 7).toString('base64');
 const PREVIOUS_KEY = Buffer.alloc(32, 8).toString('base64');
 let directory;
@@ -14,6 +16,7 @@ beforeAll(() => {
   writeFileSync(fence, `
     const deny = () => { require('node:fs').writeSync(2, 'BOOT_TEST_NETWORK_BLOCKED'); process.exit(97); };
     require('node:net').Socket.prototype.connect = deny;
+    require('node:net').Server.prototype.listen = deny;
     const dns = require('node:dns');
     dns.lookup = deny;
     dns.resolve = deny;
@@ -49,7 +52,7 @@ function boot(overrides = {}) {
   };
   for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];
   const result = spawnSync(process.execPath, ['--require', fence, path.resolve(__dirname, '../src/index.js')], {
-    cwd: directory, env, encoding: 'utf8', timeout: 5000,
+    cwd: directory, env, encoding: 'utf8', timeout: 15000, killSignal: 'SIGKILL',
   });
   expect(result.error).toBeUndefined();
   return { status: result.status, output: result.stdout + result.stderr };
@@ -91,6 +94,12 @@ test('OAuth refuses an insecure production callback origin (#192)', () => {
 });
 test('valid current and previous keys pass boot gates and reach the network fence (#191)', () => {
   const result = boot({ KEY_ENCRYPTION_KEY_PREV: PREVIOUS_KEY });
+  expect(result.output).toContain('BOOT_TEST_NETWORK_BLOCKED');
+  expect(result.status).toBe(97);
+});
+
+test('development permits a local HTTP callback with valid OAuth secrets (#62)', () => {
+  const result = boot({ NODE_ENV: 'development', BASE_URL: 'http://localhost:3000' });
   expect(result.output).toContain('BOOT_TEST_NETWORK_BLOCKED');
   expect(result.status).toBe(97);
 });

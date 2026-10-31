@@ -16,6 +16,8 @@ const logger = require('../logger');
 // Current and optional previous keys are cached on first use. Rotation needs
 // a rolling restart. Keep KEY_ENCRYPTION_KEY_PREV until old ciphertext has
 // been re-encrypted; new writes always use KEY_ENCRYPTION_KEY.
+// Re-encrypt guild_configs.qurl_api_key and .webhook_secret, plus
+// qurl_send_configs.attachment_url and .interaction_token before removing PREV.
 
 const PREFIX = 'enc:v1:';
 const ALGO = 'aes-256-gcm';

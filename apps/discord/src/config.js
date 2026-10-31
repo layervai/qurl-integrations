@@ -436,7 +436,7 @@ module.exports = {
   // in src/utils/oauth-state.js (createStateSigner);
   // boot-requirements.js's invalidStateSecretValues enforces the floor
   // (when set) and presence (when qURL OAuth is configured) at
-  // production boot.
+  // every non-test boot.
   OAUTH_STATE_SECRET: process.env.OAUTH_STATE_SECRET,
 
   // qURL webhook receiver HMAC. Written to SSM by the webhook-registrar
