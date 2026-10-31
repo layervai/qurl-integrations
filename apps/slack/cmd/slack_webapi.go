@@ -1578,6 +1578,8 @@ func marshalReactionBody(channelID, timestamp, name string) ([]byte, error) {
 func invalidateRejectedSlackToken(ownerID string, err error, invalidate func(string)) error {
 	var apiErr *slackWebAPIError
 	if invalidate != nil && errors.As(err, &apiErr) {
+		// TODO(upstream-contract): Slack Web API authentication error vocabulary.
+		// https://docs.slack.dev/reference/methods/chat.postmessage/
 		switch apiErr.code {
 		case "token_revoked", "invalid_auth", "account_inactive":
 			invalidate(ownerID)
