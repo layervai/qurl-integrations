@@ -140,6 +140,7 @@ owns the share and turns it off when it exits.`,
 			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
 				return err
 			}
+			opts.beginTermsNotice()
 			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
@@ -153,7 +154,7 @@ owns the share and turns it off when it exits.`,
 			result.LinkSiteURL = opts.resourceAddress(result.CRID)
 
 			printer := opts.printer()
-			return printer.Publish(result)
+			return opts.finishTermsNotice(printer.Publish(result))
 		},
 	}
 
@@ -237,6 +238,7 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return err
 	}
+	opts.beginTermsNotice()
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
 		return err
@@ -764,7 +766,7 @@ func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource
 	if sharing != nil {
 		published.Publisher = sharing.Publisher
 	}
-	return opts.printer().Publish(published)
+	return opts.finishTermsNotice(opts.printer().Publish(published))
 }
 
 func resolveLocalConnectorID(opts *globalOpts, flagID string) string {

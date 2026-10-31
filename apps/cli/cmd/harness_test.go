@@ -105,6 +105,8 @@ type runOpts struct {
 	tty   bool // stdout+stderr TTY-ness
 
 	configDir string
+	// Existing fixtures represent an install that already saw the current Terms.
+	firstTermsNotice bool
 	// home is the home directory the invocation looks under for a saved copy
 	// of the qURL agent skill. Empty means it does not look, so no test
 	// reads the home directory of the person who runs the suite.
@@ -278,6 +280,7 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 	browser.stdout = &res.stdout
 
 	root, opts := newRoot("test", streams, func(g *globalOpts) {
+		g.termsNoticeHandled = !o.firstTermsNotice
 		// Exercise the injected background-job/daemon boundary on every host. The
 		// separate platform-contract test keeps unsupported hosts fail-closed.
 		g.backgroundShareGOOS = o.platformGOOS
