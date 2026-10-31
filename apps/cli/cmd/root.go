@@ -202,7 +202,8 @@ type globalOpts struct {
 	resolvedSupervision connectorstate.RuntimeSupervision
 	// resolvedClientProduct is the validated QURL_CLIENT_PRODUCT, or empty. It
 	// is set by resolveSettings, so build API configs only after it has run.
-	resolvedClientProduct string
+	resolvedClientProduct         string
+	resolvedClientProductExplicit bool
 }
 
 // rootOption is a test hook for injecting process context.
@@ -384,6 +385,8 @@ func (o *globalOpts) nativeShareDaemon(stateDir, logDir string) (shareDaemonCont
 	if err != nil {
 		return nil, err
 	}
+	controller.ClientProduct = o.resolvedClientProduct
+	controller.ClientProductExplicit = o.resolvedClientProductExplicit
 	return controller, nil
 }
 
@@ -676,10 +679,12 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 const clientProductEnv = "QURL_CLIENT_PRODUCT"
 
 // resolveClientProduct returns the environment-only QURL_CLIENT_PRODUCT, or
-// empty. An empty value counts as unset; an invalid one is dropped with a
+// empty. Explicit empty clears installed attribution; unset or invalid values
+// preserve a running native daemon's product. Invalid values get a
 // verbose-only note.
 func (o *globalOpts) resolveClientProduct() string {
-	value, _ := o.lookupEnv(clientProductEnv)
+	value, present := o.lookupEnv(clientProductEnv)
+	o.resolvedClientProductExplicit = present && (value == "" || qurlapi.ValidClientProduct(value))
 	if value == "" || qurlapi.ValidClientProduct(value) {
 		return value
 	}

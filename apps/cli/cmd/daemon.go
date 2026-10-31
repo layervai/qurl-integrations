@@ -241,7 +241,7 @@ commands then reload this daemon and never install a background job.`,
 		Args: noArgs,
 	}
 	var stateDir, runtimeDir, jobVersion, headlessConfig, enrollmentTokenFile string
-	var hubHost, hubServerPublicKeyB64 string
+	var hubHost, hubServerPublicKeyB64, clientProduct string
 	var hubPort int
 	run := &cobra.Command{
 		Use:   "run",
@@ -250,6 +250,16 @@ commands then reload this daemon and never install a background job.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
 				return err
+			}
+
+			if cmd.Flags().Changed("client-product-b64") {
+				decoded, err := connectordaemon.DecodeClientProduct(clientProduct)
+				if err != nil {
+					holdDaemonJobFlagError(cmd, opts, err)
+					return err
+				}
+				opts.resolvedClientProduct = decoded
+				opts.resolvedClientProductExplicit = true
 			}
 			jobVersion, err := admitDaemonJobVersion(cmd.Context(), opts, jobVersion)
 			if err != nil {
@@ -274,6 +284,7 @@ commands then reload this daemon and never install a background job.`,
 	run.Flags().StringVar(&opts.tunnelServerName, "tunnel-server-name", "", "expected tunnel certificate name (default: admitted host)")
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
 	run.Flags().StringVar(&runtimeDir, "runtime-dir", "", "dedicated per-namespace directory for the qURL share daemon control socket (enforced mode 0700)")
+	run.Flags().StringVar(&clientProduct, "client-product-b64", "", "encoded installed job host product")
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
 	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
 	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "one-time enrollment credential file for first headless bootstrap")
@@ -293,7 +304,7 @@ commands then reload this daemon and never install a background job.`,
 		holdDaemonJobFlagError(cmd, opts, err)
 		return exitcode.UsageError(err)
 	})
-	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log", "runtime-dir"} {
+	for _, name := range []string{"client-product-b64", "hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log", "runtime-dir"} {
 		_ = run.Flags().MarkHidden(name)
 	}
 	validateTestCRID := &cobra.Command{
@@ -393,7 +404,7 @@ func holdDaemonJobFlagError(cmd *cobra.Command, opts *globalOpts, flagErr error)
 // ctx does: root.go cancels the command context on an interrupt or SIGTERM,
 // which is how a service manager stops the job it is replacing.
 func admitDaemonJobVersion(ctx context.Context, opts *globalOpts, jobVersion string) (string, error) {
-	match, expected, err := connectordaemon.MatchJobVersion(jobVersion, opts.version, opts.resolvedShareGroupMode)
+	match, expected, err := connectordaemon.MatchJobVersion(jobVersion, opts.version, opts.resolvedShareGroupMode, opts.resolvedClientProduct)
 	if err != nil {
 		return "", err
 	}
