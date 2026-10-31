@@ -833,7 +833,7 @@ func (h *Handler) lookupListedResourceAliasesForGet(ctx context.Context, log *sl
 }
 
 // allowedResourceIDsForGet returns the resource IDs mintable from channelID:
-// the `AllowedResourceIDsForChannel` union of `alias_bindings.values()` and
+// the `ChannelScopedResourceIDs` union of `alias_bindings.values()` and
 // `allowed_resource_ids`. The gate is purely channel-scoped — it does NOT
 // depend on who the caller is.
 //
@@ -865,7 +865,7 @@ func (h *Handler) allowedResourceIDsForGet(ctx context.Context, log *slog.Logger
 		log.Warn("get: AdminStore is nil; authorization unavailable", "team_id", teamID)
 		return nil, errAdminStoreNotConfigured
 	}
-	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
+	allowed, err := h.cfg.AdminStore.ChannelScopedResourceIDs(ctx, teamID, channelID)
 	if err != nil {
 		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "get: allowed-resource fetch failed", "error", err, "team_id", teamID, "channel_id", channelID)
 		return nil, &userError{msg: serviceUnreachableMessage}

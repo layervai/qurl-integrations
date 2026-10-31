@@ -18,7 +18,7 @@
 //
 // This package exposes a `Store` facade with the method shapes the
 // post-pivot Slack handlers depend on (CheckAdmin, ResolvePolicy,
-// GetChannelPolicy, AllowedResourceIDsForChannel, LookupChannelAlias,
+// GetChannelPolicy, ChannelScopedResourceIDs, LookupChannelAlias,
 // BindWorkspace, AddAdmin, RemoveAdmin, ListAdmins). Errors carry an
 // HTTP-shaped StatusCode on `*Error` so handlers branch via errors.As
 // without caring about the underlying DDB exception shape.

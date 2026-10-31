@@ -468,7 +468,7 @@ func TestHandleList_ScopedToChannel(t *testing.T) {
 // TestHandleList_ExposedViaAllowedSetShowsWithoutAlias fences that a tunnel
 // protected in a channel purely via allowed_resource_ids (no alias binding —
 // the shape the Edit modal's "expose to channels" writes) is listed there. It
-// pins that the scope gate keys on the full AllowedResourceIDsForChannel union,
+// pins that the scope gate keys on the full ChannelScopedResourceIDs union,
 // not just alias bindings.
 func TestHandleList_ExposedViaAllowedSetShowsWithoutAlias(t *testing.T) {
 	ts := newAdminTestServers(t)
@@ -495,7 +495,7 @@ func TestHandleList_ExposedViaAllowedSetShowsWithoutAlias(t *testing.T) {
 func TestHandleList_FailsClosedOnScopeReadError(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
-	// Make the channel_policies read (AllowedResourceIDsForChannel) fail.
+	// Make the channel_policies read (ChannelScopedResourceIDs) fail.
 	ts.ddb.SetGetItemErr(ts.tableNames.channelPolicy, errors.New("ddb unavailable"))
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		t.Errorf("ListResources called despite a scope-read failure — must fail closed, not list unscoped")
