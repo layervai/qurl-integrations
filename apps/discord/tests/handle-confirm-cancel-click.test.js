@@ -47,7 +47,7 @@ describe('handleConfirmCancelClick', () => {
     await handleConfirmCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/card moved/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(isOnCooldown(SENDER_ID)).toBe(true);
     expect(sendCooldowns.get(SENDER_ID)).toBe(cooldownAt);
@@ -68,7 +68,7 @@ describe('handleConfirmCancelClick', () => {
     await handleConfirmCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not cancel right now/),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(isOnCooldown(SENDER_ID)).toBe(true);
     expect(logger.error).toHaveBeenCalledWith(

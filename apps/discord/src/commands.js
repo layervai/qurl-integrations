@@ -1,4 +1,5 @@
 const {
+  MessageFlags,
   SlashCommandBuilder,
   EmbedBuilder,
   PermissionFlagsBits,
@@ -2665,11 +2666,11 @@ async function executeSendPipeline(interaction, {
         // Sync dedup before any await (Node single-threaded).
         if (revokeInFlight) return btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         if (revokingSendLocks.has(revokeLockKey)) {
-          await btnInteraction.reply({ content: ALREADY_REVOKING_SEND_MSG, ephemeral: true }).catch(logIgnoredDiscordErr);
+          await btnInteraction.reply({ content: ALREADY_REVOKING_SEND_MSG, flags: MessageFlags.Ephemeral }).catch(logIgnoredDiscordErr);
           return;
         }
         if (addRecipientsLocks.has(sendId)) {
-          await btnInteraction.reply({ content: `${ADD_RECIPIENTS_IN_PROGRESS_MSG} Finish the current selection or try again in a moment.`, ephemeral: true }).catch(logIgnoredDiscordErr);
+          await btnInteraction.reply({ content: `${ADD_RECIPIENTS_IN_PROGRESS_MSG} Finish the current selection or try again in a moment.`, flags: MessageFlags.Ephemeral }).catch(logIgnoredDiscordErr);
           return;
         }
         revokeInFlight = true;
@@ -2815,11 +2816,11 @@ async function executeSendPipeline(interaction, {
               content = 'Links for this send have already been revoked.';
             }
           }
-          await btnInteraction.reply({ content, ephemeral: true }).catch(logIgnoredDiscordErr);
+          await btnInteraction.reply({ content, flags: MessageFlags.Ephemeral }).catch(logIgnoredDiscordErr);
           return;
         }
         if (addRecipientsLocks.has(sendId)) {
-          await btnInteraction.reply({ content: `${ADD_RECIPIENTS_IN_PROGRESS_MSG} Finish the current selection or try again in a moment.`, ephemeral: true }).catch(logIgnoredDiscordErr);
+          await btnInteraction.reply({ content: `${ADD_RECIPIENTS_IN_PROGRESS_MSG} Finish the current selection or try again in a moment.`, flags: MessageFlags.Ephemeral }).catch(logIgnoredDiscordErr);
           return;
         }
         addRecipientsLocks.add(sendId);
@@ -2832,12 +2833,12 @@ async function executeSendPipeline(interaction, {
           if (remaining <= 0) {
             await btnInteraction.reply({
               content: `Recipient limit reached (${config.QURL_SEND_MAX_RECIPIENTS} max).`,
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             }).catch(logIgnoredDiscordErr);
             return;
           }
           if (isOnCooldown(interaction.user.id)) {
-            await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(logIgnoredDiscordErr);
+            await btnInteraction.reply({ content: 'Please wait before adding more recipients.', flags: MessageFlags.Ephemeral }).catch(logIgnoredDiscordErr);
             return;
           }
           setCooldown(interaction.user.id);
@@ -2855,12 +2856,12 @@ async function executeSendPipeline(interaction, {
               .setMinValues(1)
               .setMaxValues(maxSelect)
           );
-          const selectReply = await btnInteraction.reply({
+          await btnInteraction.reply({
             content: 'Select additional recipients:',
             components: [userSelectRow],
-            ephemeral: true,
-            fetchReply: true,
+            flags: MessageFlags.Ephemeral,
           });
+          const selectReply = await btnInteraction.fetchReply();
 
           try {
             const selectInteraction = await selectReply.awaitMessageComponent({
@@ -3663,9 +3664,9 @@ const REVOKE_FLOW_TTL_SECONDS = 60;
 
 async function handleRevoke(interaction, apiKey) {
   if (!apiKey) {
-    return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
+    return interaction.reply({ content: 'qURL API key is not configured.', flags: MessageFlags.Ephemeral });
   }
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const recentSends = await db.getRecentSends(interaction.user.id, 5);
 
@@ -3802,7 +3803,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
     // first result.
     return interaction.reply({
       content: 'This revoke was already processed.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
 
@@ -3904,7 +3905,7 @@ function rejectSetupForInvalidAuthPolicy(interaction) {
   logger.warn('Refusing /qurl-admin setup: AUTH0_EMAIL_CONNECTION was rejected at boot');
   return interaction.reply({
     content: SETUP_AUTH_POLICY_UNAVAILABLE_MSG,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
   });
 }
 
@@ -3984,7 +3985,7 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     // confusing Discord error.
     return interaction.reply({
       content: 'Another setup attempt is in progress — finish or close it, then retry.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
 
@@ -3994,7 +3995,7 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     // admin_cleanup). Tell the user to rerun.
     return interaction.reply({
       content: 'This setup session expired or was replaced — please run `/qurl-admin setup` again.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
 
@@ -4118,7 +4119,7 @@ async function handleSetupModal(interaction, { flow_id }) {
     // wording covers both "expired" and "already processed."
     return interaction.reply({
       content: 'This setup session has expired or was already processed — run `/qurl-admin setup` again.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
 
@@ -4174,11 +4175,11 @@ async function handleSetupModal(interaction, { flow_id }) {
     logger.warn('validate-key rejected (bad format)', logFields);
     return interaction.reply({
       content: 'Invalid API key format. Keys start with `lv_live_` or `lv_test_` and are at least 28 characters. Run `/qurl-admin setup` again to retry.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   try {
     const resp = await fetch(`${config.QURL_ENDPOINT}/v1/qurls?limit=1`, {
       headers: { 'Authorization': `Bearer ${submittedKey}`, 'Accept': 'application/json' },
@@ -5480,7 +5481,7 @@ async function handleQurlSlashSend(interaction, params) {
   if (!interaction.guildId) {
     return interaction.reply({
       content: 'This command can only be used in a server, not in DMs.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   // Cooldown gate is owned by the front-half handlers (handleQurlSend /
@@ -5507,7 +5508,7 @@ async function handleQurlSlashSend(interaction, params) {
     // defer here so discord.js doesn't throw "Already replied or
     // deferred".
     if (!interaction.deferred) {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     }
 
     const recipientsRaw = interaction.options.getString('recipients');
@@ -6017,7 +6018,7 @@ async function handleQurlSlashSend(interaction, params) {
     }
     const errContent = '❌ Something went wrong — please try again.';
     return interaction.editReply({ content: errContent })
-      .catch(() => interaction.reply({ content: errContent, ephemeral: true }).catch(logIgnoredDiscordErr));
+      .catch(() => interaction.reply({ content: errContent, flags: MessageFlags.Ephemeral }).catch(logIgnoredDiscordErr));
   }
 }
 
@@ -6034,7 +6035,7 @@ async function handleQurlSend(interaction) {
   if (!interaction.guildId) {
     return interaction.reply({
       content: 'This command can only be used in a server, not in DMs.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -6055,7 +6056,7 @@ async function handleQurlSend(interaction) {
     });
     return interaction.reply({
       content: 'The bot is processing too many file sends right now. Please try again in a moment.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -6066,7 +6067,7 @@ async function handleQurlSend(interaction) {
   if (isOnCooldown(interaction.user.id)) {
     return interaction.reply({
       content: 'Please wait before sending again.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   setCooldown(interaction.user.id);
@@ -6091,7 +6092,7 @@ async function handleQurlSend(interaction) {
     clearCooldown(interaction.user.id);
     return interaction.reply({
       content: '❌ The `attachment:` option is required. Re-run with a file attached.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   if (!attachment || typeof attachment.url !== 'string') {
@@ -6099,7 +6100,7 @@ async function handleQurlSend(interaction) {
     clearCooldown(interaction.user.id);
     return interaction.reply({
       content: '❌ Attachment is missing or malformed.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   if (!isAllowedSourceUrl(attachment.url)) {
@@ -6108,7 +6109,7 @@ async function handleQurlSend(interaction) {
     });
     return interaction.reply({
       content: '❌ Attachment source not allowed. Files must be uploaded via Discord, not linked from external URLs.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   if (!isAllowedFileType(attachment.contentType)) {
@@ -6119,7 +6120,7 @@ async function handleQurlSend(interaction) {
     clearCooldown(interaction.user.id);
     return interaction.reply({
       content: `❌ File type not allowed: \`${escapeDiscordMarkdown(String(attachment.contentType || 'unknown'))}\`.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   if (attachment.size > MAX_FILE_SIZE) {
@@ -6127,7 +6128,7 @@ async function handleQurlSend(interaction) {
     clearCooldown(interaction.user.id);
     return interaction.reply({
       content: `❌ File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -6163,7 +6164,7 @@ async function handleQurlMap(interaction) {
   if (!interaction.guildId) {
     return interaction.reply({
       content: 'This command can only be used in a server, not in DMs.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   // NOTE: No `activeFileSends` capacity gate here (unlike handleQurlSend).
@@ -6176,7 +6177,7 @@ async function handleQurlMap(interaction) {
   if (isOnCooldown(interaction.user.id)) {
     return interaction.reply({
       content: 'Please wait before sending again.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   setCooldown(interaction.user.id);
@@ -6206,7 +6207,7 @@ async function handleQurlMap(interaction) {
     clearCooldown(interaction.user.id);
     return interaction.reply({
       content: '❌ The `location:` option is required. Re-run with a Google Maps URL or address.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   const locationNameRaw = interaction.options.getString('location-name');
@@ -6217,7 +6218,7 @@ async function handleQurlMap(interaction) {
     clearCooldown(interaction.user.id);
     return interaction.reply({
       content: '❌ Location is empty.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -6237,7 +6238,7 @@ async function handleQurlMap(interaction) {
     clearCooldown(interaction.user.id);
     return interaction.reply({
       content: '❌ Could not parse location — please re-run with a Google Maps URL or address.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -6245,7 +6246,7 @@ async function handleQurlMap(interaction) {
   // handleQurlSlashSend below checks `interaction.deferred` and skips
   // its own defer.
   try {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   } catch (err) {
     // Token already expired or Discord transiently degraded — clear
     // cooldown so the user can retry without waiting it out.
@@ -6398,7 +6399,7 @@ async function handleQurlDetect(interaction) {
   if (!interaction.guildId) {
     return interaction.reply({
       content: 'This command can only be used in a server, not in DMs.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -6409,7 +6410,7 @@ async function handleQurlDetect(interaction) {
   if (isOnDetectCooldown(interaction.guildId, interaction.user.id)) {
     return interaction.reply({
       content: 'Please wait before running detect again.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   setDetectCooldown(interaction.guildId, interaction.user.id);
@@ -6429,14 +6430,14 @@ async function handleQurlDetect(interaction) {
     clearDetectCooldown(interaction.guildId, interaction.user.id);
     return interaction.reply({
       content: '❌ The `image:` option is required. Re-run with an image attached.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   if (!attachment || typeof attachment.url !== 'string') {
     clearDetectCooldown(interaction.guildId, interaction.user.id);
     return interaction.reply({
       content: '❌ Attachment is missing or malformed.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   // SSRF gate — the attachment.url is fetched below; re-validate it
@@ -6458,7 +6459,7 @@ async function handleQurlDetect(interaction) {
     });
     return interaction.reply({
       content: '❌ Attachment source not allowed. Upload the image via Discord, not a linked URL.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   // Image-only: the connector's neural detector reads pixels. A non-image
@@ -6469,7 +6470,7 @@ async function handleQurlDetect(interaction) {
     clearDetectCooldown(interaction.guildId, interaction.user.id);
     return interaction.reply({
       content: `❌ Detect needs an image. \`${escapeDiscordMarkdown(String(attachment.contentType || 'unknown'))}\` isn't supported.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
   // Size cap before buffering — guard against pulling a 25MB+ blob into
@@ -6483,7 +6484,7 @@ async function handleQurlDetect(interaction) {
     clearDetectCooldown(interaction.guildId, interaction.user.id);
     return interaction.reply({
       content: `❌ Image too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -6491,7 +6492,7 @@ async function handleQurlDetect(interaction) {
   // fetch + neural-net inference ~seconds + a recipient users.fetch), which
   // would blow Discord's 3-second ACK deadline on a plain reply. After
   // deferReply, all user-visible output is editReply.
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   // The bot credential mints the guild-scoped capability. No customer key
   // is sent to the detect service.
@@ -7056,7 +7057,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     });
     return interaction.followUp({
       content: '❌ Could not save your pick right now. Try selecting recipients again in a moment.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'conflict') {
@@ -7356,7 +7357,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     });
     return interaction.followUp({
       content: '❌ Could not save your selection right now. Try again in a moment.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'conflict') {
@@ -7479,7 +7480,7 @@ async function handleConfirmPickManual(interaction, { flow_id, row }) {
     });
     return interaction.followUp({
       content: '❌ Could not switch to manual picker right now. Try again in a moment.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'conflict') {
@@ -7714,7 +7715,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
     });
     return interaction.followUp({
       content: '❌ Could not save your selection right now. Try again in a moment.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'conflict') {
@@ -7860,7 +7861,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
     });
     return interaction.reply({
       content: '❌ Unrecognized expiry value. Re-pick from the list.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
@@ -7888,7 +7889,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
     });
     return interaction.followUp({
       content: '❌ Could not save your pick right now. Try again in a moment.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'conflict') {
@@ -7927,7 +7928,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
     });
     return interaction.reply({
       content: '❌ Unrecognized self-destruct value. Re-pick from the list.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
@@ -7953,7 +7954,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
     });
     return interaction.followUp({
       content: '❌ Could not save your pick right now. Try again in a moment.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'conflict') {
@@ -8009,7 +8010,7 @@ async function handleConfirmNoteButton(interaction, { flow_id, row }) {
     // symmetric with the menu handlers' error-followUp shape.
     return interaction.reply({
       content: '❌ Could not open the note editor — try again.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   });
 }
@@ -8044,7 +8045,7 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
     });
     return interaction.followUp({
       content: '❌ Could not read your note input — try again. (Your existing note, if any, is unchanged.)',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   // Cap matches the slash-entry path; both forms derive from the same
@@ -8086,7 +8087,7 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
     // already acked.
     return interaction.followUp({
       content: '❌ Could not save your note right now. Try again in a moment.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'conflict') {
@@ -8180,7 +8181,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
     if (!deleteResult.deleted) {
       return interaction.followUp({
         content: 'The card moved — re-check it and click Send again.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       }).catch(logIgnoredDiscordErr);
     }
     return interaction.editReply({
@@ -8212,7 +8213,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
     clearCooldown(interaction.user.id);
     return interaction.followUp({
       content: '❌ Could not look up recipients right now. Try **Send** again in a moment.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   const { users, unresolvedIds, transientFailureIds } = resolveResult.value;
@@ -8254,7 +8255,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
     if (!deleteResult.deleted) {
       return interaction.followUp({
         content: 'The card moved — re-check it and click Send again.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       }).catch(logIgnoredDiscordErr);
     }
     return interaction.editReply({
@@ -8297,7 +8298,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
     clearCooldown(interaction.user.id);
     return interaction.followUp({
       content: '❌ Could not look up the qURL API key right now. Try **Send** again in a moment.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   const guildApiKey = apiKeyResult.value;
@@ -8325,7 +8326,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   if (!deleteResult.deleted) {
     return interaction.followUp({
       content: 'Recipients changed before Send fired — re-check the card and click Send again.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
 
@@ -8363,7 +8364,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
       // failure doesn't leave the user reading a confident "sending"
       // message alongside a subsequent failure message.
       content: `ℹ\u{FE0F} ${parts.join('; ')} — attempting to send to the remaining ${valid.length}.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
 
@@ -8430,7 +8431,7 @@ async function handleConfirmCancelClick(interaction, { flow_id, row }) {
     });
     return interaction.followUp({
       content: '❌ Could not cancel right now — try clicking **Cancel** again in a moment.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   if (!deleted) {
@@ -8441,7 +8442,7 @@ async function handleConfirmCancelClick(interaction, { flow_id, row }) {
     // picker-race path where nothing actually committed.
     return interaction.followUp({
       content: 'The card moved — re-check it.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
   clearCooldown(interaction.user.id);
@@ -9026,10 +9027,10 @@ const commands = [
       // live in prod.
       if (sub === 'setup') {
         if (!interaction.guildId) {
-          return interaction.reply({ content: 'This command can only be used in a server, not in DMs.', ephemeral: true });
+          return interaction.reply({ content: 'This command can only be used in a server, not in DMs.', flags: MessageFlags.Ephemeral });
         }
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
-          return interaction.reply({ content: 'Only server administrators can configure qURL.', ephemeral: true });
+          return interaction.reply({ content: 'Only server administrators can configure qURL.', flags: MessageFlags.Ephemeral });
         }
 
         // A malformed explicit connection policy must not silently downgrade
@@ -9055,7 +9056,7 @@ const commands = [
               content: '❌ **qURL is not ready to accept setup on this server.**\n\n'
                 + 'The bot operator needs to set `KEY_ENCRYPTION_KEY` (encryption-at-rest) before '
                 + '/qurl-admin setup can store keys safely. Ask them to check the deployment env.',
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             });
           }
           const state = signQurlOAuthState(interaction.guildId, interaction.user.id);
@@ -9064,7 +9065,7 @@ const commands = [
             content: '🔐 **Connect qURL to this server**\n\n'
               + `**[Click here to authorize qURL](${startUrl})**\n\n`
               + '_Open in this browser; the link expires in 15 minutes._',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
 
@@ -9078,7 +9079,7 @@ const commands = [
             content: '❌ **qURL is not ready to accept API keys on this server.**\n\n' +
               'The bot operator needs to set `KEY_ENCRYPTION_KEY` (encryption-at-rest) before '
               + '/qurl-admin setup can store keys safely. Ask them to check the deployment env.',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
 
@@ -9097,7 +9098,7 @@ const commands = [
         // siblingMessage). When the prior flow is still pre-modal
         // — i.e. the admin walked away from the button — the
         // claim succeeds and they get a fresh button.
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const setupFlowId = flowIdForInteraction(interaction);
         let setupSupersede;
         try {
@@ -9161,10 +9162,10 @@ const commands = [
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({
             content: '❌ Only server administrators can view qURL configuration status.',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         let guildConfig;
         try {
           guildConfig = await db.getGuildConfig(interaction.guildId);
@@ -9363,7 +9364,7 @@ const commands = [
         });
         return interaction.reply({
           content: '⚠️ `/qurl file` has been renamed to `/qurl send`. Please use `/qurl send` instead — your Discord client may take up to an hour to refresh the command list.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
 
@@ -9387,7 +9388,7 @@ const commands = [
             content: '❌ **qURL is not configured for this server.**\n\n' +
               'A server admin needs to run `/qurl-admin setup` first.\n' +
               'Sign up at **https://layerv.ai** to get your API key.',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
         resolvedApiKey = guildApiKey || config.QURL_API_KEY;
@@ -9413,7 +9414,7 @@ const commands = [
             user_id: interaction.user?.id,
             guild_id: interaction.guildId,
           });
-          return interaction.reply({ content: QURL_DETECT_DISABLED_REPLY, ephemeral: true });
+          return interaction.reply({ content: QURL_DETECT_DISABLED_REPLY, flags: MessageFlags.Ephemeral });
         }
         return handleQurlDetect(interaction);
       }
@@ -9428,7 +9429,7 @@ const commands = [
             user_id: interaction.user?.id,
             guild_id: interaction.guildId,
           });
-          return interaction.reply({ content: QURL_MAP_DISABLED_REPLY, ephemeral: true });
+          return interaction.reply({ content: QURL_MAP_DISABLED_REPLY, flags: MessageFlags.Ephemeral });
         }
         return handleQurlMap(interaction);
       }
@@ -9505,7 +9506,7 @@ const commands = [
             'and very large servers may not be fully populated). ' +
             'If you need to reach a specific person for sure, use an explicit user @mention instead of a role.\n\n' +
             'Learn more at **https://layerv.ai**.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     },
@@ -9520,7 +9521,7 @@ const commands = [
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
       if (sub !== 'setup' && sub !== 'status') {
-        return interaction.reply({ content: 'Unknown qURL admin command.', ephemeral: true });
+        return interaction.reply({ content: 'Unknown qURL admin command.', flags: MessageFlags.Ephemeral });
       }
       // Reuse the same runtime permission gates as cached setup/status aliases.
       return commands.find(command => command.data.name === 'qurl').execute(interaction);
@@ -9798,7 +9799,7 @@ async function handleCommand(interaction) {
     try {
       await interaction.reply({
         content: UNSUPPORTED_CONTEXT_MSG,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       emitInteractionMetric(false, 'unsupported_context');
     } catch (err) {
@@ -9831,7 +9832,7 @@ async function handleCommand(interaction) {
     try {
       await interaction.reply({
         content: 'This command is no longer available in this server.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       emitInteractionMetric(false, 'unknown_command');
     } catch (err) {
@@ -9859,7 +9860,7 @@ async function handleCommand(interaction) {
     clearCooldown(interaction.user.id);
     const reply = {
       content: 'There was an error executing this command.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     };
 
     // failureType reflects the FIRST failure observed. If the follow-up

@@ -117,7 +117,7 @@ describe('handleQurlMap — slash entry', () => {
       guildMembers: { '100000000000000001': {} },
     });
     await handleQurlMap(int);
-    expect(int.deferReply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+    expect(int.deferReply).toHaveBeenCalledWith(expect.objectContaining({ flags: 64 }));
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Couldn't find/),
     }));
@@ -238,7 +238,7 @@ describe('handleQurlMap — slash entry', () => {
     await handleQurlMap(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/`location:` option is required/),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     expect(isOnCooldown(SENDER_ID)).toBe(false);

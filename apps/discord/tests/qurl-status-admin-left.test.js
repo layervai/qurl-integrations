@@ -109,7 +109,7 @@ describe('/qurl-admin status — admin-offboarding nudge (#185)', () => {
 
     expect(interaction._reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/only server administrators/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(interaction.deferReply).not.toHaveBeenCalled();
     expect(db.getGuildConfig).not.toHaveBeenCalled();
@@ -124,7 +124,7 @@ describe('/qurl-admin status — admin-offboarding nudge (#185)', () => {
 
     await handleCommand(interaction);
 
-    expect(interaction.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(interaction.deferReply).toHaveBeenCalledWith({ flags: 64 });
     expect(interaction._reply).not.toHaveBeenCalled();
     expect(interaction._editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/status check could not be completed/i),
@@ -143,7 +143,7 @@ describe('/qurl-admin status — admin-offboarding nudge (#185)', () => {
       memberFetchBehavior: async () => ({ id: 'admin-original' }), // present
     });
     await handleCommand(interaction);
-    expect(interaction.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(interaction.deferReply).toHaveBeenCalledWith({ flags: 64 });
     expect(interaction.deferred).toBe(true);
     expect(interaction._reply).not.toHaveBeenCalled();
     expect(interaction._editReply).toHaveBeenCalledTimes(1);
@@ -175,7 +175,7 @@ describe('/qurl-admin status — admin-offboarding nudge (#185)', () => {
 
     expect(interaction._followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: 'There was an error executing this command.',
-      ephemeral: true,
+      flags: 64,
     }));
   });
 
@@ -570,7 +570,7 @@ describe('/qurl-admin status — admin-offboarding nudge (#185)', () => {
 
     await handleCommand(interaction);
 
-    expect(interaction.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(interaction.deferReply).toHaveBeenCalledWith({ flags: 64 });
     expect(interaction._reply).not.toHaveBeenCalled();
     expect(interaction._editReply).toHaveBeenCalledTimes(1);
     expect(interaction._editReply.mock.calls[0][0].content).toContain('not configured for this server');

@@ -344,7 +344,7 @@ describe('handleCommand dispatch-time filter', () => {
 
       expect(reply).toHaveBeenCalledWith(expect.objectContaining({
         content: expect.stringContaining('no longer available'),
-        ephemeral: true,
+        flags: 64,
       }));
     },
   );
@@ -380,7 +380,7 @@ describe('handleCommand dispatch-time filter', () => {
 
     expect(reply).toHaveBeenCalledWith({
       content: 'qURL only works inside a server where it is installed, not in DMs or from a user install.',
-      ephemeral: true,
+      flags: 64,
     });
     expect(interaction.options.getSubcommand).not.toHaveBeenCalled();
   });

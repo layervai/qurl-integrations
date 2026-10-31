@@ -48,6 +48,7 @@ jest.mock('discord.js', () => ({
     setTimestamp: jest.fn().mockReturnThis(),
     setThumbnail: jest.fn().mockReturnThis(),
   })),
+  MessageFlags: jest.requireActual('discord.js').MessageFlags,
   PermissionFlagsBits: { ManageRoles: 1n },
   ActionRowBuilder: jest.fn().mockImplementation(() => {
     const row = { components: [], addComponents: jest.fn(function (...args) {
@@ -991,6 +992,7 @@ describe('handleAddRecipients', () => {
         setThumbnail: jest.fn().mockReturnThis(),
         setURL: jest.fn().mockReturnThis(),
       })),
+      MessageFlags: jest.requireActual('discord.js').MessageFlags,
       PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
       ActionRowBuilder: jest.fn().mockImplementation(() => {
         const row = { components: [], addComponents: jest.fn(function (...args) {

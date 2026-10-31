@@ -43,7 +43,7 @@ test.each(['setup', 'status'])('admin %s retains runtime permission checks, incl
     };
     await command.execute(interaction);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/Only server administrators/), ephemeral: true,
+      content: expect.stringMatching(/Only server administrators/), flags: 64,
     }));
   }
 });
@@ -58,7 +58,7 @@ test('unknown admin actions never dispatch a user command', async () => {
       reply: jest.fn().mockResolvedValue(undefined),
     };
     await loaded.commands.find(command => command.data.name === 'qurl-admin').execute(interaction);
-    expect(interaction.reply).toHaveBeenCalledWith({ content: 'Unknown qURL admin command.', ephemeral: true });
+    expect(interaction.reply).toHaveBeenCalledWith({ content: 'Unknown qURL admin command.', flags: 64 });
     expect(dispatch).not.toHaveBeenCalled();
   } finally {
     dispatch.mockRestore();

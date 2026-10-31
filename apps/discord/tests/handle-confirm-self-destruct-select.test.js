@@ -74,7 +74,7 @@ describe('handleConfirmSelfDestructSelect', () => {
     expect(int.deferUpdate).not.toHaveBeenCalled();
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Unrecognized self-destruct/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringMatching(/forged off-set self-destruct/i),

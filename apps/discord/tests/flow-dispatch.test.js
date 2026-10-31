@@ -182,7 +182,7 @@ describe('handleFlowInteraction', () => {
     expect(interaction.update).not.toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith({
       content: UNSUPPORTED_CONTEXT_MSG,
-      ephemeral: true,
+      flags: 64,
     });
   });
 
@@ -280,7 +280,7 @@ describe('handleFlowInteraction', () => {
     expect(interaction.update).not.toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith({
       content: SUPERSEDED_MSG,
-      ephemeral: true,
+      flags: 64,
     });
   });
 
@@ -299,7 +299,7 @@ describe('handleFlowInteraction', () => {
     expect(interaction.update).toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith({
       content: SUPERSEDED_MSG,
-      ephemeral: true,
+      flags: 64,
     });
   });
 
@@ -353,7 +353,7 @@ describe('handleFlowInteraction', () => {
     expect(interaction.reply).not.toHaveBeenCalled();
     expect(interaction.followUp).toHaveBeenCalledWith({
       content: SUPERSEDED_MSG,
-      ephemeral: true,
+      flags: 64,
     });
   });
 
@@ -405,7 +405,7 @@ describe('handleFlowInteraction', () => {
 
     expect(interaction.reply).not.toHaveBeenCalled();
     expect(interaction.followUp).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringMatching(/Something went wrong/), ephemeral: true }),
+      expect.objectContaining({ content: expect.stringMatching(/Something went wrong/), flags: 64 }),
     );
   });
 

@@ -93,6 +93,7 @@ jest.mock('discord.js', () => {
     TextInputBuilder: jest.fn().mockImplementation(() => makeChainable()),
     TextInputStyle: { Short: 1, Paragraph: 2 },
     AttachmentBuilder: jest.fn().mockImplementation((buf, opts) => ({ buf, name: opts?.name })),
+    MessageFlags: jest.requireActual('discord.js').MessageFlags,
     PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
   };
 });
@@ -2632,7 +2633,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       editReply: jest.fn().mockResolvedValue(undefined),
     };
     const add = makeClick('add');
-    add.reply.mockResolvedValueOnce({ awaitMessageComponent: jest.fn().mockResolvedValue(selection) });
+    add.fetchReply = jest.fn().mockResolvedValueOnce({ awaitMessageComponent: jest.fn().mockResolvedValue(selection) });
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-initial', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
@@ -2709,7 +2710,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'Already revoking links for this send.',
-      ephemeral: true,
+      flags: 64,
     });
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
@@ -2731,7 +2732,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
       expect(addClick.reply).toHaveBeenCalledWith({
         content: 'Already revoking links for this send.',
-        ephemeral: true,
+        flags: 64,
       });
       expect(mockMintLinks).toHaveBeenCalledTimes(1);
       expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
@@ -2751,7 +2752,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
       expect(revokeClick.reply).toHaveBeenCalledWith({
         content: 'Already revoking links for this send.',
-        ephemeral: true,
+        flags: 64,
       });
       expect(revokeClick.deferUpdate).not.toHaveBeenCalled();
       expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
@@ -2781,7 +2782,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'This send is no longer revocable. Add Recipients is disabled.',
-      ephemeral: true,
+      flags: 64,
     });
   });
 
@@ -2801,7 +2802,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     await collect(addClick);
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'This send is no longer revocable. Add Recipients is disabled.',
-      ephemeral: true,
+      flags: 64,
     });
   });
 
@@ -2852,7 +2853,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     await collect(addClick);
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'Links were revoked, but qURL could not save the final state. Add Recipients is disabled; retry `/qurl revoke`.',
-      ephemeral: true,
+      flags: 64,
     });
   });
 
@@ -2871,7 +2872,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'Links for this send have already been revoked.',
-      ephemeral: true,
+      flags: 64,
     });
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
@@ -2890,7 +2891,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'No live links remain for this send.',
-      ephemeral: true,
+      flags: 64,
     });
     expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
@@ -2915,7 +2916,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'Revocation is incomplete for this send. Add Recipients is disabled; retry `/qurl revoke`.',
-      ephemeral: true,
+      flags: 64,
     });
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(2);
@@ -2952,7 +2953,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
         awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
       };
       const addClick = makeClick('add');
-      addClick.reply.mockResolvedValueOnce(selectReply);
+      addClick.fetchReply = jest.fn().mockResolvedValueOnce(selectReply);
 
       mockDb.getSendConfig.mockResolvedValueOnce({
         connector_resource_id: 'res-initial', expires_in: '30m',
@@ -2972,8 +2973,11 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
       expect(addClick.reply).toHaveBeenCalledWith(expect.objectContaining({
         content: 'Select additional recipients:',
-        fetchReply: true,
+        flags: 64,
       }));
+      expect(addClick.reply.mock.calls[0][0]).not.toHaveProperty('fetchReply');
+      expect(addClick.fetchReply).toHaveBeenCalledTimes(1);
+      expect(addClick.reply.mock.invocationCallOrder[0]).toBeLessThan(addClick.fetchReply.mock.invocationCallOrder[0]);
       expect(selectInteraction.deferUpdate).toHaveBeenCalled();
       expect(mockMintLinks).toHaveBeenCalledTimes(attachmentMode ? 11 : 2);
       expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(2);
@@ -3005,7 +3009,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       awaitMessageComponent: jest.fn(() => selectPending.promise),
     };
     const addClick = makeClick('add');
-    addClick.reply.mockResolvedValueOnce(selectReply);
+    addClick.fetchReply = jest.fn().mockResolvedValueOnce(selectReply);
     const addPromise = collect(addClick);
     await waitForMicrotaskExpectation(() => {
       expect(selectReply.awaitMessageComponent).toHaveBeenCalled();
@@ -3016,7 +3020,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     expect(revokeClick.reply).toHaveBeenCalledWith({
       content: 'Already processing an "Add Recipients" action. Finish the current selection or try again in a moment.',
-      ephemeral: true,
+      flags: 64,
     });
     expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
 

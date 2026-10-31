@@ -31,6 +31,7 @@
 //   anything inside customId. A user can't spoof another user's flow
 //   by editing a customId.
 
+const { MessageFlags } = require('discord.js');
 const { buildFlowId } = require('./flow-id');
 const { loadFlow } = require('./flow-state');
 const { SHARD_ID } = require('./config');
@@ -297,9 +298,9 @@ async function supersededRoutingFailureReply(interaction, message = SUPERSEDED_M
 async function safeReply(interaction, content) {
   try {
     if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({ content, ephemeral: true });
+      await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
     } else {
-      await interaction.reply({ content, ephemeral: true });
+      await interaction.reply({ content, flags: MessageFlags.Ephemeral });
     }
   } catch (err) {
     logger.warn('flow-dispatch: reply failed', { error: err.message });

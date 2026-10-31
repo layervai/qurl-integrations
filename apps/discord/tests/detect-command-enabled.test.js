@@ -44,7 +44,7 @@ describe('/qurl detect activation', () => {
       content: enabled
         ? '❌ The `image:` option is required. Re-run with an image attached.'
         : commands._test.QURL_DETECT_DISABLED_REPLY,
-      ephemeral: true,
+      flags: 64,
     });
   });
 });

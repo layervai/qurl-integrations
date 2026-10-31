@@ -80,6 +80,7 @@ function buildDiscordMock(embedInstances = []) {
       return builder;
     }),
     EmbedBuilder: jest.fn().mockImplementation(makeEmbed),
+    MessageFlags: jest.requireActual('discord.js').MessageFlags,
     PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
     ActionRowBuilder: jest.fn().mockImplementation(() => {
       const row = { components: [], addComponents: jest.fn(function (...args) {
