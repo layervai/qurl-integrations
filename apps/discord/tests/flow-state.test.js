@@ -411,8 +411,7 @@ describe('flow-state.loadFlow', () => {
 
 describe('flow-state.transitionFlow', () => {
   test('happy path: emits FLOW_TRANSITION with terminal=true and bumps version', async () => {
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'stage_a' } });
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 5 } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'stage_a', payload: 'old-ciphertext-must-stay-private' } });
 
     const res = await flowState.transitionFlow('id', 4, {
       stage_to: 'stage_b',
@@ -422,7 +421,9 @@ describe('flow-state.transitionFlow', () => {
 
     expect(res).toEqual({ result: 'success', version: 5 });
 
+    expect(ddbMock.calls()).toHaveLength(1);
     const updCall = ddbMock.commandCalls(UpdateCommand)[0];
+    expect(updCall.args[0].input).toMatchObject({ ReturnValues: 'UPDATED_OLD', ReturnValuesOnConditionCheckFailure: 'ALL_OLD' });
     expect(updCall.args[0].input.TableName).toBe(EXPECTED_TABLE);
     expect(updCall.args[0].input.ConditionExpression).toBe('attribute_exists(flow_id) AND #v = :expected AND #e >= :now');
     expect(typeof updCall.args[0].input.ExpressionAttributeValues[':now']).toBe('number');
@@ -431,6 +432,9 @@ describe('flow-state.transitionFlow', () => {
     expect(updCall.args[0].input.ExpressionAttributeValues[':expected']).toBe(4);
     expect(updCall.args[0].input.ExpressionAttributeValues[':stage_to']).toBe('stage_b');
     expect(updCall.args[0].input.ExpressionAttributeValues[':payload'].startsWith('enc:v1:')).toBe(true);
+    expect(decrypt).not.toHaveBeenCalled();
+    expect(JSON.stringify(logger.audit.mock.calls)).not.toContain('old-ciphertext');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('old-ciphertext');
 
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
       flow_id: 'id',
@@ -444,8 +448,7 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('success with terminal: false stays false (negative-control vs forced-false)', async () => {
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 3 } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'a' } });
 
     await flowState.transitionFlow('id', 2, {
       stage_to: 'b',
@@ -464,8 +467,7 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('payload: null clears existing payload (asymmetric with createFlow)', async () => {
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'a' } });
 
     await flowState.transitionFlow('id', 1, {
       stage_to: 'b',
@@ -479,8 +481,7 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('created_at is never written by transitionFlow (preserves row birth time)', async () => {
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'a' } });
 
     await flowState.transitionFlow('id', 1, {
       stage_to: 'b',
@@ -493,8 +494,7 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('skips payload encrypt when payload is omitted', async () => {
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'a' } });
 
     await flowState.transitionFlow('id', 1, {
       stage_to: 'b',
@@ -509,8 +509,7 @@ describe('flow-state.transitionFlow', () => {
   test('set_expires_at writes new expiry; extended=true when new > prior', async () => {
     const priorExpires = futureExpiry(600);
     const newExpiry = futureExpiry(1800);
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a', expires_at: priorExpires } });
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'a', expires_at: priorExpires } });
 
     await flowState.transitionFlow('id', 1, {
       stage_to: 'b',
@@ -534,8 +533,7 @@ describe('flow-state.transitionFlow', () => {
   test('set_expires_at that SHORTENS the lifetime emits extended=false (honest forensics)', async () => {
     const priorExpires = futureExpiry(3600);
     const shorterExpiry = futureExpiry(600);
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a', expires_at: priorExpires } });
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'a', expires_at: priorExpires } });
 
     await flowState.transitionFlow('id', 1, {
       stage_to: 'b',
@@ -556,28 +554,12 @@ describe('flow-state.transitionFlow', () => {
 
   test('set_expires_at equal to prior emits extended=false (strict > semantics)', async () => {
     const sameExpiry = futureExpiry(600);
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a', expires_at: sameExpiry } });
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'a', expires_at: sameExpiry } });
 
     await flowState.transitionFlow('id', 1, {
       stage_to: 'b',
       terminal: false,
       set_expires_at: sameExpiry,
-    });
-
-    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION,
-      expect.objectContaining({ extended: false }),
-    );
-  });
-
-  test('set_expires_at on a row with missing prior expires_at emits extended=false (no honest baseline)', async () => {
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
-
-    await flowState.transitionFlow('id', 1, {
-      stage_to: 'b',
-      terminal: false,
-      set_expires_at: futureExpiry(600),
     });
 
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION,
@@ -601,166 +583,80 @@ describe('flow-state.transitionFlow', () => {
     })).rejects.toThrow(/must be strictly in the future/);
   });
 
-  test('returns not_found when pre-read finds no row (forces terminal=false in audit)', async () => {
-    ddbMock.on(GetCommand).resolves({});
-
-    const res = await flowState.transitionFlow('id', 1, {
-      stage_to: 's',
-      terminal: true,
-    });
-    expect(res).toEqual({ result: 'not_found', version: null });
+  test.each([
+    ['absent row', undefined, 'not_found', null, undefined],
+    ['live version conflict', { stage: { S: 'a' }, expires_at: { N: String(futureExpiry()) } }, 'conflict', 'a', undefined],
+    ['native live conflict', { stage: 'a', expires_at: futureExpiry() }, 'conflict', 'a', undefined],
+    ['native expired row', { stage: 'a', expires_at: futureExpiry(-30) }, 'not_found', 'a', undefined],
+    ['native numeric string is corrupt', { stage: 'a', expires_at: String(futureExpiry()) }, 'not_found', 'a', 'string'],
+    ['logically expired row', { stage: { S: 'a' }, expires_at: { N: String(futureExpiry(-30)) } }, 'not_found', 'a', undefined],
+    ['corrupt expiry', { stage: { S: 'a' }, expires_at: { S: 'not-a-number' } }, 'not_found', 'a', 'string'],
+    ['missing expiry', { stage: { S: 'a' } }, 'not_found', 'a', 'undefined'],
+    ['fractional expiry', { stage: { S: 'a' }, expires_at: { N: '2000000000.5' } }, 'not_found', 'a', 'number'],
+    ['native fractional expiry', { stage: 'a', expires_at: 2000000000.5 }, 'not_found', 'a', 'number'],
+  ])('%s is classified from the failed write without a follow-up read', async (_label, item, result, stageFrom, warnType) => {
+    const error = ccfe();
+    if (item) error.Item = item;
+    ddbMock.on(UpdateCommand).rejects(error);
+    const response = await flowState.transitionFlow('id', 1, { stage_to: 'b', terminal: true });
+    expect(response).toEqual({ result, version: null });
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
-      flow_id: 'id',
-      stage_from: null,
-      stage_to: 's',
-      result: 'not_found',
-      terminal: false,
-      extended: false,
-      version: 1,
+      flow_id: 'id', stage_from: stageFrom, stage_to: 'b', result,
+      terminal: false, extended: false, version: 1,
     });
-    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.calls()).toHaveLength(1);
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input).toMatchObject({
+      ReturnValues: 'UPDATED_OLD', ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+    });
+    if (warnType === undefined) expect(logger.warn).not.toHaveBeenCalled();
+    else expect(logger.warn).toHaveBeenCalledWith(
+      'flow-state.transitionFlow: row has missing or non-numeric expires_at; treating as expired',
+      { flow_id: 'id', expires_at_type: warnType });
   });
 
-  test('returns conflict when Update fails OCC and row still exists (forces terminal=false)', async () => {
-    ddbMock.on(GetCommand).resolves({
-      Item: { stage: 'a', flow_id: 'id', expires_at: futureExpiry() },
-    });
-    ddbMock.on(UpdateCommand).rejects(ccfe());
-
-    const res = await flowState.transitionFlow('id', 1, {
-      stage_to: 'b',
-      terminal: true,
-    });
-    expect(res).toEqual({ result: 'conflict', version: null });
-    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
-      flow_id: 'id',
-      stage_from: 'a',
-      stage_to: 'b',
-      result: 'conflict',
-      terminal: false,
-      extended: false,
-      version: 1,
-    });
+  test('an omitted prior expiry cannot inflate extension audit', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'a' } });
+    await flowState.transitionFlow('id', 1, { stage_to: 'b', terminal: false, set_expires_at: futureExpiry() });
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION,
+      expect.objectContaining({ result: 'success', stage_from: 'a', extended: false }));
   });
 
-  test('returns not_found when Update fails OCC and row disappeared (TTL race)', async () => {
-    let getCalls = 0;
-    ddbMock.on(GetCommand).callsFake(() => {
-      getCalls += 1;
-      if (getCalls === 1) return { Item: { stage: 'a' } };
-      return {};
+  test('failure classification uses the condition timestamp across a second boundary', async () => {
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(2_000_000_000_000);
+    const error = ccfe();
+    error.Item = { stage: { S: 'a' }, expires_at: { N: '2000000000' } };
+    ddbMock.on(UpdateCommand).callsFake(async () => {
+      clock.mockReturnValue(2_000_000_001_000);
+      throw error;
     });
-    ddbMock.on(UpdateCommand).rejects(ccfe());
-
-    const res = await flowState.transitionFlow('id', 1, {
-      stage_to: 'b',
-      terminal: false,
-    });
-    expect(res).toEqual({ result: 'not_found', version: null });
-    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
-      flow_id: 'id',
-      stage_from: 'a',
-      stage_to: 'b',
-      result: 'not_found',
-      terminal: false,
-      extended: false,
-      version: 1,
-    });
+    try {
+      await expect(flowState.transitionFlow('id', 1, { stage_to: 'b', terminal: false })).resolves.toEqual({ result: 'conflict', version: null });
+      expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues[':now']).toBe(2_000_000_000);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
-  test('post-CCFE recheck reports not_found when row is present but logically expired', async () => {
-    const pastExpiry = Math.floor(Date.now() / 1000) - 30;
-    let getCalls = 0;
-    ddbMock.on(GetCommand).callsFake(() => {
-      getCalls += 1;
-      if (getCalls === 1) return { Item: { stage: 'a' } };
-      return { Item: { flow_id: 'id', expires_at: pastExpiry } };
-    });
-    ddbMock.on(UpdateCommand).rejects(ccfe());
-
-    const res = await flowState.transitionFlow('id', 1, {
-      stage_to: 'b',
-      terminal: false,
-    });
-    expect(res).toEqual({ result: 'not_found', version: null });
-    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
-      flow_id: 'id',
-      stage_from: 'a',
-      stage_to: 'b',
-      result: 'not_found',
-      terminal: false,
-      extended: false,
-      version: 1,
-    });
-  });
-
-  test('post-CCFE recheck warns when row has corrupted expires_at and reports not_found', async () => {
-    let getCalls = 0;
-    ddbMock.on(GetCommand).callsFake(() => {
-      getCalls += 1;
-      if (getCalls === 1) return { Item: { stage: 'a' } };
-      return { Item: { flow_id: 'id', expires_at: 'not-a-number' } };
-    });
-    ddbMock.on(UpdateCommand).rejects(ccfe());
-
-    const res = await flowState.transitionFlow('id', 1, {
-      stage_to: 'b',
-      terminal: false,
-    });
-    expect(res).toEqual({ result: 'not_found', version: null });
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringMatching(/row has missing or non-numeric expires_at on recheck/),
-      expect.objectContaining({ flow_id: 'id' }),
-    );
-  });
-
-  test('post-CCFE recheck failure warns and conservatively reports conflict', async () => {
-    let getCalls = 0;
-    ddbMock.on(GetCommand).callsFake(() => {
-      getCalls += 1;
-      if (getCalls === 1) return { Item: { stage: 'a' } };
-      throw new Error('NetworkingError');
-    });
-    ddbMock.on(UpdateCommand).rejects(ccfe());
-
-    const res = await flowState.transitionFlow('id', 1, {
-      stage_to: 'b',
-      terminal: false,
-    });
-    expect(res).toEqual({ result: 'conflict', version: null });
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringMatching(/post-CCFE recheck failed/),
-      expect.objectContaining({ flow_id: 'id' }),
-    );
+  test('a conflict audit uses the exact rejected row instead of a stale pre-read', async () => {
+    const error = ccfe();
+    error.Item = { stage: { S: 'concurrent-stage' }, expires_at: { N: String(futureExpiry(30)) }, payload: { S: 'synthetic-sensitive-ciphertext' } };
+    ddbMock.on(UpdateCommand).rejects(error);
+    await flowState.transitionFlow('id', 1, { stage_to: 'b', terminal: false, set_expires_at: futureExpiry(60) });
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION,
+      expect.objectContaining({ stage_from: 'concurrent-stage', extended: false, result: 'conflict' }));
+    expect(JSON.stringify([logger.audit.mock.calls, logger.warn.mock.calls])).not.toContain('synthetic-sensitive-ciphertext');
+    expect(decrypt).not.toHaveBeenCalled();
+    expect(ddbMock.calls()).toHaveLength(1);
   });
 
   test('result=error emits and rethrows on non-conditional Update failure (forces terminal=false)', async () => {
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
     ddbMock.on(UpdateCommand).rejects(new Error('ProvisionedThroughputExceeded'));
 
     await expect(flowState.transitionFlow('id', 1, {
       stage_to: 'b',
       terminal: true,  // caller's terminal claim must be overridden
     })).rejects.toThrow('ProvisionedThroughputExceeded');
-
-    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
-      flow_id: 'id',
-      stage_from: 'a',
-      stage_to: 'b',
-      result: 'error',
-      terminal: false,
-      extended: false,
-      version: 1,
-    });
-  });
-
-  test('result=error emits and rethrows when pre-read fails', async () => {
-    ddbMock.on(GetCommand).rejects(new Error('NetworkingError'));
-
-    await expect(flowState.transitionFlow('id', 1, {
-      stage_to: 'b',
-      terminal: false,
-    })).rejects.toThrow('NetworkingError');
 
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
       flow_id: 'id',
