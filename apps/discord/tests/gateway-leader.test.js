@@ -2,6 +2,7 @@
 const {
   createGatewayLeader,
   DEFAULT_TICK_INTERVAL_MS,
+  MAX_TICK_AGE_MS,
 } = require('../src/gateway-leader');
 
 function makeMocks({
@@ -56,6 +57,13 @@ function makeLeader({ mocks, sleep, tickIntervalMs } = {}) {
 describe('createGatewayLeader — factory validation', () => {
   it('exposes default tick interval', () => {
     expect(DEFAULT_TICK_INTERVAL_MS).toBe(2_000);
+  });
+
+  it('rejects intervals that cannot fit the tick-freshness deadline', () => {
+    for (const tickIntervalMs of [0, -1, 0.5, Infinity, MAX_TICK_AGE_MS, MAX_TICK_AGE_MS + 1]) {
+      expect(() => makeLeader({ tickIntervalMs })).toThrow(/positive integer below/);
+    }
+    expect(() => makeLeader({ tickIntervalMs: MAX_TICK_AGE_MS - 1 })).not.toThrow();
   });
 
   it('throws on missing required deps', () => {
@@ -1047,5 +1055,80 @@ describe('hasStartedTickLoop — /health probe seam', () => {
     sleepResolvers[0]();
     await stopPromise;
     expect(leader.hasStartedTickLoop()).toBe(false);
+  });
+});
+
+describe('standby tick freshness', () => {
+  const { selectGatewayReadinessProbe } = require('../src/gateway-shutdown-helpers');
+  const probeFor = leader => selectGatewayReadinessProbe({
+    enableHotStandby: true,
+    getGatewayLeader: () => leader,
+    gatewayShim: { isReady: () => false },
+  });
+  beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }));
+  afterEach(() => jest.useRealTimers());
+
+  it('a hung heartbeat becomes unready at the monotonic freshness boundary', async () => {
+    let release = () => {};
+    const mocks = makeMocks({
+      lock: { acquireLock: jest.fn(async () => ({ acquired: false })) },
+      peerHeartbeat: { writeHeartbeat: jest.fn(() => new Promise(resolve => { release = resolve; })) },
+    });
+    const { leader } = makeLeader({ mocks });
+    const probe = probeFor(leader);
+    leader.start();
+    try {
+      await jest.advanceTimersByTimeAsync(DEFAULT_TICK_INTERVAL_MS);
+      expect(mocks.peerHeartbeat.writeHeartbeat).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(MAX_TICK_AGE_MS - 1);
+      expect(probe()).toBe(true);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(probe()).toBe(true);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(probe()).toBe(false);
+    } finally {
+      const stopping = leader.stop();
+      release();
+      await jest.advanceTimersByTimeAsync(DEFAULT_TICK_INTERVAL_MS);
+      await stopping;
+    }
+  });
+
+  it('healthy ticks stay ready beyond the threshold and ignore wall-clock changes', async () => {
+    const mocks = makeMocks({ lock: { acquireLock: jest.fn(async () => ({ acquired: false })) } });
+    const { leader } = makeLeader({ mocks });
+    const probe = probeFor(leader);
+    leader.start();
+    try {
+      await jest.advanceTimersByTimeAsync(MAX_TICK_AGE_MS * 4);
+      expect(mocks.peerHeartbeat.writeHeartbeat.mock.calls.length).toBeGreaterThan(10);
+      expect(probe()).toBe(true);
+      jest.setSystemTime(Date.now() + 60 * 60_000);
+      expect(probe()).toBe(true);
+      jest.setSystemTime(new Date('2000-01-01T00:00:00Z'));
+      expect(probe()).toBe(true);
+      await jest.advanceTimersByTimeAsync(DEFAULT_TICK_INTERVAL_MS);
+      expect(probe()).toBe(true);
+    } finally {
+      const stopping = leader.stop();
+      await jest.advanceTimersByTimeAsync(DEFAULT_TICK_INTERVAL_MS);
+      await stopping;
+    }
+  });
+
+  it('a loop that never enters its first tick cannot stay ready forever', async () => {
+    let wake = () => {};
+    const { leader } = makeLeader({ sleep: () => new Promise(resolve => { wake = resolve; }) });
+    const probe = probeFor(leader);
+    leader.start();
+    try {
+      expect(probe()).toBe(true);
+      await jest.advanceTimersByTimeAsync(MAX_TICK_AGE_MS + 1);
+      expect(probe()).toBe(false);
+    } finally {
+      const stopping = leader.stop();
+      wake();
+      await stopping;
+    }
   });
 });
