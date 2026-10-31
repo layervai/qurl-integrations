@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { CleanupRetryBudget, fetchWithCleanupRetry, fetchWithTransientRetry } from './http';
+import { CleanupRetryBudget, fetchGetWithTransientRetry, fetchWithCleanupRetry, fetchWithTransientRetry } from './http';
 
 export interface MintResult {
   resource_id: string;
@@ -218,7 +218,7 @@ export async function mintLink(
 
 /** Access a qURL link and return the HTTP result */
 export async function accessLink(url: string): Promise<LinkAccessResult> {
-  const res = await fetch(url, { redirect: 'follow' });
+  const res = await fetchGetWithTransientRetry(url, { redirect: 'follow' });
   return {
     status: res.status,
     finalUrl: res.url,
@@ -229,7 +229,7 @@ export async function accessLink(url: string): Promise<LinkAccessResult> {
 
 /** Access a qURL link without following redirects */
 export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResult> {
-  const res = await fetch(url, { redirect: 'manual' });
+  const res = await fetchGetWithTransientRetry(url, { redirect: 'manual' });
   return {
     status: res.status,
     finalUrl: res.headers.get('location') ?? res.url,

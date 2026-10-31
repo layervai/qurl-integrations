@@ -3,7 +3,7 @@
  * Uses bot token to read/write messages and verify bot behavior.
  */
 
-import { CleanupRetryBudget, fetchWithCleanupRetry } from './http';
+import { CleanupRetryBudget, fetchGetWithTransientRetry, fetchWithCleanupRetry } from './http';
 
 const API = 'https://discord.com/api/v10';
 
@@ -53,7 +53,9 @@ export async function api<T = unknown>(token: string, method: string, path: stri
   }
   const res = cleanupRetryBudget
     ? await fetchWithCleanupRetry(`${API}${path}`, opts, cleanupRetryBudget)
-    : await fetch(`${API}${path}`, opts);
+    : method.toUpperCase() === 'GET'
+      ? await fetchGetWithTransientRetry(`${API}${path}`, opts)
+      : await fetch(`${API}${path}`, opts);
   if (!res.ok) {
     const text = await res.text();
     throw new DiscordApiError(res.status, `Discord API ${method} ${path}: ${res.status} ${text}`);
