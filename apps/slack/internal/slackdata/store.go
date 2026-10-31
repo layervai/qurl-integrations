@@ -429,3 +429,8 @@ const (
 func unixNanoAttr(t time.Time) ddbtypes.AttributeValue {
 	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(t.UTC().UnixNano(), 10)}
 }
+
+// updatedAtAttrs keeps the display time and lifecycle purge stamp at one instant.
+func updatedAtAttrs(now time.Time) (display, purge ddbtypes.AttributeValue) {
+	return stringAttr(now.UTC().Format(time.RFC3339)), unixNanoAttr(now)
+}

@@ -1,0 +1,20 @@
+[
+  {
+    "team_id": "T1",
+    "user_id": "U1",
+    "counter_key": "__slack_rate_limit#T1#316ca0efda6296d8f2c11d1e20890d22",
+    "index_partition": "1f93603db53bfad5c92390f735d0cbb8617b4ab8214ae91c5664a3d1e9b009c8#3"
+  },
+  {
+    "team_id": "T_fixture",
+    "user_id": "U_fixture",
+    "counter_key": "__slack_rate_limit#T_fixture#96d3a8ac72f84ec71b9a314c69726c42",
+    "index_partition": "15ad155d0b8e06cea8aa9924fbcaa07c411dc012d14e64ded9254ae11383dadb#9"
+  },
+  {
+    "team_id": "E_example",
+    "user_id": "U_other",
+    "counter_key": "__slack_rate_limit#E_example#39e6cbbb688bc399239ad08c13747973",
+    "index_partition": "d62ae8f86a263740eb0fe62624f779bcad172fcae542d8ce8913966cba5626ac#3"
+  }
+]
