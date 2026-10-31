@@ -2633,7 +2633,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       editReply: jest.fn().mockResolvedValue(undefined),
     };
     const add = makeClick('add');
-    add.reply.mockResolvedValueOnce({ awaitMessageComponent: jest.fn().mockResolvedValue(selection) });
+    add.fetchReply = jest.fn().mockResolvedValueOnce({ awaitMessageComponent: jest.fn().mockResolvedValue(selection) });
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-initial', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
@@ -2953,7 +2953,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
         awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
       };
       const addClick = makeClick('add');
-      addClick.reply.mockResolvedValueOnce(selectReply);
+      addClick.fetchReply = jest.fn().mockResolvedValueOnce(selectReply);
 
       mockDb.getSendConfig.mockResolvedValueOnce({
         connector_resource_id: 'res-initial', expires_in: '30m',
@@ -2973,8 +2973,11 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
       expect(addClick.reply).toHaveBeenCalledWith(expect.objectContaining({
         content: 'Select additional recipients:',
-        fetchReply: true,
+        flags: 64,
       }));
+      expect(addClick.reply.mock.calls[0][0]).not.toHaveProperty('fetchReply');
+      expect(addClick.fetchReply).toHaveBeenCalledTimes(1);
+      expect(addClick.reply.mock.invocationCallOrder[0]).toBeLessThan(addClick.fetchReply.mock.invocationCallOrder[0]);
       expect(selectInteraction.deferUpdate).toHaveBeenCalled();
       expect(mockMintLinks).toHaveBeenCalledTimes(attachmentMode ? 11 : 2);
       expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(2);
@@ -3006,7 +3009,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       awaitMessageComponent: jest.fn(() => selectPending.promise),
     };
     const addClick = makeClick('add');
-    addClick.reply.mockResolvedValueOnce(selectReply);
+    addClick.fetchReply = jest.fn().mockResolvedValueOnce(selectReply);
     const addPromise = collect(addClick);
     await waitForMicrotaskExpectation(() => {
       expect(selectReply.awaitMessageComponent).toHaveBeenCalled();

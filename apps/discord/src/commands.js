@@ -2856,12 +2856,12 @@ async function executeSendPipeline(interaction, {
               .setMinValues(1)
               .setMaxValues(maxSelect)
           );
-          const selectReply = await btnInteraction.reply({
+          await btnInteraction.reply({
             content: 'Select additional recipients:',
             components: [userSelectRow],
             flags: MessageFlags.Ephemeral,
-            fetchReply: true,
           });
+          const selectReply = await btnInteraction.fetchReply();
 
           try {
             const selectInteraction = await selectReply.awaitMessageComponent({
