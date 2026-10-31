@@ -9,8 +9,8 @@ const logger = require('../logger');
 // write re-encrypts).
 //
 // Key sourced from KEY_ENCRYPTION_KEY (base64-encoded, 32 bytes after decode).
-// Returns the input unchanged when the key is unset so tests + dev installs
-// work without ceremony; production boot validation should require it.
+// encrypt requires the key. encryptOrPlaintext explicitly permits the
+// development fallback for operator-managed configuration.
 //
 // KEY ROTATION — IMPORTANT:
 // Current and optional previous keys are cached on first use. Rotation needs
@@ -57,7 +57,7 @@ function getPrevKey() {
 }
 
 let plaintextWarned = false;
-function encrypt(plaintext) {
+function encryptOrPlaintext(plaintext) {
   if (plaintext == null) return plaintext;
   const key = getKey();
   if (!key) {
@@ -66,7 +66,7 @@ function encrypt(plaintext) {
     // when NODE_ENV=production OR when the qURL OAuth setup flow is
     // configured, so this branch only runs in dev/test environments
     // without OAuth wiring. For live third-party credentials, callers
-    // MUST use encryptStrict() instead.
+    // MUST use encrypt() instead.
     if (!plaintextWarned) {
       plaintextWarned = true;
       logger.warn('KEY_ENCRYPTION_KEY is not set — secrets are being stored in PLAINTEXT. Generate a key with `node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"` and set KEY_ENCRYPTION_KEY in the environment before using in any shared deployment.');
@@ -76,17 +76,12 @@ function encrypt(plaintext) {
   return encryptWithKey(key, plaintext);
 }
 
-// Fail-closed variant of encrypt(): throws when KEY_ENCRYPTION_KEY is unset
-// instead of silently returning plaintext. Use this on persistence paths
-// that handle live third-party credentials (e.g. orphaned GitHub OAuth
-// access tokens) where a plaintext fallback is unacceptable even in
-// dev/test/staging — the boot gate in index.js already requires KEK in
-// any environment that hands out real GitHub tokens, so this is
-// defense-in-depth against a misconfigured deploy that bypasses the gate.
-function encryptStrict(plaintext) {
+// Default sensitive-value encryption fails closed in every environment.
+// Only operator-managed local configuration may opt into encryptOrPlaintext.
+function encrypt(plaintext) {
   // Null/undefined pass through unchanged, intentionally matching
-  // encrypt(). Callers that should never see a null at this point
-  // (e.g. the orphan-token revoke path) gate the value upstream;
+  // encryptOrPlaintext(). Callers that should never see a null at this point
+  // gate required values upstream;
   // tightening to a throw here would break that contract.
   if (plaintext == null) return plaintext;
   const key = getKey();
@@ -146,7 +141,7 @@ function decrypt(value) {
 // Validate both write and fallback-read keys before serving traffic.
 function smokeTestKeys() {
   const probe = 'boot-smoke';
-  if (decrypt(encryptStrict(probe)) !== probe) throw new Error('current-key round-trip mismatch');
+  if (decrypt(encrypt(probe)) !== probe) throw new Error('current-key round-trip mismatch');
   const previous = getPrevKey();
   if (previous && decrypt(encryptWithKey(previous, probe)) !== probe) {
     throw new Error('previous-key round-trip mismatch');
@@ -159,7 +154,7 @@ function smokeTestKeys() {
 // encrypt call mid-request).
 function _resetKeyCache() { cachedKey = null; cachedPrevKey = null; plaintextWarned = false; }
 
-const exports_ = { encrypt, encryptStrict, decrypt, smokeTestKeys };
+const exports_ = { encryptOrPlaintext, encrypt, decrypt, smokeTestKeys };
 if (process.env.NODE_ENV !== 'production') {
   exports_._resetKeyCache = _resetKeyCache;
 }

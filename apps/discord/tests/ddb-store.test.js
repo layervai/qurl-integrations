@@ -13,19 +13,16 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-// Mock crypto wrapper: pass-through so tests can assert on plaintext
-// that flows into the DDB Item. Real encryption + the encryptStrict
-// fail-closed behavior are exercised by crypto.test.js. encryptStrict
-// is a jest.fn so the no-KEK regression test below can override its
-// implementation per-call without a shared mutable flag.
+// Keep the ciphertext envelope for store assertions. crypto.test.js covers
+// real keys; the strict mock also tests that failed encryption prevents writes.
 function mockCiphertext(value) {
   return `enc:v1:IV:TAG:${Buffer.from(value || '').toString('hex')}`;
 }
 
-const mockEncryptStrict = jest.fn(mockCiphertext);
+const mockEncrypt = jest.fn(mockCiphertext);
 jest.mock('../src/utils/crypto', () => ({
-  encrypt: mockCiphertext,
-  encryptStrict: mockEncryptStrict,
+  encryptOrPlaintext: mockCiphertext,
+  encrypt: mockEncrypt,
   decrypt: (v) => {
     if (!v || !v.startsWith('enc:v1:')) return v;
     const parts = v.split(':');
@@ -72,8 +69,8 @@ beforeEach(() => {
   logger.error.mockReset();
   logger.warn.mockReset();
   ddbMock.reset();
-  mockEncryptStrict.mockReset();
-  mockEncryptStrict.mockImplementation(mockCiphertext);
+  mockEncrypt.mockReset();
+  mockEncrypt.mockImplementation(mockCiphertext);
 });
 
 afterAll(async () => {
@@ -2391,5 +2388,25 @@ describe('ddb-store boot-time AWS_REGION validation', () => {
     const result = spawnDdbStoreBootWithRegion('us-west-2');
     expect(result.status).toBe(0);
     expect(result.stderr).not.toMatch(/AWS_REGION/);
+  });
+});
+
+describe('live credentials never use the plaintext fallback (#190)', () => {
+  test.each([
+    ['interaction token', () => store.saveSendConfirmState('s1', { interactionToken: 'synthetic-live-secret' })],
+    ['webhook subscription', () => store.setGuildWebhookSubscription('g1', {
+      webhookId: 'wh1', webhookOwnerId: 'usr_o', webhookSecret: 'synthetic-live-secret',
+    })],
+    ['sibling webhook rotation', () => store.propagateGuildWebhookSubscription('usr_o', {
+      webhookId: 'wh1', webhookSecret: 'synthetic-live-secret',
+    })],
+  ])('%s cannot persist when strict encryption fails', async (_label, write) => {
+    ddbMock.on(ScanCommand).resolves({ Items: [
+      { guild_id: 'g_sibling', webhook_id: 'wh_old', webhook_owner_id: 'usr_o' },
+    ] });
+    mockEncrypt.mockImplementationOnce(() => { throw new Error('KEY_ENCRYPTION_KEY is required'); });
+    await expect(write()).rejects.toThrow('KEY_ENCRYPTION_KEY is required');
+    expect(mockEncrypt).toHaveBeenCalledWith('synthetic-live-secret');
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 });

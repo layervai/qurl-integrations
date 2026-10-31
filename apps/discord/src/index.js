@@ -209,9 +209,9 @@ if (process.env.NODE_ENV !== 'test') {
 // Any deploy that runs the qURL OAuth setup flow must encrypt persisted
 // credentials at rest, in any NODE_ENV — guild_configs.qurl_api_key is
 // written straight out of that callback. setGuildApiKey uses
-// encryptStrict as a backstop, but failing closed at boot is the loud
+// encrypt as a backstop, but failing closed at boot is the loud
 // signal. Smoke-test the key material so a malformed value is caught here
-// instead of on the first encrypt() call minutes into serving traffic.
+// instead of on the first encryptOrPlaintext() call minutes into serving traffic.
 //
 // Role-agnostic by design: a `gateway`-role process doesn't mount the
 // OAuth callback, but env vars are uniform across roles in a single
