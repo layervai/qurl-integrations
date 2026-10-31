@@ -1016,8 +1016,8 @@ function permanentAwsErrorCode(err) {
 // cleared on the abort path so it doesn't fire spuriously after
 // resolution.
 //
-// Defensive: if start() hasn't run (stopController is null) the
-// sleep degrades to a pure setTimeout — abortableSleep is also
+// Defensive: without a shutdown or wake signal, the sleep
+// degrades to a pure setTimeout — abortableSleep is also
 // reachable from the at-cap backpressure pause, and we don't want
 // a missing controller to throw and crash the loop.
 function abortableSleep(ms, wakeSignal) {

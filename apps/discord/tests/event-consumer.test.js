@@ -1345,6 +1345,7 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
       const client = makeStubClient();
       for (let i = 0; i < 4; i++) await pollOnceFast(client);
       expect(eventConsumer._test.getCurrentBackoffMs()).toBe(1600);
+      eventConsumer._test._setStopControllerForTest();
       let woke = false;
       const paused = withMockedSqs(() => eventConsumer._test.pollOnce(client)).then(() => { woke = true; });
       await jest.advanceTimersByTimeAsync(10);
@@ -1357,6 +1358,30 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
       await pollOnceFast(client);
       expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(1);
       expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('shutdown still wakes an at-cap sleep while every handler remains pending', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      withWorkerDispatch(() => {
+        for (let i = 0; i < eventConsumer._test.MAX_INFLIGHT_HANDLERS; i++) {
+          eventConsumer.trackDispatch(new Promise(() => {}));
+        }
+      });
+      eventConsumer._test._setStopControllerForTest();
+      let woke = false;
+      const paused = withMockedSqs(() => eventConsumer._test.pollOnce(makeStubClient())).then(() => { woke = true; });
+      await jest.advanceTimersByTimeAsync(10);
+      expect(woke).toBe(false);
+      eventConsumer._test.getStopController().abort();
+      await jest.advanceTimersByTimeAsync(1);
+      expect(woke).toBe(true);
+      await paused;
+      expect(eventConsumer._test.getInFlightCount()).toBe(eventConsumer._test.MAX_INFLIGHT_HANDLERS);
+      expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(0);
     } finally {
       jest.useRealTimers();
     }
