@@ -570,6 +570,7 @@ func TestHandle_AsyncGetSurfaces5xxCorrelationHandle(t *testing.T) {
 // instantly rather than queueing or unbounded-spawning. Two concurrent
 // long-running workers fill the pool; the third request must drop.
 func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
+	logs := captureDefaultSlog(t)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
@@ -599,7 +600,7 @@ func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
 	seedGetAliasBinding(t, h, "T123")
-	t.Cleanup(h.Wait)
+	t.Cleanup(func() { releaseAll(); h.Wait() })
 
 	send := func(triggerID string) string {
 		body := getTokenCommandBody("T123", triggerID, rec.URL)
@@ -622,7 +623,13 @@ func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 		// gives the race detector + a busy CI runner enough headroom.
 		return len(h.sem) == 2
 	})
+	if logs.contains(`"event":"ack_busy"`) {
+		t.Fatal("unsaturated pool emitted ack_busy")
+	}
 	third := send("trig-3")
+	if !logs.contains(`"event":"ack_busy"`) {
+		t.Fatal("saturated pool omitted ack_busy")
+	}
 
 	if first != ackWorkingOnIt || second != ackWorkingOnIt {
 		t.Errorf("first/second acks should be working-on-it; got %q / %q", first, second)

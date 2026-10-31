@@ -103,7 +103,7 @@ func (h *Handler) startAsyncWorkerWithTimeout(log *slog.Logger, timeout time.Dur
 	if h.runOnPool(h.sem, log, timeout, work) {
 		return true
 	}
-	log.Warn("async pool saturated — dropping request")
+	log.Warn("async pool saturated — dropping request", "event", "ack_busy")
 	return false
 }
 

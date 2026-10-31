@@ -1145,3 +1145,16 @@ budgeted at 800 ms and the `views.open` call at 1500 ms, leaving headroom inside
 Slack's roughly three-second trigger window. Sustained p99 latency near either
 budget should be treated as an operator action item before customers see setup
 window-expired prompts.
+
+
+## Async pool pressure
+
+A rejected slash-command worker emits the structured field `event=ack_busy` and returns the busy acknowledgment. Use this CloudWatch Logs Insights query to find sustained pressure without a full-text scan:
+
+```text
+filter event = "ack_busy"
+| stats count(*) as drops by bin(1m)
+| filter drops >= 3
+```
+
+This event counts pool rejections, not all command failures. Check request latency and dependency health before raising concurrency limits.
