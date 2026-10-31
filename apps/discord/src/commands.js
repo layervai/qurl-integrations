@@ -2650,11 +2650,9 @@ async function executeSendPipeline(interaction, {
 
     collector.on('collect', async (btnInteraction) => {
       if (btnInteraction.customId === `qurl_expand_${sendId}`) {
-        if (revokeAttempted) {
-          await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
-          return;
-        }
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+        // The result card has a separate qurl_revoke_expand action.
+        if (revokeAttempted) return;
         showAllRecipients = !showAllRecipients;
         // buildConfirmMsg now returns {content, attachmentText, needsExpand};
         // extract content for the monitor + editReply (string-only).
