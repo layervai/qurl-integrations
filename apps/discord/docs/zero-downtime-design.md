@@ -24,7 +24,8 @@ checks must establish that behavior on the selected image and task bindings.
 1. **Interaction admission.** An incoming slash command, component or modal must
    reach a handler and be acknowledged within its deadline.
 2. **Flow continuity.** The next interaction must load the surviving row and
-   validate its stage, version, identity and expiry before it acts.
+   validate its stage, identity and expiry; handler transitions then use the
+   loaded version as a condition.
 3. **Gateway continuity.** The new active process must recover the session and
    dispatch checkpoint, or use the explicit fresh-session fallback. Presence and
    replay behavior need a real handoff check.
@@ -51,8 +52,9 @@ DynamoDB                            DynamoDB
                                 Discord REST replies
 ```
 
-The producer in [`event-publisher.js`](../src/event-publisher.js) emits a
-shard-qualified event ID. The consumer in
+The producer in [`event-publisher.js`](../src/event-publisher.js) emits
+`0:<sequence>` today. Its shard component is still the literal `0`, with an
+open `TODO(sharding-pr)` to supply the real per-shard value. The consumer in
 [`event-consumer.js`](../src/event-consumer.js) currently reconstructs
 `INTERACTION_CREATE` through discord.js and the shared interaction listener.
 Other event types are logged and deleted; there is no DM-file-capture consumer.
@@ -61,7 +63,9 @@ A Gateway connection is still needed for the selected transport and presence.
 Worker rolling replacement must admit the replacement before stopping the old
 worker and allow bounded in-flight work to drain. Gateway replacement also
 needs the lease, session snapshot, dispatch checkpoint and handoff rules below.
-A warm replacement alone does not transfer those states. Configuration and
+The Gateway-to-DynamoDB edge applies only when the corresponding RESUME and
+hot-standby switches are enabled. A warm replacement alone does not transfer
+those states. Configuration and
 normal CI determine the deployed roles and rollout order.
 
 ## The three pillars
@@ -69,7 +73,7 @@ normal CI determine the deployed roles and rollout order.
 ### Pillar 1 — Persistent interaction state
 
 [`flow-state.js`](../src/flow-state.js) provides `createFlow`, `loadFlow`,
-`transitionFlow` and `deleteFlow`. [`flow-id.js`](../src/flow-id.js) builds and
+`transitionFlow`, `deleteFlow` and `supersedeOrCreate`. [`flow-id.js`](../src/flow-id.js) builds and
 parses the canonical `<shard_id>#<guild_id>#<channel_id>#<user_id>` key.
 [`flow-dispatch.js`](../src/flow-dispatch.js) resolves component/modal routing
 from the interaction context and loads the matching row before invoking a
@@ -102,9 +106,12 @@ front half.
 |---|---|
 | `/qurl revoke` | Supersede the prior revoke menu through the guarded delete/recreate path. |
 | `/qurl setup` | Supersede the pre-modal button stage; preserve an active setup modal. |
+| Send/map confirmation | Supersede a prior `awaiting_send_confirm` row through its stage/version-guarded claim; return a surviving sibling stage without deleting it. |
 
-Send/map confirmation uses its current guarded flow creation and dispatcher
-handlers. The deleted multi-step send wizard is not a separate command or a
+`supersedeOrCreate` tries creation, reads a conflicting row, conditionally
+claims the same-stage version and retries creation. This is a sequence of
+writes, not one transaction; a lost race returns the surviving row. Send/map
+confirmation uses this helper and the registered dispatcher handlers. The deleted multi-step send wizard is not a separate command or a
 second flow contract. Stage/version guards prevent one command from deleting a
 sibling command's surviving row.
 
@@ -112,8 +119,9 @@ sibling command's surviving row.
 
 SQS Standard can redeliver an event. The consumer's recent-event LRU is a
 telemetry hint, not a correctness gate: a repeated event may be the first
-attempt that can finish. The publisher already uses
-`<SHARD_ID>:<sequence>` as the event ID, rather than an unqualified sequence.
+attempt that can finish. The event ID format is `<shard>:<sequence>`, but the publisher still supplies
+literal `0`. Sharding must replace that placeholder; flow keys separately use
+the configured `k:n` shard format. These values are not compared with each other.
 
 The worker tracks the asynchronous handler after discord.js reconstructs the
 interaction. Queue deletion and shutdown draining follow that handler lifecycle;
@@ -128,16 +136,18 @@ confirmation remains a path that needs an explicit recovery check.
 
 #### Trust boundary
 
-The queue carries interaction identities and permission context into the same
-handlers used by Gateway events. Treat its publisher permissions as a trust
-boundary. The deployed queue policy and task roles must restrict publishing to
-the intended Gateway role and restrict consumption/deletion to the worker role.
-Verify the selected infrastructure plan and bindings; source layout alone does
-not establish those live grants.
+The worker trusts the queue payload's user, member permissions and channel
+fields as Discord-authenticated when it reconstructs the interaction. It does
+not authenticate that identity independently. This contract is safe only while
+`sqs:SendMessage` is limited to the intended Gateway task role. Consumption and
+deletion must be limited to the intended worker role.
 
-Do not add another publisher without reviewing envelope validation and
-identity/authenticity requirements first. Worker reconstruction must not turn
-untrusted queue fields into trusted user identity or permissions.
+Verify the selected queue policy and task bindings; source layout alone does
+not establish those live grants. Keep this contract aligned with the
+infrastructure `qurl-bot-events` module README. Adding another publisher requires
+envelope validation and authenticity verification before its messages can reach
+`client.actions.InteractionCreate.handle`. Review the identity and permission
+trust boundary before granting that publish access.
 
 ### Pillar 2 — Cross-process Gateway session resume
 
