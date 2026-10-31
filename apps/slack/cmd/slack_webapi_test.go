@@ -156,7 +156,7 @@ func TestSlackOpenViewFuncUsesWorkspaceTokenLookup(t *testing.T) {
 	openView := newSlackOpenViewFuncWithTokenLookup(func(_ context.Context, teamID string) (string, error) {
 		gotTeam = teamID
 		return "xoxb-workspace-token", nil
-	}, testSlackWebAPIUserAgent, srv.URL, slackOpenViewTestClient(srv))
+	}, testSlackWebAPIUserAgent, srv.URL, slackOpenViewTestClient(srv), nil)
 	if err := openView(context.Background(), "T_lookup", "trigger_test", []byte(`{"type":"modal"}`)); err != nil {
 		t.Fatalf("views.open: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestSlackUserLookupFuncWithTokenLookup(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv), nil)
 	for _, tc := range []struct {
 		name string
 		user string
@@ -257,7 +257,7 @@ func TestSlackUserLookupDrainsOversizedResponse(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}, nil
 	})}
 
-	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, "https://slack.test/users.info", httpClient)
+	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, "https://slack.test/users.info", httpClient, nil)
 	if _, err := lookup(context.Background(), "T_lookup", "", "UHUGE"); err == nil ||
 		err.Error() != "users.info response exceeded 65536 bytes" {
 		t.Fatalf("SlackUserLookup oversized response error = %v, want response limit error", err)
@@ -288,7 +288,7 @@ func TestSlackUserLookupFuncWithTokenLookupRequiresWorkspaceToken(t *testing.T) 
 			t.Fatalf("ownership transfer lookup must not fall back to the Enterprise Grid token")
 		}
 		return "", fmt.Errorf("unexpected token owner %q", ownerID)
-	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv), nil)
 
 	ok, err := lookup(context.Background(), testGridTeamID, testGridEnterpriseID, "UGRIDUSER")
 	if !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
@@ -323,7 +323,7 @@ func TestSlackUserLookupFuncWithTokenLookupPropagatesWorkspaceTokenErrors(t *tes
 			t.Fatalf("ownership transfer lookup must not fall back to the Enterprise Grid token")
 		}
 		return "", fmt.Errorf("unexpected token owner %q", ownerID)
-	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv), nil)
 
 	ok, err := lookup(context.Background(), testGridTeamID, testGridEnterpriseID, "UGRIDUSER")
 	if err == nil {
@@ -649,7 +649,7 @@ func TestSlackOpenViewFuncLookupErrorSkipsRequest(t *testing.T) {
 
 	openView := newSlackOpenViewFuncWithTokenLookup(func(context.Context, string) (string, error) {
 		return "", errors.New("missing workspace token")
-	}, testSlackWebAPIUserAgent, srv.URL, slackOpenViewTestClient(srv))
+	}, testSlackWebAPIUserAgent, srv.URL, slackOpenViewTestClient(srv), nil)
 	err := openView(context.Background(), "T_missing", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "token lookup") {
 		t.Fatalf("error = %v, want token lookup error", err)
@@ -1141,7 +1141,7 @@ func TestSlackWebAPIPosterGridFallbackWarningSanitizesOwnerIDs(t *testing.T) {
 			return testSlackValidationToken, nil
 		}
 		return "", auth.ErrSlackBotTokenNotConfigured
-	}, testSlackValidationUA, srv.URL, "chat.postMessage", slackChatPostMessageResponseError, slackWebAPITestClient(srv))
+	}, testSlackValidationUA, srv.URL, "chat.postMessage", slackChatPostMessageResponseError, slackWebAPITestClient(srv), nil)
 
 	if _, err := poster.gridPost(context.Background(), teamID, enterpriseID, []byte(`{"channel":"C123","text":"hello"}`)); err != nil {
 		t.Fatalf("gridPost: %v", err)
@@ -1190,7 +1190,7 @@ func TestSlackReadResponseLimits(t *testing.T) {
 		call   func(context.Context, *http.Client, string) error
 	}{
 		{"conversations.info", 65536, func(ctx context.Context, client *http.Client, endpoint string) error {
-			_, err := newSlackResolveConversationInfoFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, endpoint, client)(ctx, "T_test", "", "C_test")
+			_, err := newSlackResolveConversationInfoFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, endpoint, client, nil)(ctx, "T_test", "", "C_test")
 			return err
 		}},
 		{"conversations.replies", 524288, func(ctx context.Context, client *http.Client, endpoint string) error {

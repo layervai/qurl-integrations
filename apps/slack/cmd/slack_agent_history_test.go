@@ -34,7 +34,7 @@ func TestAgentThreadHistorySeam_PaginatesAndMapsMessages(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 	messages, err := read(context.Background(), "T1", "", "C1", "100.0", "70.000000")
 	if err != nil {
 		t.Fatalf("read history: %v", err)
@@ -91,7 +91,7 @@ func TestAgentThreadHistorySeam_GridFallback(t *testing.T) {
 		}
 		return testTokenXoxbOrg, nil
 	}
-	read := newSlackAgentThreadHistoryFuncWithTokenLookup(lookup, "qurl-slack/test", srv.URL, srv.Client())
+	read := newSlackAgentThreadHistoryFuncWithTokenLookup(lookup, "qurl-slack/test", srv.URL, srv.Client(), nil)
 	if _, err := read(context.Background(), "T1", "E1", "C1", "100.0", ""); err != nil {
 		t.Fatalf("read history: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestAgentThreadHistorySeam_ReportsAttachments(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 	messages, err := read(context.Background(), "T1", "", "C1", "100.0", "")
 	if err != nil {
 		t.Fatalf("read history: %v", err)
@@ -152,7 +152,7 @@ func TestAgentThreadHistorySeam_RejectsSlackErrorAndUnboundedHistory(t *testing.
 			_, _ = w.Write([]byte(`{"ok":false,"error":"missing_scope"}`))
 		}))
 		t.Cleanup(srv.Close)
-		read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+		read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 		if _, err := read(context.Background(), "T1", "", "C1", "100.0", ""); err == nil || !strings.Contains(err.Error(), "missing_scope") {
 			t.Fatalf("error = %v, want missing_scope", err)
 		}
@@ -170,7 +170,7 @@ func TestAgentThreadHistorySeam_RejectsSlackErrorAndUnboundedHistory(t *testing.
 			})
 		}))
 		t.Cleanup(srv.Close)
-		read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+		read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 		if _, err := read(context.Background(), "T1", "", "C1", "100.0", ""); err == nil || !strings.Contains(err.Error(), "exceeded 5 pages") {
 			t.Fatalf("error = %v, want page-cap error", err)
 		}
@@ -215,7 +215,7 @@ func TestAgentThreadHistorySeam_FullFileObjectShape(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 	messages, err := read(context.Background(), "T1", "", "C1", "1723600000.000100", "")
 	if err != nil {
 		t.Fatalf("read history: %v", err)

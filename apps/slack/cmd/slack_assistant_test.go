@@ -34,7 +34,7 @@ func TestSlackAssistantThreadsPort_RequestShapes(t *testing.T) {
 
 	port := newSlackAssistantThreadsPortWithTokenLookup(
 		staticTokenLookup("xoxb-test"), "qurl-slack/test",
-		srv.URL+"/setTitle", srv.URL+"/setSuggestedPrompts", srv.URL+"/setStatus", srv.Client())
+		srv.URL+"/setTitle", srv.URL+"/setSuggestedPrompts", srv.URL+"/setStatus", srv.Client(), nil)
 
 	if err := port.SetTitle(context.Background(), "T1", "", "D1", testAssistantThreadTS, "qURL Secure Access Agent"); err != nil {
 		t.Fatalf("SetTitle: %v", err)
