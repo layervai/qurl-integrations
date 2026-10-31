@@ -156,90 +156,138 @@ describe('multi-tenant mode — registerCommands registration scope', () => {
   });
 });
 
-describe('registerCommands stale-command purge (issue #86)', () => {
+describe('bounded inactive command-scope cleanup (#84/#94)', () => {
+  const current = '123456789012345678';
+  const previous = '223456789012345678';
+  const globalRoute = '/applications/app-1/commands';
+  const guildRoute = id => `/applications/app-1/guilds/${id}/commands`;
   let originalGuildId;
+  let originalPrevious;
   beforeAll(() => {
     originalGuildId = process.env.GUILD_ID;
+    originalPrevious = process.env.PREVIOUS_COMMAND_SCOPE;
   });
   afterAll(() => {
     if (originalGuildId === undefined) delete process.env.GUILD_ID; else process.env.GUILD_ID = originalGuildId;
+    if (originalPrevious === undefined) delete process.env.PREVIOUS_COMMAND_SCOPE; else process.env.PREVIOUS_COMMAND_SCOPE = originalPrevious;
     jest.resetModules();
   });
-  beforeEach(() => { jest.resetModules(); });
-
-  it('multi-tenant mode: purges stale guild-scoped registrations from every guild the bot is in', async () => {
-    delete process.env.GUILD_ID;
-    const commandsModule = require('../src/commands');
-
-    const mockGet = jest.fn()
-      .mockResolvedValueOnce([{ id: 'cmd-1' }, { id: 'cmd-2' }, { id: 'cmd-3' }]) // guild A: 3 stale
-      .mockResolvedValueOnce([{ id: 'cmd-4' }])                                    // guild B: 1 stale
-      .mockResolvedValueOnce([]);                                                  // guild C: empty — skip
-    const mockPut = jest.fn().mockResolvedValue(undefined);
-    const rest = { get: mockGet, put: mockPut };
-
-    await commandsModule.registerCommands({
-      rest,
-      appId: 'app-1',
-      guilds: new Map([['ga', 'A'], ['gb', 'B'], ['gc', 'C']]),
-    });
-
-    expect(mockGet).toHaveBeenCalledTimes(3);
-    expect(mockPut).toHaveBeenCalledTimes(3);
-    const purgeCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length === 0);
-    expect(purgeCalls).toHaveLength(2);
-    const purgedRoutes = purgeCalls.map(c => c[0]).sort();
-    expect(purgedRoutes).toEqual([
-      '/applications/app-1/guilds/ga/commands',
-      '/applications/app-1/guilds/gb/commands',
+  function load(active, old) {
+    if (active === undefined) delete process.env.GUILD_ID; else process.env.GUILD_ID = active;
+    if (old === undefined) delete process.env.PREVIOUS_COMMAND_SCOPE; else process.env.PREVIOUS_COMMAND_SCOPE = old;
+    jest.resetModules();
+    return require('../src/commands');
+  }
+  function api() {
+    const state = new Map([
+      [globalRoute, [{ name: 'old-global' }]],
+      [guildRoute(previous), [{ name: 'old-guild' }]],
     ]);
-    const registerCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length > 0);
-    expect(registerCalls).toHaveLength(1);
-    expect(registerCalls[0][0]).toBe('/applications/app-1/commands');
+    const rest = {
+      get: jest.fn(async route => state.get(route) || []),
+      put: jest.fn(async (route, { body }) => { state.set(route, body); }),
+    };
+    return { state, rest };
+  }
+
+  it.each([0, 10_000])('steady multi-tenant boot ignores a %i-guild cache and makes no cleanup calls', async size => {
+    const commands = load(undefined, undefined);
+    const { rest } = api();
+    // Deliberately pass the removed cache argument to guard against reintroducing a scan.
+    const guilds = new Map(Array.from({ length: size }, (_, i) => [`guild-${i}`, 'name']));
+    await commands.registerCommands({ rest, appId: 'app-1', guilds });
+    expect(rest.get).not.toHaveBeenCalled();
+    expect(rest.put).toHaveBeenCalledTimes(1);
+    expect(rest.put.mock.calls[0][0]).toBe(globalRoute);
   });
 
-  it('single-guild mode: purges first, then registers guild-scoped (strictly sequential, no race)', async () => {
-    process.env.GUILD_ID = '123456789012345678';
-    const commandsModule = require('../src/commands');
-
-    const mockGet = jest.fn().mockResolvedValue([{ id: 'stale-1' }]);
-    const mockPut = jest.fn().mockResolvedValue(undefined);
-    const rest = { get: mockGet, put: mockPut };
-
-    await commandsModule.registerCommands({
-      rest,
-      appId: 'app-1',
-      guilds: new Map([['123456789012345678', 'A']]),
-    });
-
-    expect(mockGet).toHaveBeenCalledTimes(1);
-    expect(mockPut).toHaveBeenCalledTimes(2);
-    expect(mockPut.mock.calls[0][1].body).toEqual([]);
-    expect(mockPut.mock.calls[1][0]).toBe('/applications/app-1/guilds/123456789012345678/commands');
-    expect(mockPut.mock.calls[1][1].body.length).toBeGreaterThan(0);
+  it('single to multi: registers globally before clearing only the previous guild, without a cache', async () => {
+    const commands = load(undefined, previous);
+    const { rest, state } = api();
+    await commands.registerCommands({ rest, appId: 'app-1' });
+    expect(rest.get.mock.calls).toEqual([[guildRoute(previous)]]);
+    expect(rest.put.mock.calls.map(([route]) => route)).toEqual([globalRoute, guildRoute(previous)]);
+    expect(state.get(globalRoute).map(command => command.name)).toEqual(['qurl']);
+    expect(state.get(guildRoute(previous))).toEqual([]);
   });
 
-  it('purge failure in one guild does not block registration', async () => {
-    delete process.env.GUILD_ID;
-    const commandsModule = require('../src/commands');
+  it('multi to single: explicitly clears the old global scope after target registration', async () => {
+    const commands = load(current, 'global');
+    const { rest, state } = api();
+    await commands.registerCommands({ rest, appId: 'app-1' });
+    expect(rest.put.mock.calls.map(([route]) => route)).toEqual([guildRoute(current), globalRoute]);
+    expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl']);
+    expect(state.get(globalRoute)).toEqual([]);
+    expect(state.get(guildRoute(previous))).toHaveLength(1);
+  });
 
-    const mockGet = jest.fn()
-      .mockRejectedValueOnce(new Error('Missing Access'))     // guild A: can't enumerate
-      .mockResolvedValueOnce([{ id: 'cmd-1' }]);              // guild B: succeeds
-    const mockPut = jest.fn().mockResolvedValue(undefined);
-    const rest = { get: mockGet, put: mockPut };
+  it('single to another: clears only the explicit old guild and preserves global commands', async () => {
+    const commands = load(current, previous);
+    const { rest, state } = api();
+    await commands.registerCommands({ rest, appId: 'app-1' });
+    expect(rest.get.mock.calls).toEqual([[guildRoute(previous)]]);
+    expect(state.get(globalRoute)[0].name).toBe('old-global');
+    expect(state.get(guildRoute(previous))).toEqual([]);
+    expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl']);
+  });
 
-    await commandsModule.registerCommands({
-      rest,
-      appId: 'app-1',
-      guilds: new Map([['ga', 'A'], ['gb', 'B']]),
-    });
+  it('never purges the active guild when the previous value equals it', async () => {
+    const commands = load(current, current);
+    const { rest, state } = api();
+    await commands.registerCommands({ rest, appId: 'app-1' });
+    expect(rest.get).not.toHaveBeenCalled();
+    expect(state.get(guildRoute(current)).map(command => command.name)).toEqual(['qurl']);
+  });
 
-    expect(mockGet).toHaveBeenCalledTimes(2);
-    const purgeCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length === 0);
-    expect(purgeCalls.map(c => c[0])).toEqual(['/applications/app-1/guilds/gb/commands']);
-    const registerCalls = mockPut.mock.calls.filter(([, opts]) => Array.isArray(opts.body) && opts.body.length > 0);
-    expect(registerCalls).toHaveLength(1);
+  it('keeps old namespaces when active registration fails', async () => {
+    const commands = load(current, previous);
+    const { rest, state } = api();
+    rest.put.mockRejectedValueOnce(new Error('registration unavailable'));
+    await commands.registerCommands({ rest, appId: 'app-1' });
+    expect(rest.get).not.toHaveBeenCalled();
+    expect(state.get(globalRoute)[0].name).toBe('old-global');
+    expect(state.get(guildRoute(previous))[0].name).toBe('old-guild');
+  });
+
+  it('steady single-guild boot never touches the global namespace', async () => {
+    const commands = load(current, undefined);
+    const { rest, state } = api();
+    await commands.registerCommands({ rest, appId: 'app-1' });
+    expect(rest.get).not.toHaveBeenCalled();
+    expect(state.get(globalRoute)[0].name).toBe('old-global');
+    expect(rest.put).toHaveBeenCalledTimes(1);
+  });
+
+  it('never clears the active global namespace when previous scope is global', async () => {
+    const commands = load(undefined, 'global');
+    const { rest, state } = api();
+    await commands.registerCommands({ rest, appId: 'app-1' });
+    expect(rest.get).not.toHaveBeenCalled();
+    expect(state.get(globalRoute).map(command => command.name)).toEqual(['qurl']);
+  });
+
+  it('does not treat a malformed namespace response as empty', async () => {
+    const commands = load(current, 'global');
+    const { rest, state } = api();
+    rest.get.mockResolvedValueOnce({ unexpected: true });
+    const logger = require('../src/logger');
+    const warning = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      await commands.registerCommands({ rest, appId: 'app-1' });
+      expect(warning).toHaveBeenCalledWith('Could not purge stale command namespace', {
+        scope: 'global', error: 'Command namespace response must be an array',
+      });
+      expect(state.get(globalRoute)[0].name).toBe('old-global');
+    } finally { warning.mockRestore(); }
+  });
+
+  it('trims a valid previous guild ID', () => {
+    load(undefined, ` ${previous} `);
+    expect(require('../src/config').PREVIOUS_COMMAND_SCOPE).toBe(previous);
+  });
+
+  it.each(['PLACEHOLDER', 'guild-1', '123', '123456789012345678901'])('rejects invalid previous guild %p before registration', value => {
+    expect(() => load(undefined, value)).toThrow('PREVIOUS_COMMAND_SCOPE must be global or a Discord snowflake');
   });
 });
 

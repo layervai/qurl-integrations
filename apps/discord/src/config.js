@@ -190,6 +190,13 @@ if (rawGuildId) {
   }
 }
 
+// TODO(upstream-contract): The infra runtime forwards the old guild during
+// a scope change; track this bounded cleanup contract in public issues #84/#94.
+const previousCommandScope = process.env.PREVIOUS_COMMAND_SCOPE?.trim() || null;
+if (previousCommandScope && previousCommandScope !== 'global' && !isDiscordSnowflake(previousCommandScope)) {
+  throw new Error('PREVIOUS_COMMAND_SCOPE must be global or a Discord snowflake when set');
+}
+
 // Multi-tenant mode: derived once here, consumed everywhere else. When
 // true, the bot treats itself as a public multi-server app (commands
 // register globally). When false, the bot runs in single-guild mode
@@ -422,6 +429,7 @@ module.exports = {
     ? null
     : normalizedDiscordClientSecret,
   GUILD_ID: normalizedGuildId,
+  PREVIOUS_COMMAND_SCOPE: previousCommandScope,
   isMultiTenant,
   isQurlOAuthConfigured,
   isQurlSetupAvailable,

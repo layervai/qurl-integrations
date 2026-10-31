@@ -517,12 +517,10 @@ if (shouldRegisterInteractionListener({
 if (isGateway && !config.ENABLE_GATEWAY_RESUME) {
   // Register commands when ready
   client.once('ready', async () => {
-    // registerCommands takes REST + appId + a guilds map so the
-    // shim path can call the same function without a Client.
+    // Registration uses REST + appId in both gateway implementations.
     await registerCommands({
       rest: client.rest,
       appId: client.application.id,
-      guilds: new Map([...client.guilds.cache.values()].map((g) => [g.id, g.name])),
     });
   });
 
@@ -592,14 +590,10 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
         logger.warn('registerCommands (shim path) skipped: appId not populated by READY');
       } else {
         commandsRegistered = true;
-        // Gateway-tier shim doesn't maintain a guild cache (that's
-        // the worker tier's job); empty map skips purge. The
-        // handleCommand dispatch-time filter remains the correctness
-        // guarantee for stale registrations.
+        // Previous-scope cleanup uses explicit config, not a guild cache.
         registerCommands({
           rest: gatewayShim.getRest(),
           appId,
-          guilds: new Map(),
         }).catch((err) => {
           logger.error('registerCommands (shim path) failed', { error: err.message });
         });

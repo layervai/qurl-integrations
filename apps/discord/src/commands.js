@@ -9535,51 +9535,23 @@ const commands = [
   },
 ];
 
-// Proactively clear stale guild-scoped command registrations from any
-// guild the bot is in. Discord's guild and global command namespaces do
-// not purge each other on a fresh PUT call, so a guild that was served
-// by an older deploy registering a wider command set keeps those
-// entries visible in its slash-command autocomplete until Discord's
-// cache ages out. The dispatch-time filter in handleCommand prevents
-// stale commands from doing anything harmful, but users still see dead
-// commands in the picker. Issuing PUT-with-empty-body on the guild-
-// commands endpoint clears the guild-scoped set.
-//
-// Runs before the registration PUT below, so in single-guild mode the
-// purge and the subsequent guild-scoped PUT are strictly sequential —
-// no race. Only iterates the `guilds` map the caller passes in — we
-// can't and shouldn't enumerate guilds we've never joined.
-async function purgeStaleGuildCommands({ rest, appId, guilds }) {
-  // Parallelize the per-guild fetch+put. Promise.allSettled so one
-  // slow/failing guild doesn't block the others; Discord's guild-
-  // commands endpoint uses a separate rate bucket per guild.
-  await Promise.allSettled(Array.from(guilds, ([guildId, guildName]) => (async () => {
-    try {
-      const existing = await rest.get(Routes.applicationGuildCommands(appId, guildId));
-      const existingCount = Array.isArray(existing) ? existing.length : 0;
-      if (existingCount === 0) return;
-      await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: [] });
-      logger.info(`Purged ${existingCount} stale guild-scoped commands from ${guildName ?? guildId} (${guildId})`);
-    } catch (error) {
-      // Don't fail boot on a purge error — the dispatch-time filter in
-      // handleCommand is the correctness guarantee; purge is UX polish.
-      logger.warn(`Could not purge stale commands from guild ${guildId}`, { error: error.message });
-    }
-  })()));
+// TODO(upstream-contract): Discord keeps global and guild command namespaces separate.
+// Clear only an explicitly inactive scope; never enumerate joined guilds at boot.
+async function purgeStaleCommandNamespace({ rest, route, scope }) {
+  try {
+    const existing = await rest.get(route);
+    if (!Array.isArray(existing)) throw new Error('Command namespace response must be an array');
+    if (existing.length === 0) return;
+    await rest.put(route, { body: [] });
+    logger.info('Purged stale command namespace', { scope, purged_count: existing.length });
+  } catch (error) {
+    logger.warn('Could not purge stale command namespace', { scope, error: error.message });
+  }
 }
 
-// Register commands with Discord.
-//
-// Signature decoupled from discord.js Client so both the legacy
-// Client path AND the @discordjs/ws shim path can call this:
-//   - Legacy path: build `guilds` as `Map<guildId, guildName>` from
-//     client.guilds.cache.
-//   - Shim path: empty Map — gateway-tier shim doesn't track guild
-//     cache, and the handleCommand dispatch-time filter remains the
-//     correctness guarantee for stale registrations.
-async function registerCommands({ rest, appId, guilds = new Map() }) {
-  await purgeStaleGuildCommands({ rest, appId, guilds });
-
+// Register the active scope before cleaning inactive scopes. REST + appId work
+// for both the legacy Client and the cache-free gateway shim.
+async function registerCommands({ rest, appId }) {
   const commandData = commands.map(cmd => {
     const data = cmd.data.toJSON();
     // Deprecated by Discord in favour of `contexts`; never send both.
@@ -9612,6 +9584,14 @@ async function registerCommands({ rest, appId, guilds = new Map() }) {
       // deployments (customers invite the bot to their own servers).
       logger.info(`Registering ${commands.length} slash commands globally (multi-tenant mode): ${commands.map(c => c.data.name).join(', ')}`);
       await rest.put(Routes.applicationCommands(appId), { body: commandData });
+    }
+    if (config.GUILD_ID && config.PREVIOUS_COMMAND_SCOPE === 'global') {
+      await purgeStaleCommandNamespace({ rest, route: Routes.applicationCommands(appId), scope: 'global' });
+    }
+    if (config.PREVIOUS_COMMAND_SCOPE && config.PREVIOUS_COMMAND_SCOPE !== 'global' && config.PREVIOUS_COMMAND_SCOPE !== config.GUILD_ID) {
+      await purgeStaleCommandNamespace({
+        rest, route: Routes.applicationGuildCommands(appId, config.PREVIOUS_COMMAND_SCOPE), scope: 'previous_guild',
+      });
     }
     logger.info('Slash commands registered.');
   } catch (error) {
@@ -9841,8 +9821,8 @@ async function handleCommand(interaction) {
   // older deploy may still list commands this build no longer ships
   // (the GitHub account-linking and contributor-role commands, removed
   // in #1026), because Discord's guild and global namespaces don't
-  // purge each other on a new .set() call. purgeStaleGuildCommands
-  // clears them at boot, but Discord's cache can lag. Look the handler
+  // purge each other on a new .set() call. registerCommands cleans inactive
+  // scopes at boot, but Discord's cache can lag. Look the handler
   // up in the shipped set so a stale registration can't dispatch into a
   // path that no longer exists.
   const command = commands.find(cmd => cmd.data.name === interaction.commandName);
