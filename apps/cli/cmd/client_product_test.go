@@ -83,3 +83,30 @@ func TestClientProductReachesRequestsThroughRoot(t *testing.T) {
 		})
 	}
 }
+
+func TestDaemonJobClientProductOverridesItsEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, product, job string
+		explicit                bool
+	}{
+		{"installed", "other/9", "host-app/1", "6/test/client/host-app/1", true},
+		{"cleared", "other/9", "", "6/test", true},
+		{"external environment", "host-app/1", "", "6/test/client/host-app/1", false},
+		{"previous job format", "host-app/1", "", "5/test", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"daemon", "run", "--state-dir", t.TempDir(), "--job-version", tc.job}
+			if tc.explicit {
+				args = append(args, "--client-product", tc.product)
+			}
+			res := runCLI(t, &runOpts{args: args, env: map[string]string{clientProductEnv: tc.env}})
+			if res.code == 0 || !strings.Contains(res.stderr.String(), "no durable account owner") {
+				t.Fatalf("daemon = %d, %s", res.code, res.stderr.String())
+			}
+		})
+	}
+	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--client-product", "secret value"}})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), "invalid client product") || strings.Contains(res.stderr.String(), "secret value") {
+		t.Fatalf("invalid product = %d, %s", res.code, res.stderr.String())
+	}
+}

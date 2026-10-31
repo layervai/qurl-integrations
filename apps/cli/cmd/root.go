@@ -381,6 +381,7 @@ func (o *globalOpts) nativeShareDaemon(stateDir, logDir string) (shareDaemonCont
 	if err != nil {
 		return nil, err
 	}
+	controller.ClientProduct = o.resolvedClientProduct
 	return controller, nil
 }
 

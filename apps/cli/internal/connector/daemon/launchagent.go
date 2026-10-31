@@ -13,6 +13,7 @@ import (
 	connectorservice "github.com/layervai/qurl-connector/pkg/service"
 	qurl "github.com/layervai/qurl-go/qurl"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectorhub "github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -42,7 +43,8 @@ var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervi
 // refusing its job, and desired-on shares down, until the next qurl command
 // replaces the job. A release that increments it should keep reading the
 // previous shape where it can.
-const daemonJobProtocolVersion = "5"
+// 6 carries the validated host product explicitly, including an empty value.
+const daemonJobProtocolVersion = "6"
 
 // TODO(upstream-contract): relocating the socket relies on
 // connectorservice.UserJobManager.Ensure treating a changed argument list as a
@@ -67,6 +69,7 @@ type JobController struct {
 	BinaryVersion  string
 	InvocationPath string
 	Endpoint       string
+	ClientProduct  string
 	// ShareGroupMode is part of the job definition: a resident daemon runs in
 	// exactly the mode its job carries, and a changed mode is a definition
 	// change that replaces the daemon just as a binary-version change does.
@@ -120,7 +123,7 @@ func (c *JobController) Ensure(ctx context.Context) error {
 		// The native ownership check below must succeed before replacement.
 		status = IPCStatus{}
 	}
-	expectedJobVersion, err := JobVersion(c.BinaryVersion, c.ShareGroupMode)
+	expectedJobVersion, err := JobVersion(c.BinaryVersion, c.ShareGroupMode, c.ClientProduct)
 	if err != nil {
 		return err
 	}
@@ -268,6 +271,7 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 		"--hub-server-public-key-b64", hub.ServerPublicKeyB64,
 		// Pin native ownership even if the user later selects external in their profile.
 		"--supervision", string(connectorstate.RuntimeSupervisionNative),
+		"--client-product", c.ClientProduct,
 	)
 	arguments = append(arguments, daemonJobLogArguments(stdoutPath, stderrPath)...)
 	return connectorservice.UserJob{
@@ -311,13 +315,13 @@ func (c *JobController) currentExecutablePath() (string, error) {
 }
 
 // JobVersion combines the IPC protocol version, the installed qurl binary
-// version, and the session group mode into the job definition version a
+// version, session group mode, and validated host product into the job definition version a
 // resident daemon reports over IPC. The default mode is elided, so a
-// single-mode job version is exactly the pre-mode string; any other mode is a
+// unattributed single-mode job version has no suffix; any other mode is a
 // definition change that replaces the resident daemon. The zero GroupMode is
 // rejected rather than defaulted, so a construction path that never resolved
 // the mode fails loudly instead of silently installing single.
-func JobVersion(binaryVersion string, mode GroupMode) (string, error) {
+func JobVersion(binaryVersion string, mode GroupMode, clientProduct string) (string, error) {
 	binaryVersion = strings.TrimSpace(binaryVersion)
 	if binaryVersion == "" {
 		return "", errors.New("qURL binary version is empty")
@@ -325,9 +329,15 @@ func JobVersion(binaryVersion string, mode GroupMode) (string, error) {
 	if _, err := ParseGroupMode(string(mode)); err != nil {
 		return "", err
 	}
+	if clientProduct != "" && !qurlapi.ValidClientProduct(clientProduct) {
+		return "", errors.New("invalid client product")
+	}
 	version := daemonJobProtocolVersion + "/" + binaryVersion
 	if mode != DefaultGroupMode {
 		version += "/" + string(mode)
+	}
+	if clientProduct != "" {
+		version += "/client/" + clientProduct
 	}
 	return version, nil
 }
@@ -343,7 +353,7 @@ const (
 	// JobVersionCurrent is the job this binary would install.
 	JobVersionCurrent
 	// JobVersionStaleBinary is a job another qurl release installed with the
-	// same argument contract and mode. A package manager replaced the binary
+	// readable argument contract and mode. A package manager replaced the binary
 	// under it; its arguments mean the same thing to this binary. This holds
 	// in both directions, an upgrade and a downgrade, and only because every
 	// change to the job's arguments increments daemonJobProtocolVersion.
@@ -354,9 +364,11 @@ const (
 // and mode produce, and returns the latter. Only the binary-version part may
 // differ for JobVersionStaleBinary: the protocol part is the argument contract
 // and the mode part selects how the daemon groups sessions, so a difference in
-// either stays a refusal.
-func MatchJobVersion(jobVersion, binaryVersion string, mode GroupMode) (match JobVersionMatch, expected string, err error) {
-	expected, err = JobVersion(binaryVersion, mode)
+// either, or in host attribution, stays a refusal. Protocol 5 omitted the
+// optional product argument and remains readable; its reported version still
+// makes the next native Ensure replace the old definition.
+func MatchJobVersion(jobVersion, binaryVersion string, mode GroupMode, clientProduct string) (match JobVersionMatch, expected string, err error) {
+	expected, err = JobVersion(binaryVersion, mode, clientProduct)
 	if err != nil {
 		return JobVersionIncompatible, "", err
 	}
@@ -367,7 +379,17 @@ func MatchJobVersion(jobVersion, binaryVersion string, mode GroupMode) (match Jo
 	if mode != DefaultGroupMode {
 		suffix = "/" + string(mode)
 	}
+	if clientProduct != "" {
+		suffix += "/client/" + clientProduct
+	}
 	installed, ok := strings.CutPrefix(jobVersion, daemonJobProtocolVersion+"/")
+	if !ok {
+		installed, ok = strings.CutPrefix(jobVersion, "5/")
+		suffix = ""
+		if mode != DefaultGroupMode {
+			suffix = "/" + string(mode)
+		}
+	}
 	if ok {
 		installed, ok = strings.CutSuffix(installed, suffix)
 	}

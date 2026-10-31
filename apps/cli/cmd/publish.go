@@ -675,7 +675,7 @@ func runForegroundLocalPublish(
 		// strand a desired-on share without this foreground process as its owner.
 		retErr = compensateLocalPublish(client, registry, resolved.Resource, retErr)
 	}()
-	jobVersion, err := connectordaemon.JobVersion(opts.version, opts.resolvedShareGroupMode)
+	jobVersion, err := connectordaemon.JobVersion(opts.version, opts.resolvedShareGroupMode, opts.resolvedClientProduct)
 	if err != nil {
 		return err
 	}
