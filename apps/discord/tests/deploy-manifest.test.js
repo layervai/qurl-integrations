@@ -28,7 +28,7 @@ function envReads(files, strict = true) {
         if (strict && !directRead && !knownBootCall) throw new Error('Untracked environment alias or destructuring');
       }
       if (file === path.join(srcDir, 'boot-requirements.js') && object?.name === 'env' && !node.computed) names.add(node.property.name);
-      if (object?.type !== 'MemberExpression' || object.object?.name !== 'process' || (object.computed ? object.property?.value : object.property?.name) !== 'env') return;
+      if (!['MemberExpression', 'OptionalMemberExpression'].includes(object?.type) || object.object?.name !== 'process' || (object.computed ? object.property?.value : object.property?.name) !== 'env') return;
       const name = node.computed ? node.property.value : node.property.name;
       if (typeof name === 'string') names.add(name);
       else if (strict && (file !== path.join(srcDir, 'config.js') || memberPath.getFunctionParent()?.node.id?.name !== 'intEnv')) {
@@ -55,6 +55,7 @@ test.each([
   'unknownHelper(process.env);',
   'process.env[unknownKey];',
   'process["env"][unknownKey];',
+  'process?.env[unknownKey];',
 ])('untracked environment access fails closed: %s', source => {
   const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'discord-env-contract-'));
   const file = path.join(directory, 'config.js');
