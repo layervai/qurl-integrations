@@ -134,7 +134,7 @@ describe('stripBidiAndControls', () => {
     expect(stripBidiAndControls(undefined)).toBe('');
   });
 
-  it('has no length cap (unlike stripControlAndBidi)', () => {
+  it('has no length cap (unlike stripBidiAndControlsBounded)', () => {
     const big = 'a'.repeat(2000);
     expect(stripBidiAndControls(big)).toBe(big);
   });
