@@ -106,18 +106,24 @@ function isAuditSecretKey(key) {
 
 // Keep matched-key descendants secret even when inner keys are generic (value,
 // data) or absent (array elements). Audit key reporting keeps encounter order.
-function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecret = false) {
+function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecret = false, seen = new WeakSet()) {
   if (insideSecret && typeof value === 'string' && value.length > 0) {
     return { value: '[REDACTED]', secretKeys };
   }
   // Never invoke caller-provided toJSON hooks during serialization.
   if (typeof value === 'function') return { value: '[UNSUPPORTED]', secretKeys };
   if (value == null || typeof value !== 'object') return { value, secretKeys };
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+    return { value: insideSecret ? '[REDACTED]' : `[BINARY ${value.byteLength} bytes]`, secretKeys };
+  }
   // Returning the original object at the depth limit could expose its secrets.
   if (depth > 5) return { value: '[TRUNCATED]', secretKeys };
+  // Inspect each object once so cycles and shared graphs cannot expand the log.
+  if (seen.has(value)) return { value: '[REPEATED]', secretKeys };
+  seen.add(value);
   if (Array.isArray(value)) {
     return {
-      value: value.map(v => redactAuditSecrets(v, depth + 1, secretKeys, insideSecret).value),
+      value: value.map(v => redactAuditSecrets(v, depth + 1, secretKeys, insideSecret, seen).value),
       secretKeys,
     };
   }
@@ -129,25 +135,30 @@ function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecr
     if (secret && isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
       out[k] = '[REDACTED]';
     } else {
-      out[k] = redactAuditSecrets(v, depth + 1, secretKeys, insideSecret || secret).value;
+      out[k] = redactAuditSecrets(v, depth + 1, secretKeys, insideSecret || secret, seen).value;
     }
   }
   return { value: out, secretKeys };
 }
 
-function redact(value, depth = 0, insideSecret = false) {
+function redact(value, depth = 0, insideSecret = false, seen = new WeakSet()) {
   if (insideSecret && typeof value === 'string' && value.length > 0) return '[REDACTED]';
   if (typeof value === 'function') return '[UNSUPPORTED]';
   if (value == null || typeof value !== 'object') return value;
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+    return insideSecret ? '[REDACTED]' : `[BINARY ${value.byteLength} bytes]`;
+  }
   if (depth > 5) return '[TRUNCATED]';
-  if (Array.isArray(value)) return value.map(v => redact(v, depth + 1, insideSecret));
+  if (seen.has(value)) return '[REPEATED]';
+  seen.add(value);
+  if (Array.isArray(value)) return value.map(v => redact(v, depth + 1, insideSecret, seen));
   const out = {};
   for (const [k, v] of Object.entries(value)) {
     const secret = shouldRedact(k);
     if (secret && isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
       out[k] = '[REDACTED]';
     } else {
-      out[k] = redact(v, depth + 1, insideSecret || secret);
+      out[k] = redact(v, depth + 1, insideSecret || secret, seen);
     }
   }
   return out;
@@ -220,19 +231,10 @@ const logger = {
   // The AUDIT_EVENTS allowlist in
   // constants.js documents the canonical vocabulary.
   audit(event, meta = {}) {
-    // Default param only fires for `undefined`. A caller passing `null`
-    // (easy mistake from optional chaining: `someObj?.meta`) would
-    // otherwise crash `Object.entries(null)` BEFORE the protected
-    // try/catch around JSON.stringify, defeating the "audit never
-    // breaks user flow" contract. Also coerces arrays — typeof [] is
-    // 'object' so the typeof check alone would let `audit('x', [1,2])`
-    // through and produce a confusing `{0:1,1:2,event,agent}` payload.
+    // Audit dimensions must be an object, not a scalar or array.
     if (meta == null || typeof meta !== 'object' || Array.isArray(meta)) meta = {};
-    // Targeted secret redaction: walk meta, replace the value of any
-    // key in AUDIT_SECRET_KEYS with '[REDACTED]', return the first
-    // offending key name so the operator log below can name it. Safe
-    // to redact because exact-match doesn't false-positive on
-    // legitimate dimensions (proven by the tokens_minted test).
+    // Exact audit-key matching preserves dimensions such as tokens_minted.
+    // Normal logs use the broader substring policy instead.
     try {
       const { value: cleanedMeta, secretKeys } = redactAuditSecrets(meta);
       if (secretKeys.size > 0) {
@@ -255,16 +257,12 @@ const logger = {
       // CloudWatch filter syntax. No timestamp prefix — the JSON has
       // its own ts field. console.log adds a trailing newline.
       //
-      // Wrap JSON.stringify in try/catch — a circular reference, BigInt,
-      // or other non-serializable value in meta would otherwise throw
-      // out of audit() and into the caller, which on the per-recipient
-      // batchSettled callback would fail an entire DM. Audit must never
-      // break the user-visible flow; degrade to an error log instead.
+      // Redaction and serialization must not break the caller's user flow.
       console.log(JSON.stringify({
         audit: auditPayload,
         ts: formatTimestamp(),
       }));
-    } catch (err) {
+    } catch {
       // Two-tier degradation: emit a minimal audit line with a fixed
       // synthetic event so CloudWatch metric filters can pattern-match
       // `{ $.audit.event = "audit_serialization_failed" }` and surface
@@ -278,11 +276,11 @@ const logger = {
             event: 'audit_serialization_failed',
             agent: 'discord',
             original_event: String(event),
-            reason: 'metadata serialization failed',
+            reason: 'metadata_serialization_failed',
           },
           ts: formatTimestamp(),
         }));
-      } catch (fallbackErr) {
+      } catch {
         console.error(`[${formatTimestamp()}] ERROR: logger.audit serialization failed event=${sanitizeMessage(event)} reason=metadata_serialization_failed fallback_reason=serialization_failed`);
       }
     }

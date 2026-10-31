@@ -34,7 +34,7 @@ describe('logger', () => {
       get field() { throw new Error('do-not-log-this-secret'); },
     })).not.toThrow();
     const lines = Object.values(consoleSpy).flatMap(spy => spy.mock.calls.map(call => call[0]));
-    expect(lines.some(line => line.includes('[TRUNCATED]'))).toBe(true);
+    expect(lines.some(line => line.includes('[REPEATED]'))).toBe(true);
     expect(lines.filter(line => line.includes('[meta_serialization_failed]'))).toHaveLength(2);
     expect(lines.join('\n')).not.toContain('do-not-log-this-secret');
   });
@@ -71,6 +71,32 @@ describe('logger', () => {
     logger.audit('unique', { hash: [{ token: 'one' }, { token: 'two' }], secret: 'three' });
     expect(consoleSpy.error.mock.calls[0][0]).toContain('["hash", "token", "secret"]');
     expect(consoleSpy.log.mock.calls.map(call => call[0]).join('\n')).not.toContain('hook-secret');
+  });
+
+  it('bounds shared cyclic metadata and hides secret binary values', () => {
+    process.env.LOG_LEVEL = 'info';
+    logger = require('../src/logger');
+    const graph = {};
+    for (let i = 0; i < 20; i += 1) graph[`child${i}`] = graph;
+    logger.info('cycle', graph);
+    logger.audit('cycle', graph);
+    for (const call of consoleSpy.log.mock.calls) {
+      expect(call[0].length).toBeLessThan(2000);
+      expect(call[0]).toContain('[REPEATED]');
+    }
+    consoleSpy.log.mockClear();
+    for (const bytes of [Buffer.from('binary-secret'), new Uint8Array([17, 23]), new ArrayBuffer(8)]) {
+      logger.info('binary', { private_key: bytes, bytes });
+      logger.audit('binary', { private_key: bytes, bytes });
+    }
+    for (const call of consoleSpy.log.mock.calls) {
+      expect(call[0]).toContain('"private_key":"[REDACTED]"');
+      expect(call[0]).toContain('[BINARY ');
+      expect(call[0]).not.toContain('binary-secret');
+    }
+    consoleSpy.log.mockClear();
+    logger.audit('counts', { token: { count: 3, value: 'secret' } });
+    expect(JSON.parse(consoleSpy.log.mock.calls[0][0]).audit.token).toEqual({ count: 3, value: '[REDACTED]' });
   });
 
   it('never serializes unexamined deep metadata', () => {
