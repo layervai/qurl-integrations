@@ -8607,8 +8607,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // step skips them.
   const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true });
 
-  // Revoke each resource's children in one call per unique resource_id and
-  // fan the result out to every recipient sharing it (mintLinksInBatches packs
+  // Revoke each resource's children together, retaining per-child confirmations
+  // even if a sibling fails (mintLinksInBatches packs
   // up to TOKENS_PER_RESOURCE recipients per resource).
   // A row without a usable qurl_id cannot be revoked: a watermarked child lives
   // on the connector's tunnel, so deleting the shared parent would neither
@@ -8656,7 +8656,12 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     if (results[i].status === 'fulfilled') {
       for (const id of recipientIds) seenSuccess.add(id);
     } else {
-      for (const id of recipientIds) seenFailure.add(id);
+      const confirmed = new Set(Array.isArray(results[i].reason?.confirmedQurlIds)
+        ? results[i].reason.confirmedQurlIds : []);
+      for (const child of children) {
+        if (confirmed.has(child.qurlId)) seenSuccess.add(child.recipientId);
+        else seenFailure.add(child.recipientId);
+      }
       logger.error('Failed to revoke qURL', {
         resource_ref: resourceIdLogRef(resourceId),
         error: results[i].reason?.message,

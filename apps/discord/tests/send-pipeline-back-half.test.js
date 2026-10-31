@@ -1145,6 +1145,28 @@ describe('revokeAllLinks', () => {
     );
   });
 
+  it('confirms children individually and keeps mixed-outcome recipients retryable', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-shared', recipient_discord_id: 'u-ok', qurl_id: 'q_ok' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-mixed', qurl_id: 'q_mixed_ok' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-mixed', qurl_id: 'q_failed' },
+      { resource_id: 'res-other', recipient_discord_id: 'u-foreign', qurl_id: 'q_foreign' },
+    ]);
+    mockRevokeMintedLinks
+      .mockRejectedValueOnce(Object.assign(new Error('one child failed'), {
+        confirmedQurlIds: ['q_ok', 'q_mixed_ok', 'q_foreign'],
+      }))
+      .mockRejectedValueOnce(new Error('other resource failed'));
+    const result = await revokeAllLinks('send-partial-children', 'sender-1', 'apikey');
+    expect(result).toMatchObject({ success: 1, total: 3, successUserIds: ['u-ok'] });
+    expect(result.failureUserIds.sort()).toEqual(['u-foreign', 'u-mixed']);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
+      send_id: 'send-partial-children', success: 0, total: 2, unresolvable_recipients: 0,
+    });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('q_mixed_ok');
+  });
+
   it('groups items by resource_id — shared-resource recipients all land in successUserIds on a single DELETE', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-shared', recipient_discord_id: 'u-1', qurl_id: 'q_u_1' },
