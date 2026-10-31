@@ -4205,40 +4205,32 @@ async function handleSetupModal(interaction, { flow_id }) {
   }
 
   await interaction.deferReply({ ephemeral: true });
+  let identity;
   try {
-    const resp = await fetch(`${config.QURL_ENDPOINT}/v1/qurls?limit=1`, {
-      headers: { 'Authorization': `Bearer ${submittedKey}`, 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (resp.status === 401 || resp.status === 403) {
-      logger.warn('validate-key rejected by qURL API', { ...logFields, status: resp.status });
+    identity = await getIdentity(submittedKey, interaction.guildId);
+  } catch (err) {
+    const status = qurlApiErrorStatus(err);
+    logger.warn('Submitted guild key validation failed', { ...logFields, status, errorType: err?.name });
+    if (status === 401 || status === 403) {
       return interaction.editReply({ content: '❌ **Invalid API key.** Double-check your key at **https://layerv.ai**.' });
     }
-    if (!resp.ok) {
-      logger.warn('validate-key non-2xx from qURL API', { ...logFields, status: resp.status });
-      return interaction.editReply({ content: `❌ **qURL API error** (${resp.status}). Try again later.` });
-    }
-  } catch (err) {
-    // Don't reflect err.message to Discord — network errors can
-    // contain internal hostnames/IPs (e.g. "connect ECONNREFUSED
-    // 10.0.0.5:8080") that should not leak to a guild admin's
-    // screen. Same redaction shape as the pre-conversion code.
-    logger.error('validate-key request failed', { ...logFields, error: err.message });
-    return interaction.editReply({
-      content: '❌ **Could not validate key.** Please try again in a moment.',
-    });
+    return interaction.editReply({ content: status
+      ? `❌ **qURL API error** (${status}). Try again later.`
+      : '❌ **Could not validate key.** Please try again in a moment.' });
   }
 
   try {
-    const identity = await getIdentity(submittedKey, interaction.guildId);
     const binding = await prepareGuildOwnerBinding(interaction.guildId, identity.owner_id);
     await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE, binding);
   } catch (err) {
     const status = qurlApiErrorStatus(err);
-    const conflict = err?.code === 'GUILD_OWNER_CONFLICT' || err?.name === 'ConditionalCheckFailedException'
-      || status === 401 || status === 403;
-    const log = conflict ? logger.warn : logger.error;
+    const changed = err?.code === 'GUILD_SETUP_CHANGED' || err?.name === 'ConditionalCheckFailedException';
+    const conflict = err?.code === 'GUILD_OWNER_CONFLICT' || status === 401 || status === 403;
+    const log = changed || conflict ? logger.warn : logger.error;
     log('Guild key owner verification refused', { ...logFields, code: err?.code, status, errorType: err?.name });
+    if (changed) {
+      return interaction.editReply({ content: '❌ **Server setup changed.** Another setup changed this server. Run `/qurl setup` again with the existing qURL owner account.' });
+    }
     return interaction.editReply({ content: conflict
       ? '❌ **Server ownership could not be verified.** Use a key from the existing qURL owner account. If its saved key is no longer valid or ownership must change, contact the bot operator.'
       : '❌ **Setup is temporarily unavailable.** The existing server connection is unchanged. Try again shortly.' });

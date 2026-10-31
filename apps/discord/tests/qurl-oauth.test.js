@@ -696,7 +696,8 @@ describe('qurl-oauth routes', () => {
     it.each([
       [new Error('DDB throttled'), 500],
       [Object.assign(new Error('conditional write lost'), { name: 'ConditionalCheckFailedException' }), 409],
-      [Object.assign(new Error('saved key changed'), { code: 'GUILD_OWNER_CONFLICT' }), 409],
+      [Object.assign(new Error('saved key changed'), { code: 'GUILD_SETUP_CHANGED' }), 409],
+      [Object.assign(new Error('owner changed'), { code: 'GUILD_OWNER_CONFLICT' }), 409],
     ])('cleans up an orphan after a failed key write: %s', async (persistError, expectedStatus) => {
       const state = signCallbackState('guild-1', 'admin-2');
       let resolveDeleteFired;

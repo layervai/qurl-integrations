@@ -1573,7 +1573,8 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
   }
 }
 
-// `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
+// `via` names the setup door. `binding` carries the verified ownerId and the
+// prior plaintext expectedApiKey (or null), checked again before conditional write.
 async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
   const door = normalizeSetupVia(via);
   // Validate on every call so caller drift (including a forgotten argument)
@@ -1581,10 +1582,11 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
   if (door === SETUP_VIA.UNKNOWN) {
     bestEffortLog(() => logger.warn('Unrecognized setup door; any admin-change audit for this write records via=unknown', { ...describeSetupVia(via), guildId }));
   }
+  // Unbound writes can create a first setup only; rotations require a verified binding.
   let condition = 'attribute_not_exists(qurl_api_key) AND attribute_not_exists(qurl_owner_id)';
   const ownerValues = {};
   if (binding) {
-    if (typeof binding.ownerId !== 'string' || !binding.ownerId) {
+    if (typeof binding.ownerId !== 'string' || !binding.ownerId.trim()) {
       throw new Error('Guild owner identity is required');
     }
     const snapshot = await ddb.send(new GetCommand({
@@ -1593,7 +1595,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
     const storedKey = snapshot?.Item?.qurl_api_key;
     if ((storedKey ? decrypt(storedKey) : null) !== binding.expectedApiKey) {
       const error = new Error('Guild key changed during setup');
-      error.code = 'GUILD_OWNER_CONFLICT';
+      error.code = 'GUILD_SETUP_CHANGED';
       throw error;
     }
     condition = '(attribute_not_exists(qurl_owner_id) OR qurl_owner_id = :owner) AND '

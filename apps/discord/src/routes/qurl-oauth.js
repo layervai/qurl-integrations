@@ -445,7 +445,8 @@ router.get('/callback', rateLimit, async (req, res) => {
       .catch((dErr) => logger.warn('Best-effort orphan-key delete threw', {
         error: dErr?.message, keyId, guildId,
       }));
-    if (err?.code === 'GUILD_OWNER_CONFLICT' || err?.name === 'ConditionalCheckFailedException') {
+    if (err?.code === 'GUILD_OWNER_CONFLICT' || err?.code === 'GUILD_SETUP_CHANGED'
+        || err?.name === 'ConditionalCheckFailedException') {
       return renderError(res, 409, 'Server setup changed',
         'Another setup changed this server. Start again with the existing qURL owner account.');
     }

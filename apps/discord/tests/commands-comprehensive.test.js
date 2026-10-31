@@ -1718,11 +1718,38 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
 
   it('reports a temporary identity outage without claiming an owner conflict', async () => {
-    require('../src/qurl').getIdentity.mockRejectedValueOnce(Object.assign(new Error('Unavailable'), { status: 503 }));
+    mockDb.getGuildConfigWithApiKey.mockResolvedValueOnce({ qurl_api_key: 'saved-key' });
+    require('../src/qurl').getIdentity
+      .mockResolvedValueOnce({ owner_id: 'synthetic-owner' })
+      .mockRejectedValueOnce(Object.assign(new Error('Unavailable'), { status: 503 }));
     const interaction = makeModalInteraction();
     await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
     expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
     expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining('temporarily unavailable') });
+  });
+
+  it.each([
+    { code: 'GUILD_SETUP_CHANGED' },
+    { name: 'ConditionalCheckFailedException' },
+  ])('asks for a retry after a concurrent setup change (%p)', async (failure) => {
+    mockDb.setGuildApiKey.mockRejectedValueOnce(Object.assign(new Error('raced'), failure));
+    const interaction = makeModalInteraction();
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    const content = interaction.editReply.mock.calls.at(-1)[0].content;
+    expect(content).toContain('Server setup changed');
+    expect(content).toContain('Run `/qurl setup` again');
+    expect(content).not.toContain('contact the bot operator');
+  });
+
+  it.each([401, 403])('keeps a legacy saved-key rejection %s distinct from a bad submitted key', async (status) => {
+    mockDb.getGuildConfigWithApiKey.mockResolvedValueOnce({ qurl_api_key: 'saved-key' });
+    require('../src/qurl').getIdentity
+      .mockResolvedValueOnce({ owner_id: 'synthetic-owner' })
+      .mockRejectedValueOnce(Object.assign(new Error('old key rejected'), { status }));
+    const interaction = makeModalInteraction();
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+    expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain('ownership could not be verified');
   });
 
   it('validates key + persists + replies success', async () => {
@@ -1733,7 +1760,9 @@ describe('handleSetupModal (dispatcher path)', () => {
       '0:1#guild-1#ch-1#user-1',
       { stage: 'awaiting_setup_modal', reason: 'terminal' },
     );
-    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(require('../src/qurl').getIdentity).toHaveBeenCalledTimes(1);
+    expect(require('../src/qurl').getIdentity).toHaveBeenCalledWith(VALID_KEY, 'guild-1');
     expect(mockDb.setGuildApiKey).toHaveBeenCalledWith(
       'guild-1', VALID_KEY, 'user-1', 'paste',
       { ownerId: 'synthetic-owner', expectedApiKey: null },
@@ -1774,8 +1803,8 @@ describe('handleSetupModal (dispatcher path)', () => {
     expect(replyArg.content).toContain('Run `/qurl setup` again');
   });
 
-  it('surfaces 401 from qURL API as invalid-key message', async () => {
-    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 401 });
+  it.each([401, 403])('surfaces submitted-key rejection %s as invalid-key message', async (status) => {
+    require('../src/qurl').getIdentity.mockRejectedValueOnce(Object.assign(new Error('rejected'), { status }));
     const interaction = makeModalInteraction();
 
     await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
@@ -1792,7 +1821,7 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
 
   it('redacts network-error details from user-facing reply', async () => {
-    global.fetch = jest.fn().mockRejectedValue(
+    require('../src/qurl').getIdentity.mockRejectedValueOnce(
       new Error('connect ECONNREFUSED 10.0.0.5:8080'),
     );
     const interaction = makeModalInteraction();
@@ -1807,7 +1836,7 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
 
   it('surfaces non-2xx non-401 as generic API error', async () => {
-    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503 });
+    require('../src/qurl').getIdentity.mockRejectedValueOnce(Object.assign(new Error('Unavailable'), { status: 503 }));
     const interaction = makeModalInteraction();
 
     await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });

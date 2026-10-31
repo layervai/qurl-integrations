@@ -8,6 +8,7 @@ beforeEach(() => jest.resetAllMocks());
 
 test('first setup needs a verified owner, not an audit fingerprint', async () => {
   await expect(prepareGuildOwnerBinding('g', '')).rejects.toMatchObject({ code: 'GUILD_OWNER_CONFLICT' });
+  await expect(prepareGuildOwnerBinding('g', '   ')).rejects.toMatchObject({ code: 'GUILD_OWNER_CONFLICT' });
   expect(db.getGuildConfigWithApiKey).not.toHaveBeenCalled();
   await expect(prepareGuildOwnerBinding('g', 'owner')).resolves.toEqual({ ownerId: 'owner', expectedApiKey: null });
 });
