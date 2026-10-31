@@ -135,6 +135,29 @@ remove them only after cleanup or link expiry is confirmed.
 
 ## Configuration
 
+[deploy-manifest.json](deploy-manifest.json) is the deployment contract for
+runtime environment names, the container port and the health path. The image
+bundles it at `/app/deploy-manifest.json`. The managed preflight reads that
+file from the selected immutable image and checks the saved Terraform plan
+before runtime apply. Both Sandbox and production run production-mode images.
+
+The manifest lists unconditional and production requirements, optional app and
+SDK settings, forbidden production hooks, and dependencies of enabled features.
+Tests check declarations against actual runtime environment reads and the
+installed SDK. New settings must update this file with the code that reads them.
+Use direct `process.env.NAME` or literal-key reads and `intEnv`; a new access
+style also needs a scanner update. Undeclared Node or SDK settings such as
+`NODE_OPTIONS` and `AWS_MAX_ATTEMPTS` also fail the managed preflight; declare
+and test them deliberately before adding task bindings.
+Boot validators still check actual secret values, OAuth setup, default-webhook/
+BYOK rules and role/resume/shipper combinations. A matching name or secret
+reference does not prove valid credentials.
+The preflight requires an explicit `NODE_ENV=production` task binding even though
+the image also defaults to it. Enabled features must have their listed dependencies
+before deployment; this is stricter than a feature failing only when called.
+Dependency flags enable only on the literal string `true`, matching config.
+`DDB_TABLE_PREFIX` is required because DynamoDB is the only supported store.
+
 The bot is a Node.js service (**Node ≥ 22**) backed by DynamoDB. Copy
 `.env.example` to `.env` and fill it in — every variable is documented inline.
 The variables below are the ones most deployments need; see `.env.example` for
