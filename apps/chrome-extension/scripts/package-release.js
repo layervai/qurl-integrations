@@ -51,7 +51,7 @@ function createZipWithZipCommand(zipPath, targetReleaseRoot = releaseRoot) {
     });
   } catch (err) {
     if (err.code === 'ENOENT') {
-      throw new Error('The "zip" command is not available. Install zip or create the ZIP manually from release/.');
+      throw new Error('The "zip" command is not available. Install zip or create the ZIP manually from release/.', { cause: err });
     }
     throw err;
   }
@@ -71,7 +71,7 @@ function createZipWithPowerShell(zipPath, targetReleaseRoot = releaseRoot) {
     });
   } catch (err) {
     if (err.code === 'ENOENT') {
-      throw new Error('PowerShell is required to package the extension on Windows.');
+      throw new Error('PowerShell is required to package the extension on Windows.', { cause: err });
     }
     throw err;
   }
