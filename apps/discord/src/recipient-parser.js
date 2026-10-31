@@ -486,7 +486,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // that order.
     //
     // Intentionally NO `ids.size >= cap` early-break here (unlike the
-    // channel-expansion and @everyone loops): role expansion walks
+    // channel-expansion loop): role expansion walks
     // every member so `consider()` can grow `seen` past the cap,
     // giving downstream `cappedCount` an accurate "you typed 55, we
     // kept 25" signal. Early-breaking would zero out cappedCount
@@ -576,15 +576,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
       continue;
     }
-    // Early-break on cap, mirroring the @everyone loop's
-    // `if (ids.size >= cap) break;` (see the ordering comment block
-    // there for the full rationale on cache-insertion-order semantics
-    // — voice expansion inherits the same caveat: under-cap overflow
-    // wins remaining slots by Discord Collection insertion order, not
-    // alphabetical / role-ordered / recently-active). Without the
-    // break, a stage channel with thousands of members + a small
-    // env-overridden cap would walk the entire member set after the
-    // cap was hit — bounded but wasted work.
+    // Voice expansion keeps cache insertion order and stops at the cap.
     //
     // `capHit` separates "no usable members" (empty / bots-only) from
     // "cap was already filled by earlier expansions, voice silently
@@ -623,6 +615,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // first, and @everyone fills the remainder. Reversing this order
   // silently drops explicit mentions when the cache is partial.
   let massMentionExpanded = false;
+  const seenBeforeEveryone = seen.size;
   if (everyonePresent && allowMassMention) {
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
@@ -709,7 +702,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   const finalIds = [...ids];
   const cappedCount = seen.size - ids.size;
   if (cappedCount > 0) {
-    const logFn = seen.size > cap * MASSIVE_OVERSHOOT_MULTIPLIER
+    const logFn = seenBeforeEveryone > cap * MASSIVE_OVERSHOOT_MULTIPLIER
       ? logger.warn
       : logger.debug;
     logFn('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {

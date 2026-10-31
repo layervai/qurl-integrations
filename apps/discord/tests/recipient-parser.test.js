@@ -1096,6 +1096,17 @@ describe('@everyone reports overflow instead of silently truncating (#384)', () 
     expect(result.massMentionExpanded).toBe(true);
   });
 
+  test.each([false, true])('large everyone expansion preserves explicit overshoot signal: %s', (largeExplicitList) => {
+    const users = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [String(2000 + i), {}]));
+    const explicit = largeExplicitList ? Object.keys(users).slice(0, 60).map(id => `<@${id}>`).join(' ') : '';
+    logger.warn.mockClear();
+    logger.debug.mockClear();
+    const result = parseRecipientMentions(explicit + ' @everyone', makeInteraction({ users }), { allowMassMention: true });
+    expect(result.cappedCount).toBe(75);
+    expect(logger.warn).toHaveBeenCalledTimes(largeExplicitList ? 1 : 0);
+    expect(logger.debug).toHaveBeenCalledTimes(largeExplicitList ? 0 : 1);
+  });
+
   test('full explicit selection keeps its mode while everyone overflow is counted', () => {
     const users = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [String(2000 + i), {}]));
     const explicit = Object.keys(users).slice(0, 25);
