@@ -178,6 +178,10 @@ function isDiscordSnowflake(value) {
 // null so every downstream truthy check (`if (config.GUILD_ID)`) correctly
 // treats the bot as multi-tenant. Prevents a malformed SSM value from
 // silently registering commands to a nonexistent guild.
+// REVIEW NOTE: infra's qurl-bot-discord/terraform/variables.tf guild_id
+// validator accepts "" for multi-tenant mode (infra PR #144). Keep that
+// sentinel accepted here and coordinate any policy change across both repos.
+// Runtime trims defensively; Terraform rejects whitespace-only input.
 const rawGuildId = process.env.GUILD_ID;
 let normalizedGuildId = null;
 if (rawGuildId) {
