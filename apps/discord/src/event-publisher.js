@@ -1,6 +1,6 @@
 // SQS-driven event publisher for the gateway tier (zero-downtime
-// design, Pillar 1). Wired as a `client.on('raw', publish)` listener
-// in src/index.js; every Discord dispatch lands here. The handler
+// design, Queue delivery). Wired by src/index.js through the legacy
+// client raw listener or the RESUME shim dispatch hook. The handler
 // filters to `INTERACTION_CREATE` (the only event type the worker
 // tier handles today — see event-consumer.js's `unhandled
 // eventType` branch) and forwards the raw payload to SQS as the
@@ -107,7 +107,7 @@ const { GATEWAY_DISPATCH_TYPES, LOG_KINDS } = require('./constants');
 // key. Re-IDENTIFY (post-reconnect) resets `s` to 1; the LRU
 // tolerates the collision because (a) interactions from the prior
 // session are already expired by Discord (3s TTL), and (b)
-// flow-state OCC owns correctness.
+// flow-state OCC guards row transitions; external effects need their own guards.
 //
 // TODO(sharding-pr): replace the literal '0' with the per-shard
 // value supplied by `@discordjs/ws`'s dispatch callback once PR 13

@@ -117,7 +117,8 @@ sibling command's surviving row.
 
 ### Queue delivery and side effects
 
-SQS Standard can redeliver an event. The consumer's recent-event LRU is a
+SQS Standard avoids requiring global event order; version-conditioned flow
+writes provide the local state-transition guard. It can redeliver an event. The consumer's recent-event LRU is a
 telemetry hint, not a correctness gate: a repeated event may be the first
 attempt that can finish. The event ID format is `<shard>:<sequence>`, but the publisher still supplies
 literal `0`. Sharding must replace that placeholder; flow keys separately use
@@ -148,6 +149,12 @@ infrastructure `qurl-bot-events` module README. Adding another publisher require
 envelope validation and authenticity verification before its messages can reach
 `client.actions.InteractionCreate.handle`. Review the identity and permission
 trust boundary before granting that publish access.
+
+Pillars 2 and 3 retain the Gateway design and its spike history. The current
+[`index.js`](../src/index.js) selects discord.js when RESUME is disabled and
+`createGatewayWsShim` with its own `@discordjs/ws` manager for a Gateway role
+with RESUME enabled. Check the actual role and flag bindings before choosing
+which path applies; old PR numbers and spike examples are not rollout receipts.
 
 ### Pillar 2 — Cross-process Gateway session resume
 
