@@ -51,6 +51,17 @@ func TestRuntimeRecoveryAndNamespaceIsolation(t *testing.T) {
 	if err := owner.WaitReady(ready); err != nil {
 		t.Fatal(err)
 	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	aliasClient := IPCClient{StateDir: filepath.Join(alias, "owner"), SocketPath: path}
+	if err := aliasClient.WaitReady(ready); err != nil {
+		t.Fatalf("alias readiness: %v", err)
+	}
+	if _, err := aliasClient.ReloadIfRunning(ready); err != nil {
+		t.Fatalf("alias reload: %v", err)
+	}
 	// A plain terminal recovers Desktop's bound address without its environment.
 	controller, err := NewJobController(stateDir, filepath.Join(root, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver, nil)
 	if err != nil {
@@ -176,5 +187,56 @@ func TestLegacyPinnedOwnerCannotBeEvicted(t *testing.T) {
 	}
 	if len(storedOverlay(manager)) != 0 {
 		t.Fatal("legacy owner overlay changed")
+	}
+}
+
+func TestNamespaceCanonicalizesAncestorAliasesBeforeCreation(t *testing.T) {
+	root := shortTempRoot(t)
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	realState := filepath.Join(root, "owner")
+	aliasState := filepath.Join(alias, "owner")
+	before := ipcNamespace(aliasState)
+	if err := connectorstate.EnsureDirMode(realState); err != nil {
+		t.Fatal(err)
+	}
+	if before != ipcNamespace(realState) || before != ipcNamespace(aliasState) {
+		t.Fatal("namespace changed after creation or through alias")
+	}
+}
+
+func TestDaemonRepairsInvalidHintButClientFailsClosed(t *testing.T) {
+	dir := shortTempRoot(t)
+	marker := filepath.Join(dir, "daemon-runtime-dir.json")
+	if err := os.WriteFile(marker, []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SocketPathForStateDir(dir, nil); err == nil {
+		t.Fatal("client silently fell back")
+	}
+	path, err := SocketPathForDaemon(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- RunRefusedJob(ctx, dir, path) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("repair daemon did not stop")
+		}
+	})
+	ready, stop := context.WithTimeout(t.Context(), 3*time.Second)
+	defer stop()
+	if err := (IPCClient{StateDir: dir, SocketPath: path}).WaitReady(ready); !errors.Is(err, ErrJobRefused) {
+		t.Fatal(err)
+	}
+	if recovered, err := SocketPathForStateDir(dir, nil); err != nil || recovered != path {
+		t.Fatalf("repaired address = %q, %v", recovered, err)
 	}
 }

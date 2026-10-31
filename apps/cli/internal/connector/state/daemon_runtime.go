@@ -78,8 +78,12 @@ func WriteDaemonRuntimeDir(dir, runtimeDir string) error {
 	if err := EnsureDirMode(dir); err != nil {
 		return err
 	}
-	old, err := ReadDaemonRuntimeDir(dir)
-	if err != nil || old == runtimeDir {
+	path := filepath.Join(dir, daemonRuntimeFile)
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("daemon runtime marker %s must be a regular file; remove it before restarting", path)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	data, err := json.Marshal(runtimeDir)

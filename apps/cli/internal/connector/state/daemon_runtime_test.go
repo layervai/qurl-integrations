@@ -85,3 +85,30 @@ func TestDaemonRuntimeRejectsSymlinkAndLoosePermissions(t *testing.T) {
 		t.Fatal("accepted readable marker")
 	}
 }
+
+func TestDaemonRuntimeOwnerRepairsRegularMarker(t *testing.T) {
+	dir := secureStateTestDir(t)
+	marker := filepath.Join(dir, daemonRuntimeFile)
+	if err := WriteDaemonRuntimeDir(dir, filepath.Join(dir, "old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		// #nosec G302 -- Deliberately insecure fixture must be repaired by its owner.
+		if err := os.Chmod(marker, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ReadDaemonRuntimeDir(dir); err == nil {
+		t.Fatal("client accepted invalid marker")
+	}
+	want := filepath.Join(dir, "new")
+	if err := WriteDaemonRuntimeDir(dir, want); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadDaemonRuntimeDir(dir); err != nil || got != want {
+		t.Fatalf("repaired marker = %q, %v", got, err)
+	}
+}

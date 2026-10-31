@@ -37,6 +37,7 @@ var cliSentinels = map[string]struct {
 	err  error
 	code int
 }{
+	"daemon.ErrJobRefused":               {connectordaemon.ErrJobRefused, Unavailable},
 	"daemon.ErrStateNamespaceMismatch":   {connectordaemon.ErrStateNamespaceMismatch, Conflict},
 	"daemon.ErrStateNamespaceUnverified": {connectordaemon.ErrStateNamespaceUnverified, Unavailable},
 	"daemon.ErrNativeDaemonUnreachable":  {connectordaemon.ErrNativeDaemonUnreachable, Unavailable},

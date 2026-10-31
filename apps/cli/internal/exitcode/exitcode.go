@@ -400,7 +400,7 @@ func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the
 		return Config, true
 	case errors.Is(err, connectordaemon.ErrResourceGone):
 		return NotFound, true
-	case errors.Is(err, connectordaemon.ErrExternalDaemonNotRunning), errors.Is(err, connectordaemon.ErrStateNamespaceUnverified), errors.Is(err, connectordaemon.ErrNativeDaemonUnreachable):
+	case errors.Is(err, connectordaemon.ErrJobRefused), errors.Is(err, connectordaemon.ErrExternalDaemonNotRunning), errors.Is(err, connectordaemon.ErrStateNamespaceUnverified), errors.Is(err, connectordaemon.ErrNativeDaemonUnreachable):
 		// The local daemon is another supervisor's process and it is not
 		// serving: the Unavailable row, and the caller's cue to start it.
 		return Unavailable, true

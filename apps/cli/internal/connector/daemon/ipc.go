@@ -26,13 +26,15 @@ import (
 // SocketFile is the fixed IPC socket name below the runtime directory.
 const SocketFile = "daemon.sock"
 
+const windowsPlatform = "windows"
+
 // RuntimeDirEnv pins the directory that holds the share daemon's control
 // socket. A host whose state path cannot fit sockaddr_un, such as an App
 // Sandbox container, sets it to a short owner-only directory so every daemon
 // and client resolves exactly <dir>/daemon.sock. This directory must be
 // dedicated to one state namespace. A daemon saves its selected directory in
-// private state for clients without the environment override. Existing directories must already have
-// mode 0700; startup creates missing directories but never changes the mode
+// private state for clients without the environment override. Existing
+// directories must already have mode 0700; startup creates missing directories but never changes the mode
 // of an existing runtime directory.
 const RuntimeDirEnv = "QURL_CONNECTOR_RUNTIME_DIR"
 
@@ -44,6 +46,16 @@ const RuntimeDirEnv = "QURL_CONNECTOR_RUNTIME_DIR"
 // /tmp when the state path cannot fit sockaddr_un. Windows hashes the
 // returned path into its named-pipe address and ignores RuntimeDirEnv.
 func SocketPathForStateDir(stateDir string, lookupEnv func(string) (string, bool)) (string, error) {
+	return resolveSocketPath(stateDir, lookupEnv, false)
+}
+
+// SocketPathForDaemon permits the namespace owner to repair an invalid hint
+// after taking the state lease. Clients never fall back from an invalid hint.
+func SocketPathForDaemon(stateDir string, lookupEnv func(string) (string, bool)) (string, error) {
+	return resolveSocketPath(stateDir, lookupEnv, true)
+}
+
+func resolveSocketPath(stateDir string, lookupEnv func(string) (string, bool), repairHint bool) (string, error) {
 	stateDir = filepath.Clean(strings.TrimSpace(stateDir))
 	if !filepath.IsAbs(stateDir) {
 		return "", errors.New("share daemon state directory must be absolute")
@@ -54,10 +66,10 @@ func SocketPathForStateDir(stateDir string, lookupEnv func(string) (string, bool
 			runtimeDir = filepath.Clean(strings.TrimSpace(raw))
 		}
 	}
-	if runtimeDir == "" && runtime.GOOS != "windows" {
+	if runtimeDir == "" && runtime.GOOS != windowsPlatform {
 		var err error
 		runtimeDir, err = connectorstate.ReadDaemonRuntimeDir(stateDir)
-		if err != nil {
+		if err != nil && !repairHint {
 			return "", fmt.Errorf("recover share daemon runtime directory: %w", err)
 		}
 		if runtimeDir != "" {
@@ -87,6 +99,7 @@ var errIPCSocketRestrictionPending = errors.New("share daemon socket restriction
 // IPCServer exposes daemon status, reconciliation, and the runtime
 // request-header overlay over an owner-only socket.
 type IPCServer struct {
+	refused    bool
 	StateDir   string
 	SocketPath string
 	Manager    ShareManager
@@ -117,6 +130,9 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	if s == nil || s.Manager == nil {
 		return errors.New("share daemon IPC server requires a manager")
 	}
+	if s.StateDir != "" && !filepath.IsAbs(s.StateDir) {
+		return errors.New("share daemon state directory must be absolute")
+	}
 	path, err := validateSocketPath(s.SocketPath)
 	if err != nil {
 		return err
@@ -133,10 +149,7 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 		retErr = errors.Join(retErr, cleanup())
 	}()
 	if s.StateDir != "" {
-		if !filepath.IsAbs(s.StateDir) {
-			return errors.New("share daemon state directory must be absolute")
-		}
-		if runtime.GOOS != "windows" {
+		if runtime.GOOS != windowsPlatform {
 			if err := connectorstate.WriteDaemonRuntimeDir(s.StateDir, filepath.Dir(path)); err != nil {
 				return fmt.Errorf("save share daemon runtime directory: %w", err)
 			}
@@ -174,18 +187,8 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	})
 	// ReadTimeout bounds a stalled PUT /overlay body, which MaxBytesReader
 	// caps only in size.
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.StateDir != "" {
-			w.Header().Set(ipcNamespaceHeader, ipcNamespace(s.StateDir))
-		}
-		// Legacy clients omit the header; new clients bind every control request.
-		if namespace := r.Header.Get(ipcNamespaceHeader); namespace != "" && s.StateDir != "" && namespace != ipcNamespace(s.StateDir) {
-			http.Error(w, ErrStateNamespaceMismatch.Error(), http.StatusConflict)
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 10 * time.Second}
+
+	server := &http.Server{Handler: s.controlHandler(mux), ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 10 * time.Second}
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()
 	managerDone := make(chan error, 1)
@@ -280,6 +283,30 @@ type IPCClient struct {
 	// fixed bounded timeout so an unresponsive daemon cannot block lifecycle
 	// commands after their cloud operation has completed.
 	requestTimeout time.Duration
+}
+
+func (s *IPCServer) controlHandler(next http.Handler) http.Handler {
+	namespace := ""
+	if s.StateDir != "" {
+		namespace = ipcNamespace(s.StateDir)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if namespace != "" {
+			w.Header().Set(ipcNamespaceHeader, namespace)
+		}
+		if s.refused {
+			w.Header().Set(ipcRefusedHeader, "1")
+		}
+		if requested := r.Header.Get(ipcNamespaceHeader); requested != "" && namespace != "" && requested != namespace {
+			http.Error(w, ErrStateNamespaceMismatch.Error(), http.StatusConflict)
+			return
+		}
+		if s.refused && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, ErrJobRefused.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // IPCStatus is the daemon version handshake and active resource set, encoded
@@ -477,6 +504,9 @@ func (c IPCClient) WaitReady(ctx context.Context) error {
 			if !running {
 				return errors.New("share daemon readiness returned a response without a running socket")
 			}
+			if response.Header.Get(ipcRefusedHeader) == "1" {
+				return ErrJobRefused
+			}
 			if response.StatusCode != http.StatusOK {
 				return fmt.Errorf("share daemon readiness returned HTTP %d", response.StatusCode)
 			}
@@ -499,6 +529,7 @@ func (c IPCClient) WaitReady(ctx context.Context) error {
 }
 
 const ipcNamespaceHeader = "X-Qurl-State-Namespace"
+const ipcRefusedHeader = "X-Qurl-Job-Refused"
 
 // ErrStateNamespaceUnverified refuses ambiguous ownership on legacy daemons.
 var ErrStateNamespaceUnverified = errors.New("share daemon cannot confirm its state namespace; restart it with this qURL version and retry")
@@ -508,11 +539,32 @@ var ErrStateNamespaceMismatch = errors.New("share daemon belongs to another stat
 
 func (c IPCClient) namespaceIdentifiedByAddress() bool {
 	path, err := platformSocketPath(c.StateDir, "")
-	return err == nil && path == c.SocketPath
+	return err == nil && canonicalIPCPath(path) == canonicalIPCPath(c.SocketPath)
+}
+
+func canonicalIPCPath(path string) string {
+	path = filepath.Clean(path)
+	ancestor := path
+	for {
+		if resolved, err := filepath.EvalSymlinks(ancestor); err == nil {
+			relative, _ := filepath.Rel(ancestor, path)
+			path = filepath.Join(resolved, relative)
+			break
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			break
+		}
+		ancestor = parent
+	}
+	if runtime.GOOS == windowsPlatform {
+		path = strings.ToLower(path)
+	}
+	return path
 }
 
 func ipcNamespace(stateDir string) string {
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(filepath.Clean(stateDir))))
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(canonicalIPCPath(stateDir))))
 }
 
 func (c IPCClient) validateNamespaceResponse(response *http.Response) error {
@@ -531,7 +583,10 @@ func (c IPCClient) validateNamespaceResponse(response *http.Response) error {
 
 // do sends one request; a nil body sends none, a non-nil body is JSON.
 func (c IPCClient) do(ctx context.Context, method, path string, body []byte) (*http.Response, bool, error) {
-	if c.StateDir != "" && method != http.MethodGet {
+	if c.StateDir != "" && !filepath.IsAbs(c.StateDir) {
+		return nil, false, errors.New("share daemon state directory must be absolute")
+	}
+	if c.StateDir != "" && method != http.MethodGet && !c.namespaceIdentifiedByAddress() {
 		// Verify legacy servers before sending a mutation they might accept blindly.
 		_, running, err := c.Status(ctx)
 		if err != nil || !running {
@@ -558,9 +613,6 @@ func (c IPCClient) do(ctx context.Context, method, path string, body []byte) (*h
 		request.Header.Set("Content-Type", "application/json")
 	}
 	if c.StateDir != "" {
-		if !filepath.IsAbs(c.StateDir) {
-			return nil, false, errors.New("share daemon state directory must be absolute")
-		}
 		request.Header.Set(ipcNamespaceHeader, ipcNamespace(c.StateDir))
 	}
 	timeout := c.requestTimeout
@@ -574,13 +626,13 @@ func (c IPCClient) do(ctx context.Context, method, path string, body []byte) (*h
 		}
 		return nil, true, err
 	}
-	if response.StatusCode == http.StatusConflict {
-		_ = response.Body.Close()
-		return nil, true, ErrStateNamespaceMismatch
-	}
 	if err := c.validateNamespaceResponse(response); err != nil {
 		_ = response.Body.Close()
 		return nil, true, err
+	}
+	if response.StatusCode == http.StatusServiceUnavailable && response.Header.Get(ipcRefusedHeader) == "1" {
+		_ = response.Body.Close()
+		return nil, true, ErrJobRefused
 	}
 	return response, true, nil
 }

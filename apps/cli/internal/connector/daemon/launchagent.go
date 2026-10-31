@@ -23,6 +23,9 @@ import (
 // DaemonJobLabel is the stable per-user background-job identifier.
 const DaemonJobLabel = "ai.layerv.qurl.share-daemon"
 
+// ErrJobRefused reports a held native job that must be replaced before sharing.
+var ErrJobRefused = errors.New("share daemon job is refused; use start, restart or publish with this qURL version to replace it")
+
 // ErrNativeDaemonUnreachable protects a native owner whose socket is unknown or starting.
 var ErrNativeDaemonUnreachable = errors.New("a native share daemon is running at another or not-yet-ready socket; wait for startup or restart its owner before retrying")
 
@@ -50,14 +53,10 @@ var ErrExternalDaemonNotRunning = errors.New("share daemon is externally supervi
 // 6 carries the validated host product explicitly, including an empty value.
 const daemonJobProtocolVersion = "6"
 
-// TODO(upstream-contract): relocating the socket relies on
-// connectorservice.UserJobManager.Ensure treating a changed argument list as a
-// definition change and booting the old job out. Verified against
-// qurl-connector v0.14.0 (userjob_darwin.go / userjob_linux.go: the rendered
-// definition is compared byte for byte and the loaded job is removed before
-// the replacement is written). If Ensure ever becomes a no-op for an
-// installed-and-running label, an upgrade would leave the old daemon serving
-// the old address while the new CLI reports convergence at the new one.
+// TODO(upstream-contract): UserJobManager.Replace must stop the old process
+// before starting its replacement, so the namespace lease cannot have two
+// owners. Verified against qurl-connector v0.14.2. An unreachable running job
+// is not relocated automatically: its namespace cannot be confirmed.
 
 // JobController installs, upgrades, and signals the per-user daemon job.
 type JobController struct {

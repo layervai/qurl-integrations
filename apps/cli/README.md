@@ -716,11 +716,15 @@ After binding, the daemon saves its runtime directory in the owner-only
 `QURL_CONNECTOR_RUNTIME_DIR` recovers that address, so a plain terminal can
 reach a daemon started by Desktop. An explicit runtime directory still takes
 precedence. An invalid or unsafe marker is an error; the command does not fall
-back to another address and install a competing job. This recovery requires
+back to another address and install a competing job. At startup, the namespace
+owner can replace a corrupt regular marker; unsafe file types still fail.
+This recovery requires
 the daemon to have started with this CLI version. Older clients omit the new
 namespace header and retain their existing control behavior; use this CLI
 version for namespace isolation. A running native job at an unknown socket is
-never replaced automatically. Wait for startup, or restart the owning app
+never replaced automatically. A native job that refuses its arguments reports
+its ownership without opening routes, so the next start, restart, or publish
+can replace it safely. Wait for startup, or restart the owning app
 with the updated CLI. An older daemon using a pinned runtime directory must
 be restarted once to provide the new namespace handshake.
 
