@@ -8870,6 +8870,129 @@ function sweepCooldowns() {
 }
 setInterval(sweepCooldowns, 60 * 1000).unref();
 
+function buildQurlCommandData(cfg) {
+  const builder = new SlashCommandBuilder()
+    .setName('qurl')
+    .setDescription('Share resources securely via qURL')
+    .addSubcommand(sub =>
+      sub.setName('send')
+        .setDescription('Share a file via one-time qURL links')
+        .addAttachmentOption(opt =>
+          opt.setName('attachment')
+            .setDescription('The file to share')
+            .setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt.setName('recipients')
+            .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+            .setRequired(false)
+            .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
+        )
+        .addStringOption(opt =>
+          opt.setName('expires-in')
+            .setDescription('How long the qURL links stay valid (default: 24 hours)')
+            .setRequired(false)
+            .addChoices(...EXPIRY_CHOICES)
+        )
+        .addStringOption(opt =>
+          opt.setName('self-destruct')
+            .setDescription('Optional countdown after first open (default: no timer)')
+            .setRequired(false)
+            .addChoices(...SELF_DESTRUCT_CHOICES)
+        )
+        .addStringOption(opt =>
+          opt.setName('personal-message')
+            .setDescription('Optional note included in each recipient\'s DM')
+            .setRequired(false)
+            .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
+        )
+    );
+  // /qurl detect — watermark attribution (#1101). Gated behind
+  // DETECT_COMMAND_ENABLED (default OFF), like /qurl map: the connector
+  // /api/detect backend 503/404s until the watermark stack is ACTIVATED (a
+  // separate gated step AFTER the connector deploys), so detect stays DARK
+  // until an operator flips the flag at activation — no visible-but-failing
+  // command in the interim. The smoke test (e2e/tests/discord-commands.smoke.test.ts)
+  // reads the same flag and asserts detect present-when-enabled / absent-when-off.
+  if (cfg.DETECT_COMMAND_ENABLED) {
+    builder.addSubcommand(sub =>
+      sub.setName('detect')
+        .setDescription('Find which recipient an image was watermarked for (this server)')
+        .addAttachmentOption(opt =>
+          opt.setName('image')
+            .setDescription('The image to check for a qURL watermark')
+            .setRequired(true)
+        )
+    );
+  }
+  if (cfg.MAP_COMMAND_ENABLED) {
+    builder.addSubcommand(sub =>
+      sub.setName('map')
+        .setDescription('Share a Google Maps location via one-time qURL links')
+        .addStringOption(opt =>
+          opt.setName('location')
+            .setDescription('Google Maps URL, or a place / address to search')
+            .setRequired(true)
+            // Picking a suggestion sends a `qurl_place:<id>` sentinel;
+            // free text is resolved server-side via resolveLocation.
+            .setAutocomplete(true)
+            // 500 chars covers full Google Maps URLs (which can be
+            // 200-400 chars after place params + coordinates) plus
+            // headroom; not tied to the recipients-parser cap because
+            // location is a single URL/address, not a token list.
+            .setMaxLength(500)
+        )
+        .addStringOption(opt =>
+          opt.setName('recipients')
+            .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+            .setRequired(false)
+            .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
+        )
+        .addStringOption(opt =>
+          opt.setName('location-name')
+            .setDescription('Override the label shown to recipients (defaults to URL/address)')
+            .setRequired(false)
+            .setMaxLength(256)
+        )
+        .addStringOption(opt =>
+          opt.setName('expires-in')
+            .setDescription('How long the qURL links stay valid (default: 24 hours)')
+            .setRequired(false)
+            .addChoices(...EXPIRY_CHOICES)
+        )
+        .addStringOption(opt =>
+          opt.setName('self-destruct')
+            .setDescription('Optional countdown after first open (default: no timer)')
+            .setRequired(false)
+            .addChoices(...SELF_DESTRUCT_CHOICES)
+        )
+        .addStringOption(opt =>
+          opt.setName('personal-message')
+            .setDescription('Optional note included in each recipient\'s DM')
+            .setRequired(false)
+            .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
+        )
+    );
+  }
+  builder.addSubcommand(sub =>
+    sub.setName('revoke')
+      .setDescription('Revoke links from a previous send')
+  );
+  builder.addSubcommand(sub =>
+    sub.setName('help')
+      .setDescription('Show qURL bot help')
+  );
+  builder.addSubcommand(sub =>
+    sub.setName('setup')
+      .setDescription('Configure your qURL API key for this server (admin only)')
+  );
+  builder.addSubcommand(sub =>
+    sub.setName('status')
+      .setDescription('Check if qURL is configured (admin only)')
+  );
+  return builder;
+}
+
 // Command definitions
 const commands = [
   {
@@ -8878,133 +9001,7 @@ const commands = [
     // `e2e/tests/discord-commands.smoke.test.ts` too — the smoke test
     // pins the subcommand NAME set (not option types, requiredness, or
     // descriptions) to catch registration regressions at deploy time.
-    // IIFE so the `/qurl map` subcommand can be conditionally added
-    // based on config.MAP_COMMAND_ENABLED — a plain fluent chain
-    // can't host an `if`. The order of `addSubcommand` calls below
-    // matches the chain we'd write inline, with `map` inserted
-    // between `send` and `revoke` when the flag is on.
-    data: (() => {
-      const builder = new SlashCommandBuilder()
-        .setName('qurl')
-        .setDescription('Share resources securely via qURL')
-        .addSubcommand(sub =>
-          sub.setName('send')
-            .setDescription('Share a file via one-time qURL links')
-            .addAttachmentOption(opt =>
-              opt.setName('attachment')
-                .setDescription('The file to share')
-                .setRequired(true)
-            )
-            .addStringOption(opt =>
-              opt.setName('recipients')
-                .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
-                .setRequired(false)
-                .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
-            )
-            .addStringOption(opt =>
-              opt.setName('expires-in')
-                .setDescription('How long the qURL links stay valid (default: 24 hours)')
-                .setRequired(false)
-                .addChoices(...EXPIRY_CHOICES)
-            )
-            .addStringOption(opt =>
-              opt.setName('self-destruct')
-                .setDescription('Optional countdown after first open (default: no timer)')
-                .setRequired(false)
-                .addChoices(...SELF_DESTRUCT_CHOICES)
-            )
-            .addStringOption(opt =>
-              opt.setName('personal-message')
-                .setDescription('Optional note included in each recipient\'s DM')
-                .setRequired(false)
-                .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
-            )
-        );
-      // /qurl detect — watermark attribution (#1101). Gated behind
-      // DETECT_COMMAND_ENABLED (default OFF), like /qurl map: the connector
-      // /api/detect backend 503/404s until the watermark stack is ACTIVATED (a
-      // separate gated step AFTER the connector deploys), so detect stays DARK
-      // until an operator flips the flag at activation — no visible-but-failing
-      // command in the interim. The smoke test (e2e/tests/discord-commands.smoke.test.ts)
-      // reads the same flag and asserts detect present-when-enabled / absent-when-off.
-      if (config.DETECT_COMMAND_ENABLED) {
-        builder.addSubcommand(sub =>
-          sub.setName('detect')
-            .setDescription('Find which recipient an image was watermarked for (this server)')
-            .addAttachmentOption(opt =>
-              opt.setName('image')
-                .setDescription('The image to check for a qURL watermark')
-                .setRequired(true)
-            )
-        );
-      }
-      if (config.MAP_COMMAND_ENABLED) {
-        builder.addSubcommand(sub =>
-          sub.setName('map')
-            .setDescription('Share a Google Maps location via one-time qURL links')
-            .addStringOption(opt =>
-              opt.setName('location')
-                .setDescription('Google Maps URL, or a place / address to search')
-                .setRequired(true)
-                // Picking a suggestion sends a `qurl_place:<id>` sentinel;
-                // free text is resolved server-side via resolveLocation.
-                .setAutocomplete(true)
-                // 500 chars covers full Google Maps URLs (which can be
-                // 200-400 chars after place params + coordinates) plus
-                // headroom; not tied to the recipients-parser cap because
-                // location is a single URL/address, not a token list.
-                .setMaxLength(500)
-            )
-            .addStringOption(opt =>
-              opt.setName('recipients')
-                .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
-                .setRequired(false)
-                .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
-            )
-            .addStringOption(opt =>
-              opt.setName('location-name')
-                .setDescription('Override the label shown to recipients (defaults to URL/address)')
-                .setRequired(false)
-                .setMaxLength(256)
-            )
-            .addStringOption(opt =>
-              opt.setName('expires-in')
-                .setDescription('How long the qURL links stay valid (default: 24 hours)')
-                .setRequired(false)
-                .addChoices(...EXPIRY_CHOICES)
-            )
-            .addStringOption(opt =>
-              opt.setName('self-destruct')
-                .setDescription('Optional countdown after first open (default: no timer)')
-                .setRequired(false)
-                .addChoices(...SELF_DESTRUCT_CHOICES)
-            )
-            .addStringOption(opt =>
-              opt.setName('personal-message')
-                .setDescription('Optional note included in each recipient\'s DM')
-                .setRequired(false)
-                .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
-            )
-        );
-      }
-      builder.addSubcommand(sub =>
-        sub.setName('revoke')
-          .setDescription('Revoke links from a previous send')
-      );
-      builder.addSubcommand(sub =>
-        sub.setName('help')
-          .setDescription('Show qURL bot help')
-      );
-      builder.addSubcommand(sub =>
-        sub.setName('setup')
-          .setDescription('Configure your qURL API key for this server (admin only)')
-      );
-      builder.addSubcommand(sub =>
-        sub.setName('status')
-          .setDescription('Check if qURL is configured (admin only)')
-      );
-      return builder;
-    })(),
+    data: buildQurlCommandData(config),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
 
@@ -10012,6 +10009,7 @@ module.exports = {
   // NODE_ENV=test (jest's default); production deploys set NODE_ENV=production.
   ...(process.env.NODE_ENV !== 'production' && {
     _test: {
+      buildQurlCommandData,
       logSafeApiDetail,
       isGoogleMapsURL,
       sanitizeFilename,
