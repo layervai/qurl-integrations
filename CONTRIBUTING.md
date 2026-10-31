@@ -105,9 +105,7 @@ All of these must pass before merge:
   - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
     `build`, `ci`, `chore`, `revert`
   - Scopes: `slack`, `teams`, `discord`, `cli`,
-    `chrome-extension`, `edge-extension`, `origins`, `shared`, `ci`
-    (`.github/workflows/pr-title.yml` also accepts repository-maintenance
-    scopes `infra` and `deps`, tracked in #463.)
+    `chrome-extension`, `edge-extension`, `origins`, `shared`, `infra`, `ci`, `deps`
 - **Linting** passes (golangci-lint with 28+ linters — see `.golangci.yml`)
 - **Tests** pass with `-race`
 - **Build** succeeds (Lambda binary)
