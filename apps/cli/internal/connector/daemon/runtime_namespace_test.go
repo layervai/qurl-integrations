@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -300,5 +301,59 @@ func TestStoppedLegacyPinnedOwnerCanBeReinstalled(t *testing.T) {
 	}
 	if len(jobs.jobs) != 1 || len(jobs.replaced) != 0 || jobs.statusCalls != 1 {
 		t.Fatalf("stopped legacy recovery: %+v", jobs)
+	}
+}
+
+func TestPinnedMutationsNeedNamespaceButNotStatusSchema(t *testing.T) {
+	root := shortTempRoot(t)
+	stateDir := filepath.Join(root, "state")
+	path := filepath.Join(root, "runtime", SocketFile)
+	if err := EnsureIPCDir(filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
+	listener, cleanup, err := listenDaemonIPC(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mutations atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"job_version":"6/future","pid":1,"running":{},"resources":{},"future_field":true}`))
+			return
+		}
+		mutations.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	server := &http.Server{Handler: (&IPCServer{StateDir: stateDir}).controlHandler(handler), ReadHeaderTimeout: time.Second}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = cleanup()
+		select {
+		case err := <-done:
+			if !errors.Is(err, http.ErrServerClosed) {
+				t.Errorf("server: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("server did not stop")
+		}
+	})
+	client := IPCClient{StateDir: stateDir, SocketPath: path}
+	if _, _, err := client.Status(t.Context()); !errors.Is(err, errIPCStatusIncompatible) {
+		t.Fatalf("strict status: %v", err)
+	}
+	if _, err := client.ReloadIfRunning(t.Context()); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if _, err := client.SetOverlay(t.Context(), map[string]map[string]string{}); err != nil {
+		t.Fatalf("overlay: %v", err)
+	}
+	foreign := IPCClient{StateDir: filepath.Join(root, "foreign"), SocketPath: path}
+	if _, err := foreign.ReloadIfRunning(t.Context()); !errors.Is(err, ErrStateNamespaceMismatch) {
+		t.Fatalf("foreign reload: %v", err)
+	}
+	if mutations.Load() != 2 {
+		t.Fatalf("mutations = %d, want only the two owner mutations", mutations.Load())
 	}
 }

@@ -585,9 +585,13 @@ func (c IPCClient) do(ctx context.Context, method, path string, body []byte) (*h
 	}
 	if c.StateDir != "" && method != http.MethodGet && !c.namespaceIdentifiedByAddress() {
 		// Verify legacy servers before sending a mutation they might accept blindly.
-		_, running, err := c.Status(ctx)
+		probe, running, err := c.do(ctx, http.MethodGet, "/status", nil)
 		if err != nil || !running {
 			return nil, running, err
+		}
+		_ = probe.Body.Close()
+		if probe.StatusCode != http.StatusOK {
+			return nil, true, fmt.Errorf("share daemon ownership probe returned HTTP %d", probe.StatusCode)
 		}
 	}
 	socket, err := validateSocketPath(c.SocketPath)
