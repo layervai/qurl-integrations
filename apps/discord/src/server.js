@@ -2,13 +2,19 @@
 const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
+
+const rawProxyHops = process.env.TRUST_PROXY?.trim();
+const proxyHops = rawProxyHops ? Number(rawProxyHops) : (process.env.NODE_ENV === 'production' ? 1 : 0);
+if ((rawProxyHops && !/^\d+$/.test(rawProxyHops)) || !Number.isSafeInteger(proxyHops) || proxyHops < 0) {
+  throw new Error('TRUST_PROXY must be a non-negative whole hop count (0 for direct connections, 1 behind the LayerV ALB)');
+}
+
 const config = require('./config');
 const { assertConfiguredWebhookSecret } = require('./utils/webhook-secret');
 const db = require('./store');
 const logger = require('./logger');
 const { LOG_EVENTS } = require('./constants');
 const { renderPage } = require('./templates/page');
-const { isPositiveFinite } = require('./utils/time');
 const qurlOAuthRouter = require('./routes/qurl-oauth');
 const discordInstallRouter = require('./routes/discord-install');
 const qurlWebhookRouter = require('./routes/qurl-webhook');
@@ -31,31 +37,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// Trust proxy headers (ECS behind ALB) for correct req.ip in rate limiting.
-// Controlled by TRUST_PROXY env var: "1"=trust one hop, "2"=two hops, etc.
-// Leaving it unset (dev direct-connect) ignores X-Forwarded-For so a local
-// caller can't spoof it to bypass rate limiting. Staging behind an LB
-// should set TRUST_PROXY=1 even with NODE_ENV != production.
-//
-// SECURITY: ALWAYS pass a finite POSITIVE integer to `app.set('trust
-// proxy', …)`. Express also accepts `true` (trust ALL hops) and `'true'`
-// (string), both of which let an attacker spoof X-Forwarded-For via any
-// upstream proxy to rotate their apparent IP and bypass the per-IP rate
-// limiter. The parseInt + isPositiveFinite chain below rejects all of
-// those: `'true'` / `'yes'` parse to NaN, negative values are dropped,
-// and a missing env falls through to the production-only default of `1`
-// (one hop = the ALB) rather than `true`.
-if (process.env.TRUST_PROXY) {
-  const hops = parseInt(process.env.TRUST_PROXY, 10);
-  if (isPositiveFinite(hops)) {
-    app.set('trust proxy', hops);
-  } else {
-    logger.warn(`Ignoring invalid TRUST_PROXY=${process.env.TRUST_PROXY} (must be a positive integer hop count, NOT 'true')`);
-  }
-} else if (process.env.NODE_ENV === 'production') {
-  // Default for production if nothing configured. Numeric, NEVER boolean.
-  app.set('trust proxy', 1);
-}
+// The managed ingress has one ALB that appends the client address. A numeric
+// count ignores client-supplied entries farther left in X-Forwarded-For.
+app.set('trust proxy', proxyHops);
 
 // helmet covers HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-
 // Policy, X-DNS-Prefetch-Control, etc. The HTTP CSP is the single source of
@@ -304,6 +288,10 @@ app.use((err, req, res, next) => {
 
 // Start server
 function startServer() {
+  if (app.get('trust proxy') !== proxyHops) {
+    throw new Error('TRUST_PROXY changed after boot configuration');
+  }
+
   // Only the receiver tier (http/combined) verifies webhook HMACs, and only
   // index.js's isHttp branch calls this — before webhookSubscriptions.start()
   // wires the default-key secret and before the listener binds. Gateway-only

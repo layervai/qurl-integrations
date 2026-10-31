@@ -43,6 +43,25 @@ search) in place of `attachment`, the
 same `recipients` / `expires-in` / `self-destruct` / `personal-message` options,
 and an optional `location-name` to override the label recipients see.
 
+## Proxy hop contract
+
+`TRUST_PROXY` is a whole, non-negative hop count. Invalid values such as `true`,
+`1oops`, or a fractional count stop startup. Use `0` for a direct connection.
+The default is `0` outside production and `1` in production.
+
+The managed deployment pins `TRUST_PROXY=1`: clients reach one ALB, that ALB
+appends their address to `X-Forwarded-For`, and the task security group accepts
+port 3000 only from that ALB. The app uses the nearest forwarded address;
+client-supplied addresses farther left do not change the OAuth rate-limit key.
+The server also refuses startup if middleware changed the configured hop count.
+
+For a self-hosted proxy chain, set the count to the number of trusted hops.
+Every route to the app must have that same trusted path; block shorter direct
+paths and make the last trusted proxy append or replace the client address.
+Do not use a boolean to trust every address. Check the
+[Express proxy guidance](https://expressjs.com/en/guide/behind-proxies/) before
+changing the ingress path or hop count.
+
 ## Getting started
 
 ### 1. Add the bot to your server
