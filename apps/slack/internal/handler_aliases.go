@@ -125,7 +125,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		// formatAliasGroupLine degrades to the alias-only row, and counts
 		// toward the pagination-gap signal below.
 		var r client.Resource
-		if rid := groups[i].resourceID; rid != "" {
+		if rid := groups[i].resourceID; rid != "" && !isLegacyDirectURLBinding(rid) {
 			var ok bool
 			if r, ok = byID[rid]; !ok {
 				unresolved++
@@ -142,7 +142,11 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		if !hasNonSlugAlias(r.Slug, groups[i].aliases) {
 			continue
 		}
-		lines = append(lines, formatAliasGroupLine(r.TargetURL, r.Slug, r.Description, groups[i].aliases))
+		line := formatAliasGroupLine(r.TargetURL, r.Slug, r.Description, groups[i].aliases)
+		if isLegacyDirectURLBinding(groups[i].resourceID) {
+			line += " (broken binding — ask your Slack admin to rebind with `/qurl-admin set-alias`)"
+		}
+		lines = append(lines, line)
 	}
 	sort.Strings(lines)
 
@@ -174,11 +178,11 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 
 // groupsNeedResolution reports whether any group carries a resource_id —
 // i.e. whether the ListResources slug join is worth an upstream call. A
-// channel whose bindings are all resource-less (legacy/synthetic) renders
-// alias-only with no fetch.
+// Resource-less and legacy direct-URL groups cannot join the resource list;
+// skip the fetch when every group has one of those shapes.
 func groupsNeedResolution(groups []aliasGroup) bool {
 	for i := range groups {
-		if groups[i].resourceID != "" {
+		if groups[i].resourceID != "" && !isLegacyDirectURLBinding(groups[i].resourceID) {
 			return true
 		}
 	}
