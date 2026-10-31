@@ -1514,3 +1514,19 @@ func TestSlackInstallConfigRejectsBadBaseURL(t *testing.T) {
 		t.Fatalf("err=%v, want https error", err)
 	}
 }
+
+func TestListenAddressFromPort(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{{"", ":8080"}, {"9000", ":9000"}, {"1", ":1"}, {"65535", ":65535"}} {
+		t.Run(tc.raw, func(t *testing.T) {
+			got, err := listenAddressFromPort(tc.raw)
+			if err != nil || got != tc.want {
+				t.Fatalf("listenAddressFromPort(%q) = %q, %v", tc.raw, got, err)
+			}
+		})
+	}
+	for _, raw := range []string{"0", "-1", "65536", "8080junk", "host:8080", " 8080", "999999999999999999999999"} {
+		if _, err := listenAddressFromPort(raw); err == nil {
+			t.Errorf("accepted invalid PORT %q", raw)
+		}
+	}
+}
