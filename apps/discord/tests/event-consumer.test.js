@@ -734,6 +734,32 @@ describe('event-consumer: pollLoop error backoff', () => {
     }
   });
 
+  test.each(['CredentialsProviderError', 'CredentialsError'])('a later %s retries and recovers after a successful poll', async (code) => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const onFatal = jest.fn();
+    let receives = 0;
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      receives++;
+      if (receives === 2) throw Object.assign(new Error('refresh unavailable'), { name: code });
+      if (receives === 3) eventConsumer._test.getStopController().abort();
+      return { Messages: [] };
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    try {
+      eventConsumer.start(makeStubClient(), { onFatal });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(receives).toBe(2);
+      expect(onFatal).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(receives).toBe(3);
+      expect(onFatal).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith('Event consumer: poll iteration failed', { error: 'refresh unavailable' });
+    } finally {
+      await eventConsumer.stop();
+      jest.useRealTimers();
+    }
+  });
+
   test('onFatal throw falls back to process.exit(1)', async () => {
     const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
     const onFatal = jest.fn(() => { throw new Error('shutdown failed'); });

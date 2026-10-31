@@ -129,7 +129,8 @@
 // deploy-time monitoring), and transient (log + POLL_ERROR_BACKOFF_MS
 // backoff). Permanent codes are typo'd queue URL, missing IAM perm,
 // region drift, bad creds, and an exhausted credential provider chain. See
-// PERMANENT_AWS_ERROR_CODES for the full set.
+// PERMANENT_AWS_ERROR_CODES for the full set. Provider failures after a
+// successful poll retain backoff so a transient ECS refresh can recover.
 //
 // How tracking works without coupling to handler internals: the
 // consumer sets `isWorkerDispatch = true` synchronously around the
@@ -1058,9 +1059,11 @@ async function pollLoop(client) {
   // a real path: start() always assigns stopController before invoking
   // pollLoop, and stop() nulls it only after `await loopPromise`
   // resolves (by which point pollLoop has already exited).
+  let hasPolledSuccessfully = false;
   while (stopController && !stopController.signal.aborted) {
     try {
       await pollOnce(client);
+      hasPolledSuccessfully = true;
     } catch (err) {
       if (isAbortError(err)) {
         // stop() aborted the in-flight receive. The while-loop's
@@ -1069,7 +1072,10 @@ async function pollLoop(client) {
         continue;
       }
       const permanentCode = permanentAwsErrorCode(err);
-      if (permanentCode) {
+      // Provider errors also wrap transient ECS metadata refresh failures.
+      const credentialRefreshFailure = hasPolledSuccessfully
+        && ['CredentialsProviderError', 'CredentialsError'].includes(permanentCode);
+      if (permanentCode && !credentialRefreshFailure) {
         // Permanent AWS misconfig (typo'd queue URL, missing IAM
         // perm, region drift, bad creds). Surface to the caller so
         // ECS sees a high task-restart rate in deploy-time monitoring
