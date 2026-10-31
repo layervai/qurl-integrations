@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2050,5 +2051,21 @@ func TestPostAgentConfirm_BlankSummaryFallsBack(t *testing.T) {
 	}
 	if len(*hc.posts) != 1 || (*hc.posts)[0].text != agentErrorReply {
 		t.Fatalf("blank summary should fall back to the error reply, got %+v", *hc.posts)
+	}
+}
+
+func TestConfirm_SetAliasExistingSkipsLookup(t *testing.T) {
+	hc := newConfirmHarness(t, "Uadmin")
+	if err := hc.h.aliasStore.BindChannelAlias(context.Background(), "T1", "C1", "oncall", "r_private"); err != nil {
+		t.Fatal(err)
+	}
+	var clients atomic.Int32
+	newClient := hc.h.cfg.NewClient
+	hc.h.cfg.NewClient = func(key string) *client.Client { clients.Add(1); return newClient(key) }
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "staging", ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
+	replaced, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !replaced || !hc.claimed(id) || !strings.Contains(text, "already bound") || strings.Contains(text, "r_private") || clients.Load() != 0 {
+		t.Fatalf("replaced=%v clients=%d text=%q", replaced, clients.Load(), text)
 	}
 }

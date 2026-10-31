@@ -32,6 +32,7 @@ import (
 // existing PK/SK; no GSI, no SK reshape, no data migration (the table
 // is empty pending Slack bot sandbox deploy).
 type AliasStore interface {
+	LookupChannelAlias(ctx context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error)
 	// BindChannelAlias atomically binds aliasName→resourceID on
 	// (teamID, channelID). Implementations issue a DynamoDB UpdateItem
 	// `SET alias_bindings.#a = :rid` with
@@ -393,7 +394,7 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 
 func (h *Handler) resolveAndBindTunnelSlugAliasResult(ctx context.Context, log *slog.Logger, teamID, channelID, alias, slug string) actionCoreResult {
 	// Avoid upstream lookup for known duplicates; the conditional bind still owns races.
-	_, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, alias)
+	_, found, err := h.aliasStore.LookupChannelAlias(ctx, teamID, channelID, alias)
 	if err != nil {
 		log.Error("setalias precheck failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
 		return newActionCoreResult(false, "Failed to update alias. Please try again.", "Alias could not be updated.")

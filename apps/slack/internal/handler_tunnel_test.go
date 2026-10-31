@@ -5094,6 +5094,10 @@ type raceBindAliasStore struct {
 	store *slackdata.Store
 }
 
+func (r raceBindAliasStore) LookupChannelAlias(ctx context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error) {
+	return r.store.LookupChannelAlias(ctx, teamID, channelID, aliasName)
+}
+
 func (r raceBindAliasStore) BindChannelAlias(ctx context.Context, teamID, channelID, aliasName, resourceID string) error {
 	if err := r.store.BindChannelAlias(ctx, teamID, channelID, aliasName, resourceID); err != nil {
 		return err

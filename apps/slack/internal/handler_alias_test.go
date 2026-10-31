@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -68,6 +69,13 @@ func newFakeAliasStore() *fakeAliasStore {
 
 func (f *fakeAliasStore) key(teamID, channelID string) string {
 	return teamID + "|" + channelID
+}
+
+func (f *fakeAliasStore) LookupChannelAlias(_ context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rid, found := f.rows[f.key(teamID, channelID)][aliasName]
+	return rid, found, nil
 }
 
 func (f *fakeAliasStore) BindChannelAlias(_ context.Context, teamID, channelID, aliasName, resourceID string) error {
@@ -1225,5 +1233,18 @@ func TestSetAlias_Precheck(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSetAlias_PrecheckUsesAliasStore(t *testing.T) {
+	store := newFakeAliasStore()
+	if err := store.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testAliasName, "r_private"); err != nil {
+		t.Fatal(err)
+	}
+	// No AdminStore or upstream client: the binding store alone answers the duplicate.
+	h := &Handler{aliasStore: store}
+	result := h.resolveAndBindTunnelSlugAliasResult(context.Background(), slog.Default(), testAliasTeamID, testAliasChannelID, testAliasName, "other-tunnel")
+	if !strings.Contains(result.cardText, "already bound") || strings.Contains(result.cardText, "r_private") {
+		t.Fatalf("reply=%q", result.cardText)
 	}
 }
