@@ -155,8 +155,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		// stale (its resource was deleted but the DDB row remains). The
 		// message names both so operators don't only chase pagination.
 		// One triage line for "why doesn't `$foo` show its slug?"; arms
-		// the #555 follow-up. Additive only — the rendered rows are
-		// unchanged.
+		// the matching user-facing detail note below.
 		log.Warn("aliases: listing may be incomplete — a bound resource was not on the scanned page (paginated out, or the binding is stale)",
 			"unresolved_groups", unresolved, "scan_limit", listResourcesScanLimit, "team_id", teamID, "channel_id", channelID)
 	}
@@ -164,6 +163,9 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	body := "*Aliases configured for this channel:*\n" +
 		"_Format: `$<id>` → the aliases that resolve to it. Run `/qurl get` with the ID or any alias._\n" +
 		strings.Join(lines, "\n")
+	if hasMore && unresolved > 0 {
+		body += "\n_Some resource details were not on this page. A resource may be on a later page, or its binding may be stale._"
+	}
 	_ = h.postResponse(log, responseURL, body)
 }
 
