@@ -120,7 +120,7 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_
 		"It prompts for the enrollment token so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup. If your terminal echoes pasted input, stop and use a platform secret manager instead.",
 	}
 	if args.WebRef == "" {
-		introParts = append(introParts, "Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `service:<name>` / `web_container:<name>` in the typed command.")
+		introParts = append(introParts, "Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `service:<service-name>` / `web_container:<container-name>` in the typed command.")
 	}
 	introParts = append(introParts,
 		"If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it.",
