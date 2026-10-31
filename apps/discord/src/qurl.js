@@ -99,7 +99,7 @@ function makeClient(apiKey, { signal, timeout = REQUEST_TIMEOUT_MS, maxRetries =
     maxRetries,
     userAgent: USER_AGENT,
     ...(signal ? {
-      fetch: (url, init) => {
+      fetch: async (url, init) => {
         signal.throwIfAborted();
         return globalThis.fetch(url, {
           ...init,
