@@ -117,14 +117,16 @@ function isLegitimateSelfDestructSelectValue(value) {
 
 // formatSelfDestructLabel — renders a stored seconds value as the matching
 // preset's friendly label (e.g., 0.5 → "1/2 second"). Used by the form to
-// echo what the user picked. Falls back to a compact "Ns" rendering for
+// echo what the user picked, with a timing note below one minute. Falls back to a compact "Ns" rendering for
 // any finite off-preset value (unreachable through the dropdown today but
 // defends against a backfilled config). Non-finite (NaN/Infinity) returns
 // "(invalid)" so a corrupted DB row doesn't surface as the literal string
 // "NaNs" / "Infinitys" in the form preview.
 function formatSelfDestructLabel(seconds) {
   const match = findPresetBySeconds(seconds);
-  if (match) return match.label;
+  const timingNote = seconds > 0 && seconds < 60
+    ? "\nAccess stops at the timer; an open file may briefly continue loading." : '';
+  if (match) return match.label + timingNote;
   // Intentionally NOT isPositiveFinite — this branch's purpose is
   // to flag *non-finite* (NaN/Infinity) as "(invalid)" while still
   // letting 0 / negative off-preset values render as "0s" / "-5s"
@@ -133,7 +135,7 @@ function formatSelfDestructLabel(seconds) {
   // "finish the refactor" by switching to isPositiveFinite — that
   // would silently re-route 0 / negatives to "(invalid)" too.
   if (!Number.isFinite(seconds)) return '(invalid)';
-  return `${seconds}s`;
+  return `${seconds}s${timingNote}`;
 }
 
 // formatSelfDestructSegment — renders the self-destruct status as a

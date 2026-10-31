@@ -4057,3 +4057,19 @@ describe('send-confirm audit correlation', () => {
     ]));
   });
 });
+
+test.each([0.5, 1, 5, 30, 60, 300, null])('short-timer precision note reaches preview and recap (%s seconds)', seconds => {
+  const preview = _test.renderConfirmCardContent({
+    resourceType: 'file', resourceLabel: 'report.pdf', validRecipients: [], expiresIn: '1h',
+    selfDestructSeconds: seconds,
+  });
+  const recap = renderSendConfirm({
+    delivered: 1, expiresIn: '1h', selfDestructSeconds: seconds,
+    failedNamesPlain: [], successNames: ['alice'], showAll: false,
+  }).content;
+  const note = 'Access stops at the timer; an open file may briefly continue loading.';
+  for (const content of [preview, recap]) {
+    if (seconds > 0 && seconds < 60) expect(content).toContain(note);
+    else expect(content).not.toContain(note);
+  }
+});
