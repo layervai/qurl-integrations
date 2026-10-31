@@ -266,7 +266,7 @@ NODE_OPTIONS=--experimental-vm-modules DDB_TEST_ENDPOINT=http://127.0.0.1:8000 \
 ```
 
 This uses synthetic credentials and a unique temporary table, then deletes it.
-It rejects non-loopback endpoints. The VM flag lets Jest load the real SDK modules.
+The contract test rejects non-loopback endpoints. The VM flag lets Jest load the real SDK modules.
 Running the bot locally (`npm run dev`) needs a DynamoDB endpoint — `docker-compose.yml` spins
 up a local DynamoDB and `scripts/provision-ddb-local.js` creates the tables.
 See `.env.example` for the local-development environment setup.

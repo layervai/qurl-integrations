@@ -423,7 +423,7 @@ describe('flow-state.transitionFlow', () => {
 
     expect(ddbMock.calls()).toHaveLength(1);
     const updCall = ddbMock.commandCalls(UpdateCommand)[0];
-    expect(updCall.args[0].input).toMatchObject({ ReturnValues: 'ALL_OLD', ReturnValuesOnConditionCheckFailure: 'ALL_OLD' });
+    expect(updCall.args[0].input).toMatchObject({ ReturnValues: 'UPDATED_OLD', ReturnValuesOnConditionCheckFailure: 'ALL_OLD' });
     expect(updCall.args[0].input.TableName).toBe(EXPECTED_TABLE);
     expect(updCall.args[0].input.ConditionExpression).toBe('attribute_exists(flow_id) AND #v = :expected AND #e >= :now');
     expect(typeof updCall.args[0].input.ExpressionAttributeValues[':now']).toBe('number');
@@ -581,31 +581,42 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test.each([
-    ['absent row', undefined, 'not_found'],
-    ['live version conflict', { stage: { S: 'a' }, expires_at: { N: String(futureExpiry()) } }, 'conflict'],
-    ['native live conflict', { stage: 'a', expires_at: futureExpiry() }, 'conflict'],
-    ['native expired row', { stage: 'a', expires_at: futureExpiry(-30) }, 'not_found'],
-    ['native numeric string is corrupt', { stage: 'a', expires_at: String(futureExpiry()) }, 'not_found'],
-    ['logically expired row', { stage: { S: 'a' }, expires_at: { N: String(futureExpiry(-30)) } }, 'not_found'],
-    ['corrupt expiry', { stage: { S: 'a' }, expires_at: { S: 'not-a-number' } }, 'not_found'],
-    ['missing expiry', { stage: { S: 'a' } }, 'not_found'],
-    ['fractional expiry', { stage: { S: 'a' }, expires_at: { N: '2000000000.5' } }, 'not_found'],
-  ])('%s is classified from the failed write without a follow-up read', async (label, item, result) => {
+    ['absent row', undefined, 'not_found', null, undefined],
+    ['live version conflict', { stage: { S: 'a' }, expires_at: { N: String(futureExpiry()) } }, 'conflict', 'a', undefined],
+    ['native live conflict', { stage: 'a', expires_at: futureExpiry() }, 'conflict', 'a', undefined],
+    ['native expired row', { stage: 'a', expires_at: futureExpiry(-30) }, 'not_found', 'a', undefined],
+    ['native numeric string is corrupt', { stage: 'a', expires_at: String(futureExpiry()) }, 'not_found', 'a', 'string'],
+    ['logically expired row', { stage: { S: 'a' }, expires_at: { N: String(futureExpiry(-30)) } }, 'not_found', 'a', undefined],
+    ['corrupt expiry', { stage: { S: 'a' }, expires_at: { S: 'not-a-number' } }, 'not_found', 'a', 'string'],
+    ['missing expiry', { stage: { S: 'a' } }, 'not_found', 'a', 'undefined'],
+    ['fractional expiry', { stage: { S: 'a' }, expires_at: { N: '2000000000.5' } }, 'not_found', 'a', 'number'],
+    ['native fractional expiry', { stage: 'a', expires_at: 2000000000.5 }, 'not_found', 'a', 'number'],
+  ])('%s is classified from the failed write without a follow-up read', async (_label, item, result, stageFrom, warnType) => {
     const error = ccfe();
     if (item) error.Item = item;
     ddbMock.on(UpdateCommand).rejects(error);
     const response = await flowState.transitionFlow('id', 1, { stage_to: 'b', terminal: true });
     expect(response).toEqual({ result, version: null });
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
-      flow_id: 'id', stage_from: typeof item?.stage === 'string' ? item.stage : item?.stage.S ?? null, stage_to: 'b', result,
+      flow_id: 'id', stage_from: stageFrom, stage_to: 'b', result,
       terminal: false, extended: false, version: 1,
     });
     expect(ddbMock.calls()).toHaveLength(1);
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input).toMatchObject({
-      ReturnValues: 'ALL_OLD', ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+      ReturnValues: 'UPDATED_OLD', ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
     });
-    if (['corrupt expiry', 'missing expiry', 'native numeric string is corrupt'].includes(label)) expect(logger.warn).toHaveBeenCalled();
+    if (warnType === undefined) expect(logger.warn).not.toHaveBeenCalled();
+    else expect(logger.warn).toHaveBeenCalledWith(
+      'flow-state.transitionFlow: row has missing or non-numeric expires_at; treating as expired',
+      { flow_id: 'id', expires_at_type: warnType });
+  });
+
+  test('an omitted prior expiry cannot inflate extension audit', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { stage: 'a' } });
+    await flowState.transitionFlow('id', 1, { stage_to: 'b', terminal: false, set_expires_at: futureExpiry() });
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION,
+      expect.objectContaining({ result: 'success', stage_from: 'a', extended: false }));
   });
 
   test('a conflict audit uses the exact rejected row instead of a stale pre-read', async () => {
@@ -614,7 +625,7 @@ describe('flow-state.transitionFlow', () => {
     ddbMock.on(UpdateCommand).rejects(error);
     await flowState.transitionFlow('id', 1, { stage_to: 'b', terminal: false, set_expires_at: futureExpiry(60) });
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION,
-      expect.objectContaining({ stage_from: 'concurrent-stage', extended: true, result: 'conflict' }));
+      expect.objectContaining({ stage_from: 'concurrent-stage', extended: false, result: 'conflict' }));
     expect(JSON.stringify([logger.audit.mock.calls, logger.warn.mock.calls])).not.toContain('synthetic-sensitive-ciphertext');
     expect(decrypt).not.toHaveBeenCalled();
     expect(ddbMock.calls()).toHaveLength(1);

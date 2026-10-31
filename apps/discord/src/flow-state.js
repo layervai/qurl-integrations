@@ -549,13 +549,13 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       ConditionExpression: 'attribute_exists(flow_id) AND #v = :expected AND #e >= :now',
       ExpressionAttributeNames: exprNames,
       ExpressionAttributeValues: exprValues,
-      ReturnValues: 'ALL_OLD',
+      ReturnValues: 'UPDATED_OLD',
       ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
     }));
     const prior = res?.Attributes;
     stage_from = prior?.stage ?? null;
     extended = set_expires_at !== undefined && typeof prior?.expires_at === 'number'
-      && Number.isFinite(prior.expires_at) && set_expires_at > prior.expires_at;
+      && Number.isFinite(prior.expires_at) && Number.isInteger(prior.expires_at) && set_expires_at > prior.expires_at;
     const newVersion = expectedVersion + 1;
     logger.audit(AUDIT_EVENTS.FLOW_TRANSITION, {
       flow_id,
@@ -578,12 +578,12 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       const expires = typeof prior?.expires_at === 'number' ? prior.expires_at
         : typeof rawExpires === 'string' ? Number(rawExpires) : NaN;
       const validExpires = Number.isFinite(expires) && Number.isInteger(expires);
-      extended = set_expires_at !== undefined && validExpires && set_expires_at > expires;
+      extended = false;
       const result = prior && validExpires && expires >= nowEpochSeconds() ? 'conflict' : 'not_found';
       if (prior && !validExpires) {
         logger.warn('flow-state.transitionFlow: row has missing or non-numeric expires_at; treating as expired', {
           flow_id,
-          expires_at_type: prior.expires_at?.N === undefined ? 'non-number' : 'number',
+          expires_at_type: typeof rawExpires === 'string' ? 'number' : typeof (prior.expires_at?.S ?? prior.expires_at),
         });
       }
       logger.audit(AUDIT_EVENTS.FLOW_TRANSITION, {
@@ -704,8 +704,7 @@ async function deleteFlow(flow_id, { stage, reason, expectedVersion, expiredOnly
     if (isConditionalCheckFailed(err)) {
       // Row absent OR stage mismatch OR (when expectedVersion is
       // gated) version mismatch. Discriminate via post-recheck for
-      // the forensic log line — same pattern as transitionFlow's
-      // recheck. Best-effort: any throw here is swallowed because
+      // the forensic log line. Best-effort: any throw here is swallowed because
       // the recheck is purely informational.
       let actual_stage = null;
       let actual_version = null;
