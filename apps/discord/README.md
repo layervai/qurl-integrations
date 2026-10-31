@@ -105,9 +105,12 @@ native state store; the bot does not use producer state.
 Deploy and validate the connector revoke endpoint before deploying this
 consumer. Until that endpoint is enabled, ordinary children use the SDK
 fallback. Watermarked children cannot be confirmed through that fallback;
-the send stays available for retry. Legacy send rows with no usable `qurl_id`
-also remain unconfirmed after endpoint activation; deleting their shared parent
-is not a safe recovery. A repeated connector 429 fails closed
+the send stays available for retry. A legacy row with an absent child ID can
+finalize as already expired only when its canonical stored creation time and
+supported expiry duration prove its link lifetime ended. The result reports
+expired users separately and sends no revoked DM edit for them. Missing or
+invalid evidence remains unconfirmed after endpoint activation; deleting the
+shared parent is not a safe recovery. A repeated connector 429 fails closed
 after one bounded retry, without an SDK fallback. Revoke buttons and selects
 share a process-local guard for each sender and send. The guard remains active
 until the work settles, including after the 13-minute result wait if needed.
