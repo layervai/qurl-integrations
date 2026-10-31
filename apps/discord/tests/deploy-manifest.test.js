@@ -14,6 +14,11 @@ function javascriptFiles(directory) {
   });
 }
 
+function propertyName(node) {
+  if (!node.computed) return node.property.name;
+  return node.property.type === 'StringLiteral' ? node.property.value : undefined;
+}
+
 function envReads(files, strict = true) {
   const names = new Set();
   for (const file of files) {
@@ -21,11 +26,14 @@ function envReads(files, strict = true) {
     const member = memberPath => {
       const node = memberPath.node;
       const object = node.object;
-      const property = node.computed ? node.property.value : node.property.name;
+      const property = propertyName(node);
+      if (strict && object?.name === 'process' && property === undefined) {
+        throw new Error('Untracked dynamic process property');
+      }
       if (strict && property === 'env' && object?.name !== 'process') {
         throw new Error('Untracked environment object');
       }
-      if (object?.name === 'process' && (node.computed ? node.property.value : node.property.name) === 'env') {
+      if (object?.name === 'process' && property === 'env') {
         const parent = memberPath.parent;
         const directRead = ['MemberExpression', 'OptionalMemberExpression'].includes(parent.type) && parent.object === node;
         const knownBootCall = file === path.join(srcDir, 'index.js') && parent.type === 'CallExpression'
@@ -33,8 +41,8 @@ function envReads(files, strict = true) {
         if (strict && !directRead && !knownBootCall) throw new Error('Untracked environment alias or destructuring');
       }
       if (file === path.join(srcDir, 'boot-requirements.js') && object?.name === 'env' && !node.computed) names.add(node.property.name);
-      if (!['MemberExpression', 'OptionalMemberExpression'].includes(object?.type) || object.object?.name !== 'process' || (object.computed ? object.property?.value : object.property?.name) !== 'env') return;
-      const name = node.computed ? node.property.value : node.property.name;
+      if (!['MemberExpression', 'OptionalMemberExpression'].includes(object?.type) || object.object?.name !== 'process' || propertyName(object) !== 'env') return;
+      const name = property;
       if (typeof name === 'string') names.add(name);
       else if (strict && (file !== path.join(srcDir, 'config.js') || memberPath.getFunctionParent()?.node.id?.name !== 'intEnv')) {
         throw new Error(`Untracked dynamic environment read in ${path.basename(file)}`);
@@ -84,6 +92,9 @@ test.each([
   'const p = process; p.env.UNTRACKED;',
   'Reflect.get(process, "env").UNTRACKED;',
   'import { env } from "node:process"; env.UNTRACKED;',
+  'process[`env`].UNTRACKED;',
+  'const k = "env"; process[k].UNTRACKED;',
+  'process["e" + "nv"].UNTRACKED;',
 ])('untracked environment access fails closed: %s', source => {
   const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'discord-env-contract-'));
   const file = path.join(directory, 'config.js');
