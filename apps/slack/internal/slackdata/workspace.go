@@ -233,8 +233,7 @@ func (s *Store) SetAgentEnabled(ctx context.Context, teamID string, enabled bool
 	if teamID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "SetAgentEnabled: team_id is required"}
 	}
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -244,8 +243,8 @@ func (s *Store) SetAgentEnabled(ctx context.Context, teamID string, enabled bool
 		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ")"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":v":        boolAttr(enabled),
-			exprNow:     stringAttr(nowISO),
-			exprNowNano: unixNanoAttr(now),
+			exprNow:     updatedAt,
+			exprNowNano: updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -476,6 +475,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 // one place. See BindWorkspace for why owner_id and
 // seed_admin_slack_user_id are kept as distinct attributes.
 func workspaceMappingItem(teamID, ownerID, seedAdmin string, created, now time.Time) map[string]ddbtypes.AttributeValue {
+	updatedAt, updatedAtNano := updatedAtAttrs(now)
 	return map[string]ddbtypes.AttributeValue{
 		attrSlackTeamID:        stringAttr(teamID),
 		attrOwnerID:            stringAttr(ownerID),
@@ -484,8 +484,8 @@ func workspaceMappingItem(teamID, ownerID, seedAdmin string, created, now time.T
 			Value: []string{seedAdmin},
 		},
 		attrCreatedAt:     stringAttr(created.Format(time.RFC3339)),
-		attrUpdatedAt:     stringAttr(now.UTC().Format(time.RFC3339)),
-		attrUpdatedAtNano: unixNanoAttr(now),
+		attrUpdatedAt:     updatedAt,
+		attrUpdatedAtNano: updatedAtNano,
 	}
 }
 
@@ -561,8 +561,7 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 			Title:      "AddAdmin: team_id and target_user_id are required",
 		}
 	}
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -578,8 +577,8 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":uids":     &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
 			":uid":      stringAttr(targetUserID),
-			exprNow:     stringAttr(nowISO),
-			exprNowNano: unixNanoAttr(now),
+			exprNow:     updatedAt,
+			exprNowNano: updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -730,8 +729,7 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 			Title:      "RemoveAdmin: cannot remove the workspace owner",
 		}
 	}
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -747,8 +745,8 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":uids":     &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
 			":uid":      stringAttr(targetUserID),
-			exprNow:     stringAttr(nowISO),
-			exprNowNano: unixNanoAttr(now),
+			exprNow:     updatedAt,
+			exprNowNano: updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -789,19 +787,20 @@ func (s *Store) TransferOwnership(ctx context.Context, teamID, currentOwnerID, n
 	if newOwnerID != currentOwnerID {
 		ownerSet = append(ownerSet, newOwnerID)
 	}
-	nowISO := s.nowOrDefault().UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrUpdatedAt + " = " + exprNow + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
+		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
 		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ") AND " + attrOwnerID + " = :current_owner"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":current_owner": stringAttr(currentOwnerID),
 			":new_owner":     stringAttr(newOwnerID),
 			":owner_set":     &ddbtypes.AttributeValueMemberSS{Value: ownerSet},
-			exprNow:          stringAttr(nowISO),
+			exprNow:          updatedAt,
+			exprNowNano:      updatedAtNano,
 		},
 	})
 	if err == nil {
