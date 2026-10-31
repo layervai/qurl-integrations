@@ -59,6 +59,13 @@ describe('createGatewayLeader — factory validation', () => {
     expect(DEFAULT_TICK_INTERVAL_MS).toBe(2_000);
   });
 
+  it('rejects intervals that cannot fit the tick-freshness deadline', () => {
+    for (const tickIntervalMs of [0, -1, 0.5, Infinity, MAX_TICK_AGE_MS, MAX_TICK_AGE_MS + 1]) {
+      expect(() => makeLeader({ tickIntervalMs })).toThrow(/positive integer below/);
+    }
+    expect(() => makeLeader({ tickIntervalMs: MAX_TICK_AGE_MS - 1 })).not.toThrow();
+  });
+
   it('throws on missing required deps', () => {
     expect(() => createGatewayLeader()).toThrow(/lock/);
     expect(() => createGatewayLeader({ lock: {} })).toThrow(/peerHeartbeat/);

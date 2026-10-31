@@ -118,8 +118,8 @@ function createGatewayLeader({
   if (!logger) throw new Error('createGatewayLeader: logger is required');
   // tickIntervalMs=0 would saturate the renew loop; negative would
   // produce surprising setTimeout behavior. Fail loud at boot.
-  if (!Number.isInteger(tickIntervalMs) || tickIntervalMs <= 0) {
-    throw new Error('createGatewayLeader: tickIntervalMs must be a positive integer');
+  if (!Number.isInteger(tickIntervalMs) || tickIntervalMs <= 0 || tickIntervalMs >= MAX_TICK_AGE_MS) {
+    throw new Error(`createGatewayLeader: tickIntervalMs must be a positive integer below ${MAX_TICK_AGE_MS}ms`);
   }
   // inboundConnectTimeoutMs=0 would race the timer against the
   // connect immediately; negative would be undefined behavior.
