@@ -13,6 +13,11 @@ describe('AUDIT_EVENTS — event-shipper Pillar 1 (flow_state)', () => {
     expect(AUDIT_EVENTS.FLOW_DELETED).toBe('flow_deleted');
   });
 
+  test('FLOW_REAPED is distinct from completion', () => {
+    expect(AUDIT_EVENTS.FLOW_REAPED).toBe('flow_reaped');
+    expect(AUDIT_EVENTS.FLOW_REAPED).not.toBe(AUDIT_EVENTS.FLOW_DELETED);
+  });
+
   test('AUDIT_EVENTS remains frozen', () => {
     expect(Object.isFrozen(AUDIT_EVENTS)).toBe(true);
   });
