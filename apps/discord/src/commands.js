@@ -1676,6 +1676,7 @@ const REVOKE_SELECT_PROGRESS_MSG = "Revoking links... this can take a few minute
 // TODO(upstream-contract): /qurl revoke result budget; 13 minutes leaves room
 // to edit the result before Discord's 15-minute interaction token expires.
 const REVOKE_SELECT_RESULT_WAIT_MS = 13 * 60 * 1000;
+const REVOKE_WORK_DEADLINE_MS = REVOKE_SELECT_RESULT_WAIT_MS - 60_000;
 const REVOKE_RUNNING_MSG = 'Revocation is still running. Run `/qurl revoke` again in a few minutes to check the result.';
 
 /**
@@ -8583,11 +8584,14 @@ function renderSendConfirm({
 // DISPLAY_NAME_FALLBACK, so a forgotten 4th arg still renders
 // gracefully on the recipient side.
 async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DISPLAY_NAME_FALLBACK) {
+  // Stop destructive work before the 13-minute interaction result deadline.
+  const workDeadline = Date.now() + REVOKE_WORK_DEADLINE_MS;
+  const signal = AbortSignal.timeout(REVOKE_WORK_DEADLINE_MS);
   // Establish the durable no-more-recipients barrier before reading the send
   // rows. getSendItems uses a strongly consistent base-table query, so an Add
   // transaction that committed before this barrier is included; one racing
   // after it fails the revoking_at condition check.
-  const barrierEstablished = await db.markSendRevoking(sendId, senderDiscordId);
+  const barrierEstablished = await db.markSendRevoking(sendId, senderDiscordId, { signal });
   // The durable store returns false for unknown, finalized, or foreign sends.
   // Never issue a DELETE unless it positively confirms the barrier.
   if (!barrierEstablished) {
@@ -8605,7 +8609,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // revoke step can edit each strict-success recipient's DM in place.
   // Legacy rows predating that wire-up have the refs unset — the edit
   // step skips them.
-  const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true });
+  const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true, signal });
 
   // Revoke each resource's children together, retaining per-child confirmations
   // even if a sibling fails (mintLinksInBatches packs
@@ -8633,7 +8637,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const failureUserIds = [];
 
   const results = await batchSettled(resourceEntries, async ([resourceId, children]) => {
-    await revokeMintedLinks(resourceId, children.map(child => child.qurlId), apiKey);
+    signal.throwIfAborted();
+    await revokeMintedLinks(resourceId, children.map(child => child.qurlId), apiKey, { signal });
     return resourceId;
   }, 5);
 
@@ -8710,6 +8715,31 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     users: { success, total },
   });
 
+  // TODO(upstream-contract): qurl-service's
+  // TestRevokeQurl_Idempotent_SecondRevokeDoesNotRepublish pins repeated
+  // DELETE /v1/qurls/{id} as a 204 no-op, so confirmed partial work is retryable.
+  // 404 can mean wrong owner; 401/403 can recover after setup. None confirms
+  // deletion. Keep the barrier until every child and finalization are confirmed.
+  // Finalize confirmed deletes before best-effort DM edits can consume the
+  // remaining deadline. Failed/uncertain writes keep the durable retry barrier.
+  let finalizationFailed = false;
+  if (fullyConfirmed) {
+    try {
+      const finalized = await db.markSendRevoked(sendId, senderDiscordId, { signal });
+      if (finalized !== true) throw new Error('finalization was not confirmed');
+    } catch (err) {
+      finalizationFailed = true;
+      if (signal.aborted) {
+        logger.info('Revoke finalization reached work deadline', { sendId });
+      } else {
+        logger.error('Failed to finalize revoked send state', {
+          sendId,
+          error: err?.message ?? String(err),
+        });
+      }
+    }
+  }
+
   // Edit each strict-success recipient's DM to "Alice closed the door"
   // so they see immediately that the link is dead rather than tapping a
   // Step Through button that now 404s. Per-recipient (one DM per
@@ -8758,7 +8788,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // prior attempt. PATCH replaces the message with the same terminal payload,
   // so the operation is idempotent; persisting a second per-DM marker would
   // introduce a write/edit race that could permanently suppress the rewrite.
-  if (success > 0) {
+  if (success > 0 && !signal.aborted) {
     const successSet = new Set(successUserIds);
     const editTargets = new Map(); // recipient_id → {channelId, messageId}
     for (const it of items) {
@@ -8792,8 +8822,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       // pass through res.expected so the rolled-up log can distinguish
       // operational outcomes (recipient deleted DM / blocked bot) from
       // surprises that warrant oncall attention.
-      const editResults = await batchSettled(entries, async ([, refs]) => {
-        const res = await editDM(refs.channelId, refs.messageId, editPayload);
+      const editWork = batchSettled(entries, async ([, refs]) => {
+        const res = await editDM(refs.channelId, refs.messageId, editPayload, { signal });
         if (!res.ok) {
           const e = new Error('editDM returned not-ok');
           e.expected = res.expected;
@@ -8801,55 +8831,30 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
         }
         return res;
       }, 5);
-      let edited = 0;
-      let expectedFailures = 0;
-      let failed = 0;
-      for (const r of editResults) {
-        if (r.status === 'fulfilled') edited++;
-        else if (r.reason?.expected === true) expectedFailures++;
-        else failed++;
+      if (await settlesWithin(editWork, Math.max(0, workDeadline - Date.now()))) {
+        const editResults = await editWork;
+        let edited = 0;
+        let expectedFailures = 0;
+        let failed = 0;
+        for (const r of editResults) {
+          if (r.status === 'fulfilled') edited++;
+          else if (r.reason?.expected === true) expectedFailures++;
+          else failed++;
+        }
+        logger.info('Edited DMs after revoke', {
+          sendId,
+          attempted: editTargets.size,
+          edited,
+          // Recipient-side operational outcomes (DM deleted, bot blocked,
+          // etc.) — already logged at info inside editDM. Split out here
+          // so the rolled-up failure count in CloudWatch isn't poisoned
+          // by user-side state changes.
+          expectedFailures,
+          failed,
+        });
+      } else {
+        logger.info('Revoke DM updates reached work deadline', { sendId });
       }
-      logger.info('Edited DMs after revoke', {
-        sendId,
-        attempted: editTargets.size,
-        edited,
-        // Recipient-side operational outcomes (DM deleted, bot blocked,
-        // etc.) — already logged at info inside editDM. Split out here
-        // so the rolled-up failure count in CloudWatch isn't poisoned
-        // by user-side state changes.
-        expectedFailures,
-        failed,
-      });
-    }
-  }
-
-  // Finalize only after every resource DELETE succeeded. Keep this after the
-  // outcome audit and recipient edits: if the DDB write fails, the durable
-  // revoking_at barrier remains and the caller can retry, but the destructive
-  // work that already completed still has an audit record and visible result.
-  //
-  // TODO(upstream-contract): qurl-service's
-  // TestRevokeQurl_Idempotent_SecondRevokeDoesNotRepublish pins repeated
-  // whole-resource DELETE /v1/qurls/{id} as a successful 204 no-op. Retrying
-  // the full set is therefore safe after partial success.
-  //
-  // A permanent-looking failure intentionally does NOT clear the barrier or
-  // finalize the send. qurl-service collapses absent and wrong-owner resources
-  // to the same 404, so treating 404/client-validation as "already revoked"
-  // could hide a still-live link after a key/account mismatch. 401/403 may also
-  // recover after `/qurl setup`. Fail closed, keep the send selectable, and let
-  // the truthful UI direct the operator to retry or reconnect.
-  let finalizationFailed = false;
-  if (fullyConfirmed) {
-    try {
-      const finalized = await db.markSendRevoked(sendId, senderDiscordId);
-      if (finalized !== true) throw new Error('finalization was not confirmed');
-    } catch (err) {
-      finalizationFailed = true;
-      logger.error('Failed to finalize revoked send state', {
-        sendId,
-        error: err?.message ?? String(err),
-      });
     }
   }
 

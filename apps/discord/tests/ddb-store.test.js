@@ -2421,3 +2421,31 @@ describe('ddb-store boot-time AWS_REGION validation', () => {
     expect(result.stderr).not.toMatch(/AWS_REGION/);
   });
 });
+
+describe('revoke work deadline', () => {
+  it('passes the same deadline through intent reads and writes', async () => {
+    const signal = new AbortController().signal;
+    ddbMock.on(GetCommand).resolves({ Item: { sender_discord_id: 'sender-1' } });
+    ddbMock.on(UpdateCommand).resolves({});
+    expect(await store.markSendRevoking('send-1', 'sender-1', { signal })).toBe(true);
+    for (const call of ddbMock.calls()) expect(call.args[1]).toEqual({ abortSignal: signal });
+  });
+
+  it('stops before the next send metadata page when the deadline expires', async () => {
+    const budget = new AbortController();
+    ddbMock.on(QueryCommand).callsFake(() => {
+      budget.abort();
+      return { Items: [], LastEvaluatedKey: { send_id: 'send-1', recipient_discord_id: 'next' } };
+    });
+    await expect(store.getSendItems('send-1', 'sender-1', { consistentRead: true, signal: budget.signal })).rejects.toThrow();
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(QueryCommand)[0].args[1]).toEqual({ abortSignal: budget.signal });
+  });
+
+  it('does not start finalization after the deadline', async () => {
+    const budget = new AbortController();
+    budget.abort();
+    await expect(store.markSendRevoked('send-1', 'sender-1', { signal: budget.signal })).rejects.toThrow();
+    expect(ddbMock.calls()).toHaveLength(0);
+  });
+});

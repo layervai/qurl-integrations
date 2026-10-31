@@ -188,11 +188,12 @@ async function countAll(TableName) {
 // for you. Don't hand it a Limit unless you also want the per-page
 // cap (we use it on the GSI hot path in getRecentSends; the per-
 // send recipient queries below intentionally don't set one).
-async function queryAll(input) {
+async function queryAll(input, { signal } = {}) {
   const items = [];
   let ExclusiveStartKey;
   do {
-    const res = await ddb.send(new QueryCommand({ ...input, ExclusiveStartKey }));
+    signal?.throwIfAborted();
+    const res = await ddb.send(new QueryCommand({ ...input, ExclusiveStartKey }), ...(signal ? [{ abortSignal: signal }] : []));
     items.push(...(res.Items || []));
     ExclusiveStartKey = res.LastEvaluatedKey;
   } while (ExclusiveStartKey);
@@ -873,7 +874,8 @@ function hasSenderIdentity(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-async function flipRevokedAt(sendId, senderDiscordId) {
+async function flipRevokedAt(sendId, senderDiscordId, { signal } = {}) {
+  signal?.throwIfAborted();
   // Sets revoked_at on an existing config row, owner-scoped, with
   // idempotent CCFE swallow. Used by both the normal markSendRevoked
   // path AND the legacy-CCFE recovery path (when a non-revoke writer
@@ -888,7 +890,7 @@ async function flipRevokedAt(sendId, senderDiscordId) {
         ':s': senderDiscordId,
       },
       ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
@@ -899,12 +901,13 @@ async function flipRevokedAt(sendId, senderDiscordId) {
       TableName: TABLES.qurl_send_configs,
       Key: { send_id: sendId },
       ConsistentRead: true,
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     return res.Item?.sender_discord_id === senderDiscordId && Boolean(res.Item.revoked_at);
   }
 }
 
-async function flipRevokingAt(sendId, senderDiscordId) {
+async function flipRevokingAt(sendId, senderDiscordId, { signal } = {}) {
+  signal?.throwIfAborted();
   try {
     await ddb.send(new UpdateCommand({
       TableName: TABLES.qurl_send_configs,
@@ -915,7 +918,7 @@ async function flipRevokingAt(sendId, senderDiscordId) {
         ':s': senderDiscordId,
       },
       ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
@@ -926,7 +929,7 @@ async function flipRevokingAt(sendId, senderDiscordId) {
       TableName: TABLES.qurl_send_configs,
       Key: { send_id: sendId },
       ConsistentRead: true,
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     if (!res.Item) return false;
     return res.Item.sender_discord_id === senderDiscordId
       && Boolean(res.Item.revoking_at)
@@ -934,13 +937,14 @@ async function flipRevokingAt(sendId, senderDiscordId) {
   }
 }
 
-async function markSendRevoking(sendId, senderDiscordId) {
+async function markSendRevoking(sendId, senderDiscordId, { signal } = {}) {
+  signal?.throwIfAborted();
   if (!hasSenderIdentity(senderDiscordId)) return false;
   const cfgRes = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
     ConsistentRead: true,
-  }));
+  }), ...(signal ? [{ abortSignal: signal }] : []));
   if (cfgRes.Item) {
     if (!hasSenderIdentity(cfgRes.Item.sender_discord_id)) {
       logger.warn('markSendRevoking rejected config without sender identity', { sendId });
@@ -949,7 +953,7 @@ async function markSendRevoking(sendId, senderDiscordId) {
     if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false;
     if (cfgRes.Item.revoked_at) return false;
     if (cfgRes.Item.revoking_at) return true;
-    return flipRevokingAt(sendId, senderDiscordId);
+    return flipRevokingAt(sendId, senderDiscordId, { signal });
   }
 
   const legacyItems = await queryAll({
@@ -958,7 +962,7 @@ async function markSendRevoking(sendId, senderDiscordId) {
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
-  });
+  }, { signal });
   if (legacyItems.length === 0) return false;
   const legacy = legacyItems[0];
   try {
@@ -976,15 +980,16 @@ async function markSendRevoking(sendId, senderDiscordId) {
         created_at: legacy.created_at || nowIso(),
       },
       ConditionExpression: 'attribute_not_exists(send_id)',
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
-    return flipRevokingAt(sendId, senderDiscordId);
+    return flipRevokingAt(sendId, senderDiscordId, { signal });
   }
 }
 
-async function markSendRevoked(sendId, senderDiscordId) {
+async function markSendRevoked(sendId, senderDiscordId, { signal } = {}) {
+  signal?.throwIfAborted();
   // Two-branch logic:
   // (a) Normal path: config row exists — flip revoked_at.
   // (b) Legacy path: config row doesn't exist — insert minimal row. Current
@@ -996,7 +1001,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
     ConsistentRead: true,
-  }));
+  }), ...(signal ? [{ abortSignal: signal }] : []));
   if (cfgRes.Item) {
     if (!hasSenderIdentity(cfgRes.Item.sender_discord_id)) {
       logger.warn('markSendRevoked rejected config without sender identity', { sendId });
@@ -1004,7 +1009,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
     }
     if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false; // ownership check
     if (cfgRes.Item.revoked_at) return true; // idempotent, durable state confirmed
-    return flipRevokedAt(sendId, senderDiscordId);
+    return flipRevokedAt(sendId, senderDiscordId, { signal });
   }
 
   // Legacy — look up qurl_sends row, insert minimal config with revoked_at.
@@ -1024,7 +1029,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
-  });
+  }, { signal });
   if (legacyItems.length === 0) return false;
   const legacy = legacyItems[0];
   try {
@@ -1039,7 +1044,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
         created_at: nowIso(),
       },
       ConditionExpression: 'attribute_not_exists(send_id)',
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
@@ -1058,7 +1063,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
     //   - A racing markSendRevoked AND a non-revoke writer
     //     interleave: flipRevokedAt's CCFE re-read confirms the
     //     "already revoked" case idempotently.
-    return flipRevokedAt(sendId, senderDiscordId);
+    return flipRevokedAt(sendId, senderDiscordId, { signal });
   }
 }
 
@@ -1496,7 +1501,7 @@ async function getSendResourceIds(sendId, senderDiscordId) {
 // recipient's DM to "closed the door". Legacy rows predating the
 // ref-capture wire-up have those fields unset — the revoke loop's
 // missing-refs guard skips the edit naturally.
-async function getSendItems(sendId, senderDiscordId, { consistentRead = false } = {}) {
+async function getSendItems(sendId, senderDiscordId, { consistentRead = false, signal } = {}) {
   const items = await queryAll({
     TableName: TABLES.qurl_sends,
     // Revoke opts into a strongly consistent base-table query after writing
@@ -1508,7 +1513,7 @@ async function getSendItems(sendId, senderDiscordId, { consistentRead = false } 
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
-  });
+  }, { signal });
   return items.map(item => ({
     resource_id: item.resource_id,
     recipient_discord_id: item.recipient_discord_id,

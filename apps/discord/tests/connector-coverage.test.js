@@ -985,6 +985,30 @@ describe('revokeMintedLinks — #1551 fail-closed contract', () => {
     globalThis.fetch = originalFetch;
   });
 
+  it('stops before another chunk on deadline and preserves confirmed children', async () => {
+    const budget = new AbortController();
+    const ids = Array.from({ length: 11 }, (_, i) => `q_budget_${i}`);
+    globalThis.fetch = jest.fn().mockImplementation(async () => {
+      budget.abort();
+      return revoked(...ids.slice(0, 10));
+    });
+    await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key', { signal: budget.signal }))
+      .rejects.toMatchObject({ confirmedQurlIds: ids.slice(0, 10) });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(globalThis.fetch.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+  });
+
+  it('never starts an SDK fallback after the shared deadline', async () => {
+    const budget = new AbortController();
+    globalThis.fetch = jest.fn().mockImplementation(async () => {
+      budget.abort();
+      throw new Error('transport failed');
+    });
+    await expect(connector.revokeMintedLinks('res-1', ['q_budget_1'], 'guild-key', { signal: budget.signal })).rejects.toThrow();
+    expect(revokeOrdinaryLinks).not.toHaveBeenCalled();
+  });
+
   it('sends the caller credential and accepts reordered exact coverage', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(okJson({
       success: true,

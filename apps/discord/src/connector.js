@@ -659,8 +659,9 @@ async function discardBody(response) {
 // (Retry-After: 1) is retried once, so /qurl revoke's own 5-resource fan-out
 // does not fail itself; a second 429 is returned for the caller to fail closed.
 // Both attempts share one REVOKE_LINKS_TIMEOUT_MS budget.
-async function postRevokeLinks(resourceId, batchIds, apiKey) {
-  const signal = AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS);
+async function postRevokeLinks(resourceId, batchIds, apiKey, parentSignal) {
+  const signal = AbortSignal.any([AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS), ...(parentSignal ? [parentSignal] : [])]);
+  signal.throwIfAborted();
   const post = () => fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
@@ -715,7 +716,8 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
  * @throws when any requested link may still be live; confirmedQurlIds retains
  * only this resource's children whose revocation was confirmed.
  */
-async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
+async function revokeMintedLinks(resourceId, qurlIds, apiKey, { signal } = {}) {
+  signal?.throwIfAborted();
   validateResourceId(resourceId);
   if (!Array.isArray(qurlIds)) throw new Error('Invalid connector revoke token list');
   const normalizedIds = qurlIds.map(qurlIdForCleanup);
@@ -733,7 +735,8 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   const confirmedQurlIds = new Set();
   const revokeOrdinary = async batchIds => {
     try {
-      await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+      signal?.throwIfAborted();
+      await revokeOrdinaryLinks(resourceId, batchIds, apiKey, ...(signal ? [{ signal }] : []));
       for (const id of batchIds) confirmedQurlIds.add(id);
     } catch (err) {
       const confirmed = new Set(Array.isArray(err?.confirmedQurlIds) ? err.confirmedQurlIds : []);
@@ -765,6 +768,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   let connectorDirectCount = 0;
   try {
     for (let offset = 0; offset < ids.length; offset += CONNECTOR_REVOKE_MAX_IDS) {
+      signal?.throwIfAborted();
       const batchIds = ids.slice(offset, offset + CONNECTOR_REVOKE_MAX_IDS);
       // An empty chunk (a broken cap) would confirm vacuously; never let it.
       if (batchIds.length === 0) throw new Error('Connector revoke chunk is empty');
@@ -775,7 +779,7 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
       }
       let response;
       try {
-        response = await postRevokeLinks(resourceId, batchIds, apiKey);
+        response = await postRevokeLinks(resourceId, batchIds, apiKey, signal);
       } catch (transportError) {
         logger.warn('Connector revoke_links unreachable', {
           resource_ref: resourceIdLogRef(resourceId),

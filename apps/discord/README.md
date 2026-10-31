@@ -110,7 +110,17 @@ also remain unconfirmed after endpoint activation; deleting their shared parent
 is not a safe recovery. A repeated connector 429 fails closed
 after one bounded retry, without an SDK fallback. Revoke buttons and selects
 share a process-local guard for each sender and send. The guard remains active
-after the 13-minute result wait while revocation continues. Store checks still
+until the work settles, including after the 13-minute result wait if needed.
+The revoke work deadline is 12 minutes. The same signal stops queued resource
+work, connector requests, SDK calls, DynamoDB requests/pages, and recipient DM
+edits. Confirmed deletes are finalized before best-effort DM edits. Waiting on
+Discord's queue is also bounded by the remaining deadline. Already confirmed
+children remain confirmed; all others stay unconfirmed
+and the durable intent remains for retry. An abort can race a completed remote
+write, so retry reconciles uncertain results instead of claiming success.
+Ordinary SDK revokes use one attempt per read/delete: SDK GET Retry-After sleeps
+do not accept caller cancellation, so transient failures return for an explicit
+retry. The connector retains its one bounded admission retry. Store checks still
 enforce ownership and prevent new recipients across processes.
 
 While the connector route is off, each resource re-probes it on every retry.
