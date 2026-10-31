@@ -58,6 +58,10 @@ import { resolve } from 'node:path';
 let targetPathInputSeedChild = '';
 import { mintIdFromTunnelViewUrl, viewViaQurlLink, checkOwnershipConfig } from '../helpers/tunnelView';
 
+// Explicit per-test budgets must include both views' bounded cleanup when enabled.
+const nativeCleanupTestTimeout = (normal: number) =>
+  process.env.QURL_NATIVE_CLEANUP_ENABLED === '1' ? 12 * 60_000 : normal;
+
 const env = loadEnv();
 
 // Track-before-validate, same as every other minting suite: an upload is
@@ -106,7 +110,7 @@ describe('File Revoke', () => {
     });
     expect(view.status).toBe(200);
     expect(mintIdFromTunnelViewUrl(view.url)).toMatch(/^[0-9a-f]{32}$/);
-  }, 90_000);
+  }, nativeCleanupTestTimeout(90_000));
 
   test('upload file → view 200 → revoke → resource status revoked', async () => {
     const upload = await qurl.uploadFile(
@@ -155,7 +159,7 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     targetPathInputSeedChild = minted.qurl_id;
     // Preserve the 90s upload/browser budget and add one confirmation wait.
-  }, 90_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+  }, nativeCleanupTestTimeout(90_000 + qurl.REVOKE_CONFIRM_WAIT_MS));
 
   test('distinct-per-viewer watermark + DNS-safe route-label SNI on the tunnel', async () => {
     // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
@@ -245,7 +249,7 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     // Keep the 180s total for two browser views; spend 35s of existing margin
     // on confirmation. This case took 10.3s in the final sandbox run.
-  }, 145_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+  }, nativeCleanupTestTimeout(145_000 + qurl.REVOKE_CONFIRM_WAIT_MS));
 
   test('a consumed one-time link does not serve a second knock (single-use enforced)', async () => {
     // THE knock-driven enforcement guard for one-time links. The URL-mint
@@ -282,7 +286,7 @@ describe('File Revoke', () => {
     // (tunnelView.ts's sandbox-proven note), so 20s amply proves "did
     // not serve" without spending the default 30s on a pass-by-timeout.
     await expect(
-      viewViaQurlLink(minted.qurl_link, { timeoutMs: 20_000, ownership: { resource_id: upload.resource_id, qurl_id: minted.qurl_id, expires_at: minted.expires_at } }),
+      viewViaQurlLink(minted.qurl_link, { timeoutMs: 20_000, expectedNoAdmission: true, ownership: { resource_id: upload.resource_id, qurl_id: minted.qurl_id, expires_at: minted.expires_at } }),
     ).rejects.toThrow(/no tunnel-view response|tunnel-view returned/);
 
     // Cleanup as assertion (tracked.revoke also syncs the afterAll ledger).
@@ -295,7 +299,7 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     // Keep the 150s total for one view plus a 20s negative knock and revoke.
     // The confirmation wait uses existing margin; measured work took 34.9s.
-  }, 115_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+  }, nativeCleanupTestTimeout(115_000 + qurl.REVOKE_CONFIRM_WAIT_MS));
 
   test('double revoke on file is idempotent', async () => {
     const upload = await qurl.uploadFile(
@@ -329,7 +333,7 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     // Keep the 120s total for upload and two DELETEs; only the first confirms.
     // Measured 9.8s without a retry, 48.0s with a retry in the earlier run.
-  }, 85_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+  }, nativeCleanupTestTimeout(85_000 + qurl.REVOKE_CONFIRM_WAIT_MS));
 });
 
 // Only the reviewed normal file workflow enables this operator probe.
