@@ -3822,3 +3822,56 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(message.content).not.toMatch(/\u202E/u);
   });
 });
+
+describe('send validation diagnostics', () => {
+  test.each([
+    ['attachment_url_ssrf', { attachment: null }, Error],
+    ['invalid_expires_in', { expiresIn: 'bogus' }, TypeError],
+    ['invalid_personal_message', { personalMessage: {} }, TypeError],
+    ['invalid_recipients', { recipients: undefined }, TypeError],
+    ['recipient_cap_exceeded', { recipients: Array.from({ length: require('../src/config').QURL_SEND_MAX_RECIPIENTS + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` })) }, RangeError],
+  ])('audits %s once before cloud work', async (reason, params, ErrorCtor) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(params))).rejects.toThrow(ErrorCtor);
+    expect(logger.audit).toHaveBeenCalledWith('dispatch_blocked', { reason });
+    expect(logger.audit).toHaveBeenCalledTimes(1);
+    expect(interaction.editReply).toHaveBeenCalledTimes(1);
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
+
+  test('reports all independent failures and cancels only once', async () => {
+    const interaction = makeInteraction();
+    _test.setCooldown(interaction.user.id);
+    const error = await executeSendPipeline(interaction, makePipelineParams({
+      attachment: { ...DEFAULT_ATTACHMENT, url: 'http://localhost/internal' },
+      expiresIn: 'bogus', personalMessage: { private: 'do-not-log' }, recipients: null,
+    })).catch(err => err);
+    expect(error).toBeInstanceOf(TypeError);
+    expect(error.message).toContain('4 input gates failed');
+    for (const field of ['attachment.url', 'expiresIn', 'personalMessage', 'recipients']) expect(error.message).toContain(field);
+    expect(error.message).toContain('got bogus');
+    expect(error.message).toContain('typeof=object');
+    expect(error.message).not.toContain('do-not-log');
+    expect(logger.audit).toHaveBeenCalledWith('dispatch_blocked', { reason: 'multiple_invalid_inputs' });
+    expect(logger.audit).toHaveBeenCalledTimes(1);
+    expect(interaction.editReply).toHaveBeenCalledTimes(1);
+    expect(_test.isOnCooldown(interaction.user.id)).toBe(false);
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
+
+  test('audits a saved Add Recipients expiry rejection before mint or dispatch', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({ expires_in: 'bogus' });
+    const result = await handleAddRecipients('send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]), makeInteraction(), 'apikey');
+    expect(result.msg).toMatch(/saved expiry is invalid/);
+    expect(logger.audit).toHaveBeenCalledWith('dispatch_blocked', { send_id: 'send-1', reason: 'invalid_expires_in' });
+    expect(logger.audit).toHaveBeenCalledTimes(1);
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+});
