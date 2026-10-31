@@ -123,13 +123,13 @@ owns the share and turns it off when it exits.`,
 			if err != nil {
 				return err
 			}
-			opts.beginTermsNotice()
 			if target.kind == publishTargetLocal {
 				for _, name := range []string{"description", "tag", "alias"} {
 					if cmd.Flags().Changed(name) {
 						return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", name))
 					}
 				}
+				opts.beginTermsNotice()
 				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access)
 			}
 			if cmd.Flags().Changed("id") {
@@ -141,6 +141,7 @@ owns the share and turns it off when it exits.`,
 			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
 				return err
 			}
+			opts.beginTermsNotice()
 			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err

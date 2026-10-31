@@ -28,14 +28,15 @@ func ValidFormat(f Format) bool {
 type Printer struct {
 	// TermsNotice is present only on a first-use publish or share result.
 	TermsNotice string
-	out         io.Writer
-	err         io.Writer
-	outTTY      bool
-	color       bool
-	ascii       bool
-	quiet       bool
-	format      Format
-	now         func() time.Time
+
+	out    io.Writer
+	err    io.Writer
+	outTTY bool
+	color  bool
+	ascii  bool
+	quiet  bool
+	format Format
+	now    func() time.Time
 }
 
 // New builds a Printer. now is injected so relative times are testable;
