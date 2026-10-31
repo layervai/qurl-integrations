@@ -4900,12 +4900,12 @@ function renderRecipientWarnings({
     // Surfaced symmetrically with droppedBots so the user knows the
     // role pick was partially filtered (vs. silently shrinking the
     // recipient count). Distinct copy from droppedBots since the
-    // user took a different picker action (selecting a role rather
+    // user took a different picker action (selecting a role or @everyone rather
     // than an individual bot).
     lines.push(`• ${iterationBoundHit ? 'At least ' : ''}${droppedFromRoles} bot(s) filtered from this selection — skipped.`);
   }
   if (iterationBoundHit) {
-    lines.push('• Picked role(s) could not be fully checked — pick fewer or smaller roles.');
+    lines.push('• This selection could not be fully checked — pick individual users or smaller roles.');
   }
   if (everyoneCacheCold) {
     // Symmetric with droppedFromRoles: surfaced even on partial-valid
@@ -6965,8 +6965,8 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // but pin the parity here against future drift.
     const reasons = [];
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
-    if (iterationBoundHit) reasons.push('Picked role(s) could not be fully checked — pick fewer or smaller roles');
-    else if (droppedFromRoles > 0) reasons.push('Bot accounts from picked roles were excluded');
+    if (iterationBoundHit) reasons.push('This selection could not be fully checked — pick individual users or smaller roles');
+    else if (droppedFromRoles > 0) reasons.push('Bot accounts from this selection were excluded');
     if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
     if (unavailableRoleCount > 0) reasons.push(RECIPIENT_REASON_ROLE_MEMBERS_UNAVAILABLE);
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');

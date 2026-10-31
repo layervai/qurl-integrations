@@ -330,7 +330,7 @@ describe('handleConfirmUserSelect', () => {
     expect(recipientIds).not.toContain(bot1);
   });
 
-  test('mentionable picker: bot-only role pick → all-invalid branch with role-specific reason (no silent swallow)', async () => {
+  test.each([false, true])('mentionable picker: bot-only selection has accurate rejection copy (everyone=%s)', async (everyone) => {
     const bot1 = makeUser('100000000000000091', { bot: true });
     const bot2 = makeUser('100000000000000092', { bot: true });
     const botRole = ['role-bots', {
@@ -340,12 +340,15 @@ describe('handleConfirmUserSelect', () => {
     }];
     const int = makeSelectInteraction({
       users: [],
-      roles: [botRole],
+      roles: everyone ? [] : [botRole],
+      canMentionEveryone: everyone,
+      guildMemberCache: everyone ? botRole[1].members : null,
     });
+    if (everyone) int.roles = new Map([[int.guild.id, { id: int.guild.id }]]);
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
-    expect(updated.content).toContain('Bot accounts from picked roles were excluded');
+    expect(updated.content).toContain('Bot accounts from this selection were excluded');
     expect(updated.content).toMatch(/Sending file/);
   });
 
@@ -405,20 +408,23 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Mention Everyone/);
   });
 
-  test.each([false, true])('bounded role expansion: partial valid=%s', async (partialValid) => {
+  test.each([[false, false], [true, false], [false, true], [true, true]])('bounded selection: partial valid=%s, everyone=%s', async (partialValid, everyone) => {
     const members = new Map(Array.from({ length: 101 }, (_, i) => {
       const bot = makeUser(String(200000000000000000n + BigInt(i)), { bot: true });
       return [bot.id, { user: bot }];
     }));
     const int = makeSelectInteraction({
       users: partialValid ? [makeUser(u1)] : [],
-      roles: [['large-role', { id: 'large-role', mentionable: true, members }]],
+      roles: everyone ? [] : [['large-role', { id: 'large-role', mentionable: true, members }]],
+      canMentionEveryone: everyone,
+      guildMemberCache: everyone ? members : null,
     });
+    if (everyone) int.roles = new Map([[int.guild.id, { id: int.guild.id }]]);
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     if (partialValid) expect(mockTransitionFlow).toHaveBeenCalled();
     else expect(mockTransitionFlow).not.toHaveBeenCalled();
     const updated = int.editReply.mock.calls.at(-1)[0];
-    expect(updated.content).toContain('Picked role(s) could not be fully checked — pick fewer or smaller roles');
+    expect(updated.content).toContain('This selection could not be fully checked — pick individual users or smaller roles');
     expect(updated.content).not.toContain('have no non-bot members');
     if (partialValid) expect(updated.content).toContain('At least 100 bot(s)');
   });
@@ -447,7 +453,7 @@ describe('handleConfirmUserSelect', () => {
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     const content = int.editReply.mock.calls.at(-1)[0].content;
-    expect(content).toContain('Bot accounts from picked roles were excluded');
+    expect(content).toContain('Bot accounts from this selection were excluded');
     expect(content).toContain('Select individual users instead');
     expect(content).not.toMatch(/no non-bot members/i);
   });
@@ -503,7 +509,7 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Sending file/);
   });
 
-  test.each([false, true])('mixed human/bot selection shows accurate copy: everyone=%s', async (everyone) => {
+  test.each(['role', 'everyone', 'both'])('mentionable picker: mixed human/bot selection shows accurate copy (%s)', async (selection) => {
     const u1 = makeUser('100000000000000001');
     const bot1 = makeUser('100000000000000091', { bot: true });
     const mixedRole = ['role-mixed', {
@@ -513,13 +519,11 @@ describe('handleConfirmUserSelect', () => {
     }];
     const int = makeSelectInteraction({
       users: [],
-      roles: [mixedRole],
+      roles: selection === 'everyone' ? [] : [mixedRole],
+      canMentionEveryone: selection !== 'role',
+      guildMemberCache: selection !== 'role' ? mixedRole[1].members : null,
     });
-    if (everyone) {
-      int.roles = new Map([[int.guild.id, { id: int.guild.id }]]);
-      int.guild.members.cache = mixedRole[1].members;
-      int.memberPermissions = { has: () => true };
-    }
+    if (selection !== 'role') int.roles.set(int.guild.id, { id: int.guild.id });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
     expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds).toEqual([u1.id]);
@@ -544,7 +548,7 @@ describe('handleConfirmUserSelect', () => {
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Cannot send to bots/);
-    expect(updated.content).toContain('Bot accounts from picked roles were excluded');
+    expect(updated.content).toContain('Bot accounts from this selection were excluded');
   });
 
   test('mentionable picker: multi-signal pick (bot user + denied non-mentionable role) → banner reasons follow renderRecipientWarnings ordering', async () => {
