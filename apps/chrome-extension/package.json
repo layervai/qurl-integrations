@@ -20,7 +20,7 @@
     "publish:major": "node scripts/bump-version.js major && node scripts/package-release.js"
   },
   "devDependencies": {
-    "eslint": "^8.57.1",
+    "eslint": "^10.13.0",
     "sharp": "^0.35.5"
   }
 }
