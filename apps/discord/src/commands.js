@@ -1682,7 +1682,7 @@ const REVOKE_RUNNING_MSG = 'Revocation is still running. Run `/qurl revoke` agai
  *   Optional/back-compat — omitting it leaves the mint body unchanged.
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
  */
-async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
+async function mintLinksInBatches({ sendId, initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
   let tokensUsed = 0;
@@ -1746,6 +1746,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
         }
       });
       tokensUsed += batchSize;
+      if (minted.length < batchSize) break;
     }
   } catch (error) {
     // Earlier batches' links were never delivered; revoke them (and the
@@ -1795,6 +1796,11 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       });
     }
     throw error;
+  }
+  if (allLinks.length < recipientCount) {
+    await cleanupFreshMintedLinks(allLinks.map(link => ({
+      resourceId: link.resourceId, qurlId: link.qurl_id,
+    })), apiKey, sendId, { rowsMayHavePersisted: false, reason: 'short_mint' });
   }
   return allLinks;
 }
@@ -2104,6 +2110,7 @@ async function executeSendPipeline(interaction, {
       let allLinks;
       try {
         allLinks = await mintLinksInBatches({
+          sendId,
           initialResourceId: firstUpload.resource_id,
           reuploadFn: () => reUploadBuffer(bufHolder.buf, filename, attachment.contentType, apiKey, selfDestructSeconds),
           expiresAt,
@@ -2147,6 +2154,7 @@ async function executeSendPipeline(interaction, {
 
       const expiresAt = expiryToISO(expiresIn);
       const allLinks = await mintLinksInBatches({
+        sendId,
         initialResourceId: firstUpload.resource_id,
         reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds),
         expiresAt,
@@ -2297,6 +2305,9 @@ async function executeSendPipeline(interaction, {
       errorMessage: persistenceErrorMessageForLog(err),
       linkCount: qurlLinks.length,
       orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
+    });
+    await cleanupFreshMintedLinks(qurlLinks, apiKey, sendId, {
+      reason: 'persistence_failure',
     });
     clearCooldown(interaction.user.id);
     return interaction.editReply({
@@ -3006,17 +3017,17 @@ async function executeSendPipeline(interaction, {
   }
 }
 
-async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, options = {}) {
+async function cleanupFreshMintedLinks(batchSends, apiKey, sendId, options = {}) {
   const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
   const txnActionCount = ddbSendConfigGuardActionCount(batchSends);
   if (rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
-    // Unreachable by construction for today's Add Recipients flow: oversized
+    // Unreachable by construction for today's send flows: oversized
     // batches fail before DDB, and revoked errors only come from a single
     // transaction. If a future caller violates that invariant, still revoke
     // the freshly minted qURLs; rows may point at revoked links, but no DMs
     // have been sent and the grants fail closed.
-    logger.error('Cleaning up oversized Add Recipients batch after possible persistence', {
+    logger.error('Cleaning up oversized send batch after possible persistence', {
       sendId,
       send_count: batchSends.length,
       txn_actions: txnActionCount,
@@ -3048,10 +3059,10 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId), apiKey);
     return resourceId;
   }, 5);
-  // Same bounded wait as mint-failure compensation: the Add Recipients reply
+  // Same bounded wait as mint-failure compensation: the send reply
   // must not be held past its interaction window; the revoke keeps running.
   if (!await settlesWithin(cleanup, CLEANUP_WAIT_BUDGET_MS)) {
-    logger.warn('Add Recipients cleanup still running at its wait budget', {
+    logger.warn('Send cleanup still running at its wait budget', {
       sendId,
       reason: cleanupReason,
       unidentified_count: unidentifiedCount,
@@ -3073,7 +3084,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     }
   });
   if (failed.length > 0 || unidentifiedCount > 0) {
-    logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
+    logger.error('Failed to clean up freshly minted qURL links', {
       sendId,
       reason: cleanupReason,
       failed_count: failed.length,
@@ -3082,7 +3093,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
       failures: failed,
     });
   } else {
-    logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
+    logger.info('Cleaned up freshly minted qURL links', {
       sendId,
       reason: cleanupReason,
       total: resourceIds.length,
@@ -3249,6 +3260,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         const first = await downloadAndUpload(sendConfig.attachment_url, filename, contentType, apiKey, inheritedDestruct);
         fileBuffer = first.fileBuffer;
         allLinks = await mintLinksInBatches({
+          sendId,
           initialResourceId: first.resource_id,
           reuploadFn: () => reUploadBuffer(fileBuffer, filename, contentType, apiKey, inheritedDestruct),
           expiresAt,
@@ -3328,6 +3340,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct);
       const expiresAt = expiryToISO(sendConfig.expires_in);
       const allLinks = await mintLinksInBatches({
+        sendId,
         initialResourceId: firstUpload.resource_id,
         reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct),
         expiresAt,
@@ -3442,7 +3455,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       send_count: batchSends.length,
       txn_actions: ddbSendConfigGuardActionCount(batchSends),
     });
-    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+    await cleanupFreshMintedLinks(batchSends, apiKey, sendId, {
       rowsMayHavePersisted: false,
       reason: 'pre_persistence_oversized_batch',
     });
@@ -3463,7 +3476,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       logger.warn('recordQURLSendBatch refused Add Recipients for revoked send', {
         sendId, error: err.message, linkCount: batchSends.length,
       });
-      await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId);
+      await cleanupFreshMintedLinks(batchSends, apiKey, sendId);
       return {
         msg: 'Cannot add recipients — this send has already been revoked.',
         newLinks: [], newRecipients: [],
@@ -3478,7 +3491,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // retry actually committed but its response was lost, this cleanup can
     // leave rows pointing at deleted resources; that is still fail-closed
     // because no DMs were sent and the qURLs no longer grant access.
-    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+    await cleanupFreshMintedLinks(batchSends, apiKey, sendId, {
       reason: 'guarded_transaction_failed',
     });
     return {
@@ -10092,7 +10105,7 @@ module.exports = {
       mintLinksInBatches,
       // Fresh-mint cleanup's defensive unidentified-id branch is unreachable
       // through validated mint output, so pin it directly.
-      cleanupFreshAddRecipientResources,
+      cleanupFreshMintedLinks,
       activeMonitors,
       // The top-level back-half driver. Exported here so PR 7b's
       // tests (and the follow-up direct unit spec in #278) can pin

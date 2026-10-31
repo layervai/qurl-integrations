@@ -189,7 +189,7 @@ const {
   buildDeliveryEmbed,
   packBulkDeliveryComponents,
   mintLinksInBatches,
-  cleanupFreshAddRecipientResources,
+  cleanupFreshMintedLinks,
   activeMonitors,
   executeSendPipeline,
   persistDispatchResult,
@@ -2140,6 +2140,9 @@ describe('handleAddRecipients — file path failure modes', () => {
 
     expect(result.msg).toMatch(/Only 1 of 2/);
     expect(result.delivered).toBe(0);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_1'], 'apikey');
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
   });
 
   it('surfaces "Link pool exhausted" on a 429 error from the location path (outer catch)', async () => {
@@ -2397,6 +2400,25 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
 });
 
 describe('executeSendPipeline — orphaned qURL log safety', () => {
+  it.each(['file', 'location'])('revokes a short %s mint before the failure reply', async (resourceType) => {
+    const interaction = makeInteraction();
+    if (resourceType === 'file') {
+      mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-short', fileBuffer: new ArrayBuffer(8) });
+    } else {
+      mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-short' });
+    }
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short' }]);
+    await executeSendPipeline(interaction, makePipelineParams({
+      resourceType, locationUrl: 'https://google.com/maps/search/x',
+      recipients: [{ id: 'u1', username: 'Alice' }, { id: 'u2', username: 'Bob' }],
+    }));
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-short', ['q_short'], 'apikey');
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Only 1 of 2 links could be created. Please try again.' });
+    expect(mockRevokeMintedLinks.mock.invocationCallOrder[0]).toBeLessThan(interaction.editReply.mock.invocationCallOrder.at(-1));
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
   it('logs cleanup identifiers without the live access link when DDB persistence fails', async () => {
     const interaction = makeInteraction();
     mockDownloadAndUpload.mockResolvedValueOnce({
@@ -2434,6 +2456,9 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
 
     const failureLog = logger.error.mock.calls.find(
       ([message]) => message === 'recordQURLSendBatch failed; aborting send to keep state consistent',
+    );
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith(
+      'resource-public-id', ['q_orphaned_link_one', 'q_orphaned_link_two'], 'apikey',
     );
     expect(failureLog).toBeDefined();
     expect(failureLog[1].orphanedResources).toEqual([
@@ -3082,7 +3107,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_aaaaaaaaaa1'], 'apikey');
     expect(logger.info).toHaveBeenCalledWith(
-      'Cleaned up freshly minted Add Recipients qURL resources',
+      'Cleaned up freshly minted qURL links',
       expect.objectContaining({
         sendId: 'send-1',
         reason: 'guarded_transaction_failed',
@@ -3118,7 +3143,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
   });
 
   it('still revokes identifiable fresh children when one cleanup row lacks an id', async () => {
-    await cleanupFreshAddRecipientResources([
+    await cleanupFreshMintedLinks([
       { resourceId: 'res-new', qurlId: 'q_aaaaaaaaaa1' },
       { resourceId: 'res-new', qurlId: undefined },
       { resourceId: '', qurlId: 'q_aaaaaaaaaa2' },
@@ -3127,7 +3152,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_aaaaaaaaaa1'], 'apikey');
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted Add Recipients qURL resources',
+      'Failed to clean up freshly minted qURL links',
       expect.objectContaining({ failed_count: 0, unidentified_count: 2 }),
     );
   });
@@ -3136,12 +3161,12 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     jest.useFakeTimers();
     try {
       mockRevokeMintedLinks.mockImplementationOnce(() => new Promise(() => {}));
-      const pending = cleanupFreshAddRecipientResources([
+      const pending = cleanupFreshMintedLinks([
         { resourceId: 'res-new', qurlId: 'q_aaaaaaaaaa1' },
       ], 'apikey', 'send-1', { rowsMayHavePersisted: false });
       await jest.advanceTimersByTimeAsync(120_000);
       await expect(pending).resolves.toBeUndefined();
-      expect(logger.warn).toHaveBeenCalledWith('Add Recipients cleanup still running at its wait budget', {
+      expect(logger.warn).toHaveBeenCalledWith('Send cleanup still running at its wait budget', {
         sendId: 'send-1',
         reason: 'pre_persistence',
         unidentified_count: 0,
@@ -3198,7 +3223,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
     expect(result.newRecipients).toEqual([]);
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted Add Recipients qURL resources',
+      'Failed to clean up freshly minted qURL links',
       expect.objectContaining({
         sendId: 'send-1',
         reason: 'revoked_guard',
@@ -3419,6 +3444,22 @@ describe('handleAddRecipients — happy path (location)', () => {
 });
 
 describe('mintLinksInBatches', () => {
+  it('revokes all identified children and stops minting after a short later batch', async () => {
+    mockMintLinks
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
+      .mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short' }]);
+    const reuploadFn = jest.fn().mockResolvedValue({ resource_id: 'res-2' });
+    const result = await mintLinksInBatches({
+      sendId: 'short-send', initialResourceId: 'res-1', reuploadFn,
+      expiresAt: new Date().toISOString(), recipientCount: 21, apiKey: 'apikey',
+    });
+    expect(result).toHaveLength(11);
+    expect(mockMintLinks).toHaveBeenCalledTimes(2);
+    expect(reuploadFn).toHaveBeenCalledTimes(1);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', Array.from({ length: 10 }, (_, i) => `q_${i}`), 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-2', ['q_short'], 'apikey');
+  });
+
   it('mints once for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
     mockMintLinks.mockResolvedValueOnce([
       { qurl_id: 'q_1', qurl_link: 'https://q.test/1' },
