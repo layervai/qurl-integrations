@@ -20,6 +20,7 @@ const {
   InteractionContextType,
 } = require('discord-api-types/v10');
 const crypto = require('crypto');
+const { takeAutocompleteToken } = require('./utils/autocomplete-rate-limit');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
@@ -9683,6 +9684,8 @@ async function handleAutocomplete(interaction) {
     if (/^https?:\/\//i.test(rawQuery)) {
       return await interaction.respond([]);
     }
+
+    if (!takeAutocompleteToken(interaction.user?.id)) return await interaction.respond([]);
 
     let results;
     try {
