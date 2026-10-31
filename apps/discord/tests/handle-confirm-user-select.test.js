@@ -399,21 +399,21 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Mention Everyone/);
   });
 
-  test.each([undefined, new Map()])('unavailable named role gives a retry reason instead of an empty no-op (%s)', async members => {
+  test.each([undefined, new Map()])('unavailable named role gives individual-user guidance instead of an empty no-op (%s)', async members => {
     const int = makeSelectInteraction({ users: [], roles: [['role-cold', { id: 'role-cold', mentionable: true, members }]] });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
-    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Picked role members could not be loaded');
-    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Try again in a few seconds');
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Could not confirm all members of the picked roles. Select individual users instead');
+    expect(int.editReply.mock.calls.at(-1)[0].content).not.toContain('Try again in a few seconds');
   });
 
   test('valid user plus unavailable named role advances with a visible warning', async () => {
     const int = makeSelectInteraction({ roles: [['role-cold', { id: 'role-cold', mentionable: true }]] });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
-      payload: expect.objectContaining({ recipientIds: [u1], warningsBlock: expect.stringContaining('Picked role members could not be loaded') }),
+      payload: expect.objectContaining({ recipientIds: [u1], warningsBlock: expect.stringContaining('Could not confirm all members of the picked roles. Select individual users instead') }),
     }));
-    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Picked role members could not be loaded');
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Could not confirm all members of the picked roles. Select individual users instead');
   });
 
   test('mentionable picker: partial-valid pick with cold-cache @everyone → flow advances AND everyoneCacheCold warning surfaces', async () => {

@@ -474,22 +474,35 @@ describe('resolveMentionableSelection', () => {
     expect(resolveMentionableSelection({ interaction: warm, canMentionEveryone: false }).unavailableRoleCount).toBe(0);
   });
 
-  test.each([1, 10])('actual SDK role getter with one cached bot and memberCount=%i', memberCount => {
-    const { Role, Collection } = jest.requireActual('discord.js');
-    const bot = makeUser('100000000000000099', { bot: true });
-    const interaction = makeMentionableInteraction({
-      guildMemberCache: new Collection([[bot.id, { user: bot, _roles: [] }]]),
-    });
-    interaction.guild.memberCount = memberCount;
-    const role = new Role({}, { id: '200000000000000001', name: 'Empty cached role', mentionable: true }, interaction.guild);
-    interaction.roles.set(role.id, role);
-    interaction.guild.roles.cache.set(role.id, role);
-    expect(role.members.size).toBe(0);
-    expect(interaction.guild.members.cache.size).toBe(1);
+  test.each([[false, 1], [false, 10], [true, 2], [true, 10]])(
+    'actual SDK role getter with cached human=%s and memberCount=%i', (hasHuman, memberCount) => {
+      // Use the installed getter deliberately: it filters guild.members.cache.
+      const { Role, Collection } = jest.requireActual('discord.js');
+      const roleId = '200000000000000001';
+      const bot = makeUser('100000000000000099', { bot: true });
+      const human = makeUser('100000000000000001');
+      const cache = new Collection([[bot.id, { user: bot, _roles: [] }]]);
+      if (hasHuman) cache.set(human.id, { user: human, _roles: [roleId] });
+      const interaction = makeMentionableInteraction({ guildMemberCache: cache });
+      interaction.guild.memberCount = memberCount;
+      const role = new Role({}, { id: roleId, name: 'Cached role', mentionable: true }, interaction.guild);
+      interaction.roles.set(role.id, role);
+      interaction.guild.roles.cache.set(role.id, role);
+      expect(role.members.size).toBe(hasHuman ? 1 : 0);
+      const result = resolveMentionableSelection({ interaction, canMentionEveryone: false });
+      expect(result.users).toEqual(hasHuman ? [human] : []);
+      expect(result.unavailableRoleCount).toBe(memberCount > cache.size ? 1 : 0);
+      expect(result.droppedFromRoles).toBe(0);
+    },
+  );
+
+  test('non-mentionable role denial takes priority over incomplete member data', () => {
+    const role = makeRole({ id: 'role-denied', members: [] });
+    const interaction = makeMentionableInteraction({ pickedRoles: [role] });
+    interaction.guild.memberCount = 10;
     const result = resolveMentionableSelection({ interaction, canMentionEveryone: false });
-    expect(result.users).toEqual([]);
-    expect(result.unavailableRoleCount).toBe(memberCount > 1 ? 1 : 0);
-    expect(result.droppedFromRoles).toBe(0);
+    expect(result.roleMentionsDenied).toEqual(['role-denied']);
+    expect(result.unavailableRoleCount).toBe(0);
   });
 
   test('everyoneCacheCold: @everyone WITH perm but missing guild.members.cache → flag set, no expansion', () => {

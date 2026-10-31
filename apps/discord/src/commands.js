@@ -4400,7 +4400,7 @@ function normalizeRecipientMode(mode) {
 // hoisted here so all the user-visible strings live in one place
 // rather than being scattered through 800+ lines of handler code.
 const RECIPIENT_REASON_BOTS_DROPPED = 'Cannot send to bots';
-const RECIPIENT_REASON_ROLE_MEMBERS_UNAVAILABLE = 'Picked role members could not be loaded. Try again in a few seconds';
+const RECIPIENT_REASON_ROLE_MEMBERS_UNAVAILABLE = 'Could not confirm all members of the picked roles. Select individual users instead';
 const VOICE_REJECT_CHANNEL_UNREADABLE = `⚠\u{FE0F} Couldn't read the voice channel — it may have been deleted. Pick recipients below.\n\n`;
 const VOICE_REJECT_EMPTY_CHANNEL = `⚠\u{FE0F} No one is connected to that voice channel right now. Pick recipients below.\n\n`;
 const VOICE_REJECT_CONTEXT_LOST = `⚠\u{FE0F} Voice channel context was lost — use the picker below to choose recipients.\n\n`;
@@ -4740,12 +4740,13 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
         everyoneCacheCold = true;
         continue;
       }
-      if (!isEveryoneRole && source.size === 0) {
-        // Role.members filters the guild cache; a cached bot alone is not warm.
+      if (!isEveryoneRole) {
+        // Role.members filters the guild cache; cached members can be incomplete.
         const cachedMembers = guild?.members?.cache?.size ?? 0;
-        if (cachedMembers === 0 || (Number.isSafeInteger(guild?.memberCount) && cachedMembers < guild.memberCount)) {
+        const knownIncomplete = Number.isSafeInteger(guild?.memberCount) && cachedMembers < guild.memberCount;
+        if ((source.size === 0 && cachedMembers === 0) || knownIncomplete) {
           namedRoleMembersUnavailable.add(roleId);
-          continue;
+          if (source.size === 0) continue;
         }
       }
       // Two break conditions, both belt-and-suspenders:
