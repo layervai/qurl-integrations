@@ -1,3 +1,6 @@
+// Real entry-point/SIGTERM fixture: each resource tears down once, no leader,
+// watchdog or metric starts after shutdown is claimed, and exit stays zero.
+// Stub only external I/O boundaries; the actual shutdown coordinator runs.
 const fs = require('node:fs');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');

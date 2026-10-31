@@ -12,8 +12,8 @@
 //   1. If connected → reset attempts/recovery; continue. When local lock
 //      ownership is false, strongly read the holder first and exit only if a
 //      peer owner confirms split brain.
-//   2. If @discordjs/ws is automatically recovering from Closed,
-//      wait for Ready/Resumed. Never race it with manager.connect().
+//   2. If @discordjs/ws is recovering or an inbound connect is pending,
+//      wait for settlement. Never race it with manager.connect().
 //      A recovery that stays stuck for maxRecoveryMs releases the lock,
 //      when held, and exits so ECS can replace the process. This limit
 //      also runs on a non-lock-holder, so a stale standby latch cannot
@@ -21,9 +21,7 @@
 //      timer, so lock flapping cannot extend the bound.
 //   3. If not holding the lock → reset attempts; continue. The standby
 //      loop no-ops until promotion, but recovery in step 2 stays bounded.
-//   4. If the leader is already connecting → reset attempts; continue.
-//      This prevents concurrent connect() calls.
-//   5. Otherwise: attempts++, try `manager.connect()`. On success,
+//   4. Otherwise: attempts++, try `manager.connect()`. On success,
 //      reset attempts. On failure, log + exponential backoff sleep
 //      (200 ms, 400 ms, 800 ms, 1.6 s — capped at 5 s, see below).
 //      At `attempts >= maxAttempts` (default 5), release the lock
@@ -75,7 +73,7 @@ const BACKOFF_CAP_MS = 5_000;
 // ~200 ms client-side cap in gateway-leader.js's pushHandoff). A
 // stuck standby holding the failover slot is what these protect
 // against; worst-case watchdog tick at exhaustion is CONNECT +
-// RELEASE_LOCK + PEER_CLEANUP ≈ 14 s, well inside the 30 s ECS graceful-stop.
+// RELEASE_LOCK × 2 ≈ 14 s, well inside the 30 s ECS graceful-stop.
 //
 // Bound each DDB cleanup call during exit. If lock release or peer-row
 // deletion hangs, replace the process; the lease/TTL supplies the backstop.
@@ -103,8 +101,9 @@ function createConnectionWatchdog({
   manager,
   isHoldingLock,
   // REQUIRED. Returns true when the leader is itself mid-
-  // `manager.connect()` (inbound-handoff path); the watchdog backs
-  // off rather than race a second concurrent connect. Required
+  // `manager.connect()` (inbound-handoff path); wait within maxRecoveryMs
+  // rather than race another connect. A standby stuck before adopting
+  // the lock is also replaced. Required
   // because the race is otherwise silent: an inbound-handoff connect
   // taking >1 s would produce overlapping connect() calls against
   // the non-concurrency-safe WebSocketManager. A wiring oversight
