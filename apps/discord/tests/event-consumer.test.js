@@ -711,12 +711,12 @@ describe('event-consumer: pollLoop error backoff', () => {
     }
   });
 
-  test('onFatal callback routes permanent-error path away from process.exit', async () => {
+  test.each(['QueueDoesNotExist', 'CredentialsProviderError', 'CredentialsError'])('onFatal handles %s without a retry or direct exit', async (code) => {
     const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
     const onFatal = jest.fn();
     sqsMock.on(ReceiveMessageCommand).callsFake(() => {
       const err = new Error('q gone');
-      err.name = 'QueueDoesNotExist';
+      err.name = code;
       throw err;
     });
     eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
@@ -731,6 +731,32 @@ describe('event-consumer: pollLoop error backoff', () => {
       await eventConsumer.stop();
     } finally {
       exitSpy.mockRestore();
+    }
+  });
+
+  test.each(['CredentialsProviderError', 'CredentialsError'])('a later %s retries and recovers after a successful poll', async (code) => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const onFatal = jest.fn();
+    let receives = 0;
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      receives++;
+      if (receives === 2) throw Object.assign(new Error('refresh unavailable'), { name: code });
+      if (receives === 3) eventConsumer._test.getStopController().abort();
+      return { Messages: [] };
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    try {
+      eventConsumer.start(makeStubClient(), { onFatal });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(receives).toBe(2);
+      expect(onFatal).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(receives).toBe(3);
+      expect(onFatal).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith('Event consumer: poll iteration failed', { error: 'refresh unavailable' });
+    } finally {
+      await eventConsumer.stop();
+      jest.useRealTimers();
     }
   });
 
@@ -876,6 +902,11 @@ describe('event-consumer: start/stop lifecycle', () => {
 
     const badCreds = Object.assign(new Error('creds'), { name: 'UnrecognizedClientException' });
     expect(permanentAwsErrorCode(badCreds)).toBe('UnrecognizedClientException');
+
+    for (const code of ['CredentialsProviderError', 'CredentialsError']) {
+      expect(permanentAwsErrorCode(Object.assign(new Error('no credentials'), { name: code }))).toBe(code);
+      expect(permanentAwsErrorCode(new Error('wrapper', { cause: { name: code } }))).toBe(code);
+    }
 
     const wrapped = Object.assign(new Error('wrap'), {
       cause: { name: 'QueueDoesNotExist' },
