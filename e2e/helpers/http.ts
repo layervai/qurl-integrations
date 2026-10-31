@@ -167,6 +167,17 @@ export async function fetchWithTransientRetry(
   return res;
 }
 
+/** Read calls get at most three attempts and one rate-limit wait of at most 10s.
+ * Reuse cleanup's Retry-After parser so a long directive never causes an early retry. */
+export function fetchGetWithTransientRetry(
+  input: string | URL,
+  init?: Pick<RequestInit, 'headers' | 'redirect' | 'signal'>,
+): Promise<Response> {
+  return fetchWithTransientRetry(input, { ...init, method: 'GET' }, {
+    cleanupRetryBudget: { remainingMs: 10_000 },
+  });
+}
+
 /** One sweep shares this wait budget across all owned resources or messages. */
 export interface CleanupRetryBudget { remainingMs: number }
 
@@ -199,12 +210,12 @@ async function retryCleanupRateLimit(
     : Number.isFinite(date) ? Math.max(0, date - Date.now()) : 1000;
   const delayMs = Math.max(250, Math.ceil(hintedMs));
   if (!Number.isFinite(delayMs) || delayMs > budget.remainingMs) {
-    console.warn(`[cleanup] 429 retry declined: ${delayMs}ms exceeds the remaining ${budget.remainingMs}ms sweep budget`);
+    console.warn(`[rate-limit] 429 retry declined: ${delayMs}ms exceeds the remaining ${budget.remainingMs}ms sweep budget`);
     return response;
   }
   budget.remainingMs -= delayMs;
   await response.body?.cancel().catch(() => {});
-  console.warn(`[cleanup] 429: one retry after ${delayMs}ms`);
+  console.warn(`[rate-limit] 429: one retry after ${delayMs}ms`);
   await new Promise<void>((resolve, reject) => {
     const signal = init.signal;
     const finish = () => { signal?.removeEventListener('abort', abort); resolve(); };
