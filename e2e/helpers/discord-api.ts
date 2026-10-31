@@ -32,7 +32,15 @@ export interface DiscordMessage {
   timestamp: string;
 }
 
-export async function api(token: string, method: string, path: string, body?: unknown): Promise<any> {
+export class DiscordApiError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = 'DiscordApiError';
+  }
+}
+
+// shortcut: 204 keeps returning null; use a nullable type if callers need mixed response shapes.
+export async function api<T = unknown>(token: string, method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {
     Authorization: `Bot ${token}`,
   };
@@ -44,9 +52,9 @@ export async function api(token: string, method: string, path: string, body?: un
   const res = await fetch(`${API}${path}`, opts);
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Discord API ${method} ${path}: ${res.status} ${text}`);
+    throw new DiscordApiError(res.status, `Discord API ${method} ${path}: ${res.status} ${text}`);
   }
-  if (res.status === 204) return null;
+  if (res.status === 204) return null as T;
   return res.json();
 }
 
