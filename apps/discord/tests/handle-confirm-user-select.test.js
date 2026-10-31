@@ -399,6 +399,19 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Mention Everyone/);
   });
 
+  test.each([false, true])('unavailable named role members: partial valid=%s', async (partialValid) => {
+    const int = makeSelectInteraction({
+      users: partialValid ? [makeUser(u1)] : [],
+      roles: [['missing-role', { id: 'missing-role', mentionable: true }]],
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    if (partialValid) expect(mockTransitionFlow).toHaveBeenCalled();
+    else expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const updated = int.editReply.mock.calls.at(-1)[0];
+    expect(updated.content).toContain('Picked role(s) could not be loaded — try again in a few seconds');
+    expect(updated.content).not.toContain('Member cache not yet ready');
+  });
+
   test('mentionable picker: partial-valid pick with cold-cache @everyone → flow advances AND everyoneCacheCold warning surfaces', async () => {
     const u1 = makeUser('100000000000000001');
     const int = makeSelectInteraction({

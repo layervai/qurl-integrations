@@ -4648,6 +4648,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
   // silent deferUpdate-only no-op the user-visible path would
   // otherwise hit.
   let everyoneCacheCold = false;
+  const namedRoleMembersUnavailable = new Set();
   // Per-role denied list (issue #326): a picked role that's not
   // `mentionable: true` AND the sender lacks MENTION_EVERYONE lands
   // here as `roleId`. Dedup via parallel Set so a future picker that
@@ -4734,6 +4735,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
       //     chunk-on-startup completion).
       if (!source || typeof source.entries !== 'function') {
         if (isEveryoneRole) everyoneCacheCold = true;
+        else namedRoleMembersUnavailable.add(roleId);
         continue;
       }
       if (isEveryoneRole && source.size === 0) {
@@ -4799,6 +4801,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
     massMentionDenied,
     droppedFromRoles: droppedFromRolesSet.size,
     everyoneCacheCold,
+    namedRoleMembersUnavailable,
     roleMentionsDenied,
   };
 }
@@ -4839,6 +4842,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  *   droppedFromRoles?: number,
  *   massMentionDenied?: boolean,
  *   everyoneCacheCold?: boolean,
+ *   namedRoleMembersUnavailable?: number,
  *   roleMentionsDeniedNames?: string[],
  * }} [opts]
  */
@@ -4851,6 +4855,7 @@ function renderRecipientWarnings({
   droppedFromRoles = 0,
   massMentionDenied = false,
   everyoneCacheCold = false,
+  namedRoleMembersUnavailable = 0,
   roleMentionsDeniedNames = [],
 } = {}) {
   const lines = [];
@@ -4906,6 +4911,9 @@ function renderRecipientWarnings({
     // user took a different picker action (selecting a role rather
     // than an individual bot).
     lines.push(`• ${droppedFromRoles} bot(s) filtered from picked role(s) — skipped.`);
+  }
+  if (namedRoleMembersUnavailable > 0) {
+    lines.push('• Picked role(s) could not be loaded — try again in a few seconds.');
   }
   if (everyoneCacheCold) {
     // Symmetric with droppedFromRoles: surfaced even on partial-valid
@@ -6825,6 +6833,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     massMentionDenied,
     droppedFromRoles,
     everyoneCacheCold,
+    namedRoleMembersUnavailable,
     roleMentionsDenied,
   } = resolveMentionableSelection({
     interaction,
@@ -6840,6 +6849,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     && !massMentionDenied
     && droppedFromRoles === 0
     && !everyoneCacheCold
+    && namedRoleMembersUnavailable.size === 0
     && roleMentionsDenied.length === 0
   ) {
     // Truly empty pick (no users, no roles, no @everyone, no
@@ -6915,6 +6925,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       mass_mention_denied: massMentionDenied,
       dropped_from_roles: droppedFromRoles,
       everyone_cache_cold: everyoneCacheCold,
+      named_role_members_unavailable: namedRoleMembersUnavailable.size,
       role_mentions_denied: roleMentionsDenied.length,
     });
     // Reachable cases:
@@ -6945,6 +6956,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     const reasons = [];
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
     if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
+    if (namedRoleMembersUnavailable.size > 0) reasons.push('Picked role(s) could not be loaded — try again in a few seconds');
     if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
     if (roleMentionsDenied.length > 0) {
@@ -6993,6 +7005,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     droppedFromRoles,
     massMentionDenied,
     everyoneCacheCold,
+    namedRoleMembersUnavailable: namedRoleMembersUnavailable.size,
     roleMentionsDeniedNames,
   });
   const newRecipientAliases = Object.fromEntries(

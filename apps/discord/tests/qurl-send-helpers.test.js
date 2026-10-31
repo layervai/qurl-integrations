@@ -449,6 +449,19 @@ describe('resolveMentionableSelection', () => {
     expect(r.everyoneCacheCold).toBe(true);
   });
 
+  test('missing named role members are reported separately from valid and empty roles', () => {
+    const user = makeUser('100000000000000001');
+    const int = makeMentionableInteraction({ pickedRoles: [
+      ['missing', { id: 'missing', mentionable: true }],
+      ['empty', { id: 'empty', mentionable: true, members: new Map() }],
+      makeRole({ id: 'loaded', members: [{ user }] }),
+    ] });
+    const result = resolveMentionableSelection({ interaction: int, canMentionEveryone: true });
+    expect([...result.namedRoleMembersUnavailable]).toEqual(['missing']);
+    expect(result.users).toEqual([user]);
+    expect(result.everyoneCacheCold).toBe(false);
+  });
+
   test('everyoneCacheCold stays false when @everyone is DENIED (cache state irrelevant)', () => {
     const int = makeMentionableInteraction({
       pickedRoles: [makeRole({ id: GUILD_ID, members: [] })],
@@ -480,7 +493,7 @@ describe('resolveMentionableSelection', () => {
   test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold, roleMentionsDenied }', () => {
     const int = makeMentionableInteraction({});
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
-    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'massMentionDenied', 'roleMentionsDenied', 'users']);
+    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'massMentionDenied', 'namedRoleMembersUnavailable', 'roleMentionsDenied', 'users']);
   });
 
   describe('role-mention permission gate (#326)', () => {
