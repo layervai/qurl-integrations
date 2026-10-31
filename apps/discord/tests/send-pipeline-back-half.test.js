@@ -3822,3 +3822,86 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(message.content).not.toMatch(/\u202E/u);
   });
 });
+
+
+describe('executeSendPipeline — direct contract coverage (#278)', () => {
+  beforeEach(() => {
+    mockDownloadAndUpload.mockReset().mockResolvedValue({ resource_id: 'res-direct', fileBuffer: new ArrayBuffer(8) });
+    mockUploadJsonToConnector.mockReset().mockResolvedValue({ resource_id: 'res-direct' });
+    mockMintLinks.mockReset().mockResolvedValue([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/direct', resource_id: 'res-direct' }]);
+    mockSendDM.mockReset().mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockReset().mockResolvedValue(undefined);
+    mockDb.saveSendConfig.mockReset().mockResolvedValue(undefined);
+    _test.setActiveFileSends(0);
+  });
+
+  afterEach(() => {
+    _test.setActiveFileSends(0);
+    for (const monitor of Array.from(activeMonitors)) monitor.stop();
+  });
+
+  test('file send persists before DM delivery, saves reuse config, and defaults to picker mode', async () => {
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, makePipelineParams());
+    expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
+    expect(mockSendDM).toHaveBeenCalledTimes(1);
+    expect(mockDb.saveSendConfig).toHaveBeenCalledTimes(1);
+    expect(mockDownloadAndUpload.mock.invocationCallOrder[0]).toBeLessThan(mockMintLinks.mock.invocationCallOrder[0]);
+    expect(mockMintLinks.mock.invocationCallOrder[0]).toBeLessThan(mockDb.recordQURLSendBatch.mock.invocationCallOrder[0]);
+    expect(mockDb.recordQURLSendBatch.mock.invocationCallOrder[0]).toBeLessThan(mockSendDM.mock.invocationCallOrder[0]);
+    expect(mockSendDM.mock.invocationCallOrder[0]).toBeLessThan(mockDb.saveSendConfig.mock.invocationCallOrder[0]);
+    expect(mockDb.saveSendConfig).toHaveBeenCalledWith(expect.objectContaining({ resourceType: 'file', connectorResourceId: 'res-direct' }));
+    expect(mockSendChannelMessage).not.toHaveBeenCalled();
+    expect(_test.getActiveFileSends()).toBe(0);
+  });
+
+  test('location send uploads its map payload and emits upload success before delivery', async () => {
+    const interaction = makeInteraction();
+    const locationUrl = 'https://www.google.com/maps?q=Paris';
+    await executeSendPipeline(interaction, makePipelineParams({ resourceType: 'location', attachment: null, locationUrl, locationName: 'Paris' }));
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith({ type: 'google-map', url: locationUrl, name: 'Paris' }, 'location.json', 'apikey', null);
+    expect(logger.audit).toHaveBeenCalledWith('upload_success', expect.objectContaining({ kind: 'location', send_id: expect.any(String) }));
+    expect(mockDb.recordQURLSendBatch.mock.invocationCallOrder[0]).toBeLessThan(mockSendDM.mock.invocationCallOrder[0]);
+    expect(mockSendDM).toHaveBeenCalledTimes(1);
+    expect(mockDb.saveSendConfig).toHaveBeenCalledWith(expect.objectContaining({ resourceType: 'location', actualUrl: locationUrl }));
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+  });
+
+  test('rejects a file at the five-slot claim boundary without upload or persistence', async () => {
+    _test.setActiveFileSends(5);
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, makePipelineParams());
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('too many file sends') }));
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(_test.getActiveFileSends()).toBe(5);
+  });
+
+  test.each([
+    ['file', 're-upload the file'],
+    ['location', 'edit the location query and resend'],
+  ])('quota failure uses the recovery action for %s', async (resourceType, action) => {
+    mockMintLinks.mockRejectedValueOnce(Object.assign(new Error('quota reached'), { apiCode: 'quota_exceeded' }));
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, makePipelineParams(resourceType === 'file' ? {} : {
+      resourceType, attachment: null, locationUrl: 'https://www.google.com/maps?q=Paris', locationName: 'Paris',
+    }));
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining(action) }));
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(_test.getActiveFileSends()).toBe(0);
+  });
+
+  test('a reuse-config write failure cannot turn an already delivered send into failure', async () => {
+    mockDb.saveSendConfig.mockRejectedValueOnce(new Error('config write failed'));
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams())).resolves.toBeUndefined();
+    expect(mockSendDM).toHaveBeenCalledTimes(1);
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith('saveSendConfig failed; Add Recipients will be unavailable for this send', expect.objectContaining({ error: 'config write failed' }));
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Sent to 1 user') }));
+  });
+});
