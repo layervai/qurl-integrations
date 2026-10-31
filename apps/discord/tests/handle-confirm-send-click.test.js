@@ -79,7 +79,7 @@ describe('handleConfirmSendClick', () => {
     await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Recipients changed|re-click Send/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Preparing/),
@@ -137,7 +137,7 @@ describe('handleConfirmSendClick', () => {
     }));
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/1 recipient had left the server/),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringMatching(/partial drop at click time/),
@@ -159,7 +159,7 @@ describe('handleConfirmSendClick', () => {
     }));
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/1 couldn't be looked up.*rerun \/qurl send/),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringMatching(/partial drop at click time/),
@@ -186,7 +186,7 @@ describe('handleConfirmSendClick', () => {
     await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: mapPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/rerun \/qurl map/),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(int.followUp).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/rerun \/qurl send/),
@@ -200,7 +200,7 @@ describe('handleConfirmSendClick', () => {
     await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not look up the qURL API key/),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(mockDeleteFlow).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
@@ -222,7 +222,7 @@ describe('handleConfirmSendClick', () => {
     await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: { ...validPayload, recipientIds: [u1] }, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not look up recipients/),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(mockDeleteFlow).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
@@ -282,7 +282,7 @@ describe('handleConfirmSendClick', () => {
     });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/card moved/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/No recipients were selected/i),
@@ -299,7 +299,7 @@ describe('handleConfirmSendClick', () => {
     });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/card moved/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Invalid recipient list/i),

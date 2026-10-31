@@ -26,7 +26,7 @@ describe('handleQurlSend — slash entry', () => {
     await handleQurlSend(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/in a server/),
-      ephemeral: true,
+      flags: 64,
     }));
   });
 
@@ -38,7 +38,7 @@ describe('handleQurlSend — slash entry', () => {
       await handleQurlSend(int);
       expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
         content: expect.stringMatching(/too many file sends/i),
-        ephemeral: true,
+        flags: 64,
       }));
       expect(logger.audit).toHaveBeenCalledWith('upload_rejected_capacity', {
         active_file_sends: 99, max_concurrent: 5,
@@ -57,7 +57,7 @@ describe('handleQurlSend — slash entry', () => {
     await handleQurlSend(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/source not allowed/),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(isOnCooldown(SENDER_ID)).toBe(true);
   });

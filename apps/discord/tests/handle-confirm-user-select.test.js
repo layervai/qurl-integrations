@@ -249,7 +249,7 @@ describe('handleConfirmUserSelect', () => {
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not save your pick/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/i),

@@ -106,7 +106,7 @@ describe('handleConfirmPickManual', () => {
     await handleConfirmPickManual(int, { flow_id: 'fid', row: { payload: voicePayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not switch to manual picker/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/i),

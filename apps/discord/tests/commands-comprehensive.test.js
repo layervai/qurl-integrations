@@ -214,7 +214,7 @@ describe('handleCommand', () => {
     await handleCommand(interaction);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('no longer available'),
-      ephemeral: true,
+      flags: 64,
     }));
   });
 
@@ -225,7 +225,7 @@ describe('handleCommand', () => {
     await handleCommand(interaction);
 
     expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('error'), ephemeral: true }),
+      expect.objectContaining({ content: expect.stringContaining('error'), flags: 64 }),
     );
   });
 
@@ -505,7 +505,7 @@ describe('/qurl help subcommand', () => {
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining('qURL Bot'),
-        ephemeral: true,
+        flags: 64,
       }),
     );
   });
@@ -1163,7 +1163,7 @@ describe('/qurl-admin setup subcommand (legacy modal-paste path)', () => {
       expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
       expect(interaction.reply).toHaveBeenCalledWith({
         content: expect.stringContaining('qURL setup is temporarily unavailable'),
-        ephemeral: true,
+        flags: 64,
       });
       expect(interaction.reply.mock.calls[0][0].content)
         .not.toContain('AUTH0_EMAIL_CONNECTION');
@@ -1191,7 +1191,7 @@ describe('/qurl-admin setup subcommand (legacy modal-paste path)', () => {
       // setup-only policy block.
       expect(interaction.reply).toHaveBeenCalledWith({
         content: expect.stringContaining('Attachment is missing or malformed'),
-        ephemeral: true,
+        flags: 64,
       });
       expect(interaction.reply.mock.calls[0][0].content)
         .not.toContain('temporarily unavailable');
@@ -1369,7 +1369,7 @@ describe('handleSetupButton (dispatcher path)', () => {
       expect(interaction.showModal).not.toHaveBeenCalled();
       expect(interaction.reply).toHaveBeenCalledWith({
         content: expect.stringContaining('qURL setup is temporarily unavailable'),
-        ephemeral: true,
+        flags: 64,
       });
     } finally {
       config.isAuth0EmailConnectionRejected = originalRejected;
@@ -1561,7 +1561,7 @@ describe('handleSetupModal (dispatcher path)', () => {
       expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
       expect(interaction.reply).toHaveBeenCalledWith({
         content: expect.stringContaining('qURL setup is temporarily unavailable'),
-        ephemeral: true,
+        flags: 64,
       });
       expect(interaction.reply.mock.calls[0][0].content)
         .not.toContain('AUTH0_EMAIL_CONNECTION');
@@ -1741,7 +1741,7 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     await handleCommand(interaction);
     expect(interaction.reply).toHaveBeenCalledWith({
       content: _test.QURL_MAP_DISABLED_REPLY,
-      ephemeral: true,
+      flags: 64,
     });
     expect(interaction.deferReply).not.toHaveBeenCalled();
   });
@@ -1756,7 +1756,7 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     await handleCommand(interaction);
     expect(interaction.reply).toHaveBeenCalledWith({
       content: _test.QURL_DETECT_DISABLED_REPLY,
-      ephemeral: true,
+      flags: 64,
     });
     expect(interaction.deferReply).not.toHaveBeenCalled();
   });
@@ -1788,7 +1788,7 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     await handleCommand(interaction);
     expect(interaction.reply).toHaveBeenCalledWith({
       content: expect.stringMatching(/`\/qurl file` has been renamed to `\/qurl send`/),
-      ephemeral: true,
+      flags: 64,
     });
     expect(interaction.deferReply).not.toHaveBeenCalled();
   });

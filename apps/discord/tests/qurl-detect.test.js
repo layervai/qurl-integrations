@@ -61,7 +61,7 @@ describe('handleQurlDetect', () => {
     await handleQurlDetect(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/in a server/),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(mockDetectWatermark).not.toHaveBeenCalled();
   });
@@ -71,7 +71,7 @@ describe('handleQurlDetect', () => {
     await handleQurlDetect(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/needs an image/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(mockDetectWatermark).not.toHaveBeenCalled();
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
@@ -82,7 +82,7 @@ describe('handleQurlDetect', () => {
     await handleQurlDetect(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/source not allowed/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(mockDetectWatermark).not.toHaveBeenCalled();
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(true);
@@ -103,7 +103,7 @@ describe('handleQurlDetect', () => {
     await handleQurlDetect(int2);
     expect(int2.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/wait before running detect/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(int2.deferReply).not.toHaveBeenCalled();
     expect(mockDetectWatermark).toHaveBeenCalledTimes(1);
@@ -131,7 +131,7 @@ describe('handleQurlDetect', () => {
 
     int.options.getSubcommand = () => 'detect';
     await commands.commands[0].execute(int);
-    expect(int.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(int.deferReply).toHaveBeenCalledWith({ flags: 64 });
 
     expect(mockDetectWatermark).toHaveBeenCalledWith(
       expect.any(Buffer),
@@ -381,7 +381,7 @@ describe('handleQurlDetect', () => {
     await handleQurlDetect(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/too large/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(int.deferReply).not.toHaveBeenCalled();
     expect(mockDetectWatermark).not.toHaveBeenCalled();
@@ -468,7 +468,7 @@ describe('handleQurlDetect', () => {
 
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/`image:` option is required/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(int.deferReply).not.toHaveBeenCalled();
     expect(mockDetectWatermark).not.toHaveBeenCalled();

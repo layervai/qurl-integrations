@@ -75,7 +75,7 @@ describe('handleConfirmExpirySelect', () => {
     expect(int.deferUpdate).not.toHaveBeenCalled();
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Unrecognized expiry/i),
-      ephemeral: true,
+      flags: 64,
     }));
   });
 
@@ -105,7 +105,7 @@ describe('handleConfirmExpirySelect', () => {
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not save/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/i),

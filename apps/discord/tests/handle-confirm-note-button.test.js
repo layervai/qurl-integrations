@@ -77,7 +77,7 @@ describe('handleConfirmNoteButton', () => {
     await handleConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not open the note editor/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(mockTransitionFlow).not.toHaveBeenCalled();
   });

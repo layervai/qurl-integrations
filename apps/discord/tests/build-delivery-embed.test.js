@@ -77,6 +77,7 @@ jest.mock('discord.js', () => {
     })),
     TextInputStyle: { Short: 1, Paragraph: 2 },
     InteractionType: { ApplicationCommand: 2 },
+    MessageFlags: jest.requireActual('discord.js').MessageFlags,
     PermissionFlagsBits: { Administrator: 1n << 3n, ManageGuild: 1n << 5n },
     ChannelType: { GuildText: 0, GuildVoice: 2 },
     ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },

@@ -206,7 +206,7 @@ describe('handleConfirmEveryone', () => {
     await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not save.*Try again/i),
-      ephemeral: true,
+      flags: 64,
     }));
     const logger = require('../src/logger');
     expect(logger.error).toHaveBeenCalledWith(

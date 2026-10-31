@@ -126,7 +126,7 @@ describe('handleConfirmNoteModal', () => {
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not read your note input/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(mockTransitionFlow).not.toHaveBeenCalled();
   });
@@ -137,7 +137,7 @@ describe('handleConfirmNoteModal', () => {
     await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not save your note/i),
-      ephemeral: true,
+      flags: 64,
     }));
     expect(int.reply).not.toHaveBeenCalled();
     expect(int.update).not.toHaveBeenCalled();
