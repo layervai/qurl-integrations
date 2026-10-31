@@ -17,7 +17,7 @@ import (
 // workspace_mappings). Bare `agent` reports the current per-workspace setting. The
 // toggle gates the agent on TOP of the org-level surface — while the deployment's
 // conversation mode is dark, setting it just pre-stages the opt-in.
-func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleAgentToggle(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	// Admin-gate BEFORE parsing the arg, so every unauthorized caller takes the same
 	// audited admin-only path: a non-admin probing `agent <anything>` must not get a
 	// different (and unaudited) reply than `agent on`.
@@ -30,7 +30,7 @@ func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
 	if !h.requireAdminStoreSync(w) {
 		return
 	}
-	if !h.requireAdminSync(w, teamID, userID, AdminActionAgentToggle) {
+	if !h.requireAdminSync(requestCtx, w, teamID, userID, AdminActionAgentToggle) {
 		return
 	}
 
@@ -52,7 +52,7 @@ func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
 
 	// Single-DDB sync admin verb (one UpdateItem to set, or one GetItem to show) —
 	// same shape and budget as add/remove/admins, not the multi-hop alias verbs.
-	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
+	ctx, cancel := context.WithTimeout(requestCtx, adminSyncVerbBudget)
 	defer cancel()
 
 	if show {

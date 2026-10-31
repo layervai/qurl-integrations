@@ -68,7 +68,7 @@ const revokeConfirmText = "This revokes the resource and every qURL on it, in ev
 // it…" followed by a denial. requireAdminSync writes the denial and returns
 // false; on success it writes nothing, leaving runAsync to own the ack — so
 // `w` is written exactly once on either path.
-func (h *Handler) handleRevoke(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleRevoke(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	cmd, err := Parse(text)
 	if err != nil {
@@ -104,7 +104,7 @@ func (h *Handler) handleRevoke(w http.ResponseWriter, values url.Values) {
 	if !h.requireAdminStoreSync(w) {
 		return
 	}
-	if !h.requireAdminSync(w, teamID, userID, AdminActionRevoke) {
+	if !h.requireAdminSync(requestCtx, w, teamID, userID, AdminActionRevoke) {
 		return
 	}
 	h.runAsync(w, "revoke", values, func(ctx context.Context, log *slog.Logger) {

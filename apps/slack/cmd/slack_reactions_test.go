@@ -48,7 +48,7 @@ func reactionTestServer(t *testing.T, okJSON string) (*httptest.Server, *[]captu
 }
 
 func newTestReactionPort(lookup slackBotTokenLookup, addURL, removeURL string, httpClient *http.Client) internal.ReactionPort {
-	return newSlackReactionPortWithTokenLookup(lookup, "qurl-slack/test", addURL, removeURL, httpClient)
+	return newSlackReactionPortWithTokenLookup(lookup, "qurl-slack/test", addURL, removeURL, httpClient, nil)
 }
 
 func TestSlackReactionPort_AddPostsExpectedRequest(t *testing.T) {

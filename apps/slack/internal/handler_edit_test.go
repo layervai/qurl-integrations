@@ -1176,9 +1176,9 @@ func TestHandleTunnelEdit_ExposesNewChannel(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("no result posted to response_url")
 	}
-	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, newChannel)
+	allowed, err := h.cfg.AdminStore.ChannelScopedResourceIDs(context.Background(), testAdminTeamID, newChannel)
 	if err != nil {
-		t.Fatalf("AllowedResourceIDsForChannel: %v", err)
+		t.Fatalf("ChannelScopedResourceIDs: %v", err)
 	}
 	if _, ok := allowed[testEditResourceID]; !ok {
 		t.Errorf("resource not protected in the new channel; allow-set = %v", allowed)
@@ -1222,9 +1222,9 @@ func TestHandleTunnelEdit_RevokesDeselectedChannel(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("no result posted to response_url")
 	}
-	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, extraChannel)
+	allowed, err := h.cfg.AdminStore.ChannelScopedResourceIDs(context.Background(), testAdminTeamID, extraChannel)
 	if err != nil {
-		t.Fatalf("AllowedResourceIDsForChannel: %v", err)
+		t.Fatalf("ChannelScopedResourceIDs: %v", err)
 	}
 	if _, ok := allowed[testEditResourceID]; ok {
 		t.Errorf("resource should have been revoked from extraChannel; allow-set = %v", allowed)
@@ -1237,7 +1237,7 @@ func TestHandleTunnelEdit_RevokesDeselectedChannel(t *testing.T) {
 // TestHandleTunnelEdit_AliasBoundChannelReportedRetainedNotRevoked fences the
 // alias-bound revoke gap: de-selecting a (non-current) channel that exposes the
 // tunnel via an ALIAS binding can't be fully revoked by clearing
-// allowed_resource_ids alone — the alias keeps it in AllowedResourceIDsForChannel's
+// allowed_resource_ids alone — the alias keeps it in ChannelScopedResourceIDs's
 // union — so it must be reported as still-available-via-alias rather than
 // "Revoked from", or the admin is told access was removed while the tunnel stays
 // listable/mintable there.
@@ -1278,9 +1278,9 @@ func TestHandleTunnelEdit_AliasBoundChannelReportedRetainedNotRevoked(t *testing
 	}
 	// The alias binding survives the revoke, so the resource is STILL in the
 	// channel's union — listable/mintable there.
-	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, aliasChannel)
+	allowed, err := h.cfg.AdminStore.ChannelScopedResourceIDs(context.Background(), testAdminTeamID, aliasChannel)
 	if err != nil {
-		t.Fatalf("AllowedResourceIDsForChannel: %v", err)
+		t.Fatalf("ChannelScopedResourceIDs: %v", err)
 	}
 	if _, ok := allowed[testEditResourceID]; !ok {
 		t.Errorf("alias binding should keep the resource available in aliasChannel; allow-set = %v", allowed)
@@ -1326,9 +1326,9 @@ func TestHandleTunnelEdit_CurrentChannelNeverRevoked(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("no result posted to response_url")
 	}
-	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, testEditChannel)
+	allowed, err := h.cfg.AdminStore.ChannelScopedResourceIDs(context.Background(), testAdminTeamID, testEditChannel)
 	if err != nil {
-		t.Fatalf("AllowedResourceIDsForChannel: %v", err)
+		t.Fatalf("ChannelScopedResourceIDs: %v", err)
 	}
 	if _, ok := allowed[testEditResourceID]; !ok {
 		t.Errorf("current channel was revoked despite the never-revoke guard; allow-set = %v", allowed)

@@ -18,7 +18,7 @@
 //
 // This package exposes a `Store` facade with the method shapes the
 // post-pivot Slack handlers depend on (CheckAdmin, ResolvePolicy,
-// GetChannelPolicy, AllowedResourceIDsForChannel, LookupChannelAlias,
+// GetChannelPolicy, ChannelScopedResourceIDs, LookupChannelAlias,
 // BindWorkspace, AddAdmin, RemoveAdmin, ListAdmins). Errors carry an
 // HTTP-shaped StatusCode on `*Error` so handlers branch via errors.As
 // without caring about the underlying DDB exception shape.
@@ -428,4 +428,9 @@ const (
 
 func unixNanoAttr(t time.Time) ddbtypes.AttributeValue {
 	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(t.UTC().UnixNano(), 10)}
+}
+
+// updatedAtAttrs keeps the display time and lifecycle purge stamp at one instant.
+func updatedAtAttrs(now time.Time) (display, purge ddbtypes.AttributeValue) {
+	return stringAttr(now.UTC().Format(time.RFC3339)), unixNanoAttr(now)
 }

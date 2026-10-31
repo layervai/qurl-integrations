@@ -45,12 +45,12 @@ func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string) func(context.Co
 func newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
 	return newSlackOpenViewFuncWithTokenLookup(func(context.Context, string) (string, error) {
 		return token, nil
-	}, userAgent, viewsOpenURL, httpClient)
+	}, userAgent, viewsOpenURL, httpClient, nil)
 }
 
 type slackBotTokenLookup func(ctx context.Context, teamID string) (string, error)
 
-func newSlackOpenViewFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
+func newSlackOpenViewFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, viewsOpenURL string, httpClient *http.Client, invalidate func(string)) func(context.Context, string, string, []byte) error {
 	if httpClient == nil {
 		httpClient = defaultSlackViewsOpenClient()
 	}
@@ -104,7 +104,7 @@ func newSlackOpenViewFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, 
 		if err != nil {
 			return err
 		}
-		return slackOpenViewResponseError(resp.StatusCode, resp.Header, raw)
+		return invalidateRejectedSlackToken(teamID, slackOpenViewResponseError(resp.StatusCode, resp.Header, raw), invalidate)
 	}
 }
 
@@ -243,7 +243,7 @@ func slackOpenViewAPIError(code, retryAfter string) error {
 	case "ratelimited":
 		return internal.NewSlackRateLimitError(retryAfter)
 	default:
-		return fmt.Errorf("views.open: %s", code)
+		return &slackWebAPIError{op: "views.open", code: code}
 	}
 }
 
@@ -329,6 +329,7 @@ const slackWebAPIResponseBodyLimit = 64 * 1024
 // connection pooling ever matters.
 type slackWebAPIPoster struct {
 	lookup     slackBotTokenLookup
+	invalidate func(string)
 	userAgent  string
 	url        string
 	op         string // method label for error strings, e.g. "chat.postMessage"
@@ -336,7 +337,7 @@ type slackWebAPIPoster struct {
 	httpClient *http.Client
 }
 
-func newSlackWebAPIPoster(lookup slackBotTokenLookup, userAgent, url, op string, respErr func(int, http.Header, []byte) error, httpClient *http.Client) *slackWebAPIPoster {
+func newSlackWebAPIPoster(lookup slackBotTokenLookup, userAgent, url, op string, respErr func(int, http.Header, []byte) error, httpClient *http.Client, invalidate func(string)) *slackWebAPIPoster {
 	if httpClient == nil {
 		httpClient = defaultSlackWebAPIClient()
 	}
@@ -344,7 +345,7 @@ func newSlackWebAPIPoster(lookup slackBotTokenLookup, userAgent, url, op string,
 	if userAgent == "" {
 		userAgent = defaultSlackAPIUserAgent
 	}
-	return &slackWebAPIPoster{lookup: lookup, userAgent: userAgent, url: url, op: op, respErr: respErr, httpClient: httpClient}
+	return &slackWebAPIPoster{lookup: lookup, invalidate: invalidate, userAgent: userAgent, url: url, op: op, respErr: respErr, httpClient: httpClient}
 }
 
 // postOnce resolves one owner's bot token (workspace team or, on the Grid fallback,
@@ -382,7 +383,7 @@ func (p *slackWebAPIPoster) postOnce(ctx context.Context, ownerID string, body [
 	if err != nil {
 		return nil, err
 	}
-	return raw, p.respErr(resp.StatusCode, resp.Header, raw)
+	return raw, invalidateRejectedSlackToken(ownerID, p.respErr(resp.StatusCode, resp.Header, raw), p.invalidate)
 }
 
 // gridPost sends body with the workspace token, then retries once with the Enterprise
@@ -426,8 +427,8 @@ func (p *slackWebAPIPoster) post(ctx context.Context, teamID, enterpriseID strin
 // newSlackPostMessageFuncWithTokenLookup builds the [internal.PostMessageFunc] seam:
 // a threaded text chat.postMessage using the per-workspace bot token (the same token
 // resolution as the slash-command modals).
-func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
-	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient)
+func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client, invalidate func(string)) internal.PostMessageFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient, invalidate)
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, text string) error {
 		// Marshal once: the payload is owner-independent, so the Grid retry reuses it.
 		body, err := json.Marshal(struct {
@@ -446,9 +447,9 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 // or resume a 1:1 IM with conversations.open, then post into that DM channel.
 // Both calls use the same per-workspace token lookup and Enterprise Grid
 // fallback as channel posts.
-func newSlackPostDMFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsOpenURL, postMessageURL string, httpClient *http.Client) internal.PostDMFunc {
-	open := newSlackWebAPIPoster(lookup, userAgent, conversationsOpenURL, "conversations.open", slackConversationsOpenResponseError, httpClient)
-	post := newSlackPostMessageFuncWithTokenLookup(lookup, userAgent, postMessageURL, httpClient)
+func newSlackPostDMFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsOpenURL, postMessageURL string, httpClient *http.Client, invalidate func(string)) internal.PostDMFunc {
+	open := newSlackWebAPIPoster(lookup, userAgent, conversationsOpenURL, "conversations.open", slackConversationsOpenResponseError, httpClient, invalidate)
+	post := newSlackPostMessageFuncWithTokenLookup(lookup, userAgent, postMessageURL, httpClient, invalidate)
 	return func(ctx context.Context, teamID, enterpriseID, slackUserID, text string) error {
 		body, err := json.Marshal(struct {
 			Users string `json:"users"`
@@ -474,9 +475,9 @@ func newSlackPostDMFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, co
 // shared Block Kit chat.postMessage poster — so `/qurl get dm:true` delivers an Enter
 // Portal URL button instead of a raw hyperlink. Both hops use the same per-workspace
 // token lookup and Enterprise Grid fallback as the text DM seam.
-func newSlackPostDMBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsOpenURL, postMessageURL string, httpClient *http.Client) internal.PostDMBlocksFunc {
-	open := newSlackWebAPIPoster(lookup, userAgent, conversationsOpenURL, "conversations.open", slackConversationsOpenResponseError, httpClient)
-	postBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(lookup, userAgent, postMessageURL, httpClient)
+func newSlackPostDMBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsOpenURL, postMessageURL string, httpClient *http.Client, invalidate func(string)) internal.PostDMBlocksFunc {
+	open := newSlackWebAPIPoster(lookup, userAgent, conversationsOpenURL, "conversations.open", slackConversationsOpenResponseError, httpClient, invalidate)
+	postBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(lookup, userAgent, postMessageURL, httpClient, invalidate)
 	return func(ctx context.Context, teamID, enterpriseID, slackUserID string, blocks []any, fallbackText string) error {
 		body, err := json.Marshal(struct {
 			Users string `json:"users"`
@@ -502,8 +503,8 @@ func newSlackPostDMBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAge
 // response_url card-replace can't overwrite. Shares the poster (token lookup + Grid
 // fallback + ok:false parse) with the text seams; only the JSON body (which adds `user`)
 // differs.
-func newSlackPostEphemeralFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postEphemeralURL string, httpClient *http.Client) internal.PostEphemeralFunc {
-	poster := newSlackWebAPIPoster(lookup, userAgent, postEphemeralURL, "chat.postEphemeral", slackChatPostEphemeralResponseError, httpClient)
+func newSlackPostEphemeralFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postEphemeralURL string, httpClient *http.Client, invalidate func(string)) internal.PostEphemeralFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, postEphemeralURL, "chat.postEphemeral", slackChatPostEphemeralResponseError, httpClient, invalidate)
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, userID, text string) error {
 		body, err := json.Marshal(struct {
 			Channel  string `json:"channel"`
@@ -526,8 +527,8 @@ func newSlackPostEphemeralFuncWithTokenLookup(lookup slackBotTokenLookup, userAg
 // literally, mirroring the Block Kit chat.postMessage seam's defense-in-depth. Shares
 // the poster (token lookup + Grid fallback + ok:false parse) with the text ephemeral
 // seam — only the JSON body (which adds `blocks`) differs.
-func newSlackPostEphemeralBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postEphemeralURL string, httpClient *http.Client) internal.PostEphemeralBlocksFunc {
-	poster := newSlackWebAPIPoster(lookup, userAgent, postEphemeralURL, "chat.postEphemeral", slackChatPostEphemeralResponseError, httpClient)
+func newSlackPostEphemeralBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postEphemeralURL string, httpClient *http.Client, invalidate func(string)) internal.PostEphemeralBlocksFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, postEphemeralURL, "chat.postEphemeral", slackChatPostEphemeralResponseError, httpClient, invalidate)
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, userID string, blocks []any, fallbackText string) error {
 		body, err := json.Marshal(struct {
 			Channel  string `json:"channel"`
@@ -555,8 +556,8 @@ func newSlackPostEphemeralBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, 
 // rejects text alongside markdown_text, so the normal path uses blocks. If Slack
 // rejects the markdown block shape in an older/limited surface, retry once with the
 // older markdown_text-only body so the answer still delivers.
-func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
-	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient)
+func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client, invalidate func(string)) internal.PostMessageFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient, invalidate)
 	var fallbackLogMu sync.Mutex
 	fallbackLogSeen := make(map[string]struct{})
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, markdownText string) error {
@@ -725,8 +726,8 @@ func slackChatPostMessageErrorCode(err error) string {
 // conversation-mode Approve/Reject confirm card). text is the notification /
 // non-block-client fallback. It shares the poster (token lookup + Grid fallback +
 // response parsing) with the text seam — only the JSON body differs.
-func newSlackPostMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageBlocksFunc {
-	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient)
+func newSlackPostMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client, invalidate func(string)) internal.PostMessageBlocksFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient, invalidate)
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error {
 		body, err := json.Marshal(struct {
 			Channel  string `json:"channel"`
@@ -776,8 +777,8 @@ type slackHomeView struct {
 // fallback + response parsing) with the chat seams — only the JSON body differs. No
 // extra OAuth scope is needed beyond the bot token, but the manifest's App Home tab
 // must be enabled for Slack to render the published view.
-func newSlackAppHomePublishFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, viewsPublishURL string, httpClient *http.Client) internal.AppHomePublishFunc {
-	poster := newSlackWebAPIPoster(lookup, userAgent, viewsPublishURL, "views.publish", slackViewsPublishResponseError, httpClient)
+func newSlackAppHomePublishFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, viewsPublishURL string, httpClient *http.Client, invalidate func(string)) internal.AppHomePublishFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, viewsPublishURL, "views.publish", slackViewsPublishResponseError, httpClient, invalidate)
 	return func(ctx context.Context, teamID, enterpriseID, userID string, blocks []any) error {
 		body, err := json.Marshal(struct {
 			UserID string        `json:"user_id"`
@@ -805,7 +806,7 @@ type slackAgentStreamPort struct {
 	stop  *slackWebAPIPoster
 }
 
-func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, startURL, appendURL, stopURL string, httpClient *http.Client) internal.AgentStreamPort {
+func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, startURL, appendURL, stopURL string, httpClient *http.Client, invalidate func(string)) internal.AgentStreamPort {
 	if httpClient == nil {
 		// One shared client across start/append×N/stop so a streamed turn's verb sequence
 		// reuses keep-alive connections (parity with the assistant/reactions ports).
@@ -814,7 +815,7 @@ func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgen
 	mk := func(url, op string) *slackWebAPIPoster {
 		return newSlackWebAPIPoster(lookup, userAgent, url, op, func(s int, h http.Header, raw []byte) error {
 			return slackWebAPIResponseError(op, nil, s, h, raw)
-		}, httpClient)
+		}, httpClient, invalidate)
 	}
 	return &slackAgentStreamPort{
 		start: mk(startURL, "chat.startStream"),
@@ -899,7 +900,7 @@ func slackResolveChannelNameFromConversationInfo(resolveInfo internal.ResolveCon
 // and is_mpim). Unlike the POST seams (which discard the body), this parses the
 // response, so it doesn't use the shared poster; it replicates the same token lookup +
 // Enterprise Grid org-token fallback.
-func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsInfoURL string, httpClient *http.Client) internal.ResolveConversationInfoFunc {
+func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsInfoURL string, httpClient *http.Client, invalidate func(string)) internal.ResolveConversationInfoFunc {
 	if httpClient == nil {
 		httpClient = defaultSlackWebAPIClient()
 	}
@@ -953,7 +954,7 @@ func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLook
 			if slackErr == "" {
 				slackErr = fmt.Sprintf("status %d", resp.StatusCode)
 			}
-			return internal.ConversationInfo{}, fmt.Errorf("conversations.info: %s", slackErr)
+			return internal.ConversationInfo{}, invalidateRejectedSlackToken(ownerID, &slackWebAPIError{op: "conversations.info", code: slackErr}, invalidate)
 		}
 		return internal.ConversationInfo{Name: out.Channel.Name, IsMPIM: out.Channel.IsMPIM}, nil
 	}
@@ -973,7 +974,7 @@ func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLook
 // conversations.replies seam used to reconstruct recent agent context directly
 // from Slack. It uses the same workspace-token and Enterprise Grid fallback as
 // the other read seams and returns messages oldest-first.
-func newSlackAgentThreadHistoryFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsRepliesURL string, httpClient *http.Client) internal.AgentThreadHistoryFunc {
+func newSlackAgentThreadHistoryFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsRepliesURL string, httpClient *http.Client, invalidate func(string)) internal.AgentThreadHistoryFunc {
 	if httpClient == nil {
 		httpClient = defaultSlackWebAPIClient()
 	}
@@ -989,7 +990,8 @@ func newSlackAgentThreadHistoryFuncWithTokenLookup(lookup slackBotTokenLookup, u
 		if token = strings.TrimSpace(token); token == "" {
 			return nil, errors.New("conversations.replies token lookup: empty token")
 		}
-		return fetchSlackAgentThreadHistory(ctx, httpClient, conversationsRepliesURL, userAgent, token, channelID, threadTS, oldestTS)
+		messages, err := fetchSlackAgentThreadHistory(ctx, httpClient, conversationsRepliesURL, userAgent, token, channelID, threadTS, oldestTS)
+		return messages, invalidateRejectedSlackToken(ownerID, err, invalidate)
 	}
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, oldestTS string) ([]internal.AgentThreadMessage, error) {
 		messages, err := read(ctx, teamID, channelID, threadTS, oldestTS)
@@ -1161,7 +1163,7 @@ func fetchSlackUserInfo(ctx context.Context, httpClient *http.Client, baseURL, u
 // seam over users.info. It returns false (not an error) for Slack's user_not_found
 // and for deleted/bot users; all other Slack/API failures surface as errors so
 // the transfer handler can fail closed without mutating owner_id.
-func newSlackUserLookupFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, usersInfoURL string, httpClient *http.Client) internal.SlackUserLookupFunc {
+func newSlackUserLookupFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, usersInfoURL string, httpClient *http.Client, invalidate func(string)) internal.SlackUserLookupFunc {
 	if httpClient == nil {
 		httpClient = defaultSlackWebAPIClient()
 	}
@@ -1179,7 +1181,7 @@ func newSlackUserLookupFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent
 		}
 		info, found, err := fetchSlackUserInfo(ctx, httpClient, usersInfoURL, userAgent, token, userID)
 		if err != nil {
-			return false, err
+			return false, invalidateRejectedSlackToken(ownerID, err, invalidate)
 		}
 		ok := found && info.ID == userID && !info.Deleted && !info.IsBot
 		if !ok {
@@ -1261,7 +1263,7 @@ func fetchConversationsMembersPage(ctx context.Context, httpClient *http.Client,
 		if slackErr == "" {
 			slackErr = fmt.Sprintf("status %d", resp.StatusCode)
 		}
-		return nil, "", fmt.Errorf("conversations.members: %s", slackErr)
+		return nil, "", &slackWebAPIError{op: "conversations.members", code: slackErr}
 	}
 	return out.Members, out.ResponseMetadata.NextCursor, nil
 }
@@ -1274,7 +1276,7 @@ func fetchConversationsMembersPage(ctx context.Context, httpClient *http.Client,
 // answers missing_scope and the caller treats the error as "not confirmed" (no scope). It
 // scans at most maxMembershipPages pages, so a member beyond that bound reads as
 // not-confirmed; that's an acceptable degradation for a best-effort access guard.
-func newSlackChannelMembershipFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsMembersURL string, httpClient *http.Client) internal.ChannelMembershipFunc {
+func newSlackChannelMembershipFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsMembersURL string, httpClient *http.Client, invalidate func(string)) internal.ChannelMembershipFunc {
 	if httpClient == nil {
 		httpClient = defaultSlackWebAPIClient()
 	}
@@ -1299,7 +1301,7 @@ func newSlackChannelMembershipFuncWithTokenLookup(lookup slackBotTokenLookup, us
 		for page := 0; page < maxMembershipPages; page++ {
 			members, next, err := fetchConversationsMembersPage(ctx, httpClient, conversationsMembersURL, userAgent, token, channelID, cursor)
 			if err != nil {
-				return false, err
+				return false, invalidateRejectedSlackToken(ownerID, err, invalidate)
 			}
 			for _, m := range members {
 				if m == userID {
@@ -1334,22 +1336,22 @@ type slackAssistantThreadsPort struct {
 	setStatus  *slackWebAPIPoster
 }
 
-func newSlackAssistantThreadsPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, setTitleURL, setSuggestedPromptsURL, setStatusURL string, httpClient *http.Client) internal.AssistantThreadsPort {
+func newSlackAssistantThreadsPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, setTitleURL, setSuggestedPromptsURL, setStatusURL string, httpClient *http.Client, invalidate func(string)) internal.AssistantThreadsPort {
 	if httpClient == nil {
 		httpClient = defaultSlackWebAPIClient()
 	}
 	setTitle := newSlackWebAPIPoster(lookup, userAgent, setTitleURL, "assistant.threads.setTitle",
 		func(s int, h http.Header, raw []byte) error {
 			return slackWebAPIResponseError("assistant.threads.setTitle", nil, s, h, raw)
-		}, httpClient)
+		}, httpClient, invalidate)
 	setPrompts := newSlackWebAPIPoster(lookup, userAgent, setSuggestedPromptsURL, "assistant.threads.setSuggestedPrompts",
 		func(s int, h http.Header, raw []byte) error {
 			return slackWebAPIResponseError("assistant.threads.setSuggestedPrompts", nil, s, h, raw)
-		}, httpClient)
+		}, httpClient, invalidate)
 	setStatus := newSlackWebAPIPoster(lookup, userAgent, setStatusURL, "assistant.threads.setStatus",
 		func(s int, h http.Header, raw []byte) error {
 			return slackWebAPIResponseError("assistant.threads.setStatus", nil, s, h, raw)
-		}, httpClient)
+		}, httpClient, invalidate)
 	return &slackAssistantThreadsPort{setTitle: setTitle, setPrompts: setPrompts, setStatus: setStatus}
 }
 
@@ -1525,7 +1527,7 @@ type slackReactionPort struct {
 	remove *slackWebAPIPoster
 }
 
-func newSlackReactionPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, addURL, removeURL string, httpClient *http.Client) internal.ReactionPort {
+func newSlackReactionPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, addURL, removeURL string, httpClient *http.Client, invalidate func(string)) internal.ReactionPort {
 	if httpClient == nil {
 		// Reuse the shared Web API transport posture: 4s timeout + redirect-as-response.
 		httpClient = defaultSlackWebAPIClient()
@@ -1533,11 +1535,11 @@ func newSlackReactionPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, 
 	add := newSlackWebAPIPoster(lookup, userAgent, addURL, "reactions.add",
 		func(s int, h http.Header, raw []byte) error {
 			return slackWebAPIResponseError("reactions.add", slackReactionAddBenign, s, h, raw)
-		}, httpClient)
+		}, httpClient, invalidate)
 	remove := newSlackWebAPIPoster(lookup, userAgent, removeURL, "reactions.remove",
 		func(s int, h http.Header, raw []byte) error {
 			return slackWebAPIResponseError("reactions.remove", slackReactionRemoveBenign, s, h, raw)
-		}, httpClient)
+		}, httpClient, invalidate)
 	return &slackReactionPort{add: add, remove: remove}
 }
 
@@ -1570,4 +1572,18 @@ func marshalReactionBody(channelID, timestamp, name string) ([]byte, error) {
 		return nil, fmt.Errorf("reactions request marshal: %w", err)
 	}
 	return body, nil
+}
+
+// Invalidate only the rejected owner; preserve the error and never replay a write.
+func invalidateRejectedSlackToken(ownerID string, err error, invalidate func(string)) error {
+	var apiErr *slackWebAPIError
+	if invalidate != nil && errors.As(err, &apiErr) {
+		// TODO(upstream-contract): Slack Web API authentication error vocabulary.
+		// https://docs.slack.dev/reference/methods/chat.postmessage/
+		switch apiErr.code {
+		case "token_revoked", "invalid_auth", "account_inactive":
+			invalidate(ownerID)
+		}
+	}
+	return err
 }
