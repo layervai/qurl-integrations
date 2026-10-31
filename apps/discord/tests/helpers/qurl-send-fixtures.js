@@ -25,54 +25,32 @@ jest.mock('../../src/logger', () => ({
 }));
 
 jest.mock('discord.js', () => {
-  const { makeOptionBuilder, makeComponentChainable } = require('./discord-mock');
-  return {
-    SlashCommandBuilder: jest.fn().mockImplementation(() => {
-      const subBuilder = () => ({
-        setName: jest.fn().mockReturnThis(),
-        setDescription: jest.fn().mockReturnThis(),
-        addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
-        addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
-        addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
-        addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
-      });
-      const builder = {
-        setName: jest.fn().mockReturnThis(),
-        setDescription: jest.fn().mockReturnThis(),
-        addSubcommand: jest.fn(function (fn) { if (typeof fn === 'function') fn(subBuilder()); return builder; }),
-        addStringOption: jest.fn().mockReturnThis(),
-        addAttachmentOption: jest.fn().mockReturnThis(),
-        addUserOption: jest.fn().mockReturnThis(),
-        addIntegerOption: jest.fn().mockReturnThis(),
-        setDefaultMemberPermissions: jest.fn().mockReturnThis(),
-        toJSON: jest.fn().mockReturnValue({}),
-      };
-      return builder;
-    }),
-    EmbedBuilder: jest.fn().mockImplementation(() => makeComponentChainable({
-      setColor: jest.fn().mockReturnThis(),
-      setDescription: jest.fn().mockReturnThis(),
-      addFields: jest.fn().mockReturnThis(),
-      setFooter: jest.fn().mockReturnThis(),
-      setTimestamp: jest.fn().mockReturnThis(),
-    })),
-    ActionRowBuilder: jest.fn().mockImplementation(() => {
-      const row = { components: [], addComponents: jest.fn(function (...args) { row.components.push(...args.flat()); return row; }) };
-      return row;
-    }),
-    ButtonBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
-    ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
-    ChannelType: { GuildText: 0, DM: 1, GuildVoice: 2, GuildStageVoice: 13 },
-    ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
-    StringSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
-    UserSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
-    MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
-    ModalBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
-    TextInputBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
-    TextInputStyle: { Short: 1, Paragraph: 2 },
-    AttachmentBuilder: jest.fn().mockImplementation((buf, opts) => ({ buf, name: opts?.name })),
-    PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n, ManageGuild: 32n },
-  };
+  const { buildDiscordMock, makeComponentChainable } = require('./discord-mock');
+  const mock = buildDiscordMock();
+  const makeCommand = mock.SlashCommandBuilder;
+  mock.SlashCommandBuilder = jest.fn().mockImplementation(() => {
+    const builder = makeCommand();
+    // Keep this fixture's top-level options as no-ops; subcommands execute callbacks.
+    builder.setName = jest.fn().mockReturnThis();
+    for (const method of ['addStringOption', 'addAttachmentOption', 'addUserOption', 'addIntegerOption']) {
+      builder[method] = jest.fn().mockReturnThis();
+    }
+    return builder;
+  });
+  mock.EmbedBuilder = jest.fn().mockImplementation(() => makeComponentChainable({
+    setColor: jest.fn().mockReturnThis(),
+    setDescription: jest.fn().mockReturnThis(),
+    addFields: jest.fn().mockReturnThis(),
+    setFooter: jest.fn().mockReturnThis(),
+    setTimestamp: jest.fn().mockReturnThis(),
+  }));
+  for (const name of ['ButtonBuilder', 'StringSelectMenuBuilder', 'UserSelectMenuBuilder', 'MentionableSelectMenuBuilder', 'ModalBuilder', 'TextInputBuilder']) {
+    mock[name] = jest.fn().mockImplementation(() => makeComponentChainable());
+  }
+  mock.ChannelType.DM = 1;
+  mock.PermissionFlagsBits.ManageGuild = 32n;
+  mock.AttachmentBuilder = jest.fn().mockImplementation((buf, opts) => ({ buf, name: opts?.name }));
+  return mock;
 });
 
 const mockDb = {
