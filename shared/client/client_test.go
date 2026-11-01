@@ -1582,8 +1582,8 @@ func TestGetResourceDecodesDetailEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetResource: %v", err)
 	}
-	if got.ResourceID != "r_abc123test" || got.Type != ResourceTypeTunnel {
-		t.Fatalf("GetResource = %+v, want tunnel r_abc123test", got)
+	if got.ResourceID != "r_abc123test" || got.Type != ResourceTypeTunnel || got.Slug != testTunnelSlug {
+		t.Fatalf("GetResource = %+v, want tunnel r_abc123test with slug %s", got, testTunnelSlug)
 	}
 }
 

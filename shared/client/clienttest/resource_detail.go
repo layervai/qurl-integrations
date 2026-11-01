@@ -2,6 +2,7 @@
 package clienttest
 
 // ResourceDetailData mirrors qurl-service's ResourceDetailResponse data field.
+// TODO(upstream-contract): keep the resource/qurls shape in lockstep with that response.
 func ResourceDetailData(resourceID, resourceType, slug string) map[string]any {
 	return map[string]any{
 		"resource": map[string]any{
