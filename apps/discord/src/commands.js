@@ -1856,12 +1856,6 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //     payload reaching the gate produces a generic "Internal
 //     error" cancel without leaking the SSRF detail.
 //
-//   - `recipients` is MUTATED in-place on the Add Recipients post-
-//     send branch (deduped push of new IDs). Treat as transferred
-//     ownership for the lifetime of the call, not as a snapshot.
-//     A caller that reuses the same array across retries will see
-//     silent double-adds.
-//
 // Required `interaction` surface (fail loudly at the corresponding
 // call site if missing):
 //
@@ -1931,12 +1925,7 @@ async function executeSendPipeline(interaction, {
   attachment,
   locationUrl,
   locationName,
-  // MUTATES: the Add Recipients post-send branch dedupe-pushes into
-  // this array (see docstring's "transferred ownership" note). The
-  // initial `recipients` is already deduped + bot-filtered by
-  // partitionRecipients (see contract pin at commands.js:~3552):
-  // upstream owns dedup, this function does NOT re-dedup the initial set.
-  // Sender CAN appear in `recipients` — self-send is supported.
+  // Initial recipients are deduped and bot-filtered upstream; self-send is allowed.
   recipients,
   expiresIn,
   selfDestructSeconds,
@@ -2037,6 +2026,9 @@ async function executeSendPipeline(interaction, {
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
     failGate(RangeError, `executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
   }
+  // Add Recipients owns this snapshot; callers may retain or freeze their input.
+  recipients = [...recipients];
+
   // Operator-visibility hook for big sends. Fires when a single send
   // crosses `largeSendThreshold()` so the operational cost (qurl-
   // service re-uploads + DM fan-out duration at Discord's per-bot
