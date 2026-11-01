@@ -8,8 +8,9 @@ import "regexp"
 // error that echoes a credential back cannot leak it into a terminal
 // scrollback or a pasted bug report.
 var (
-	apiKeyPattern = regexp.MustCompile(`lv_(?:live|test)_[A-Za-z0-9_-]+`)
-	bearerPattern = regexp.MustCompile(`(?i)bearer\s+[^\s"']+`)
+	apiKeyPattern               = regexp.MustCompile(`lv_(?:live|test)_[A-Za-z0-9_-]+`)
+	webhookSigningSecretPattern = regexp.MustCompile(`whsec_[A-Za-z0-9_-]+`)
+	bearerPattern               = regexp.MustCompile(`(?i)bearer\s+[^\s"']+`)
 	// requestCodePathPattern is the code of an access request where a
 	// request path carries it: the six digits after /access-requests/. The
 	// code gives a person access for as long as their request is pending,
@@ -26,6 +27,7 @@ var (
 // covers the diagnostic surfaces.
 func Redact(s string) string {
 	s = apiKeyPattern.ReplaceAllString(s, "lv_***")
+	s = webhookSigningSecretPattern.ReplaceAllString(s, "whsec_***")
 	s = requestCodePathPattern.ReplaceAllString(s, "${1}******")
 	return bearerPattern.ReplaceAllString(s, "Bearer ***")
 }
