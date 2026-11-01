@@ -32,6 +32,7 @@ const {
   DM_STATUS,
   MAX_FILE_SIZE,
   MINT_BATCH_SIZE,
+  REVOKE_BATCH_MAX_IDS,
   MAX_OVERFLOW_REVOKE_IDS,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
@@ -1746,7 +1747,7 @@ async function mintLinksInBatches({ sendId, initialResourceId, expiresAt, recipi
       ids.push(qurlId);
       idsByResource.set(link.resourceId, ids);
     }
-    const entries = [...idsByResource];
+    const entries = cleanupBatchesByResource(idsByResource);
     const compensation = batchSettled(entries, ([resourceId, ids]) => (
       revokeMintedLinks(resourceId, ids, apiKey)
     ), 5);
@@ -2952,6 +2953,17 @@ async function executeSendPipeline(interaction, {
   }
 }
 
+// Keep cleanup failures isolated to one transport-sized batch, even under one parent.
+function cleanupBatchesByResource(idsByResource) {
+  const batches = [];
+  for (const [resourceId, ids] of idsByResource) {
+    for (let offset = 0; offset < ids.length; offset += REVOKE_BATCH_MAX_IDS) {
+      batches.push([resourceId, ids.slice(offset, offset + REVOKE_BATCH_MAX_IDS)]);
+    }
+  }
+  return batches;
+}
+
 async function cleanupFreshMintedLinks(batchSends, apiKey, sendId, options = {}) {
   const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
@@ -2973,11 +2985,11 @@ async function cleanupFreshMintedLinks(batchSends, apiKey, sendId, options = {})
     ids.push(qurlId);
     qurlIdsByResource.set(s.resourceId, ids);
   }
-  const resourceIds = [...qurlIdsByResource.keys()];
-  if (resourceIds.length === 0 && unidentifiedCount === 0) return;
+  const batches = cleanupBatchesByResource(qurlIdsByResource);
+  if (batches.length === 0 && unidentifiedCount === 0) return;
 
-  const cleanup = batchSettled(resourceIds, async (resourceId) => {
-    await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId), apiKey);
+  const cleanup = batchSettled(batches, async ([resourceId, ids]) => {
+    await revokeMintedLinks(resourceId, ids, apiKey);
     return resourceId;
   }, 5);
   // Same bounded wait as mint-failure compensation: the send reply
@@ -2987,9 +2999,9 @@ async function cleanupFreshMintedLinks(batchSends, apiKey, sendId, options = {})
       sendId,
       reason: cleanupReason,
       unidentified_count: unidentifiedCount,
-      resources: resourceIds.map(resourceId => ({
+      resources: batches.map(([resourceId, ids]) => ({
         resource_ref: resourceIdLogRef(resourceId),
-        qurl_ids: qurlIdsByResource.get(resourceId),
+        qurl_ids: ids,
       })),
     });
     return;
@@ -2999,7 +3011,8 @@ async function cleanupFreshMintedLinks(batchSends, apiKey, sendId, options = {})
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
       failed.push({
-        resource_ref: resourceIdLogRef(resourceIds[index]),
+        resource_ref: resourceIdLogRef(batches[index][0]),
+        qurl_ids: batches[index][1],
         error: result.reason?.message,
       });
     }
@@ -3009,7 +3022,7 @@ async function cleanupFreshMintedLinks(batchSends, apiKey, sendId, options = {})
       sendId,
       reason: cleanupReason,
       failed_count: failed.length,
-      total: resourceIds.length,
+      total: batches.length,
       unidentified_count: unidentifiedCount,
       failures: failed,
     });
@@ -3017,7 +3030,7 @@ async function cleanupFreshMintedLinks(batchSends, apiKey, sendId, options = {})
     logger.info('Cleaned up freshly minted qURL links', {
       sendId,
       reason: cleanupReason,
-      total: resourceIds.length,
+      total: batches.length,
     });
   }
 }

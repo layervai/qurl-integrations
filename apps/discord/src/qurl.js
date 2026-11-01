@@ -5,7 +5,7 @@ const {
 } = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
-const { AUDIT_EVENTS } = require('./constants');
+const { AUDIT_EVENTS, REVOKE_BATCH_MAX_IDS } = require('./constants');
 const {
   qurlPath,
   resourceIdLogRef,
@@ -63,8 +63,6 @@ const RESOURCE_QURL_LOG_PATH = '/resources/:resourceId/qurls/:qurlId';
 // TODO(upstream-contract): SDK GET retries can sleep for a long Retry-After
 // without caller cancellation. Disable retries for this bounded user action;
 // failed reads/deletes stay unconfirmed for the next explicit revoke attempt.
-// Shared with connector.js's revoke_links chunk size, which must never exceed it.
-const REVOKE_BATCH_MAX_IDS = 10;
 const ORDINARY_REVOKE_ATTEMPT_TIMEOUT_MS = 10_000;
 const ORDINARY_REVOKE_MAX_RETRIES = 0;
 // Each child can need a 10s lookup and a 10s delete, plus scheduling headroom.

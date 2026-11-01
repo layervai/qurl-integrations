@@ -3440,7 +3440,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
         reason: 'revoked_guard',
         failed_count: 1,
         total: 1,
-        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), error: 'delete failed' }],
+        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), qurl_ids: ['q_aaaaaaaaaa1'], error: 'delete failed' }],
       }),
     );
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);
@@ -3478,9 +3478,9 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(result.newRecipients).toEqual([]);
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
-    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockRevokeMintedLinks.mock.calls.map(call => call[0]).sort()).toEqual(
-      ['res-0'],
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(10);
+    expect(mockRevokeMintedLinks.mock.calls.map(call => call[0])).toEqual(
+      Array(10).fill('res-0'),
     );
   });
 });
@@ -3638,7 +3638,8 @@ describe('mintLinksInBatches', () => {
     });
     expect(result).toHaveLength(11);
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', [...Array.from({ length: 10 }, (_, i) => `q_${i}`), 'q_short'], 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', Array.from({ length: 10 }, (_, i) => `q_${i}`), 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_short'], 'apikey');
   });
 
   it('mints once for recipientCount <= MINT_BATCH_SIZE (10)', async () => {
@@ -3768,7 +3769,8 @@ describe('mintLinksInBatches', () => {
       apiKey: 'apikey',
     })).rejects.toThrow('Connector mint_link returned 24 links for a 1-link batch');
     // Compensation covers the request plus 20 overflow ids, not the whole untrusted body.
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', minted.slice(0, 21).map(l => l.qurl_id), 'apikey');
+    expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toEqual(minted.slice(0, 21).map(l => l.qurl_id));
+    expect(mockRevokeMintedLinks.mock.calls.every(([parent, ids]) => parent === 'res-1' && ids.length <= 10)).toBe(true);
     expect(logger.error).toHaveBeenCalledWith('Connector mint_link over-minted', {
       resource_ref: resourceIdLogRef('res-1'), requested: 1, returned: 24,
       unrevoked_overflow_qurl_ids: ['q_x21', 'q_x22', 'q_x23'],
@@ -4287,7 +4289,7 @@ describe.each(['file', 'maps'])('self-destruct timing copy for %s', resourceType
 });
 
 describe('initial-send compensation boundaries', () => {
-  test('chunked persistence failure revokes all 101 minted children without a false transaction alarm', async () => {
+  test('persistence failure attempts all 101 children even when one cleanup batch fails', async () => {
     const config = require('../src/config');
     const previousCap = config.QURL_SEND_MAX_RECIPIENTS;
     config.QURL_SEND_MAX_RECIPIENTS = 101;
@@ -4302,13 +4304,16 @@ describe('initial-send compensation boundaries', () => {
         })));
       }
       mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('partial BatchWrite failure'));
+      mockRevokeMintedLinks.mockRejectedValueOnce(new Error('first cleanup batch unavailable'));
       await executeSendPipeline(makeInteraction(), makePipelineParams({ recipients }));
-      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(11);
       expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toHaveLength(101);
       expect(mockSendDM).not.toHaveBeenCalled();
-      expect(logger.info).toHaveBeenCalledWith('Cleaned up freshly minted qURL links', {
-        sendId: expect.any(String), reason: 'persistence_failure', total: 1,
-      });
+      expect(mockRevokeMintedLinks.mock.calls.every(([, ids]) => ids.length <= 10)).toBe(true);
+      expect(new Set(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).size).toBe(101);
+      expect(logger.error).toHaveBeenCalledWith('Failed to clean up freshly minted qURL links', expect.objectContaining({
+        sendId: expect.any(String), reason: 'persistence_failure', failed_count: 1, total: 11,
+      }));
     } finally {
       config.QURL_SEND_MAX_RECIPIENTS = previousCap;
     }

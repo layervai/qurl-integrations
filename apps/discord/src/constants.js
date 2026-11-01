@@ -91,6 +91,8 @@ const MAX_FILE_SIZE = 25 * 1024 * 1024;
 // Shared with the standalone load test, which cannot import commands.js without a store.
 // Bound each connector mint request; this is not a per-resource quota.
 const MINT_BATCH_SIZE = 10;
+// TODO(upstream-contract): shared SDK/connector child-revoke request cap.
+const REVOKE_BATCH_MAX_IDS = 10;
 // Over-minted children beyond the requested count that mint-failure
 // compensation still revokes (commands.js 2xx path and connector.js non-2xx
 // partial path); further overflow ids are only logged for reconciliation.
@@ -734,6 +736,7 @@ module.exports = {
   ddbSendConfigGuardFitsTransaction,
   MAX_FILE_SIZE,
   MINT_BATCH_SIZE,
+  REVOKE_BATCH_MAX_IDS,
   MAX_OVERFLOW_REVOKE_IDS,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
