@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/shared/client/clienttest"
 )
 
 const (
@@ -1571,11 +1573,7 @@ func TestGetResourceDecodesDetailEnvelope(t *testing.T) {
 			http.Error(w, "unexpected request", http.StatusInternalServerError)
 			return
 		}
-		// Mirrors qurl-service ResourceDetailResponse: resource beside a qurls preview.
-		apiEnvelope(t, w, map[string]any{
-			"resource": map[string]any{"resource_id": "r_abc123test", "type": "tunnel", "status": "active"},
-			"qurls":    []any{},
-		})
+		apiEnvelope(t, w, clienttest.ResourceDetailData("r_abc123test", ResourceTypeTunnel, testTunnelSlug))
 	}))
 	defer srv.Close()
 
