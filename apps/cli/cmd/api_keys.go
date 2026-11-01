@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -128,11 +129,15 @@ func apiKeyCreateCmd(opts *globalOpts, owner *string) *cobra.Command {
 				return err
 			}
 			key, err := client.CreateAccountAPIKey(cmd.Context(), createName, scopes, idempotencyKey)
+			var problem *qurlapi.Error
+			if errors.As(err, &problem) && problem.StatusCode >= 400 && problem.StatusCode < 500 {
+				return err
+			}
 			if err == nil {
 				err = opts.printer().APIKey(selected, &key.APIKeyMetadata, key.Secret)
 			}
 			if err != nil {
-				return fmt.Errorf("API key creation result unavailable; recover the same request with --idempotency-key %q: %w", idempotencyKey, err)
+				return &apiKeyCreationResultError{key: idempotencyKey, cause: err}
 			}
 			return nil
 		}}
@@ -140,4 +145,16 @@ func apiKeyCreateCmd(opts *globalOpts, owner *string) *cobra.Command {
 	create.Flags().StringSliceVar(&scopes, "scopes", nil, "explicit comma-separated scopes (for example qurl:read,qurl:write)")
 	create.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "recover an earlier create with the same name/scopes (32–256 characters)")
 	return create
+}
+
+// The existing UserMessage hook preserves recovery advice over a wrapped API error.
+type apiKeyCreationResultError struct {
+	key   string
+	cause error
+}
+
+func (e *apiKeyCreationResultError) Error() string { return e.UserMessage() }
+func (e *apiKeyCreationResultError) Unwrap() error { return e.cause }
+func (e *apiKeyCreationResultError) UserMessage() string {
+	return fmt.Sprintf("Could not read the key creation result. Repeat the same name, scopes and owner with --idempotency-key %q within 24 hours.", e.key)
 }

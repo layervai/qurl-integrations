@@ -14,6 +14,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/qurl"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 )
 
 // APIKeyManagement uses one in-memory browser account token, never device auth.
@@ -159,7 +161,7 @@ func (c *client) CreateAccountAPIKey(ctx context.Context, name string, scopes []
 	var envelope struct {
 		Data *CreatedAPIKey `json:"data"`
 	}
-	if json.Unmarshal(reply.body, &envelope) != nil || envelope.Data == nil || !validAccountKeyMetadata(&envelope.Data.APIKeyMetadata) || envelope.Data.Kind != "api_key" || !validAccountKeySecret(envelope.Data.Secret) || envelope.Data.Status != "active" || envelope.Data.Name != name || !sameAccountKeyScopes(envelope.Data.Scopes, scopes) {
+	if json.Unmarshal(reply.body, &envelope) != nil || envelope.Data == nil || !validAccountKeyMetadata(&envelope.Data.APIKeyMetadata) || envelope.Data.Kind != "api_key" || auth.ValidateKeyShape(envelope.Data.Secret) != nil || envelope.Data.Status != "active" || envelope.Data.Name != name || !sameAccountKeyScopes(envelope.Data.Scopes, scopes) {
 		return nil, invalidAPIKeyReply()
 	}
 	return envelope.Data, nil
@@ -236,9 +238,6 @@ func ValidateAccountKeyListOptions(opts APIKeyListOptions) error {
 	return nil
 }
 
-func validAccountKeySecret(secret string) bool {
-	return secret != "" && strings.IndexFunc(secret, func(r rune) bool { return !unicode.IsPrint(r) || unicode.IsSpace(r) }) < 0
-}
 func sameAccountKeyScopes(a, b []string) bool {
 	a = slices.Clone(a)
 	b = slices.Clone(b)

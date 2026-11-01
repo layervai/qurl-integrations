@@ -508,7 +508,8 @@ account token stays in memory. Listing requests read access; mutations also requ
 write access. Creating a key with `qurl:agent` or `qurl:keys` asks for that permission
 explicitly in browser consent. Normal resource commands keep using this machine's
 device identity. If your account has several owners, select one with `--owner`.
-The command reports the available owner IDs before it can change a credential.
+Without `--owner`, an account with several owners returns the available IDs and
+makes no change.
 
 ```sh
 qurl api-keys list --owner 'auth0|example' --output json

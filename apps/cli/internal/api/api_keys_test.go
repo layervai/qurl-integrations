@@ -14,7 +14,7 @@ import (
 )
 
 const fixtureAdminKeyID = "key_Ab0123456789"
-const fixtureAdminSecret = "lv_test_fixture_admin_key_123456789"
+const fixtureAdminSecret = "lv_test_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
 
 func fixtureAdminMetadata() APIKeyMetadata {
 	return APIKeyMetadata{KeyID: fixtureAdminKeyID, Kind: "api_key", Name: "CI reader", Scopes: []string{"qurl:read"}, Status: "active"}
@@ -165,6 +165,7 @@ func TestAPIKeyCreateRejectsMismatchedReceipts(t *testing.T) {
 		{"missing ID", func(k *CreatedAPIKey) { k.KeyID = "" }}, {"wrong kind", func(k *CreatedAPIKey) { k.Kind = "enrollment_token" }},
 		{"wrong name", func(k *CreatedAPIKey) { k.Name = "Other" }}, {"extra scope", func(k *CreatedAPIKey) { k.Scopes = []string{"qurl:read", "qurl:write"} }},
 		{"revoked", func(k *CreatedAPIKey) { k.Status = "revoked" }}, {"missing secret", func(k *CreatedAPIKey) { k.Secret = "" }},
+		{"wrong secret kind", func(k *CreatedAPIKey) { k.Secret = strings.Repeat("x", 51) }},
 		{"control secret", func(k *CreatedAPIKey) { k.Secret = fixtureAdminSecret + "\nforged" }},
 	}
 	for _, tt := range tests {

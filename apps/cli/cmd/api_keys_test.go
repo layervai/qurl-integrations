@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ import (
 )
 
 const accountKeyCommandID = "key_Ab0123456789"
-const accountKeyCommandSecret = "lv_test_fixture_admin_secret_123456789"
+const accountKeyCommandSecret = testAPIKey
 
 func TestAPIKeyCommandsUseFreshAccountAuthority(t *testing.T) {
 	for _, operation := range []string{"list", "create", "update", "revoke"} {
@@ -225,7 +226,7 @@ func TestAPIKeyCreateReportsReplayIdentityOnFailure(t *testing.T) {
 			return
 		}
 		received = r.Header.Get("Idempotency-Key")
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
 	var stdout, stderr bytes.Buffer
@@ -240,6 +241,14 @@ func TestAPIKeyCreateReportsReplayIdentityOnFailure(t *testing.T) {
 	err := root.Execute()
 	if err == nil || len(received) != 64 || !strings.Contains(err.Error(), "--idempotency-key "+fmt.Sprintf("%q", received)) {
 		t.Fatal("failure lost its recoverable create identity")
+	}
+	var rendered bytes.Buffer
+	output.RenderError(&rendered, err, false)
+	if !strings.Contains(rendered.String(), received) {
+		t.Fatal("customer error rendering dropped the recovery identity")
+	}
+	if exitcode.FromError(err) != exitcode.FromError(&qurlapi.Error{StatusCode: http.StatusServiceUnavailable}) {
+		t.Fatal("recovery advice changed the service exit code")
 	}
 	if stdout.Len() != 0 {
 		t.Fatal("failed create emitted successful data")
@@ -294,6 +303,11 @@ func TestAPIKeyCreateOutputFailureKeepsRecoveryIdentity(t *testing.T) {
 	if err == nil || len(replay) != 64 || !strings.Contains(err.Error(), fmt.Sprintf("--idempotency-key %q", replay)) {
 		t.Fatal("failed output lost the existing key's recovery identity")
 	}
+	var rendered bytes.Buffer
+	output.RenderError(&rendered, err, false)
+	if !strings.Contains(rendered.String(), replay) {
+		t.Fatal("output failure rendering dropped the recovery identity")
+	}
 	if strings.Contains(err.Error(), accountKeyCommandSecret) || strings.Contains(stderr.String(), accountKeyCommandSecret) {
 		t.Fatal("failed output leaked the secret into diagnostics")
 	}
@@ -329,6 +343,41 @@ func TestAPIKeyDelegationRequestsOnlyExplicitAdditionalScopes(t *testing.T) {
 			}
 			if !slices.Equal(got, want) {
 				t.Fatalf("requested %s: auth scopes %v, want %v", requested, got, want)
+			}
+		})
+	}
+}
+
+func TestAPIKeyDefinitiveCreateRejectionsKeepTheirActionableError(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden, http.StatusConflict} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/account/owners" {
+					_, _ = w.Write([]byte(`{"owners":["auth0|fixture"]}`))
+					return
+				}
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"error":{"detail":"fixture definitive rejection"}}`))
+			}))
+			defer server.Close()
+			var stdout, stderr bytes.Buffer
+			root, _ := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: &stdout, Err: &stderr}, func(g *globalOpts) {
+				g.configDir = t.TempDir()
+				g.lookupEnv = func(string) (string, bool) { return "", false }
+				g.signInAdmin = func(context.Context, *qurlapi.Config, func(context.Context, string) error, []string) (string, error) {
+					return "fixture-browser-token", nil
+				}
+			})
+			root.SetArgs([]string{"api-keys", "create", "--name", "CI", "--scopes", "qurl:read", "--endpoint", server.URL})
+			err := root.Execute()
+			var problem *qurlapi.Error
+			if !errors.As(err, &problem) || problem.StatusCode != status {
+				t.Fatalf("lost definitive rejection: %v", err)
+			}
+			var rendered bytes.Buffer
+			output.RenderError(&rendered, err, false)
+			if !strings.Contains(rendered.String(), "fixture definitive rejection") || strings.Contains(rendered.String(), "--idempotency-key") {
+				t.Fatal("definitive rejection was mislabeled as uncertain creation")
 			}
 		})
 	}
