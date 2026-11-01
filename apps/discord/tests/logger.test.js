@@ -325,8 +325,30 @@ describe('logger', () => {
       const fallback = auditLines.find(l => l.audit && l.audit.event === 'audit_serialization_failed');
       expect(fallback).toBeDefined();
       expect(fallback.audit.agent).toBe('discord');
-      expect(fallback.audit.original_event).toBe('upload_success');
-      expect(typeof fallback.audit.reason).toBe('string');
+      expect(fallback.audit).toEqual({
+        event: 'audit_serialization_failed',
+        agent: 'discord',
+        reason: 'metadata_serialization_failed',
+      });
+    });
+
+    it.each([false, true])('omits caller data from audit fallback (serializer failure: %s)', (serializerFailure) => {
+      logger = require('../src/logger');
+      const event = { toString: jest.fn(() => { throw new Error('event-secret'); }) };
+      if (serializerFailure) {
+        jest.spyOn(JSON, 'stringify').mockImplementation(() => { throw new Error('serializer-secret'); });
+      }
+
+      expect(() => logger.audit(event, { unsupported: 1n })).not.toThrow();
+
+      expect(event.toString).not.toHaveBeenCalled();
+      const lines = Object.values(consoleSpy).flatMap(spy => spy.mock.calls.map(call => call[0]));
+      expect(lines.join('\n')).toContain('serialization');
+      expect(lines.join('\n')).not.toMatch(/event-secret|serializer-secret|original_event/);
+      if (serializerFailure) {
+        expect(consoleSpy.error).toHaveBeenCalledTimes(1);
+        expect(consoleSpy.error.mock.calls[0][0]).toContain('audit serialization failed');
+      }
     });
 
     it('redacts secret-shaped key VALUES while keeping siblings intact + warns', () => {

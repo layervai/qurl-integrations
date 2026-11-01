@@ -261,8 +261,8 @@ const logger = {
       // Two-tier degradation: emit a minimal audit line with a fixed
       // synthetic event so CloudWatch metric filters can pattern-match
       // `{ $.audit.event = "audit_serialization_failed" }` and surface
-      // the gap. The fallback payload only contains primitive strings
-      // — no caller meta — so it cannot itself trip JSON.stringify.
+      // the gap. Omit all caller data, including the event: coercion hooks
+      // can throw and event values are not safe failure diagnostics.
       // If even this throws (effectively impossible), fall through to
       // a plain error log so an operator still sees something.
       try {
@@ -270,13 +270,12 @@ const logger = {
           audit: {
             event: 'audit_serialization_failed',
             agent: 'discord',
-            original_event: String(event),
             reason: 'metadata_serialization_failed',
           },
           ts: formatTimestamp(),
         }));
       } catch {
-        console.error(`[${formatTimestamp()}] ERROR: logger.audit serialization failed event=${sanitizeMessage(event)} reason=metadata_serialization_failed fallback_reason=serialization_failed`);
+        console.error(`[${formatTimestamp()}] ERROR: logger.audit serialization failed reason=metadata_serialization_failed fallback_reason=serialization_failed`);
       }
     }
   },
