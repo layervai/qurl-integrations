@@ -442,3 +442,37 @@ the finalization committed. Re-run the dry run against the same target. Do not
 remove the barrier blindly; use normal revoke/repair when the rows changed.
 A `local_record_already_closed` result describes local bookkeeping, not
 upstream proof.
+
+### Send-confirm audit counts
+
+`send_confirm_opened` records a successfully delivered `/qurl file` or `/qurl map`
+card. It carries resource type, recipient count, picker state, expiry, and flags
+for self-destruct and a personal message. It does not carry message text or
+recipient lists. `send_confirm_picked` counts committed valid picker changes.
+`send_confirm_cancelled` counts only a successful version-fenced cancellation;
+its dwell uses the original `created_at`, because picker activity renews expiry.
+Unknown creation time omits dwell. Failed claims and failed delivery do not count
+as opened cards; failed or losing cancels do not count as cancellations.
+
+For the observed card-to-delivery funnel, use this Logs Insights query on the
+relevant bot log groups:
+
+```text
+fields audit.event, audit.send_nonce
+| filter ispresent(audit.send_nonce)
+| filter audit.event in ["send_confirm_opened", "dispatch_sent"]
+| stats count_distinct(audit.send_nonce) as cards by audit.event
+```
+
+Compare the two distinct-card counts, not raw dispatch rows: one card can send
+to many recipients. The bounded random `send_nonce` links the initial pipeline
+to its opened card. Add Recipients and legacy callers without that reference
+are excluded. High-cardinality distinct counts can be approximate. A time-window
+boundary can include only one side of a card's journey. Missing successful
+delivery also includes failures and in-progress cards, so this is an observed
+completion funnel, not proof of abandonment. Confirm the query against approved
+Sandbox traffic after rollout before using it in a production dashboard.
+
+TTL deletion does not emit `send_confirm_expired`: DynamoDB reaping is delayed
+and no stream hook is added here. Exact expiry-event counts are unavailable.
+Do not infer an exact expiry count from open-minus-delivered cards.

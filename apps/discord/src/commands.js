@@ -1920,6 +1920,8 @@ async function executeSendPipeline(interaction, {
   // callers and the picker happy path.
   recipientMode,
 }) {
+  const confirmationNonce = typeof sendNonce === 'string' && /^[a-f0-9]{16}$/.test(sendNonce)
+    ? sendNonce : undefined;
   // Shared cancel-edit for every entry gate. Fire-and-forget — the
   // throw is the load-bearing signal (test pins + logger.error in
   // handleCommand's outer catch). The outer catch will still append
@@ -2342,7 +2344,7 @@ async function executeSendPipeline(interaction, {
       });
       result = await sendDM(link.recipientId, dmPayload);
     } finally {
-      logger.audit(result.ok === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+      logger.audit(result.ok === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId, send_nonce: confirmationNonce });
     }
     await persistDispatchResult(sendId, link.recipientId, result);
     return { recipientId: link.recipientId, username: recipient?.username, sent: result.ok === true };
@@ -5984,7 +5986,13 @@ async function handleQurlSlashSend(interaction, params) {
     // bypass the outer catch entirely, leaving the user with a set
     // cooldown AND an orphan flow row from the supersedeOrCreate
     // we just landed.
-    return await interaction.editReply({ content, components: rows });
+    const reply = await interaction.editReply({ content, components: rows });
+    logger.audit(AUDIT_EVENTS.SEND_CONFIRM_OPENED, {
+      flow_id, user_id: interaction.user.id, send_nonce: sendNonce, resource_type: params.resourceType,
+      recipient_count: recipientIds.length, needs_picker: needsPicker, expires_in: expiresIn,
+      has_self_destruct: selfDestructSeconds !== null, has_personal_message: Boolean(personalMessage),
+    });
+    return reply;
   } catch (err) {
     // Unanticipated throw. Always clear cooldown — the user got no
     // visible response, so they must not be locked out for the full
@@ -7072,6 +7080,10 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
+
+  logger.audit(AUDIT_EVENTS.SEND_CONFIRM_PICKED, {
+    flow_id, user_id: interaction.user.id, recipient_count: valid.length,
+  });
 
   // The CONTENT renders the resolved recipient summary
   // ("**To:** N user(s)") with needsPicker:false; the ROWS keep the
@@ -8445,6 +8457,12 @@ async function handleConfirmCancelClick(interaction, { flow_id, row }) {
       flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
+  // Picker transitions renew expiry; created_at keeps the original dwell time.
+  const dwell = Number.isSafeInteger(row.created_at)
+    ? { dwell_seconds: Math.max(0, Math.floor(Date.now() / 1000) - row.created_at) } : {};
+  logger.audit(AUDIT_EVENTS.SEND_CONFIRM_CANCELLED, {
+    flow_id, user_id: interaction.user.id, ...dwell,
+  });
   clearCooldown(interaction.user.id);
   return interaction.editReply({
     content: 'Send cancelled.',

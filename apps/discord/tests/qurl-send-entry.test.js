@@ -954,3 +954,25 @@ test('slash-text @everyone shows the dropped-recipient warning before confirmati
   expect(payload.warningsBlock).toContain('Capped at 25 — 1 recipient(s) past the cap were dropped.');
   expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain(payload.warningsBlock);
 });
+
+describe('send-confirm open audit', () => {
+  test.each(['file', 'maps'])('%s records only card metadata after successful delivery', async kind => {
+    const int = makeInteraction({ options: kind === 'file'
+      ? { attachment: VALID_ATTACHMENT, 'personal-message': 'private message' }
+      : { _sub: 'map', location: 'https://maps.app.goo.gl/abcXYZ' } });
+    await (kind === 'file' ? handleQurlSend(int) : handleQurlMap(int));
+    expect(logger.audit).toHaveBeenCalledWith('send_confirm_opened', {
+      flow_id: expect.any(String), user_id: SENDER_ID, send_nonce: expect.stringMatching(/^[a-f0-9]{16}$/), resource_type: kind,
+      recipient_count: 0, needs_picker: true, expires_in: '24h',
+      has_self_destruct: false, has_personal_message: kind === 'file',
+    });
+    expect(logger.audit.mock.invocationCallOrder.at(-1)).toBeGreaterThan(int.editReply.mock.invocationCallOrder.at(-1));
+  });
+  test.each(['claim', 'delivery'])('%s failure does not count an opened card', async failure => {
+    const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
+    if (failure === 'claim') mockSupersedeOrCreate.mockResolvedValueOnce({ created: false });
+    else int.editReply.mockRejectedValueOnce(new Error('delivery failed'));
+    await handleQurlSend(int);
+    expect(logger.audit).not.toHaveBeenCalledWith('send_confirm_opened', expect.anything());
+  });
+});
