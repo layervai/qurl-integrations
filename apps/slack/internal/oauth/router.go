@@ -383,6 +383,7 @@ type WorkspaceStore interface {
 	APIKeyID(ctx context.Context, workspaceID string) (keyID string, err error)
 	APIKeyIdentity(ctx context.Context, workspaceID string) (keyID, qurlAccountID string, err error)
 	SetAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error
+	SetInitialAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error
 	DeleteAPIKey(ctx context.Context, workspaceID string) error
 }
 
