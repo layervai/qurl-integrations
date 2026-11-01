@@ -47,7 +47,7 @@ describe('handleConfirmUserSelect', () => {
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
-      payload: expect.objectContaining({ recipientIds: [u1] }),
+      payload: expect.objectContaining({ recipients: [expect.objectContaining({ id: u1 })] }),
       terminal: false,
       set_expires_at: expect.any(Number),
     }));
@@ -188,7 +188,7 @@ describe('handleConfirmUserSelect', () => {
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
-    expect(payload.recipientIds).toEqual([SENDER_ID]);
+    expect(payload.recipients.map(recipient => recipient.id)).toEqual([SENDER_ID]);
     expect(payload.selfIncluded).toBe(true);
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/bot/);
@@ -232,7 +232,7 @@ describe('handleConfirmUserSelect', () => {
     });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
-      payload: expect.objectContaining({ recipientIds: [u1, u2, u3] }),
+      payload: expect.objectContaining({ recipients: [u1, u2, u3].map(id => expect.objectContaining({ id })) }),
     }));
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/bot/);
@@ -294,10 +294,10 @@ describe('handleConfirmUserSelect', () => {
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({
-        recipientIds: expect.arrayContaining([u1, u2, u3]),
+        recipients: expect.arrayContaining([u1, u2, u3].map(id => expect.objectContaining({ id }))),
       }),
     }));
-    expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds.length).toBe(3);
+    expect(mockTransitionFlow.mock.calls[0][2].payload.recipients.map(recipient => recipient.id).length).toBe(3);
   });
 
   test('mentionable picker: @everyone role WITHOUT MENTION_EVERYONE → all-invalid branch surfaces gated warning', async () => {
@@ -335,7 +335,7 @@ describe('handleConfirmUserSelect', () => {
     int.roles = new Map([[everyoneId, { id: everyoneId, members: new Map() }]]);
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
-    const recipientIds = mockTransitionFlow.mock.calls[0][2].payload.recipientIds;
+    const recipientIds = mockTransitionFlow.mock.calls[0][2].payload.recipients.map(recipient => recipient.id);
     expect(recipientIds.sort()).toEqual([u2, u3].sort());
     expect(recipientIds).not.toContain(bot1);
   });
@@ -376,7 +376,7 @@ describe('handleConfirmUserSelect', () => {
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
-    expect(payload.recipientIds).toEqual([SENDER_ID]);
+    expect(payload.recipients.map(recipient => recipient.id)).toEqual([SENDER_ID]);
     expect(payload.selfIncluded).toBe(true);
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Send includes you/);
@@ -396,7 +396,7 @@ describe('handleConfirmUserSelect', () => {
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
-    expect(payload.recipientIds).toEqual([SENDER_ID]);
+    expect(payload.recipients.map(recipient => recipient.id)).toEqual([SENDER_ID]);
     expect(payload.selfIncluded).toBe(true);
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Send includes you/);
@@ -448,7 +448,7 @@ describe('handleConfirmUserSelect', () => {
     int.guild.memberCount = 10;
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
-      payload: expect.objectContaining({ recipientIds: [u1], warningsBlock: expect.stringContaining('Select individual users instead') }),
+      payload: expect.objectContaining({ recipients: [expect.objectContaining({ id: u1 })], warningsBlock: expect.stringContaining('Select individual users instead') }),
     }));
     expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Select individual users instead');
   });
@@ -480,7 +480,7 @@ describe('handleConfirmUserSelect', () => {
     const int = makeSelectInteraction({ roles: [['role-cold', { id: 'role-cold', mentionable: true }]] });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
-      payload: expect.objectContaining({ recipientIds: [u1], warningsBlock: expect.stringContaining('Could not confirm all members of the picked roles. Select individual users instead') }),
+      payload: expect.objectContaining({ recipients: [expect.objectContaining({ id: u1 })], warningsBlock: expect.stringContaining('Could not confirm all members of the picked roles. Select individual users instead') }),
     }));
     expect(int.editReply.mock.calls.at(-1)[0].content).toContain('Could not confirm all members of the picked roles. Select individual users instead');
   });
@@ -497,7 +497,7 @@ describe('handleConfirmUserSelect', () => {
     int.roles = new Map([[everyoneId, { id: everyoneId, members: new Map() }]]);
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
-    expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds).toEqual([u1.id]);
+    expect(mockTransitionFlow.mock.calls[0][2].payload.recipients.map(recipient => recipient.id)).toEqual([u1.id]);
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Member cache not yet ready/);
     expect(updated.content).toMatch(/expanded to 0 members/);
@@ -536,7 +536,7 @@ describe('handleConfirmUserSelect', () => {
     if (selection !== 'role') int.roles.set(int.guild.id, { id: int.guild.id });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
-    expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds).toEqual([u1.id]);
+    expect(mockTransitionFlow.mock.calls[0][2].payload.recipients.map(recipient => recipient.id)).toEqual([u1.id]);
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toContain('1 bot(s) filtered from this selection — skipped.');
     expect(updated.content).toMatch(/Sending file/);
@@ -662,7 +662,7 @@ describe('handleConfirmUserSelect', () => {
     int.guild.roles.cache.set('role-admin', { id: 'role-admin', name: 'admin-team', mentionable: false });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
-    expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds).toEqual([u1.id]);
+    expect(mockTransitionFlow.mock.calls[0][2].payload.recipients.map(recipient => recipient.id)).toEqual([u1.id]);
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/@admin-team/);
     expect(updated.content).toMatch(/Mention Everyone/);
@@ -703,7 +703,7 @@ describe('handleConfirmUserSelect', () => {
     });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
-    expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds).toEqual([u1.id]);
+    expect(mockTransitionFlow.mock.calls[0][2].payload.recipients.map(recipient => recipient.id)).toEqual([u1.id]);
   });
 
   test('role pick → members.list() pre-warm fires', async () => {

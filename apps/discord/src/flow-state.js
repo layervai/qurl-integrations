@@ -73,7 +73,7 @@ const { AUDIT_EVENTS } = require('./constants');
 const { parseFlowId } = require('./flow-id');
 const { randomUUID } = require('node:crypto');
 const { gzipSync, gunzipSync } = require('node:zlib');
-const { RECIPIENT_SET_FIELD, readFlowRecipients } = require('./flow-recipient-payload');
+const { RECIPIENT_SET_FIELD, readFlowRecipients, withFlowRecipients } = require('./flow-recipient-payload');
 
 // Module-load validations. Same fail-fast pattern as ddb-store.js
 // (DDB_TABLE_PREFIX + AWS_REGION). flow-state intentionally
@@ -197,6 +197,11 @@ async function writeRecipientChunks(items, signal) {
 async function encryptPayload(payload, expiresAt) {
   if (payload == null) return null;
   if (Object.hasOwn(payload, RECIPIENT_SET_FIELD)) throw new TypeError('Flow recipients must be hydrated before writing');
+  if (!Object.hasOwn(payload, 'recipients') && Array.isArray(payload.recipientIds)) {
+    payload = withFlowRecipients(payload, readFlowRecipients(payload).map(({ id, alias }) => ({
+      id, alias: typeof alias === 'string' ? alias : '',
+    })));
+  }
   if (Object.hasOwn(payload, 'recipients')) {
     readFlowRecipients(payload);
     payload = { ...payload };
@@ -714,7 +719,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   let nextPayload = payload;
   if (nextPayload === undefined && set_expires_at !== undefined && priorItem?.payload) {
     const priorPayload = decryptPayload(priorItem.payload);
-    if (priorPayload && Object.hasOwn(priorPayload, RECIPIENT_SET_FIELD)) {
+    if (priorPayload && (Object.hasOwn(priorPayload, RECIPIENT_SET_FIELD) || Array.isArray(priorPayload.recipientIds))) {
       nextPayload = await expandRecipientPayload(priorPayload);
     }
   }

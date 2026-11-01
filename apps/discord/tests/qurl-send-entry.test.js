@@ -102,13 +102,13 @@ describe('handleQurlSend — slash entry', () => {
     }));
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.resourceType).toBe('file');
-    expect(payload.recipientIds.sort()).toEqual([u1, u2]);
+    expect(payload.recipients.map(recipient => recipient.id).sort()).toEqual([u1, u2]);
     expect(payload.expiresIn).toBe('24h');
     expect(payload.selfDestructSeconds).toBeNull();
     expect(payload.personalMessage).toBeNull();
-    expect(payload.recipientAliases).toEqual(
-      expect.objectContaining({ [u1]: expect.any(String), [u2]: expect.any(String) })
-    );
+    expect(payload.recipients).toEqual(expect.arrayContaining([u1, u2].map(id => ({ id, alias: expect.any(String) }))));
+    expect(payload).not.toHaveProperty('recipientIds');
+    expect(payload).not.toHaveProperty('recipientAliases');
     expect(payload).toHaveProperty('warningsBlock');
     expect(int.editReply).toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
@@ -131,9 +131,7 @@ describe('handleQurlSend — slash entry', () => {
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.resourceType).toBe('maps');
-    expect(payload.recipientAliases).toEqual(
-      expect.objectContaining({ [u1]: expect.any(String) })
-    );
+    expect(payload.recipients).toEqual([{ id: u1, alias: expect.any(String) }]);
   });
 
   test('warm over-cap server explains disabled everyone button through the slash handler', async () => {
@@ -184,7 +182,7 @@ describe('handleQurlSend — slash entry', () => {
     expect(reply.content).not.toMatch(/No valid recipients/);
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.selfIncluded).toBe(true);
-    expect(payload.recipientIds).toEqual([SENDER_ID]);
+    expect(payload.recipients.map(recipient => recipient.id)).toEqual([SENDER_ID]);
   });
 
   test('DM context (no guild) suppresses the @everyone permission warning', async () => {
@@ -210,7 +208,7 @@ describe('handleQurlSend — slash entry', () => {
     const lastEdit = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(lastEdit.content).toMatch(/Mention Everyone\b/);
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.recipientIds).toEqual([aliceId]);
+    expect(payload.recipients.map(recipient => recipient.id)).toEqual([aliceId]);
   });
 
   test('text path: <@&roleId> for non-mentionable role WITHOUT MENTION_EVERYONE → warning with role name, no expansion', async () => {
@@ -229,7 +227,7 @@ describe('handleQurlSend — slash entry', () => {
     await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.recipientIds).toEqual([aliceId]);
+    expect(payload.recipients.map(recipient => recipient.id)).toEqual([aliceId]);
     const lastEdit = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(lastEdit.content).toMatch(/@admin-team/);
     expect(lastEdit.content).toMatch(/Mention Everyone/);
@@ -286,7 +284,7 @@ describe('handleQurlSend — slash entry', () => {
     await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.recipientIds.sort()).toEqual([aliceId, bobId].sort());
+    expect(payload.recipients.map(recipient => recipient.id).sort()).toEqual([aliceId, bobId].sort());
     const lastEdit = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(lastEdit.content).not.toMatch(/role\.mentionable/);
   });
@@ -304,7 +302,7 @@ describe('handleQurlSend — slash entry', () => {
     const lastEdit = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(lastEdit.content).not.toMatch(/Mention Everyone permission/);
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.recipientIds.sort()).toEqual([aliceId, bobId].sort());
+    expect(payload.recipients.map(recipient => recipient.id).sort()).toEqual([aliceId, bobId].sort());
   });
 
   test('all mentioned recipients hit transient lookup failure → retry copy, not "no valid recipients"', async () => {
@@ -333,7 +331,7 @@ describe('handleQurlSend — slash entry', () => {
     await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.recipientIds).toEqual([known]);
+    expect(payload.recipients.map(recipient => recipient.id)).toEqual([known]);
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/no longer in this server/);
   });
@@ -519,8 +517,8 @@ describe('handleQurlSend — slash entry', () => {
       await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('voice');
-      expect(payload.recipientIds.sort()).toEqual([u1, u2].sort());
-      expect(payload.recipientIds).not.toContain(SENDER_ID);
+      expect(payload.recipients.map(recipient => recipient.id).sort()).toEqual([u1, u2].sort());
+      expect(payload.recipients.map(recipient => recipient.id)).not.toContain(SENDER_ID);
       expect(payload.selfIncluded).toBe(false);
     });
 
@@ -532,8 +530,8 @@ describe('handleQurlSend — slash entry', () => {
       await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('voice');
-      expect(payload.recipientIds.sort()).toEqual([u1, u2].sort());
-      expect(payload.recipientIds).not.toContain(bot);
+      expect(payload.recipients.map(recipient => recipient.id).sort()).toEqual([u1, u2].sort());
+      expect(payload.recipients.map(recipient => recipient.id)).not.toContain(bot);
     });
 
     test('bots-only voice → picker fallback WITH bot-drop banner (not silent)', async () => {
@@ -544,7 +542,7 @@ describe('handleQurlSend — slash entry', () => {
       await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('picker');
-      expect(payload.recipientIds).toEqual([]);
+      expect(payload.recipients.map(recipient => recipient.id)).toEqual([]);
       expect(payload.warningsBlock).toMatch(/bot/i);
     });
 
@@ -553,7 +551,7 @@ describe('handleQurlSend — slash entry', () => {
       await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('picker');
-      expect(payload.recipientIds).toEqual([]);
+      expect(payload.recipients.map(recipient => recipient.id)).toEqual([]);
     });
 
     test('empty voice channel → falls back to picker-mode', async () => {
@@ -561,7 +559,7 @@ describe('handleQurlSend — slash entry', () => {
       await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('picker');
-      expect(payload.recipientIds).toEqual([]);
+      expect(payload.recipients.map(recipient => recipient.id)).toEqual([]);
     });
 
     test('over-cap voice → falls back to picker-mode WITH banner explaining why', async () => {
@@ -573,7 +571,7 @@ describe('handleQurlSend — slash entry', () => {
         await handleQurlSend(int);
         const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
         expect(payload.recipientMode).toBe('picker');
-        expect(payload.recipientIds).toEqual([]);
+        expect(payload.recipients.map(recipient => recipient.id)).toEqual([]);
         expect(payload.warningsBlock).toMatch(/Voice channel has 2 eligible recipients/);
         expect(payload.warningsBlock).toMatch(/max 1/);
       } finally {
@@ -598,7 +596,7 @@ describe('handleQurlSend — slash entry', () => {
       await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('picker');
-      expect(payload.recipientIds).toEqual([u1]);
+      expect(payload.recipients.map(recipient => recipient.id)).toEqual([u1]);
     });
 
     test('text `@everyone` in recipients → EVERYONE mode (picker hidden, no auto-fill)', async () => {
@@ -616,7 +614,7 @@ describe('handleQurlSend — slash entry', () => {
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('everyone');
       expect(payload.selfIncluded).toBe(true);
-      expect(payload.recipientIds.length).toBeGreaterThanOrEqual(2);
+      expect(payload.recipients.map(recipient => recipient.id).length).toBeGreaterThanOrEqual(2);
     });
 
     test('text `@everyone` with sender MISSING from members.cache post-prewarm → selfIncluded:false (documented divergence from button-click path)', async () => {
@@ -633,7 +631,7 @@ describe('handleQurlSend — slash entry', () => {
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('everyone');
       expect(payload.selfIncluded).toBe(false);
-      expect(payload.recipientIds).not.toContain(SENDER_ID);
+      expect(payload.recipients.map(recipient => recipient.id)).not.toContain(SENDER_ID);
     });
 
     test('text `@everyone` WITHOUT MENTION_EVERYONE → stays PICKER (parser denied expansion)', async () => {
@@ -1084,7 +1082,7 @@ test('slash-text @everyone shows the dropped-recipient warning before confirmati
   await handleQurlSend(interaction);
   expect(mockSupersedeOrCreate).toHaveBeenCalledTimes(1);
   const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-  expect(payload.recipientIds).toHaveLength(25);
+  expect(payload.recipients.map(recipient => recipient.id)).toHaveLength(25);
   expect(payload.warningsBlock).toContain('Capped at 25 — 1 recipient(s) past the cap were dropped.');
   expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain(payload.warningsBlock);
 });

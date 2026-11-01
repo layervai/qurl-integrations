@@ -37,6 +37,22 @@ async function main() {
     await client.send(new CreateTableCommand({ TableName: table, BillingMode: 'PAY_PER_REQUEST',
       KeySchema: [{ AttributeName: 'flow_id', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'flow_id', AttributeType: 'S' }] }));
     created = true;
+    // Writer phase: large legacy inputs become bounded canonical sets too.
+    const legacyID = '0:1#fixture-guild#fixture-channel#legacy-writer';
+    const legacyPayload = { recipientIds: recipients.map(recipient => recipient.id),
+      recipientAliases: Object.fromEntries(recipients.map(recipient => [recipient.id, recipient.alias])) };
+    await createFlow({ flow_id: legacyID, stage, payload: legacyPayload, expires_at: expires });
+    assert.deepEqual((await loadFlow(legacyID)).payload, { recipients });
+    // Model an old worker's inline row, then renew it through the new writer.
+    const oldPayload = { recipientIds: recipients.slice(0, 2).map(recipient => recipient.id),
+      recipientAliases: { [recipients[0].id]: 'Legacy Alice' }, sendNonce: 'legacy' };
+    await client.send(new PutCommand({ TableName: table, Item: { ...(await get(legacyID)), payload: encryptStrict(JSON.stringify(oldPayload)) } }));
+    const oldLegacy = await loadFlow(legacyID);
+    assert.equal((await transitionFlow(legacyID, oldLegacy.version, { stage_to: stage, terminal: false,
+      set_expires_at: expires + 180, expectedPayload: oldLegacy.payloadSnapshot })).result, 'success');
+    const converted = { recipients: [{ id: recipients[0].id, alias: 'Legacy Alice' }, { id: recipients[1].id, alias: '' }], sendNonce: 'legacy' };
+    assert.deepEqual((await loadFlow(legacyID)).payload, converted);
+    assert.deepEqual(JSON.parse(decrypt((await get(legacyID)).payload)), converted);
     assert.equal((await createFlow({ flow_id, stage, payload, expires_at: expires })).created, true);
     let parent = await get(flow_id);
     assert(Buffer.byteLength(JSON.stringify(parent)) < 400 * 1024);

@@ -59,19 +59,19 @@ describe('handleConfirmVoiceEveryone', () => {
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: expect.objectContaining({
-        recipientIds: expect.arrayContaining([u1, u2]),
+        recipients: expect.arrayContaining([u1, u2].map(id => expect.objectContaining({ id }))),
         voiceChannelId: VOICE_CH,
       }),
       terminal: false,
     }));
-    const ids = mockTransitionFlow.mock.calls[0][2].payload.recipientIds;
+    const ids = mockTransitionFlow.mock.calls[0][2].payload.recipients.map(recipient => recipient.id);
     expect(ids).toHaveLength(2);
   });
 
   test('happy path: bots are filtered out of the connected set', async () => {
     const int = makeVoiceInteraction({ members: [u1, bot1, u2], botIds: [bot1] });
     await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
-    const ids = mockTransitionFlow.mock.calls[0][2].payload.recipientIds;
+    const ids = mockTransitionFlow.mock.calls[0][2].payload.recipients.map(recipient => recipient.id);
     expect(ids.sort()).toEqual([u1, u2].sort());
     expect(ids).not.toContain(bot1);
   });
@@ -137,8 +137,8 @@ describe('handleConfirmVoiceEveryone', () => {
     const int = makeVoiceInteraction({ members: [SENDER_ID, u1] });
     await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
-    expect(payload.recipientIds).toEqual([u1]);
-    expect(payload.recipientIds).not.toContain(SENDER_ID);
+    expect(payload.recipients.map(recipient => recipient.id)).toEqual([u1]);
+    expect(payload.recipients.map(recipient => recipient.id)).not.toContain(SENDER_ID);
     expect(payload.selfIncluded).toBe(false);
   });
 
@@ -197,7 +197,7 @@ describe('handleConfirmVoiceEveryone', () => {
     await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
-    expect(payload.recipientIds.sort()).toEqual([u1, u2].sort());
+    expect(payload.recipients.map(recipient => recipient.id).sort()).toEqual([u1, u2].sort());
   });
 
   test('transitionFlow not_found → expired message (row TTL elapsed between click and write)', async () => {
