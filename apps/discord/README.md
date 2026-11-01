@@ -302,16 +302,11 @@ still don't show, confirm the bot was invited with the **Use Application
 Commands** permission.
 
 **Add Recipients failed after a storage timeout** — a final guarded transaction
-can commit while its response is lost. The handler sends no DMs and tries to
-revoke the qURLs just minted for the new recipients. Successful cleanup can
-leave `qurl_sends` rows that
-point at revoked children. Treat those as failed-delivery residue during
-status/revoke triage. The sender sees “Failed to save link records. Recipients
-were not messaged.” Find `recordQURLSendBatch failed in addRecipients; aborting
-before DMs` and the same send ID in cleanup logs. `Failed to clean up freshly
-minted Add Recipients qURL resources` or `Add Recipients cleanup still running
-at its wait budget` means revocation is unconfirmed. Use the send ID and available cleanup
-references to investigate which grants remain before manual cleanup.
+can commit while its response is lost. The bot sends no DMs and tries to revoke
+the qURLs just minted for the new recipients. Successful cleanup can leave
+`qurl_sends` rows pointing at revoked children; treat these as failed-delivery
+residue during status/revoke triage. If cleanup fails or exceeds its wait
+budget, revocation is unconfirmed. Check the grants before manual row cleanup.
 
 ## License
 

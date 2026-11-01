@@ -27,6 +27,7 @@ protected resources. Start with the guide for the task you want to complete:
 | Build or submit the Microsoft Edge extension | [Edge installation and release guide](apps/edge-extension/README.md) |
 | Develop or deploy the Microsoft Teams integration | [Teams integration source and deployment guide](apps/teams/README.md) |
 | Serve a private S3 static site through a connector | [Private S3 origin image](origins/s3-static-connector/README.md) |
+| Mint links from Cloudflare, Netlify, or Vercel | [Edge function templates](templates/README.md) |
 
 The CLI guide documents local publishing and sharing. Each integration guide
 lists its own setup requirements. Teams deployment is managed outside this

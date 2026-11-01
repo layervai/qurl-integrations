@@ -69,7 +69,7 @@ jobs:
             discord:
               # Source of truth for Discord-impacting paths on PR and main push events.
               - 'apps/discord/**'
-              # shared/ contains Go code; this Node app and its image do not consume it.
+              # shared/ is Go-only; shared-test.yml covers its Go consumers.
               - '.github/workflows/discord.yml'
 
   # Mirrored locally by `make check-discord`, so a contributor can run this gate
