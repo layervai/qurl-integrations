@@ -754,6 +754,51 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     expect(int.guild.members.list.mock.calls.filter(isPrewarmCall).length).toBeGreaterThan(0);
   });
 
+
+  test('HTTP-only successful walk is reused until the exact 60-second boundary', async () => {
+    let now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
+        guildMembers: { '500000000000000007': {} } });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      const run = async () => { sendCooldowns.clear(); await handleQurlSend(int); };
+      await run();
+      now += 59_999;
+      await run();
+      expect(int.guild.members.list.mock.calls.filter(isPrewarmCall)).toHaveLength(1);
+      now += 1;
+      await run();
+      expect(int.guild.members.list.mock.calls.filter(isPrewarmCall)).toHaveLength(2);
+      now -= 1;
+      await run();
+      expect(int.guild.members.list.mock.calls.filter(isPrewarmCall)).toHaveLength(3);
+    } finally { clock.mockRestore(); }
+  });
+
+  test.each(['cache replaced', 'cache shrunk', 'known count changed', 'failed walk', 'null cursor', 'safety cap'])(
+    'HTTP-only freshness is not reused after %s', async (scenario) => {
+      const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
+        guildMembers: { '500000000000000007': {} } });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      const list = int.guild.members.list;
+      if (scenario === 'failed walk') list.mockRejectedValueOnce(new Error('transient list failure'));
+      if (scenario === 'null cursor') list.mockResolvedValue({ size: 1000, lastKey: () => null });
+      if (scenario === 'safety cap') {
+        let cursor = 0;
+        list.mockImplementation(async () => ({ size: 1000, lastKey: () => String(++cursor) }));
+      }
+      await handleQurlSend(int);
+      const firstCalls = list.mock.calls.filter(isPrewarmCall).length;
+      if (scenario === 'cache replaced') int.guild.members.cache = new Map(int.guild.members.cache);
+      if (scenario === 'cache shrunk') int.guild.members.cache.clear();
+      if (scenario === 'known count changed') int.guild.memberCount = int.guild.members.cache.size + 1;
+      sendCooldowns.clear();
+      await handleQurlSend(int);
+      expect(list.mock.calls.filter(isPrewarmCall).length).toBeGreaterThan(firstCalls);
+    },
+  );
+
   test('concurrent invocations in the same guild share one in-flight fetch', async () => {
     const aliceId = '500000000000000010';
     let release;

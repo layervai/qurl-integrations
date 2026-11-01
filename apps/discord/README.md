@@ -637,3 +637,28 @@ In multi-tenant mode, `/qurl revoke` lists only sends recorded for the invoking 
 Keep one `QURL_SEND_MAX_RECIPIENTS` setting for explicit users, role expansion, voice/stage expansion, `@everyone`, and recipient pickers. Its source default remains 20,000, including the previously selected voice/stage size. A workspace that uses that default also gets the same ceiling for non-voice selections; `@everyone` still requires its existing permission. Operators who need a smaller blast radius must lower the shared setting, which also lowers the voice ceiling. No separate voice-only setting is introduced.
 
 The ceiling is a selection bound, not a delivery-rate or large-send capacity guarantee. Other permissions and operation limits still apply. The large-send warning is visibility, not permission or proof that a send can finish within its interaction window. Keep the existing main-adoption, quota, load and rollout gates; this policy decision does not authorize a live blast or remove those gates.
+
+### Member-cache prewarm
+
+HTTP-only workers reuse a completed member walk for 60 seconds. The cache object
+and its size must still match. Failed, capped or stalled walks do not establish
+freshness. An exact gateway member count keeps its existing completeness check.
+Membership can lag during this short window; each send still uses its normal
+recipient and grant checks. The worker does not retain a separate guild-ID map
+for completion timestamps.
+
+With `LOG_LEVEL=debug`, use this CloudWatch Logs Insights query on the Discord
+worker log group to compare completed walks with both hot-cache paths. It returns
+aggregate counts and cache sizes, without guild or user IDs:
+
+```text
+fields @timestamp, @message
+| filter @message like /members pre-warm (short-circuited|complete|failed|hit safety cap)/
+| parse @message /"cache_size":(?<cache_size>[0-9]+)/
+| stats count(*) as events, max(cache_size) as largest_cache by bin(5m)
+```
+
+Run the same filter with `short-circuited` or `complete` to compare their event
+counts. No matching rows with debug logging off means unavailable telemetry.
+The retired `/unlinked` command no longer uses an approximate-count threshold.
+Long walks still need incremental user progress feedback (issue #457).
