@@ -73,7 +73,7 @@ const { AUDIT_EVENTS } = require('./constants');
 const { parseFlowId } = require('./flow-id');
 const { randomUUID } = require('node:crypto');
 const { gzipSync, gunzipSync } = require('node:zlib');
-const { RECIPIENT_SET_FIELD, readFlowRecipients } = require('./flow-recipient-payload');
+const { RECIPIENT_SET_FIELD, readFlowRecipients, withFlowRecipients } = require('./flow-recipient-payload');
 
 // Module-load validations. Same fail-fast pattern as ddb-store.js
 // (DDB_TABLE_PREFIX + AWS_REGION). flow-state intentionally
@@ -197,6 +197,11 @@ async function writeRecipientChunks(items, signal) {
 async function encryptPayload(payload, expiresAt) {
   if (payload == null) return null;
   if (Object.hasOwn(payload, RECIPIENT_SET_FIELD)) throw new TypeError('Flow recipients must be hydrated before writing');
+  if (!Object.hasOwn(payload, 'recipients') && Array.isArray(payload.recipientIds)) {
+    payload = withFlowRecipients(payload, readFlowRecipients(payload).map(({ id, alias }) => ({
+      id, alias: typeof alias === 'string' ? alias : '',
+    })));
+  }
   if (Object.hasOwn(payload, 'recipients')) {
     readFlowRecipients(payload);
     payload = { ...payload };
@@ -663,11 +668,14 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   // row's lifetime) must NOT count as extended. The pre-read
   // projects `stage, expires_at` to give us the prior value.
   let extended = false;
+  const needsPriorPayload = (payload === undefined && set_expires_at !== undefined)
+    || (payload && (Object.hasOwn(payload, 'recipients') || Array.isArray(payload.recipientIds)));
   try {
     const got = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: { flow_id },
-      ProjectionExpression: (payload === undefined && set_expires_at !== undefined) || (payload && Object.hasOwn(payload, 'recipients')) ? 'stage, expires_at, payload' : 'stage, expires_at',
+      ProjectionExpression: needsPriorPayload ? 'stage, expires_at, payload, #v' : 'stage, expires_at',
+      ...(needsPriorPayload && { ExpressionAttributeNames: { '#v': 'version' } }),
       ConsistentRead: true,
     }));
     if (!got?.Item) {
@@ -711,10 +719,24 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
     throw err;
   }
 
+  // Avoid staging known-stale recipient sets; the final conditional write still fences races.
+  if (needsPriorPayload) {
+    const expired = Number.isSafeInteger(priorItem.expires_at) && priorItem.expires_at < nowEpochSeconds();
+    const stale = (Number.isInteger(priorItem.version) && priorItem.version !== expectedVersion)
+      || (expectedPayload !== undefined && priorItem.payload !== expectedPayload);
+    if (expired || stale) {
+      const result = expired ? 'not_found' : 'conflict';
+      logger.audit(AUDIT_EVENTS.FLOW_TRANSITION, {
+        flow_id, stage_from, stage_to, result, terminal: false, extended, version: expectedVersion,
+      });
+      return { result, version: null };
+    }
+  }
+
   let nextPayload = payload;
   if (nextPayload === undefined && set_expires_at !== undefined && priorItem?.payload) {
     const priorPayload = decryptPayload(priorItem.payload);
-    if (priorPayload && Object.hasOwn(priorPayload, RECIPIENT_SET_FIELD)) {
+    if (priorPayload && (Object.hasOwn(priorPayload, RECIPIENT_SET_FIELD) || Array.isArray(priorPayload.recipientIds))) {
       nextPayload = await expandRecipientPayload(priorPayload);
     }
   }

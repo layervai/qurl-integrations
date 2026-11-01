@@ -16,16 +16,10 @@ function readFlowRecipients(payload) {
 }
 
 function withFlowRecipients(payload, recipients) {
-  const next = { ...payload };
-  if (Object.hasOwn(payload, 'recipients')) {
-    readFlowRecipients({ recipients });
-    delete next.recipientIds;
-    delete next.recipientAliases;
-    next.recipients = recipients;
-  } else {
-    next.recipientIds = recipients.map(recipient => recipient.id);
-    next.recipientAliases = Object.fromEntries(recipients.map(recipient => [recipient.id, recipient.alias]));
-  }
+  readFlowRecipients({ recipients });
+  const next = { ...payload, recipients };
+  delete next.recipientIds;
+  delete next.recipientAliases;
   return next;
 }
 
