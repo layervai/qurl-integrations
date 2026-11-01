@@ -140,7 +140,7 @@ jobs:
           cache: true
 
       - name: Run govulncheck
-        run: go tool govulncheck ./...
+        run: go tool govulncheck ./apps/slack/... ./shared/...
 
   docker-check:
     name: slack / docker
