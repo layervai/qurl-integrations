@@ -2906,3 +2906,27 @@ describe('sender count availability', () => {
     expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(2);
   });
 });
+
+describe('credential reference migration authority', () => {
+  test('a changed legacy row leaves the migration closed', async () => {
+    const prior = { ...config };
+    Object.assign(config, { ENABLE_CREDENTIAL_LIFECYCLE: true, CREDENTIAL_CLEANUP_SCOPE: 'scope',
+      QURL_API_KEY: 'global', QURL_WEBHOOK_SECRET: 'global-secret', DISCORD_CLIENT_ID: 'bot' });
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(ScanCommand).resolves({ Items: [{ guild_id: 'guild', webhook_id: 'wh', webhook_owner_id: 'owner' }] });
+    ddbMock.on(GetCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).rejects(new Error('row changed'));
+    try {
+      await expect(store.migrateGuildWebhookReferences('scope', { allWritersAdopted: true })).rejects.toThrow('row changed');
+      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+      expect(ddbMock.commandCalls(PutCommand)[0].args[0].input.Item.cleanup_state).toBe('migrating');
+    } finally {
+      for (const key of Object.keys(config)) if (!(key in prior)) delete config[key];
+      Object.assign(config, prior);
+    }
+  });
+  test('migration cannot infer fleet adoption', async () => {
+    await expect(store.migrateGuildWebhookReferences('scope')).rejects.toThrow('Full fleet');
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+});

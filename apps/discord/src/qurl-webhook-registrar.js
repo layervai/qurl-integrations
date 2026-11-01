@@ -156,10 +156,11 @@ class QurlServiceError extends Error {
   }
 }
 
-async function callQurlService({ method, path, apiEndpoint, apiKey, body, timeoutMs = 10_000 }) {
+async function callQurlService({ method, path, apiEndpoint, apiKey, body, timeoutMs = 10_000, expectedStatus }) {
   const op = `${method} ${path}`;
   const opts = {
     method,
+    redirect: 'error',
     headers: { Authorization: `Bearer ${apiKey}` },
     signal: AbortSignal.timeout(timeoutMs),
   };
@@ -181,7 +182,7 @@ async function callQurlService({ method, path, apiEndpoint, apiKey, body, timeou
   const text = await resp.text();
   let parsed = text;
   try { parsed = text ? JSON.parse(text) : null; } catch { /* keep as text */ }
-  if (!resp.ok) throw new QurlServiceError(resp.status, parsed, op);
+  if (!resp.ok || (expectedStatus !== undefined && resp.status !== expectedStatus)) throw new QurlServiceError(resp.status, parsed, op);
   return parsed;
 }
 
@@ -286,20 +287,22 @@ const DELETE_OUTCOMES = Object.freeze({
   ALREADY_ABSENT: 'already-absent',
 });
 async function deleteSubscription({ apiEndpoint, apiKey, webhookId }) {
+  if (typeof webhookId !== 'string' || !webhookId) throw new Error('Webhook ID is required');
+  const path = `/v1/webhooks/${encodeURIComponent(webhookId)}`;
   try {
     await callQurlService({
       method: 'DELETE',
-      path: `/v1/webhooks/${webhookId}`,
+      path,
+      expectedStatus: 204,
       apiEndpoint,
       apiKey,
     });
     return DELETE_OUTCOMES.DELETED;
   } catch (err) {
-    // 404 = another replica deleted it concurrently. Treat as
-    // success — the goal state ("this duplicate is gone") is met —
-    // and signal the distinction so an observability caller can
-    // pick the right log message.
-    if (err.status === 404) return DELETE_OUTCOMES.ALREADY_ABSENT;
+    // A disabled feature or proxy 404 does not prove deletion.
+    if (err.status === 404 && err.body?.error?.code === 'not_found'
+        && err.body?.error?.detail === 'Webhook not found'
+        && err.body?.error?.instance === path) return DELETE_OUTCOMES.ALREADY_ABSENT;
     throw err;
   }
 }

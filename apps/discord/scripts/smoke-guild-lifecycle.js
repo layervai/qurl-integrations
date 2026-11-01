@@ -11,6 +11,10 @@ process.env.AWS_REGION ||= 'us-east-2';
 process.env.DDB_TABLE_PREFIX = `guild-lifecycle-smoke-${randomUUID()}-`;
 process.env.KEY_ENCRYPTION_KEY = randomBytes(32).toString('base64');
 process.env.ENABLE_CREDENTIAL_LIFECYCLE = 'true';
+process.env.CREDENTIAL_CLEANUP_SCOPE = 'migrated-local-fleet';
+process.env.DISCORD_CLIENT_ID = '123456789012345678';
+process.env.QURL_API_KEY = 'global-key';
+process.env.QURL_WEBHOOK_SECRET = 'global-secret';
 validateEnv({ endpoint: process.env.DDB_TEST_ENDPOINT, prefix: process.env.DDB_TABLE_PREFIX });
 delete process.env.AWS_PROFILE;
 delete process.env.AWS_DEFAULT_PROFILE;
@@ -156,6 +160,86 @@ async function main() {
       expectedApiKey: 'global-key', expectedDefaultWebhookSecret: 'global-secret' });
     assert.equal((await head('legacy-global-wh')).reference_count, 0);
     assert.equal((await head('legacy-global-wh')).system_reference, true);
+    const replayId = await store.enqueueGuildRemoval({ guildId: 'guild', joinedAt: joinC });
+    const replayJob = (await lifecycleRows()).find(row => row.job_id === replayId);
+    const replaySnapshot = await store.getGuildCleanupSnapshot('guild');
+    assert.equal(await store.restoreGuildInstallation(replayJob, replaySnapshot), true);
+    assert.equal(await store.getGuildApiKey('guild'), 'secret-c', 'Fresh membership proof can restore a stale removal marker');
+    assert.equal(await store.restoreGuildInstallation(replayJob, replaySnapshot), false, 'An old removal cannot clear a later marker');
+    // Claim fencing, crash recovery, retained capability and monotonic installation.
+    assert((await store.migrateGuildWebhookReferences('migrated-local-fleet', { allWritersAdopted: true })).registered >= 2);
+    const removalId = await store.enqueueGuildRemoval({ guildId: 'guild' });
+    const removal = (await lifecycleRows()).find(row => row.job_id === removalId);
+    await ddb.send(new UpdateCommand({ TableName: `${process.env.DDB_TABLE_PREFIX}credential-lifecycle`,
+      Key: { pk: removal.pk, sk: removal.sk }, UpdateExpression: 'SET due_at = :due', ExpressionAttributeValues: { ':due': 0 } }));
+    const claimed = await store.claimCredentialCleanup(removal.due_bucket, 1);
+    assert.equal(claimed.job_id, removalId);
+    assert.equal(await store.claimCredentialCleanup(removal.due_bucket, 1), null, 'Claim lease excludes other workers');
+    const oldSnapshot = await store.getGuildCleanupSnapshot('guild');
+    await store.setGuildApiKey('guild', 'secret-c-new', 'admin-c', 'oauth', {
+      ownerId: 'owner-c', expectedApiKey: 'secret-c', keyId: 'key-c-new', keyKind: 'dedicated', installationJoinedAt: joinC,
+    });
+    await assert.rejects(store.retireGuildCredential(claimed, oldSnapshot));
+    const freshSnapshot = await store.getGuildCleanupSnapshot('guild');
+    await store.noteGuildInstallation('guild', '2026-10-04T00:00:00.000000000Z');
+    const captured = await store.retireGuildCredential(claimed, freshSnapshot);
+    assert.equal(require('../src/utils/crypto').decrypt(captured.qurl_api_key), 'secret-c-new');
+    const tombstone = await store.getGuildCleanupSnapshot('guild');
+    assert.equal(tombstone.qurl_api_key, undefined);
+    assert.equal(tombstone.observed_installation_joined_at, '2026-10-04T00:00:00.000000000Z');
+    assert.equal(await store.finishCredentialCleanup(captured, 'retry', 'test_retry'), 'pending');
+    assert.equal((await lifecycleRows()).find(row => row.pk === captured.pk).qurl_api_key, captured.qurl_api_key);
+    await assert.rejects(store.finishCredentialCleanup(captured, 'complete', 'stale_lease'));
+    await ddb.send(new UpdateCommand({ TableName: `${process.env.DDB_TABLE_PREFIX}credential-lifecycle`,
+      Key: { pk: captured.pk, sk: captured.sk }, UpdateExpression: 'SET due_at = :due', ExpressionAttributeValues: { ':due': 0 } }));
+    const reclaimed = await store.claimCredentialCleanup(removal.due_bucket, 1);
+    assert.equal(reclaimed.attempts, 2);
+    assert.equal(await store.claimWebhookCleanup({ ...reclaimed, webhook_id: 'never-linked', webhook_owner_id: 'owner-c' }, 'local-fleet'), false);
+    await ddb.send(new (require('@aws-sdk/lib-dynamodb').PutCommand)({ TableName: `${process.env.DDB_TABLE_PREFIX}credential-lifecycle`,
+      Item: { pk: 'MIGRATION#WEBHOOK_REFERENCES', sk: 'local-fleet', cleanup_state: 'ready', bot_application_id: process.env.DISCORD_CLIENT_ID,
+        writer_region: process.env.AWS_REGION, table_prefix: process.env.DDB_TABLE_PREFIX, all_writers_adopted: true } }));
+    assert.equal(await store.claimWebhookCleanup({ ...reclaimed, webhook_id: 'migrated-wh', webhook_owner_id: 'owner-b' }, 'local-fleet'), 'referenced');
+    assert.equal(await store.claimWebhookCleanup({ ...reclaimed, webhook_id: 'global-wh', webhook_owner_id: 'owner-d' }, 'local-fleet'), 'referenced');
+    const webhookJob = { ...reclaimed, webhook_id: 'never-linked', webhook_owner_id: 'owner-c' };
+    assert.equal(await store.claimWebhookCleanup(webhookJob, 'local-fleet'), true);
+    await store.completeWebhookCleanup(webhookJob);
+    assert.equal(await store.claimWebhookCleanup(webhookJob, 'local-fleet'), 'deleted', 'Lost completion reply is recoverable');
+    assert.equal(await store.finishCredentialCleanup(reclaimed, 'complete', 'test_done'), 'complete');
+    assert.equal((await lifecycleRows()).find(row => row.pk === reclaimed.pk).qurl_api_key, undefined);
+    // Real HTTP transport plus real DynamoDB; only Discord membership is stubbed.
+    const requests = [];
+    const server = require('node:http').createServer((req, res) => {
+      requests.push(`${req.method} ${req.url}`);
+      assert.equal(req.headers.authorization, 'Bearer worker-key');
+      if (req.method === 'GET' && req.url === '/v1/me') {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ data: { owner_id: 'worker-owner', api_key: { key_id: 'worker-key-id', kind: 'dedicated' } } }));
+      } else if (req.method === 'DELETE' && ['/v1/webhooks/worker-wh', '/v1/me/api-key'].includes(req.url)) {
+        res.writeHead(204); res.end();
+      } else { res.writeHead(500); res.end(); }
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      require('../src/config').QURL_ENDPOINT = `http://127.0.0.1:${server.address().port}`;
+      const restPath = require.resolve('../src/discord-rest');
+      require.cache[restPath] = { id: restPath, filename: restPath, loaded: true,
+        exports: { getBotGuildInstallation: async () => ({ ok: false, status: 404, code: 10007 }) } };
+      await store.setGuildApiKey('worker', 'worker-key', 'admin', 'oauth', {
+        ownerId: 'worker-owner', expectedApiKey: null, keyId: 'worker-key-id', keyKind: 'dedicated', installationJoinedAt: joinB,
+      });
+      await store.setGuildWebhookSubscription('worker', { webhookId: 'worker-wh', webhookSecret: 'worker-secret', webhookOwnerId: 'worker-owner' });
+      const workerJobId = await store.enqueueGuildRemoval({ guildId: 'worker', joinedAt: joinB });
+      const pending = (await lifecycleRows()).find(row => row.job_id === workerJobId);
+      await ddb.send(new UpdateCommand({ TableName: `${process.env.DDB_TABLE_PREFIX}credential-lifecycle`,
+        Key: { pk: pending.pk, sk: pending.sk }, UpdateExpression: 'SET due_at = :due', ExpressionAttributeValues: { ':due': 0 } }));
+      const work = await store.claimCredentialCleanup(pending.due_bucket, 1);
+      assert.equal(work.job_id, workerJobId);
+      assert.equal(await require('../src/credential-cleanup').processJob(work), 'complete');
+      assert.deepEqual(requests, ['DELETE /v1/webhooks/worker-wh', 'DELETE /v1/me/api-key']);
+      assert.equal((await store.getGuildCleanupSnapshot('worker')).qurl_api_key, undefined);
+      assert.equal((await store.getGuildCleanupSnapshot('worker')).observed_installation_joined_at, joinB);
+      assert.equal((await lifecycleRows()).find(row => row.job_id === workerJobId).qurl_api_key, undefined);
+    } finally { await new Promise(resolve => server.close(resolve)); }
   } finally {
     try {
       for (const TableName of created.reverse()) await client.send(new DeleteTableCommand({ TableName }));

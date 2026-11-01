@@ -655,6 +655,8 @@ module.exports = {
   ENABLE_EVENT_SHIPPER: process.env.ENABLE_EVENT_SHIPPER === 'true',
   // Enable only with durable removal handling and the approved installation migration.
   ENABLE_CREDENTIAL_LIFECYCLE: process.env.ENABLE_CREDENTIAL_LIFECYCLE === 'true',
+  ENABLE_CREDENTIAL_CLEANUP_WORKER: process.env.ENABLE_CREDENTIAL_CLEANUP_WORKER === 'true',
+  CREDENTIAL_CLEANUP_SCOPE: (process.env.CREDENTIAL_CLEANUP_SCOPE ?? '').trim(),
   // Enable only after the short-lived probe table and alarm exist (#1383).
   ENABLE_DISPATCH_PROBE: process.env.ENABLE_DISPATCH_PROBE === 'true',
 

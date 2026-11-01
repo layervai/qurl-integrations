@@ -548,6 +548,7 @@ describe('setup wait and shutdown drain', () => {
       stopAcceptingGuildWebhookSubscriptions: () => { order.push('admission-stop'); links.stopAcceptingGuildWebhookSubscriptions(); },
       drainGuildWebhookSubscriptions: async () => { order.push('link-start'); await links.drainGuildWebhookSubscriptions(); order.push('link-end'); },
       dispatchProbe: { stop: () => order.push('probe-stop') },
+      credentialCleanup: { stop: async () => order.push('cleanup-stop') },
       gatewayHeartbeatTimer: null, activeGuildCountTimer: null,
       config: { ENABLE_GATEWAY_HOT_STANDBY: true, ENABLE_GATEWAY_RESUME: true },
       controlChannelServer: {}, connectionWatchdog: {}, gatewayLeader: {},
@@ -562,7 +563,7 @@ describe('setup wait and shutdown drain', () => {
     try {
       await jest.advanceTimersByTimeAsync(23000);
       await shutdown;
-      expect(order).toEqual(['admission-stop', 'probe-stop', 'http', 'intervals', 'consumer', 'publisher',
+      expect(order).toEqual(['admission-stop', 'probe-stop', 'cleanup-stop', 'http', 'intervals', 'consumer', 'publisher',
         ...(fatal ? [] : ['link-start', 'link-end']), 'control', 'seal', 'storage', `exit:${fatal ? 1 : 0}`]);
       expect(exit).toHaveBeenCalledTimes(1);
     } finally { finish(); await task; }

@@ -64,6 +64,7 @@ const REFRESH_FAIL_ESCALATE_AT = 3;
 // orphan-token-sweeper.js's pattern and so tests can import a fresh
 // copy via jest.isolateModules().
 const subscriptions = new Map();
+let mutationRevision = 0;
 let consecutiveFailures = 0;
 // Discovery-only failure counter. Tracked separately from
 // consecutiveFailures so a transient qurl-service 5xx during
@@ -166,6 +167,7 @@ function upsertGuild({ guildId, ownerId, webhookId, webhookSecret }) {
     entry.webhookId = webhookId;
   }
   entry.guildIds.add(guildId);
+  mutationRevision++;
   upsertsDuringScan.add(ownerId);
 }
 
@@ -209,7 +211,8 @@ function ensureDefaultOwnerCacheEntry(ownerId) {
 // command MUST call this synchronously after writing to DDB so the
 // registering replica's cache is immediately correct (mirror of
 // upsertGuild's sync-update pattern).
-function removeGuild({ guildId, ownerId }) {
+function removeGuild({ guildId, ownerId, expectedRevision }) {
+  if (expectedRevision !== undefined && expectedRevision !== mutationRevision) return;
   if (!ownerId) return;
   // Reject the default-key sentinel as a guildId — a caller-bug that
   // passed it would .delete() the sentinel from the default entry's
@@ -223,6 +226,8 @@ function removeGuild({ guildId, ownerId }) {
   }
   const entry = subscriptions.get(ownerId);
   if (!entry) return;
+  mutationRevision++;
+  upsertsDuringScan.add(ownerId);
   entry.guildIds.delete(guildId);
   if (entry.guildIds.size === 0 && ownerId !== defaultOwnerId) {
     subscriptions.delete(ownerId);
@@ -572,7 +577,7 @@ async function scanOnce() {
       liveSnapshot = new Map();
       for (const ownerId of upsertsDuringScan) {
         const entry = subscriptions.get(ownerId);
-        if (entry) liveSnapshot.set(ownerId, entry);
+        liveSnapshot.set(ownerId, entry ?? null);
       }
     }
     subscriptions.clear();
@@ -586,7 +591,8 @@ async function scanOnce() {
       // converged; preferring liveSnapshot closes the up-to-30s
       // window where the cache would otherwise hold a stale secret.
       for (const [ownerId, liveEntry] of liveSnapshot) {
-        subscriptions.set(ownerId, liveEntry);
+        if (liveEntry) subscriptions.set(ownerId, liveEntry);
+        else subscriptions.delete(ownerId);
       }
     }
 
@@ -710,6 +716,7 @@ module.exports = {
   upsertGuild,
   ensureDefaultOwnerCacheEntry,
   removeGuild,
+  getMutationRevision: () => mutationRevision,
   // Test-only: production callers should let the 30s ticker drive
   // refresh. Exposed because the test suite needs to drive scans
   // deterministically without waiting on real intervals.

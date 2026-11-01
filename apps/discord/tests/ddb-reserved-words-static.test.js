@@ -206,12 +206,14 @@ describe('DDB reserved-words static check — full src scan', () => {
     //   - ddb-store.js (setGuildApiKey: qurl_api_key/qurl_owner_id CAS; neither reserved)
     //   - ddb-store.js (webhook head SET/ADD, conditional head guard and composed row CAS;
     //     audited cleanup_state/reference_count/system_reference/webhook_* names; native DDB exercised)
+    //   - cleanup completion state/REMOVE fields, retirement generation/cipher CAS and retained-fact SET;
+    //     closed field names audited and exercised in native DynamoDB Local.
     // If this assertion fires, audit each newly-dynamic expression
     // against the reserved-words list manually + raise the ceiling.
     const dynamic = [];
     for (const f of files) {
       dynamic.push(...findViolations(f).filter(v => v.dynamic));
     }
-    expect(dynamic.length).toBeLessThan(12);
+    expect(dynamic.length).toBeLessThan(15);
   });
 });

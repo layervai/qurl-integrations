@@ -146,6 +146,17 @@ describe('webhook-subscriptions registry — concurrent upsert during scan', () 
     expect(subs.getSecretForOwner('usr_race')).toBe('sec_race');
   });
 
+  it('an in-flight scan cannot resurrect a removed owner', async () => {
+    subs.upsertGuild({ guildId: 'gone', ownerId: 'usr_gone', webhookId: 'wh', webhookSecret: 'secret' });
+    let resolveScan;
+    mockScan.mockImplementationOnce(() => new Promise(resolve => { resolveScan = resolve; }));
+    const scanPromise = subs.scanOnce();
+    subs.removeGuild({ guildId: 'gone', ownerId: 'usr_gone' });
+    resolveScan([{ guild_id: 'gone', webhook_owner_id: 'usr_gone', webhook_id: 'wh', webhook_secret: 'secret' }]);
+    await scanPromise;
+    expect(subs.getSecretForOwner('usr_gone')).toBeNull();
+  });
+
   it('scan supersedes a pre-scan upsert when DDB row is also present', async () => {
     subs.upsertGuild({
       guildId: 'g_pre', ownerId: 'usr_pre', webhookId: 'wh_pre', webhookSecret: 'sec_pre',
@@ -241,6 +252,14 @@ describe('webhook-subscriptions registry — synchronous local update API', () =
     });
     subs.removeGuild({ guildId: 'g1', ownerId: 'usr_solo' });
     expect(subs.getSecretForOwner('usr_solo')).toBeNull();
+  });
+
+  it('a cleanup snapshot cannot remove a newer setup from the cache', () => {
+    subs.upsertGuild({ guildId: 'g1', ownerId: 'owner', webhookId: 'old', webhookSecret: 'old-secret' });
+    const expectedRevision = subs.getMutationRevision();
+    subs.upsertGuild({ guildId: 'g1', ownerId: 'owner', webhookId: 'new', webhookSecret: 'new-secret' });
+    subs.removeGuild({ guildId: 'g1', ownerId: 'owner', expectedRevision });
+    expect(subs.getSecretForOwner('owner')).toBe('new-secret');
   });
 
   it('removeGuild keeps the entry when sibling guilds remain', () => {

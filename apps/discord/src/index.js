@@ -53,6 +53,7 @@ const eventPublisher = require('./event-publisher');
 const { createDispatchProbe, getRuntimeProbeStore } = require('./dispatch-probe');
 let dispatchProbe = null;
 const webhookSubscriptions = require('./webhook-subscriptions');
+const credentialCleanup = require('./credential-cleanup');
 const { drainGuildWebhookSubscriptions, stopAcceptingGuildWebhookSubscriptions } = require('./guild-webhook-link');
 const { LOG_KINDS } = require('./constants');
 
@@ -649,6 +650,7 @@ async function gracefulShutdownTeardown({
   awaitGatewayLeader = true,
 } = {}) {
   dispatchProbe?.stop();
+  const cleanupDrain = credentialCleanup.stop();
   // Wait for in-flight HTTP requests to drain — server.close() is async,
   // and process.exit() called immediately after would truncate an OAuth
   // callback mid-flight, leaving the admin's /qurl-admin setup without a
@@ -750,6 +752,7 @@ async function gracefulShutdownTeardown({
     // today but masks the underlying construction failure.
     await discordShutdown();
   }
+  await cleanupDrain;
   await db.close();
   logger.info('Shutdown complete');
 }
@@ -1098,6 +1101,7 @@ async function start() {
     // true, so a slow first-scan doesn't drop events — qurl-service
     // retries 503. Awaiting here would delay the HTTP listener
     // unnecessarily.
+    credentialCleanup.start();
     webhookSubscriptions.start().catch((err) => {
       logger.error('webhook-subscriptions registry initial scan crash', { error: err?.message });
     });
