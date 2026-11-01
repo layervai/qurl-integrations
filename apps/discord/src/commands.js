@@ -64,6 +64,7 @@ const { qurlApiErrorStatus } = require('./utils/qurl-errors');
 const { downloadAndUpload, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
 const { deleteFlow, loadFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
+const { warnFlowCorruptionOnce } = require('./flow-warning');
 const { linkGuildWebhookSubscriptionForSetup } = require('./guild-webhook-link');
 const {
   flowIdForInteraction,
@@ -5146,7 +5147,7 @@ function computeEveryoneDisplayCount(guild) {
 }
 
 function renderConfirmCardRows({
-  sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
+  flow_id, sendNonce, sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
   voiceChannelId, interaction, recipientIds, recipientMode,
 }) {
   const rows = [];
@@ -5191,8 +5192,10 @@ function renderConfirmCardRows({
     // row. The "No timer" fallback keeps the header sensible but the
     // content line still renders "self-destructs in N seconds" — log
     // so the asymmetric state surfaces in forensics.
-    logger.warn('renderConfirmCardRows: off-preset selfDestructSeconds in payload — falling back to No timer default', {
-      selfDestructSeconds: truncForLog(selfDestructSeconds),
+    warnFlowCorruptionOnce({ flow_id, sendNonce, kind: 'self_destruct', value: selfDestructSeconds }, () => {
+      logger.warn('renderConfirmCardRows: off-preset selfDestructSeconds in payload — falling back to No timer default', {
+        selfDestructSeconds: truncForLog(selfDestructSeconds),
+      });
     });
   }
   rows.push(new ActionRowBuilder().addComponents(
@@ -5223,8 +5226,10 @@ function renderConfirmCardRows({
   if (!hasExpiryMatch && !legacyExpiry && expiresIn != null) {
     // Log so corrupted rows surface in forensics rather than just
     // getting papered over by the 24h fallback.
-    logger.warn('renderConfirmCardRows: off-EXPIRY_LABELS expiresIn in payload — falling back to 24h default', {
-      expiresIn: truncForLog(expiresIn),
+    warnFlowCorruptionOnce({ flow_id, sendNonce, kind: 'expiry', value: expiresIn }, () => {
+      logger.warn('renderConfirmCardRows: off-EXPIRY_LABELS expiresIn in payload — falling back to 24h default', {
+        expiresIn: truncForLog(expiresIn),
+      });
     });
   }
   rows.push(new ActionRowBuilder().addComponents(
@@ -5924,6 +5929,7 @@ async function handleQurlSlashSend(interaction, params) {
       voiceChannelId,
     });
     const rows = renderConfirmCardRows({
+      flow_id, sendNonce,
       sendDisabled: needsPicker,  // Send stays disabled until UserSelectMenu fires
       expiresIn,
       selfDestructSeconds,
@@ -6861,6 +6867,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       voiceChannelId: payload.voiceChannelId,
     }),
     components: renderConfirmCardRows({
+      flow_id, sendNonce: payload.sendNonce,
       sendDisabled: true,
       expiresIn: payload.expiresIn,
       selfDestructSeconds: payload.selfDestructSeconds,
@@ -7058,6 +7065,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   return interaction.editReply({
     content,
     components: renderConfirmCardRows({
+      flow_id, sendNonce: payload.sendNonce,
       sendDisabled: false,
       expiresIn: payload.expiresIn,
       selfDestructSeconds: payload.selfDestructSeconds,
@@ -7134,7 +7142,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     // can tell the voice button vanished intentionally (vs. an
     // unexplained UI flicker). The button removal is automatic via
     // `voiceChannelId: null` flowing through to renderConfirmCardRows.
-    return rerenderConfirmCard(interaction, {
+    return rerenderConfirmCard(interaction, flow_id, {
       ...payload,
       voiceChannelId: null,
       warningsBlock: VOICE_REJECT_CONTEXT_LOST,
@@ -7182,6 +7190,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       voiceChannelId,
     }),
     components: renderConfirmCardRows({
+      flow_id, sendNonce: payload.sendNonce,
       sendDisabled: true,
       expiresIn: payload.expiresIn,
       selfDestructSeconds: payload.selfDestructSeconds,
@@ -7367,6 +7376,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   return interaction.editReply({
     content,
     components: renderConfirmCardRows({
+      flow_id, sendNonce: payload.sendNonce,
       sendDisabled: false,
       expiresIn: payload.expiresIn,
       selfDestructSeconds: payload.selfDestructSeconds,
@@ -7459,7 +7469,7 @@ async function handleConfirmPickManual(interaction, { flow_id, row }) {
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
-  return rerenderConfirmCard(interaction, newPayload);
+  return rerenderConfirmCard(interaction, flow_id, newPayload);
 }
 
 // @everyone button — workaround for Discord's MentionableSelectMenu
@@ -7508,6 +7518,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
       voiceChannelId: payload.voiceChannelId,
     }),
     components: renderConfirmCardRows({
+      flow_id, sendNonce: payload.sendNonce,
       sendDisabled: true,
       expiresIn: payload.expiresIn,
       selfDestructSeconds: payload.selfDestructSeconds,
@@ -7711,7 +7722,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
     cache_size: cache?.size, member_count: interaction.guild.memberCount,
   });
 
-  return rerenderConfirmCard(interaction, newPayload);
+  return rerenderConfirmCard(interaction, flow_id, newPayload);
 }
 
 // Shared re-render after a confirm-card menu/button updates the flow
@@ -7726,7 +7737,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
 // recipient set.
 // All four entry paths (picker, expiry, self-destruct, note modal)
 // defer-ack first, then re-render via editReply.
-async function rerenderConfirmCard(interaction, newPayload) {
+async function rerenderConfirmCard(interaction, flow_id, newPayload) {
   const recipientIds = Array.isArray(newPayload.recipientIds) ? newPayload.recipientIds : [];
   // Resolve each id through three layers, in priority order:
   //   1. members.cache — freshest data when populated
@@ -7794,6 +7805,7 @@ async function rerenderConfirmCard(interaction, newPayload) {
   return interaction.editReply({
     content,
     components: renderConfirmCardRows({
+      flow_id, sendNonce: newPayload.sendNonce,
       sendDisabled,
       expiresIn: newPayload.expiresIn,
       selfDestructSeconds: newPayload.selfDestructSeconds,
@@ -7821,7 +7833,7 @@ async function refreshConflictedConfirmCard(interaction, flow_id, row) {
   const nonce = row.payload?.sendNonce;
   if (fresh?.stage === SEND_STAGE_AWAITING_CONFIRM && typeof nonce === 'string'
     && /^[a-f0-9]{16}$/.test(nonce) && fresh.payload?.sendNonce === nonce) {
-    await rerenderConfirmCard(interaction, fresh.payload);
+    await rerenderConfirmCard(interaction, flow_id, fresh.payload);
     return interaction.followUp({
       content: 'Another change landed first. Try your change again if you still want it.',
       flags: MessageFlags.Ephemeral,
@@ -7863,7 +7875,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
   // modal) that's mid-flight. Still re-render the card so the user
   // gets visible feedback that their click registered.
   if (picked === payload.expiresIn) {
-    return rerenderConfirmCard(interaction, payload);
+    return rerenderConfirmCard(interaction, flow_id, payload);
   }
   const newPayload = { ...payload, expiresIn: picked };
   let result;
@@ -7892,7 +7904,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
-  return rerenderConfirmCard(interaction, newPayload);
+  return rerenderConfirmCard(interaction, flow_id, newPayload);
 }
 
 // Self-destruct StringSelectMenu → update payload.selfDestructSeconds.
@@ -7925,7 +7937,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
   // No-op re-pick (same value as current state) → skip the write +
   // version bump (see expiry handler for the full rationale).
   if (selfDestructSeconds === payload.selfDestructSeconds) {
-    return rerenderConfirmCard(interaction, payload);
+    return rerenderConfirmCard(interaction, flow_id, payload);
   }
   const newPayload = { ...payload, selfDestructSeconds };
   let result;
@@ -7954,7 +7966,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
-  return rerenderConfirmCard(interaction, newPayload);
+  return rerenderConfirmCard(interaction, flow_id, newPayload);
 }
 
 // Note button → opens a modal with the current personalMessage pre-
@@ -8052,7 +8064,7 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
   // fires so the user knows the submit registered.
   if (personalMessage === (payload.personalMessage ?? null)
       && personalMessageRaw === (payload.personalMessageRaw ?? null)) {
-    return rerenderConfirmCard(interaction, payload);
+    return rerenderConfirmCard(interaction, flow_id, payload);
   }
   const newPayload = { ...payload, personalMessage, personalMessageRaw };
   let result;
@@ -8084,7 +8096,7 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
-  return rerenderConfirmCard(interaction, newPayload);
+  return rerenderConfirmCard(interaction, flow_id, newPayload);
 }
 
 // Send button → fire executeSendPipeline. deleteFlow first as the

@@ -962,7 +962,43 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
   return { created: false, surviving };
 }
 
+// Claim a renderer warning without changing the flow version, payload or TTL.
+// Only an existing marker is seen; missing or changed rows remain retryable.
+// The ciphertext condition fences replacements after the strong read.
+async function claimFlowWarning(flow_id, sendNonce, kind, value) {
+  const fields = { expiry: 'expiresIn', self_destruct: 'selfDestructSeconds' };
+  if (typeof flow_id !== 'string' || !flow_id || typeof kind !== 'string' || !Object.hasOwn(fields, kind)) {
+    throw new TypeError('flow-state.claimFlowWarning: invalid flow or warning kind');
+  }
+  const marker = `corruption_warned_${kind}`;
+  const options = { abortSignal: AbortSignal.timeout(3000) };
+  const result = await ddb.send(new GetCommand({
+    TableName: TABLE_NAME, Key: { flow_id }, ConsistentRead: true,
+  }), options);
+  const item = result?.Item;
+  const now = nowEpochSeconds();
+  if (!item || !Number.isInteger(item.expires_at) || item.expires_at < now) return 'retry';
+  const payload = decryptPayload(item.payload);
+  if (!payload || payload.sendNonce !== sendNonce
+      || JSON.stringify(payload[fields[kind]]) !== JSON.stringify(value)) return 'retry';
+  if (Object.hasOwn(item, marker)) return 'seen';
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLE_NAME, Key: { flow_id },
+      UpdateExpression: 'SET #warning = :yes',
+      ConditionExpression: '#payload = :payload AND #expiry >= :now AND attribute_not_exists(#warning)',
+      ExpressionAttributeNames: { '#warning': marker, '#payload': 'payload', '#expiry': 'expires_at' },
+      ExpressionAttributeValues: { ':yes': true, ':payload': item.payload, ':now': now },
+    }), options);
+    return 'claimed';
+  } catch (err) {
+    if (isConditionalCheckFailed(err)) return 'retry';
+    throw err;
+  }
+}
+
 module.exports = {
+  claimFlowWarning,
   createFlow,
   loadFlow,
   transitionFlow,
@@ -970,7 +1006,7 @@ module.exports = {
   supersedeOrCreate,
   // Test-only escape hatch (the `__` prefix signals: not part of
   // the public API). Production code paths must go through the
-  // five named functions above. A future admin CLI or third
+  // lifecycle methods and warning claim above. A future admin CLI or third
   // consumer should get its own real export when it arrives — the
   // shape of "what does the API surface to non-test callers look
   // like" is easier to design once that caller actually exists.
