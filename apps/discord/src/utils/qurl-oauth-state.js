@@ -10,7 +10,7 @@
 //
 // Format:
 //   state = base64url(JSON({k: 'qurl-oauth', g: guildId, u: discordUserId,
-//                           n: nonce, e: expirySec})) + '.' + sigHex
+//                           n: nonce, a?: authStartedAt, e: expirySec})) + '.' + sigHex
 //   sig   = HMAC-SHA256(state secret, payload).hex
 //
 // 15-minute TTL. After Auth0 redirects back, the callback re-verifies the
@@ -22,16 +22,15 @@
 // session — there's no consumed-nonce store. The practical impact is
 // bounded because Auth0's `code` parameter is single-use and short-lived
 // (so the second presentation needs a fresh Auth0 grant), and a re-mint
-// on the bot side uses a separate retry key per Auth0 grant before the
-// guild_configs upsert. The signed state is NOT a one-shot token; it's an integrity envelope. PR copy and
+// on the bot side is conditional on the saved key and durable owner. The signed
+// state is NOT a one-shot token; it's an integrity envelope. PR copy and
 // route comments avoid the "single-use" framing for that reason.
 const crypto = require('crypto');
 const { createStateSigner } = require('./oauth-state');
 
 const STATE_KIND = 'qurl-oauth';
-// 15 minutes: every setup now forces a fresh sign-in (often a passwordless
-// email round-trip), and this clock starts at the Auth0 redirect, before Auth0
-// even issues its code. The browser-bound cookie still limits a leaked link.
+// The original setup link and OAuth completion share one 15-minute expiry.
+// Redirects record a fresh authentication time without extending that expiry.
 const STATE_TTL_SECONDS = 15 * 60;
 const ACCOUNT_FINGERPRINT_CONTEXT = 'qurl-account-fingerprint:v1';
 
@@ -102,8 +101,23 @@ function signQurlOAuthState(guildId, discordUserId) {
     n: nonce,
     e: expirySec,
   };
+  return signStatePayload(payload);
+}
+
+function signStatePayload(payload) {
   const encoded = b64urlEncode(JSON.stringify(payload));
   return `${encoded}.${qurlOAuthStateSigner.sign(encoded)}`;
+}
+
+function signQurlOAuthRedirectState(state) {
+  const verified = verifyQurlOAuthState(state);
+  if (!verified.ok) return null;
+  const { guildId, discordUserId, expirySec } = verified.payload;
+  return signStatePayload({
+    k: STATE_KIND, g: guildId, u: discordUserId,
+    n: crypto.randomBytes(16).toString('hex'),
+    a: Math.floor(Date.now() / 1000), e: expirySec,
+  });
 }
 
 // Returns { ok: true, payload } on success, or { ok: false, reason } on
@@ -144,12 +158,13 @@ function verifyQurlOAuthState(state) {
   if (Math.floor(Date.now() / 1000) >= payload.e) return { ok: false, reason: 'expired' };
   return {
     ok: true,
-    payload: { guildId: payload.g, discordUserId: payload.u, nonce: payload.n, expirySec: payload.e },
+    payload: { guildId: payload.g, discordUserId: payload.u, nonce: payload.n, expirySec: payload.e, authStartedAt: payload.a },
   };
 }
 
 module.exports = {
   signQurlOAuthState,
+  signQurlOAuthRedirectState,
   verifyQurlOAuthState,
   fingerprintQurlAccountSubject,
   qurlAccountFingerprintKeyEpoch,

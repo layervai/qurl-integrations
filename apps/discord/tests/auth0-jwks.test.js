@@ -8,6 +8,7 @@ jest.mock('jose', () => ({
 }));
 
 const EXPECTED_NONCE = 'a'.repeat(32);
+const EXPECTED_BINDING = { nonce: EXPECTED_NONCE, startedAt: Math.floor(Date.now() / 1000) - 60 };
 const jose = require('jose');
 const { verifyAuth0IdToken } = require('../src/utils/auth0-jwks');
 
@@ -23,36 +24,42 @@ describe('verifyAuth0IdToken', () => {
     expect(jose.jwtVerify).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, null, EXPECTED_NONCE, {}, { nonce: EXPECTED_NONCE, startedAt: -1 }])('requires a fresh binding object: %p', async binding => {
+    await expect(verifyAuth0IdToken('valid.jwt.sig', binding)).resolves.toEqual({ ok: false, reason: 'setup_identity_not_bound_or_fresh' });
+    expect(jose.jwtVerify).not.toHaveBeenCalled();
+  });
+
   it('returns ok with the payload when jose.jwtVerify resolves', async () => {
     jose.jwtVerify.mockResolvedValueOnce({
-      payload: { email: 'alice@layerv.test', sub: 'auth0|abc', nonce: EXPECTED_NONCE },
+      payload: { email: 'alice@layerv.test', sub: 'auth0|abc', nonce: EXPECTED_NONCE, auth_time: Math.floor(Date.now() / 1000) },
       protectedHeader: { alg: 'RS256' },
     });
-    const res = await verifyAuth0IdToken('valid.jwt.sig', EXPECTED_NONCE);
+    const res = await verifyAuth0IdToken('valid.jwt.sig', EXPECTED_BINDING);
     expect(res.ok).toBe(true);
     expect(res.payload.email).toBe('alice@layerv.test');
     const verifyArgs = jose.jwtVerify.mock.calls[0][2];
     expect(verifyArgs.issuer).toBe('https://layerv-test.auth0.com/');
     expect(verifyArgs.audience).toBe('test-client-id');
+    expect(verifyArgs.requiredClaims).toEqual(['sub', 'exp', 'iat', 'nonce', 'auth_time']);
   });
 
   it.each([undefined, null, 42, '', 'b'.repeat(32)])('rejects a verified token with a missing or mismatched nonce %s', async nonce => {
     jose.jwtVerify.mockResolvedValueOnce({ payload: { nonce, email: 'wrong@example.test' } });
-    expect(await verifyAuth0IdToken('valid.jwt.sig', EXPECTED_NONCE)).toEqual({ ok: false, reason: 'nonce_mismatch' });
+    expect(await verifyAuth0IdToken('valid.jwt.sig', EXPECTED_BINDING)).toEqual({ ok: false, reason: 'setup_identity_not_bound_or_fresh' });
   });
 
   it('returns coarse-grained reason on signature/issuer/audience/expiry failures', async () => {
     const err = new Error('signature verification failed');
     err.code = 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED';
     jose.jwtVerify.mockRejectedValueOnce(err);
-    const res = await verifyAuth0IdToken('tampered.jwt.sig', EXPECTED_NONCE);
+    const res = await verifyAuth0IdToken('tampered.jwt.sig', EXPECTED_BINDING);
     expect(res.ok).toBe(false);
     expect(res.reason).toBe('ERR_JWS_SIGNATURE_VERIFICATION_FAILED');
   });
 
   it('returns verify_failed when jose throws without a code', async () => {
     jose.jwtVerify.mockRejectedValueOnce(new Error('mystery'));
-    const res = await verifyAuth0IdToken('some.jwt.sig', EXPECTED_NONCE);
+    const res = await verifyAuth0IdToken('some.jwt.sig', EXPECTED_BINDING);
     expect(res).toEqual({ ok: false, reason: 'verify_failed' });
   });
 });
@@ -75,5 +82,29 @@ describe('verifyAuth0IdToken — Auth0 not configured', () => {
     } finally {
       process.env.AUTH0_DOMAIN = saved;
     }
+  });
+});
+
+describe('fresh setup identity', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const binding = { nonce: 'bound-nonce', startedAt: now - 60 };
+  it.each([
+    { nonce: 'another', sub: 'owner', auth_time: now },
+    { sub: 'owner', auth_time: now },
+    { nonce: 'bound-nonce', auth_time: now },
+    { nonce: 'bound-nonce', sub: 'owner' },
+    { nonce: 'bound-nonce', sub: 'owner', auth_time: now - 66 },
+    { nonce: 'bound-nonce', sub: 'owner', auth_time: now + 60 },
+    { nonce: 'bound-nonce', sub: 'owner', auth_time: String(now) },
+  ])('refuses a validly signed but unbound or stale identity: %p', async (payload) => {
+    jose.jwtVerify.mockResolvedValueOnce({ payload });
+    await expect(verifyAuth0IdToken('signed.jwt', binding)).resolves.toEqual({
+      ok: false, reason: 'setup_identity_not_bound_or_fresh',
+    });
+  });
+  it('accepts the nonce-bound identity authenticated since setup began', async () => {
+    const payload = { nonce: binding.nonce, sub: 'owner', auth_time: now };
+    jose.jwtVerify.mockResolvedValueOnce({ payload });
+    await expect(verifyAuth0IdToken('signed.jwt', binding)).resolves.toEqual({ ok: true, payload });
   });
 });

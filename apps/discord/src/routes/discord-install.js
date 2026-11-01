@@ -37,7 +37,7 @@ const crypto = require('crypto');
 const express = require('express');
 const config = require('../config');
 const logger = require('../logger');
-const { signQurlOAuthState, verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
+const { signQurlOAuthState, signQurlOAuthRedirectState, verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { createPkcePair } = require('../utils/oauth-pkce');
 const { buildAuth0AuthorizeUrl } = require('../utils/auth0-authorize-url');
 const { rateLimit, installRateLimit } = require('../utils/oauth-rate-limit');
@@ -319,7 +319,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    /qurl-admin setup slash-command state. Mint a qURL OAuth state and
   //    redirect to Auth0; the existing /oauth/qurl/callback will finish
   //    the flow (mint qurl-service API key, persist, DM admin).
-  const qurlState = signQurlOAuthState(guildId, discordUserId);
+  const qurlState = signQurlOAuthRedirectState(signQurlOAuthState(guildId, discordUserId));
   const qurlStateVerified = verifyQurlOAuthState(qurlState);
   if (!qurlStateVerified.ok) {
     logger.error('Generated qURL setup state failed verification', { reason: qurlStateVerified.reason });

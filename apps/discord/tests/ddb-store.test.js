@@ -81,11 +81,145 @@ afterAll(async () => {
 });
 
 describe('guild configs', () => {
-  test('setGuildApiKey: encrypts apiKey before write, preserves configured_at on re-key', async () => {
+  test('owner-bound key writes compare the exact saved ciphertext', async () => {
+    const ciphertext = mockCiphertext('saved-key');
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: ciphertext } });
+    ddbMock.on(TransactWriteCommand).resolves({});
+    await store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'auth0|owner', expectedApiKey: 'saved-key',
+    });
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
+    const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+    const input = transaction.TransactItems[0].Update;
+    const job = transaction.TransactItems[1].Put.Item;
+    expect(job.qurl_api_key).toBe(ciphertext);
+    expect(job.qurl_key_kind).toBe('unknown');
+    expect(job.cleanup_state).toBe('pending');
+    expect(job).not.toHaveProperty('expires_at');
+    expect(transaction.ClientRequestToken).toBe(job.job_id);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(input.ConditionExpression).toContain('qurl_owner_id = :owner');
+    expect(input.ConditionExpression).toContain('qurl_api_key = :prior');
+    expect(input.ExpressionAttributeValues[':prior']).toBe(ciphertext);
+    expect(input.ExpressionAttributeValues[':owner']).toBe('auth0|owner');
+  });
+
+  test('replacement preserves encrypted webhook facts and minted key provenance atomically', async () => {
+    const prior = { qurl_api_key: mockCiphertext('old-key'), qurl_key_id: 'old-id',
+      qurl_key_kind: 'dedicated', qurl_owner_id: 'owner', qurl_generation: 'prior-generation',
+      webhook_id: 'wh-old', webhook_owner_id: 'owner', webhook_secret: mockCiphertext('old-secret') };
+    ddbMock.on(GetCommand).resolves({ Item: prior });
+    ddbMock.on(TransactWriteCommand).resolves({});
+    await store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'owner', expectedApiKey: 'old-key', keyId: 'new-id', keyKind: 'dedicated',
+    });
+    const { TransactItems } = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+    expect(TransactItems[1].Put.Item).toMatchObject(prior);
+    expect(TransactItems[1].Put.Item.qurl_api_key).not.toContain('old-key');
+    expect(TransactItems[0].Update.ExpressionAttributeValues).toMatchObject({
+      ':keyId': 'new-id', ':keyKind': 'dedicated', ':prior_webhook_secret': prior.webhook_secret,
+    });
+    expect(TransactItems[0].Update.ConditionExpression).toContain('webhook_secret = :prior_webhook_secret');
+  });
+
+  test('job-write failure cannot fall back to overwriting the saved key', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: mockCiphertext('old-key') } });
+    ddbMock.on(TransactWriteCommand).rejects(new Error('storage unavailable'));
+    await expect(store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'owner', expectedApiKey: 'old-key',
+    })).rejects.toMatchObject({ code: 'GUILD_SETUP_UNCONFIRMED' });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('concurrent relink cancellation asks setup to start again', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: mockCiphertext('old-key') } });
+    ddbMock.on(TransactWriteCommand).rejects({ name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }] });
+    await expect(store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'owner', expectedApiKey: 'old-key',
+    })).rejects.toMatchObject({ code: 'GUILD_SETUP_CHANGED' });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test.each([
+    { keyKind: 'dedicated' }, { keyKind: 'dedicated', keyId: 'bad id' },
+    { keyKind: 'unexpected' },
+  ])('rejects untrusted dedicated-key metadata %j', async (metadata) => {
+    ddbMock.on(GetCommand).resolves({});
+    await expect(store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'owner', expectedApiKey: null, ...metadata,
+    })).rejects.toThrow();
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  test('pasting the same dedicated key retains its mint provenance without a cleanup job', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: mockCiphertext('same-key'),
+      qurl_key_id: 'minted-id', qurl_key_kind: 'dedicated', qurl_owner_id: 'owner' } });
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('g', 'same-key', 'admin', 'paste', {
+      ownerId: 'owner', expectedApiKey: 'same-key',
+    });
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues)
+      .toMatchObject({ ':keyId': 'minted-id', ':keyKind': 'dedicated' });
+  });
+
+  test('a lost transaction reply is accepted only after reading back its exact generation', async () => {
+    let written;
+    ddbMock.on(GetCommand).callsFake(() => ({ Item: written
+      ? { qurl_api_key: written[':k'], qurl_generation: written[':generation'] }
+      : { qurl_api_key: mockCiphertext('old-key') } }));
+    ddbMock.on(TransactWriteCommand).callsFake(input => {
+      written = input.TransactItems[0].Update.ExpressionAttributeValues;
+      throw new Error('reply lost after commit');
+    });
+    await expect(store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'owner', expectedApiKey: 'old-key',
+    })).resolves.toBeUndefined();
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(2);
+    expect(ddbMock.commandCalls(GetCommand)[1].args[0].input.ConsistentRead).toBe(true);
+  });
+
+  test.each(['generation', 'ciphertext'])('a different saved %s cannot confirm a lost write reply', async (mismatch) => {
+    let written;
+    ddbMock.on(GetCommand).callsFake(() => ({ Item: written
+      ? { qurl_api_key: mismatch === 'ciphertext' ? mockCiphertext('other-key') : written[':k'],
+        qurl_generation: mismatch === 'generation' ? 'other-generation' : written[':generation'] }
+      : { qurl_api_key: mockCiphertext('old-key') } }));
+    ddbMock.on(TransactWriteCommand).callsFake(input => {
+      written = input.TransactItems[0].Update.ExpressionAttributeValues;
+      throw new Error('reply lost');
+    });
+    await expect(store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'owner', expectedApiKey: 'old-key',
+    })).rejects.toMatchObject({ code: 'GUILD_SETUP_UNCONFIRMED' });
+  });
+
+  test('missing encryption cannot persist a new credential or cleanup job', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: mockCiphertext('old-key') } });
+    mockEncryptStrict.mockImplementationOnce(() => { throw new Error('Encryption key is missing'); });
+    await expect(store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'owner', expectedApiKey: 'old-key',
+    })).rejects.toThrow('Encryption key is missing');
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  test('a changed key snapshot fails before the update', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: mockCiphertext('changed-key') } });
+    await expect(store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'auth0|owner', expectedApiKey: 'saved-key',
+    })).rejects.toMatchObject({ code: 'GUILD_SETUP_CHANGED' });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('setGuildApiKey: unbound first setup encrypts the key and preserves the timestamp expression', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'configurer');
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.Key).toEqual({ guild_id: 'g-1' });
+    expect(input.ConditionExpression).toBe('attribute_not_exists(qurl_api_key) AND attribute_not_exists(qurl_owner_id)');
     expect(input.ExpressionAttributeValues[':k']).toMatch(/^enc:v1:/);
     expect(input.ExpressionAttributeValues[':k']).not.toContain('plain-key');
     expect(input.ExpressionAttributeValues[':b']).toBe('configurer');
@@ -259,7 +393,7 @@ describe('guild configs', () => {
 
   test('setGuildApiKey: does not audit when the write rejects', async () => {
     ddbMock.on(UpdateCommand).rejects(new Error('ddb down'));
-    await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin')).rejects.toThrow('ddb down');
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'new-admin')).rejects.toMatchObject({ code: 'GUILD_SETUP_UNCONFIRMED' });
     expect(logger.audit.mock.calls.map(([event]) => event))
       .not.toContain(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED);
   });

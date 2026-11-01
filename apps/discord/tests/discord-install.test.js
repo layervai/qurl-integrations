@@ -31,6 +31,7 @@ jest.mock('../src/discord', () => ({
 
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
+  getGuildConfigWithApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
   getPendingLink: jest.fn(),
   consumePendingLink: jest.fn(),
@@ -41,6 +42,10 @@ jest.mock('../src/commands', () => ({
   handleCommand: jest.fn(),
   commands: [],
   registerCommands: jest.fn(),
+}));
+
+jest.mock('../src/utils/auth0-jwks', () => ({
+  verifyAuth0IdToken: jest.fn().mockResolvedValue({ ok: true, payload: { sub: 'auth0|abc' } }),
 }));
 
 const request = require('supertest');
@@ -824,12 +829,13 @@ describe('Discord install callback', () => {
       expect(sessionCookieValue).not.toBeNull();
       expect(pkceCookieValue).not.toBeNull();
       const stateFromRedirect = new URL(stage2.headers.location).searchParams.get('state');
+      expect(new URL(stage2.headers.location).searchParams.get('nonce')).toBe(verifyQurlOAuthState(stateFromRedirect).payload.nonce);
       expect(sessionCookieValue).toBe(stateFromRedirect);
 
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 201,

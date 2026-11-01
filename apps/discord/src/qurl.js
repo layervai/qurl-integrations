@@ -228,7 +228,8 @@ async function getIdentity(apiKey, guildId) {
     // TODO(upstream-contract): mirrors qurl-service's GET /v1/me envelope.
     const identity = body?.data;
     const key = identity?.api_key;
-    if (!key || typeof key !== 'object' || Array.isArray(key)) {
+    if (typeof identity?.owner_id !== 'string' || !identity.owner_id.trim()
+        || !key || typeof key !== 'object' || Array.isArray(key)) {
       throw new Error('qURL identity response had an unexpected shape');
     }
     // A 200 already proves the service accepted the key. Display fields are
