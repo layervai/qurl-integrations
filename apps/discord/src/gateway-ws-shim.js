@@ -734,6 +734,7 @@ function createGatewayWsShim({
           return;
         }
         wsConnected = false;
+        store.rewindToDurableCheckpoint?.();
         // A new WS session must earn a fresh positive signal. Retaining the
         // previous session's ACK would briefly report healthy after RESUMED
         // even if the replacement connection never completes a heartbeat.

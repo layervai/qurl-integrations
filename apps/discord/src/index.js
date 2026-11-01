@@ -428,6 +428,7 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME) {
     tableName: `${ddbTablePrefix}gateway-session`,
     shardId: config.SHARD_ID,
     logger,
+    beforePersist: config.ENABLE_EVENT_SHIPPER ? eventPublisher.waitForPublishes : undefined,
   });
   gatewayShim = createGatewayWsShim({
     token: config.DISCORD_TOKEN,
@@ -1160,7 +1161,7 @@ async function start() {
   // would otherwise drop at debug (defense-in-depth in publish()).
   // Same shutdown-race guard as the consumer above.
   if (isGateway && config.ENABLE_EVENT_SHIPPER && !isShuttingDown) {
-    eventPublisher.start();
+    eventPublisher.start({ onFailure: config.ENABLE_GATEWAY_RESUME ? gatewayFatalShutdown : undefined });
   }
 
   // TODO(upstream-contract): #875 retains view-update resources until all deployed old producers are gone.

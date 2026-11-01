@@ -131,6 +131,42 @@ const GATEWAY_OP_DISPATCH = 0;
 let running = false;
 let sqsClient = null;
 const inFlightSends = new Set();
+let deliveryFailed = false;
+let failureHandler;
+
+function markDeliveryFailed() {
+  const firstFailure = !deliveryFailed;
+  deliveryFailed = true;
+  if (!firstFailure || !failureHandler) return;
+  try {
+    Promise.resolve(failureHandler()).catch(() => {
+      logger.error('Event publisher: delivery failure shutdown rejected');
+    });
+  } catch {
+    logger.error('Event publisher: delivery failure shutdown threw');
+  }
+}
+
+async function waitForPublishes() {
+  // TODO(upstream-contract): @discordjs/ws emits Dispatch immediately after its
+  // synchronous session update. Let that dispatch register its send before saving.
+  await new Promise(setImmediate);
+  if (deliveryFailed) throw new Error('Gateway dispatch publication is unconfirmed');
+  let timer;
+  try {
+    await Promise.race([
+      Promise.all([...inFlightSends]),
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('Gateway dispatch publication is pending')), DRAIN_DEADLINE_MS);
+      }),
+    ]);
+    if (deliveryFailed) throw new Error('Gateway dispatch publication is unconfirmed');
+  } catch {
+    throw new Error('Gateway dispatch publication is unconfirmed');
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // Drain deadline mirrors event-consumer.js. Resolved via
 // config.QURL_BOT_DRAIN_DEADLINE_MS — same env var, same range,
@@ -194,6 +230,7 @@ function publishPacket(packet, probeOrigin) {
   // race doesn't flood. `running` is also flipped false by stop()
   // so dispatches that arrive during graceful shutdown drop here.
   if (!running) {
+    deliveryFailed = true;
     logger.debug('Event publisher: dispatch received before start() / after stop(), dropping', {
       eventType: packet.t,
     });
@@ -235,6 +272,7 @@ function publishPacket(packet, probeOrigin) {
     });
     sendPromise = sqsClient.send(cmd);
   } catch (err) {
+    markDeliveryFailed();
     logger.error('Event publisher: SendMessage threw synchronously (interaction lost)', {
       kind: LOG_KINDS.UNHANDLED_REJECTION,
       error: err?.message || String(err),
@@ -254,6 +292,7 @@ function publishPacket(packet, probeOrigin) {
   sendPromise.finally(() => {
     inFlightSends.delete(sendPromise);
   }).catch((err) => {
+    markDeliveryFailed();
     logger.error('Event publisher: SendMessage failed (interaction lost)', {
       kind: LOG_KINDS.UNHANDLED_REJECTION,
       error: err?.message || String(err),
@@ -269,7 +308,7 @@ function publishPacket(packet, probeOrigin) {
  * visible). Start before either Gateway connection so the raw listener
  * or shim dispatch hook has a live sqsClient for its first frame.
  */
-function start() {
+function start({ onFailure } = {}) {
   if (running) {
     logger.warn('Event publisher: start() called while already running — no-op');
     return;
@@ -284,6 +323,10 @@ function start() {
   if (!config.QURL_BOT_EVENTS_QUEUE_URL) {
     throw new Error('Event publisher: QURL_BOT_EVENTS_QUEUE_URL is not set');
   }
+  if (onFailure !== undefined && typeof onFailure !== 'function') {
+    throw new Error('Event publisher: onFailure must be a function');
+  }
+  failureHandler = onFailure;
   if (!sqsClient) {
     sqsClient = createSqsClient('event publisher');
   }
@@ -359,6 +402,8 @@ function _resetStateForTest() {
   running = false;
   sqsClient = null;
   inFlightSends.clear();
+  deliveryFailed = false;
+  failureHandler = undefined;
   DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 }
 
@@ -367,6 +412,7 @@ module.exports = {
   stop,
   publish,
   publishDispatchProbe,
+  waitForPublishes,
   _test: {
     _setSqsClientForTest,
     _resetStateForTest,
