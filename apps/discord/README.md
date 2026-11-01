@@ -142,6 +142,10 @@ that use `Failed to revoke QURL`, `missing resource identity`, or the partial-mi
 token identity`, and `resource_ref`. The load-test warning now says
 `carried no usable resource identifier`.
 
+Saved queries for `Failed to prepare QURL links` must use
+`Failed to prepare qURL links` after this source is deployed. API names,
+environment variables, headers, and storage method names keep their exact spelling.
+
 Each mint request allows 65 seconds for the connector’s 55-second deadline
 and response transport. Only the connector’s `request_admission_rejected` 429
 with `success: false` and an empty `links` array is retried, up to five times,

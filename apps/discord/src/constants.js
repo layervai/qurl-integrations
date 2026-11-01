@@ -20,9 +20,9 @@ const RESOURCE_TYPES = {
 };
 
 // Trust signals surfaced on the per-recipient DM embed (sender provenance
-// + "is this real?" verify path). The destination domain in the footer
-// mirrors the host of the minted qURL — keep in lockstep with whatever
-// host qurl-service returns from POST /v1/qurls. The landing URL is the
+// + "is this real?" verify path). DESTINATION_DOMAIN is the footer fallback
+// for embeds without a minted link. Linked embeds
+// derive their destination host from the link. The landing URL is the
 // public brand page first-time recipients can hit to verify qURL is a
 // real service before clicking Step Through.
 //
@@ -32,16 +32,6 @@ const RESOURCE_TYPES = {
 // real?", not "is this tenant real?"; routing through the canonical
 // brand page is the correct trust signal regardless of which host
 // served the link.
-//
-// TODO(branded-domain) — tracked: layervai/qurl-integrations#383
-// DESTINATION_DOMAIN is a brand-default literal. qurl-service already
-// supports a `branded_domain` concept (tenant-custom hosts on minted
-// links — see qurl-service api.gen.go). Discord doesn't consume that
-// field today, but the moment it does, the footer "opens qurl.link"
-// becomes factually wrong while Step Through opens e.g.
-// `door.acme.com`. When qurl-integrations starts honoring
-// branded_domain in the minted-link response, derive the footer text
-// from link.qurlLink's host rather than this literal.
 const TRUST = {
   LANDING_URL: 'https://layerv.ai/qurl/',
   DESTINATION_DOMAIN: 'qurl.link',
@@ -66,7 +56,8 @@ const ROLE_COLORS = {
 const TIMEOUTS = {
   BUTTON_INTERACTION: 60000,  // 1 minute
   DEFER_REPLY: 3000,          // 3 seconds
-  QURL_REVOKE_WINDOW: 900000, // 15 minutes - button stays active, /qurl revoke works forever
+  // TODO(upstream-contract): Discord tokens last 15m; collectors subtract age and close headroom.
+  QURL_REVOKE_WINDOW: 900000, // /qurl revoke remains available after this token expires
 };
 
 // Limits

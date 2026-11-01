@@ -444,6 +444,16 @@ describe('buildDeliveryPayload — author row provenance', () => {
 });
 
 describe('buildDeliveryPayload — footer + trust button', () => {
+  it.each([
+    ['https://door.acme.com/#at_secret', 'door.acme.com'],
+    ['https://QURL.SITE/path?key=secret#token', 'qurl.site'],
+    ['https://bücher.example/path', 'xn--bcher-kva.example'],
+    [`https://door.acme.com/#qv2t1.${'A'.repeat(600)}`, 'door.acme.com'],
+  ])('names the actual destination host for %s', (qurlLink, host) => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', qurlLink });
+    expect(capturedEmbeds[0]._footer).toEqual({ text: `opens ${host}` });
+  });
+
   it('sets a footer naming the destination domain', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik' });
     expect(capturedEmbeds[0]._footer).toEqual({ text: 'opens qurl.link' });

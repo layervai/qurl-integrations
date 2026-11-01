@@ -761,13 +761,13 @@ function editSenderCounterInBackground({
         return { status: 'no-state' };
       }
 
-      // 3. TERMINAL CHECK FIRST. A revoked / window-closed / otherwise
-      //    frozen confirmation must NOT be resurrected by a late view
+      // 3. FAST-PATH-OFF CHECK FIRST. A revoked / window-closed / otherwise
+      //    disarmed token display must NOT be edited by a late view
       //    edit — checked before anything else so we never even read the
       //    send items for a dead display.
-      if (state.terminal) {
-        logger.debug('qURL webhook sender-counter: skip — terminal', { qurl_id: qurlId, send_id: sendId });
-        return { status: 'terminal' };
+      if (state.fastPathOff) {
+        logger.debug('qURL webhook sender-counter: skip — fast path off', { qurl_id: qurlId, send_id: sendId });
+        return { status: 'fast_path_off' };
       }
 
       // 4. ABSENT-GUARD. No token / app id / base means this send predates
@@ -913,9 +913,9 @@ function editSenderCounterInBackground({
         cacheSenderCounterRenderState(sendId, latestState);
         state = latestState;
         renderStateCached = false;
-        if (state.terminal) {
-          logger.debug('qURL webhook sender-counter: skip — terminal', { qurl_id: qurlId, send_id: sendId });
-          return { status: 'terminal' };
+        if (state.fastPathOff) {
+          logger.debug('qURL webhook sender-counter: skip — fast path off', { qurl_id: qurlId, send_id: sendId });
+          return { status: 'fast_path_off' };
         }
         if (!state.interactionToken || !state.interactionAppId || typeof state.baseMsg !== 'string') {
           logger.debug('qURL webhook sender-counter: skip — render state absent/partial (legacy or pre-TTL)', { qurl_id: qurlId, send_id: sendId });
@@ -1118,11 +1118,7 @@ router.post('/qurl', async (req, res) => {
   // int case in one check. Also blocks Number(null)===0 from slipping
   // through, which would otherwise cost a DDB write per such event.
   // Strict positive integer — qurl.accessed events always carry
-  // access_count >= 1 by contract. Reject 0 here (vs accepting 0 +
-  // writing to DDB + publisher dropping at SQS layer) to avoid the
-  // asymmetric log pair where the webhook returns "recorded" and the
-  // view-update-publisher then warns "invalid accessCount" on the
-  // same event. One source of truth at the wire boundary.
+  // access_count >= 1 by contract. Reject zero before recording a view.
   if (!Number.isSafeInteger(data.access_count) || data.access_count <= 0) {
     logger.warn('qURL webhook access_count not a positive integer', { qurl_id: data.qurl_id, access_count: data.access_count });
     return res.status(200).json({ status: 'invalid-payload' });
@@ -1151,7 +1147,6 @@ router.post('/qurl', async (req, res) => {
     // already-decided 200 — the polling backstop in monitorLinkStatus
     // re-renders anything this edit misses.
     //
-    // Keep the old SQS view-update path off; #875 removes that dead wiring.
     if (dbResult === 'recorded') {
       editSenderCounterInBackground({ qurlId: data.qurl_id, firstView });
     }

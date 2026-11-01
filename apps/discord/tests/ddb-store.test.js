@@ -1555,7 +1555,10 @@ describe('qurl sends', () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'sender', attachment_url: encryptedUrl, personal_message: 'hi' },
     });
-    const result = await store.getSendConfig('s1', 'sender');
+    const controller = new AbortController();
+    const result = await store.getSendConfig('s1', 'sender', { signal: controller.signal });
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
+    expect(ddbMock.commandCalls(GetCommand)[0].args[1]).toEqual({ abortSignal: controller.signal });
     expect(result.attachment_url).toBe('https://cdn.example/attachment');
   });
 
@@ -1568,6 +1571,7 @@ describe('qurl sends', () => {
       },
     });
     const result = await store.getSendConfig('s1', 'sender');
+    expect(ddbMock.commandCalls(GetCommand)[0].args[1]).toBeUndefined();
     expect(result).not.toHaveProperty('interaction_token');
     expect(JSON.stringify(result)).not.toContain('tok-LIVE-bearer-cred');
     expect(result.expires_in).toBe('24h');
@@ -1635,7 +1639,7 @@ describe('qurl sends', () => {
       expectedCount: 5, lastRenderedCount: 2,
       viewedCount: null,
       lastRenderedAt: 0,
-      baseMsg: undefined, qurlIds: [], terminal: false,
+      baseMsg: undefined, qurlIds: [], fastPathOff: false,
     });
   });
 
@@ -1652,21 +1656,35 @@ describe('qurl sends', () => {
   test.each([
     ['revoked_at', true, { revoked_at: 'when' }],
     ['revoking_at', false, { revoking_at: 'when' }],
-  ])('getSendRenderState: %s yields terminal=%s', async (_field, terminal, revocationState) => {
+  ])('getSendRenderState: %s yields fastPathOff=%s', async (_field, fastPathOff, revocationState) => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', ...revocationState, confirm_qurl_ids: ['q_a', 'q_b'] },
     });
     const viaRevoke = await store.getSendRenderState('s1');
-    expect(viaRevoke.terminal).toBe(terminal);
+    expect(viaRevoke.fastPathOff).toBe(fastPathOff);
     expect(viaRevoke.qurlIds).toEqual(['q_a', 'q_b']);
     expect(viaRevoke.expectedCount).toBe(0);
     expect(viaRevoke.lastRenderedCount).toBe(0);
 
     ddbMock.reset();
     ddbMock.on(GetCommand).resolves({ Item: { send_id: 's2', confirm_terminal: true } });
-    const viaTerminalFlag = await store.getSendRenderState('s2');
-    expect(viaTerminalFlag.terminal).toBe(true);
-    expect(viaTerminalFlag.qurlIds).toEqual([]); // absent → [] not undefined
+    const viaLegacyFlag = await store.getSendRenderState('s2');
+    expect(viaLegacyFlag.fastPathOff).toBe(true);
+    expect(viaLegacyFlag.qurlIds).toEqual([]); // absent → [] not undefined
+  });
+
+  test.each([
+    [{ confirm_fast_path_off: true }, true],
+    [{ confirm_terminal: true }, true],
+    [{ confirm_fast_path_off: true, confirm_terminal: false }, true],
+    [{ confirm_fast_path_off: false, confirm_terminal: true }, true],
+    [{ confirm_fast_path_off: true, confirm_terminal: true }, true],
+    [{ confirm_fast_path_off: false, confirm_terminal: false }, false],
+    [{ confirm_fast_path_off: 'true', confirm_terminal: 'true' }, false],
+    [{}, false],
+  ])('getSendRenderState: new and legacy fast-path flags %j → %s', async (flags, expected) => {
+    ddbMock.on(GetCommand).resolves({ Item: { send_id: 's1', ...flags } });
+    expect((await store.getSendRenderState('s1')).fastPathOff).toBe(expected);
   });
 
   test('getSendRenderState: returns null on missing row / empty sendId', async () => {
@@ -1881,11 +1899,11 @@ describe('qurl sends', () => {
     await expect(store.tryClaimRenderAttempt('', Date.now())).resolves.toBe(false);
   });
 
-  test('markConfirmTerminal: idempotent SET confirm_terminal = true, no condition', async () => {
+  test('markConfirmFastPathOff: idempotent new flag plus legacy compatibility write, no condition', async () => {
     ddbMock.on(UpdateCommand).resolves({});
-    await store.markConfirmTerminal('s1');
+    await store.markConfirmFastPathOff('s1');
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    expect(input.UpdateExpression).toMatch(/SET confirm_terminal = :t/);
+    expect(input.UpdateExpression).toBe('SET confirm_fast_path_off = :t, confirm_terminal = :t');
     expect(input.ExpressionAttributeValues[':t']).toBe(true);
     expect(input.ConditionExpression).toBeUndefined(); // sticky kill-switch, no guard
   });
@@ -1974,7 +1992,7 @@ describe('qurl sends', () => {
 
   test('getSendConfig: ownership check — returns undefined for wrong sender', async () => {
     ddbMock.on(GetCommand).resolves({
-      Item: { send_id: 's1', sender_discord_id: 'owner', personal_message: 'secret' },
+      Item: { send_id: 's1', sender_discord_id: 'owner', personal_message: 'secret', revoked_at: '2026-10-31T00:00:00Z' },
     });
     const result = await store.getSendConfig('s1', 'attacker');
     expect(result).toBeUndefined();

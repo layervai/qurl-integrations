@@ -1157,12 +1157,7 @@ async function start() {
     eventPublisher.start();
   }
 
-  // TODO(upstream-contract): the infrastructure repository still emits and
-  // provisions the retired view-update queue. No app producer remains; remove
-  // its variables, queue, and IAM there, then delete this compatibility log.
-  if (process.env.ENABLE_VIEW_UPDATE_PUSH === 'true' && isHttp && !isShuttingDown) {
-    logger.info('ENABLE_VIEW_UPDATE_PUSH is retired; using the webhook fast path and polling fallback');
-  }
+  // TODO(upstream-contract): #875 retains view-update resources until all deployed old producers are gone.
 
   // Resume uses the shim's persisted Discord session. The legacy path keeps
   // discord.js as the WebSocket owner. HTTP-only replicas open no gateway.
