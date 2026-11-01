@@ -50,11 +50,11 @@ async function run() {
     assert.equal(new Set(writes.map(command => command.input.Item.writer_id)).size, 3);
     const result = await client.send(new GetCommand({ TableName: tableName, Key: { instance_id: 'same-fixture-id' }, ConsistentRead: true }));
     assert.equal(result.Item.writer_id, writes[5].input.Item.writer_id);
-    console.log('PASS actual ALL_OLD: six producer writes, no producer reads, two collision events, no stopped-predecessor event.');
   } finally {
     try { if (created) await client.send(new DeleteTableCommand({ TableName: tableName })); }
     finally { client.destroy(); }
   }
+  process.stdout.write('PASS actual ALL_OLD: six producer writes, no producer reads, two collision events, no stopped-predecessor event.\n');
 }
 
 run().catch(error => { console.error(error.message); process.exitCode = 1; });
