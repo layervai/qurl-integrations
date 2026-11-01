@@ -204,8 +204,10 @@ successful content test green. This does not recover keys from earlier runs.
 
 ### URL-target one-use browser check (Sandbox only)
 
-With that verified ownership and native-cleanup configuration, run only
-`tests/url-target-one-time.test.ts` with `--reporters=default`. This test needs
+The suite can join a normally authorized Sandbox live run with that verified
+ownership and native-cleanup configuration. For an isolated check, select only
+`tests/url-target-one-time.test.ts` and use `--reporters=default` to avoid the
+wider suite's bot reporter. This test needs
 the Sandbox API key, not bot/channel credentials, and sends no bot messages.
 Without the native-cleanup flag the optional suite skips. With it enabled,
 missing configuration or a non-Sandbox API fails before fixture creation.

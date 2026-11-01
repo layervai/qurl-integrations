@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { chromium } from 'playwright';
 import { trackedQurlResources } from '../helpers/cleanup';
 import { checkOwnershipConfig } from '../helpers/tunnelView';
-import { getLinkStatus } from '../helpers/qurl-api';
+import { getLinkStatus, StatusCheckError } from '../helpers/qurl-api';
+import { fetchWithTransientRetry } from '../helpers/http';
 import { resolveUrlTargetViaQurlLink } from '../helpers/urlTargetView';
 
 const api = 'https://api.layerv.xyz/v1/qurls';
@@ -66,9 +67,10 @@ suite('URL-target one-use', () => {
       if (!created.ok || typeof resource_id !== 'string' || typeof qurl_id !== 'string') {
         throw new Error('URL-target fixture identity was not confirmed; retain the mint intent');
       }
-      const readback = await fetch(`${api}/${encodeURIComponent(qurl_id)}`, {
+      // TODO(upstream-contract): qurl-service exposes target_url and qurls[] in this owner readback.
+      const readback = await fetchWithTransientRetry(`${api}/${encodeURIComponent(qurl_id)}`, {
         headers: { Authorization: `Bearer ${process.env.QURL_API_KEY}` }, signal: AbortSignal.timeout(10_000), redirect: 'error',
-      });
+      }, { maxAttempts: 2, maxRetryAfterMs: 1000 });
       const canonical = await readback.json().catch(() => null);
       const resource = canonical?.data ?? canonical;
       journal({ event: 'owned_url_target_binding_response', nonce, http_status: readback.status });
@@ -101,8 +103,8 @@ suite('URL-target one-use', () => {
         expect(status.use_count).toBe(1);
         journal({ event: 'owned_url_target_one_use_status', resource_id, qurl_id, use_count: status.use_count });
       } catch (error) {
-        if (!(error instanceof Error) || error.name !== 'StatusCheckError' ||
-            !('status' in error) || error.status !== 404) throw error;
+        // TODO(upstream-contract): #1233 terminal preview retention; a missing summary is not HTTP 404.
+        if (!(error instanceof StatusCheckError) || error.status !== 404) throw error;
         journal({ event: 'owned_url_target_one_use_status', resource_id, qurl_id, http_status: 404 });
       }
     } finally { await browser.close(); }

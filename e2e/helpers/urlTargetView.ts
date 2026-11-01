@@ -4,6 +4,7 @@ import { recordAdmissionAttempt, type ViewViaQurlLinkOptions } from './tunnelVie
 import { observeBrowserCleanup, nativeCleanupDisposition } from './nativeBrowserCleanup';
 
 /** Observed Sandbox URL targets bootstrap a q- origin, then serve its root. */
+// TODO(upstream-contract): NHP bootstrap owns this Sandbox q- hostname/root shape.
 export function isUrlTargetNavigation(value: string): boolean {
   try {
     const url = new URL(value);
@@ -25,6 +26,7 @@ export async function resolveUrlTargetViaQurlLink(
   const cleanup = await observeBrowserCleanup(page, link);
   if (!cleanup) throw new Error('URL-target test requires authenticated native cleanup');
   let served = false;
+  let completed = false;
   try {
     // Register before navigation and settle rejection even if goto fails first.
     const response = page.waitForResponse((candidate) =>
@@ -34,20 +36,26 @@ export async function resolveUrlTargetViaQurlLink(
       await page.goto(link, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     } catch { throw new Error('URL-target navigation failed'); }
     const target = await response;
-    if (target?.status() === 200 && target.headers()['content-type']?.includes('application/json')) {
+    // TODO(upstream-contract): Sandbox API /health returns only {"status":"healthy"}.
+    if (target?.status() === 200 && target.headers()['content-type']?.split(';', 1)[0].trim().toLowerCase() === 'application/json') {
       const body: unknown = await target.json().catch(() => null);
       served = body !== null && typeof body === 'object' && !Array.isArray(body) &&
         Object.keys(body).length === 1 && (body as { status?: unknown }).status === 'healthy';
     }
+    completed = true;
     return served;
   } finally {
-    const result = await cleanup();
-    const state = nativeCleanupDisposition(result, expectedNoAdmission, served);
-    appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS!, JSON.stringify({
-      event: 'owned_native_cleanup', ...ownership, observed_at: new Date().toISOString(),
-      ...result, state,
-    }) + '\n', { mode: 0o600, flush: true });
-    if (expectedNoAdmission && served) throw new Error('URL-target one-time link served a second time');
-    if (state === 'unresolved') throw new Error('URL-target content, native cleanup, or denial evidence is unresolved');
+    try {
+      const result = await cleanup();
+      const state = nativeCleanupDisposition(result, expectedNoAdmission, served);
+      appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS!, JSON.stringify({
+        event: 'owned_native_cleanup', ...ownership, observed_at: new Date().toISOString(),
+        ...result, state,
+      }) + '\n', { mode: 0o600, flush: true });
+      if (expectedNoAdmission && served) throw new Error('URL-target one-time link served a second time');
+      if (state === 'unresolved') throw new Error('URL-target content, native cleanup, or denial evidence is unresolved');
+    } catch (error) {
+      if (completed) throw error;
+    }
   }
 }

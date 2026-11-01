@@ -26,7 +26,7 @@ global.fetch = async (url, options) => {
   }
   if (url === 'https://api.layerv.xyz/v1/qurls/q_fixture' && !options.method) {
     reads++;
-    if (mode === 'readback') return new Response('not JSON', { status: 502 });
+    if (mode === 'readback' || mode === 'retry-readback' && reads === 1) return new Response('not JSON', { status: 502 });
     return Response.json({ resource_id: 'owned-fixture', target_url: target,
       qurls: [{ qurl_id: 'q_fixture', one_time_use: true, max_sessions: 1, use_count: 0, status: 'active' }] });
   }
