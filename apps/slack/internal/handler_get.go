@@ -555,7 +555,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 		return getResult{}, &userError{msg: rateLimitMessage(retry, "")}
 	}
 
-	input := client.CreateInput{
+	input := &client.CreateInput{
 		// One-time use is the only mode for `/qurl get` — there is no
 		// `once` flag; every minted link burns on first redemption.
 		OneTimeUse: true,

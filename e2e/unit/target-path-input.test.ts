@@ -7,7 +7,7 @@ const snapshot = (path: string) => JSON.parse(readFileSync(path, 'utf8').trimEnd
 const bearer = 'private-bearer-canary';
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
-for (const mode of ['success', 'unknown-post', 'wrong-path', 'wrong-parent', 'delete-fails', 'not-revoked', 'wrong-type', 'bad-rejection', 'oversize-response', 'missing-child']) {
+for (const mode of ['success', 'unknown-post', 'wrong-path', 'wrong-parent', 'delete-fails', 'not-revoked', 'wrong-type', 'bad-rejection', 'oversize-response', 'missing-child', 'parent-id-mismatch', 'parent-inactive']) {
  test(mode, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'target-path-input-'));
   const path = join(dir, 'journal.json');
@@ -43,9 +43,11 @@ for (const mode of ['success', 'unknown-post', 'wrong-path', 'wrong-parent', 'de
    }
    const id = url.pathname.split('/').pop()!;
    const entry = children.get(id);
+   const parentRead = url.pathname.startsWith('/v1/resources/');
    if (entry) expect(snapshot(path).children.some((child: { id: string }) => child.id === id)).toBe(true);
-   return json({ data: { resource_id: mode === 'wrong-parent' && entry ? 'wrong-parent' : parent,
-    status: 'active', type: mode === 'wrong-type' ? 'url' : 'tunnel',
+   return json({ data: { resource_id: (mode === 'wrong-parent' && entry) || (mode === 'parent-id-mismatch' && parentRead) ? 'wrong-parent' : parent,
+    status: mode === 'parent-inactive' && parentRead ? 'revoked' : 'active',
+    ...(parentRead ? { type: mode === 'wrong-type' ? 'url' : 'tunnel' } : {}),
     qurls: entry ? [{ qurl_id: id, use_count: 0, status: entry.revoked && mode !== 'not-revoked' ? 'revoked' : 'active',
      ...(entry.path === undefined ? {} : { target_path: mode === 'wrong-path' ? '/wrong' : entry.path }) }] : [] } });
   });
@@ -64,7 +66,7 @@ for (const mode of ['success', 'unknown-post', 'wrong-path', 'wrong-parent', 'de
    } else {
     expect(saved.status).toBe('FAILED_CLOSED_RETAIN_LOCK_AND_JOURNAL');
     if (mode === 'unknown-post') { expect(posts).toBe(1); expect(saved.pending).not.toBeNull(); }
-    if (mode === 'wrong-type') expect(posts).toBe(0);
+    if (['wrong-type', 'parent-id-mismatch', 'parent-inactive'].includes(mode)) expect(posts).toBe(0);
    }
   } finally { fetchMock.mockRestore(); rmSync(dir, { recursive: true, force: true }); }
  });

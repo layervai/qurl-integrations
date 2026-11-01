@@ -1188,3 +1188,15 @@ budgeted at 800 ms and the `views.open` call at 1500 ms, leaving headroom inside
 Slack's roughly three-second trigger window. Sustained p99 latency near either
 budget should be treated as an operator action item before customers see setup
 window-expired prompts.
+
+## Async pool pressure
+
+A rejected worker in the shared async pool emits `event=async_pool_rejected`. This includes slash commands, interactions, and conversation turns; each caller chooses its reply. Use this CloudWatch Logs Insights query to find sustained pressure without matching on message text:
+
+```text
+filter event = "async_pool_rejected"
+| stats count(*) as drops by bin(1m)
+| filter drops >= 3
+```
+
+This event counts shared-pool rejections, including the slash-command busy acknowledgment. It does not count every command failure or rejection from a separate follow-up gate. Group by `command` when you need the slash-command breakdown; rejections without that field appear in an empty group. Check request latency and dependency health before raising concurrency limits.

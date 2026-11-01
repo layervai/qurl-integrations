@@ -675,7 +675,7 @@ func runForegroundLocalPublish(
 		// strand a desired-on share without this foreground process as its owner.
 		retErr = compensateLocalPublish(client, registry, resolved.Resource, retErr)
 	}()
-	jobVersion, err := connectordaemon.JobVersion(opts.version, opts.resolvedShareGroupMode)
+	jobVersion, err := connectordaemon.JobVersion(opts.version, opts.resolvedShareGroupMode, opts.resolvedClientProduct)
 	if err != nil {
 		return err
 	}
@@ -687,7 +687,7 @@ func runForegroundLocalPublish(
 	cancelDaemon = cancel
 	daemonErr = make(chan error, 1)
 	go func() { daemonErr <- opts.runForegroundDaemon(daemonCtx, opts, stateDir, jobVersion) }()
-	ipc := connectordaemon.IPCClient{SocketPath: socketPath}
+	ipc := connectordaemon.IPCClient{SocketPath: socketPath, StateDir: stateDir}
 	readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	readyErr := make(chan error, 1)
 	go func() { readyErr <- ipc.WaitReady(readyCtx) }()

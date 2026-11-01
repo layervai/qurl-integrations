@@ -22,7 +22,10 @@ import (
 )
 
 const slackViewsOpenURL = "https://slack.com/api/views.open"
-const defaultSlackAPIUserAgent = "qurl-slack/unknown"
+
+// TODO(upstream-contract): keep bot attribution/log consumers aligned with this wire product.
+const slackUserAgentProduct = "qurl-bot-slack"
+const defaultSlackAPIUserAgent = slackUserAgentProduct + "/unknown"
 
 // slackViewsOpenTimeout is the HTTP-client fallback upper bound for every
 // views.open request made by this client. Callers can still pass a tighter
