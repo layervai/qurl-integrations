@@ -18,8 +18,18 @@ expiry, so a file you share today won't stay reachable forever.
 
 ## Installing
 
-The extension is distributed by your qURL operator. Install the build they
-give you:
+[**Install from the Chrome Web Store**](https://chromewebstore.google.com/detail/qurl-agent/icmdbkclledmbhbcjcjmckcokkgikjem),
+then pin the **qURL Agent** icon in your toolbar.
+
+The store currently lists version **1.0.3** (checked November 1, 2026). This
+source tree is version **1.1.0**. The usage and settings below describe the
+source build; the store build can have different controls and behavior.
+Check the listing for its current version and instructions.
+
+### Developer or operator-provided build
+
+To test this source version, or install an unpacked build from your qURL
+operator:
 
 1. Download or build the extension folder your operator provides (the
    unpacked `release/` directory).
