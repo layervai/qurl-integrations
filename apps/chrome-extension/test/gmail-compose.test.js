@@ -145,6 +145,7 @@ function createComposeSandbox(t, config) {
   const observers = [];
   const appended = [];
   const warnings = [];
+  const outgoing = [];
   let messageListener = null;
 
   class RecordingMutationObserver {
@@ -173,6 +174,11 @@ function createComposeSandbox(t, config) {
       },
       runtime: {
         lastError: null,
+        sendMessage(message, callback) {
+          outgoing.push(message);
+          if (settings.notificationFails) throw new Error('Extension context invalidated');
+          if (callback) callback();
+        },
         onMessage: {
           addListener(listener) {
             messageListener = listener;
@@ -249,6 +255,7 @@ function createComposeSandbox(t, config) {
 
   return {
     appended,
+    outgoing,
     documentElement,
     messageListener,
     observers,
@@ -1154,4 +1161,43 @@ test('contenteditable="false" rejects a body the class triple would otherwise ma
   });
 
   await assertComposeBodyRejected(t, composeBody);
+});
+
+
+for (const mode of ['open', 'closed', 'expired']) test(`late completion (${mode}) preserves insertion and callback state`, function (t) {
+  const timers = new Map();
+  let nextTimer = 0;
+  let bodies = [];
+  const frames = [];
+  let inserts = 0;
+  const { messageListener, outgoing } = createComposeSandbox(t, {
+    notificationFails: mode === 'closed',
+    timers: {
+      setTimeout(callback, delay) { timers.set(++nextTimer, { callback, delay }); return nextTimer; },
+      clearTimeout(id) { timers.delete(id); },
+    },
+    document: {
+      querySelectorAll() { return bodies; },
+      execCommand() { inserts++; return true; },
+    },
+    globals: { requestAnimationFrame(callback) { frames.push(callback); return frames.length; } },
+  });
+  const responses = [];
+  const message = { type: 'INSERT_LINKS', requestId: 'late-request', results: [{ filename: 'demo.txt', link: 'https://files.example.com/demo' }] };
+  messageListener(message, null, response => responses.push(response));
+  [...timers.values()].find(timer => timer.delay === 8000).callback();
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].success, false);
+  assert.equal(outgoing.length, 0);
+  if (mode === 'expired') [...timers.values()].find(timer => timer.delay === 30000).callback();
+  bodies = [createComposeBody()];
+  frames.shift()();
+  assert.deepEqual(JSON.parse(JSON.stringify(outgoing)), [{ type: 'INSERT_LINKS_LATE_SUCCESS', requestId: 'late-request' }]);
+  assert.equal(inserts, 1);
+  assert.equal(responses.length, 1);
+  if (mode === 'expired') return; // The expired dedup cache is not recreated.
+  messageListener(message, null, response => responses.push(response));
+  assert.equal(responses[1].success, true);
+  assert.equal(inserts, 1);
+  assert.equal(outgoing.length, 1);
 });

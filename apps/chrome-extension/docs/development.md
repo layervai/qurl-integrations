@@ -6,8 +6,8 @@ If you just want to **use** the extension in Gmail, see the
 
 ## Prerequisites
 
-- Node 20.9+ — the `sharp` devDependency requires it. CI and local dev run the
-  `22.21.0` pinned in `.nvmrc`; nothing below that is tested.
+- Node 20.19+, 22.13+, or 24+ — required by ESLint. CI and local dev use
+  `22.21.0` from `.nvmrc`; other versions are not checked in CI.
 - Google Chrome, or another Chromium browser, with access to
   `chrome://extensions`
 

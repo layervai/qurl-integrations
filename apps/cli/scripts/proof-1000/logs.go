@@ -19,7 +19,8 @@ var daemonLogFiles = []string{"share-daemon.log", "share-daemon.err.log"}
 // collectDaemonLogs returns the daemon's own log lines from the run window
 // that mention any needle (proof CRIDs and resource ids) or a generic
 // throttling/denial word, redacted and capped. Those lines are the daemon's
-// explanation for every non-serving share the report lists.
+// diagnostic context for non-serving shares. Missing excerpts are not proof
+// of zero failures; ambiguous legacy timestamps cannot be attributed to a run.
 func collectDaemonLogs(logDir string, since, until time.Time, needles []string, red *redactor, limit int) []string {
 	var out []string
 	set := newNeedleSet(needles)
@@ -46,11 +47,8 @@ func scanDaemonLog(path string, since, until time.Time, needles *needleSet, red 
 	var out []string
 	for scanner.Scan() {
 		line := scanner.Text()
-		if len(line) < len(daemonLogTimeLayout) {
-			continue
-		}
-		at, err := time.ParseInLocation(daemonLogTimeLayout, line[:len(daemonLogTimeLayout)], time.Local)
-		if err != nil || at.Before(since) || at.After(until) {
+		at, ok := parseDaemonLogTime(line, time.Local)
+		if !ok || at.Before(since) || at.After(until) {
 			continue
 		}
 		if !needles.matches(line) && !mentionsThrottle(line) {
@@ -62,6 +60,44 @@ func scanDaemonLog(path string, since, until time.Time, needles *needleSet, red 
 		}
 	}
 	return out
+}
+
+// parseDaemonLogTime accepts current slog timestamps and unambiguous legacy logs.
+// A zone-less repeated hour cannot prove which instant a legacy entry belongs to.
+func parseDaemonLogTime(line string, location *time.Location) (time.Time, bool) {
+	if raw, ok := strings.CutPrefix(line, "time="); ok {
+		stamp, _, _ := strings.Cut(raw, " ")
+		at, err := time.Parse(time.RFC3339Nano, stamp)
+		return at, err == nil
+	}
+	if len(line) < len(daemonLogTimeLayout) {
+		return time.Time{}, false
+	}
+	stamp := line[:len(daemonLogTimeLayout)]
+	at, err := time.ParseInLocation(daemonLogTimeLayout, stamp, location)
+	if err != nil || at.In(location).Format(daemonLogTimeLayout) != stamp {
+		return time.Time{}, false
+	}
+	// Check both adjacent zone offsets, including non-hour DST transitions.
+	start, end := at.ZoneBounds()
+	_, offset := at.Zone()
+	for i, boundary := range []time.Time{start, end} {
+		if boundary.IsZero() {
+			continue
+		}
+		if i == 0 {
+			boundary = boundary.Add(-time.Nanosecond)
+		}
+		_, otherOffset := boundary.Zone()
+		if otherOffset == offset {
+			continue
+		}
+		alternate := at.Add(time.Duration(offset-otherOffset) * time.Second)
+		if alternate.In(location).Format(daemonLogTimeLayout) == stamp {
+			return time.Time{}, false
+		}
+	}
+	return at, true
 }
 
 // needleSet indexes identifiers so a daemon log line is matched by looking
@@ -133,11 +169,11 @@ func mentionsThrottle(line string) bool {
 func contextLines(lines, needles []string, at time.Time, window time.Duration, limit int) []string {
 	var out []string
 	for _, line := range lines {
-		if !mentionsAny(line, needles) || len(line) < len(daemonLogTimeLayout) {
+		if !mentionsAny(line, needles) {
 			continue
 		}
-		stamp, err := time.ParseInLocation(daemonLogTimeLayout, line[:len(daemonLogTimeLayout)], time.Local)
-		if err != nil || stamp.Before(at.Add(-window)) || stamp.After(at.Add(window)) {
+		stamp, ok := parseDaemonLogTime(line, time.Local)
+		if !ok || stamp.Before(at.Add(-window)) || stamp.After(at.Add(window)) {
 			continue
 		}
 		out = append(out, line)

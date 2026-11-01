@@ -30,6 +30,10 @@
 
 import * as discord from './discord-api';
 import * as qurl from './qurl-api';
+import { CleanupRetryBudget } from './http';
+
+// Additional retry waits total at most 10 seconds per sweep, not per entry.
+const CLEANUP_RETRY_WAIT_MS = 10_000;
 
 /** Per-run nonce baked into every minted target_url. URL-safe
  * (alphanumeric + hyphen), so it never alters the escaping a fixture
@@ -90,13 +94,13 @@ export function trackedQurlResources(env: {
   const children = new Set<string>();
   // Shared by revoke() and revokeAll() so EVERY successful revoke —
   // test-time or cleanup-time — drops the id from the ledger.
-  // Cleanup uses one DELETE per resource; test-time revokes confirm the update.
+  // Cleanup only retries rate limits; test-time revokes confirm the update.
   const revoke = async (
     resourceId: string,
-    { confirmPending = true }: { confirmPending?: boolean } = {},
+    { confirmPending = true, cleanupRetryBudget }: { confirmPending?: boolean; cleanupRetryBudget?: CleanupRetryBudget } = {},
   ): Promise<boolean> => {
     const ok = await qurl.revokeLink(
-      env.MINT_API_URL, env.QURL_API_KEY, resourceId, { confirmPending },
+      env.MINT_API_URL, env.QURL_API_KEY, resourceId, { confirmPending, cleanupRetryBudget },
     );
     if (ok) ids.delete(resourceId);
     return ok;
@@ -110,11 +114,12 @@ export function trackedQurlResources(env: {
     },
     revoke,
     async revokeAll() {
+      const cleanupRetryBudget = { remainingMs: CLEANUP_RETRY_WAIT_MS };
       const failedChildren: string[] = [];
       const failedSources: string[] = [];
       for (const id of children) {
         try {
-          await qurl.revokeChild(env.MINT_API_URL, env.QURL_API_KEY, id);
+          await qurl.revokeChild(env.MINT_API_URL, env.QURL_API_KEY, id, undefined, cleanupRetryBudget);
           children.delete(id);
         } catch (error) {
           const status = (error as { status?: unknown } | null)?.status;
@@ -137,7 +142,7 @@ export function trackedQurlResources(env: {
         if (!first) await new Promise((r) => setTimeout(r, 250));
         first = false;
         try {
-          const ok = await revoke(id, { confirmPending: false });
+          const ok = await revoke(id, { confirmPending: false, cleanupRetryBudget });
           // HTTP failures return false; network failures throw. Report both.
           if (!ok) {
             failedSources.push(`${id} (not confirmed)`);
@@ -177,16 +182,16 @@ export function trackedDiscordMessages(env: { BOT_TOKEN: string }): DiscordMessa
       messages.set(msg.id, msg.channel_id);
     },
     async deleteAll() {
+      const cleanupRetryBudget = { remainingMs: CLEANUP_RETRY_WAIT_MS };
       // Serial for the same reason as revokeAll, PLUS a short pause
       // between deletes: Discord's per-channel delete bucket rate-limits
-      // bursts, api() doesn't honor Retry-After, and best-effort cleanup
-      // would rather be slow than shed messages to 429s.
+      // bursts. Any 429 retry shares the sweep's bounded wait allowance.
       let first = true;
       for (const [id, channelId] of messages) {
         if (!first) await new Promise((r) => setTimeout(r, 250));
         first = false;
         try {
-          await discord.deleteMessage(env.BOT_TOKEN, channelId, id);
+          await discord.deleteMessage(env.BOT_TOKEN, channelId, id, cleanupRetryBudget);
         } catch (err) {
           // Best-effort: stale test messages are channel noise, not live
           // grants — warn for visibility, never fail the run.

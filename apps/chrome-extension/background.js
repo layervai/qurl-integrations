@@ -95,7 +95,7 @@ async function ensureGmailContentScript(tab) {
   try {
     await sendMessageToTab(tab.id, { type: 'QURL_PING' });
     return;
-  } catch (_err) {
+  } catch {
     // Reinject on any ping failure. The content script has a double-injection guard,
     // so this avoids brittle browser error-string matching.
   }
