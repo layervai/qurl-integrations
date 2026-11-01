@@ -58,6 +58,7 @@ const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
 // (IP, owner). Hashing bounds key size but grants no trust. A 1500/min IP
 // ceiling (ten owner budgets) also catches rotating bogus owners. Both limits
 // run only after an unknown-owner result, so registered NAT siblings bypass them.
+// shortcut: each local 10k-key map can evict history; revisit for strict fleet-wide budgets.
 const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000 });
 const unknownOwnerIpLimiter = createBadSigLimiter({ max: 1500, windowMs: 60_000 });
 
