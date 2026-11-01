@@ -975,4 +975,14 @@ describe('send-confirm open audit', () => {
     await handleQurlSend(int);
     expect(logger.audit).not.toHaveBeenCalledWith('send_confirm_opened', expect.anything());
   });
+  test('preselected recipients and timer are reflected in the open audit', async () => {
+    const id = '100000000000000001';
+    const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT,
+      recipients: `<@${id}>`, 'self-destruct': '300' }, guildMembers: { [id]: {} } });
+    await handleQurlSend(int);
+    expect(logger.audit).toHaveBeenCalledWith('send_confirm_opened', expect.objectContaining({
+      recipient_count: 1, needs_picker: false, has_self_destruct: true,
+    }));
+  });
+
 });

@@ -8458,8 +8458,9 @@ async function handleConfirmCancelClick(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
   // Picker transitions renew expiry; created_at keeps the original dwell time.
-  const dwell = Number.isSafeInteger(row.created_at)
-    ? { dwell_seconds: Math.max(0, Math.floor(Date.now() / 1000) - row.created_at) } : {};
+  const now = Math.floor(Date.now() / 1000);
+  const dwell = Number.isSafeInteger(row.created_at) && row.created_at >= 0 && row.created_at <= now
+    ? { dwell_seconds: now - row.created_at } : {};
   logger.audit(AUDIT_EVENTS.SEND_CONFIRM_CANCELLED, {
     flow_id, user_id: interaction.user.id, ...dwell,
   });

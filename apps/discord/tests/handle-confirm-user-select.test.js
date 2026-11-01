@@ -233,6 +233,7 @@ describe('handleConfirmUserSelect', () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
     const int = makeSelectInteraction();
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(logger.audit).not.toHaveBeenCalledWith('send_confirm_picked', expect.anything());
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/),
     }));
@@ -251,6 +252,7 @@ describe('handleConfirmUserSelect', () => {
     mockTransitionFlow.mockRejectedValueOnce(new Error('ddb gone'));
     const int = makeSelectInteraction();
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(logger.audit).not.toHaveBeenCalledWith('send_confirm_picked', expect.anything());
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not save your pick/i),
       flags: 64,

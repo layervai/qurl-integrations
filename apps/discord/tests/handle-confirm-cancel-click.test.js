@@ -98,9 +98,8 @@ describe('send-confirm cancel audit', () => {
     await handleConfirmCancelClick(makeInteraction(), { flow_id: 'fid', row: { version: 3 } });
     expect(logger.audit).not.toHaveBeenCalledWith('send_confirm_cancelled', expect.anything());
   });
-});
-
-test('cancel audit omits unknown dwell instead of emitting an invalid number', async () => {
-  await handleConfirmCancelClick(makeInteraction(), { flow_id: 'fid', row: { version: 3 } });
-  expect(logger.audit).toHaveBeenCalledWith('send_confirm_cancelled', { flow_id: 'fid', user_id: SENDER_ID });
+  test.each([undefined, -1, Number.MAX_SAFE_INTEGER, Date.now()])('omits invalid creation time %s', async created_at => {
+    await handleConfirmCancelClick(makeInteraction(), { flow_id: 'fid', row: { version: 3, created_at } });
+    expect(logger.audit).toHaveBeenCalledWith('send_confirm_cancelled', { flow_id: 'fid', user_id: SENDER_ID });
+  });
 });
