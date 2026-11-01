@@ -49,6 +49,7 @@ export interface TeamsServerOptions {
   readonly callback: OAuthCallbackCore;
   readonly state: OAuthStateManager;
   readonly maxBodyBytes?: number;
+  readonly metricNamespace?: string;
   readonly logger?: Logger;
 }
 
@@ -158,7 +159,7 @@ export function installOAuthRoutes(options: TeamsServerOptions): void {
 export async function createTeamsServer(options: TeamsServerOptions): Promise<Server> {
   // TODO(upstream-contract): the shared runtime alarm uses its injected namespace
   // and the dimensionless SignatureFailures aggregate, including missing JWTs.
-  const metricNamespace = process.env.EMF_METRIC_NAMESPACE?.trim();
+  const metricNamespace = options.metricNamespace?.trim();
   options.expressApp.post(MESSAGING_ENDPOINT, (_request, response, next) => {
     if (metricNamespace && options.logger) {
       response.once('finish', () => {
@@ -383,7 +384,10 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
       catch (error) { logger.warn('Teams conversation capture failed', { error }); }
     }
   });
-  const server = await createTeamsServer({ baseUrl, app, expressApp, tokenClient, callback, state: oauthState, logger });
+  const server = await createTeamsServer({
+    baseUrl, app, expressApp, tokenClient, callback, state: oauthState, logger,
+    metricNamespace: process.env.EMF_METRIC_NAMESPACE?.trim() ?? '',
+  });
   const host = process.env.HOST?.trim() || DEFAULT_HOST;
   const port = Number(process.env.PORT?.trim() || '3000');
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('PORT is invalid');

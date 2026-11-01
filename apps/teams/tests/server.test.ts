@@ -298,11 +298,7 @@ describe('Teams HTTP body limits', () => {
 });
 
 describe('Teams inbound authentication metric', () => {
-  afterEach(() => { vi.unstubAllEnvs(); });
-
   it.each([true, false])('reports only SDK auth rejections with configured namespace=%s', async configured => {
-    if (configured) vi.stubEnv('EMF_METRIC_NAMESPACE', 'qurl-bot-teams-sandbox');
-    else vi.stubEnv('EMF_METRIC_NAMESPACE', '');
     const lines: string[] = [];
     const sink = { debug: vi.fn(), info: vi.fn(), warn: (line: string) => { lines.push(line); }, error: vi.fn() };
     const expressApp = express();
@@ -315,6 +311,7 @@ describe('Teams inbound authentication metric', () => {
       baseUrl: 'https://teams.example', expressApp, app,
       tokenClient: {} as never, callback: {} as never, state: {} as never, maxBodyBytes: 128,
       logger: new RedactingLogger(jsonConsoleSink(sink)),
+      metricNamespace: configured ? 'qurl-bot-teams-sandbox' : '',
     });
     expressApp.get('/api/messages', (_request, response) => { response.sendStatus(401); });
     expressApp.post('/oauth/auth-test', (_request, response) => { response.sendStatus(401); });
