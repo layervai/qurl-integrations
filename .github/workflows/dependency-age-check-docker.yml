@@ -8,6 +8,7 @@ name: Dependency Age Check (Docker)
 # script exits 0 quickly when no Dockerfile/compose changes are in the diff.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 # Cancel superseded runs on the same PR — the reusable workflow
