@@ -129,7 +129,7 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		"Its ECS restart policy retries the non-essential qURL container indefinitely after the 60-second minimum run window without restarting the target application container.",
 	}, " ")
 	return intro + "\n\n" +
-		"1. Store the enrollment token from the separate DM as the read-only `enrollment-token` file at the qurl-bootstrap access-point root. This message intentionally does not contain the token.\n\n" +
+		"1. First create the access points and provisioning policy in step 4. Store the enrollment token from the separate DM as the read-only `enrollment-token` file at the qurl-bootstrap access-point root. This message intentionally does not contain the token.\n\n" +
 		"2. Put share.yaml at the qurl-config access-point root (the container reads `/etc/qurl/share.yaml`):\n\n" +
 		configBlock + "\n\n" +
 		"3. Add this non-essential qURL sidecar container to the same task definition as the target container:\n\n" +

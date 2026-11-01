@@ -1075,7 +1075,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		"The log group is shared across installs. Each task has separate `origin/" + s3WebsiteOriginContainerName + "/<task-id>` and `qurl/qurl/<task-id>` streams; filter by task ID to find one install. For separate access or retention, replace both `awslogs-group` values with an install-specific group and update the execution role permissions.",
 	}, " ")
 	return intro + "\n\n" +
-		"1. Store the enrollment token from the separate DM as enrollment-token at the qurl-bootstrap access-point root. This message intentionally does not contain it.\n\n" +
+		"1. First create the access points and provisioning policy in step 5. Store the enrollment token from the separate DM as `enrollment-token` at the qurl-bootstrap access-point root. This message intentionally does not contain it.\n\n" +
 		"2. Put share.yaml at the qurl-config access-point root (the container reads `/etc/qurl/share.yaml`):\n\n" +
 		configBlock + "\n\n" +
 		"3. Add these two containers to the same task definition and replace each `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
