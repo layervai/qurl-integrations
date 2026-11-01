@@ -367,6 +367,8 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 		// An answer that failed its check is discarded like any link that
 		// fails CRID verification: nothing was opened, nothing was emitted.
 		return VerificationFailed, true
+	case errors.Is(err, auth.ErrAccountManagementDenied):
+		return Forbidden, true
 	case errors.Is(err, auth.ErrNoCredential), errors.Is(err, auth.ErrInvalidKey):
 		return Auth, true
 	case errors.Is(err, auth.ErrDeviceEnrollmentScope):

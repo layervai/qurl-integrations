@@ -52,6 +52,7 @@ var cliSentinels = map[string]struct {
 	"auth.ErrAnonymousRecovery":          {auth.ErrAnonymousRecovery, Auth},
 	"auth.ErrExternalDeviceMissing":      {auth.ErrExternalDeviceMissing, Auth},
 	"auth.ErrExternalAnonymousRecovery":  {auth.ErrExternalAnonymousRecovery, Auth},
+	"auth.ErrAccountManagementDenied":    {auth.ErrAccountManagementDenied, Forbidden},
 	"auth.ErrNoCredential":               {auth.ErrNoCredential, Auth},
 	"auth.ErrInvalidKey":                 {auth.ErrInvalidKey, Auth},
 	"auth.ErrDeviceEnrollmentScope":      {auth.ErrDeviceEnrollmentScope, Auth},

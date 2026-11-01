@@ -20,7 +20,8 @@ const (
 
 func domainsCmd(opts *globalOpts) *cobra.Command {
 	command := &cobra.Command{Use: "domains", Short: "Manage custom domains with fresh browser account sign-in", Args: noArgs,
-		Long: "Manage domains owned by the signed-in account. Registration requires an enterprise plan. Tokens stay in memory. Writes make one HTTP attempt. DNS records are instructions for you to configure; these commands do not change your DNS provider. Verification runs once and does not wait for propagation. Inspect status and checks before using the domain.", RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
+		Long: "Manage domains owned by the signed-in account. For automation, select --api-key-auth with an explicit durable account key. Registration requires an enterprise plan. Tokens stay in memory. Writes make one HTTP attempt. DNS records are instructions for you to configure; these commands do not change your DNS provider. Verification runs once and does not wait for propagation. Inspect status and checks before using the domain.", RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
+	command.PersistentFlags().BoolVar(&opts.accountAPIKeyAuth, "api-key-auth", false, "Use an explicit QURL_API_KEY_FILE or QURL_API_KEY for account automation")
 	var limit int
 	var cursor string
 	list := &cobra.Command{Use: accountListOperation, Short: "List one page of domain status", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {

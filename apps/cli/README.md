@@ -203,6 +203,8 @@ There is deliberately no `--api-key` flag — command-line arguments leak into
 shell history and process lists. `qurl login` reads it from a hidden prompt or
 piped standard input. Scripts and CI can set `QURL_API_KEY` or
 `QURL_API_KEY_FILE` for the same first bootstrap or for an explicit recovery.
+Webhook and domain account automation also accept these sources when you explicitly
+select `--api-key-auth`. This mode verifies a durable account key and its scopes.
 
 `QURL_API_KEY_FILE` must be an exact absolute path. Its contents must be the
 key bytes followed by one LF or CRLF line ending, with no BOM, spaces, or
@@ -243,10 +245,10 @@ Keep the local state directory unchanged for this retry.
 
 `qurl whoami` checks the registered device and shows its account.
 
-Authenticated commands need the owner-only local state directory to remain
-writable. `QURL_API_KEY` can bootstrap missing or explicitly rejected device
+Authenticated resource commands need the owner-only local state directory to
+remain writable. `QURL_API_KEY` can bootstrap missing or explicitly rejected device
 credentials, but it is not a steady-state bypass for that durable identity.
-Each authenticated command verifies the saved device identity with the qURL
+Each resource command verifies the saved device identity with the qURL
 platform before it calls the resource API. If the platform cannot verify that
 identity, read-only commands such as `qurl list` are unavailable too. An
 account API key does not bypass this boundary.
@@ -531,10 +533,10 @@ This command does not store the browser token or replace the device credential.
 
 ## Account webhooks
 
-Webhook commands use a fresh browser sign-in for each invocation. They manage
-subscriptions owned by the signed-in account. Linked device-owner selection is
-not supported. Tokens stay in memory. Reads request read access; writes also
-request write access.
+Webhook commands use a fresh browser sign-in by default. They manage subscriptions
+owned by that account. Linked device-owner selection is not supported. Browser
+tokens stay in memory. Browser reads request read access; writes also request
+write access.
 
 ```sh
 qurl webhooks events --output json
@@ -563,10 +565,28 @@ Lists and deliveries return one page. Use JSON `next_cursor` with `--cursor` for
 the next page. The event catalog is not a delivery guarantee. The API reference
 currently marks `qurl.expired` and `resource.closed` as not yet delivered.
 
+### Account automation
+
+For webhook and domain automation, explicitly select `--api-key-auth` and supply
+`QURL_API_KEY_FILE` or `QURL_API_KEY`. Prefer an owner-private key file. The CLI
+checks `/v1/me` before the operation: the credential must be a durable account
+API key with `qurl:read`, plus `qurl:write` for changes. Device, setup and unknown
+credential kinds are refused. Invalid or missing explicit credentials do not
+fall back to browser sign-in.
+
+```sh
+QURL_API_KEY_FILE=/run/secrets/qurl-account qurl webhooks list --api-key-auth --output json
+QURL_API_KEY_FILE=/run/secrets/qurl-account qurl domains list --api-key-auth --output json
+```
+
+The mode never stores the account key or opens the machine's device identity.
+Without `--api-key-auth`, these commands ignore account-key environment values
+and use browser sign-in. The `api-keys` commands always require browser sign-in.
+
 ## Account custom domains
 
-Domain commands use the same fresh browser account sign-in as webhooks. They
-manage domains owned by that account. Registration requires an enterprise plan;
+Domain commands use the same browser or explicit API-key account authority as
+webhooks. They manage domains owned by that account. Registration requires an enterprise plan;
 the API checks that entitlement. These commands print DNS instructions and never
 change your DNS provider.
 

@@ -11,7 +11,7 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
-// AccountManagement uses the signed-in account; linked device owners are unsupported.
+// AccountManagement uses explicit account authority; linked device owners are unsupported.
 type AccountManagement interface {
 	Me(context.Context) (*Identity, error)
 	ListDomains(context.Context, int, string) (*AccountPage[AccountDomain], error)

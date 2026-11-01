@@ -16,7 +16,8 @@ const webhookCreateOperation = "create"
 
 func webhooksCmd(opts *globalOpts) *cobra.Command {
 	command := &cobra.Command{Use: "webhooks", Short: "Manage account webhooks with a fresh browser sign-in", Args: noArgs,
-		Long: "Each command signs in to your browser account. Linked device-owner selection is not supported. Writes make one HTTP attempt. Creation and secret rotation have no idempotent replay guarantee. The signing secret is printed only by create and rotate-secret. Delivery response text is omitted because it can contain endpoint secrets.", RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
+		Long: "By default, each command signs in to your browser account. For automation, select --api-key-auth with an explicit durable account key. Linked device-owner selection is not supported. Writes make one HTTP attempt. Creation and secret rotation have no idempotent replay guarantee. The signing secret is printed only by create and rotate-secret. Delivery response text is omitted because it can contain endpoint secrets.", RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
+	command.PersistentFlags().BoolVar(&opts.accountAPIKeyAuth, "api-key-auth", false, "Use an explicit QURL_API_KEY_FILE or QURL_API_KEY for account automation")
 	command.AddCommand(webhookListCmd(opts), webhookGetCmd(opts), webhookWriteCmd(opts, true), webhookWriteCmd(opts, false), webhookDeleteCmd(opts), webhookRotateCmd(opts), webhookEventsCmd(opts), webhookDeliveriesCmd(opts))
 	return command
 }
