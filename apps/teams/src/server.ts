@@ -162,6 +162,22 @@ export async function createTeamsServer(options: TeamsServerOptions): Promise<Se
   // TODO(upstream-contract): verify this parser-ordering contract on every
   // @microsoft/teams.apps upgrade; the route-level SDK parser must continue
   // respecting an already parsed body.
+  // TODO(upstream-contract): the shared runtime alarm uses its injected namespace
+  // and the dimensionless SignatureFailures aggregate, including missing JWTs.
+  const metricNamespace = process.env.EMF_METRIC_NAMESPACE?.trim();
+  options.expressApp.use((request, response, next) => {
+    if (metricNamespace && request.method === 'POST' && request.path === '/api/messages') {
+      response.once('finish', () => {
+        if (response.statusCode === 401) options.logger?.warn('Teams inbound authentication rejected', {
+          _aws: { Timestamp: Date.now(), CloudWatchMetrics: [{
+            Namespace: metricNamespace, Dimensions: [[]], Metrics: [{ Name: 'SignatureFailures', Unit: 'Count' }],
+          }] },
+          SignatureFailures: 1,
+        });
+      });
+    }
+    next();
+  });
   options.expressApp.disable('x-powered-by');
   options.expressApp.use(express.json({ limit: options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES }));
   installOAuthRoutes(options);
