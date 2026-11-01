@@ -179,3 +179,25 @@ This proves only input responses, stored paths, and API child cleanup. Root must
 separately bind the deployed API/config, six rejected requests' bounded metric
 labels and redacted DEBUG records, and normal flag restoration. It proves no
 NHP/native-session cleanup, Connector object lookup, or production result.
+
+### Owned browser native-session cleanup (Sandbox only)
+
+The normal Sandbox workflow can set `QURL_NATIVE_CLEANUP_ENABLED=1` after it
+builds the pinned NHP SDK and resolves its public `@layervai/nhp-js-agent/portal`
+export into `QURL_NATIVE_CLEANUP_PORTAL_MODULE`. The served, trusted qURL-link
+configuration must also enable native cleanup and browser session bootstrap.
+Before fixtures, the runner requires the expected built bundle hash and verifies
+both the served script name and its actual bytes/SRI.
+The ownership verifier keeps its separate source pin.
+
+The Node runner observes the actual relay request/reply before navigation. It
+keeps the signed link and original authenticated cleanup handle in memory only.
+Before closing the browser it retries all captured handles in paced rounds for
+at most five minutes, using the normal Go cleanup budget.
+Only `closed` completes a granted session. The existing second one-time arm
+requires one strictly authenticated denial with no successful or unknown grant;
+its receipt says `no_admission`, never `closed`. Missing, malformed or failed
+transport evidence fails that arm instead of passing as an ordinary denial. The private ownership artifact records counts and
+owned resource/link identifiers; it never stores keys, packets, or capabilities.
+A failed content assertion remains failed. Unresolved cleanup cannot turn a
+successful content test green. This does not recover keys from earlier runs.

@@ -1032,6 +1032,42 @@ describe('qurl sends', () => {
     expect(input.ExpressionAttributeValues[':s']).toBe('sent');
   });
 
+  test.each(['guild-a', 'guild-b'])('getRecentSends scopes the sender history to %s before fanout', async (guildId) => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName) return Promise.resolve({ Items: [
+        { send_id: 'a', guild_id: 'guild-a', created_at: '2026-10-31T01:00:00Z' },
+        { send_id: 'b', guild_id: 'guild-b', created_at: '2026-10-31T00:00:00Z' },
+        { send_id: 'legacy', created_at: '2026-10-30T00:00:00Z' },
+      ] });
+      return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
+    });
+    ddbMock.on(GetCommand).resolves({});
+    const expectedId = guildId === 'guild-a' ? 'a' : 'b';
+    const result = await store.getRecentSends('sender', 5, guildId);
+    expect(result.map(row => row.send_id)).toEqual([expectedId]);
+    expect(ddbMock.commandCalls(GetCommand).map(call => call.args[0].input.Key.send_id)).toEqual([expectedId]);
+  });
+
+  test('getRecentSends continues past a page with only other-guild sends', async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (!input.IndexName) return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
+      if (!input.ExclusiveStartKey) return Promise.resolve({
+        Items: [{ send_id: 'other', guild_id: 'guild-a' }],
+        LastEvaluatedKey: { send_id: 'other', recipient_discord_id: 'r1' },
+      });
+      return Promise.resolve({ Items: [{ send_id: 'mine', guild_id: 'guild-b' }] });
+    });
+    ddbMock.on(GetCommand).resolves({});
+    const result = await store.getRecentSends('sender', 1, 'guild-b');
+    expect(result.map(row => row.send_id)).toEqual(['mine']);
+    expect(ddbMock.commandCalls(QueryCommand).filter(call => call.args[0].input.IndexName)).toHaveLength(2);
+  });
+
+  test.each([null, '', 1])('getRecentSends rejects an invalid explicit guild scope: %s', async (guildId) => {
+    await expect(store.getRecentSends('sender', 5, guildId)).rejects.toThrow('guildId must be a non-empty string');
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+
   test('getRecentSends: uses base-table Query per send for accurate recipient_count', async () => {
     ddbMock.on(QueryCommand).callsFake((input) => {
       const cmd = input;

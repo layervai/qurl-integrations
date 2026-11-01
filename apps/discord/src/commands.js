@@ -1838,10 +1838,8 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //     when `resourceType === RESOURCE_TYPES.FILE`.
 //   - `expiresIn` must be a key of `EXPIRY_LABELS`.
 //   - `personalMessage` must be `null` or `string`.
-//   - `recipients` must be a non-empty array (element shape is
-//     `{ id: <discord-user-id>, username: <string> }`; the gate
-//     does NOT validate elements — only the array's outer shape +
-//     length ≤ `config.QURL_SEND_MAX_RECIPIENTS`).
+//   - `recipients` must be a non-empty, capped array of objects with
+//     a non-empty string id. Optional username fields are caller-provided.
 // Each gate clears the caller's stale ephemeral with a cancel-
 // edit then throws — the user still sees the outer catch's
 // generic followUp, but the gate's specific cancel replaces
@@ -1855,12 +1853,6 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //     is the second line, not the first). A tampered persisted
 //     payload reaching the gate produces a generic "Internal
 //     error" cancel without leaking the SSRF detail.
-//
-//   - `recipients` is MUTATED in-place on the Add Recipients post-
-//     send branch (deduped push of new IDs). Treat as transferred
-//     ownership for the lifetime of the call, not as a snapshot.
-//     A caller that reuses the same array across retries will see
-//     silent double-adds.
 //
 // Required `interaction` surface (fail loudly at the corresponding
 // call site if missing):
@@ -1931,12 +1923,7 @@ async function executeSendPipeline(interaction, {
   attachment,
   locationUrl,
   locationName,
-  // MUTATES: the Add Recipients post-send branch dedupe-pushes into
-  // this array (see docstring's "transferred ownership" note). The
-  // initial `recipients` is already deduped + bot-filtered by
-  // partitionRecipients (see contract pin at commands.js:~3552):
-  // upstream owns dedup, this function does NOT re-dedup the initial set.
-  // Sender CAN appear in `recipients` — self-send is supported.
+  // Initial recipients are deduped and bot-filtered upstream; self-send is allowed.
   recipients,
   expiresIn,
   selfDestructSeconds,
@@ -2037,6 +2024,15 @@ async function executeSendPipeline(interaction, {
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
     failGate(RangeError, `executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
   }
+  for (const [index, recipient] of recipients.entries()) {
+    if (!recipient || typeof recipient !== 'object' || Array.isArray(recipient)
+        || typeof recipient.id !== 'string' || !recipient.id.trim()) {
+      failGate(TypeError, `executeSendPipeline: recipients[${index}] must be an object with a non-empty string id`);
+    }
+  }
+  // Add Recipients owns this snapshot; callers may retain or freeze their input.
+  recipients = [...recipients];
+
   // Operator-visibility hook for big sends. Fires when a single send
   // crosses `largeSendThreshold()` so the operational cost (qurl-
   // service re-uploads + DM fan-out duration at Discord's per-bot
@@ -2645,11 +2641,14 @@ async function executeSendPipeline(interaction, {
     let revokeShowAll = false;
     let revokeInFlight = false;
     let revokeSucceeded = false;
+    let revokeAttempted = false;
     let revokeResultKnown = false;
 
     collector.on('collect', async (btnInteraction) => {
       if (btnInteraction.customId === `qurl_expand_${sendId}`) {
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+        // The result card has a separate qurl_revoke_expand action.
+        if (revokeAttempted) return;
         showAllRecipients = !showAllRecipients;
         // buildConfirmMsg now returns {content, attachmentText, needsExpand};
         // extract content for the monitor + editReply (string-only).
@@ -2711,6 +2710,7 @@ async function executeSendPipeline(interaction, {
         // collector-setup block; the guard above already proved truthy.
         let revoking;
         try {
+          revokeAttempted = true;
           monitor.stop();
           await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
           let persistedSendConfig;
@@ -2805,8 +2805,8 @@ async function executeSendPipeline(interaction, {
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
           }).catch(logIgnoredDiscordErr);
-          // Release only this collector's retry gate. Durable revoking_at
-          // keeps Add Recipients closed after a partial/external failure.
+          // Release the in-process gate; retry from /qurl revoke after this card closes.
+          // Durable revoking_at also protects other collectors/processes.
           revokeInFlight = false;
         } finally {
           if (!revoking) revokingSendLocks.delete(revokeLockKey);
@@ -2844,6 +2844,13 @@ async function executeSendPipeline(interaction, {
             }
           }
           await btnInteraction.reply({ content, ephemeral: true }).catch(logIgnoredDiscordErr);
+          return;
+        }
+        if (revokeAttempted) {
+          await btnInteraction.reply({
+            content: 'This management card is closed after a revoke attempt. Run `/qurl revoke` to check the result.',
+            ephemeral: true,
+          }).catch(logIgnoredDiscordErr);
           return;
         }
         if (addRecipientsLocks.has(sendId)) {
@@ -3692,7 +3699,12 @@ async function handleRevoke(interaction, apiKey) {
   }
   await interaction.deferReply({ ephemeral: true });
 
-  const recentSends = await db.getRecentSends(interaction.user.id, 5);
+  if (config.isMultiTenant && !interaction.guildId) {
+    return interaction.editReply({ content: 'Use this command in a server.' });
+  }
+  const recentSends = config.isMultiTenant
+    ? await db.getRecentSends(interaction.user.id, 5, interaction.guildId)
+    : await db.getRecentSends(interaction.user.id, 5);
 
   if (recentSends.length === 0) {
     return interaction.editReply({ content: 'No recent sends to revoke.' });

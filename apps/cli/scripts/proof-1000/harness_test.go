@@ -574,7 +574,7 @@ func TestPublishRetryExhaustionIsATerminalFailure(t *testing.T) {
 	if r.Passed || !strings.Contains(strings.Join(r.Verdict, "\n"), "requested shares") {
 		t.Fatalf("verdict = %v", r.Verdict)
 	}
-	if _, all := waitAllServing(context.Background(), nil, env.SocketPath, time.Now(), time.Minute, time.Second, func(statusSample) {}); all {
+	if _, all := waitAllServing(context.Background(), nil, env.StateDir, env.SocketPath, time.Now(), time.Minute, time.Second, func(statusSample) {}); all {
 		t.Fatal("an empty resource set must never be all serving")
 	}
 }
