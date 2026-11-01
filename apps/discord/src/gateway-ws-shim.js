@@ -243,6 +243,7 @@ function createGatewayWsShim({
   const pendingGuildRemoves = new Set();
   let wsRecovering = false;
   let appId = null;
+  let probeUserId = null;
   let identifyAttempts = 0;
   let identifyBudgetFatalSignaled = false;
   let missingAbortSignalLogged = false;
@@ -593,6 +594,7 @@ function createGatewayWsShim({
           // RegisterCommands needs this to address the global-
           // commands or guild-commands endpoint.
           appId = data?.d?.application?.id ?? null;
+          probeUserId = data?.d?.user?.id ?? null;
           isReady = true;
           // wsConnected is mirrored on the shard-level Ready/Resumed
           // listeners installed below — not here.
@@ -853,6 +855,28 @@ function createGatewayWsShim({
 
     isReady() {
       return isReady;
+    },
+
+    async getDispatchProbeTarget() {
+      if (stopped || !isReady || !wsConnected) return null;
+      // RESUMED has no READY user/guild snapshot; fetch only the bot and one guild.
+      if (!probeUserId) {
+        const user = await restInstance.get('/users/@me', { signal: AbortSignal.timeout(3000) });
+        probeUserId = user.id;
+      }
+      let guildId = activeGuildIds?.values().next().value;
+      if (!activeGuildIds) {
+        const guilds = await restInstance.get('/users/@me/guilds', {
+          query: new URLSearchParams({ limit: '1' }), signal: AbortSignal.timeout(3000),
+        });
+        guildId = guilds[0]?.id;
+      }
+      return guildId ? { guildId, userId: probeUserId } : null;
+    },
+
+    requestDispatchProbe(_target, packet) {
+      // This shim's WebSocketManager owns one shard (shardCount: 1).
+      return manager.send(0, packet);
     },
 
     onDispatch(handler) {

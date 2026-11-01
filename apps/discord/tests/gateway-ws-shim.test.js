@@ -1970,3 +1970,34 @@ describe('constants are pinned', () => {
   });
 
 });
+
+describe('dispatch probe transport', () => {
+  test('READY uses its bot user and guild, and sends on the owned shard', async () => {
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start(); const manager = managerInstances[0];
+    manager.send = jest.fn().mockResolvedValue(undefined);
+    manager.emit(WebSocketShardEvents.Ready, { shardId: 0 });
+    manager.emit(WebSocketShardEvents.Dispatch, { shardId: 0, data: { t: 'READY', d: {
+      user: { id: '234567890123456789' }, guilds: [{ id: '123456789012345678' }],
+    } } });
+    const target = await shim.getDispatchProbeTarget();
+    expect(target).toEqual({ guildId: '123456789012345678', userId: '234567890123456789' });
+    const packet = { op: 8, d: { guild_id: target.guildId, user_ids: [target.userId], nonce: 'fixture' } };
+    await shim.requestDispatchProbe(target, packet);
+    expect(manager.send).toHaveBeenCalledWith(0, packet);
+    expect(restInstances[0].get).not.toHaveBeenCalled(); await shim.stop();
+  });
+  test('pure RESUMED boot fetches only self and one guild, never uses application.id as user ID', async () => {
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start(); const manager = managerInstances[0], rest = restInstances[0];
+    expect(await shim.getDispatchProbeTarget()).toBeNull();
+    manager.emit(WebSocketShardEvents.Resumed, { shardId: 0 });
+    manager.emit(WebSocketShardEvents.Dispatch, { shardId: 0, data: { t: 'RESUMED', d: {} } });
+    rest.get.mockResolvedValueOnce({ id: '234567890123456789' }).mockResolvedValueOnce([{ id: '123456789012345678' }]);
+    expect(await shim.getDispatchProbeTarget()).toEqual({ guildId: '123456789012345678', userId: '234567890123456789' });
+    expect(rest.get.mock.calls.map(call => call[0])).toEqual(['/users/@me', '/users/@me/guilds']);
+    expect(rest.get.mock.calls[1][1].query.get('limit')).toBe('1');
+    expect(rest.get.mock.calls.every(call => call[1].signal instanceof AbortSignal)).toBe(true);
+    await shim.stop(); expect(await shim.getDispatchProbeTarget()).toBeNull();
+  });
+});
