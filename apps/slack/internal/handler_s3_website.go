@@ -1059,6 +1059,10 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 	if err != nil {
 		return "", err
 	}
+	volumeInstructions, err := renderECSEFSVolumeInstructions(args.Slug)
+	if err != nil {
+		return "", err
+	}
 	intro := strings.Join([]string{
 		"Use this as an " + ecsFargateChecklistText + ".",
 		"Write the temporary enrollment token to `enrollment-token` on a read-only qurl-bootstrap EFS access point; never place it in task environment or argv.",
@@ -1078,7 +1082,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		"3. Add these two containers to the same task definition and replace each `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
 		containerBlock + "\n\n" +
 		"4. Create the CloudWatch Logs group `" + s3WebsiteECSLogGroup + "` in the ECS task region if it does not already exist.\n" +
-		"5. Add EFS-backed qurl-agent-state, qurl-config, and qurl-bootstrap volumes. After qURL connects, deploy a warm-start revision without the bootstrap mount/flag, verify reconnect, then delete the enrollment-token file.", nil
+		"5. " + volumeInstructions + "\n\nAfter qURL connects, deploy a warm-start revision without the bootstrap mount/flag, verify reconnect, then delete the enrollment-token file.", nil
 }
 
 func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {

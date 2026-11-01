@@ -135,6 +135,19 @@ channel alias, the local port, and where you'll run it (Docker, Docker Compose,
 ECS/Fargate, or Kubernetes). qURL replies with copy-paste deploy steps tailored
 to that choice, plus a one-shot enrollment token that expires after one hour.
 
+ECS/Fargate output includes separate config YAML, container JSON, and task-volume JSON
+artifacts. The volume sample enables EFS IAM and transit encryption. Replace
+its file-system and access-point placeholders, then create separate per-slug
+state, config, and bootstrap access points as the output describes. Keep one
+active sidecar per state access point; use a different slug and access points
+for concurrent sidecars. Put `share.yaml` at the config access-point root, which
+mounts at `/etc/qurl/share.yaml`. The earlier `/work/qurl-proxy.yaml` layout is
+retired. The temporary enrollment file goes at the bootstrap access-point root;
+keep the state volume after enrollment. The task-volume `rootDirectory` stays
+`/`: the access point supplies the per-slug root. See the [ECS EFS task volume
+contract](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specify-efs-config.html)
+and [EFS access-point directory rules](https://docs.aws.amazon.com/efs/latest/ug/enforce-root-directory-access-point.html).
+
 **qURL Connector for an S3 hosted website** — for a private S3 static website.
 The guided form asks for the connector ID, optional channel alias, target
 environment, bucket, region, optional prefix, and index document. qURL replies
