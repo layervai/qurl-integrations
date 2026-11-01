@@ -963,6 +963,8 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
 }
 
 // Claim a renderer warning without changing the flow version, payload or TTL.
+// Only an existing marker is seen; missing or changed rows remain retryable.
+// The ciphertext condition fences replacements after the strong read.
 async function claimFlowWarning(flow_id, sendNonce, kind, value) {
   const fields = { expiry: 'expiresIn', self_destruct: 'selfDestructSeconds' };
   if (typeof flow_id !== 'string' || !flow_id || typeof kind !== 'string' || !Object.hasOwn(fields, kind)) {
@@ -975,10 +977,10 @@ async function claimFlowWarning(flow_id, sendNonce, kind, value) {
   }), options);
   const item = result?.Item;
   const now = nowEpochSeconds();
-  if (!item || !Number.isInteger(item.expires_at) || item.expires_at < now) return 'seen';
+  if (!item || !Number.isInteger(item.expires_at) || item.expires_at < now) return 'retry';
   const payload = decryptPayload(item.payload);
   if (!payload || payload.sendNonce !== sendNonce
-      || JSON.stringify(payload[fields[kind]]) !== JSON.stringify(value)) return 'seen';
+      || JSON.stringify(payload[fields[kind]]) !== JSON.stringify(value)) return 'retry';
   if (Object.hasOwn(item, marker)) return 'seen';
   try {
     await ddb.send(new UpdateCommand({

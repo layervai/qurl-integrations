@@ -99,7 +99,7 @@ async function main() {
       item = await read();
       assert.deepEqual(item, scenario === 'deleted' ? undefined : replacement, scenario);
       if (scenario === 'new lifecycle') {
-        assert.equal(await claim(), 'seen');
+        assert.equal(await claim(), 'retry');
         assert.equal(await claim('replacement'), 'claimed');
       }
       if (scenario === 'payload transition') {

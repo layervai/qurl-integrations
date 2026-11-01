@@ -102,6 +102,7 @@ const mockLoadFlow = jest.fn();
 const mockTransitionFlow = jest.fn();
 const mockDeleteFlow = jest.fn();
 const mockSupersedeOrCreate = jest.fn();
+// Give corrupt fixtures unique lifecycle IDs; the real warning cache survives mock clearing.
 jest.mock('../../src/flow-state', () => ({
   claimFlowWarning: jest.fn(async () => 'claimed'),
   createFlow: (...a) => mockCreateFlow(...a),

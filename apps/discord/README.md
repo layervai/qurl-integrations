@@ -673,7 +673,7 @@ that completed walk from being marked fresh.
 ### Corrupt confirm-option warnings
 
 Invalid saved expiry and timer options keep their existing safe menu defaults.
-Each warning kind is claimed once on the existing flow row. The claim checks the
+Each warning kind is claimed once on the existing flow row, regardless of value. The claim checks the
 current nonce, encrypted payload and expiry; it does not change version, payload
 or TTL. Normal flow transitions preserve the markers. New flow creation clears
 them with the rest of the old row.

@@ -1217,7 +1217,7 @@ describe('flow-state.claimFlowWarning', () => {
       if (scenario === 'corrected value') item = row({}, { sendNonce: nonce, expiresIn: '24h' });
       if (scenario === 'already claimed') item.corruption_warned_expiry = true;
       ddbMock.on(GetCommand).resolves({ Item: item });
-      expect(await flowState.claimFlowWarning(FLOW_ID, nonce, 'expiry', value)).toBe('seen');
+      expect(await flowState.claimFlowWarning(FLOW_ID, nonce, 'expiry', value)).toBe(scenario === 'already claimed' ? 'seen' : 'retry');
       expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     },
   );
