@@ -3020,23 +3020,9 @@ async function executeSendPipeline(interaction, {
 async function cleanupFreshMintedLinks(batchSends, apiKey, sendId, options = {}) {
   const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
-  const txnActionCount = ddbSendConfigGuardActionCount(batchSends);
-  if (rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
-    // Unreachable by construction for today's send flows: oversized
-    // batches fail before DDB, and revoked errors only come from a single
-    // transaction. If a future caller violates that invariant, still revoke
-    // the freshly minted qURLs; rows may point at revoked links, but no DMs
-    // have been sent and the grants fail closed.
-    logger.error('Cleaning up oversized send batch after possible persistence', {
-      sendId,
-      send_count: batchSends.length,
-      txn_actions: txnActionCount,
-    });
-  }
-
-  // Called when no recipient rows landed, or when a terminal guarded
-  // transaction failure is ambiguous enough that revoking freshly minted qURLs
-  // is the fail-closed outcome (no DMs have been sent yet).
+  // Initial sends may have partially committed BatchWrite chunks. Add
+  // Recipients may have an ambiguous guarded transaction. No DMs have been
+  // sent yet, so revoking the known fresh grants is the fail-closed outcome.
   const qurlIdsByResource = new Map();
   let unidentifiedCount = 0;
   for (const s of batchSends) {
