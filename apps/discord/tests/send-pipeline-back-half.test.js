@@ -114,7 +114,7 @@ const mockDb = {
   recordQurlView: jest.fn(),
   tryAdvanceRenderedCount: jest.fn().mockResolvedValue(true),
   getSendRenderedCount: jest.fn().mockResolvedValue(0),
-  markConfirmTerminal: jest.fn().mockResolvedValue(undefined),
+  markConfirmFastPathOff: jest.fn().mockResolvedValue(undefined),
 };
 jest.mock('../src/store', () => mockDb);
 

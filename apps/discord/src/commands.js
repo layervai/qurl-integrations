@@ -1474,12 +1474,6 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     });
   }
 
-  // `viewed` already declared above the createHandleViewUpdate factory
-  // call so the factory closes over the live binding. Closure-tracked
-  // so we don't re-walk linkStatus on each render; incremented when a
-  // link flips pending → opened in either runTick OR the view-update
-  // handler; never decreases.
-
   // No explicit `expired` state in the rendered counter: qurl.accessed
   // is the only event we receive. The interaction-token edit window
   // bounds the 14-min monitor cap (#465). Pre-PR-455 modelled
@@ -1506,8 +1500,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // db.getQurlViews`) resolves, so two ticks can never be in flight at
   // once — the self-destruct-era setInterval concurrency race is gone.
   // The synchronous `status === 'opened'` guard at the flip site stays
-  // as defense-in-depth (and to no-op the view-update push path racing
-  // a poll), so `viewed++` still can't double-count.
+  // as defense-in-depth, so `viewed++` cannot double-count.
   const runTick = async () => {
     if (isTerminated()) {
       clearTimeout(timer);
@@ -2767,14 +2760,14 @@ async function executeSendPipeline(interaction, {
           // Freeze the confirmation display so a late webhook fast-path
           // edit can't resurrect a live-looking "👀 N viewed" counter
           // over this "Revoked X/Y" terminal copy (getSendRenderState
-          // reads confirm_terminal → terminal, which the fast-path checks
+          // reads the persisted fast-path-off flag, which the fast-path checks
           // FIRST and skips on). Best-effort + logged-swallowed: a miss
           // narrows to a cosmetic race (a view landing in the tens-of-ms
           // before the flag lands could re-render the counter once); the
           // monitor.stop() above already halts the poll, so this is the
           // only remaining off-monitor editor to fence.
-          db.markConfirmTerminal(sendId).catch((err) => {
-            logger.warn('markConfirmTerminal (revoke) failed; a late fast-path edit could briefly re-render the counter', { sendId, error: err.message });
+          db.markConfirmFastPathOff(sendId).catch((err) => {
+            logger.warn('markConfirmFastPathOff (revoke) failed; a late fast-path edit could briefly re-render the counter', { sendId, error: err.message });
           });
         } catch (err) {
           logger.error('Revoke failed', { sendId, error: err.message });
@@ -2906,11 +2899,11 @@ async function executeSendPipeline(interaction, {
               // the send to view-counter-degraded (the monitor renders bare
               // baseMsg from here on). The fast-path can't see that, so
               // DISARM it by marking the confirmation terminal — its
-              // terminal guard then skips, leaving the (bare) poll render
+              // fast-path-off guard then skips, leaving the (bare) poll render
               // as the sole renderer. Matches the send-time degraded gate.
               if ((addResult.newLinks || []).some(l => !l?.qurlId)) {
-                db.markConfirmTerminal(sendId).catch((err) => {
-                  logger.warn('markConfirmTerminal (add-recipients degrade) failed; fast-path could briefly stamp a partial counter until poll re-renders bare', { sendId, error: err.message });
+                db.markConfirmFastPathOff(sendId).catch((err) => {
+                  logger.warn('markConfirmFastPathOff (add-recipients degrade) failed; fast-path could briefly stamp a partial counter until poll re-renders bare', { sendId, error: err.message });
                 });
               } else {
                 // Re-arm the fast-path with the post-add totals so a view
@@ -2995,8 +2988,8 @@ async function executeSendPipeline(interaction, {
         // off-monitor editor to fence. Expired is intentionally NOT fenced
         // here — the qurl.expired handler edits the recipient DM, never
         // this sender confirmation, so it needs no terminal mark.
-        db.markConfirmTerminal(sendId).catch((err) => {
-          logger.warn('markConfirmTerminal (window-closed) failed; a late fast-path edit could briefly re-render the counter', { sendId, error: err.message });
+        db.markConfirmFastPathOff(sendId).catch((err) => {
+          logger.warn('markConfirmFastPathOff (window-closed) failed; a late fast-path edit could briefly re-render the counter', { sendId, error: err.message });
         });
         interaction.editReply({
           content: monitor.getFullMsg() + '\n\n⏰ **Management window closed** — use `/qurl revoke` to revoke later.',

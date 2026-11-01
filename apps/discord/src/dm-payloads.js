@@ -2,7 +2,7 @@
 // (PATCH /channels/{id}/messages/{id}). Pure functions — no I/O, no
 // process state. Lives in its own leaf module so the qurl-webhook
 // receiver route can import it without pulling in commands.js's
-// require graph (Discord REST, view-update-registry, flow-state,
+// require graph (Discord REST, flow-state,
 // etc.) at module-init time during tests.
 //
 // Today buildExpiredDMPayload + buildConsumedDMPayload live here.
