@@ -867,8 +867,10 @@ backend receipt and expiration; these commands do not verify payment.
 The publisher backend can subscribe to `consumer.subscribed` webhooks.
 If its notification is pending, repeat the same receipt, expiry and version.
 
-For paid contracts, run `qurl payments connect -o json`, open the Stripe consent
-URL, then read `qurl payments account -o json`. Use that account and an active
+For paid contracts, first run `qurl account setup` to link the device to your
+publisher account. Run `qurl payments connect -o json` and open the consent URL
+yourself. Finish setup in LayerV billing while signed in to that publisher account.
+Then read `qurl payments account -o json`. Use that account and an active
 fixed Stripe price with `--stripe-account` and `--stripe-price` when publishing
 or configuring contract access. The service verifies payment; manual approval
 is unavailable. LayerV collects 3%, including subscription renewals. One-time
