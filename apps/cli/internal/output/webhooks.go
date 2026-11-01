@@ -9,10 +9,8 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
 
-const webhookStatusField = "status"
-
 // WebhookPage prints one page without secret fields or terminal control sequences.
-func (p *Printer) WebhookPage(page *qurlapi.WebhookPage[qurlapi.Webhook]) error {
+func (p *Printer) WebhookPage(page *qurlapi.AccountPage[qurlapi.Webhook]) error {
 	if p.format == FormatJSON {
 		return p.writeJSON(page)
 	}
@@ -66,7 +64,7 @@ func (p *Printer) Webhook(item *qurlapi.Webhook, secret string) error {
 // WebhookDeleted confirms the selected subscription was removed.
 func (p *Printer) WebhookDeleted(id string) error {
 	if p.format == FormatJSON {
-		return p.writeJSON(map[string]string{"webhook_id": id, webhookStatusField: "deleted"})
+		return p.writeJSON(map[string]string{"webhook_id": id, accountStatusField: "deleted"})
 	}
 	if p.quiet {
 		_, err := fmt.Fprintln(p.out, id)
@@ -97,7 +95,7 @@ func (p *Printer) WebhookEvents(items []qurlapi.WebhookEvent) error {
 }
 
 // WebhookDeliveries omits endpoint response text in every output format.
-func (p *Printer) WebhookDeliveries(page *qurlapi.WebhookPage[qurlapi.WebhookDelivery]) error {
+func (p *Printer) WebhookDeliveries(page *qurlapi.AccountPage[qurlapi.WebhookDelivery]) error {
 	if p.format == FormatJSON {
 		return p.writeJSON(page)
 	}

@@ -8,36 +8,10 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
-	"strconv"
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/qurl"
 )
-
-// WebhookManagement uses the signed-in account; linked device owners are unsupported.
-type WebhookManagement interface {
-	Me(context.Context) (*Identity, error)
-	ListWebhooks(context.Context, int, string) (*WebhookPage[Webhook], error)
-	GetWebhook(context.Context, string) (*Webhook, error)
-	CreateWebhook(context.Context, WebhookInput) (*WebhookSecret, error)
-	UpdateWebhook(context.Context, string, WebhookInput) (*Webhook, error)
-	DeleteWebhook(context.Context, string) error
-	RotateWebhookSecret(context.Context, string) (*WebhookSecret, error)
-	WebhookEvents(context.Context) ([]WebhookEvent, error)
-	WebhookDeliveries(context.Context, string, int, string) (*WebhookPage[WebhookDelivery], error)
-}
-
-// NewWebhookManagement shares the CLI transport without device-owner selection.
-func NewWebhookManagement(cfg *Config) (WebhookManagement, error) {
-	if cfg == nil || cfg.OwnerID != "" {
-		return nil, fmt.Errorf("%w: webhooks require the browser account owner", qurl.ErrInvalidResourceRequest)
-	}
-	c, err := New(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return c.(*client), nil
-}
 
 // Webhook excludes signing secrets from ordinary reads.
 // TODO(upstream-contract): qurl-service api/openapi.yaml owns webhook shapes and retry rules.
@@ -67,13 +41,6 @@ type WebhookInput struct {
 	Events      *[]string `json:"events,omitempty"`
 	Description *string   `json:"description,omitempty"`
 	Status      *string   `json:"status,omitempty"`
-}
-
-// WebhookPage contains one bounded page without automatic cursor traversal.
-type WebhookPage[T any] struct {
-	Data       []T    `json:"data"`
-	NextCursor string `json:"next_cursor,omitempty"`
-	HasMore    bool   `json:"has_more"`
 }
 
 // WebhookEvent is a catalog entry, not a delivery guarantee.
@@ -107,14 +74,6 @@ var webhookEventNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(?:\.[a-z][a-z
 func ValidateWebhookID(id string) error {
 	if !webhookIDPattern.MatchString(id) {
 		return fmt.Errorf("%w: webhook ID must be wh_ followed by 16 URL-safe characters", qurl.ErrInvalidResourceRequest)
-	}
-	return nil
-}
-
-// ValidateWebhookPage checks the server page bounds before sign-in.
-func ValidateWebhookPage(limit int) error {
-	if limit < 1 || limit > 100 {
-		return fmt.Errorf("%w: limit must be 1–100", qurl.ErrInvalidResourceRequest)
 	}
 	return nil
 }
@@ -171,41 +130,16 @@ func validateWebhookEvents(events []string) error {
 	return nil
 }
 
-func webhookListPath(path string, limit int, cursor string) string {
-	query := url.Values{"limit": {strconv.Itoa(limit)}}
-	if cursor != "" {
-		query.Set("cursor", cursor)
-	}
-	return path + "?" + query.Encode()
-}
-
-func decodeWebhookPage[T any](reply *restReply, limit int) (*WebhookPage[T], error) {
-	if reply.status != http.StatusOK {
-		return nil, reply.problem()
-	}
-	var wire struct {
-		Data []T `json:"data"`
-		Meta *struct {
-			HasMore    *bool  `json:"has_more"`
-			NextCursor string `json:"next_cursor"`
-		} `json:"meta"`
-	}
-	if json.Unmarshal(reply.body, &wire) != nil || wire.Data == nil || len(wire.Data) > limit || wire.Meta == nil || wire.Meta.HasMore == nil || (*wire.Meta.HasMore && wire.Meta.NextCursor == "") {
-		return nil, fmt.Errorf("%w: incomplete webhook page", qurl.ErrInvalidAPIResponse)
-	}
-	return &WebhookPage[T]{Data: wire.Data, HasMore: *wire.Meta.HasMore, NextCursor: wire.Meta.NextCursor}, nil
-}
-
 // ListWebhooks reads metadata only, even when a server adds a secret field.
-func (c *client) ListWebhooks(ctx context.Context, limit int, cursor string) (*WebhookPage[Webhook], error) {
-	if err := ValidateWebhookPage(limit); err != nil {
+func (c *client) ListWebhooks(ctx context.Context, limit int, cursor string) (*AccountPage[Webhook], error) {
+	if err := ValidateAccountPage(limit); err != nil {
 		return nil, err
 	}
-	reply, err := c.doREST(ctx, http.MethodGet, webhookListPath("/v1/webhooks", limit, cursor), nil)
+	reply, err := c.doREST(ctx, http.MethodGet, accountListPath("/v1/webhooks", limit, cursor), nil)
 	if err != nil {
 		return nil, err
 	}
-	page, err := decodeWebhookPage[Webhook](reply, limit)
+	page, err := decodeAccountPage[Webhook](reply, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -354,18 +288,18 @@ func (c *client) WebhookEvents(ctx context.Context) ([]WebhookEvent, error) {
 }
 
 // WebhookDeliveries reads bounded metadata without endpoint response text.
-func (c *client) WebhookDeliveries(ctx context.Context, id string, limit int, cursor string) (*WebhookPage[WebhookDelivery], error) {
+func (c *client) WebhookDeliveries(ctx context.Context, id string, limit int, cursor string) (*AccountPage[WebhookDelivery], error) {
 	if err := ValidateWebhookID(id); err != nil {
 		return nil, err
 	}
-	if err := ValidateWebhookPage(limit); err != nil {
+	if err := ValidateAccountPage(limit); err != nil {
 		return nil, err
 	}
-	reply, err := c.doREST(ctx, http.MethodGet, webhookListPath("/v1/webhooks/"+id+"/deliveries", limit, cursor), nil)
+	reply, err := c.doREST(ctx, http.MethodGet, accountListPath("/v1/webhooks/"+id+"/deliveries", limit, cursor), nil)
 	if err != nil {
 		return nil, err
 	}
-	page, err := decodeWebhookPage[WebhookDelivery](reply, limit)
+	page, err := decodeAccountPage[WebhookDelivery](reply, limit)
 	if err != nil {
 		return nil, err
 	}
