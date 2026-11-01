@@ -69,9 +69,10 @@ func parsePublicConfig(html string) (publicConfig, error) {
 	return config, nil
 }
 
+// The origin is explicit operator configuration, never taken from an input link.
 func loadPublicConfig(endpoint string) (publicConfig, error) {
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "https" || (u.Host != "qurl.link.layerv.xyz" && u.Host != "qurl.link") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "/" && u.Path != "") {
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "/" && u.Path != "") {
 		return publicConfig{}, errors.New("invalid public config origin")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)

@@ -1453,7 +1453,7 @@ const { parseIPv4Octets, ipv4LocalScope, ipv6LocalScope } = require('../src/util
 // adds a production hostname, this list moves with it.
 //
 // `api.layerv.ai` is pinned as an exact HOST and deliberately not as a parent
-// domain: `api.staging.layerv.ai` is a legitimate non-production endpoint (see
+// domain: `api.staging.example.layerv.ai` is a legitimate non-production endpoint (see
 // connector.js's DETECT_TUNNEL_NON_PROD_QURL_ENDPOINT_HOSTS), so a
 // domain-wide rule would misfile staging as production.
 // `get.qurl.link` is also matched by the `qurl.link` domain rule below; it is
@@ -1465,8 +1465,8 @@ const PROD_HOSTS = new Set(['api.layerv.ai', 'get.qurl.link']);
 // domains are production wholesale — including a regional or replacement
 // connector like `get-eu.qurl.link`, which is exactly the case an exact-host
 // pin would miss. Unlike `layerv.ai`, neither domain has a non-production
-// tenant: the non-prod tunnel spellings are `.qurl.site.layerv.xyz` /
-// `.qurl.site.layerv.ai` and `qurl.link.layerv.xyz`, all of which end in
+// tenant: the non-prod tunnel spellings are `.qurl.site.example.layerv.xyz` /
+// `.qurl.site.example.layerv.ai` and `qurl.link.example.layerv.xyz`, all of which end in
 // `.layerv.xyz` / `.layerv.ai` and so do NOT match this rule.
 const PROD_DOMAINS = ['qurl.site', 'qurl.link'];
 

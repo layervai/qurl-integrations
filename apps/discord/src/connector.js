@@ -906,22 +906,13 @@ const DETECT_RESOURCE_FAILURE_BACKOFF_MS = 30 * 1000;
 // TODO(upstream-contract): keep these suffixes in lockstep with qurl-service /
 // qURL tunnel infra hostnames for production, sandbox, and staging.
 const DETECT_TUNNEL_PROD_HOST_SUFFIX = '.qurl.site';
-const DETECT_TUNNEL_NON_PROD_HOST_SUFFIXES = [
-  '.qurl.site.layerv.xyz',
-  '.qurl.site.layerv.ai',
-];
-// Extended (built-ins ∪ extras) via config.DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS
-// — env-injected by the private infra repo so real sandbox/staging hostnames
-// never need to be committed to this public repo. `|| []` keeps every mock of
-// ../src/config in the test suite that omits the field working unchanged
-// (empty extra set == today's behavior). See config.js for the parsing +
-// fail-fast shape validation of both DETECT_EXTRA_NON_PROD_* env vars.
+// Deployment configuration supplies non-production API hosts and tunnel suffixes.
+// Local API fixtures remain useful without naming any real environment.
 const DETECT_TUNNEL_NON_PROD_QURL_ENDPOINT_HOSTS = new Set([
   'localhost',
   '127.0.0.1',
   '[::1]',
   'api.test.local',
-  'api.staging.layerv.ai',
   ...(config.DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS || []),
 ]);
 
@@ -937,7 +928,6 @@ function detectTunnelHostSuffixesForEndpoint(endpoint) {
   if (DETECT_TUNNEL_NON_PROD_QURL_ENDPOINT_HOSTS.has(host)) {
     return [
       DETECT_TUNNEL_PROD_HOST_SUFFIX,
-      ...DETECT_TUNNEL_NON_PROD_HOST_SUFFIXES,
       ...(config.DETECT_EXTRA_NON_PROD_HOST_SUFFIXES || []),
     ];
   }

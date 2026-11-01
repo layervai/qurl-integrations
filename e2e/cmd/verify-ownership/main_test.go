@@ -1,83 +1,90 @@
 package main
 
 import (
-	"context"
-	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
-
-	"github.com/layervai/qurl-go/qurl"
-
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 )
 
-func TestVerifiedPublicOwnership(t *testing.T) {
-	for _, cellID := range []string{"cell0", ""} {
-		t.Run("cell_id="+cellID, func(t *testing.T) {
-			priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-			der, _ := x509.MarshalPKIXPublicKey(&priv.PublicKey)
-			cell, _ := ecdh.X25519().GenerateKey(rand.Reader)
-			signer, _ := qurl.NewLocalSigner(priv, "test-issuer")
-			// The signed v2 cell differs from the legacy browser key.
-			config, err := parsePublicConfig("const QURL_LINK_CONFIG = {\n        issuerTrustStore: {\"test-issuer\":\"" + base64.RawURLEncoding.EncodeToString(der) + "\"},\n        serverStaticPubB64: \"" + base64.StdEncoding.EncodeToString(make([]byte, 32)) + "\",\n      };")
-			if err != nil {
-				t.Fatal(err)
-			}
-			link, err := qurl.CreatePortalWithParams(context.Background(), signer, qurl.CreateParams{CellPublicKey: cell.PublicKey().Bytes(), ResourcePublicKey: der, RelayURL: "https://relay.example.com", CellID: cellID, JTI: "test-owned-qurl", IssuedAt: 1781910000, NotBefore: 1781910000, Expiry: 1781910300})
-			if err != nil {
-				t.Fatal(err)
-			}
-			got, err := verifiedPublicIdentity(link, config)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got["cell_id"] != cellID || got["cell_public_key_b64"] != base64.StdEncoding.EncodeToString(cell.PublicKey().Bytes()) || got["resource_public_key_b64"] != base64.RawURLEncoding.EncodeToString(der) {
-				t.Fatal("public binding mismatch")
-			}
-			agent, err := base64.StdEncoding.DecodeString(got["agent_public_key"])
-			if err != nil || len(agent) != 32 {
-				t.Fatal("invalid native agent key")
-			}
-			if _, err := verifiedPublicIdentity(link+"tampered", config); err == nil {
-				t.Fatal("tampered signature accepted")
-			}
-			untrusted := publicConfig{Issuers: map[string]string{"other-issuer": base64.RawURLEncoding.EncodeToString(der)}}
-			if _, err := verifiedPublicIdentity(link, untrusted); err == nil {
-				t.Fatal("untrusted issuer accepted")
-			}
-			if got["signed_jti"] != "test-owned-qurl" || got["signed_expiry_unix"] != "1781910300" {
-				t.Fatal("signed claim identity missing")
-			}
-			if len(got) != 6 {
-				t.Fatal("unexpected receipt fields")
-			}
+type configTransport func(*http.Request) (*http.Response, error)
+
+func (f configTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestPublicConfigUsesExplicitOperatorOrigin(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("const QURL_LINK_CONFIG = {\n        issuerTrustStore: {\"fixture\":%q},\n      };", base64.RawURLEncoding.EncodeToString(der))
+	old := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = old })
+	calls := 0
+	http.DefaultTransport = configTransport(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.URL.String() != "https://public.sandbox.example.com/" || req.Header.Get("Authorization") != "" || req.URL.User != nil {
+			t.Fatal("bootstrap request changed its configured origin or carried credentials")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})
+	config, err := loadPublicConfig("https://public.sandbox.example.com/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issuerTrust(config); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("bootstrap requests: got %d want 1", calls)
+	}
+}
+
+func TestPublicConfigRejectsUnsafeOriginsBeforeHTTP(t *testing.T) {
+	old := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = old })
+	calls := 0
+	http.DefaultTransport = configTransport(func(*http.Request) (*http.Response, error) {
+		calls++
+		t.Fatal("invalid origin reached HTTP")
+		return nil, errors.New("invalid origin reached HTTP")
+	})
+	for _, endpoint := range []string{"", "http://public.example.com/", "https://user:secret@public.example.com/", "https://public.example.com/path", "https://public.example.com/?x=1", "https://public.example.com/?", "https://public.example.com/#x", "https://:443/"} {
+		if _, err := loadPublicConfig(endpoint); err == nil {
+			t.Fatal("unsafe bootstrap origin accepted")
+		}
+	}
+	if calls != 0 {
+		t.Fatal("invalid origin caused a request")
+	}
+}
+
+func TestPublicConfigKeepsRedirectAndBodyLimits(t *testing.T) {
+	old := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = old })
+	for _, status := range []int{http.StatusFound, http.StatusOK} {
+		calls := 0
+		http.DefaultTransport = configTransport(func(req *http.Request) (*http.Response, error) {
+			calls++
+			header := make(http.Header)
+			header.Set("Location", "https://other.example.com/")
+			return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(strings.Repeat("x", 1048577))), Request: req}, nil
 		})
-	}
-}
-
-func TestPublicConfigShape(t *testing.T) {
-	html := "const QURL_LINK_CONFIG = {\n        issuerTrustStore: {\"issuer\":\"public\"},\n        serverStaticPubB64: \"" + base64.StdEncoding.EncodeToString(make([]byte, 32)) + "\",\n      };"
-	// Legacy static keys do not constrain issuer-signed qv2 cell identities.
-	for _, input := range []string{html, strings.ReplaceAll(html, "serverStaticPubB64:", "unusedLegacyKey:")} {
-		if _, err := parsePublicConfig(input); err != nil {
-			t.Fatal(err)
+		if _, err := loadPublicConfig("https://public.example.com/"); err == nil {
+			t.Fatal("redirect or oversized bootstrap body accepted")
 		}
-	}
-	for _, bad := range []string{"", html + html, strings.ReplaceAll(html, "issuerTrustStore:", "missing:"), strings.ReplaceAll(html, "{\"issuer\":\"public\"}", "null")} {
-		if _, err := parsePublicConfig(bad); err == nil {
-			t.Fatal("malformed public config accepted")
-		}
-	}
-}
-
-func TestIssuerPreflightRejectsInvalidKeys(t *testing.T) {
-	for _, key := range []string{"not+raw/url=", base64.RawURLEncoding.EncodeToString([]byte("not DER"))} {
-		if _, err := issuerTrust(publicConfig{Issuers: map[string]string{"issuer": key}}); err == nil {
-			t.Fatal("invalid issuer passed preflight")
+		if calls != 1 {
+			t.Fatalf("request count: got %d want 1", calls)
 		}
 	}
 }

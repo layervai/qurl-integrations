@@ -172,10 +172,11 @@ it('allows one retry after a slug lookup transport error', async () => {
 });
 it('accepts the configured sandbox tunnel suffix through the complete request', async () => {
   jest.resetModules();
-  require('../src/config').QURL_ENDPOINT = 'https://api.layerv.xyz';
-  require('../src/config').DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS = ['api.layerv.xyz'];
+  require('../src/config').QURL_ENDPOINT = 'https://api.example.layerv.xyz';
+  require('../src/config').DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS = ['api.example.layerv.xyz'];
+  require('../src/config').DETECT_EXTRA_NON_PROD_HOST_SUFFIXES = ['.qurl.site.example.layerv.xyz'];
   detect = require('../src/connector').detectWatermark;
-  const site = 'https://detect-test.qurl.site.layerv.xyz';
+  const site = 'https://detect-test.qurl.site.example.layerv.xyz';
   mockClient.createQurlForResource.mockResolvedValue(minted({ qurl_site: site }));
   opener.fetch.mockImplementation(async build => send(build(new URL(site + path))));
   await expect(detect(Buffer.from('x'), { guildId })).resolves.toEqual(result);

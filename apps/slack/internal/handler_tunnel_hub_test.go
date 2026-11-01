@@ -6,7 +6,7 @@ import (
 )
 
 func TestTunnelInstallCarriesConfiguredHub(t *testing.T) {
-	hub := TunnelHub{Host: "hub.nhp.layerv.xyz", Port: "443", PublicKey: "UhVQcrKoJ2LhQlRtuIItBjxXR2wA/VvZvTmqnzT+GS8="}
+	hub := TunnelHub{Host: "hub.example.layerv.ai", Port: "443", PublicKey: "UhVQcrKoJ2LhQlRtuIItBjxXR2wA/VvZvTmqnzT+GS8="}
 	for _, env := range []tunnelInstallEnvironment{tunnelEnvDocker, tunnelEnvCompose, tunnelEnvKubernetes, tunnelEnvECSFargate} {
 		t.Run(string(env), func(t *testing.T) {
 			args := testTunnelInstallArgs()
@@ -26,7 +26,7 @@ func TestTunnelInstallCarriesConfiguredHub(t *testing.T) {
 }
 
 func TestTunnelHubRejectsPartialAndUnsafeConfig(t *testing.T) {
-	valid := TunnelHub{Host: "hub.nhp.layerv.xyz", Port: "443", PublicKey: "UhVQcrKoJ2LhQlRtuIItBjxXR2wA/VvZvTmqnzT+GS8="}
+	valid := TunnelHub{Host: "hub.example.layerv.ai", Port: "443", PublicKey: "UhVQcrKoJ2LhQlRtuIItBjxXR2wA/VvZvTmqnzT+GS8="}
 	for _, tc := range []struct {
 		name   string
 		change func(*TunnelHub)
@@ -38,9 +38,9 @@ func TestTunnelHubRejectsPartialAndUnsafeConfig(t *testing.T) {
 		{"injected host", func(h *TunnelHub) { h.Host = "hub.$(echo bad).layerv.xyz" }},
 		{"foreign host", func(h *TunnelHub) { h.Host = "hub.example.com" }},
 		{"empty label", func(h *TunnelHub) { h.Host = "hub..layerv.xyz" }},
-		{"invalid label", func(h *TunnelHub) { h.Host = "-hub.layerv.xyz" }},
-		{"empty interior label", func(h *TunnelHub) { h.Host = "hub..edge.layerv.xyz" }},
-		{"invalid interior label", func(h *TunnelHub) { h.Host = "hub.-edge.layerv.xyz" }},
+		{"invalid label", func(h *TunnelHub) { h.Host = "-hub.example.layerv.ai" }},
+		{"empty interior label", func(h *TunnelHub) { h.Host = "hub..edge.example.layerv.ai" }},
+		{"invalid interior label", func(h *TunnelHub) { h.Host = "hub.-edge.example.layerv.ai" }},
 		{"overlong label", func(h *TunnelHub) { h.Host = "hub." + strings.Repeat("a", 64) + ".layerv.xyz" }},
 		{"invalid key", func(h *TunnelHub) { h.PublicKey = "not-base64" }},
 	} {
@@ -62,7 +62,7 @@ func TestTunnelHubRejectsPartialAndUnsafeConfig(t *testing.T) {
 }
 
 func TestS3WebsiteInstallCarriesConfiguredHub(t *testing.T) {
-	hub := TunnelHub{Host: "hub.nhp.layerv.xyz", Port: "443", PublicKey: "UhVQcrKoJ2LhQlRtuIItBjxXR2wA/VvZvTmqnzT+GS8="}
+	hub := TunnelHub{Host: "hub.example.layerv.ai", Port: "443", PublicKey: "UhVQcrKoJ2LhQlRtuIItBjxXR2wA/VvZvTmqnzT+GS8="}
 	for _, env := range []tunnelInstallEnvironment{tunnelEnvDocker, tunnelEnvCompose, tunnelEnvKubernetes, tunnelEnvECSFargate} {
 		t.Run(string(env), func(t *testing.T) {
 			h := &Handler{cfg: Config{TunnelHub: hub}}

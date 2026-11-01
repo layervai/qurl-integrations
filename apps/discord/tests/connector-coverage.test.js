@@ -951,16 +951,16 @@ describe('detectTunnelHostSuffixesForEndpoint — env-extendable non-prod allowl
     expect(detectTunnelHostSuffixesForEndpoint('https://api.layerv.ai')).toEqual(['.qurl.site']);
   });
 
-  it('still grants the built-in non-prod suffixes for a built-in endpoint host when the extra vars are unset', () => {
+  it('requires explicit suffix configuration for a deployment endpoint', () => {
     jest.resetModules();
     jest.doMock('../src/config', () => ({
       CONNECTOR_URL: 'https://connector.test.local',
-      QURL_ENDPOINT: 'https://api.staging.layerv.ai',
+      QURL_ENDPOINT: 'https://api.staging.example.layerv.ai',
       QURL_API_KEY: 'test-key',
     }));
     const { detectTunnelHostSuffixesForEndpoint } = require('../src/connector');
-    expect(detectTunnelHostSuffixesForEndpoint('https://api.staging.layerv.ai'))
-      .toEqual(['.qurl.site', '.qurl.site.layerv.xyz', '.qurl.site.layerv.ai']);
+    expect(detectTunnelHostSuffixesForEndpoint('https://api.staging.example.layerv.ai'))
+      .toEqual(['.qurl.site']);
   });
 });
 

@@ -258,15 +258,14 @@ The mint response also must echo the selected resource ID and guild path.
 Both the qURL expiry and access-session duration are set to five minutes;
 expiring a qURL does not shorten an already-open session.
 
-Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
-tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts
-(`localhost`, `127.0.0.1`, `[::1]`, `api.test.local`,
-`api.staging.layerv.ai`); the endpoint host does not bind to one specific
-non-prod suffix. Unknown endpoint hosts, including unlisted `.local` hosts, fail
-closed to production tunnel suffixes. If tunnel infra adds a suffix or a
-path-based `qurl_site`, update the detect host-pin/path contract and tests before
-flipping `DETECT_COMMAND_ENABLED=true`.
-The built-in non-prod set above can be extended via
+Production `QURL_ENDPOINT` accepts only `*.qurl.site`. Non-prod deployments
+must set both the API host allowlist and their tunnel suffixes. Local endpoint
+fixtures (`localhost`, `127.0.0.1`, `[::1]`, `api.test.local`) also need explicit
+tunnel suffix configuration. Unknown endpoint hosts fail closed to production
+suffixes. Apply private deployment config before adopting this source change.
+If tunnel routing changes, update the detect host-pin/path tests before enabling
+`DETECT_COMMAND_ENABLED`.
+Configure the deployment with
 `DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS` and `DETECT_EXTRA_NON_PROD_HOST_SUFFIXES`
 (comma-separated, trimmed, lowercased; suffixes must start with `.`) — e.g.
 `DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS=api.sandbox.example` paired with

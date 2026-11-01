@@ -16,7 +16,7 @@ beforeEach(() => {
   global.fetch = fetchMock as typeof fetch;
   process.env.BOT_TOKEN = 'test-token';
   process.env.CHANNEL_ID = 'test-channel';
-  process.env.MINT_API_URL = 'https://api.layerv.xyz/v1/qurls';
+  process.env.MINT_API_URL = 'https://api.example.layerv.xyz/v1/qurls';
 });
 
 afterAll(() => {

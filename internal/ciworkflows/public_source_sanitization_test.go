@@ -1,13 +1,17 @@
 package ciworkflows
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // This repository is PUBLIC. Its source and docs describe how the qURL
@@ -20,9 +24,8 @@ import (
 // deliberate reductions. Both exist because a guard that has to be muted is
 // not a guard:
 //
-//   - No hostname scan. There, a CLI names two documented endpoints and
-//     anything else is suspicious. Here, layerv.ai hostnames are the product
-//     surface: the browser extension ships them to users.
+//   - Hostname scanning targets concrete pre-production names. Public product
+//     domains and explicit example fixtures remain allowed.
 //
 //   - A shorter banned-name list. "qurl-service" appears in over 100 files
 //     as this repository's ordinary architectural vocabulary, and it is
@@ -41,7 +44,8 @@ import (
 // Forbidden literals are split so this file does not itself contain the terms
 // it bans.
 var (
-	sanitizeAppID = regexp.MustCompile(`(?i)app[_ -]?(?:id|client[_ -]?id)[[:space:]]*[:=][[:space:]]*["']?([0-9]+)`)
+	sanitizePreProdHost = regexp.MustCompile(`(?i)\b(?:(?:[a-z0-9_-]+\.)+layerv\.xyz|(?:[a-z0-9_-]+\.)*staging\.layerv\.ai|(?:[a-z0-9_-]+\.)*qurl\.site\.layerv\.ai)\b`)
+	sanitizeAppID       = regexp.MustCompile(`(?i)app[_ -]?(?:id|client[_ -]?id)[[:space:]]*[:=][[:space:]]*["']?([0-9]+)`)
 	// Exclude only a preceding "@", so an @layervai/<team> CODEOWNERS entry is
 	// not read as a repository reference -- teams are not repositories and are
 	// not disclosures.
@@ -217,6 +221,7 @@ func TestPublicSourceNamesNoPrivateLayerVMaterial(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	self := filepath.Join("internal", "ciworkflows", "public_source_sanitization_test.go")
 
+	sourcePaths := sanitizePublicSourcePaths(repoRoot)
 	err := filepath.WalkDir(repoRoot, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -247,6 +252,9 @@ func TestPublicSourceNamesNoPrivateLayerVMaterial(t *testing.T) {
 		// G304 flags reading a variable path. The variable is supplied by
 		// WalkDir over this repository's own checkout, which is the entire
 		// point of the test; there is no caller-controlled input to constrain.
+		if sourcePaths != nil && !sourcePaths[rel] {
+			return nil
+		}
 		body, err := os.ReadFile(path) //nolint:gosec // G304: scanning this repo's own tree is the test
 		if err != nil {
 			return nil //nolint:nilerr // non-source entries are not the subject of this check
@@ -261,11 +269,65 @@ func TestPublicSourceNamesNoPrivateLayerVMaterial(t *testing.T) {
 	}
 }
 
+// Respect ignored local deployment inputs while still checking proposed source.
+// Source archives without Git retain the filesystem scan.
+func sanitizePublicSourcePaths(root string) map[string]bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+	cmd.Dir = root
+	raw, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	paths := make(map[string]bool)
+	for _, path := range strings.Split(string(raw), "\x00") {
+		if path != "" {
+			paths[filepath.ToSlash(path)] = true
+		}
+	}
+	if !paths["go.mod"] {
+		return nil
+	}
+	return paths
+}
+
+func TestSanitizePublicSourcePathsKeepsProposedSourceAndSkipsIgnoredInputs(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cmd := exec.CommandContext(t.Context(), "git", "init")
+	cmd.Dir = root
+	if raw, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, raw)
+	}
+	for name, body := range map[string]string{"go.mod": "module example.com/fixture\n", ".gitignore": ".env\n", ".env": "local deployment input", "new.go": "package fixture\n"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := sanitizePublicSourcePaths(root)
+	if !paths["new.go"] || paths[".env"] {
+		t.Fatalf("source inventory lost proposed code or included ignored inputs: %v", paths)
+	}
+	if paths := sanitizePublicSourcePaths(t.TempDir()); paths != nil {
+		t.Fatal("a source archive must retain the filesystem scan")
+	}
+}
+
 // sanitizeFindings returns every violation in one file's text. rel is the
 // file's slash-separated path relative to the repository root, which keys the
 // sanitizeKnownReference ratchet.
 func sanitizeFindings(rel, text string) []string {
 	var findings []string
+	// Some SDK trust-policy fixtures need an owned apex; an explicit example
+	// label keeps them synthetic without weakening that independent policy.
+	for _, host := range sanitizePreProdHost.FindAllString(text, -1) {
+		if slices.Contains(strings.Split(strings.ToLower(host), "."), "example") {
+			continue
+		}
+		findings = append(findings, rel+" embeds a pre-production hostname; use deployment configuration or an explicit example placeholder")
+		break
+	}
 	lower := strings.ToLower(sanitizeStripKnownLine(rel, text))
 
 	for _, name := range sanitizePrivateRepo {
@@ -313,6 +375,12 @@ func TestSanitizeFindingsCatchesBarePrivateRepoNames(t *testing.T) {
 		text string
 		flag bool
 	}{
+		{name: "private endpoint", rel: file, text: "https://api." + "layerv" + ".xyz", flag: true},
+		{name: "private tunnel suffix", rel: file, text: ".qurl.site." + "layerv" + ".ai", flag: true},
+		{name: "production host", rel: file, text: "https://api.layerv.ai", flag: false},
+		{name: "reserved example host", rel: file, text: "https://api.sandbox.example.com", flag: false},
+		{name: "owned-apex policy fixture", rel: file, text: "https://relay.example." + "layerv" + ".xyz", flag: false},
+		{name: "owned-apex policy suffix", rel: file, text: "endsWith(\"." + "layerv" + ".xyz\")", flag: false},
 		{name: "path reference", rel: file, text: "// filters at " + infra + "/qurl-bot-discord/terraform/main.tf", flag: true},
 		{name: "issue reference", rel: file, text: "// Justin's review comment on " + infra + "#309.", flag: true},
 		{name: "possessive prose", rel: file, text: "// TODO(upstream-contract): keep " + infra + "'s", flag: true},

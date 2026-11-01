@@ -728,7 +728,7 @@ curl --unix-socket "$STATE_DIR/daemon.sock" -X POST http://localhost/reload
 
 All daemon routes verify the tunnel server certificate with the system trust
 store and the hostname from authenticated NHP admission. The hosted deployment
-uses `connect.layerv.ai` in production and `connect.layerv.xyz` in sandbox.
+uses `connect.layerv.ai` in production and `connect.sandbox.example.com` in sandbox.
 Certificate and key renewal does not require client updates. Runtime origin
 headers are now available on the default per-user daemon without a CA file.
 
@@ -1889,3 +1889,10 @@ video only after Play. Use `-o json` for structured revision, media and job stat
 A revision conflict never retries automatically. The API owns verification and
 all limits. Supervisors may also GET/PATCH `/v1/resources/{id}/preview` and POST
 `/v1/resources/{id}/preview/uploads` through the existing `qurl request` command.
+
+The protected anonymous Sandbox journey also needs `QURL_SANDBOX_CRID_CELL_HOST`
+and `QURL_SANDBOX_CRID_LINK_ORIGIN` from its deployment profile. CI reads these
+from `QURL_JOURNEY_CELL0_HOST` and `QURL_JOURNEY_LINK_ORIGIN` in the protected
+environment. Set them before adopting the source change; the journey fails
+before its public-resource creation if either is absent. Keep the existing
+pinned cell key and relay allowlist.

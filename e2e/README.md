@@ -60,7 +60,7 @@ receipt_dir=$(mktemp -d)
 go build -o "$receipt_dir/verify-ownership" ./e2e/cmd/verify-ownership
 export QURL_OWNERSHIP_VERIFIER="$receipt_dir/verify-ownership"
 export QURL_OWNERSHIP_RECEIPTS="$receipt_dir/owned-admissions.jsonl"
-export QURL_PUBLIC_CONFIG_URL=https://qurl.link.layerv.xyz/
+export QURL_PUBLIC_CONFIG_URL=https://qurl.link.example.layerv.xyz/
 ```
 
 The suite checks public issuer configuration and authenticated `/v1/me`

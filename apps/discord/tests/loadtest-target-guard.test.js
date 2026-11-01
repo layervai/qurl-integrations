@@ -63,7 +63,7 @@ describe('loadtest target guard — unrecognized hosts fail closed', () => {
     ['a regional host', 'https://api-eu.layerv.ai'],
     ['a future API hostname', 'https://api2.layerv.ai'],
     ['a customer custom domain', 'https://links.acme-corp.com'],
-    ['a staging host not named in the allowlist', 'https://api.staging.layerv.ai'],
+    ['a staging host not named in the allowlist', 'https://api.staging.example.layerv.ai'],
     ['a lookalike domain', 'https://api.layerv.ai.evil.example'],
     ['a domain merely ending in the prod name', 'https://notqurl.site'],
     ['a non-loopback private address', 'http://10.0.0.5:8080'],
@@ -121,8 +121,8 @@ describe('loadtest target guard — hosts that may proceed', () => {
   });
 
   it.each([
-    ['a qurl.site tunnel host', 'sbx.qurl.site.layerv.ai'],
-    ['a qurl.link tunnel host', 'qurl.link.layerv.xyz'],
+    ['a qurl.site tunnel host', 'sbx.qurl.site.example.layerv.ai'],
+    ['a qurl.link tunnel host', 'qurl.link.example.layerv.xyz'],
   ])('does not misfile %s as production', (_label, host) => {
     expect(isProductionHost(host)).toBe(false);
     const { hosts, errors } = parseTargetAllowlist(host);
@@ -131,10 +131,10 @@ describe('loadtest target guard — hosts that may proceed', () => {
   });
 
   it('permits a non-prod tunnel host without misfiling it as production', () => {
-    expect(isProductionHost('sbx.qurl.site.layerv.ai')).toBe(false);
-    expect(isProductionHost('sbx.qurl.site.layerv.xyz')).toBe(false);
-    const { hosts } = parseTargetAllowlist('sbx.qurl.site.layerv.ai');
-    expect(verdictFor('https://sbx.qurl.site.layerv.ai', hosts)).toBe('allowlisted');
+    expect(isProductionHost('sbx.qurl.site.example.layerv.ai')).toBe(false);
+    expect(isProductionHost('sbx.qurl.site.example.layerv.xyz')).toBe(false);
+    const { hosts } = parseTargetAllowlist('sbx.qurl.site.example.layerv.ai');
+    expect(verdictFor('https://sbx.qurl.site.example.layerv.ai', hosts)).toBe('allowlisted');
   });
 });
 

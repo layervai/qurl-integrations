@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,19 @@ import (
 
 func assertSandboxAnonymousPublicJourney(t *testing.T, binary string, publisherEnv map[string]string, publisherState string) {
 	t.Helper()
+	publisherDeployment, err := qurl.LoadDeployment(publisherEnv["QURL_DEPLOYMENT"])
+	if err != nil {
+		t.Fatal("publisher deployment settings are invalid")
+	}
+	cell := qurl.DeploymentCell{CellID: "cell0", Host: strings.TrimSpace(os.Getenv("QURL_SANDBOX_CRID_CELL_HOST")), Port: 443, ServerPublicKeyB64: os.Getenv("QURL_SANDBOX_CRID_CELL_PUBLIC_KEY_B64")}
+	link := qurl.DeploymentCRIDLink{RelayURL: os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"), LinkOrigin: strings.TrimSpace(os.Getenv("QURL_SANDBOX_CRID_LINK_ORIGIN"))}
+	if cell.Host == "" || link.LinkOrigin == "" {
+		t.Fatal("anonymous journey requires QURL_SANDBOX_CRID_CELL_HOST and QURL_SANDBOX_CRID_LINK_ORIGIN from the protected profile")
+	}
+	anonymousDeployment, err := anonymousPublicDeployment(publisherDeployment, cell, link)
+	if err != nil {
+		t.Fatal(err)
+	}
 	target := fmt.Sprintf("https://example.com/?qurl-anonymous-public-journey=%d", time.Now().UnixNano())
 	published := runSandboxLocalCLI(t, binary, publisherEnv, publisherState, "-o", "json", "publish", target, "--public", "--description", sandboxJourneyResourceDescription(t, publisherEnv))
 	if published.code != 0 {
@@ -48,14 +62,6 @@ func assertSandboxAnonymousPublicJourney(t *testing.T, binary string, publisherE
 	consumerState, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("resolve anonymous consumer state directory: %v", err)
-	}
-	publisherDeployment, err := qurl.LoadDeployment(publisherEnv["QURL_DEPLOYMENT"])
-	if err != nil {
-		t.Fatal("publisher deployment settings are invalid")
-	}
-	anonymousDeployment, err := anonymousPublicDeployment(publisherDeployment, os.Getenv("QURL_SANDBOX_CRID_CELL_PUBLIC_KEY_B64"), os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"))
-	if err != nil {
-		t.Fatal(err)
 	}
 	deploymentJSON, err := json.Marshal(anonymousDeployment)
 	if err != nil {

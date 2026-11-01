@@ -97,7 +97,7 @@ async function main() {
   const endpoint = new URL(config.QURL_ENDPOINT);
   assert.ok(endpoint.protocol === 'https:' && !endpoint.username && !endpoint.password
     && !endpoint.port && endpoint.pathname === '/' && !endpoint.search && !endpoint.hash
-    && ['api.layerv.ai', 'api.layerv.xyz',
+    && ['api.layerv.ai',
       ...(config.DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS || [])].includes(endpoint.hostname),
   'untrusted ownership API endpoint');
   fs.accessSync(process.env.QURL_OWNERSHIP_VERIFIER, fs.constants.X_OK);

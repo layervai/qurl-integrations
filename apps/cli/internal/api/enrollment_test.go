@@ -146,7 +146,7 @@ func TestMintConnectorEnrollmentTokenCanonicalOriginAppendsV1ExactlyOnce(t *test
 
 	var requestURL string
 	client, err := New(&Config{
-		BaseURL: "https://api.layerv.xyz",
+		BaseURL: "https://api.example.layerv.xyz",
 		APIKey:  "lv_test_logincredential123456789",
 		Version: "test",
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -168,7 +168,7 @@ func TestMintConnectorEnrollmentTokenCanonicalOriginAppendsV1ExactlyOnce(t *test
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if requestURL != "https://api.layerv.xyz/v1/api-keys" {
+	if requestURL != "https://api.example.layerv.xyz/v1/api-keys" {
 		t.Fatalf("enrollment request URL = %q, want one version prefix", requestURL)
 	}
 }
