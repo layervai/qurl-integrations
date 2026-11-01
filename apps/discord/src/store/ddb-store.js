@@ -706,9 +706,12 @@ async function isSendRevoked(sendId) {
   return Boolean(res.Item?.revoked_at);
 }
 
-async function getRecentSends(senderDiscordId, limit = 10) {
+async function getRecentSends(senderDiscordId, limit = 10, guildId) {
   if (!Number.isInteger(limit) || limit <= 0) {
     throw new TypeError('getRecentSends: limit must be a positive integer');
+  }
+  if (guildId !== undefined && (typeof guildId !== 'string' || guildId.length === 0)) {
+    throw new TypeError('getRecentSends: guildId must be a non-empty string');
   }
   // This is the revoke-menu query (handleRevoke is its only production
   // caller). Its result deliberately prioritizes retryable revocations over
@@ -730,7 +733,7 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   // starvation. Capped at 10 pagination rounds to bound worst-case
   // cost when a sender has hundreds of recent sends.
   // GSI projection requirement: this Query reads `resource_type`,
-  // `target_type`, `channel_id`, `expires_in`, `created_at` directly
+  // `target_type`, `channel_id`, `guild_id`, `expires_in`, `created_at` directly
   // off the returned rows (see metaBySendId usage below). That only
   // works because `sender_discord_id-created_at-index` is declared
   // with `projection_type = "ALL"` in the qurl-bot-ddb terraform
@@ -775,6 +778,9 @@ async function getRecentSends(senderDiscordId, limit = 10) {
     // ScanIndexForward to true, revisit this — first-seen would
     // become oldest-wins which isn't what we want.
     for (const row of sendsRes.Items || []) {
+      // Missing guild scope also stays hidden; never infer ownership for legacy rows.
+      // Filter before counting unique sends so other guilds cannot fill the menu.
+      if (guildId !== undefined && row.guild_id !== guildId) continue;
       if (!metaBySendId.has(row.send_id)) {
         sendIdOrder.push(row.send_id);
         metaBySendId.set(row.send_id, row);
