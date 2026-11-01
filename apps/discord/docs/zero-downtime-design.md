@@ -264,14 +264,31 @@ want for cross-process handoff.
 
 The right shape for the production gateway's SIGTERM handler is therefore:
 
-1. Persist final sequence to the DDB session row.
+1. Drain admitted SQS sends and persist a confirmed sequence to the DDB session row.
 2. Push "you're up" to the standby's control channel; await ACK.
 3. **Exit without closing the WS.** TCP drops without a close frame; Discord
    treats it as an unexpected network disconnect and preserves the session
    in its resume buffer for ~60 s.
 4. The standby's `retrieveSessionInfo` returns the persisted row, the
    library issues `RESUME` on the resume URL, Discord replays buffered
-   events, no event loss.
+   events within the retained replay window.
+
+The SDK updates its session sequence before it emits the corresponding dispatch.
+The session store's `beforePersist` gate lets that dispatch register its SQS send,
+then waits for admitted sends within the existing drain budget before a checkpoint
+write. A pending send delays the write. A failed or dropped send keeps the stream
+unsafe for the process lifetime, including after a later successful send. The
+gateway starts its existing fatal recovery path after a publication failure.
+
+On socket close, the in-memory resume position also rewinds to the last confirmed
+checkpoint. An explicit invalid-session clear stays cleared. Final flush cannot
+advance past an unconfirmed publication. This path is tested through the pinned
+`@discordjs/ws` packet decoder and dispatch implementation, without a live socket.
+
+If the provider replay window expires during a queue/backend outage, REST
+membership reconciliation is required before claiming app-removal cleanup is
+complete. Publication confirmation proves queue delivery, not credential revocation
+or reference-safe webhook deletion; those remain separate lifecycle operations.
 
 The spike's phase1 validates this exact sequence: persist + `process.exit(0)`
 without a `destroy()` call → phase2 in a fresh process picks up the session
