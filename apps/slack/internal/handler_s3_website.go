@@ -1069,6 +1069,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		s3WebsitePreflightNotice,
 		"Configure qurl-agent-state for POSIX UID/GID `65532:65532`, and mount qurl-config and qurl-bootstrap read-only. Do not share qurl-agent-state across concurrently running sidecars.",
 		"Both generated containers drop every Linux capability.",
+		"The log group is shared across installs. Each task has separate `origin/" + s3WebsiteOriginContainerName + "/<task-id>` and `qurl/qurl/<task-id>` streams; filter by task ID to find one install. For separate access or retention, replace both `awslogs-group` values with an install-specific group and update the execution role permissions.",
 	}, " ")
 	return intro + "\n\n" +
 		"1. Store the enrollment token from the separate DM as the read-only qurl-bootstrap/enrollment-token file. This message intentionally does not contain it.\n\n" +

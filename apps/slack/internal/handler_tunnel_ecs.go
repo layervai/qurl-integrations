@@ -98,6 +98,7 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		"Use this as an " + ecsFargateChecklistText + ".",
 		"Write the temporary enrollment token delivered separately by DM to `enrollment-token` on a read-only `qurl-bootstrap` EFS access point. Do not place it in the task definition, environment, or command line.",
 		ecsFargateRegionPlaceholderNote,
+		"Create the shared CloudWatch Logs group `/ecs/qurl-connector` in the task region and let the task execution role write to it. Each task has a separate `qurl/qurl/<task-id>` stream; filter by task ID to find one install. For separate access or retention, replace `awslogs-group` with an install-specific group and update the execution role permissions.",
 		"Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.",
 		"Configure qurl-agent-state for POSIX UID/GID `" + ecsConnectorUser + "`; qURL creates its owner-only nested state directory. Mount qurl-config and qurl-bootstrap read-only with share.yaml and enrollment-token respectively.",
 		"The generated sidecar drops every Linux capability.",
