@@ -37,6 +37,8 @@ func testEnv(token string) func(string) string {
 func fixedNow() time.Time { return time.Unix(1723600000, 0).UTC() }
 
 // runCLI drives run end to end and returns the exit code plus both streams.
+// Tests that reach HTTP through run stay serial: its production client uses
+// http.DefaultTransport, which parallel httptest.Server cleanup can close.
 func runCLI(t *testing.T, args []string, getenv func(string) string) (code int, stdoutText, stderrText string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
@@ -45,8 +47,6 @@ func runCLI(t *testing.T, args []string, getenv func(string) string) (code int, 
 }
 
 func TestRunSucceedsWhenTheContractHolds(t *testing.T) {
-	t.Parallel()
-
 	srv, _ := newFakeSlack(t, map[string]string{
 		methodConversationsList:    listBody(testChannel),
 		methodConversationsHistory: messagesBody(textMessage("100.1"), uploadMessage("100.2")),
@@ -75,8 +75,6 @@ func TestRunSucceedsWhenTheContractHolds(t *testing.T) {
 // empty report learns only that something went wrong, which is what this command is
 // meant to stop being the answer.
 func TestRunEmitsTheReportWhenTheContractBreaks(t *testing.T) {
-	t.Parallel()
-
 	srv, _ := newFakeSlack(t, map[string]string{
 		methodConversationsList:    listBody(testChannel),
 		methodConversationsHistory: messagesBody(textMessage("100.1")),
@@ -356,8 +354,6 @@ func TestSanitizeReportText(t *testing.T) {
 // numbers disagree with the recorded measurement is only actionable if the report says
 // which workspace shape and scope set produced it.
 func TestRunCarriesOperatorNotesIntoTheReport(t *testing.T) {
-	t.Parallel()
-
 	srv, _ := newFakeSlack(t, map[string]string{
 		methodConversationsList:    listBody(testChannel),
 		methodConversationsHistory: messagesBody(uploadMessage("100.1")),
