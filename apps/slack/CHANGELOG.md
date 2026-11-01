@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.2](https://github.com/layervai/qurl-integrations/compare/slack-v0.6.1...slack-v0.6.2) (2026-11-01)
+
+
+### Bug Fixes
+
+* patch Go security and align sandbox fixtures ([#1611](https://github.com/layervai/qurl-integrations/issues/1611)) ([05ea8df](https://github.com/layervai/qurl-integrations/commit/05ea8df07d58362bdecf5260ca5981f4936e4622))
+* **slack:** prevent concurrent setup key overwrites ([#1881](https://github.com/layervai/qurl-integrations/issues/1881)) ([5e5efdb](https://github.com/layervai/qurl-integrations/commit/5e5efdb1f0a48da477a8f8bf112511f69c8592ef))
+
 ## [0.6.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.6.0...slack-v0.6.1) (2026-10-09)
 
 

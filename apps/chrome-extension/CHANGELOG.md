@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/layervai/qurl-integrations/compare/chrome-extension-v1.1.0...chrome-extension-v1.1.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **chrome-extension:** correct late Gmail insertion status ([#1849](https://github.com/layervai/qurl-integrations/issues/1849)) ([e1544eb](https://github.com/layervai/qurl-integrations/commit/e1544eb5d38a0ad876c75defe51b00a0d88d7772))
+
 ## [1.1.0](https://github.com/layervai/qurl-integrations/compare/chrome-extension-v1.0.2...chrome-extension-v1.1.0) (2026-08-18)
 
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/layervai/qurl-integrations/compare/edge-extension-v1.1.0...edge-extension-v1.1.1) (2026-11-01)
+
+
+### Miscellaneous Chores
+
+* **edge-extension:** Synchronize browser-extensions versions
+
 ## [1.1.0](https://github.com/layervai/qurl-integrations/compare/edge-extension-v1.0.0...edge-extension-v1.1.0) (2026-08-18)
 
 
