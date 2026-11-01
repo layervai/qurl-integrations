@@ -207,6 +207,8 @@ successful content test green. This does not recover keys from earlier runs.
 With that verified ownership and native-cleanup configuration, run only
 `tests/url-target-one-time.test.ts` with `--reporters=default`. This test needs
 the Sandbox API key, not bot/channel credentials, and sends no bot messages.
+Without the native-cleanup flag the optional suite skips. With it enabled,
+missing configuration or a non-Sandbox API fails before fixture creation.
 It adds a nonce to the Sandbox API's public `/health` URL and creates one
 one-use URL resource. A real browser must serve exactly `{"status":"healthy"}`
 from the isolated `q-` origin. A fresh browser context must then receive an

@@ -47,6 +47,7 @@ export async function resolveUrlTargetViaQurlLink(
       event: 'owned_native_cleanup', ...ownership, observed_at: new Date().toISOString(),
       ...result, state,
     }) + '\n', { mode: 0o600, flush: true });
-    if (state === 'unresolved') throw new Error('URL-target native cleanup or denial remains unresolved');
+    if (expectedNoAdmission && served) throw new Error('URL-target one-time link served a second time');
+    if (state === 'unresolved') throw new Error('URL-target content, native cleanup, or denial evidence is unresolved');
   }
 }

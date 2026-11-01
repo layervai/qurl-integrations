@@ -27,13 +27,18 @@ test('navigation cannot pass on an error body or substitute for authenticated de
   process.env.QURL_OWNERSHIP_RECEIPTS = join(directory, 'receipts.jsonl');
   const ownership = { resource_id: 'owned', qurl_id: 'q_owned', expires_at: '2030-01-01T00:00:00Z' };
   const frame = {};
-  const page = (body: unknown, status = 200, contentType = 'application/json') => ({
-    mainFrame: () => frame,
-    goto: jest.fn().mockResolvedValue(undefined),
-    waitForResponse: jest.fn().mockResolvedValue({
+  const page = (body: unknown, status = 200, contentType = 'application/json',
+    navigation = true, mainFrame = true, url = `https://q-${'a'.repeat(52)}.qurl.site.layerv.xyz/`) => {
+    const candidate = {
       status: () => status, headers: () => ({ 'content-type': contentType }), json: async () => body,
-    }),
-  }) as unknown as Page;
+      url: () => url, frame: () => mainFrame ? frame : {},
+      request: () => ({ isNavigationRequest: () => navigation }),
+    };
+    return {
+      mainFrame: () => frame, goto: jest.fn().mockResolvedValue(undefined),
+      waitForResponse: jest.fn().mockImplementation(async (predicate) => predicate(candidate) ? candidate : undefined),
+    } as unknown as Page;
+  };
   try {
     jest.mocked(observeBrowserCleanup).mockImplementation(async () => async () =>
       ({ exchanges: 1, closed: 1, denied: 0, unresolved: 0 }));
@@ -43,11 +48,18 @@ test('navigation cannot pass on an error body or substitute for authenticated de
     expect(await resolveUrlTargetViaQurlLink(page({ status: 'healthy' }, 503), 'test-link', ownership)).toBe(false);
     expect(await resolveUrlTargetViaQurlLink(page({ status: 'healthy' }, 200, 'text/html'), 'test-link', ownership)).toBe(false);
     expect(await resolveUrlTargetViaQurlLink(page({ status: 'healthy' }), 'test-link', ownership)).toBe(true);
+    expect(await resolveUrlTargetViaQurlLink(page({ status: 'healthy' }, 200, 'application/json', false), 'test-link', ownership)).toBe(false);
+    expect(await resolveUrlTargetViaQurlLink(page({ status: 'healthy' }, 200, 'application/json', true, false), 'test-link', ownership)).toBe(false);
+    expect(await resolveUrlTargetViaQurlLink(page({ status: 'healthy' }, 200, 'application/json', true, true,
+      `https://q-${'a'.repeat(52)}.qurl.site.layerv.xyz/.well-known/qurl/session`), 'test-link', ownership)).toBe(false);
+    const failed = page(null);
+    jest.mocked(failed.goto).mockRejectedValue(new Error('private capability URL'));
+    await expect(resolveUrlTargetViaQurlLink(failed, 'test-link', ownership)).rejects.toThrow(/^URL-target navigation failed$/);
     await expect(resolveUrlTargetViaQurlLink(page(null), 'test-link', ownership, true)).rejects.toThrow('unresolved');
     jest.mocked(observeBrowserCleanup).mockImplementation(async () => async () =>
       ({ exchanges: 1, closed: 0, denied: 1, unresolved: 0 }));
     expect(await resolveUrlTargetViaQurlLink(page(null), 'test-link', ownership, true)).toBe(false);
-    await expect(resolveUrlTargetViaQurlLink(page({ status: 'healthy' }), 'test-link', ownership, true)).rejects.toThrow('unresolved');
+    await expect(resolveUrlTargetViaQurlLink(page({ status: 'healthy' }), 'test-link', ownership, true)).rejects.toThrow('served a second time');
   } finally {
     if (previous === undefined) delete process.env.QURL_OWNERSHIP_RECEIPTS;
     else process.env.QURL_OWNERSHIP_RECEIPTS = previous;
