@@ -2606,6 +2606,31 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     };
   }
 
+  it('consumes a post-read synchronous rendering failure instead of rejecting the event listener', async () => {
+    const { end, interaction } = await setupRevocableSend();
+    mockDb.getSendConfig.mockResolvedValueOnce({});
+    interaction.editReply.mockImplementationOnce(() => { throw new Error('render failed'); });
+    try {
+      await expect(end(null, 'time')).resolves.toBeUndefined();
+      expect(logger.error).toHaveBeenCalledWith('Failed to close send management view', expect.objectContaining({ errorName: 'Error' }));
+    } finally { clearCooldown('sender-1'); }
+  });
+
+  it('skips the persisted read while a real local revoke is already running', async () => {
+    const { collect, end, revokeStarted, finishRevoke, makeClick } = await setupRevocableSend();
+    const revoking = collect(makeClick('revoke'));
+    try {
+      await revokeStarted.promise;
+      const readsBeforeClose = mockDb.getSendConfig.mock.calls.length;
+      await end(null, 'time');
+      expect(mockDb.getSendConfig).toHaveBeenCalledTimes(readsBeforeClose);
+    } finally {
+      finishRevoke.resolve();
+      await revoking;
+      clearCooldown('sender-1');
+    }
+  });
+
   it('collector time expiry preserves the successful revoke result instead of restoring the management banner', async () => {
     const { collect, end, finishRevoke, interaction, makeClick } = await setupRevocableSend();
     try {
@@ -2615,7 +2640,9 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       expect(revoked.content).toContain('Revoked 1/1 user.');
       expect(revoked.content).toContain('Alice');
       interaction.editReply.mockClear();
+      const readsBeforeClose = mockDb.getSendConfig.mock.calls.length;
       await end(null, 'time');
+      expect(mockDb.getSendConfig).toHaveBeenCalledTimes(readsBeforeClose);
       const final = interaction.editReply.mock.calls.at(-1)[0];
       expect(final.content).toBe(revoked.content);
       expect(final.components).toEqual([]);
@@ -2669,6 +2696,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     } finally { controller.abort(); timeout.mockRestore(); clearCooldown('sender-1'); }
   });
 
+  // Defensive ordering test: a real ended collector no longer emits new collects.
   it('a local revoke completing during the persisted read keeps its full result', async () => {
     const { collect, end, finishRevoke, interaction, makeClick } = await setupRevocableSend();
     const read = defer();

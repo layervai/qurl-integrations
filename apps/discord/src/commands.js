@@ -2947,7 +2947,8 @@ async function executeSendPipeline(interaction, {
       }
     });
 
-    collector.on('end', async (_, reason) => {
+    // EventEmitter ignores listener promises; consume every close-path failure.
+    collector.on('end', (_, reason) => (async () => {
       // stop() freezes the final getFullMsg() render internally, so the
       // post-stop getFullMsg() below preserves the last-known counter
       // (vs. re-rendering against a cleared linkStatus → `0 of N viewed`).
@@ -3016,7 +3017,9 @@ async function executeSendPipeline(interaction, {
           components: [],
         }).catch(logIgnoredDiscordErr);
       }
-    });
+    })().catch(err => {
+      logger.error('Failed to close send management view', { sendId, errorName: err?.name });
+    }));
   }
 }
 
