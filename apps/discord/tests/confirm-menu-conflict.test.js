@@ -8,7 +8,7 @@ const payload = {
   expiresIn: '24h', selfDestructSeconds: null, personalMessage: null, sendNonce: '0123456789abcdef',
 };
 const cases = [
-  ['expiry', handleConfirmExpirySelect, '7d'],
+  ['expiry', handleConfirmExpirySelect, '3d'],
   ['self-destruct', handleConfirmSelfDestructSelect, '30'],
   ['note', handleConfirmNoteModal, null],
 ];
@@ -40,7 +40,7 @@ test.each([null, { stage: 'another-stage', payload },
 ])('a missing or replaced send keeps the terminal fallback: %j', async fresh => {
   mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
   mockLoadFlow.mockResolvedValueOnce(fresh);
-  const interaction = interactionFor('7d');
+  const interaction = interactionFor('3d');
   await handleConfirmExpirySelect(interaction, { flow_id: 'fid', row: { version: 1, payload } });
   expect(interaction.editReply).toHaveBeenCalledWith({
     content: expect.stringMatching(/superseded/), components: [],
@@ -50,7 +50,7 @@ test.each([null, { stage: 'another-stage', payload },
 test('a failed refresh preserves the card and asks for a retry', async () => {
   mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
   mockLoadFlow.mockRejectedValueOnce(new Error('temporary database error'));
-  const interaction = interactionFor('7d');
+  const interaction = interactionFor('3d');
   await handleConfirmExpirySelect(interaction, { flow_id: 'fid', row: { version: 1, payload } });
   expect(interaction.editReply).not.toHaveBeenCalled();
   expect(interaction.followUp).toHaveBeenCalledWith({ content: expect.stringMatching(/refresh.*try again/i), flags: 64 });
@@ -58,17 +58,17 @@ test('a failed refresh preserves the card and asks for a retry', async () => {
 
 test('rapid expiry then timer conflict displays the committed expiry and keeps the card', async () => {
   const stale = { version: 1, payload };
-  const first = interactionFor('7d');
+  const first = interactionFor('3d');
   await handleConfirmExpirySelect(first, { flow_id: 'fid', row: stale });
   const committed = mockTransitionFlow.mock.calls[0][2].payload;
-  expect(committed.expiresIn).toBe('7d');
+  expect(committed.expiresIn).toBe('3d');
   mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
   mockLoadFlow.mockResolvedValueOnce({ stage: SEND_STAGE_AWAITING_CONFIRM, version: 2, payload: committed });
   const second = interactionFor('30');
   await handleConfirmSelfDestructSelect(second, { flow_id: 'fid', row: stale });
   const card = second.editReply.mock.calls.at(-1)[0];
   expect(card.components.length).toBeGreaterThan(0);
-  expect(card.content).toContain('7 days');
+  expect(card.content).toContain('3 days');
   expect(card.content).not.toContain('30 seconds');
   expect(mockTransitionFlow).toHaveBeenCalledTimes(2);
 });
@@ -77,7 +77,7 @@ test.each([undefined, 'malformed'])('a missing or malformed original nonce canno
   mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
   mockLoadFlow.mockResolvedValueOnce({ stage: SEND_STAGE_AWAITING_CONFIRM,
     payload: { ...payload, sendNonce } });
-  const interaction = interactionFor('7d');
+  const interaction = interactionFor('3d');
   await handleConfirmExpirySelect(interaction, { flow_id: 'fid', row: { version: 1, payload: { ...payload, sendNonce } } });
   expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringMatching(/superseded/), components: [] });
 });
@@ -85,7 +85,7 @@ test.each([undefined, 'malformed'])('a missing or malformed original nonce canno
 test('a Discord redraw rejection still reaches the private recovery notice', async () => {
   mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
   mockLoadFlow.mockResolvedValueOnce({ stage: SEND_STAGE_AWAITING_CONFIRM, payload });
-  const interaction = interactionFor('7d');
+  const interaction = interactionFor('3d');
   interaction.editReply.mockRejectedValueOnce(new Error('Discord temporarily unavailable'));
   await handleConfirmExpirySelect(interaction, { flow_id: 'fid', row: { version: 1, payload } });
   expect(interaction.followUp).toHaveBeenCalledWith({

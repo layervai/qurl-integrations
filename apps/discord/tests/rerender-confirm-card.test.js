@@ -8,11 +8,28 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
   const u1 = '100000000000000001';
   const persistedAlias = 'Alice (display)';
 
-  function makeSelectInteraction({ value = '7d', ...rest } = {}) {
+  function makeSelectInteraction({ value = '3d', ...rest } = {}) {
     const int = makeInteraction(rest);
     int.values = [value];
     return int;
   }
+
+  test('saved seven-day card shows its request without selecting a false 24-hour default', async () => {
+    const { StringSelectMenuBuilder } = require('discord.js');
+    StringSelectMenuBuilder.mockClear();
+    const int = makeSelectInteraction({ value: '300', guildMembers: {} });
+    await handleConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { version: 1, payload: {
+      resourceType: 'file', resourceLabel: 'x.png', recipientIds: [u1], recipientAliases: { [u1]: 'Alice' },
+      expiresIn: '7d', selfDestructSeconds: null, personalMessage: null,
+    } } });
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    expect(lastEdit.content).toContain('**Requested expiry:** 7 days');
+    const menu = StringSelectMenuBuilder.mock.results.map(result => result.value)
+      .find(builder => builder.setCustomId.mock.calls.some(([id]) => id === 'qurl_confirm_expiry'));
+    expect(menu.setPlaceholder).toHaveBeenCalledWith(expect.stringContaining('7 days'));
+    expect(menu.addOptions.mock.calls[0].some(option => option.default)).toBe(false);
+    expect(menu.addOptions.mock.calls[0].some(option => option.value === '7d')).toBe(false);
+  });
 
   test('renders persisted alias when member-cache is empty', async () => {
     const payload = {
@@ -24,7 +41,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
       selfDestructSeconds: null,
       personalMessage: null,
     };
-    const int = makeSelectInteraction({ value: '7d', guildMembers: {} });
+    const int = makeSelectInteraction({ value: '3d', guildMembers: {} });
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     expect(int.editReply).toHaveBeenCalled();
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
@@ -43,7 +60,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
       personalMessage: null,
       warningsBlock: '⚠️ Skipped bots: 1\n\n',
     };
-    const int = makeSelectInteraction({ value: '7d', guildMembers: { [u1]: {} } });
+    const int = makeSelectInteraction({ value: '3d', guildMembers: { [u1]: {} } });
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
     expect(lastEdit.content).toMatch(/Skipped bots/);
@@ -92,7 +109,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
       personalMessage: null,
     };
     const int = makeInteraction();
-    int.values = ['7d'];
+    int.values = ['3d'];
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
     expect(lastEdit.content).toMatch(/0 users in <#voice-empty>/);

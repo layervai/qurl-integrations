@@ -2507,3 +2507,36 @@ describe('revoke work deadline', () => {
     expect(ddbMock.calls()).toHaveLength(0);
   });
 });
+
+
+describe('authoritative link expiry persistence', () => {
+  beforeEach(() => {
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(BatchWriteCommand).resolves({});
+  });
+  test('single and batch writes retain epoch seconds without replacing requested duration', async () => {
+    const row = { sendId: 'expiry-send', senderDiscordId: 'sender', recipientDiscordId: 'recipient', resourceId: 'resource', resourceType: 'file', qurlLink: 'https://q.test/1', expiresIn: '24h', expiresAt: 1800000900 };
+    await store.recordQURLSend(row);
+    expect(ddbMock.commandCalls(PutCommand).at(-1).args[0].input.Item).toEqual({
+      send_id: row.sendId, sender_discord_id: row.senderDiscordId, recipient_discord_id: row.recipientDiscordId,
+      resource_id: row.resourceId, resource_type: row.resourceType, qurl_link: row.qurlLink,
+      expires_at: row.expiresAt, expires_in: row.expiresIn, dm_status: 'pending', created_at: expect.any(String),
+      channel_id: undefined, target_type: undefined,
+    });
+    await store.recordQURLSendBatch([row]);
+    const request = ddbMock.commandCalls(BatchWriteCommand).at(-1).args[0].input;
+    const item = Object.values(request.RequestItems)[0][0].PutRequest.Item;
+    expect(item).toMatchObject({ expires_at: 1800000900, expires_in: '24h' });
+  });
+  test.each([null, '1800000900', NaN, Infinity, 1.5, 0, -1])('invalid expiry %s in a later chunk fails before any write', async expiresAt => {
+    const sends = Array.from({ length: 26 }, (_, i) => ({ sendId: 'expiry-send', senderDiscordId: 'sender', recipientDiscordId: `recipient${i}`, resourceId: 'resource', resourceType: 'file', qurlLink: 'https://q.test/1', expiresIn: '24h', expiresAt: i === 25 ? expiresAt : 1800000900 }));
+    await expect(store.recordQURLSendBatch(sends)).rejects.toThrow(/expiry/i);
+    expect(ddbMock.calls()).toHaveLength(0);
+  });
+});
+
+
+test('single send expiry validation runs before its write', async () => {
+  await expect(store.recordQURLSend({ expiresAt: null })).rejects.toThrow(/expiry/i);
+  expect(ddbMock.calls()).toHaveLength(0);
+});

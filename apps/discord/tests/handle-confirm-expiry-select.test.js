@@ -16,14 +16,14 @@ describe('handleConfirmExpirySelect', () => {
     personalMessage: null,
   };
 
-  function makeSelectInteraction({ value = '7d', ...rest } = {}) {
+  function makeSelectInteraction({ value = '3d', ...rest } = {}) {
     const int = makeInteraction(rest);
     int.values = [value];
     return int;
   }
 
   test('failed acknowledgement stops before expiry flow mutation', async () => {
-    const int = makeSelectInteraction({ value: '7d' });
+    const int = makeSelectInteraction({ value: '3d' });
     int.deferUpdate.mockRejectedValueOnce(new Error('Unknown interaction'));
 
     await handleConfirmExpirySelect(int, {
@@ -35,26 +35,26 @@ describe('handleConfirmExpirySelect', () => {
   });
 
   test('happy path persists new expiresIn + re-renders', async () => {
-    const int = makeSelectInteraction({ value: '7d' });
+    const int = makeSelectInteraction({ value: '3d' });
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
-      payload: expect.objectContaining({ expiresIn: '7d', recipientIds: [u1] }),
+      payload: expect.objectContaining({ expiresIn: '3d', recipientIds: [u1] }),
       terminal: false,
       set_expires_at: expect.any(Number),
     }));
     expect(int.editReply).toHaveBeenCalled();
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
-    expect(lastEdit.content).toMatch(/7 days/);
+    expect(lastEdit.content).toMatch(/3 days/);
   });
 
   test('selfIncluded notice survives an expiry change re-render', async () => {
-    const int = makeSelectInteraction({ value: '7d' });
+    const int = makeSelectInteraction({ value: '3d' });
     const payloadWithSelf = { ...basePayload, selfIncluded: true };
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: payloadWithSelf, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
-      payload: expect.objectContaining({ selfIncluded: true, expiresIn: '7d' }),
+      payload: expect.objectContaining({ selfIncluded: true, expiresIn: '3d' }),
     }));
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
     expect(lastEdit.content).toMatch(/Send includes you/);
@@ -68,8 +68,8 @@ describe('handleConfirmExpirySelect', () => {
     expect(int.editReply).toHaveBeenCalled();
   });
 
-  test('forged off-set expiry value → reply warn BEFORE defer, NO transitionFlow', async () => {
-    const int = makeSelectInteraction({ value: '999d' });
+  test.each(['999d', '7d'])('unoffered expiry %s is rejected before defer or mutation', async value => {
+    const int = makeSelectInteraction({ value });
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     expect(int.deferUpdate).not.toHaveBeenCalled();
@@ -81,7 +81,7 @@ describe('handleConfirmExpirySelect', () => {
 
   test('conflict result → superseded copy', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
-    const int = makeSelectInteraction({ value: '7d' });
+    const int = makeSelectInteraction({ value: '3d' });
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/i),
@@ -91,7 +91,7 @@ describe('handleConfirmExpirySelect', () => {
 
   test('not_found result → expired copy', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
-    const int = makeSelectInteraction({ value: '7d' });
+    const int = makeSelectInteraction({ value: '3d' });
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/expired/i),
@@ -101,7 +101,7 @@ describe('handleConfirmExpirySelect', () => {
 
   test('transitionFlow throw → ephemeral retry followUp, no superseded copy', async () => {
     mockTransitionFlow.mockRejectedValueOnce(new Error('DDB blip'));
-    const int = makeSelectInteraction({ value: '7d' });
+    const int = makeSelectInteraction({ value: '3d' });
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not save/i),
@@ -115,7 +115,7 @@ describe('handleConfirmExpirySelect', () => {
   test('preserves all other payload fields across transition + warns on corrupted selfDestructSeconds', async () => {
     const logger = require('../src/logger');
     logger.warn.mockClear();
-    const int = makeSelectInteraction({ value: '7d' });
+    const int = makeSelectInteraction({ value: '3d' });
     const payload = {
       ...basePayload,
       selfDestructSeconds: 60,
@@ -125,7 +125,7 @@ describe('handleConfirmExpirySelect', () => {
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({
-        expiresIn: '7d',
+        expiresIn: '3d',
         recipientIds: [u1],
         selfDestructSeconds: 60,
         personalMessage: 'hi',

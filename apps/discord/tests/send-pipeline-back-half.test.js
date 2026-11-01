@@ -165,14 +165,7 @@ jest.mock('../src/flow-state', () => ({
   deleteFlow: jest.fn(),
 }));
 
-jest.mock('../src/utils/time', () => {
-  const actual = jest.requireActual('../src/utils/time');
-  return {
-    ...actual,
-    expiryToMs: jest.fn(actual.expiryToMs),
-  };
-});
-const mockTime = require('../src/utils/time');
+
 
 const { _test } = require('../src/commands');
 const logger = require('../src/logger');
@@ -2126,7 +2119,7 @@ describe('handleAddRecipients — file path failure modes', () => {
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1' },  // only 1 minted, 2 recipients
+      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString() },  // only 1 minted, 2 recipients
     ]);
 
     const result = await handleAddRecipients(
@@ -2433,7 +2426,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     } else {
       mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-short' });
     }
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
     await executeSendPipeline(interaction, makePipelineParams({
       resourceType, locationUrl: 'https://google.com/maps/search/x',
       recipients: [{ id: 'u1', username: 'Alice' }, { id: 'u2', username: 'Bob' }],
@@ -2454,12 +2447,12 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     });
     mockMintLinks.mockResolvedValueOnce([
       {
-        qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+        qurl_link: 'https://qurl.link/#at_secret_bearer_one', expires_at: new Date(Date.now() + 86400000).toISOString(),
         resource_id: 'resource-public-id',
         qurl_id: 'q_orphaned_link_one',
       },
       {
-        qurl_link: 'https://qurl.site/#at_secret_bearer_two',
+        qurl_link: 'https://qurl.site/#at_secret_bearer_two', expires_at: new Date(Date.now() + 86400000).toISOString(),
         resource_id: 'resource-public-id',
         qurl_id: 'q_orphaned_link_two',
       },
@@ -2521,7 +2514,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       fileBuffer: new ArrayBuffer(8),
     });
     mockMintLinks.mockResolvedValueOnce([{
-      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one', expires_at: new Date(Date.now() + 86400000).toISOString(),
       resource_id: 'resource-public-id',
       qurl_id: 'q_orphaned_link_one',
     }]);
@@ -2551,7 +2544,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       fileBuffer: new ArrayBuffer(8),
     });
     mockMintLinks.mockResolvedValueOnce([{
-      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one', expires_at: new Date(Date.now() + 86400000).toISOString(),
       resource_id: 'resource-public-id',
       qurl_id: 'q_orphaned_link_one',
     }]);
@@ -2579,7 +2572,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       fileBuffer: new ArrayBuffer(8),
     });
     mockMintLinks.mockResolvedValueOnce([{
-      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one', expires_at: new Date(Date.now() + 86400000).toISOString(),
       resource_id: 'resource-public-id',
       qurl_id: 'q_orphaned_link_one',
     }]);
@@ -2619,7 +2612,7 @@ test('real worker reconstruction preserves the original interaction deadline thr
     expect(interaction.createdTimestamp).toBe(created);
     interaction.editReply = jest.fn().mockResolvedValue(response);
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_one', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_one', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValueOnce({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     await executeSendPipeline(interaction, makePipelineParams());
     expect(response.createMessageComponentCollector).toHaveBeenCalledWith(expect.objectContaining({ time: 590000 }));
@@ -2644,7 +2637,7 @@ describe('management collector interaction-token deadline', () => {
       editReply: jest.fn().mockResolvedValue(response),
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_one', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_one', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValueOnce({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     try {
       await executeSendPipeline(interaction, makePipelineParams());
@@ -2674,7 +2667,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     for (let offset = 0; offset < recipients.length; offset += 10) {
       if (offset > 0) mockReUploadBuffer.mockResolvedValueOnce({ resource_id: 'res-initial' });
       mockMintLinks.mockResolvedValueOnce(recipients.slice(offset, offset + 10).map((r) => ({
-        qurl_link: `https://q.test/${r.id}`, resource_id: 'res-initial', qurl_id: `q_${r.id}`,
+        qurl_link: `https://q.test/${r.id}`, expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-initial', qurl_id: `q_${r.id}`,
       })));
     }
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
@@ -2855,7 +2848,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/added', qurl_id: 'q_added', resource_id: 'res-added' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/added', expires_at: new Date(Date.now() + 86400000).toISOString(), qurl_id: 'q_added', resource_id: 'res-added' }]);
     try {
       await collect(add);
       expect(selection.editReply).toHaveBeenCalledWith({ content: 'Added 1 recipient', components: [] });
@@ -3178,7 +3171,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
       mockMintLinks.mockResolvedValueOnce([
         {
-          qurl_link: 'https://q.test/added',
+          qurl_link: 'https://q.test/added', expires_at: new Date(Date.now() + 86400000).toISOString(),
           qurl_id: 'q_added',
           resource_id: 'res-added',
         },
@@ -3257,26 +3250,24 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
   });
 });
 
-describe('handleAddRecipients — validate expires_in BEFORE recordQURLSendBatch (#352)', () => {
-  afterEach(() => { mockTime.expiryToMs.mockImplementation(jest.requireActual('../src/utils/time').expiryToMs); });
-
-  it('does not write to DB if expiryToMs throws (no orphan rows, no audit-blackhole)', async () => {
+describe('handleAddRecipients — validate returned expiry before persistence (#352)', () => {
+  it('compensates an invalid mint before any row or DM is written', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
-    mockTime.expiryToMs.mockImplementationOnce(() => { throw new Error('synthetic expiryToMs failure'); });
-
-    await expect(handleAddRecipients(
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: 'not-a-time', resource_id: 'res-new' }]);
+    mockRevokeMintedLinks.mockReset().mockResolvedValue(undefined);
+    const result = await handleAddRecipients(
       'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
       makeInteraction(), 'apikey',
-    )).rejects.toThrow(/synthetic expiryToMs failure/);
-
+    );
+    expect(result.delivered).toBe(0);
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_aaaaaaaaaa1'], 'apikey');
   });
 });
 
@@ -3288,7 +3279,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('DB unavailable'));
 
     const result = await handleAddRecipients(
@@ -3318,8 +3309,8 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' },
-      { qurl_link: 'https://q.test/2', resource_id: 'res-new' },
+      { qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
+      { qurl_link: 'https://q.test/2', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
     ]);
 
     const result = await handleAddRecipients(
@@ -3378,7 +3369,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     const err = new Error('revoked');
     err.code = 'SEND_CONFIG_REVOKED';
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(err);
@@ -3403,7 +3394,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: sensitiveResourceId, fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: sensitiveResourceId }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: sensitiveResourceId }]);
     const err = new Error('revoked');
     err.code = 'SEND_CONFIG_REVOKED';
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(err);
@@ -3447,7 +3438,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     for (let batch = 0; batch < 10; batch++) {
       mockMintLinks.mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({
         qurl_id: `q_${batch}_${i}`,
-        qurl_link: `https://q.test/${batch}/${i}`,
+        qurl_link: `https://q.test/${batch}/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString(),
       })));
     }
     mockRevokeMintedLinks.mockResolvedValue(undefined);
@@ -3478,8 +3469,8 @@ describe('handleAddRecipients — happy path (location)', () => {
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
-      { qurl_id: 'q_2', qurl_link: 'https://other.example/2', resource_id: 'res-loc-new' },
+      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-new' },
+      { qurl_id: 'q_2', qurl_link: 'https://other.example/2', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-new' },
     ]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
@@ -3515,7 +3506,7 @@ describe('handleAddRecipients — happy path (location)', () => {
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-pack' });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_pack', qurl_link: 'https://q.test/pack', resource_id: 'res-loc-pack' },
+      { qurl_id: 'q_pack', qurl_link: 'https://q.test/pack', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-pack' },
     ]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
@@ -3542,7 +3533,7 @@ describe('handleAddRecipients — happy path (location)', () => {
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-qv2' });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_qv2', qurl_link: qv2Link, resource_id: 'res-loc-qv2' },
+      { qurl_id: 'q_qv2', qurl_link: qv2Link, expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-qv2' },
     ]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
@@ -3589,8 +3580,8 @@ describe('handleAddRecipients — happy path (location)', () => {
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
-      { qurl_id: 'q_2', qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
+      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-new' },
+      { qurl_id: 'q_2', qurl_link: 'https://q.test/2', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-new' },
     ]);
     mockSendDM.mockResolvedValueOnce({ ok: false })
       .mockResolvedValueOnce({ ok: true, channelId: 'dm-c-2', messageId: 'dm-m-2' });
@@ -3613,8 +3604,8 @@ describe('handleAddRecipients — happy path (location)', () => {
 describe('mintLinksInBatches', () => {
   it('revokes all identified children and stops minting after a short later batch', async () => {
     mockMintLinks
-      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
-      .mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short' }]);
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
+      .mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
     const reuploadFn = jest.fn().mockResolvedValue({ resource_id: 'res-2' });
     const result = await mintLinksInBatches({
       sendId: 'short-send', initialResourceId: 'res-1', reuploadFn,
@@ -3629,8 +3620,8 @@ describe('mintLinksInBatches', () => {
 
   it('mints once for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1' },
-      { qurl_id: 'q_2', qurl_link: 'https://q.test/2' },
+      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString() },
+      { qurl_id: 'q_2', qurl_link: 'https://q.test/2', expires_at: new Date(Date.now() + 86400000).toISOString() },
     ]);
 
     const result = await mintLinksInBatches({
@@ -3648,8 +3639,8 @@ describe('mintLinksInBatches', () => {
 
   it('re-uploads + mints again when recipientCount > TOKENS_PER_RESOURCE', async () => {
     mockMintLinks
-      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
-      .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10' }]);
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
+      .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
     const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
 
     const result = await mintLinksInBatches({
@@ -3669,7 +3660,7 @@ describe('mintLinksInBatches', () => {
   it('revokes earlier batches before rethrowing a later mint failure', async () => {
     const failure = new Error('Connector mint_link failed (502)');
     mockMintLinks
-      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
       .mockRejectedValueOnce(failure);
     mockRevokeMintedLinks.mockRejectedValueOnce(new Error('connector unavailable'));
 
@@ -3697,7 +3688,7 @@ describe('mintLinksInBatches', () => {
   });
 
   it('surfaces the invalid-qurl_id error, not a TypeError, for a null mint entry', async () => {
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_ok', qurl_link: 'https://q.test/ok' }, null]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_ok', qurl_link: 'https://q.test/ok', expires_at: new Date(Date.now() + 86400000).toISOString() }, null]);
 
     await expect(mintLinksInBatches({
       initialResourceId: 'res-1',
@@ -3727,7 +3718,7 @@ describe('mintLinksInBatches', () => {
     try {
       const failure = new Error('Connector mint_link failed (502)');
       mockMintLinks
-        .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
+        .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
         .mockRejectedValueOnce(failure);
       mockRevokeMintedLinks.mockImplementationOnce(() => new Promise(() => {}));
 
@@ -3751,7 +3742,7 @@ describe('mintLinksInBatches', () => {
   });
 
   it('revokes a bounded over-mint and logs only the unrevoked overflow', async () => {
-    const minted = Array.from({ length: 1 + 20 + 3 }, (_, i) => ({ qurl_id: `q_x${i}`, qurl_link: `https://q.test/x${i}` }));
+    const minted = Array.from({ length: 1 + 20 + 3 }, (_, i) => ({ qurl_id: `q_x${i}`, qurl_link: `https://q.test/x${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() }));
     mockMintLinks.mockResolvedValueOnce(minted);
 
     await expect(mintLinksInBatches({
@@ -3785,8 +3776,8 @@ describe('mintLinksInBatches', () => {
 
   it('forwards guildId to mintLinks on EVERY batch (#1101 attribution)', async () => {
     mockMintLinks
-      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
-      .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10' }]);
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
+      .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
     const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
 
     await mintLinksInBatches({
@@ -3809,7 +3800,7 @@ describe('executeSendPipeline — guild_id threading (#1101)', () => {
   it('threads interaction.guildId into BOTH mintLinks and recordQURLSendBatch (file send)', async () => {
     const interaction = makeInteraction({ guildId: 'guild-1' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://door.acme.com/#at_test', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://door.acme.com/#at_test', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
@@ -3832,7 +3823,7 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
       token: 'interaction-tok-live', applicationId: 'app-123', guildId: 'guild-1',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
@@ -3854,7 +3845,7 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
   it('refuses to persist, deliver, or arm the fast-path for a link missing qurl_id', async () => {
     const interaction = makeInteraction({ token: 'tok-live', applicationId: 'app-123', guildId: 'guild-1' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
 
     await executeSendPipeline(interaction, makePipelineParams());
 
@@ -3867,7 +3858,7 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
   it('skips the persist when no interaction token is present (legacy/worker w/o token)', async () => {
     const interaction = makeInteraction({ token: undefined, applicationId: 'app-123' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
@@ -3879,7 +3870,7 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
   it('a send-time persist failure is logged-swallowed, not thrown (DMs already delivered)', async () => {
     const interaction = makeInteraction({ token: 'tok', applicationId: 'app-123' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
     mockDb.saveSendConfirmState.mockRejectedValueOnce(new Error('ddb throttle'));
@@ -3900,7 +3891,7 @@ describe('handleAddRecipients — guild_id threading (#1101)', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_add', qurl_link: 'https://q.test/add', resource_id: 'res-file-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_add', qurl_link: 'https://q.test/add', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-file-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
@@ -3968,7 +3959,6 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
 });
 
 describe('executeSendPipeline — expiresIn allowed-set gate', () => {
-  afterEach(() => { mockTime.expiryToMs.mockImplementation(jest.requireActual('../src/utils/time').expiryToMs); });
 
   test.each([
     ['off-set numeric-style', '25h'],
@@ -3988,27 +3978,19 @@ describe('executeSendPipeline — expiresIn allowed-set gate', () => {
     );
   });
 
-  test.each(['30m', '1h', '6h', '24h', '7d'])('accepts the allowed value: %s', async (expiresIn) => {
+  test.each(['30m', '1h', '6h', '24h', '3d', '7d'])('accepts a current or saved legacy value: %s', async (expiresIn) => {
     await expectGateAccepts(makePipelineParams({ expiresIn }), /expiresIn must be one of/);
   });
 
-  test('hoists expiresAt above recordQURLSendBatch so a throw can\'t leave orphan rows (#352)', async () => {
-    const { expiryToMs } = require('../src/utils/time');
-    expiryToMs.mockImplementationOnce(() => { throw new Error('synthetic expiryToMs throw'); });
+  test('rejects an invalid returned expiry before persistence and compensates the minted child (#352)', async () => {
     mockDb.recordQURLSendBatch.mockClear();
-
-    mockDownloadAndUpload.mockResolvedValueOnce({
-      resource_id: 'res-new', fileBuffer: new ArrayBuffer(10),
-    });
-    mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-new' },
-    ]);
-
-    const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams({ expiresIn: '30m' })))
-      .rejects.toThrow(/synthetic expiryToMs throw/);
-
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: 'not-a-time', resource_id: 'res-new' }]);
+    mockRevokeMintedLinks.mockReset().mockResolvedValue(undefined);
+    await executeSendPipeline(makeInteraction(), makePipelineParams({ expiresIn: '30m' }));
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_1'], 'apikey');
   });
 });
 
@@ -4157,7 +4139,7 @@ describe('executeSendPipeline — truncForLog applies to value-rendering gates',
 describe('executeSendPipeline — channel notification on @everyone / voice mode', () => {
   beforeEach(() => {
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-1' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-1' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
   });
 
@@ -4251,8 +4233,8 @@ describe('send-confirm audit correlation', () => {
   test.each(['0123456789abcdef', 'legacy-or-secret'])('bounds the card reference for %s', async nonce => {
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' },
-      { qurl_id: 'q_aaaaaaaaaa2', qurl_link: 'https://q.test/2', resource_id: 'res-new' },
+      { qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
+      { qurl_id: 'q_aaaaaaaaaa2', qurl_link: 'https://q.test/2', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
     ]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
@@ -4304,7 +4286,7 @@ describe('initial-send compensation boundaries', () => {
         const resourceId = `res-large-${offset / 10}`;
         if (offset) mockReUploadBuffer.mockResolvedValueOnce({ resource_id: resourceId });
         mockMintLinks.mockResolvedValueOnce(recipients.slice(offset, offset + 10).map((_, i) => ({
-          qurl_id: `q_large${offset + i}`, qurl_link: `https://q.test/${offset + i}`, resource_id: resourceId,
+          qurl_id: `q_large${offset + i}`, qurl_link: `https://q.test/${offset + i}`, expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: resourceId,
         })));
       }
       mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('partial BatchWrite failure'));
@@ -4323,7 +4305,7 @@ describe('initial-send compensation boundaries', () => {
     if (mode === 'timeout') jest.useFakeTimers();
     try {
       mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-short', fileBuffer: Buffer.from('x') });
-      mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short' }]);
+      mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
       if (mode === 'timeout') mockRevokeMintedLinks.mockImplementationOnce(() => new Promise(() => {}));
       else mockRevokeMintedLinks.mockRejectedValueOnce(new Error('revoke unavailable'));
       const interaction = makeInteraction();
@@ -4352,8 +4334,8 @@ describe('destination footer — per-recipient failure isolation', () => {
       resource_type: 'maps', actual_url: 'https://maps.example.com/x', expires_in: '30m',
     });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_bad', qurl_link: failure === 'malformed' ? 'not a URL' : failure === 'hostless' ? 'mailto:x@example.com' : 'https://bad.example/#secret', resource_id: 'res-new' },
-      { qurl_id: 'q_good', qurl_link: 'https://other.example/link', resource_id: 'res-new' },
+      { qurl_id: 'q_bad', qurl_link: failure === 'malformed' ? 'not a URL' : failure === 'hostless' ? 'mailto:x@example.com' : 'https://bad.example/#secret', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
+      { qurl_id: 'q_good', qurl_link: 'https://other.example/link', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
     ]);
     mockSendDM.mockImplementation(async recipientId => {
       if (failure === 'send-throws' && recipientId === 'u1') throw new Error('secret delivery failure');
@@ -4379,5 +4361,81 @@ describe('destination footer — per-recipient failure isolation', () => {
     });
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith(expect.any(String), 'u1', 'failed');
     expect(mockDb.markSendDMDelivered).toHaveBeenCalledWith(expect.any(String), 'u2', 'dm-c', 'dm-m');
+  });
+});
+
+
+describe('authoritative mint expiry — persisted and rendered', () => {
+  it.each([['initial', 'file', '24h'], ['initial', 'maps', '24h'], ['add', 'file', '24h'], ['add', 'maps', '24h'], ['add', 'file', '7d'], ['add', 'maps', '7d']])('%s %s (%s requested) uses the returned expiry when the resource clamps it', async (path, kind, requested = '24h') => {
+    const now = 1800000000000;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    const returnedExpiry = new Date(now + 900000).toISOString();
+    mockDownloadAndUpload.mockReset().mockResolvedValue({ resource_id: path === 'add' ? 'res-old' : 'res-new', fileBuffer: Buffer.from('x') });
+    mockUploadJsonToConnector.mockReset().mockResolvedValue({ resource_id: path === 'add' ? 'res-old' : 'res-new' });
+    mockMintLinks.mockReset().mockResolvedValue([{ qurl_id: 'q_expiry', qurl_link: 'https://q.test/expiry', expires_at: returnedExpiry }]);
+    mockSendDM.mockReset().mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockReset().mockResolvedValue(undefined);
+    mockDb.getSendConfig.mockReset();
+    try {
+      if (path === 'add') {
+        mockDb.getSendConfig.mockResolvedValueOnce({
+          resource_type: kind, expires_in: requested, connector_resource_id: 'res-old',
+          attachment_url: kind === 'file' ? DEFAULT_ATTACHMENT.url : null,
+          attachment_name: kind === 'file' ? 'x.png' : null, attachment_content_type: kind === 'file' ? 'image/png' : null,
+          actual_url: kind === 'maps' ? 'https://maps.example.com/x' : null,
+        });
+        await handleAddRecipients('send-expiry', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]), makeInteraction(), 'apikey');
+      } else {
+        await executeSendPipeline(makeInteraction(), makePipelineParams({
+          resourceType: kind, attachment: kind === 'file' ? DEFAULT_ATTACHMENT : null,
+          locationUrl: kind === 'maps' ? 'https://maps.example.com/x' : null,
+          locationName: kind === 'maps' ? 'Place' : null,
+        }));
+      }
+      expect(mockDb.recordQURLSendBatch.mock.calls[0][0][0].expiresIn).toBe(requested);
+      expect(mockDb.recordQURLSendBatch.mock.calls[0][0][0].resourceId).toBe(path === 'add' ? 'res-old' : 'res-new');
+      expect(mockDb.recordQURLSendBatch.mock.calls[0][0][0].expiresAt).toBe(1800000900);
+      expect(mockSendDM.mock.calls[0][1].embeds[0].setDescription).toHaveBeenCalledWith(expect.stringContaining('<t:1800000900:R>'));
+    } finally { clock.mockRestore(); clearCooldown('sender-1'); }
+  });
+});
+
+
+describe('authoritative mint expiry — rejection and delivery deadline', () => {
+  it.each([undefined, null, 0, '', 'not-a-time', '2000-01-01T00:00:00Z'])('compensates a mint with unusable expiry %s', async expires_at => {
+    mockMintLinks.mockReset().mockResolvedValueOnce([{ qurl_id: 'q_expiry_bad', qurl_link: 'https://q.test/bad', expires_at }]);
+    mockRevokeMintedLinks.mockReset().mockResolvedValue(undefined);
+    await expect(mintLinksInBatches({ initialResourceId: 'res-expiry', reuploadFn: jest.fn(), expiresAt: new Date(Date.now() + 86400000).toISOString(), recipientCount: 1, apiKey: 'apikey' })).rejects.toThrow(/valid future expiry/);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-expiry', ['q_expiry_bad'], 'apikey');
+  });
+
+  it.each(['initial', 'add'])('does not deliver a sibling that expires while fanout is running (%s)', async path => {
+    const now = 1800000000000;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    const expires_at = new Date(now + 1000).toISOString();
+    mockDownloadAndUpload.mockReset().mockResolvedValue({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockReset().mockResolvedValue([
+      { qurl_id: 'q_first', qurl_link: 'https://q.test/first', expires_at },
+      { qurl_id: 'q_second', qurl_link: 'https://q.test/second', expires_at },
+    ]);
+    mockDb.recordQURLSendBatch.mockReset().mockResolvedValue(undefined);
+    mockDb.getSendConfig.mockReset();
+    mockSendDM.mockReset().mockImplementation(async () => {
+      clock.mockReturnValue(now + 2000);
+      return { ok: true, channelId: 'dm-c', messageId: 'dm-m' };
+    });
+    const recipients = [{ id: 'u1', username: 'Alice', bot: false }, { id: 'u2', username: 'Bob', bot: false }];
+    try {
+      if (path === 'add') {
+        mockDb.getSendConfig.mockResolvedValueOnce({ expires_in: '24h', connector_resource_id: 'res-old', attachment_url: DEFAULT_ATTACHMENT.url, attachment_name: 'x.png', attachment_content_type: 'image/png' });
+        const result = await handleAddRecipients('send-expiry', makeUsersCollection(recipients), makeInteraction(), 'apikey');
+        expect(result).toMatchObject({ delivered: 1, failed: 1 });
+      } else {
+        await executeSendPipeline(makeInteraction(), makePipelineParams({ recipients }));
+      }
+      expect(mockSendDM).toHaveBeenCalledTimes(1);
+      expect(mockSendDM.mock.calls[0][0]).toBe('u1');
+      expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith(expect.any(String), 'u2', 'failed');
+    } finally { clock.mockRestore(); clearCooldown('sender-1'); }
   });
 });

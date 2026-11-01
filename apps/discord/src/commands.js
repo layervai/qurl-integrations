@@ -802,17 +802,14 @@ function resolveRoleNames(guild, ids) {
 // in the design mockup would require a Success-style button + custom_id
 // + interaction handler that redirects, which adds a click round-trip
 // for marginal aesthetic gain.
-// Single source of truth for the SlashCommandBuilder `addChoices(...)` —
-// `EXPIRY_CHOICES` is derived from this map so dropdown labels and values
-// cannot drift. The DM embed renders expiry as a Discord native relative
-// timestamp (`<t:N:R>`, see buildDeliveryPayload) so the human label is
-// only used in the slash-command picker, not at render time.
+// Requested lifetimes are shared by slash choices and the confirm form.
+// Recipient closing times come from the mint response, not these labels.
 const EXPIRY_LABELS = {
   '30m': '30 minutes',
   '1h': '1 hour',
   '6h': '6 hours',
   '24h': '24 hours',
-  '7d': '7 days',
+  '3d': '3 days',
 };
 
 const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
@@ -824,6 +821,11 @@ const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ n
 // `git grep isValidExpiry` for call sites.
 function isValidExpiry(v) {
   return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v);
+}
+
+// Earlier saved sends/cards can request 7d; the mint's actual expiry still wins.
+function isValidSavedExpiry(v) {
+  return isValidExpiry(v) || v === '7d';
 }
 
 // Per-pick cap on UserSelectMenuBuilder.setMaxValues, set to Discord's
@@ -1672,7 +1674,7 @@ const REVOKE_RUNNING_MSG = 'Revocation is still running. Run `/qurl revoke` agai
  *   Threaded through here (not passed to mintLinks at each call site) because
  *   mintLinks is only reached via this batcher on the real send paths.
  *   Optional/back-compat — omitting it leaves the mint body unchanged.
- * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
+ * @returns {Array<{qurl_link: string, qurl_id: string, expires_at: string, resourceId: string}>}
  * A short result has scheduled cleanup and must never be delivered.
  */
 async function mintLinksInBatches({ sendId, initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
@@ -1705,7 +1707,7 @@ async function mintLinksInBatches({ sendId, initialResourceId, reuploadFn, expir
       // requested links plus a bounded overflow so small over-mints self-heal
       // in the catch below (the over-count is thrown on after this loop).
       for (const link of minted.slice(0, batchSize + MAX_OVERFLOW_REVOKE_IDS)) {
-        allLinks.push({ qurl_link: link?.qurl_link, qurl_id: link?.qurl_id, resourceId: currentResourceId });
+        allLinks.push({ qurl_link: link?.qurl_link, qurl_id: link?.qurl_id, expires_at: link?.expires_at, resourceId: currentResourceId });
       }
       // Validate only after every entry is pushed: the catch below revokes the
       // identified siblings of a bad entry. More links than requested breaks
@@ -1736,6 +1738,11 @@ async function mintLinksInBatches({ sendId, initialResourceId, reuploadFn, expir
         // can be neither delivered nor rebuilt, so revoke it rather than persist.
         if (typeof link.qurl_link !== 'string' || link.qurl_link.length === 0) {
           throw new Error(`Connector mint_link returned a link without a qurl_link (entry ${i + idx})`);
+        }
+        // TODO(upstream-contract): every deliverable mint carries its enforced expiry.
+        const expiryMs = typeof link.expires_at === 'string' ? Date.parse(link.expires_at) : NaN;
+        if (!Number.isFinite(expiryMs) || expiryMs <= Date.now()) {
+          throw new Error(`Connector mint_link returned a link without a valid future expiry (entry ${i + idx})`);
         }
       });
       tokensUsed += batchSize;
@@ -1808,7 +1815,7 @@ async function mintLinksInBatches({ sendId, initialResourceId, reuploadFn, expir
 // Entry gates (fire-and-forget cancel-edit + throw):
 //   - `attachment.url` re-validated against `isAllowedSourceUrl`
 //     when `resourceType === RESOURCE_TYPES.FILE`.
-//   - `expiresIn` must be a key of `EXPIRY_LABELS`.
+//   - `expiresIn` must be a current choice or the saved legacy 7d preset.
 //   - `personalMessage` must be `null` or `string`.
 //   - `recipients` must be a non-empty array (element shape is
 //     `{ id: <discord-user-id>, username: <string> }`; the gate
@@ -1972,8 +1979,8 @@ async function executeSendPipeline(interaction, {
   // ship an off-set value (`'25h'`, `'bogus'`) that lands in the
   // DB and trips downstream when `expiryToISO` / `expiryToMs`
   // hit it. Validate at the boundary instead.
-  if (!isValidExpiry(expiresIn)) {
-    failGate(TypeError, `executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${truncForLog(expiresIn)})`);
+  if (!isValidSavedExpiry(expiresIn)) {
+    failGate(TypeError, `executeSendPipeline: expiresIn must be one of ${[...Object.keys(EXPIRY_LABELS), '7d (legacy)'].join('|')} (got ${truncForLog(expiresIn)})`);
   }
 
   // `personalMessage` shape gate. The DM-embed renderer expects
@@ -2129,6 +2136,7 @@ async function executeSendPipeline(interaction, {
       qurlLinks = recipients.map((r, i) => ({
         recipientId: r.id,
         qurlLink: allLinks[i].qurl_link,
+        expiresAt: Math.floor(Date.parse(allLinks[i].expires_at) / 1000),
         qurlId: allLinks[i].qurl_id,
         resourceId: allLinks[i].resourceId,
       }));
@@ -2170,6 +2178,7 @@ async function executeSendPipeline(interaction, {
       qurlLinks = recipients.map((r, i) => ({
         recipientId: r.id,
         qurlLink: allLinks[i].qurl_link,
+        expiresAt: Math.floor(Date.parse(allLinks[i].expires_at) / 1000),
         qurlId: allLinks[i].qurl_id,
         resourceId: allLinks[i].resourceId,
       }));
@@ -2222,30 +2231,7 @@ async function executeSendPipeline(interaction, {
     return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
   }
 
-  // Compute the absolute expiry instant once for this dispatch (Unix
-  // seconds — Discord's <t:N:R> format requires seconds, not millis).
-  // Using send-time + duration rather than reading from the API mint
-  // response since `mintLinks` doesn't currently surface `expires_at`.
-  // Drift between this clock and the API's enforcement clock is the
-  // wall-clock gap between THIS compute site and the earlier mint call
-  // (mintLinksInBatches has already returned by the time we land here
-  // on the send-pipeline path; on handleAddRecipients the gap also
-  // covers re-download + re-upload + re-mint). So recipients see
-  // "in 24 hours" measured against send-time, not mint-time. Negligible
-  // at the 30m–7d horizon — even a worst-case 10s gap rounds the same
-  // way in the relative-time display.
-  //
-  // Computed BEFORE recordQURLSendBatch so a malformed `expiresIn`
-  // throwing in `expiryToMs` aborts the dispatch BEFORE any DDB rows
-  // are written — otherwise the DB writes would happen, then the throw
-  // would bubble out with no DMs sent, leaving orphan qURL records
-  // with no recipient. The throw fires HERE (at the hoisted compute
-  // site below, function-scoped) rather than at the per-recipient
-  // render step inside batchSettled — that distinction matters for
-  // the failure-mode bookkeeping: a thrown expiryToMs surfaces as a
-  // single uncaught error at the function level, not as N
-  // `DISPATCH_FAILED` audit emissions. Closes #352.
-  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+  // Per-link mint expiries were validated before any recipient row is written.
 
   // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
   // still exist on the qURL side but there's no local record to revoke them
@@ -2259,6 +2245,7 @@ async function executeSendPipeline(interaction, {
       // mintLinksInBatches return value above. Sparse on the write
       // side — see recordQURLSendBatch.
       qurlId: link.qurlId,
+      expiresAt: link.expiresAt,
       // CONTRACT: targetType is always 'user' for new rows post-PR
       // #313 (the only caller is executeSendPipeline via the confirm
       // card on /qurl send + /qurl map, both of which DM individual
@@ -2267,11 +2254,9 @@ async function executeSendPipeline(interaction, {
       // historical legacy /qurl send wizard rows ('channel') during the TTL drain
       // window. #318 drops the formatRevokeLabel non-'user' branch
       // once no revoke-visible row has `target_type !== 'user'` — the
-      // drain happens naturally as the revoke renderer filters on
-      // `expires_at`, so the gate is condition-driven (no live legacy
-      // rows surface in /qurl revoke) rather than date-driven. The
-      // EXPIRY_LABELS max window (7d) bounds when that condition is
-      // safe to assume post-deploy. No entry-gate fires because the
+      // drain requires a check of stored legacy rows before retiring
+      // the reader; seven-day requested windows do not prove actual expiry.
+      // No entry-gate fires because the
       // value can't drift — it's a literal, not a forwarded param.
       expiresIn, channelId: interaction.channelId, targetType: 'user',
       // guild_id persisted on each row so /qurl detect (#1101) can
@@ -2308,43 +2293,29 @@ async function executeSendPipeline(interaction, {
     });
   }
 
-  // Send DMs. `expiresAt` is Unix seconds, computed above the DDB
-  // write — see the #352 hoist comment near recordQURLSendBatch for
-  // the clock-drift caveat that was previously documented here.
+  // Send only links that remain live at dispatch time.
   let delivered = 0;
   let failed = 0;
   const failedUsers = [];
   const recipientMap = new Map(recipients.map(r => [r.id, r]));
 
-  // Mirror handleAddRecipients: hoist resolveSenderAlias out of the
-  // per-recipient batchSettled callback. The function is a pure
-  // resolution of nickname > globalName > username from `interaction`,
-  // so the per-link call inside the callback was N redundant
-  // resolutions of the same string. Both pipelines now share the same
-  // hoist pattern for both expiresAt AND senderAlias.
+  // Resolve shared sender provenance once; expiry remains per-link.
   const senderAlias = resolveSenderAlias(interaction);
   const { guildName, guildIconUrl } = resolveGuildProvenance(interaction);
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
-    // Audit in `finally` so the metric fires for every recipient regardless
-    // of where the dispatch fails — sendDM resolving to false, sendDM
-    // throwing (against contract — see apps/discord/src/discord.js), OR
-    // buildDeliveryPayload throwing (e.g. on a non-integer expiresAt —
-    // see its `Number.isInteger` guard; would throw on every iteration
-    // of the batch, since expiresAt is computed once above).
-    // Audit fires BEFORE the DB write so a DDB-layer throw can't suppress
-    // it either — that's the failure mode the audit metric exists to
-    // measure. Coverage spans the entire dispatch attempt, not just the
-    // network leg.
+    // Audit payload and transport failures before the status write so a
+    // bookkeeping failure cannot hide the dispatch outcome.
     let result = { ok: false };
     try {
+      if (link.expiresAt <= Math.floor(Date.now() / 1000)) throw new Error('Minted link expired before delivery');
       const dmPayload = buildDeliveryPayload({
         senderAlias,
         guildName,
         guildIconUrl,
         qurlLink: link.qurlLink,
-        expiresAt,
+        expiresAt: link.expiresAt,
         personalMessage,
       });
       result = await sendDM(link.recipientId, dmPayload);
@@ -2896,7 +2867,7 @@ async function executeSendPipeline(interaction, {
                 if (l?.qurlId) allQurlIds.push(l.qurlId);
               }
               const totalSent = delivered + addRecipientsCount;
-              confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | ${formatSelfDestructSegment(selfDestructSeconds)}`;
+              confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Requested expiry: ${expiresIn} | ${formatSelfDestructSegment(selfDestructSeconds)}`;
               if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
               if (confirmRendered.attachmentText) {
                 confirmMsg += `\nAttached recipients.txt lists only the original recipients; newly added recipients are not listed.`;
@@ -3125,19 +3096,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     };
   }
 
-  // #352 entry gate. Shares the same `EXPIRY_LABELS` membership
-  // predicate as the executeSendPipeline failGate
-  // (`grep "expiresIn must be one of"`), closing the unprotected
-  // path where a stale/regressed sendConfig row could ship an
-  // off-set value. Protects BOTH downstream `expiryToMs` AND
-  // `expiryToISO` (each used below for mint + DM dispatch) from
-  // their shared silent-24h-default fallback. Failure shape
-  // diverges from failGate intentionally: failGate throws (caller
-  // catches at the slash-command boundary), while this gate returns
-  // an error object — handleAddRecipients's caller renders the
-  // string on the post-send confirm card, where a throw would land
-  // as a generic "Internal error" with no actionable message.
-  if (!isValidExpiry(sendConfig.expires_in)) {
+  // #352: reject bad stored requests before expiryToISO can silently default.
+  // Keep the retired 7d setting readable; actual link expiry comes from the mint.
+  if (!isValidSavedExpiry(sendConfig.expires_in)) {
     // warn (not error): a stale/corrupted DDB row is user-recoverable
     // (re-send), not paging-worthy. Matches renderConfirmCardRows's
     // analogous off-EXPIRY_LABELS log level. Forensics-only signal.
@@ -3318,6 +3279,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
+          expiresAt: Math.floor(Date.parse(allLinks[i].expires_at) / 1000),
           qurlId: allLinks[i].qurl_id,
           resourceId: allLinks[i].resourceId,
           resType: RESOURCE_TYPES.FILE,
@@ -3351,6 +3313,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
+          expiresAt: Math.floor(Date.parse(allLinks[i].expires_at) / 1000),
           qurlId: allLinks[i].qurl_id,
           resourceId: allLinks[i].resourceId,
           resType: RESOURCE_TYPES.MAPS, label: sendConfig.location_name || 'Google Maps',
@@ -3393,31 +3356,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Failed to create any links.', newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
-  // Hoist payload-shared inputs to the top of the dispatch block so
-  // the entire batch shares one expiry timestamp and one resolved
-  // sender alias. Mirrors executeSendPipeline's structure — both
-  // pipelines now compute the Unix-seconds expiresAt once per call,
-  // eliminating Date.now() drift between recipients in the same
-  // batch. (The ISO-string `expiresAt` inside the file/location prep
-  // branches calls expiryToISO independently for mintLinks — that's
-  // a separate type for a separate consumer; sub-second drift between
-  // the minted-link expiry and the DM-payload expiry is negligible
-  // at the 30m–7d horizon.) resolveSenderAlias is a pure function of
-  // originalInteraction so hoisting also avoids re-resolving the
-  // nickname/globalName/username chain per dispatch.
-  //
-  // Computed BEFORE recordQURLSendBatch so a malformed
-  // `sendConfig.expires_in` throwing in `expiryToMs` aborts the
-  // dispatch BEFORE any DDB rows are written — otherwise the DB
-  // writes would happen, then the throw would bubble out with no DMs
-  // sent, leaving orphan qURL records with no recipient. The
-  // `handleAddRecipients` path is especially exposed here because
-  // sendConfig.expires_in is read from DDB (rather than validated
-  // upstream like executeSendPipeline's slash-command param), so a
-  // stale/regressed row predating the current validation would slip
-  // through. Throwing pre-write makes the failure mode visible at
-  // the function level rather than as orphan rows. Closes #352.
-  const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
+  // Provenance is shared; expiry comes from each minted link.
   const senderAlias = resolveSenderAlias(originalInteraction);
   const { guildName, guildIconUrl } = resolveGuildProvenance(originalInteraction);
 
@@ -3432,6 +3371,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         // through executeSendPipeline — needed for the qurl.expired
         // webhook handler's GSI lookup. See recordQURLSendBatch.
         qurlId: link.qurlId,
+        expiresAt: link.expiresAt,
         expiresIn: sendConfig.expires_in,
         channelId: originalInteraction.channelId, targetType: 'user',
         // guild_id for /qurl detect attribution (#1101) — mirrors the mint
@@ -3536,14 +3476,17 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         senderAlias,
         guildName,
         guildIconUrl,
-        expiresAt,
         personalMessage: sendConfig.personal_message,
       };
-      const allEmbeds = cappedLinks.map(link => buildDeliveryEmbed({
-        ...embedArgs,
-        qurlLink: link.qurlLink,
-        renderActionsAsMarkdown,
-      }));
+      const allEmbeds = cappedLinks.map(link => {
+        if (link.expiresAt <= Math.floor(Date.now() / 1000)) throw new Error('Minted link expired before delivery');
+        return buildDeliveryEmbed({
+          ...embedArgs,
+          qurlLink: link.qurlLink,
+          expiresAt: link.expiresAt,
+          renderActionsAsMarkdown,
+        });
+      });
       const allComponents = renderActionsAsMarkdown
         ? []
         : packBulkDeliveryComponents(cappedLinks.map(link => link.qurlLink));
@@ -3630,7 +3573,7 @@ function formatRevokeLabel(s, channelName) {
 function formatRevokeDescription(s) {
   const when = new Date(s.created_at).toLocaleString();
   const delivery = `${s.delivered_count}/${s.recipient_count} delivered`;
-  const expiry = `expires ${s.expires_in}`;
+  const expiry = `requested expiry ${s.expires_in}`;
   const retry = s.revocation_pending ? 'Retry · ' : '';
   const base = `${retry}${when} · ${delivery} · ${expiry}`;
   // If there's space left, append a truncated message preview so users
@@ -5036,7 +4979,7 @@ function renderConfirmCardContent({
     const more = validRecipients.length > PREVIEW ? `, +${validRecipients.length - PREVIEW} more` : '';
     content += `\n**To:** ${validRecipients.length} user${validRecipients.length === 1 ? '' : 's'} (${previewNames}${more})\n`;
   }
-  content += `**Expires:** ${EXPIRY_LABELS[expiresIn] || expiresIn}\n`;
+  content += `**Requested expiry:** ${EXPIRY_LABELS[expiresIn] || (expiresIn === '7d' ? '7 days' : expiresIn)}\n`;
   if (isPositiveFinite(selfDestructSeconds)) {
     content += `**Self-destruct:** ${formatSelfDestructLabel(selfDestructSeconds)}\n`;
     const note = formatSelfDestructTimingNote(selfDestructSeconds);
@@ -5273,7 +5216,8 @@ function renderConfirmCardRows({
   // back to defaulting the codebase-default '24h' option so the card
   // still shows SOMETHING meaningful.
   const hasExpiryMatch = isValidExpiry(expiresIn);
-  if (!hasExpiryMatch && expiresIn != null) {
+  const legacyExpiry = expiresIn === '7d';
+  if (!hasExpiryMatch && !legacyExpiry && expiresIn != null) {
     // Log so corrupted rows surface in forensics rather than just
     // getting papered over by the 24h fallback.
     logger.warn('renderConfirmCardRows: off-EXPIRY_LABELS expiresIn in payload — falling back to 24h default', {
@@ -5283,13 +5227,14 @@ function renderConfirmCardRows({
   rows.push(new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(CONFIRM_EXPIRY_SELECT_CUSTOM_ID)
+      .setPlaceholder(legacyExpiry ? 'Saved request: 7 days. Choose a new expiry to change it.' : 'Choose expiry')
       .setMinValues(1)
       .setMaxValues(1)
       .addOptions(
         ...EXPIRY_CHOICES.map((c) => ({
           label: c.name,
           value: c.value,
-          default: hasExpiryMatch ? c.value === expiresIn : c.value === '24h',
+          default: hasExpiryMatch ? c.value === expiresIn : !legacyExpiry && c.value === '24h',
         }))
       )
   ));
@@ -5522,7 +5467,8 @@ async function handleQurlSlashSend(interaction, params) {
     // Defense-in-depth: expiresIn comes from the slash command's choice
     // list which Discord enforces server-side, but a forged interaction
     // could carry an off-set value. EXPIRY_LABELS owns the closed set.
-    if (!isValidExpiry(expiresIn)) {
+    // Cached Discord command choices can still carry the retired 7d preset.
+    if (!isValidSavedExpiry(expiresIn)) {
       clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: '❌ Unrecognized expiry value. Re-run and pick from the list.',
@@ -8569,7 +8515,7 @@ function renderSendConfirm({
   delivered, expiresIn, selfDestructSeconds,
   failedNamesPlain = [], successNames = [], showAll = false,
 }) {
-  const header = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | ${formatSelfDestructSegment(selfDestructSeconds)}`;
+  const header = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Requested expiry: ${expiresIn} | ${formatSelfDestructSegment(selfDestructSeconds)}`;
   const escapedFailed = failedNamesPlain.map(escapeDiscordMarkdown);
   const escapedSuccess = successNames.map(escapeDiscordMarkdown);
 
