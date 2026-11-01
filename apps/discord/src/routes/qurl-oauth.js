@@ -50,6 +50,19 @@ const KEY_MINT_FAILURES = new Map([
 ]);
 
 
+async function retainSetupCompensation({ guildId, apiKey, keyId, ownerId, uncertain }) {
+  if (!config.ENABLE_CREDENTIAL_LIFECYCLE) return false;
+  try {
+    await db.enqueueUnstoredGuildCredential({ guildId, apiKey, keyId, ownerId, uncertain });
+    return true;
+  } catch {
+    logger.audit(AUDIT_EVENTS.CREDENTIAL_CLEANUP_FAILED, {
+      reason: 'setup_compensation_not_saved', guild_id: guildId, key_id: keyId,
+    });
+    return false;
+  }
+}
+
 const router = express.Router();
 
 const readyCommandsPlain = config.MAP_COMMAND_ENABLED
@@ -421,6 +434,11 @@ router.get('/callback', rateLimit, async (req, res) => {
     // PR #177 follow-up C.3 + round-9 review item #4.
     if (typeof apiKey !== 'string' || !apiKey
         || typeof keyId !== 'string' || !keyId) {
+      if (typeof apiKey === 'string' && apiKey) {
+        await retainSetupCompensation({ guildId, apiKey,
+          keyId: typeof keyId === 'string' && keyId.trim() ? keyId : null,
+          ownerId: ownerBinding.ownerId, uncertain: true });
+      }
       logger.error('qURL API key response missing or non-string required fields', {
         guildId,
         apiKeyType: typeof apiKey,
@@ -449,11 +467,15 @@ router.get('/callback', rateLimit, async (req, res) => {
     logger.error('Failed to persist guild API key after successful mint', {
       error: err?.message, guildId, discordUserId, keyId,
     });
+    const cleanupQueued = await retainSetupCompensation({ guildId, apiKey, keyId, ownerId: ownerBinding.ownerId,
+      uncertain: err?.code === 'GUILD_SETUP_UNCONFIRMED' });
     if (err?.code === 'GUILD_SETUP_UNCONFIRMED') {
       return renderError(res, 503, 'Server setup needs confirmation',
         'The key was created, but its saved state could not be confirmed. '
         + 'Contact your layerv.ai admin before starting setup again.');
     }
+    // If durable compensation is unavailable, retain the existing known-failure
+    // best-effort delete. An uncertain save never reaches this path.
     // Key was minted but not stored. Best-effort delete on qurl-service
     // so retries don't pile up orphan keys under the admin's account.
     // Fire-and-forget — even if the cleanup fails, the user-facing 500
@@ -462,7 +484,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     // `keyId` is guaranteed non-empty here — the missing-key_id 502
     // earlier in the handler returned before this block can run, so
     // the historical `if (keyId)` guard was dead code (round-9 #5).
-    fetch(`${config.QURL_ENDPOINT}/v1/api-keys/${encodeURIComponent(keyId)}`, {
+    if (!cleanupQueued) fetch(`${config.QURL_ENDPOINT}/v1/api-keys/${encodeURIComponent(keyId)}`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${accessToken}` },
       signal: AbortSignal.timeout(ORPHAN_DELETE_TIMEOUT_MS),

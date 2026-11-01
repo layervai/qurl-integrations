@@ -1925,6 +1925,21 @@ async function enqueueGuildWebhookCleanup({ guildId, apiKey, webhookId, webhookO
   return jobId;
 }
 
+async function enqueueUnstoredGuildCredential({ guildId, apiKey, keyId, ownerId, uncertain = false }) {
+  if ([guildId, apiKey, ownerId].some(value => typeof value !== 'string' || !value.trim())
+      || (keyId != null && (typeof keyId !== 'string' || !keyId.trim()))) {
+    throw new Error('Unstored credential identity is required');
+  }
+  const jobId = crypto.randomUUID();
+  await ddb.send(new PutCommand({ TableName: TABLES.credential_lifecycle,
+    Item: { pk: `JOB#${jobId}`, sk: 'META', job_id: jobId, guild_id: guildId,
+      reason: uncertain ? 'uncertain_setup' : 'failed_setup', cleanup_state: 'pending', attempts: 0,
+      due_bucket: String(parseInt(jobId.slice(0, 2), 16) % 16), due_at: Date.now(), created_at: nowIso(),
+      qurl_api_key: encryptStrict(apiKey), qurl_key_id: keyId ?? null, qurl_owner_id: ownerId, qurl_key_kind: 'dedicated' },
+    ConditionExpression: 'attribute_not_exists(pk)' }));
+  return jobId;
+}
+
 // Claims are fenced by a random token. Failed and exhausted jobs retain their
 // encrypted capability; only a confirmed completion can erase it.
 async function claimCredentialCleanup(bucket, now = Date.now()) {
@@ -2738,7 +2753,7 @@ module.exports = {
   getGuildApiKey, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
   // Per-guild webhook subscriptions (BYOK view counter)
   setGuildWebhookSubscription, setGuildDefaultWebhookOwner, clearGuildWebhookSubscription,
-  enqueueGuildWebhookCleanup, noteGuildInstallation, enqueueGuildRemoval,
+  enqueueGuildWebhookCleanup, enqueueUnstoredGuildCredential, noteGuildInstallation, enqueueGuildRemoval,
   listCompleteGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
   claimCredentialCleanup, finishCredentialCleanup, getGuildCleanupSnapshot, restoreGuildInstallation, retireGuildCredential,
   backfillGuildWebhookReferences, migrateGuildWebhookReferences, claimWebhookCleanup, completeWebhookCleanup,

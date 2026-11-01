@@ -841,3 +841,12 @@ generic HTTP 404. Recover with the correct owner credential, confirm remote stat
 and preserve the installation observation row. The worker does not delete shared
 or global API keys. Completed jobs erase their retained credential and webhook
 secret; retry and manual jobs preserve both.
+
+With lifecycle handling enabled, OAuth setup retains an encrypted compensation
+job before replying to a failed save. Known failed saves can revoke their unused
+dedicated key through the worker. An uncertain save, or a usable mint response
+with no key ID, requires operator recovery unless the key is confirmed active.
+No uncertain outcome triggers inline revocation. If compensation storage also
+fails, the existing known-failure best-effort delete remains available; uncertain
+saves still preserve the key and emit the cleanup failure alarm. A lost mint
+response with no usable secret still needs upstream issuance recovery evidence.

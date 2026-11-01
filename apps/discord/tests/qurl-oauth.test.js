@@ -27,6 +27,7 @@ jest.mock('../src/logger', () => ({
 
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
+  enqueueUnstoredGuildCredential: jest.fn().mockResolvedValue('cleanup-job'),
   getGuildConfigWithApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
   getGuildConfig: jest.fn(),
@@ -544,6 +545,54 @@ describe('qurl-oauth routes', () => {
       expect(res.text).not.toContain('new-secret');
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
       expect(discord.sendDM).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])('retains a minted key before replying to failed setup (uncertain=%s)', async uncertain => {
+      config.ENABLE_CREDENTIAL_LIFECYCLE = true;
+      require('../src/discord-rest').getGuildSetupInstallation.mockResolvedValue({ ok: true, joinedAt: '2026-10-01T00:00:00.000000000Z' });
+      const state = signCallbackState('guild-1', 'admin-2');
+      db.setGuildApiKey.mockRejectedValueOnce(Object.assign(new Error('write failed'), {
+        code: uncertain ? 'GUILD_SETUP_UNCONFIRMED' : 'GUILD_SETUP_CHANGED',
+      }));
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'jwt', id_token: 'verified.jwt.sig' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { key_id: 'new-id', api_key: 'new-secret' } }) });
+      const res = await request(app).get(`/oauth/qurl/callback?code=grant&state=${encodeURIComponent(state)}`)
+        .set('Cookie', cookieFor(state));
+      expect(res.status).toBe(uncertain ? 503 : 409);
+      expect(db.enqueueUnstoredGuildCredential).toHaveBeenCalledWith({
+        guildId: 'guild-1', apiKey: 'new-secret', keyId: 'new-id', ownerId: 'auth0|abc', uncertain,
+      });
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(res.text).not.toContain('new-secret');
+    });
+
+    it('alarms and preserves an uncertain key when compensation storage also fails', async () => {
+      config.ENABLE_CREDENTIAL_LIFECYCLE = true;
+      require('../src/discord-rest').getGuildSetupInstallation.mockResolvedValue({ ok: true, joinedAt: '2026-10-01T00:00:00.000000000Z' });
+      const state = signCallbackState('guild-1', 'admin-2');
+      db.setGuildApiKey.mockRejectedValueOnce(Object.assign(new Error('unknown'), { code: 'GUILD_SETUP_UNCONFIRMED' }));
+      db.enqueueUnstoredGuildCredential.mockRejectedValueOnce(new Error('unavailable'));
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'jwt', id_token: 'verified.jwt.sig' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { key_id: 'new-id', api_key: 'new-secret' } }) });
+      const res = await request(app).get(`/oauth/qurl/callback?code=grant&state=${encodeURIComponent(state)}`).set('Cookie', cookieFor(state));
+      expect(res.status).toBe(503); expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.CREDENTIAL_CLEANUP_FAILED,
+        { reason: 'setup_compensation_not_saved', guild_id: 'guild-1', key_id: 'new-id' });
+    });
+
+    it('retains a usable secret for manual recovery when the mint response omits its key ID', async () => {
+      config.ENABLE_CREDENTIAL_LIFECYCLE = true;
+      require('../src/discord-rest').getGuildSetupInstallation.mockResolvedValue({ ok: true, joinedAt: '2026-10-01T00:00:00.000000000Z' });
+      const state = signCallbackState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'jwt', id_token: 'verified.jwt.sig' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { api_key: 'new-secret' } }) });
+      const res = await request(app).get(`/oauth/qurl/callback?code=grant&state=${encodeURIComponent(state)}`).set('Cookie', cookieFor(state));
+      expect(res.status).toBe(502); expect(db.setGuildApiKey).not.toHaveBeenCalled();
+      expect(db.enqueueUnstoredGuildCredential).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'new-secret', keyId: null, uncertain: true }));
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2); expect(res.text).not.toContain('new-secret');
     });
 
     it('fresh grant on the same state cannot replay a key revoked after persistence failed', async () => {
