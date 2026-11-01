@@ -150,6 +150,9 @@ const (
 // /oauth/qurl/start rather than rendering a generic "auth failed" error.
 var ErrWorkspaceNotConfigured = errors.New("workspace not configured — admin must complete /oauth/qurl/start")
 
+// ErrWorkspaceAPIKeyConflict means another setup attempt stored a different key.
+var ErrWorkspaceAPIKeyConflict = errors.New("workspace API key already configured")
+
 // ErrSlackBotTokenNotConfigured is returned when a workspace has not completed
 // the Slack app OAuth install/reinstall path that grants a per-workspace bot
 // token. The Slack handler catches this distinctly from decrypt/transport
@@ -899,6 +902,7 @@ func (p *DDBProvider) SetAPIKeyWithMetadata(ctx context.Context, workspaceID, ap
 
 // SetInitialAPIKeyWithMetadata saves setup credentials without replacing a different key.
 // Replaying the same binding-backed key is safe and remains idempotent.
+// Legacy rows without key identity can be healed after validation rejects their key.
 func (p *DDBProvider) SetInitialAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error {
 	return p.setAPIKey(ctx, "DDBProvider.SetInitialAPIKeyWithMetadata", workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy, true)
 }
@@ -956,7 +960,8 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 	var condition *string
 	if initial {
 		// The database picks one setup winner across processes; a losing legacy mint is revoked.
-		condition = aws.String("attribute_not_exists(" + attrQURLAPIKey + ") OR " + attrQURLAPIKeyID + " = :key_id")
+		condition = aws.String("attribute_not_exists(" + attrQURLAPIKey + ") OR attribute_not_exists(" + attrQURLAPIKeyID + ") OR " + attrQURLAPIKeyID + " = :empty_key_id OR " + attrQURLAPIKeyID + " = :key_id")
+		values[":empty_key_id"] = &ddbtypes.AttributeValueMemberS{Value: ""}
 	}
 	out, err := p.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		ConditionExpression: condition,
@@ -969,6 +974,10 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 		ReturnValues:              ddbtypes.ReturnValueUpdatedOld,
 	})
 	if err != nil {
+		var conflict *ddbtypes.ConditionalCheckFailedException
+		if initial && errors.As(err, &conflict) {
+			return fmt.Errorf("%s: UpdateItem: %w: %w", operation, ErrWorkspaceAPIKeyConflict, err)
+		}
 		return fmt.Errorf("%s: UpdateItem: %w", operation, err)
 	}
 	if out != nil {

@@ -2507,7 +2507,7 @@ func TestDDBProviderInitialKeySaveIsConditional(t *testing.T) {
 	if err := save(testKeyID); err != nil {
 		t.Fatal(err)
 	}
-	want := "attribute_not_exists(" + attrQURLAPIKey + ") OR " + attrQURLAPIKeyID + " = :key_id"
+	want := "attribute_not_exists(" + attrQURLAPIKey + ") OR attribute_not_exists(" + attrQURLAPIKeyID + ") OR " + attrQURLAPIKeyID + " = :empty_key_id OR " + attrQURLAPIKeyID + " = :key_id"
 	if got := aws.ToString(ddb.updateInput.ConditionExpression); got != want {
 		t.Fatalf("condition = %q, want %q", got, want)
 	}
@@ -2516,7 +2516,7 @@ func TestDDBProviderInitialKeySaveIsConditional(t *testing.T) {
 	}
 	conflict := &ddbtypes.ConditionalCheckFailedException{}
 	ddb.updateErr = conflict
-	if err := save("losing-key"); !errors.Is(err, conflict) {
+	if err := save("losing-key"); !errors.Is(err, conflict) || !errors.Is(err, ErrWorkspaceAPIKeyConflict) {
 		t.Fatalf("conflict lost: %v", err)
 	}
 	ddb.updateErr = nil

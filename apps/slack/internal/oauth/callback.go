@@ -332,8 +332,8 @@ func Callback(cfg Config) http.HandlerFunc {
 		// (id_token sub) is already in hand pre-mint, so there's no
 		// ordering blocker. On a refused outcome, no key is minted and
 		// no DDB row is touched — refused-bind half-install becomes
-		// impossible by construction (the lost-PutItem-race orphan-key
-		// case is separate; tracked at #265).
+		// impossible by construction. The conditional setup save also prevents
+		// overlapping accepted attempts from overwriting different keys.
 		if !checkBindAllowed(w, cfg, verified, qurlSub) {
 			return
 		}
@@ -901,10 +901,6 @@ func confirmStoredKeyAlreadyRevoked(w http.ResponseWriter, cfg Config, accessTok
 // persist-failure, and only --rotate/--repoint can replay the replacement's
 // old-key idempotency bucket.
 //
-// Replacement still enters mintAndPersist's post-timeout orphan-key window
-// tracked at #265. Keep this read+validate budget short so missing/revoked-key
-// recovery does not materially enlarge that known race.
-//
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
 func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg Config, teamID string) (keyPrefix string, reused bool, ok bool) {
 	readCtx, readCancel := context.WithTimeout(context.Background(), existingKeyTimeout)
@@ -1043,6 +1039,16 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	// cross-account move; it is best-effort and tolerated empty when admin
 	// storage is disabled (see SetAPIKeyWithMetadata).
 	if perr := cfg.Provider.SetInitialAPIKeyWithMetadata(persistCtx, teamID, apiKey, keyID, keyPrefix, qurlAccountID, userID); perr != nil {
+		if errors.Is(perr, auth.ErrWorkspaceAPIKeyConflict) {
+			slog.Info("oauth/callback another setup attempt stored the workspace key", "team_id", teamID, "key_id", keyID)
+			if !minted.BindingBacked {
+				scheduleOrphanRevoke(cfg, accessToken, keyID, teamID)
+			}
+			renderOAuthErrorPage(w, http.StatusConflict, "qURL setup changed",
+				"Another setup attempt saved a different qURL™ workspace key. This attempt did not replace it.",
+				"Return to Slack and try /qurl get. If the workspace key needs recovery, run /qurl setup <email> with --rotate.")
+			return "", false
+		}
 		if minted.BindingBacked {
 			replayWindowHours := replayWindowHoursOrDefault(cfg.SetupBindingReplayWindowHours, DefaultSetupBindingReplayWindowHours)
 			slog.Error("oauth/callback persist failed — keeping binding-backed key for setup retry",
