@@ -336,6 +336,6 @@ describe('File Revoke', () => {
 (process.env.QURL_TARGET_PATH_INPUT_PROBE === '1' ? test : test.skip)(
   'both target-path mint routes on the existing owned Connector parent', async () => {
     await runTargetPathInput(targetPathInputSeedChild, env.QURL_API_KEY,
-      resolve('owned-target-path-input-journal.jsonl'));
+      resolve('owned-target-path-input-journal.jsonl'), env.MINT_API_URL);
   }, 900_000,
 );
