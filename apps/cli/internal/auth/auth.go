@@ -1,9 +1,9 @@
 // Package auth resolves the qURL API credential for the CLI.
 //
-// The account API key is a bootstrap or explicit-recovery credential. Current
-// CLI commands never store it; steady-state commands use the registered device
-// identity. It is never accepted as a command-line flag (argv leaks into shell
-// history and process lists). Bootstrap resolves it from these sources:
+// The account API key bootstraps or recovers a device and can explicitly authorize
+// account administration where the API permits it. CLI commands never store it;
+// steady-state resource commands use the registered device identity. It is never accepted as a command-line flag (argv leaks into shell
+// history and process lists). Explicit account-key authority resolves from these sources:
 //
 //  1. The QURL_API_KEY_FILE environment variable — private-file hermetic mode.
 //  2. The QURL_API_KEY environment variable — inline hermetic mode.
@@ -44,6 +44,8 @@ var (
 	ErrInvalidKey = errors.New("cli: the configured value does not look like a qURL API key")
 	// ErrCredentialConflict rejects ambiguous inline and file authority.
 	ErrCredentialConflict = errors.New("cli: QURL_API_KEY and QURL_API_KEY_FILE cannot both be set")
+	// ErrAccountManagementDenied rejects a key outside explicit account authority.
+	ErrAccountManagementDenied = errors.New("cli: credential cannot authorize account administration")
 	// ErrDeviceAccountConflict rejects reuse of one durable device state
 	// directory across different qURL accounts.
 	ErrDeviceAccountConflict = errors.New("cli: registered device state belongs to a different qURL account")

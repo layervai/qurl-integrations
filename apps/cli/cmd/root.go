@@ -184,6 +184,7 @@ type globalOpts struct {
 	// whoami describes exactly that namespace.
 	nativeStateDir      string
 	warnedCleartextAuth bool
+	accountAPIKeyAuth   bool
 
 	// Resolved in PersistentPreRunE.
 	resolved           bool
