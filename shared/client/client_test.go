@@ -2656,3 +2656,31 @@ func TestUpdateResourceIdempotencyRejectsBadKeysBeforeTransport(t *testing.T) {
 		t.Fatalf("invalid keys made %d requests", calls.Load())
 	}
 }
+
+func TestUpdateResourceRetryMetadataValidationBoundary(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		apiEnvelope(t, w, map[string]any{})
+	}))
+	defer srv.Close()
+	emptyAlias := ""
+	for _, tc := range []struct {
+		name  string
+		input UpdateResourceInput
+		want  error
+	}{
+		{"key-only-is-not-an-update", UpdateResourceInput{IdempotencyKey: strings.Repeat("k", 32)}, ErrUpdateResourceNoFieldsSet},
+		{"bad-key-before-alias-conflict", UpdateResourceInput{IdempotencyKey: "bad\nkey", Alias: &emptyAlias, ClearAlias: true}, ErrIdempotencyKeyInvalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := testClient(srv.URL, "test-key").UpdateResource(context.Background(), testResourceID, &tc.input)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("got %v, want %v", err, tc.want)
+			}
+		})
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("invalid metadata made %d requests", calls.Load())
+	}
+}

@@ -35,8 +35,8 @@ const (
 // idempotency-store table is `hash(owner_id:idempotency_key:method:path)`).
 //
 // Callers don't set this header directly — pass IdempotencyKey on the
-// per-request input struct (CreateInput, CreateAPIKeyInput, UpdateResourceInput) and the
-// client wires the header. The constant is exported only so observability
+// per-request input struct (CreateInput, CreateAPIKeyInput, UpdateResourceInput).
+// The client wires the header. The constant is exported only so observability
 // code can grep for it consistently across logs and request inspectors.
 //
 // Key construction guidance (apply to every caller — not just Slack):
@@ -794,8 +794,10 @@ type APIKey struct {
 // ([ErrUpdateResourceNoFieldsSet]) — symmetric with Create's
 // no-target guard.
 //
-// Retries without an IdempotencyKey require field-idempotent updates.
+// Retries without an IdempotencyKey require field-idempotent updates:
+// an ambiguous 5xx can repeat counters, appends, or per-call audit entries.
 type UpdateResourceInput struct {
+	// TODO(upstream-contract): qURL must honor retry keys on resource PATCHes.
 	// IdempotencyKey is an optional retry key sent only as a request header.
 	IdempotencyKey string `json:"-"`
 	// Description: pass `&""` to clear the field server-side (no
