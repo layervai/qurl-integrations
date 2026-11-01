@@ -7,7 +7,7 @@ jest.mock('../src/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jes
 jest.mock('../src/dispatch-probe', () => ({ ...jest.requireActual('../src/dispatch-probe'), getRuntimeProbeStore: jest.fn() }));
 const { Client, GatewayIntentBits } = require('discord.js');
 const { mockClient } = require('aws-sdk-client-mock');
-const { SQSClient, SendMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
+const { SQSClient, SendMessageCommand, DeleteMessageCommand, ReceiveMessageCommand } = require('@aws-sdk/client-sqs');
 const probes = require('../src/dispatch-probe');
 const publisher = require('../src/event-publisher');
 const consumer = require('../src/event-consumer');
@@ -17,10 +17,12 @@ beforeEach(() => {
   process.env.AWS_REGION = 'us-east-2'; sqs.reset();
   publisher._test._resetStateForTest(); consumer._test._resetStateForTest();
 });
+afterEach(() => jest.restoreAllMocks());
 afterAll(() => { if (originalRegion === undefined) delete process.env.AWS_REGION; else process.env.AWS_REGION = originalRegion; });
 
 test('actual publisher envelope crosses actual consumer and real SDK before completion', async () => {
   let time = 0, row;
+  jest.spyOn(Date, 'now').mockImplementation(() => time);
   const store = {
     prepare: async data => { row = { ...data }; }, read: jest.fn(async () => row),
     acknowledge: jest.fn(async (_origin, nonce) => { if (nonce === row.nonce) row.ack_at = time; return true; }),
@@ -52,15 +54,30 @@ test('actual publisher envelope crosses actual consumer and real SDK before comp
   const envelope = JSON.parse(body);
   expect(envelope).toMatchObject({ eventType: 'GUILD_MEMBERS_CHUNK', probe_origin: row.origin, data: packet.d });
   let observed = false; client.on('guildMembersChunk', () => { observed = true; });
-  // Cross-host time uses the project's existing wall-clock convention.
-  row.deadline = Date.now() + 30_000;
   await consumer._test.processMessage(client, { Body: body, ReceiptHandle: 'fixture-receipt' });
   expect(observed).toBe(true); expect(store.acknowledge).toHaveBeenCalledTimes(1);
   expect(sqs.commandCalls(DeleteMessageCommand)).toHaveLength(1);
   await probe.tick(); expect(logger.audit).toHaveBeenCalledWith('gateway_dispatch_probe_ok', { latency_ms: 0 });
   // A storage outage is not terminal: leave the SQS message for redelivery.
   store.read.mockRejectedValueOnce(new Error('fixture DDB unavailable'));
-  await expect(consumer._test.processMessage(client, { Body: body, ReceiptHandle: 'retry-receipt' })).rejects.toThrow('fixture DDB unavailable');
+  sqs.on(ReceiveMessageCommand).resolves({ Messages: [{ Body: body, ReceiptHandle: 'retry-receipt' }] });
+  consumer._test._setStopControllerForTest();
+  await consumer._test.pollOnce(client);
+  expect(require('../src/logger').error).toHaveBeenCalledWith(
+    expect.stringContaining('processing or deletion failed'), expect.objectContaining({ error: 'fixture DDB unavailable' }),
+  );
   expect(sqs.commandCalls(DeleteMessageCommand)).toHaveLength(1);
   probe.stop(); await client.destroy();
+});
+
+test('worker flag off deletes an unknown probe envelope without processing it', async () => {
+  const config = require('../src/config'); config.ENABLE_DISPATCH_PROBE = false;
+  try {
+    sqs.on(DeleteMessageCommand).resolves({});
+    consumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    probes.getRuntimeProbeStore.mockClear();
+    await consumer._test.processMessage({}, { Body: JSON.stringify({ eventType: 'GUILD_MEMBERS_CHUNK' }), ReceiptHandle: 'old-worker' });
+    expect(probes.getRuntimeProbeStore).not.toHaveBeenCalled();
+    expect(sqs.commandCalls(DeleteMessageCommand)).toHaveLength(1);
+  } finally { config.ENABLE_DISPATCH_PROBE = true; }
 });

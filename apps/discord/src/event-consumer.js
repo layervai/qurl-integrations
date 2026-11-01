@@ -872,11 +872,8 @@ async function pollOnce(client) {
 
   // Process messages in parallel. Each wrapper catches its own
   // failures so one rejection doesn't collapse the batch and strand
-  // siblings. The only escape from `processMessage` is a
-  // DeleteMessage throw — every other error path is internally
-  // caught + delete-eager. So this log is specifically the
-  // SQS-delete-failed signal: the message will redrive after the
-  // visibility timeout and re-dispatch.
+  // siblings. DeleteMessage and probe storage/SDK failures escape
+  // processMessage so their receipts redrive after the visibility timeout.
   //
   // Operational interpretation depends on the upstream code path:
   // - INTERACTION_CREATE that dispatched successfully → OCC at
@@ -900,7 +897,7 @@ async function pollOnce(client) {
     try {
       await processMessage(client, message);
     } catch (err) {
-      logger.error('Event consumer: DeleteMessage failed; message will redeliver after visibility timeout', {
+      logger.error('Event consumer: processing or deletion failed; message will redeliver after visibility timeout', {
         error: err.message,
         messageId: message.MessageId,
       });

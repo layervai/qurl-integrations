@@ -1,5 +1,5 @@
 const { Client, GatewayIntentBits } = require('discord.js');
-const { createDispatchProbe, createProbeStore, consumeProbe } = require('../src/dispatch-probe');
+const { createDispatchProbe, createProbeStore, consumeProbe, validChunk } = require('../src/dispatch-probe');
 const guildId = '123456789012345678';
 const userId = '234567890123456789';
 function fixture(shipping = true) {
@@ -134,4 +134,61 @@ test('stuck WebSocket send is bounded and still reports the expected missed repl
     f.advance(30_000); await f.probe.tick();
     expect(f.logger.audit).toHaveBeenCalledWith('gateway_dispatch_probe_missed');
   } finally { await f.close(); jest.useRealTimers(); }
+});
+
+test('only a matching opcode-8 RATE_LIMITED cancels the expected reply and respects retry_after', async () => {
+  const f = fixture(); f.advance(60_000); await f.probe.tick();
+  const limited = { op: 0, t: 'RATE_LIMITED', d: { opcode: 8, retry_after: 120,
+    meta: { guild_id: guildId, nonce: f.row().nonce } } };
+  f.probe.capture({ ...limited, d: { ...limited.d, meta: { ...limited.d.meta, nonce: 'foreign' } } });
+  expect(f.logger.audit).not.toHaveBeenCalled();
+  f.probe.capture(limited); f.advance(60_000); await f.probe.tick();
+  expect(f.logger.audit).toHaveBeenCalledWith('gateway_dispatch_probe_unavailable', { reason: 'rate_limited' });
+  expect(f.logger.audit).not.toHaveBeenCalledWith('gateway_dispatch_probe_missed');
+  expect(f.transport.request).toHaveBeenCalledTimes(1);
+  f.advance(60_000); await f.probe.tick(); expect(f.transport.request).toHaveBeenCalledTimes(2);
+  await f.close();
+});
+
+test('guild unavailable and a connection flap cancel pending coverage without a false page', async () => {
+  const f = fixture(); f.advance(60_000); await f.probe.tick();
+  f.probe.capture({ op: 0, t: 'GUILD_DELETE', d: { id: guildId, unavailable: true } });
+  f.advance(30_000); await f.probe.tick();
+  expect(f.logger.audit).toHaveBeenCalledWith('gateway_dispatch_probe_unavailable', { reason: 'guild_removed_or_unavailable' });
+  f.advance(30_000); await f.probe.tick();
+  f.transport.isReady.mockReturnValue(false); await f.probe.tick();
+  f.transport.isReady.mockReturnValue(true); f.advance(59_999); await f.probe.tick();
+  expect(f.transport.request).toHaveBeenCalledTimes(2);
+  expect(f.logger.audit).not.toHaveBeenCalledWith('gateway_dispatch_probe_missed'); await f.close();
+});
+
+test('combined index transport selects an available guild and returns the pinned real-SDK send Promise', async () => {
+  const fs = require('node:fs'); const path = require('node:path'); const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(__dirname, '../src/index.js'), 'utf8');
+  const start = source.indexOf('    const transport = gatewayShim ?');
+  const end = source.indexOf('    dispatchProbe = createDispatchProbe(', start);
+  expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+  expect('_ws' in client.ws).toBe(true);
+  expect(typeof require('@discordjs/ws').WebSocketManager.prototype.send).toBe('function');
+  client.guilds._add({ id: '345678901234567890', name: 'unavailable', unavailable: true });
+  const guild = client.guilds._add({ id: guildId, name: 'available', unavailable: false, channels: [], shardId: 0 });
+  client.user = { id: userId };
+  const promise = Promise.resolve(); const send = jest.fn(() => promise); client.ws._ws = { send };
+  const globals = { client, gatewayShim: null }; vm.createContext(globals);
+  vm.runInContext(source.slice(start, end) + '\nthis.transport = transport;', globals);
+  const target = await globals.transport.getTarget(); expect(target).toEqual({ guildId, userId, shardId: guild.shardId });
+  const packet = { op: 8, d: { guild_id: guildId, user_ids: [userId], nonce: 'fixture' } };
+  expect(globals.transport.request(target, packet)).toBe(promise);
+  expect(send).toHaveBeenCalledWith(guild.shardId, packet);
+  client.guilds.cache.clear(); expect(await globals.transport.getTarget()).toBeNull();
+  client.ws._ws = null; await client.destroy();
+});
+
+
+test('empty optional presence arrays are valid; a presence payload never enters the probe worker', async () => {
+  const f = fixture(); f.advance(60_000); await f.probe.tick(); const data = f.packet().d;
+  expect(validChunk({ ...data, presences: [] })).toBe(true);
+  expect(validChunk({ ...data, presences: [{ user: { id: '345678901234567890' } }] })).toBe(false);
+  await f.close();
 });

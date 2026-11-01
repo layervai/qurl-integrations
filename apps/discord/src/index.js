@@ -1227,6 +1227,7 @@ async function start() {
         const guild = client.guilds.cache.find(g => g.available);
         return guild && client.user ? { guildId: guild.id, userId: client.user.id, shardId: guild.shardId } : null;
       },
+      // TODO(upstream-contract): pinned SDK field returns the send Promise; public shard.send drops it.
       request: (target, packet) => client.ws._ws.send(target.shardId, packet),
     };
     dispatchProbe = createDispatchProbe({

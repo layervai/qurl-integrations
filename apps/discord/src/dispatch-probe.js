@@ -43,7 +43,7 @@ function validChunk(data) {
     && Array.isArray(data.members) && data.members.length === 1
     && typeof data.members[0]?.user?.id === 'string' && /^\d{17,20}$/.test(data.members[0].user.id)
     && (!data.not_found || data.not_found.length === 0)
-    && !data.presences;
+    && (!data.presences || (Array.isArray(data.presences) && data.presences.length === 0));
 }
 
 // Do not ACK a raw packet. The SDK must emit its public event first.
@@ -158,8 +158,21 @@ function createDispatchProbe({ store, transport, publish, client, logger, now = 
   }
 
   function capture(packet) {
-    if (stopped || packet?.op !== 0 || packet.t !== 'GUILD_MEMBERS_CHUNK'
-      || !pending || !validChunk(packet.d) || packet.d.nonce !== pending.nonce
+    if (stopped || packet?.op !== 0 || !pending) return;
+    if (packet.t === 'GUILD_DELETE' && packet.d?.id === pending.guild_id) {
+      pending = null;
+      logger.audit(AUDIT_EVENTS.GATEWAY_DISPATCH_PROBE_UNAVAILABLE, { reason: 'guild_removed_or_unavailable' });
+      return;
+    }
+    if (packet.t === 'RATE_LIMITED' && packet.d?.opcode === 8
+      && packet.d.meta?.nonce === pending.nonce && packet.d.meta?.guild_id === pending.guild_id) {
+      const retryMs = Number.isFinite(packet.d.retry_after) ? packet.d.retry_after * 1000 : 0;
+      nextAt = now() + Math.max(CADENCE_MS, Number.isFinite(retryMs) && retryMs > 0 ? retryMs : 0);
+      pending = null;
+      logger.audit(AUDIT_EVENTS.GATEWAY_DISPATCH_PROBE_UNAVAILABLE, { reason: 'rate_limited' });
+      return;
+    }
+    if (packet.t !== 'GUILD_MEMBERS_CHUNK' || !validChunk(packet.d) || packet.d.nonce !== pending.nonce
       || packet.d.guild_id !== pending.guild_id
       || packet.d.members[0].user.id !== pending.user_id || now() > pending.deadline) return;
     if (publish && !pending.forwarded) {

@@ -2,7 +2,7 @@
 
 `ENABLE_DISPATCH_PROBE=true` enables one expected Discord reply per active gateway process per minute. The default is false. It does not use ambient guild traffic or send messages.
 
-The gateway waits 60 seconds after startup or an observed disconnect. It sends Gateway opcode 8 with a fresh nonce and only the bot's own user ID in one guild. A pure RESUMED boot fetches the current bot and one guild through REST. The existing GuildMembers intent is required. See [Discord's Request Guild Members contract](https://docs.discord.com/developers/events/gateway-events#request-guild-members).
+The gateway waits 60 seconds after startup or an observed disconnect. It sends Gateway opcode 8 with a fresh nonce and only the bot's own user ID in one guild. A pure RESUMED boot fetches the current bot and one guild through REST, then caches the target until removal or disconnect. Known unavailable guilds are skipped. The existing GuildMembers intent is required. See [Discord's Request Guild Members contract](https://docs.discord.com/developers/events/gateway-events#request-guild-members).
 
 In combined mode the normal Discord SDK member-chunk event records the result. In event-shipping mode only the matching expected chunk enters the existing SQS publisher. The worker loads the current probe row, checks its guild, bot, nonce and deadline, then calls the pinned Discord SDK chunk handler. It writes an ACK only after the SDK emits the expected public event. A raw gateway reply alone cannot pass the queue/worker probe. Ordinary member chunks stay off the queue.
 
@@ -12,7 +12,7 @@ The gateway emits four audit events without IDs or nonce dimensions:
 
 - `gateway_dispatch_probe_ok`: expected SDK result returned before the deadline; includes `latency_ms`.
 - `gateway_dispatch_probe_missed`: an issued probe has no timely result. This is the only paging input.
-- `gateway_dispatch_probe_unavailable`: no eligible guild. This is unknown coverage, not proof of a healthy dispatch path.
+- `gateway_dispatch_probe_unavailable`: no eligible guild, guild removal/unavailability, or an explicit matching [Discord rate-limit response](https://docs.discord.com/developers/events/gateway-events#rate-limited). These cancel the expected result; rate limiting also delays the next request by the server retry interval, with a one-minute minimum. This is unknown coverage, not proof of a healthy dispatch path.
 - `gateway_dispatch_probe_error`: request, storage, or SDK work failed. A pending expected probe still expires and can page.
 
 The existing ACK-age heartbeat and silence alarms stay in place. This probe does not alter HTTP readiness or force task restarts. The infra alarm requires missed probes in two of three one-minute periods. Missing data is not breaching, so a quiet guild or standby does not page.

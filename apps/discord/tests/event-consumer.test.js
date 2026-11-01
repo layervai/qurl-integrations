@@ -521,7 +521,7 @@ describe('event-consumer: pollOnce', () => {
 
     expect(client.actions.InteractionCreate.handle).toHaveBeenCalledTimes(3);
     expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('DeleteMessage failed'),
+      expect.stringContaining('processing or deletion failed'),
       expect.objectContaining({ messageId: 'm-2' }),
     );
   });
