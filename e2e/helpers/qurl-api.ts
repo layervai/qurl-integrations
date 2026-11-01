@@ -403,7 +403,7 @@ function parseResourceStatus(value: unknown, id: string): ResourceStatus | null 
 }
 
 /** A typed HTTP failure from the qURL management lookup. */
-class StatusCheckError extends Error {
+export class StatusCheckError extends Error {
   constructor(readonly status: number) {
     super(`qURL lookup failed: ${status}`);
     this.name = 'StatusCheckError';
