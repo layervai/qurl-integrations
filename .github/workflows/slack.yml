@@ -148,7 +148,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.slack == 'true'
     # Native Go cross-compilation keeps the ARM64 image and all image checks.
-    # Recent PR p95 was 11m07s including cache export; see issues #514 and #750.
+    # Pre-cross-compile PR p95 was 11m07s including cache export; see #514 and #750.
     timeout-minutes: 15
     env:
       # Pulled anonymously: the ghcr.io/layervai/qurl package is public. If it ever
