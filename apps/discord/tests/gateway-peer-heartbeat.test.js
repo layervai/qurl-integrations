@@ -369,6 +369,19 @@ describe('duplicate instance ID detection', () => {
     }
   });
 
+  it('allows overlapping ECS tasks with distinct instance IDs', async () => {
+    const rows = new Map();
+    const replicas = ['task-a', 'task-b'].map(instanceId => makeHeartbeat({ instanceId, clock: () => 1_700_000_000_000 }));
+    for (const replica of replicas) replica.ddbMock.on(PutCommand).callsFake(input => {
+      const previous = rows.get(input.Item.instance_id);
+      rows.set(input.Item.instance_id, input.Item);
+      return { Attributes: previous };
+    });
+    for (let tick = 0; tick < 2; tick += 1) for (const replica of replicas) await replica.heartbeat.writeHeartbeat();
+    for (const replica of replicas) expect(replica.logger.audit).not.toHaveBeenCalled();
+    expect(rows.size).toBe(2);
+  });
+
   it('does not report an ordinary restart or repeated writes by one writer', async () => {
     let row;
     for (let i = 0; i < 2; i += 1) {

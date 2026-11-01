@@ -157,7 +157,7 @@ function createPeerHeartbeat({
       ReturnValues: 'ALL_OLD',
     }));
     const previous = result?.Attributes;
-    // Skip the first successful write: a normal restart can replace a fresh row.
+    // A stopped predecessor's fresh row can survive an in-task process restart.
     if (hasWritten && typeof previous?.writer_id === 'string' && previous.writer_id
       && previous.writer_id !== writerId
       && Number.isSafeInteger(previous.updated_at) && Math.abs(now - previous.updated_at) < ttlSeconds

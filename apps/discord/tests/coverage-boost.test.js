@@ -98,12 +98,18 @@ crypto.randomBytes = jest.fn((size) => {
   if (size === 8) return Buffer.from(MOCK_NONCE, 'hex');
   return originalRandomBytes(size);
 });
+const originalRandomUUID = crypto.randomUUID;
 crypto.randomUUID = jest.fn(() => 'mock-uuid-9999');
 
 const { commands, handleCommand, _test } = require('../src/commands');
 const { sendCooldowns, setCooldown, isGoogleMapsURL } = _test;
 
 const { makeInteraction } = require('./helpers/discord-mock');
+
+afterAll(() => {
+  crypto.randomBytes = originalRandomBytes;
+  crypto.randomUUID = originalRandomUUID;
+});
 
 beforeEach(() => {
   jest.clearAllMocks();

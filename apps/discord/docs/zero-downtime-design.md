@@ -724,7 +724,10 @@ Its existing PutItem requests `ALL_OLD`, so it can detect a different recent
 writer on the same `instance_id` without a separate read or scan. After its first
 successful write, replacing another writer's unexpired row within the heartbeat
 TTL emits one dimensionless `gateway_instance_id_collision` audit event. The first
-write is excluded so a normal restart does not alert on its predecessor's row.
+write is excluded so a stopped predecessor's row does not alert on an in-task
+process restart. Distinct ECS tasks must have distinct IDs even during rolling
+replacement; overlapping writers that reuse an ID violate that invariant and
+should alert. No extra startup grace period hides that overlap.
 The event carries no instance, writer, IP, guild or shard dimension.
 
 The paired infrastructure filter counts the event as `GatewayInstanceIdCollision`
@@ -738,3 +741,13 @@ Legacy writers without `writer_id` cannot be identified by this detector; deploy
 all writers before relying on the alarm. A writer that never succeeds, or a
 collision that ends before either writer observes a replacement after startup,
 may not be reported. The existing row TTL and heartbeat cadence do not change.
+
+To repeat the actual database check, start DynamoDB Local on a loopback port,
+then run from `apps/discord`:
+
+```sh
+GATEWAY_HEARTBEAT_DDB_TEST_ENDPOINT=http://127.0.0.1:8000 node tests/gateway-peer-heartbeat.ddb.cjs
+```
+
+The test refuses non-loopback endpoints, uses explicit fixture credentials,
+and creates/deletes only its own random table. Run this integration check separately from the mocked Jest suite. No cloud credential or notification is needed.
