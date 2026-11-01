@@ -146,6 +146,7 @@ const { ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client
 const { createSqsClient } = require('./utils/sqs');
 const config = require('./config');
 const logger = require('./logger');
+const { consumeProbe, getRuntimeProbeStore } = require('./dispatch-probe');
 const { GATEWAY_DISPATCH_TYPES, LOG_KINDS } = require('./constants');
 
 // AWS_REGION is required (matches src/flow-state.js + src/store/ddb-store.js
@@ -541,6 +542,13 @@ async function processMessage(client, message) {
 
   const { eventType, data, event_id: eventId, published_at_ms: publishedAtMs } = parsed;
 
+  if (eventType === 'GUILD_MEMBERS_CHUNK' && config.ENABLE_DISPATCH_PROBE) {
+    // A storage or SDK failure must retry; an expired/foreign probe is terminal.
+    await consumeProbe(client, parsed, getRuntimeProbeStore());
+    await deleteMessage(message.ReceiptHandle);
+    return;
+  }
+
   if (eventType !== GATEWAY_DISPATCH_TYPES.INTERACTION_CREATE) {
     // Single-event-type today; PR 12+ may add MESSAGE_CREATE,
     // GUILD_CREATE, etc. An unknown type from a future producer
@@ -864,11 +872,8 @@ async function pollOnce(client) {
 
   // Process messages in parallel. Each wrapper catches its own
   // failures so one rejection doesn't collapse the batch and strand
-  // siblings. The only escape from `processMessage` is a
-  // DeleteMessage throw — every other error path is internally
-  // caught + delete-eager. So this log is specifically the
-  // SQS-delete-failed signal: the message will redrive after the
-  // visibility timeout and re-dispatch.
+  // siblings. DeleteMessage and probe storage/SDK failures escape
+  // processMessage so their receipts redrive after the visibility timeout.
   //
   // Operational interpretation depends on the upstream code path:
   // - INTERACTION_CREATE that dispatched successfully → OCC at
@@ -892,7 +897,7 @@ async function pollOnce(client) {
     try {
       await processMessage(client, message);
     } catch (err) {
-      logger.error('Event consumer: DeleteMessage failed; message will redeliver after visibility timeout', {
+      logger.error('Event consumer: processing or deletion failed; message will redeliver after visibility timeout', {
         error: err.message,
         messageId: message.MessageId,
       });

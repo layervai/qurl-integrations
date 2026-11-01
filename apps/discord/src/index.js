@@ -50,6 +50,8 @@ const {
 const { initHttpOnly } = require('./http-only-init');
 const eventConsumer = require('./event-consumer');
 const eventPublisher = require('./event-publisher');
+const { createDispatchProbe, getRuntimeProbeStore } = require('./dispatch-probe');
+let dispatchProbe = null;
 const webhookSubscriptions = require('./webhook-subscriptions');
 const { drainGuildWebhookSubscriptions, stopAcceptingGuildWebhookSubscriptions } = require('./guild-webhook-link');
 const { LOG_KINDS } = require('./constants');
@@ -537,6 +539,7 @@ if (isGateway && !config.ENABLE_GATEWAY_RESUME) {
   // function directly (not wrapped) so v8 keeps a single shape and
   // avoids per-frame closure allocation.
   client.on('raw', noteGatewayActivity);
+  client.on('raw', packet => dispatchProbe?.capture(packet));
 
   // Publish-to-SQS hook for the worker tier (zero-downtime Pillar 1).
   // Fires on every gateway dispatch; `publish` filters internally to
@@ -602,6 +605,7 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
     }
     noteGatewayActivity();
     eventPublisher.publish(data);
+    dispatchProbe?.capture(data);
   });
 }
 
@@ -640,6 +644,7 @@ async function gracefulShutdownTeardown({
   awaitConnectionWatchdog = true,
   awaitGatewayLeader = true,
 } = {}) {
+  dispatchProbe?.stop();
   // Wait for in-flight HTTP requests to drain — server.close() is async,
   // and process.exit() called immediately after would truncate an OAuth
   // callback mid-flight, leaving the admin's /qurl-admin setup without a
@@ -796,6 +801,7 @@ function gatewayFatalShutdown() {
 async function pushHandoffShutdown(code = 0) {
   if (isShuttingDown) return;
   isShuttingDown = true;
+  dispatchProbe?.stop();
   stopAcceptingGuildWebhookSubscriptions();
   await runPushHandoffShutdown({
     code, gatewayLeader, connectionWatchdog, eventPublisher, logger,
@@ -1209,6 +1215,26 @@ async function start() {
       gatewayHeartbeatTimer = startGatewayHeartbeat(client);
       activeGuildCountTimer = startActiveGuildCount(client);
     }
+  }
+  if (isGateway && config.ENABLE_DISPATCH_PROBE && !isShuttingDown) {
+    const transport = gatewayShim ? {
+      isReady: () => gatewayShim.isReady() && gatewayShim.isConnected(),
+      getTarget: () => gatewayShim.getDispatchProbeTarget(),
+      request: (target, packet) => gatewayShim.requestDispatchProbe(target, packet),
+    } : {
+      isReady: () => client.isReady(),
+      getTarget: async () => {
+        const guild = client.guilds.cache.find(g => g.available);
+        return guild && client.user ? { guildId: guild.id, userId: client.user.id, shardId: guild.shardId } : null;
+      },
+      // TODO(upstream-contract): pinned SDK field returns the send Promise; public shard.send drops it.
+      request: (target, packet) => client.ws._ws.send(target.shardId, packet),
+    };
+    dispatchProbe = createDispatchProbe({
+      store: getRuntimeProbeStore(), transport, client, logger,
+      publish: config.ENABLE_EVENT_SHIPPER ? eventPublisher.publishDispatchProbe : null,
+    });
+    dispatchProbe.start();
   }
 }
 

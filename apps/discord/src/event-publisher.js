@@ -165,6 +165,14 @@ function _setSqsClientForTest(client) {
  *   Shape: `{ op, t, s, d }`.
  */
 function publish(packet) {
+  publishPacket(packet);
+}
+
+function publishDispatchProbe(packet, origin) {
+  publishPacket(packet, origin);
+}
+
+function publishPacket(packet, probeOrigin) {
   // Defense against a falsy packet (a future discord.js refactor or
   // test stub passing nothing) — gated once before the filter so
   // every subsequent access can use plain dot-notation. Cheaper
@@ -174,7 +182,9 @@ function publish(packet) {
   // acks, presence updates, etc.). Bail before any work on the
   // non-interaction path. Order: `op` first because the comparison
   // is an integer; `t` second because string-eq is slower.
-  if (packet.op !== GATEWAY_OP_DISPATCH || packet.t !== GATEWAY_DISPATCH_TYPES.INTERACTION_CREATE) {
+  if (packet.op !== GATEWAY_OP_DISPATCH
+    || (probeOrigin ? packet.t !== 'GUILD_MEMBERS_CHUNK'
+      : packet.t !== GATEWAY_DISPATCH_TYPES.INTERACTION_CREATE)) {
     return;
   }
   // Drop dispatches that arrive before start() (race window during
@@ -206,6 +216,7 @@ function publish(packet) {
     data: packet.d,
     event_id: `${SHARD_ID}:${packet.s}`,
     published_at_ms: Date.now(),
+    ...(probeOrigin ? { probe_origin: probeOrigin } : {}),
   };
   // Wrap envelope-building + send-dispatch in try/catch so a
   // synchronous throw (rare with @aws-sdk/client-sqs v3 but possible
@@ -355,6 +366,7 @@ module.exports = {
   start,
   stop,
   publish,
+  publishDispatchProbe,
   _test: {
     _setSqsClientForTest,
     _resetStateForTest,

@@ -286,6 +286,10 @@ const AUDIT_EVENTS = {
   // predicate (#210 backed out the false-positive on idle bots). Don't
   // alarm on activity_age_ms; alarm on missing healthy emissions.
   GATEWAY_HEARTBEAT_UNHEALTHY: 'gateway_heartbeat_unhealthy',
+  GATEWAY_DISPATCH_PROBE_OK: 'gateway_dispatch_probe_ok',
+  GATEWAY_DISPATCH_PROBE_MISSED: 'gateway_dispatch_probe_missed',
+  GATEWAY_DISPATCH_PROBE_UNAVAILABLE: 'gateway_dispatch_probe_unavailable',
+  GATEWAY_DISPATCH_PROBE_ERROR: 'gateway_dispatch_probe_error',
 
   // No identity metadata: count fresh foreign-writer replacements after startup.
   // TODO(upstream-contract): paired GatewayInstanceIdCollision filter/alarm in infra.
