@@ -2597,6 +2597,39 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
   });
 });
 
+test('real worker reconstruction preserves the original interaction deadline through a send', async () => {
+  const { Client, ClientUser, SnowflakeUtil } = jest.requireActual('discord.js');
+  const client = new Client({ intents: [] });
+  const now = 1800000000000;
+  const created = now - 300000;
+  const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+  const response = { createMessageComponentCollector: jest.fn(() => ({ on: jest.fn() })) };
+  try {
+    client.user = new ClientUser(client, { id: '111111111111111111', username: 'Bot', discriminator: '0', avatar: null, bot: true });
+    let interaction;
+    client.once('interactionCreate', rebuilt => { interaction = rebuilt; });
+    client.actions.InteractionCreate.handle({
+      id: SnowflakeUtil.generate({ timestamp: created }).toString(), type: 2,
+      application_id: '111111111111111111', token: 'fixture-token', version: 1,
+      channel_id: '222222222222222222',
+      user: { id: '333333333333333333', username: 'Sender', discriminator: '0', avatar: null },
+      data: { id: '444444444444444444', name: 'qurl', type: 1 },
+      locale: 'en-US', entitlements: [], authorizing_integration_owners: {},
+    });
+    expect(interaction.createdTimestamp).toBe(created);
+    interaction.editReply = jest.fn().mockResolvedValue(response);
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_one', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValueOnce({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    await executeSendPipeline(interaction, makePipelineParams());
+    expect(response.createMessageComponentCollector).toHaveBeenCalledWith(expect.objectContaining({ time: 590000 }));
+    expect(mockDb.saveSendConfirmState.mock.calls[0][1].confirmExpiresAt).toBe(1800000600);
+  } finally {
+    clock.mockRestore();
+    await client.destroy();
+  }
+});
+
 describe('management collector interaction-token deadline', () => {
   it.each([
     [0, 890000, 1800000900], [300000, 590000, 1800000600],
@@ -4312,7 +4345,7 @@ describe('initial-send compensation boundaries', () => {
 });
 
 describe('destination footer — per-recipient failure isolation', () => {
-  it.each(['initial', 'add'].flatMap(path => ['malformed', 'hostless', 'send-throws'].map(failure => [path, failure])))('persists a failed recipient while delivering its sibling (%s, %s)', async (path, failure) => {
+  it.each(['initial', 'add'].flatMap(path => ['malformed', 'hostless', 'send-throws', 'send-null', 'send-undefined'].map(failure => [path, failure])))('persists a failed recipient while delivering its sibling (%s, %s)', async (path, failure) => {
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-new' });
     mockDb.getSendConfig.mockResolvedValueOnce({
@@ -4324,6 +4357,8 @@ describe('destination footer — per-recipient failure isolation', () => {
     ]);
     mockSendDM.mockImplementation(async recipientId => {
       if (failure === 'send-throws' && recipientId === 'u1') throw new Error('secret delivery failure');
+      if (failure === 'send-null' && recipientId === 'u1') return Promise.reject(null);
+      if (failure === 'send-undefined' && recipientId === 'u1') return Promise.reject(undefined);
       return { ok: true, channelId: 'dm-c', messageId: 'dm-m' };
     });
     const recipients = [
@@ -4336,11 +4371,11 @@ describe('destination footer — per-recipient failure isolation', () => {
       const result = await handleAddRecipients('send-1', makeUsersCollection(recipients), makeInteraction(), 'apikey');
       expect(result).toMatchObject({ delivered: 1, failed: 1 });
     }
-    expect(mockSendDM).toHaveBeenCalledTimes(failure === 'send-throws' ? 2 : 1);
+    expect(mockSendDM).toHaveBeenCalledTimes(failure.startsWith('send-') ? 2 : 1);
     expect(mockSendDM.mock.calls.at(-1)[0]).toBe('u2');
     expect(mockSendDM.mock.calls.at(-1)[1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens other.example' });
     expect(logger.warn).toHaveBeenCalledWith('Recipient delivery failed before completion', {
-      sendId: expect.any(String), errorName: failure === 'send-throws' ? 'Error' : 'TypeError',
+      sendId: expect.any(String), errorName: failure.startsWith('send-') ? (failure === 'send-throws' ? 'Error' : 'NonError') : 'TypeError',
     });
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith(expect.any(String), 'u1', 'failed');
     expect(mockDb.markSendDMDelivered).toHaveBeenCalledWith(expect.any(String), 'u2', 'dm-c', 'dm-m');

@@ -2349,7 +2349,7 @@ async function executeSendPipeline(interaction, {
       });
       result = await sendDM(link.recipientId, dmPayload);
     } catch (err) {
-      logger.warn('Recipient delivery failed before completion', { sendId, errorName: err.name });
+      logger.warn('Recipient delivery failed before completion', { sendId, errorName: err?.name ?? 'NonError' });
     } finally {
       logger.audit(result.ok === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId, send_nonce: confirmationNonce });
     }
@@ -3550,7 +3550,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
       result = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
     } catch (err) {
-      logger.warn('Recipient delivery failed before completion', { sendId, errorName: err.name });
+      logger.warn('Recipient delivery failed before completion', { sendId, errorName: err?.name ?? 'NonError' });
     } finally {
       logger.audit(result.ok === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
     }

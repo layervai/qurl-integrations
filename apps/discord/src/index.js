@@ -1157,6 +1157,8 @@ async function start() {
     eventPublisher.start();
   }
 
+  // TODO(upstream-contract): #875 retains view-update resources until all deployed old producers are gone.
+
   // Resume uses the shim's persisted Discord session. The legacy path keeps
   // discord.js as the WebSocket owner. HTTP-only replicas open no gateway.
   if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
