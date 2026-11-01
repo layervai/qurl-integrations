@@ -1065,7 +1065,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 	}
 	intro := strings.Join([]string{
 		"Use this as an " + ecsFargateChecklistText + ".",
-		"Write the temporary enrollment token to `enrollment-token` on a read-only qurl-bootstrap EFS access point; never place it in task environment or argv.",
+		"Write the temporary enrollment token to `enrollment-token` on the qurl-bootstrap EFS access point (read-only to the task role); never place it in task environment or argv.",
 		"Run both containers in the same task; Fargate awsvpc networking lets the qURL Connector reach the private S3 origin on `127.0.0.1:" + strconv.Itoa(s3WebsiteOriginPort) + "`.",
 		"Both containers are essential, so a failure of either one restarts the whole task.",
 		"The START dependency orders container launch only, so the qURL Connector may log local connection errors until the origin is listening.",
@@ -1081,7 +1081,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		"3. Add these two containers to the same task definition and replace each `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
 		containerBlock + "\n\n" +
 		"4. Create the CloudWatch Logs group `" + s3WebsiteECSLogGroup + "` in the ECS task region if it does not already exist.\n" +
-		"5. " + volumeInstructions + "\n\n" + ecsWarmStartInstructions, nil
+		"5. " + volumeInstructions + "\n\n6. " + ecsWarmStartInstructions, nil
 }
 
 func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
