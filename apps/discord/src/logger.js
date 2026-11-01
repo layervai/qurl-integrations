@@ -226,6 +226,8 @@ const logger = {
   // The AUDIT_EVENTS allowlist in
   // constants.js documents the canonical vocabulary.
   audit(event, meta = {}) {
+    // Event names are strings; never invoke caller serialization hooks.
+    if (typeof event !== 'string') event = 'invalid_audit_event';
     // Audit dimensions must be an object, not a scalar or array.
     if (meta == null || typeof meta !== 'object' || Array.isArray(meta)) meta = {};
     // Exact audit-key matching preserves dimensions such as tokens_minted.
@@ -236,11 +238,9 @@ const logger = {
         // Logged via console.error so it surfaces at error level in
         // CloudWatch (the logger has no separate warn channel that
         // emits at error severity). Defense-in-depth alongside the
-        // value redaction above — the redacted payload still emits,
-        // but the operator can grep the error log to find every
-        // misbehaving call site and remove the key from meta. ALL
-        // offending keys are listed so a caller fixing the first
-        // doesn't have to re-run to discover the second.
+        // value redaction above. Report all matched keys once so callers can
+        // fix them in one pass; the adjacent audit record carries the event
+        // and dimensions without copying its data into this diagnostic.
         const namedKeys = [...secretKeys].map(k => `"${sanitizeMessage(k)}"`).join(', ');
         console.error(`[${formatTimestamp()}] ERROR: logger.audit received sensitive key(s) [${namedKeys}]; value(s) redacted in emitted payload — caller must remove from meta`);
       }
