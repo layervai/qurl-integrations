@@ -668,11 +668,14 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   // row's lifetime) must NOT count as extended. The pre-read
   // projects `stage, expires_at` to give us the prior value.
   let extended = false;
+  const needsPriorPayload = (payload === undefined && set_expires_at !== undefined)
+    || (payload && (Object.hasOwn(payload, 'recipients') || Array.isArray(payload.recipientIds)));
   try {
     const got = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: { flow_id },
-      ProjectionExpression: (payload === undefined && set_expires_at !== undefined) || (payload && Object.hasOwn(payload, 'recipients')) ? 'stage, expires_at, payload' : 'stage, expires_at',
+      ProjectionExpression: needsPriorPayload ? 'stage, expires_at, payload, #v' : 'stage, expires_at',
+      ...(needsPriorPayload && { ExpressionAttributeNames: { '#v': 'version' } }),
       ConsistentRead: true,
     }));
     if (!got?.Item) {
@@ -714,6 +717,20 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       version: expectedVersion,
     });
     throw err;
+  }
+
+  // Avoid staging known-stale recipient sets; the final conditional write still fences races.
+  if (needsPriorPayload) {
+    const expired = Number.isSafeInteger(priorItem.expires_at) && priorItem.expires_at < nowEpochSeconds();
+    const stale = (Number.isInteger(priorItem.version) && priorItem.version !== expectedVersion)
+      || (expectedPayload !== undefined && priorItem.payload !== expectedPayload);
+    if (expired || stale) {
+      const result = expired ? 'not_found' : 'conflict';
+      logger.audit(AUDIT_EVENTS.FLOW_TRANSITION, {
+        flow_id, stage_from, stage_to, result, terminal: false, extended, version: expectedVersion,
+      });
+      return { result, version: null };
+    }
   }
 
   let nextPayload = payload;
