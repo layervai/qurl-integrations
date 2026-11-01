@@ -62,7 +62,7 @@ const { resourceIdLogRef } = require('./utils/resource-id');
 const { qurlApiErrorStatus } = require('./utils/qurl-errors');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
-const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
+const { deleteFlow, loadFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { linkGuildWebhookSubscriptionForSetup } = require('./guild-webhook-link');
 const {
   flowIdForInteraction,
@@ -7855,6 +7855,33 @@ async function rerenderConfirmCard(interaction, newPayload) {
   }).catch(logIgnoredDiscordErr);
 }
 
+async function refreshConflictedConfirmCard(interaction, flow_id, row) {
+  let fresh;
+  try {
+    fresh = await loadFlow(flow_id);
+  } catch (err) {
+    logger.warn('confirm-card conflict refresh failed', { flow_id, errorName: err?.name });
+    return interaction.followUp({
+      content: 'Could not refresh the card. Please try again.',
+      flags: MessageFlags.Ephemeral,
+    }).catch(logIgnoredDiscordErr);
+  }
+  // A reused flow_id can belong to a newer send; only refresh this card.
+  const nonce = row.payload?.sendNonce;
+  if (fresh?.stage === SEND_STAGE_AWAITING_CONFIRM && typeof nonce === 'string'
+    && /^[a-f0-9]{16}$/.test(nonce) && fresh.payload?.sendNonce === nonce) {
+    await rerenderConfirmCard(interaction, fresh.payload);
+    return interaction.followUp({
+      content: 'Another change landed first. Try your change again if you still want it.',
+      flags: MessageFlags.Ephemeral,
+    }).catch(logIgnoredDiscordErr);
+  }
+  return interaction.editReply({
+    content: 'Send was superseded — re-run the command.',
+    components: [],
+  }).catch(logIgnoredDiscordErr);
+}
+
 // Expiry StringSelectMenu → update payload.expiresIn. Defense-in-depth
 // validation against EXPIRY_LABELS mirrors handleQurlSlashSend's slash-
 // option gate — Discord enforces the choice set server-side, but a
@@ -7906,10 +7933,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'conflict') {
-    return interaction.editReply({
-      content: 'Send was superseded — re-run the command.',
-      components: [],
-    }).catch(logIgnoredDiscordErr);
+    return refreshConflictedConfirmCard(interaction, flow_id, row);
   }
   if (result.result === 'not_found') {
     return interaction.editReply({
@@ -7971,10 +7995,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'conflict') {
-    return interaction.editReply({
-      content: 'Send was superseded — re-run the command.',
-      components: [],
-    }).catch(logIgnoredDiscordErr);
+    return refreshConflictedConfirmCard(interaction, flow_id, row);
   }
   if (result.result === 'not_found') {
     return interaction.editReply({
@@ -8104,10 +8125,7 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'conflict') {
-    return interaction.editReply({
-      content: 'Send was superseded — re-run the command.',
-      components: [],
-    }).catch(logIgnoredDiscordErr);
+    return refreshConflictedConfirmCard(interaction, flow_id, row);
   }
   if (result.result === 'not_found') {
     return interaction.editReply({
