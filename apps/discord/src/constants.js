@@ -172,6 +172,7 @@ const LOG_EVENTS = Object.freeze({
 // would have made the redaction unsafe; exact-match makes it safe.
 const AUDIT_EVENTS = {
   CREDENTIAL_CLEANUP_FAILED: 'credential_cleanup_failed',
+  CREDENTIAL_CLEANUP_RESULT: 'credential_cleanup_result',
   // UPLOAD_SUCCESS fires after upload + mintLinksInBatches + sufficiency
   // check all succeed — i.e. when the send is fully prepared and ready
   // to dispatch. It's not just the connector POST. Name is kept literal

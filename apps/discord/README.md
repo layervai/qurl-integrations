@@ -850,3 +850,9 @@ No uncertain outcome triggers inline revocation. If compensation storage also
 fails, the existing known-failure best-effort delete remains available; uncertain
 saves still preserve the key and emit the cleanup failure alarm. A lost mint
 response with no usable secret still needs upstream issuance recovery evidence.
+
+`credential_cleanup_result` records aggregate read-only dry-run counts, confirmed
+webhook deletion/already-absent outcomes, and completed jobs. Dry-run counts are
+an inventory, not deletion authority. They contain no owner or guild identifiers
+and never grant migration authority. Per-job results carry only job/webhook IDs
+and controlled outcome fields.

@@ -65,8 +65,11 @@ async function processJob(original) {
       return db.finishCredentialCleanup(job, 'retry', 'references_or_migration_pending');
     }
     if (claim === true) {
-      await deleteSubscription({ apiEndpoint: config.QURL_ENDPOINT.replace(/\/+$/, ''), apiKey, webhookId: job.webhook_id });
+      const outcome = await deleteSubscription({ apiEndpoint: config.QURL_ENDPOINT.replace(/\/+$/, ''), apiKey, webhookId: job.webhook_id });
       await db.completeWebhookCleanup(job);
+      try {
+        logger.audit(AUDIT_EVENTS.CREDENTIAL_CLEANUP_RESULT, { stage: 'webhook', job_id: job.job_id, webhook_id: job.webhook_id, outcome });
+      } catch { /* a confirmed deletion must not become uncertain due to logging */ }
     }
   }
   if (job.revoke_key !== false && !keyInUse
