@@ -59,7 +59,8 @@ beforeEach(() => {
 });
 
 describe('flow-state — module sanity', () => {
-  test('exposes the five lifecycle methods', () => {
+  test('exposes lifecycle methods and the conditional warning claim', () => {
+    expect(typeof flowState.claimFlowWarning).toBe('function');
     expect(typeof flowState.createFlow).toBe('function');
     expect(typeof flowState.loadFlow).toBe('function');
     expect(typeof flowState.transitionFlow).toBe('function');
@@ -1180,5 +1181,56 @@ describe('flow-state.supersedeOrCreate', () => {
     await expect(flowState.supersedeOrCreate({
       flow_id: FLOW_ID, stage: 's', payload: null, ttl_seconds: 60.5,
     })).rejects.toThrow(/ttl_seconds must be a positive integer/);
+  });
+});
+
+describe('flow-state.claimFlowWarning', () => {
+  const nonce = 'lifecycle-one';
+  const value = '999d';
+  function row(overrides = {}, payload = { sendNonce: nonce, expiresIn: value }) {
+    return { flow_id: FLOW_ID, version: 7, expires_at: futureExpiry(), payload: encryptStrict(JSON.stringify(payload)), ...overrides };
+  }
+
+  test('claims only the warning marker, without changing version, payload or TTL', async () => {
+    const item = row();
+    ddbMock.on(GetCommand).resolves({ Item: item });
+    ddbMock.on(UpdateCommand).resolves({});
+    expect(await flowState.claimFlowWarning(FLOW_ID, nonce, 'expiry', value)).toBe('claimed');
+    const read = ddbMock.commandCalls(GetCommand)[0];
+    expect(read.args[0].input.ConsistentRead).toBe(true);
+    expect(read.args[1].abortSignal).toBeInstanceOf(AbortSignal);
+    const write = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(write.UpdateExpression).toBe('SET #warning = :yes');
+    expect(write.ConditionExpression).toBe('#payload = :payload AND #expiry >= :now AND attribute_not_exists(#warning)');
+    expect(write.ExpressionAttributeNames).toEqual({ '#warning': 'corruption_warned_expiry', '#payload': 'payload', '#expiry': 'expires_at' });
+    expect(write.ExpressionAttributeValues[':payload']).toBe(item.payload);
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test.each(['missing', 'expired', 'bad expiry', 'new lifecycle', 'corrected value', 'already claimed'])(
+    'does not claim %s rows', async scenario => {
+      let item = row();
+      if (scenario === 'missing') item = undefined;
+      if (scenario === 'expired') item.expires_at = Math.floor(Date.now() / 1000) - 1;
+      if (scenario === 'bad expiry') item.expires_at = String(item.expires_at);
+      if (scenario === 'new lifecycle') item = row({}, { sendNonce: 'replacement', expiresIn: value });
+      if (scenario === 'corrected value') item = row({}, { sendNonce: nonce, expiresIn: '24h' });
+      if (scenario === 'already claimed') item.corruption_warned_expiry = true;
+      ddbMock.on(GetCommand).resolves({ Item: item });
+      expect(await flowState.claimFlowWarning(FLOW_ID, nonce, 'expiry', value)).toBe('seen');
+      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    },
+  );
+
+  test('retries a conditional conflict and supports legacy rows without a nonce', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: row({}, { selfDestructSeconds: 60 }) });
+    ddbMock.on(UpdateCommand).rejectsOnce(ccfe()).resolves({});
+    expect(await flowState.claimFlowWarning(FLOW_ID, undefined, 'self_destruct', 60)).toBe('retry');
+    expect(await flowState.claimFlowWarning(FLOW_ID, undefined, 'self_destruct', 60)).toBe('claimed');
+  });
+
+  test('rejects unknown marker names before touching storage', async () => {
+    await expect(flowState.claimFlowWarning(FLOW_ID, nonce, 'payload', value)).rejects.toThrow(TypeError);
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
   });
 });

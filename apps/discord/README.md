@@ -637,3 +637,25 @@ In multi-tenant mode, `/qurl revoke` lists only sends recorded for the invoking 
 Keep one `QURL_SEND_MAX_RECIPIENTS` setting for explicit users, role expansion, voice/stage expansion, `@everyone`, and recipient pickers. Its source default remains 20,000, including the previously selected voice/stage size. A workspace that uses that default also gets the same ceiling for non-voice selections; `@everyone` still requires its existing permission. Operators who need a smaller blast radius must lower the shared setting, which also lowers the voice ceiling. No separate voice-only setting is introduced.
 
 The ceiling is a selection bound, not a delivery-rate or large-send capacity guarantee. Other permissions and operation limits still apply. The large-send warning is visibility, not permission or proof that a send can finish within its interaction window. Keep the existing main-adoption, quota, load and rollout gates; this policy decision does not authorize a live blast or remove those gates.
+
+
+### Corrupt confirm-option warnings
+
+Invalid saved expiry and timer options keep their existing safe menu defaults.
+Each warning kind is claimed once on the existing flow row. The claim checks the
+current nonce, encrypted payload and expiry; it does not change version, payload
+or TTL. Normal flow transitions preserve the markers. New flow creation clears
+them with the rest of the old row.
+
+A 64-entry LRU avoids repeated reads. The conditional row claim preserves dedup
+across eviction and worker restart. Diagnostic work runs outside the UI path,
+with at most four active claims and a three-second SDK request budget. It has no
+queued backlog. Failed claims can retry on later renders. Legacy rows without a
+nonce consult their durable marker instead of caching completion across lifecycles.
+A process crash after a successful claim can omit its warning; this is an
+at-most-once diagnostic, not a guaranteed log-delivery system.
+
+`DDB_TEST_ENDPOINT=http://127.0.0.1:<port> node scripts/smoke-flow-warning.js`
+runs the native conditional-write proof. It only accepts a loopback endpoint,
+uses fake credentials and deletes its own unique fixture table. Discord Docker
+CI runs the same proof against its existing local DynamoDB service.

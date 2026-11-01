@@ -138,4 +138,19 @@ describe('handleConfirmExpirySelect', () => {
       expect.objectContaining({ selfDestructSeconds: '60' })
     );
   });
+  test('three menu rerenders claim and emit a corrupt timer warning once', async () => {
+    const logger = require('../src/logger');
+    const { claimFlowWarning } = require('../src/flow-state');
+    const payload = { ...basePayload, sendNonce: 'renderer-three-pass', selfDestructSeconds: 60 };
+    for (let i = 0; i < 3; i++) {
+      await handleConfirmExpirySelect(makeSelectInteraction({ value: '3d' }), {
+        flow_id: 'renderer-three-pass-flow', row: { payload, version: 1 },
+      });
+    }
+    await new Promise(resolve => setImmediate(resolve));
+    expect(claimFlowWarning).toHaveBeenCalledTimes(1);
+    expect(claimFlowWarning).toHaveBeenCalledWith('renderer-three-pass-flow', payload.sendNonce, 'self_destruct', 60);
+    expect(logger.warn.mock.calls.filter(([message]) => message.includes('off-preset selfDestructSeconds'))).toHaveLength(1);
+  });
+
 });

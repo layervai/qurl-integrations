@@ -103,6 +103,7 @@ const mockTransitionFlow = jest.fn();
 const mockDeleteFlow = jest.fn();
 const mockSupersedeOrCreate = jest.fn();
 jest.mock('../../src/flow-state', () => ({
+  claimFlowWarning: jest.fn(async () => 'claimed'),
   createFlow: (...a) => mockCreateFlow(...a),
   loadFlow: (...a) => mockLoadFlow(...a),
   transitionFlow: (...a) => mockTransitionFlow(...a),
