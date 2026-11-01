@@ -140,6 +140,11 @@ function makeInteraction(overrides = {}) {
   return makeBaseInteraction({ guildId: 'guild-1', ...overrides });
 }
 
+afterAll(() => {
+  crypto.randomBytes = originalRandomBytes;
+  crypto.randomUUID = originalRandomUUID;
+});
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockDb.markSendRevoked.mockReset();
