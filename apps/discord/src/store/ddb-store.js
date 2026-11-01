@@ -38,7 +38,7 @@ const {
   TransactWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
-const { encrypt, decrypt } = require('../utils/crypto');
+const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
 const logger = require('../logger');
 const {
   DM_STATUS,
@@ -1699,7 +1699,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
       ':keyId': keyId,
       ':keyKind': keyKind,
       ':generation': crypto.randomUUID(),
-      ':k': encrypt(apiKey),
+      ':k': encryptStrict(apiKey),
       ':b': configuredBy,
       ':u': now,
     },
@@ -1731,14 +1731,14 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
         pk: `JOB#${jobId}`, sk: 'META', job_id: jobId, guild_id: guildId,
         reason: 'rekey', cleanup_state: 'pending', attempts: 0,
         due_bucket: String(parseInt(jobId.slice(0, 2), 16) % 16), due_at: Date.now(),
-        created_at: now, qurl_api_key: priorRow.qurl_api_key,
+        created_at: now, qurl_api_key: encryptStrict(decrypt(priorRow.qurl_api_key)),
         qurl_key_id: priorRow.qurl_key_id ?? null,
         qurl_key_kind: priorRow.qurl_key_kind ?? 'unknown',
         qurl_owner_id: priorRow.qurl_owner_id ?? binding.ownerId,
         qurl_generation: priorRow.qurl_generation ?? null,
         webhook_id: priorRow.webhook_id ?? null,
         webhook_owner_id: priorRow.webhook_owner_id ?? null,
-        webhook_secret: priorRow.webhook_secret ?? null,
+        webhook_secret: priorRow.webhook_secret ? encryptStrict(decrypt(priorRow.webhook_secret)) : null,
       };
       const { ReturnValues: _dropReturnValues, ...transactionUpdate } = update;
       await ddb.send(new TransactWriteCommand({

@@ -196,6 +196,16 @@ describe('guild configs', () => {
     })).rejects.toMatchObject({ code: 'GUILD_SETUP_UNCONFIRMED' });
   });
 
+  test('missing encryption cannot persist a new credential or cleanup job', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: mockCiphertext('old-key') } });
+    mockEncryptStrict.mockImplementationOnce(() => { throw new Error('Encryption key is missing'); });
+    await expect(store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
+      ownerId: 'owner', expectedApiKey: 'old-key',
+    })).rejects.toThrow('Encryption key is missing');
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
   test('a changed key snapshot fails before the update', async () => {
     ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: mockCiphertext('changed-key') } });
     await expect(store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', {
