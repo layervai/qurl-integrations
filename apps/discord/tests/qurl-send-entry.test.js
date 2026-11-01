@@ -371,7 +371,7 @@ describe('handleQurlSend — slash entry', () => {
       options: {
         attachment: VALID_ATTACHMENT,
         recipients: '<@100000000000000001>',
-        'expires-in': '7d',
+        'expires-in': '3d',
         'self-destruct': '300',
         'personal-message': 'see you Tuesday',
       },
@@ -380,7 +380,7 @@ describe('handleQurlSend — slash entry', () => {
     await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.expiresIn).toBe('7d');
+    expect(payload.expiresIn).toBe('3d');
     expect(payload.selfDestructSeconds).toBe(300);
     expect(payload.personalMessage).toBe('see you Tuesday');
   });

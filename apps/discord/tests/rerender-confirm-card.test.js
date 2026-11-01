@@ -8,7 +8,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
   const u1 = '100000000000000001';
   const persistedAlias = 'Alice (display)';
 
-  function makeSelectInteraction({ value = '7d', ...rest } = {}) {
+  function makeSelectInteraction({ value = '3d', ...rest } = {}) {
     const int = makeInteraction(rest);
     int.values = [value];
     return int;
@@ -24,7 +24,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
       selfDestructSeconds: null,
       personalMessage: null,
     };
-    const int = makeSelectInteraction({ value: '7d', guildMembers: {} });
+    const int = makeSelectInteraction({ value: '3d', guildMembers: {} });
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     expect(int.editReply).toHaveBeenCalled();
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
@@ -43,7 +43,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
       personalMessage: null,
       warningsBlock: '⚠️ Skipped bots: 1\n\n',
     };
-    const int = makeSelectInteraction({ value: '7d', guildMembers: { [u1]: {} } });
+    const int = makeSelectInteraction({ value: '3d', guildMembers: { [u1]: {} } });
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
     expect(lastEdit.content).toMatch(/Skipped bots/);
@@ -92,7 +92,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
       personalMessage: null,
     };
     const int = makeInteraction();
-    int.values = ['7d'];
+    int.values = ['3d'];
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
     expect(lastEdit.content).toMatch(/0 users in <#voice-empty>/);

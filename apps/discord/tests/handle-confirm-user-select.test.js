@@ -195,7 +195,7 @@ describe('handleConfirmUserSelect', () => {
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/bots/);
     expect(updated.content).toMatch(/Sending file/);
-    expect(updated.content).toMatch(/Expires/);
+    expect(updated.content).toMatch(/Requested expiry/);
   });
 
   test('defense-in-depth: cap-exceeded pick rejected even though picker setMaxValues makes it unreachable today', async () => {

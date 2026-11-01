@@ -147,29 +147,11 @@ function verifyAndResolve(req) {
   return { result: VERIFY_RESULTS.OK, ownerId, body };
 }
 
-// Reconstruct the absolute expiry instant from the recipient row's
-// `created_at` (ISO-8601) + `expires_in` (the symbolic label, one of
-// EXPIRY_LABELS keys like '24h'). Returns UNIX seconds, or null if
-// either field is missing/unparseable.
-//
-// Why reconstruct rather than read from the wire payload: the
-// qurl.expired event's `data` is exactly `{qurl_id, resource_id}` —
-// transit-safe by design, so target-side fields like an absolute
-// `expires_at` aren't carried on the wire. The row already carries
-// everything needed to render the marker.
-//
-// Drift direction is consistently FORWARD (reconstructed > true): the
-// bot computes the true `expiresAt` pre-mint and `created_at` is
-// stamped post-mint, so `created_at + expires_in` always lands later
-// than the upstream-enforced expiry by the mint round-trip duration.
-// Magnitude: sub-second on small sends, single-digit seconds on
-// large multi-batch mints (each batch is its own network round-trip).
-// At the firing edge this can briefly render "expired in 3 seconds"
-// before Discord re-evaluates the `<t:N:R>` marker forward across
-// the boundary. Bounded and cosmetic — both the magnitude and the
-// brief future-render window are well inside the rounding window of
-// a relative-time render at the 30m–7d horizon.
+// Use the mint expiry for new rows; reconstruct only legacy rows without it.
 function rowExpiresAtSeconds(row) {
+  if (row?.expires_at !== undefined) {
+    return Number.isSafeInteger(row.expires_at) && row.expires_at > 0 ? row.expires_at : null;
+  }
   if (typeof row?.created_at !== 'string' || typeof row?.expires_in !== 'string') return null;
   const createdMs = Date.parse(row.created_at);
   if (!Number.isFinite(createdMs)) return null;

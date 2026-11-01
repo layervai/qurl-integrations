@@ -1104,7 +1104,7 @@ describe('renderConfirmCardContent', () => {
     const out = renderConfirmCardContent(baseProps);
     expect(out).toMatch(/Sending file/);
     expect(out).toMatch(/report\.pdf/);
-    expect(out).toMatch(/Expires/);
+    expect(out).toMatch(/Requested expiry/);
     expect(out).toMatch(/24 hours/);
   });
 
@@ -1630,7 +1630,7 @@ describe('renderConfirmCardRows', () => {
       MentionableSelectMenuBuilder.mockClear();
       ButtonBuilder.mockClear();
       const int = makeInteraction({ guildMembers: { [u1]: {} } });
-      int.values = ['7d'];  // change expiry from 24h → 7d
+      int.values = ['3d'];  // change expiry from 24h → 3d
       await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
       expect(MentionableSelectMenuBuilder).not.toHaveBeenCalled();
       const customIds = ButtonBuilder.mock.results.map(

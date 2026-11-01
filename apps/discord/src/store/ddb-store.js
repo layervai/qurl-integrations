@@ -224,52 +224,24 @@ async function scanAll(TableName, { consistentRead = false } = {}) {
 
 // ── Badges ──
 
-async function recordQURLSend({
-  sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType,
-  qurlLink, qurlId, expiresIn, channelId, targetType, guildId,
-}) {
-  // qurl_id is the GSI hash key on qurl_id-index, used by the
-  // qurl.expired webhook handler to locate the recipient row for DM
-  // editing. Sparse GSI: omit the attribute when empty so the row stays
-  // out of the index (qurl-service returns "" for resources that don't
-  // surface a qurl_id, and indexing those would clutter the GSI without
-  // a lookup path that could use them).
-  const Item = {
-    send_id: sendId,
-    recipient_discord_id: recipientDiscordId,
-    sender_discord_id: senderDiscordId,
-    resource_id: resourceId,
-    resource_type: resourceType,
-    qurl_link: qurlLink,
-    expires_in: expiresIn,
-    channel_id: channelId,
-    target_type: targetType,
-    dm_status: 'pending',
-    created_at: nowIso(),
-  };
-  if (typeof qurlId === 'string' && qurlId.length > 0) {
-    Item.qurl_id = qurlId;
+function validateSendExpiry(expiry) {
+  if (expiry !== undefined && (!Number.isSafeInteger(expiry) || expiry <= 0)) {
+    throw new TypeError('Link expiry must be positive integer epoch seconds');
   }
-  // guild_id is a NON-KEY, non-indexed attribute — DynamoDB is schemaless
-  // for non-key attrs, so the qurl-bot-ddb table needs no Terraform change
-  // to carry it. It scopes watermark attribution to the minting guild
-  // (#1101); the /qurl detect read filters sends on it (a write-time
-  // invariant + a defense-in-depth filter at read time). Sparse like
-  // qurl_id: a legacy/non-guild send omits it rather than writing an empty
-  // string. It rides the `qurl_id-index` GSI for free (projection = ALL).
-  if (typeof guildId === 'string' && guildId.length > 0) {
-    Item.guild_id = guildId;
-  }
+}
+
+async function recordQURLSend(send) {
+  validateSendExpiry(send.expiresAt);
   await ddb.send(new PutCommand({
     TableName: TABLES.qurl_sends,
-    Item,
+    Item: qurlSendBatchItem(send, nowIso()),
   }));
 }
 
 function qurlSendBatchItem(s, createdAt) {
   // qurl_id is sparsely written so an empty/missing value (e.g.
   // a future emit path that doesn't surface it) doesn't pollute
-  // the qurl_id-index GSI. See recordQURLSend for the same gate.
+  // the qurl_id-index GSI.
   const Item = {
     send_id: s.sendId,
     recipient_discord_id: s.recipientDiscordId,
@@ -290,15 +262,20 @@ function qurlSendBatchItem(s, createdAt) {
   // the minting guild (#1101). Sparse like qurl_id — a legacy /
   // non-guild send omits it. No Terraform change needed (schemaless
   // non-key attr); rides the qurl_id-index GSI for the /qurl detect
-  // read (projection = ALL). See recordQURLSend for the full why.
+  // read (projection = ALL).
   if (typeof s.guildId === 'string' && s.guildId.length > 0) {
     Item.guild_id = s.guildId;
+  }
+  if (s.expiresAt !== undefined) {
+    // TODO(upstream-contract): qurl_sends retains history; this field must not be a TTL.
+    Item.expires_at = s.expiresAt;
   }
   return Item;
 }
 
 async function recordQURLSendBatch(sends, options = {}) {
   if (!sends || sends.length === 0) return;
+  for (const send of sends) validateSendExpiry(send.expiresAt);
   const MAX_RETRIES = 5;
   // Single `now` shared across every batch chunk / guarded transaction of this
   // batch. INTENTIONAL parity with SQLite's transactional insert —
