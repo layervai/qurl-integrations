@@ -1009,6 +1009,43 @@ enabled on `workspace_mappings.expires_at`. Durable workspace binding rows must
 not write `expires_at`; DynamoDB TTL is table-wide and would reap any real row
 that accidentally carried a numeric value.
 
+## Conversation-mode controls
+
+These values are source defaults when the task does not set an override. Check
+the task definition and environment overrides before changing a deployment.
+The process reads these controls at startup; replace the task after a change.
+
+| Variable | Source default | Meaning |
+| --- | --- | --- |
+| `QURL_AGENT_DISABLED` | `false` | Deployment-wide kill switch. `true` disables the agent. An invalid boolean also disables it. |
+| `QURL_AGENT_CONFIRM_ENABLED` | `false` | Enables mutation confirmation only when the read-only agent and block-message delivery are wired. An invalid boolean keeps it off. |
+| `QURL_AGENT_DEFAULT_ENABLED` | `false` | Default for workspaces without their own agent toggle. An explicit workspace choice takes precedence. An invalid boolean keeps the default off. |
+| `QURL_AGENT_MAX_TURNS_PER_USER_PER_HOUR` | `30` | Per-user turn cap within a workspace. `0` removes this cap. |
+| `QURL_AGENT_MAX_TURNS_PER_TEAM_PER_HOUR` | `300` | Workspace turn cap. `0` removes this cap. |
+
+Turn caps use fixed UTC hour buckets. A user or workspace can consume up to
+twice its cap within a few seconds across an hour boundary, even with healthy
+storage. These caps do not impose a hard spend limit. Missing, negative, or invalid integer
+values use the source default. These are cost backstops: a rate-counter storage
+failure allows the turn and logs this message:
+
+`agent: turn-rate counter failed; allowing turn (fail-open)`
+
+Alert on that message and the deployment's matching alarm. Turns rejected by the user cap do not
+increment the workspace counter.
+
+Keep 30/300 as the initial guardrails. Before changing them, review pilot turn
+usage, rejected turns, model usage, and the workflows that customers need.
+A higher cap does not establish capacity, and `0` removes that protection.
+Enablement flags do not replace model credentials, storage, Slack scopes, or
+message-delivery checks. Verify those paths in the target environment before
+broad enablement. Check the startup conversation-mode and confirm-mode state
+logs after task replacement. Confirm mode can be live while ephemeral block
+delivery is missing; the startup warning says channel get approvals will fail
+after minting. Resolve that warning before enabling those workflows. Boolean
+controls accept Go `ParseBool` forms such as `true`, `false`, `1`, and `0`;
+`yes` and `enable` are invalid.
+
 ## Environment variables
 
 | Variable | Required | Description |
