@@ -6,7 +6,7 @@ The gateway waits 60 seconds after startup or an observed disconnect. It sends G
 
 In combined mode the normal Discord SDK member-chunk event records the result. In event-shipping mode only the matching expected chunk enters the existing SQS publisher. The worker loads the current probe row, checks its guild, bot, nonce and deadline, then calls the pinned Discord SDK chunk handler. It writes an ACK only after the SDK emits the expected public event. A raw gateway reply alone cannot pass the queue/worker probe. Ordinary member chunks stay off the queue.
 
-One row per gateway process goes in `${DDB_TABLE_PREFIX}dispatch-probe`. It contains a random process UUID, nonce, bot and guild IDs, start/deadline/ACK times, and `expires_at`. There are no participant IDs, messages, tokens, scans, or history. The deadline is 30 seconds. Logical expiry is checked in code; DynamoDB's 120-second TTL is asynchronous cleanup and can retain expired rows for days. Duplicate ACKs preserve the first time and cannot extend TTL. A new nonce replaces the row at the next probe. DDB calls and WebSocket submission each have a 3-second bound.
+One row per gateway process goes in `${DDB_TABLE_PREFIX}dispatch-probe`. It contains a random process UUID, nonce, bot and guild IDs, start/deadline/ACK times, and `expires_at`. There are no participant IDs, messages, tokens, scans, or history. The deadline is 30 seconds. Logical expiry is checked in code; DynamoDB's 120-second TTL is asynchronous cleanup and can retain expired rows for days. Infra also requires point-in-time backup, set to the minimum one-day recovery window for this table. Duplicate ACKs preserve the first time and cannot extend TTL. A new nonce replaces the row at the next probe. DDB calls and WebSocket submission each have a 3-second bound.
 
 The gateway emits four audit events without IDs or nonce dimensions:
 
@@ -21,7 +21,7 @@ The existing ACK-age heartbeat and silence alarms stay in place. This probe does
 
 The Discord integration operator owns the probe and its alarm. Source changes are not deployment proof. Keep issue #1383 open until both deployment modes and the alarm have approved live receipts.
 
-1. Review the short-lived operational row fields and TTL cleanup limit. Apply the paired infra bootstrap table first, then refresh the bot task IAM from bootstrap outputs. The existing table-scoped data-plane policy supplies GetItem/PutItem/UpdateItem; no Scan or new control port is needed.
+1. Review the short-lived operational row fields, one-day backup window, and TTL cleanup limit. Apply the paired infra bootstrap table first, then refresh the bot task IAM from bootstrap outputs. The existing table-scoped data-plane policy supplies GetItem/PutItem/UpdateItem; no Scan or new control port is needed.
 2. Deploy probe-aware worker images before gateway images. Keep the flag false during mixed worker versions: an old worker deletes an unknown member-chunk envelope and cannot ACK it.
 3. Enable the shared Terraform flag `dispatch_probe_enabled` for the gateway and workers. The plan rejects an absent probe table. The alarm uses the existing Phase 1 SNS route; enabling it can notify people and requires the normal approval.
 4. In an approved test guild, confirm successful quiet-period probes in combined and shipping modes. Confirm a worker/queue block causes misses while heartbeat ACKs stay healthy. Confirm duplicate delivery and startup/standby grace. Restore the path and confirm recovery. Do not post or run Discord requests from a local fixture test.
