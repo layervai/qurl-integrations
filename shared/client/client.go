@@ -799,6 +799,8 @@ type APIKey struct {
 type UpdateResourceInput struct {
 	// TODO(upstream-contract): qURL must honor retry keys on resource PATCHes.
 	// IdempotencyKey is an optional retry key sent only as a request header.
+	// Use a new key per distinct update; reuse it only for retries of that update.
+	// See [HeaderIdempotencyKey] for key construction.
 	IdempotencyKey string `json:"-"`
 	// Description: pass `&""` to clear the field server-side (no
 	// `ClearDescription` sentinel — the empty string is the clear
