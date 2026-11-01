@@ -268,9 +268,18 @@ Preview the API payload without making changes:
 npm run apply-discord-metadata -- --dry-run
 ```
 
-Dry-run also verifies that every asset referenced by `discord-metadata.json`
+Unless `--skip-images` is set, dry-run verifies that every asset referenced by `discord-metadata.json`
 exists, can be read, stays under the local byte cap for its Discord surface,
 and matches the local dimension rules.
+
+For a repeat apply with unchanged images, use
+`npm run apply-discord-metadata -- --skip-images` (also works with `--dry-run`).
+This preserves all four stored images and does not read or upload local image
+files. Omit the flag for the first branding apply or after changing an asset.
+Discord CDN hashes are not source-file hashes, so the script does not guess
+whether local images match. Application text/install metadata is still applied
+on every run to restore the configured state; its log says "Applied" rather
+than claiming those fields changed.
 
 Run the live apply as an operator step after seeding the LayerV-owned token; do
 not wire it as an unconditional CI job until image/app PATCH idempotency lands

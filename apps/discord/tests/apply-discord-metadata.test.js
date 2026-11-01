@@ -398,6 +398,8 @@ describe('apply-discord-metadata helpers', () => {
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(5);
     expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({ username: metadata.bot.unique_username });
+    expect(JSON.parse(fetchImpl.mock.calls[3][1].body)).toEqual({ avatar: expect.stringMatching(/^data:image\//), banner: expect.stringMatching(/^data:image\//) });
+    expect(JSON.parse(fetchImpl.mock.calls[4][1].body)).toMatchObject({ icon: expect.stringMatching(/^data:image\//), cover_image: expect.stringMatching(/^data:image\//) });
     expect(logger.log).toHaveBeenCalledWith(`Updated bot username: ${metadata.bot.unique_username}`);
     expect(logger.warn).not.toHaveBeenCalled();
   });
@@ -628,5 +630,48 @@ describe('apply-discord-metadata helpers', () => {
     await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
       .rejects.toThrow(/Developer Portal action is also required/);
     expect(fetchImpl).toHaveBeenCalledTimes(5);
+  });
+});
+
+
+describe('metadata apply image upload policy', () => {
+  test('skip-images retains application 429 failure and retry-after reporting', async () => {
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ username: metadata.bot.unique_username, discriminator: '0' }),
+      jsonResponse({ message: 'rate limited', retry_after: 12.5 }, { status: 429 }),
+    );
+    await expect(main({ skipImages: true, token: 'test-token', fetchImpl, logger: quietLogger() }))
+      .rejects.toMatchObject({ exitCode: 3, status: 429, retryAfter: '12.5' });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  test('explicit skip-images preserves all four images while applying text metadata', async () => {
+    const logger = quietLogger();
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ username: metadata.bot.unique_username, discriminator: '0' }),
+      jsonResponse(appResponse()),
+    );
+    await main({ skipImages: true, token: 'test-token', fetchImpl, logger });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    const writes = fetchImpl.mock.calls.filter(([, options]) => options.method === 'PATCH');
+    expect(writes).toHaveLength(1);
+    const body = JSON.parse(writes[0][1].body);
+    expect(body).toMatchObject({ description: metadata.application.description, tags: metadata.application.tags });
+    for (const key of ['avatar', 'banner', 'icon', 'cover_image']) expect(body).not.toHaveProperty(key);
+    expect(logger.log).toHaveBeenCalledWith(expect.stringContaining('Images preserved (--skip-images)'));
+  });
+
+  test('skip-images dry-run omits image data and clearly reports the operator choice', async () => {
+    const logger = quietLogger();
+    const fetchImpl = jest.fn();
+    await main({ dryRun: true, skipImages: true, fetchImpl, logger });
+    const plan = JSON.parse(logger.log.mock.calls[0][0]);
+    expect(plan.bot_images).toEqual({});
+    expect(plan.application).not.toHaveProperty('icon');
+    expect(plan.application).not.toHaveProperty('cover_image');
+    expect(plan.skip_images).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// Operator note: live applies are not fully idempotent yet. Image/app
-// PATCHes re-upload assets on each run until #588 adds safe no-op detection.
+// Use --skip-images for repeat applies that must preserve existing image assets.
 
 const fs = require('fs');
 const path = require('path');
@@ -285,6 +284,7 @@ function assertExpectedApplication(app, doc = loadMetadata()) {
 
 async function main({
   dryRun = process.argv.includes('--dry-run'),
+  skipImages = process.argv.includes('--skip-images'),
   token = process.env.DISCORD_TOKEN,
   fetchImpl = fetch,
   logger = console,
@@ -304,9 +304,9 @@ async function main({
   // carries the cased qURL brand via application metadata and portal fields.
   const apiUsername = doc.bot.unique_username;
 
-  // Build payloads before the dry-run branch so dry-run validates local assets.
+  // Build payloads before dry-run; --skip-images also skips local image reads.
   const botUsernamePatch = { username: apiUsername };
-  const botImagePatch = {
+  const botImagePatch = skipImages ? {} : {
     avatar: dataUri(doc.bot.avatar, 'bot.avatar'),
     banner: dataUri(doc.bot.banner, 'bot.banner'),
   };
@@ -314,8 +314,10 @@ async function main({
   // authoritative PATCH fatal instead of guessing at image no-op detection.
   const appPatch = {
     description: doc.application.description,
-    icon: dataUri(doc.application.icon, 'application.icon'),
-    cover_image: dataUri(doc.application.cover_image, 'application.cover_image'),
+    ...(!skipImages && {
+      icon: dataUri(doc.application.icon, 'application.icon'),
+      cover_image: dataUri(doc.application.cover_image, 'application.cover_image'),
+    }),
     tags: doc.application.tags,
     // Discord v10 Edit Current Application documents install_params as writable.
     install_params: doc.application.install_params,
@@ -327,6 +329,7 @@ async function main({
         id: doc.application.id,
         public_key: doc.application.public_key,
       },
+      skip_images: skipImages,
       bot_username: summarize(botUsernamePatch),
       bot_images: summarize(botImagePatch),
       application: summarize(appPatch),
@@ -381,22 +384,26 @@ async function main({
     }
   }
 
-  try {
-    // Discord returns stored asset hashes, not source-file hashes; upload bot
-    // images together to limit request count until safe no-op detection exists.
-    const imageUser = await request('PATCH', '/users/@me', botImagePatch, requestOptions);
-    if (!imageUser.avatar) {
+  if (skipImages) {
+    logger.log('Images preserved (--skip-images); no avatar, banner, icon, or cover upload.');
+  } else {
+    try {
+      // Discord returns stored asset hashes, not source-file hashes; upload bot
+      // images together to limit request count until safe no-op detection exists.
+      const imageUser = await request('PATCH', '/users/@me', botImagePatch, requestOptions);
+      if (!imageUser.avatar) {
+        hadPartialFailure = true;
+        logger.warn('Bot avatar update skipped: Discord response did not include an avatar hash.');
+      }
+      if (!imageUser.banner) {
+        hadPartialFailure = true;
+        logger.warn('Bot banner update skipped: Discord response did not include a banner hash.');
+      }
+      logger.log(`Updated bot images: avatar=${Boolean(imageUser.avatar)} banner=${Boolean(imageUser.banner)}`);
+    } catch (err) {
       hadPartialFailure = true;
-      logger.warn('Bot avatar update skipped: Discord response did not include an avatar hash.');
+      logger.warn(`Bot image update skipped: ${errorDetails(err)}`);
     }
-    if (!imageUser.banner) {
-      hadPartialFailure = true;
-      logger.warn('Bot banner update skipped: Discord response did not include a banner hash.');
-    }
-    logger.log(`Updated bot images: avatar=${Boolean(imageUser.avatar)} banner=${Boolean(imageUser.banner)}`);
-  } catch (err) {
-    hadPartialFailure = true;
-    logger.warn(`Bot image update skipped: ${errorDetails(err)}`);
   }
 
   let updatedApp;
@@ -410,7 +417,9 @@ async function main({
     }
     throw err;
   }
-  logger.log(`Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
+  logger.log(skipImages
+    ? 'Applied application text/install metadata; images preserved (--skip-images).'
+    : `Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
 
   if (doc.application.name !== updatedApp.name) {
     hadPortalActionRequired = true;
