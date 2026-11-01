@@ -105,6 +105,7 @@ func TestRenderedECSVolumeArtifactsMatchBothInstallers(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{"tunnel", "s3-website"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			var instructions, slug string
 			var err error
 			if kind == "tunnel" {

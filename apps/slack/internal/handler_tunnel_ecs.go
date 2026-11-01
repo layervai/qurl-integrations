@@ -84,6 +84,9 @@ type ecsLogConfiguration struct {
 }
 
 const (
+	ecsAgentStateVolume     = "qurl-agent-state"
+	ecsConfigVolume         = "qurl-config"
+	ecsBootstrapVolume      = "qurl-bootstrap"
 	ecsFargateChecklistText = "ECS/Fargate task-definition checklist"
 	connectorContainerName  = "qurl"
 	// TODO(upstream-contract): keep in lockstep with the qurl image USER.
@@ -141,7 +144,7 @@ func renderECSEFSVolumeInstructions(slug string) (string, error) {
 	definition := struct {
 		Volumes []ecsTaskVolume `json:"volumes"`
 	}{}
-	for _, name := range []string{"qurl-agent-state", "qurl-config", "qurl-bootstrap"} {
+	for _, name := range []string{ecsAgentStateVolume, ecsConfigVolume, ecsBootstrapVolume} {
 		definition.Volumes = append(definition.Volumes, ecsTaskVolume{
 			Name: name,
 			EFSVolumeConfiguration: ecsEFSVolumeConfiguration{
@@ -182,9 +185,9 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 			{Name: "QURL_ENDPOINT", Value: endpoint},
 		},
 		MountPoints: []ecsMountPoint{
-			{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/qurl-volume"},
-			{SourceVolume: "qurl-config", ContainerPath: "/etc/qurl", ReadOnly: true},
-			{SourceVolume: "qurl-bootstrap", ContainerPath: "/run/secrets/qurl", ReadOnly: true},
+			{SourceVolume: ecsAgentStateVolume, ContainerPath: "/var/lib/qurl-volume"},
+			{SourceVolume: ecsConfigVolume, ContainerPath: "/etc/qurl", ReadOnly: true},
+			{SourceVolume: ecsBootstrapVolume, ContainerPath: "/run/secrets/qurl", ReadOnly: true},
 		},
 		LogConfiguration: awslogsConfiguration("/ecs/qurl-connector", "qurl"),
 		LinuxParameters:  hardenedECSLinuxParameters(),
