@@ -2380,26 +2380,28 @@ func TestS3WebsiteInstallPanicRevokesBeforeUnexpectedFailureNotice(t *testing.T)
 				"target": client.CredentialTargetAgent,
 				"claims": []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			}, &unusedRevokeHits)
+			// Override the fixture route so the server goroutine counts revokes atomically.
 			var revoked atomic.Int32
 			ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
 				revoked.Add(1)
 				w.WriteHeader(http.StatusNoContent)
 			})
 			var notices atomic.Int32
+			bodies := make(chan []byte, 1)
 			responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, err := io.ReadAll(r.Body)
 				if err != nil {
 					t.Errorf("read failure notice: %v", err)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
 				}
 				if revoked.Load() != 1 {
 					t.Error("unexpected-failure notice arrived before the minted token was revoked")
 				}
-				text := parseSlackText(t, body)
-				if text != s3WebsiteUnexpectedFailureNotice {
-					t.Errorf("failure notice = %q", text)
-				}
-				if strings.Contains(string(body), testTunnelModalKey) || strings.Contains(string(body), testInstallBlockLead) {
-					t.Error("panic exposed the token or public install instructions")
+				select {
+				case bodies <- body:
+				default:
+					t.Error("multiple unexpected-failure notices")
 				}
 				notices.Add(1)
 				w.WriteHeader(http.StatusOK)
@@ -2409,12 +2411,13 @@ func TestS3WebsiteInstallPanicRevokesBeforeUnexpectedFailureNotice(t *testing.T)
 			freezeTunnelBootstrapNow(t, h, fixedNow)
 			h.cfg.TunnelImage = testTunnelImageRef
 			h.cfg.S3OriginImage = testS3OriginImageRef
-			var dmCalls int
+			var dmCalls atomic.Int32
 			h.cfg.PostDM = func(context.Context, string, string, string, string) error {
-				dmCalls++
+				dmCalls.Add(1)
 				panic("test DM delivery panic")
 			}
 			if stage == "build" {
+				// The renderer reads h.now after mint; the revoke count also pins that order.
 				h.now = func() time.Time { panic("test render panic after mint") }
 			}
 			h.SetAliasStore(h.cfg.AdminStore)
@@ -2422,12 +2425,26 @@ func TestS3WebsiteInstallPanicRevokesBeforeUnexpectedFailureNotice(t *testing.T)
 			if revoked.Load() != 1 || notices.Load() != 1 {
 				t.Fatalf("revokes = %d, notices = %d; want one each", revoked.Load(), notices.Load())
 			}
+			if unusedRevokeHits != 0 {
+				t.Fatal("fixture revoke route was not replaced")
+			}
+			select {
+			case body := <-bodies:
+				if text := parseSlackText(t, body); text != s3WebsiteUnexpectedFailureNotice {
+					t.Errorf("failure notice = %q", text)
+				}
+				if strings.Contains(string(body), testTunnelModalKey) || strings.Contains(string(body), testInstallBlockLead) {
+					t.Error("panic exposed the token or public install instructions")
+				}
+			default:
+				t.Fatal("missing unexpected-failure notice")
+			}
 			wantDMCalls := 1
 			if stage == "build" {
 				wantDMCalls = 0
 			}
-			if dmCalls != wantDMCalls {
-				t.Fatalf("DM calls = %d, want %d", dmCalls, wantDMCalls)
+			if dmCalls.Load() != int32(wantDMCalls) {
+				t.Fatalf("DM calls = %d, want %d", dmCalls.Load(), wantDMCalls)
 			}
 		})
 	}
