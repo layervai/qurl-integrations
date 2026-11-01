@@ -67,7 +67,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("aliases: API key lookup failed", "error", err)
-		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
+		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err, values.Get(fieldCommand)))
 		return
 	}
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, userID, teamID)

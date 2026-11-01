@@ -325,7 +325,7 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("display-name: failed to get API key", "error", err, "team_id", teamID, "id", id)
-		return nil, nil, authErrorMessage(err)
+		return nil, nil, authErrorMessage(err, commandUser)
 	}
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Slug: id})
 	if err != nil {

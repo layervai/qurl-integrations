@@ -520,15 +520,8 @@ func TestCommandNameConstantsStayInSync(t *testing.T) {
 	}
 }
 
-// TestHelpMessagesContainOnlyCommandTokens guards the MAINTAINER INVARIANT
-// documented on userHelpMessage / adminHelpMessage: the help lines are
-// authored with prod command names and rewritten to the invoked command via
-// a blind strings.ReplaceAll, so every `/qurl…` token in the rendered help
-// must be a real command literal (`/qurl` or `/qurl-admin`). A future help
-// line introducing a non-command slash token — a `/qurl-docs` link, a
-// `/qurl-foo` example — would be silently mangled in a non-prod env (where
-// the command is named e.g. `/qurl-sandbox`). Fail here instead of shipping
-// a garbled help message.
+// TestHelpMessagesContainOnlyCommandTokens checks rendered command names.
+// The separate source-token test prevents raw command literals in help templates.
 func TestHelpMessagesContainOnlyCommandTokens(t *testing.T) {
 	// Fully wire the handler (aliasStore + AdminStore + OpenView) so every
 	// gated help line renders — maximizes the set of tokens under test.
@@ -555,7 +548,7 @@ func TestHelpMessagesContainOnlyCommandTokens(t *testing.T) {
 	} {
 		for _, tok := range tokenRe.FindAllString(tc.rendered, -1) {
 			if !allowed[tok] {
-				t.Errorf("%s help contains non-command slash token %q; the blind ReplaceAll rewrite would mangle it in a non-prod env (see the MAINTAINER INVARIANT on userHelpMessage)", tc.surface, tok)
+				t.Errorf("%s help contains non-command slash token %q; help must render only its explicit command tokens", tc.surface, tok)
 			}
 		}
 	}

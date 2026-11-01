@@ -689,7 +689,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("tunnel install: failed to get API key", "error", err)
-		return nil, authErrorMessage(err), err
+		return nil, authErrorMessage(err, commandUser), err
 	}
 	connectorAPIURL := strings.TrimSpace(h.cfg.ConnectorAPIURL)
 	if err := ValidateConnectorAPIURL(connectorAPIURL); err != nil {

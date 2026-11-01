@@ -500,7 +500,7 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("S3 website install: failed to get API key", "error", sanitizeLogValue(err.Error()))
-		return nil, authErrorMessage(err), err
+		return nil, authErrorMessage(err, commandUser), err
 	}
 
 	ownerID, err := resolveInstallOwnerID(ctx, c, log, "S3 website install", args.Slug)

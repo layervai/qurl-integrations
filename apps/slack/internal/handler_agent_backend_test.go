@@ -1393,7 +1393,7 @@ func TestAgentBackend_UnboundWorkspaceNudgesToSetup(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: unbound workspace must not error, got %v", name, err)
 		}
-		if out != workspaceNotSetupMessage {
+		if out != workspaceNotSetupMessage(commandUser) {
 			t.Fatalf("%s: want the setup nudge, got %q", name, out)
 		}
 	}

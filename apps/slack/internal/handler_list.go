@@ -413,7 +413,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("list: API key lookup failed", "error", err)
-		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
+		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err, values.Get(fieldCommand)))
 		return
 	}
 
