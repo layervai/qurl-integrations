@@ -36,6 +36,14 @@ const { linkGuildWebhookSubscriptionForSetup } = require('../guild-webhook-link'
 const AUTH0_TIMEOUT_MS = 15000;
 const QURL_SERVICE_TIMEOUT_MS = 15000;
 const ORPHAN_DELETE_TIMEOUT_MS = 10000;
+const KEY_MINT_FAILURES = new Map([
+  ['email_verification_required', [403, 'Verify your qURL account email', 'Verify your qURL account email, then start setup again.']],
+  ['account_frozen', [403, 'qURL account unavailable', 'Your qURL account is frozen. Contact your layerv.ai admin before trying setup again.']],
+  ['scope_delegation_denied', [403, 'qURL permissions unavailable', 'Your account does not permit the required qURL permissions. Ask your layerv.ai admin to allow qURL read and write access.']],
+  ['invalid_audience', [401, 'qURL sign-in configuration error', 'The bot operator must correct the Auth0 audience for this qURL endpoint before setup can continue.']],
+  ['insufficient_scope', [401, 'qURL sign-in permissions missing', 'Sign in again and grant qURL read and write access. If this repeats, ask the bot operator to check the Auth0 scopes.']],
+]);
+
 
 const router = express.Router();
 
@@ -349,6 +357,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
+        'Idempotency-Key': verified.payload.nonce,
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
@@ -377,6 +386,12 @@ router.get('/callback', rateLimit, async (req, res) => {
         });
         return renderError(res, 429, 'qURL API key limit reached',
           'Your qURL account has hit its API key limit. Delete an unused key in your layerv.ai dashboard, or upgrade your plan, then run /qurl-admin setup again.');
+      }
+
+      const knownFailure = KEY_MINT_FAILURES.get(problemCode);
+      if (knownFailure && mintResp.status === knownFailure[0]) {
+        logger.warn('qURL API key mint refused', { status: mintResp.status, problemCode, guildId });
+        return renderError(res, ...knownFailure);
       }
 
       logger.error('qURL API key mint failed', {

@@ -376,6 +376,26 @@ describe('qurl-oauth routes', () => {
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
+    it.each([
+      [403, 'email_verification_required', 'Verify your qURL account email'],
+      [403, 'account_frozen', 'Your qURL account is frozen'],
+      [403, 'scope_delegation_denied', 'does not permit the required qURL permissions'],
+      [401, 'invalid_audience', 'bot operator must correct the Auth0 audience'],
+      [401, 'insufficient_scope', 'Sign in again and grant qURL read and write access'],
+    ])('shows a safe next step for mint failure %s/%s', async (status, code, expected) => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'jwt-xyz' }) })
+        .mockResolvedValueOnce({ ok: false, status, text: async () => JSON.stringify({ error: { code, detail: 'PRIVATE upstream detail' } }) });
+      const res = await request(app).get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
+        .set('Cookie', cookieFor(state));
+      expect(res.status).toBe(status);
+      expect(res.text).toContain(expected);
+      expect(res.text).not.toContain('PRIVATE upstream detail');
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
+      expect(discord.sendDM).not.toHaveBeenCalled();
+    });
+
     it('429s with key-limit-specific copy when qurl-service returns api_key_limit, does not persist or DM', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()
@@ -482,6 +502,9 @@ describe('qurl-oauth routes', () => {
 
       const mintCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/v1/api-keys'));
       const body = JSON.parse(mintCall[1].body);
+      const statePayload = JSON.parse(Buffer.from(state.split('.')[0], 'base64url').toString());
+      expect(mintCall[1].headers['Idempotency-Key']).toBe(statePayload.n);
+      expect(mintCall[1].headers['Idempotency-Key']).toMatch(/^[a-f0-9]{32}$/);
       expect(body.kind).toBe('api_key');
       expect(body).not.toHaveProperty('key_type');
 

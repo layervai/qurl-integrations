@@ -139,6 +139,7 @@ function verifyQurlOAuthState(state) {
   if (payload?.k !== STATE_KIND) return { ok: false, reason: 'wrong_kind' };
   if (typeof payload.g !== 'string' || !payload.g) return { ok: false, reason: 'no_guild_id' };
   if (typeof payload.u !== 'string' || !payload.u) return { ok: false, reason: 'no_user_id' };
+  if (typeof payload.n !== 'string' || !/^[a-f0-9]{32}$/.test(payload.n)) return { ok: false, reason: 'invalid_nonce' };
   if (typeof payload.e !== 'number') return { ok: false, reason: 'no_expiry' };
   if (Math.floor(Date.now() / 1000) >= payload.e) return { ok: false, reason: 'expired' };
   return {
