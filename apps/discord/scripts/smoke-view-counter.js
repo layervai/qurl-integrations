@@ -50,6 +50,10 @@ async function main() {
     await store.saveSendConfirmState(sendId, { expectedCount: 20000 });
     assert.equal(await store.getSendViewedCount(sendId, 20000), 1); // Initialization cannot reset a live count.
     assert.equal(await store.getSendRenderedCount(sendId), 0);
+    const concurrentSend = 'fixture-contention';
+    await store.saveSendConfirmState(concurrentSend, { expectedCount: 101, viewedCount: 0 });
+    await Promise.all(ids.slice(0, 16).map(id => store.incrementSendViewedCount(concurrentSend, id, 101)));
+    assert.equal(await store.getSendViewedCount(concurrentSend, 101), 16);
     const reads = [];
     DynamoDBDocumentClient.prototype.send = function (command, options) {
       if (command instanceof BatchGetCommand && command.input.RequestItems?.[viewsTable]) {
@@ -69,7 +73,7 @@ async function main() {
     await store.recordQurlView({ qurlId: ids[1], accessCount: 1, consumed: true, eventId: 'fixture-source-only' });
     assert.equal((await store.getQurlViews(ids.slice(0, 2))).size, 2);
     assert.equal(await store.getSendViewedCount(sendId, 20000), 1);
-    process.stdout.write('PASS local store: 200 source pages versus one 64-key aggregate read; known zero differs from missing; transaction replay counts once; source-only crash gap is visible to source reads.\n');
+    process.stdout.write('PASS local store: 200 source pages versus one 64-key aggregate read; known zero differs from missing; transaction replay counts once; 16 concurrent one-shard increments all count; source-only crash gap is visible to source reads.\n');
   } finally {
     DynamoDBDocumentClient.prototype.send = originalSend;
     try { for (const table of created.reverse()) await client.send(new DeleteTableCommand({ TableName: table })); }

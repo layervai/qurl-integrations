@@ -1767,6 +1767,25 @@ describe('qurl sends', () => {
     expect(input.ReturnValues).toBeUndefined();
   });
 
+  test('incrementSendViewedCount: conflict retries preserve the exact command and token', async () => {
+    const conflict = Object.assign(new Error('conflict'), { name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'TransactionConflict' }] });
+    ddbMock.on(TransactWriteCommand).rejectsOnce(conflict).resolves({});
+    await store.incrementSendViewedCount('s1', 'q_a', 1);
+    const calls = ddbMock.commandCalls(TransactWriteCommand);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].args[0]).toBe(calls[1].args[0]);
+    expect(calls[0].args[1].abortSignal).toBe(calls[1].args[1].abortSignal);
+    ddbMock.reset();
+    ddbMock.on(TransactWriteCommand).rejects(conflict);
+    await expect(store.incrementSendViewedCount('s1', 'q_a', 1)).rejects.toThrow('conflict');
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(7);
+    ddbMock.reset();
+    ddbMock.on(TransactWriteCommand).rejects(Object.assign(new Error('invalid'), { name: 'ValidationException' }));
+    await expect(store.incrementSendViewedCount('s1', 'q_a', 1)).rejects.toThrow('invalid');
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+
   test('getSendViewedCount: small sends read one strong shard key', async () => {
     ddbMock.on(BatchGetCommand).resolves({
       Responses: { 'test-prefix-qurl-views': [{ qurl_id: '__send_view_count__s1#00', viewed_count: 1 }] },
@@ -1945,7 +1964,7 @@ describe('qurl sends', () => {
     expect(shard.UpdateExpression).toContain('viewed_count = if_not_exists(viewed_count, :zero)');
     ddbMock.reset();
     ddbMock.on(UpdateCommand).resolvesOnce({}).rejectsOnce(new Error('throttled'));
-    await expect(store.saveSendConfirmState('s1', { expectedCount: 20000 })).resolves.toBe(true);
+    await expect(store.saveSendConfirmState('s1', { expectedCount: 20000, viewedCount: 0 })).resolves.toBe(true);
   });
 
   test('saveSendConfirmState: partial /qurl-add re-persist updates ONLY the passed keys — NEVER nulls the live token', async () => {

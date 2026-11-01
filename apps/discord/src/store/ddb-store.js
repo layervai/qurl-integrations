@@ -1258,7 +1258,7 @@ async function incrementSendViewedCount(sendId, qurlId, expectedCount) {
   if (!qurlId) throw new Error('incrementSendViewedCount: qurlId is required');
   const shardCount = sendViewedCountShardCount(expectedCount);
   const shard = sendViewedCountShard(qurlId, shardCount);
-  await ddb.send(new TransactWriteCommand({
+  const command = new TransactWriteCommand({
     // One token per logical increment makes SDK retries safe after a lost response.
     ClientRequestToken: crypto.randomUUID(),
     TransactItems: [{
@@ -1274,7 +1274,22 @@ async function incrementSendViewedCount(sendId, qurlId, expectedCount) {
         },
       },
     }],
-  }), { abortSignal: AbortSignal.timeout(3000) });
+  });
+  const signal = AbortSignal.timeout(3000);
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted();
+    try {
+      await ddb.send(command, { abortSignal: signal });
+      return;
+    } catch (err) {
+      const conflict = err.name === 'TransactionConflictException'
+        || (err.name === 'TransactionCanceledException'
+          && err.CancellationReasons?.some(reason => reason.Code === 'TransactionConflict'));
+      if (!conflict || signal.aborted || attempt >= 6) throw err;
+      // Preserve the command/token through contention retries and ambiguous SDK responses.
+      await new Promise(resolve => setTimeout(resolve, Math.min(250, 25 * 2 ** attempt) * (0.5 + Math.random())));
+    }
+  }
 }
 
 async function getSendViewedCount(sendId, expectedCount) {
@@ -1485,7 +1500,7 @@ async function saveSendConfirmState(sendId, {
   }
   try {
     await ddb.send(new UpdateCommand(update));
-    if (Number.isSafeInteger(expectedCount) && expectedCount > 100) {
+    if (viewedCount === 0 && Number.isSafeInteger(expectedCount) && expectedCount > 100) {
       try {
         await ddb.send(new UpdateCommand({
           TableName: TABLES.qurl_views,

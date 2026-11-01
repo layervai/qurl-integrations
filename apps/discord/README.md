@@ -716,7 +716,8 @@ trigger a duplicate edit. Recipient additions during an edit keep polling the
 new total; a late edit receipt after stop cannot write a floor.
 
 Each shard increment uses a one-item DynamoDB transaction with one random
-request token per call and a three-second request bound. SDK retries with that
+request token per call and a three-second request bound. Transaction conflicts
+retry at most six times with jitter and the same command/token. SDK retries with that
 token cannot double-count a committed write after a lost response. Transactions
 use two write phases, so this costs more writes than the old non-idempotent ADD.
 The shard layout stays the same for rolling workers; this is no capacity claim.

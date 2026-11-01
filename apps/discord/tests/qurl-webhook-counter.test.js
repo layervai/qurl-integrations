@@ -481,6 +481,30 @@ describe('sender view-counter fast-path — N is the distinct viewed-count aggre
     );
   });
 
+  it('incomplete source fallback preserves the webhook receipt without committing a display floor', async () => {
+    mockGetSendViewedCount.mockRejectedValue(new Error('send viewed count aggregate unavailable'));
+    mockGetQurlViews.mockRejectedValue(new Error('qurl view read incomplete after retries'));
+    const response = await signedRequest();
+    expect(response.status).toBe(200);
+    await waitFor(() => logger.error.mock.calls.some(([message]) => message === 'qURL webhook sender-counter: fast-path threw'));
+    expect(logger.error).toHaveBeenCalledWith('qURL webhook sender-counter: fast-path threw', {
+      error: 'qurl view read incomplete after retries', qurl_id: QURL_ID,
+    });
+    expect(mockEditInteractionReply).not.toHaveBeenCalled();
+    expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
+  });
+
+  it('an ambiguous increment failure is not retried by webhook redelivery', async () => {
+    mockIncrementSendViewedCount.mockRejectedValue(new Error('response lost'));
+    await signedRequest();
+    await flushCounter();
+    expect(mockIncrementSendViewedCount).toHaveBeenCalledTimes(1);
+    mockRecordQurlView.mockResolvedValue({ result: 'dedup', firstView: false });
+    await signedRequest();
+    await flushCounter();
+    expect(mockIncrementSendViewedCount).toHaveBeenCalledTimes(1);
+  });
+
   it('shard-sum read failure falls back through getSendItems when inline qurlIds are capped empty', async () => {
     mockGetSendRenderState.mockResolvedValue(armedState({
       viewedCount: 0,
