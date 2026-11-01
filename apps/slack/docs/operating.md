@@ -1023,7 +1023,9 @@ The process reads these controls at startup; replace the task after a change.
 | `QURL_AGENT_MAX_TURNS_PER_USER_PER_HOUR` | `30` | Per-user turn cap within a workspace. `0` removes this cap. |
 | `QURL_AGENT_MAX_TURNS_PER_TEAM_PER_HOUR` | `300` | Workspace turn cap. `0` removes this cap. |
 
-Turn caps use fixed UTC hour buckets. Missing, negative, or invalid integer
+Turn caps use fixed UTC hour buckets. A user or workspace can consume almost
+twice its cap across an hour boundary, even with healthy storage. These caps
+do not impose a hard spend limit. Missing, negative, or invalid integer
 values use the source default. These are cost backstops: a rate-counter storage
 failure allows the turn and logs `agent: turn-rate counter failed; allowing turn
 (fail-open)`. Watch that warning and the deployment's matching alarm.
