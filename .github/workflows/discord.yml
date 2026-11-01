@@ -150,6 +150,17 @@ jobs:
             -v "$PWD/scripts/smoke-setup-audit.js:/app/scripts/smoke-setup-audit.js:ro" \
             discord-bot-test node scripts/smoke-setup-audit.js
 
+      - name: Verify guild installation and webhook references against DynamoDB Local
+        working-directory: apps/discord
+        run: |
+          docker run --rm --network host -e NODE_ENV=test \
+            -e DDB_TEST_ENDPOINT=http://127.0.0.1:8000 \
+            -e AWS_ACCESS_KEY_ID=local -e AWS_SECRET_ACCESS_KEY=local \
+            -v "$PWD/scripts/smoke-guild-lifecycle.js:/app/scripts/smoke-guild-lifecycle.js:ro" \
+            -v "$PWD/scripts/provision-ddb-local.js:/app/scripts/provision-ddb-local.js:ro" \
+            -v "$PWD/scripts/ddb-local-schema.json:/app/scripts/ddb-local-schema.json:ro" \
+            discord-bot-test node scripts/smoke-guild-lifecycle.js
+
       - name: Verify flow warning claims against DynamoDB Local
         working-directory: apps/discord
         run: |

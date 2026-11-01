@@ -204,12 +204,14 @@ describe('DDB reserved-words static check — full src scan', () => {
     //   - flow-state.js (a few template-with-expression Filter/Update)
     //   - ddb-store.js (setGuildDefaultWebhookOwner's audited CAS join)
     //   - ddb-store.js (setGuildApiKey: qurl_api_key/qurl_owner_id CAS; neither reserved)
+    //   - ddb-store.js (webhook head SET/ADD, conditional head guard and composed row CAS;
+    //     audited cleanup_state/reference_count/system_reference/webhook_* names; native DDB exercised)
     // If this assertion fires, audit each newly-dynamic expression
     // against the reserved-words list manually + raise the ceiling.
     const dynamic = [];
     for (const f of files) {
       dynamic.push(...findViolations(f).filter(v => v.dynamic));
     }
-    expect(dynamic.length).toBeLessThan(9);
+    expect(dynamic.length).toBeLessThan(12);
   });
 });

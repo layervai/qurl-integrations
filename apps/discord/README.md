@@ -796,3 +796,18 @@ DDB_TEST_ENDPOINT=http://127.0.0.1:8000 node scripts/smoke-guild-lifecycle.js
 
 The check refuses cloud endpoints and real AWS key shapes, creates disposable
 local tables, and deletes them afterward.
+
+
+Webhook writers keep an owner/subscription head and one member per guild in the
+lifecycle table. Attaches reject a deletion claim; detach and replacement update
+the count in the same transaction as the guild row. A replaced mapping retains
+its encrypted cleanup capability before losing its fields. Same-owner key
+rotation retains or registers that reference. A new installation with a new owner
+clears the old webhook mapping and detaches it with the key replacement. A
+verified default-subscription conversion records a system reference even when
+no guild member remains. A mismatched webhook response owner is rejected.
+
+The local lifecycle check covers shared references, relink during deletion,
+owner replacement, legacy reference registration, propagation, and protected
+default mappings. CI runs it against its existing DynamoDB Local service. The
+cleanup worker and full-fleet reference backfill still gate physical deletion.
