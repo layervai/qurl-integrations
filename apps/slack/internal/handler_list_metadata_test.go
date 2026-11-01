@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -56,6 +57,9 @@ func TestHandleListMetadataGhostDoesNotScanOrPrune(t *testing.T) {
 	}
 	for range 2 {
 		_, _, reply := newAdminSlashInvoker(t, h).invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+		if strings.Contains(reply, "r_ghost_bb") {
+			t.Fatal("missing binding leaked into list reply")
+		}
 		if !strings.Contains(reply, "`$live-tun`") {
 			t.Fatalf("live resource missing: %s", reply)
 		}
@@ -160,5 +164,146 @@ func TestFetchAllowedMetadataDoesNotFallbackOnFailure(t *testing.T) {
 				t.Fatalf("status %d fell back: %v", status, err)
 			}
 		})
+	}
+}
+
+func TestFetchAllowedMetadataMissingRouteFallsBack(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var metadataHits, catalogHits atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/v1/resources/batch-get" {
+					metadataHits.Add(1)
+					writeAPIError(t, w, status, "not_found", "route unavailable")
+					return
+				}
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" {
+					t.Error("unexpected fallback request")
+				}
+				catalogHits.Add(1)
+				writeMetadataFixture(t, w, []client.Resource{{ResourceID: "known", Type: client.ResourceTypeTunnel}, {ResourceID: "foreign", Type: client.ResourceTypeTunnel}})
+			}))
+			defer server.Close()
+			rows, err := (&Handler{}).fetchAllowedResources(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), client.New(server.URL, "key", client.WithRetry(0)), map[string]struct{}{"known": {}})
+			if err != nil || len(rows) != 1 || rows[0].ResourceID != "known" || metadataHits.Load() != 1 || catalogHits.Load() != 1 {
+				t.Fatalf("fallback rows=%v error=%v metadata=%d catalog=%d", rows, err, metadataHits.Load(), catalogHits.Load())
+			}
+		})
+	}
+}
+
+func TestFetchAllowedMetadataLaterFailureDiscardsPartialRows(t *testing.T) {
+	allowed := make(map[string]struct{}, 201)
+	for i := range 201 {
+		allowed[fmt.Sprintf("resource-%04d", i)] = struct{}{}
+	}
+	peerEntered, release := make(chan struct{}), make(chan struct{})
+	var catalogHits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			catalogHits.Add(1)
+			t.Error("failed batch must not fall back")
+		}
+		var body struct {
+			IDs []string `json:"resource_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if len(body.IDs) > 0 && body.IDs[0] == "resource-0100" {
+			select {
+			case <-peerEntered:
+			case <-r.Context().Done():
+				return
+			case <-release:
+				return
+			}
+			writeAPIError(t, w, http.StatusInternalServerError, "fetch_failed", "store unavailable")
+			return
+		}
+		if len(body.IDs) > 0 && body.IDs[0] == "resource-0200" {
+			close(peerEntered)
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+			return
+		}
+		rows := make([]client.Resource, 0, len(body.IDs))
+		for _, id := range body.IDs {
+			rows = append(rows, client.Resource{ResourceID: id, Type: client.ResourceTypeTunnel})
+		}
+		writeMetadataFixture(t, w, rows)
+	}))
+	defer server.Close()
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := (&Handler{}).fetchAllowedResources(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), client.New(server.URL, "key", client.WithRetry(0)), allowed)
+	var apiErr *client.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusInternalServerError || rows != nil || catalogHits.Load() != 0 {
+		t.Fatalf("failed batch did not cancel peer and preserve original error: rows=%d error=%v catalog=%d", len(rows), err, catalogHits.Load())
+	}
+}
+
+func TestFetchAllowedMetadataCancellationStopsLaunch(t *testing.T) {
+	allowed := make(map[string]struct{}, 1001)
+	for i := range 1001 {
+		allowed[fmt.Sprintf("resource-%04d", i)] = struct{}{}
+	}
+	var calls atomic.Int32
+	entered := make(chan struct{}, 10)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			IDs []string `json:"resource_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if calls.Add(1) > 1 {
+			entered <- struct{}{}
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+			return
+		}
+		rows := make([]client.Resource, 0, len(body.IDs))
+		for _, id := range body.IDs {
+			rows = append(rows, client.Resource{ResourceID: id, Type: client.ResourceTypeTunnel})
+		}
+		writeMetadataFixture(t, w, rows)
+	}))
+	defer server.Close()
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		rows, err := (&Handler{}).fetchAllowedResources(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), client.New(server.URL, "key", client.WithRetry(0)), allowed)
+		if rows != nil {
+			err = fmt.Errorf("cancel exposed %d partial rows", len(rows))
+		}
+		done <- err
+	}()
+	for range 5 {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatal("batch launch did not start")
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel result: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("canceled lookup did not stop")
+	}
+	if calls.Load() > 6 {
+		t.Fatalf("extra requests after cancellation: %d", calls.Load())
 	}
 }

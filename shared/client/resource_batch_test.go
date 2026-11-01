@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"sync/atomic"
 	"testing"
 )
 
@@ -63,5 +64,31 @@ func TestBatchGetResourcesRejectsIncompleteOrForeignResponse(t *testing.T) {
 	got, err := New(server.URL, "key", WithRetry(0)).BatchGetResources(context.Background(), []string{"gone"})
 	if err != nil || got == nil || len(got) != 0 {
 		t.Fatalf("empty batch: %v %v", got, err)
+	}
+}
+
+func TestBatchGetResourcesRetryReplaysReadBody(t *testing.T) {
+	var hits atomic.Int32
+	ids := []string{"known", "gone"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			IDs []string `json:"resource_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if !reflect.DeepEqual(body.IDs, ids) {
+			t.Errorf("retry changed metadata body: %v", body.IDs)
+		}
+		if hits.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		apiEnvelope(t, w, []Resource{{ResourceID: "known"}})
+	}))
+	defer server.Close()
+	rows, err := New(server.URL, "key", WithRetry(1), withDelaysForTest()).BatchGetResources(context.Background(), ids)
+	if err != nil || len(rows) != 1 || hits.Load() != 2 {
+		t.Fatalf("read retry rows=%v error=%v attempts=%d", rows, err, hits.Load())
 	}
 }

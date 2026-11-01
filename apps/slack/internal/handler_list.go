@@ -642,6 +642,8 @@ func isURLResource(r *client.Resource) bool {
 // lookup. Missing bindings can reach this cap; they never authorize pruning.
 const listMaxResourcePages = 50
 
+const listMetadataConcurrency = 5
+
 // fetchAllowedResources reads only channel-bound metadata. Missing IDs do not
 // cause catalog scans or remove bindings: a later request can resolve them again.
 // Old producers retain the bounded catalog walk until the metadata route is deployed.
@@ -658,22 +660,26 @@ func (h *Handler) fetchAllowedResources(ctx context.Context, log *slog.Logger, c
 	first, err := c.BatchGetResources(ctx, ids[:firstEnd])
 	if err != nil {
 		var apiErr *client.APIError
-		// Keep old producers usable during rollout; auth and store errors must fail closed.
+		// TODO(upstream-contract): batch-get returns 200 [] for missing IDs;
+		// only absent routes use 404/405. Auth and store errors fail closed.
 		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusMethodNotAllowed) {
+			log.Debug("list: metadata route unavailable; using bounded catalog lookup", "status", apiErr.StatusCode)
 			return h.fetchAllowedResourcesLegacy(ctx, log, c, allowed)
 		}
 		return nil, err
 	}
 	batches := (len(ids) + client.ResourceBatchGetMaxIDs - 1) / client.ResourceBatchGetMaxIDs
-	results, failures := make([][]client.Resource, batches), make([]error, batches)
+	results := make([][]client.Resource, batches)
+	batchCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	results[0] = first
-	sem := make(chan struct{}, 5)
+	sem := make(chan struct{}, listMetadataConcurrency)
 	var wg sync.WaitGroup
 launch:
 	for batch := 1; batch < batches; batch++ {
 		select {
 		case sem <- struct{}{}:
-		case <-ctx.Done():
+		case <-batchCtx.Done():
 			break launch
 		}
 		wg.Add(1)
@@ -681,23 +687,27 @@ launch:
 			defer wg.Done()
 			defer func() { <-sem }()
 			start := index * client.ResourceBatchGetMaxIDs
-			results[index], failures[index] = c.BatchGetResources(ctx, ids[start:min(start+client.ResourceBatchGetMaxIDs, len(ids))])
+			resources, err := c.BatchGetResources(batchCtx, ids[start:min(start+client.ResourceBatchGetMaxIDs, len(ids))])
+			if err != nil {
+				cancel(err)
+				return
+			}
+			results[index] = resources
 		}(batch)
 	}
 	wg.Wait()
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	if cause := context.Cause(batchCtx); cause != nil {
+		return nil, cause
 	}
 	matched := make([]client.Resource, 0, len(ids))
-	for index, resources := range results {
-		if failures[index] != nil {
-			return nil, failures[index]
-		}
+	for _, resources := range results {
 		matched = append(matched, resources...)
 	}
+	log.Debug("list: resource metadata lookup complete", "requested", len(ids), "returned", len(matched))
 	return filterListableResources(matched), nil
 }
 
+// fetchAllowedResourcesLegacy satisfies the full channel allow-set across pages (#590/#596/#599), up to the cap.
 func (h *Handler) fetchAllowedResourcesLegacy(ctx context.Context, log *slog.Logger, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
 	pending := make(map[string]struct{}, len(allowed))
 	for id := range allowed {

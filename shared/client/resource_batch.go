@@ -11,9 +11,12 @@ import (
 )
 
 // ResourceBatchGetMaxIDs bounds one metadata request.
+// TODO(upstream-contract): mirrors the producer's BatchGetResourcesRequest:
+// POST /v1/resources/batch-get, resource_ids (1..100), owner-scoped unpaged
+// metadata, and 200 data:[] for unknown/foreign IDs; no qURL history or counts.
 const ResourceBatchGetMaxIDs = 100
 
-// BatchGetResources reads metadata for public-key resource IDs without querying qURL history.
+// BatchGetResources reads metadata by resource_id public keys, without qURL history.
 func (c *Client) BatchGetResources(ctx context.Context, ids []string) ([]Resource, error) {
 	if len(ids) == 0 || len(ids) > ResourceBatchGetMaxIDs {
 		return nil, errors.New("resource metadata lookup requires 1 to 100 IDs")
@@ -39,6 +42,7 @@ func (c *Client) BatchGetResources(ctx context.Context, ids []string) ([]Resourc
 		return nil, fmt.Errorf("build resource metadata lookup: %w", err)
 	}
 	var resources []Resource
+	// This POST only reads metadata; the normal retry policy can replay its body.
 	meta, err := c.do(req, &resources, "POST /v1/resources/batch-get")
 	if err != nil {
 		return nil, err
