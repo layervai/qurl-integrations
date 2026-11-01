@@ -201,3 +201,24 @@ transport evidence fails that arm instead of passing as an ordinary denial. The 
 owned resource/link identifiers; it never stores keys, packets, or capabilities.
 A failed content assertion remains failed. Unresolved cleanup cannot turn a
 successful content test green. This does not recover keys from earlier runs.
+
+### URL-target one-use browser check (Sandbox only)
+
+With that verified ownership and native-cleanup configuration, run only
+`tests/url-target-one-time.test.ts` with `--reporters=default`. This test needs
+the Sandbox API key, not bot/channel credentials, and sends no bot messages.
+It adds a nonce to the Sandbox API's public `/health` URL and creates one
+one-use URL resource. A real browser must serve exactly `{"status":"healthy"}`
+from the isolated `q-` origin. A fresh browser context must then receive an
+authenticated denial, and management status must report one use or HTTP 404.
+
+The November 2026 Sandbox observation was a bootstrap redirect through
+`/.well-known/qurl/session` to the isolated origin's root, not a redirect to
+the target's public hostname. The predicate requires that document response
+and its JSON body; an origin change or timeout alone cannot pass.
+
+Mint intent and known IDs are fsynced into the private ownership JSONL before
+assertions. There is one POST attempt. Preserve the journal on every outcome;
+an ambiguous create or unconfirmed target binding requires owner recovery.
+The test revokes only the nonce-bound child/source it verified. Native CLOSED,
+authenticated no-admission, and API cleanup remain separate receipts.
