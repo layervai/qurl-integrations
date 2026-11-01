@@ -70,7 +70,7 @@ The following stay literal — don't "finish" the rebrand:
 - Go identifiers: types/structs/funcs (`QURL`, `QURLClient`, `Qurl`, `CreateQurlRequest`, `QURLLink`)
 - Env vars (`QURL_API_KEY`, `QURL_ENDPOINT`, `QURL_BASE_URL`, `QURL_TIMEOUT`)
 - DDB table/column names and JSON keys (`qurl_sends`, `qurl_send_configs`, `qurl_link`, `qurl_id`)
-- Wire-protocol HTTP headers (`QURL-Signature`, `X-QURL-*`) and User-Agent strings (`qurl-cli/...`, `qurl-go-client/...`, `qurl-discord-bot/1.0`)
+- Wire-protocol HTTP headers (`QURL-Signature`, `X-QURL-*`) and User-Agent strings (`qurl-cli/...`, `qurl-go-client/...`, `qurl-bot-slack/...`, `qurl-discord-bot/1.0`)
 - Slash command names (`/qurl file`, `/qurl map`, `/qurl help`) and the CLI binary `qurl`
 - OAuth scope identifiers (`qurl:read`, `qurl:write`, `qurl:resolve`)
 - Domain literals (`qurl.link`, `qurl.site`)
