@@ -51,7 +51,11 @@ func scanDaemonLog(path string, since, until time.Time, needles *needleSet, red 
 		if !ok || at.Before(since) || at.After(until) {
 			continue
 		}
-		if !needles.matches(line) && !mentionsThrottle(line) {
+		message := line[len(daemonLogTimeLayout):]
+		if strings.HasPrefix(line, "time=") {
+			_, message, _ = strings.Cut(line, " ")
+		}
+		if !needles.matches(message) && !mentionsThrottle(message) {
 			continue
 		}
 		out = append(out, red.apply(line))
