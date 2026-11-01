@@ -690,3 +690,46 @@ at-most-once diagnostic, not a guaranteed log-delivery system.
 runs the native conditional-write proof. It only accepts a loopback endpoint,
 uses fake credentials and deletes its own unique fixture table. Discord Docker
 CI runs the same proof against its existing local DynamoDB service.
+
+### Sender counter reconciliation
+
+The sender monitor reads a full source snapshot first. For sends above 100
+recipients, a confirmed display floor and a recent complete snapshot let healthy
+ticks read the sharded aggregate instead of all recipient IDs. Smaller sends
+keep one source BatchGet per unchanged tick. The confirmed initial send edit
+seeds floor zero, and large sends initialize a zero shard without resetting an
+existing count. Missing or partial aggregate reads, counts below
+the known floor, legacy/no-floor rows, recipient additions and clock rollback
+force a source read. A known invalid count disables further aggregate reads for
+that monitor. Incomplete source reads fail; they never establish freshness.
+
+The aggregate remains an optimization. The source fact and shard increment are
+not atomic. During dense polling, source reads repeat every 30 seconds to repair
+a crash between those writes. At steady intervals above 30 seconds, each tick
+still reads source. This keeps the normal five-second poll cadence and existing
+webhook fast path, but a new source-only crash gap can take 30 seconds plus the
+next tick/read time to repair instead of the old next-tick recovery. Known floors
+never move backward, and a failed final edit does not stop the monitor or advance
+the stored floor. Reconciliation repairs undercounts only: it cannot lower an
+already confirmed floor, including an old overcount created by pre-upgrade
+workers. Rolling-worker and old-row behavior still needs the held Sandbox proof.
+Source facts are checked with a strong read before aggregate
+completion can settle the monitor. Each candidate final count gets one complete
+strong audit; a contradicted floor then uses normal source reads rather than
+repeating strong full-fanout reads. An already confirmed external floor does not
+trigger a duplicate edit. Recipient additions during an edit keep polling the
+new total; a late edit receipt after stop cannot write a floor.
+
+Each shard increment uses a one-item DynamoDB transaction with one random
+request token per call and a three-second request bound. Transaction conflicts
+retry at most six times with jitter and the same command/token. SDK retries with that
+token cannot double-count a committed write after a lost response. Transactions
+use two write phases, so this costs more writes than the old non-idempotent ADD.
+The shard layout stays the same for rolling workers; this is no capacity claim.
+
+The local `scripts/smoke-view-counter.js` proof measures 200 source BatchGet calls
+for 20,000 IDs versus one 64-key aggregate call. It also creates a real source-only
+crash gap and replays the exact increment transaction to prove it counts once.
+The gap remains visible to source reads; monitor tests prove recovery. These
+are local request counts, not production latency or capacity
+measurements. Main rollout and real cross-replica Sandbox proof remain held.

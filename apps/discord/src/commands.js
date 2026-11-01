@@ -1358,6 +1358,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   }
 
   let viewed = 0;
+  let displayedFloor = 0;
+  let renderedGeneration = 0;
+  let lastSourceSnapshotAt = null;
+  let aggregateUsable = true;
+  let lastStrongFinalCount = null;
   let allDone = false;
 
   // A tick that began before addRecipients must not render its stale view map.
@@ -1387,6 +1392,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
         }
       }
       trackingGeneration++;
+      lastSourceSnapshotAt = null;
       // Re-enter the dense polling phase without extending monitor lifetime.
       earlyPhaseUntil = Date.now() + EARLY_POLL_WINDOW_MS;
       // Two cases:
@@ -1514,7 +1520,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // mutate across ticks + addRecipients; viewCounterDegraded can flip
   // mid-life) — buildStatusMsg snapshots them at call time and hands them
   // to the pure fn.
-  function buildStatusMsg(viewedOverride = viewed) {
+  function buildStatusMsg(viewedOverride = Math.max(viewed, displayedFloor)) {
     return renderViewCounter({
       baseMsg: currentBaseMsg,
       viewed: viewedOverride,
@@ -1523,12 +1529,10 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     });
   }
 
-  // Non-overlapping ticks: arm()/tick() below reschedule the NEXT tick
-  // only after the current runTick (including its single `await
-  // db.getQurlViews`) resolves, so two ticks can never be in flight at
-  // once — the self-destruct-era setInterval concurrency race is gone.
-  // The synchronous `status === 'opened'` guard at the flip site stays
-  // as defense-in-depth, so `viewed++` cannot double-count.
+  // Aggregate reads stay an optimization: reconcile source facts at least every
+  // 30s during dense polling, and each steady tick whose interval exceeds 30s.
+  // This repairs a crash between source recording and the non-atomic shard ADD.
+  const SOURCE_RECONCILE_MS = 30_000;
   const runTick = async () => {
     if (isTerminated()) {
       clearTimeout(timer);
@@ -1540,62 +1544,72 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     if (viewCounterDegraded || trackedQurlIds.size === 0) return;
     try {
       const genAtStart = trackingGeneration;
-      const views = await db.getQurlViews([...trackedQurlIds]);
-      // addRecipients during the await invalidates this snapshot.
-      if (trackingGeneration !== genAtStart) return;
-      if (!interaction) return;
-
-      // Iterate the (sparse) views map instead of the full linkStatus
-      // set — usually only a handful of qurls have actually been
-      // accessed, vs. up to 50 tracked links.
-      let changed = false;
-      for (const [qurlId, v] of views) {
-        if (!(v.accessCount > 0)) continue;
-        const current = linkStatus.get(qurlId);
-        if (!current || current.status === 'opened') continue;
-        linkStatus.set(qurlId, { ...current, status: 'opened' });
-        viewed++;
-        changed = true;
-      }
-      if (changed) {
-        // Clamp poll renders to the persisted display floor. The fast-path
-        // can strongly read/render N before this replica's eventual
-        // getQurlViews catches up; rendering below last_rendered_count would
-        // create a visible N -> lower -> N flicker.
-        let rendered = viewed;
+      const useAggregate = trackedQurlIds.size > 100 && aggregateUsable;
+      let floor = null;
+      const readFloor = async () => {
+        try { floor = await db.getSendRenderedCount(sendId); }
+        catch (err) { logger.debug('Monitor floor-read failed; rendering local poll count', { sendId, error: err.message }); }
+        if (Number.isSafeInteger(floor) && floor >= 0) displayedFloor = Math.max(displayedFloor, floor);
+      };
+      if (useAggregate) await readFloor();
+      if (trackingGeneration !== genAtStart || !interaction) return;
+      const haveFloor = Number.isSafeInteger(floor) && floor >= 0;
+      const age = lastSourceSnapshotAt === null ? -1 : Date.now() - lastSourceSnapshotAt;
+      let aggregate = null;
+      if (useAggregate && haveFloor && age >= 0 && age < SOURCE_RECONCILE_MS) {
         try {
-          rendered = Math.max(rendered, await db.getSendRenderedCount(sendId));
-        } catch (floorErr) {
-          logger.debug('Monitor floor-read failed; rendering local poll count', { sendId, error: floorErr.message });
+          const count = await db.getSendViewedCount(sendId, expectedCount);
+          if (Number.isSafeInteger(count) && count >= Math.max(viewed, displayedFloor)
+              && count <= expectedCount) aggregate = count;
+          else aggregateUsable = false; // A known gap must not add a failed aggregate read to every source poll.
+        } catch (err) {
+          logger.debug('Monitor aggregate unavailable; reconciling source', { sendId, error: err.message });
         }
-        const pending = Math.max(0, expectedCount - rendered);
-        const ok = await safeEdit({ content: buildStatusMsg(rendered), components: pending > 0 ? [buttonRow] : [] });
-        if (pending === 0) { allDone = true; clearTimeout(timer); }
-        // Share the monotonic floor with the webhook fast-path. The poll
-        // is now a first-class renderer of the settled count (coalescing
-        // makes the burst tail poll-only), so advance last_rendered_count
-        // to what we just DISPLAYED — only on a confirmed edit (`ok`),
-        // mirroring the fast-path's commit-after-edit. Without this the
-        // fast-path could read a stale lower N after the poll showed a
-        // higher count and step the display BACKWARDS until the next tick.
-        // CCFE is the normal "a concurrent fast-path already advanced
-        // higher" case (returns false, ignored). Best-effort + wrapped so
-        // a non-CCFE DDB throw can't surface as a misleading "poll failed"
-        // or skip the allDone bookkeeping above. (tryAdvanceRenderedCount
-        // also stamps last_rendered_at, arming the coalesce clock — so a
-        // genuine NEW view landing within QURL_VIEW_COUNTER_COALESCE_MS
-        // after this tick is coalesced by the fast-path's step 4b and
-        // rendered by the webhook trailing flush, not stranded for the
-        // next poll.) NOT advanced on the degraded
-        // early-return or the terminal-freeze render — neither displays a
-        // live counter, so advancing would strand it.
-        if (ok) {
-          try {
-            await db.tryAdvanceRenderedCount(sendId, rendered);
-          } catch (advErr) {
-            logger.debug('Monitor floor-advance failed (non-CCFE); fast-path/poll self-heal on next tick', { sendId, error: advErr.message });
-          }
+      }
+      if (trackingGeneration !== genAtStart || !interaction) return;
+      // Only source facts can settle the monitor. Final reads are strong so a
+      // committed first-view fact cannot lag its aggregate and strand the loop.
+      const finalCandidate = Math.max(aggregate ?? 0, displayedFloor);
+      const verifyFinal = finalCandidate >= expectedCount && finalCandidate !== lastStrongFinalCount;
+      if (aggregate === null || verifyFinal) {
+        const views = await db.getQurlViews([...trackedQurlIds], { consistentRead: verifyFinal });
+        if (trackingGeneration !== genAtStart || !interaction) return;
+        for (const [qurlId, view] of views) {
+          if (!(view.accessCount > 0)) continue;
+          const current = linkStatus.get(qurlId);
+          if (!current || current.status === 'opened') continue;
+          linkStatus.set(qurlId, { ...current, status: 'opened' });
+          viewed++;
         }
+        lastSourceSnapshotAt = Date.now();
+        if (verifyFinal) lastStrongFinalCount = finalCandidate;
+        if (verifyFinal && viewed < expectedCount) {
+          aggregateUsable = false;
+          aggregate = null;
+        }
+      }
+      let rendered = Math.max(viewed, displayedFloor, aggregate ?? 0);
+      if (rendered <= displayedFloor && renderedGeneration === trackingGeneration) {
+        if (viewed >= expectedCount) { allDone = true; clearTimeout(timer); }
+        return;
+      }
+      // Small sends retain one source BatchGet per unchanged tick, without extra floor/aggregate reads.
+      if (!useAggregate) await readFloor();
+      if (trackingGeneration !== genAtStart || !interaction) return;
+      rendered = Math.max(rendered, displayedFloor);
+      if (rendered <= displayedFloor && renderedGeneration === trackingGeneration) {
+        if (viewed >= expectedCount) { allDone = true; clearTimeout(timer); }
+        return;
+      }
+      const pending = Math.max(0, expectedCount - rendered);
+      const ok = await safeEdit({ content: buildStatusMsg(rendered), components: pending > 0 ? [buttonRow] : [] });
+      if (!ok || !interaction || stopped) return; // Never commit a failed or stopped render.
+      displayedFloor = Math.max(displayedFloor, rendered);
+      renderedGeneration = genAtStart;
+      if (viewed >= expectedCount && trackingGeneration === genAtStart) { allDone = true; clearTimeout(timer); }
+      try { await db.tryAdvanceRenderedCount(sendId, rendered); }
+      catch (err) {
+        logger.debug('Monitor floor-advance failed (non-CCFE); fast-path/poll self-heal on next tick', { sendId, error: err.message });
       }
     } catch (err) {
       logger.error('Link monitor poll failed', { sendId, error: err.message });

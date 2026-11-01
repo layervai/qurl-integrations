@@ -1749,9 +1749,12 @@ describe('qurl sends', () => {
 
   test('incrementSendViewedCount: increments a sharded qurl_views counter row, not the send config hot row', async () => {
     const before = Math.floor(Date.now() / 1000);
-    ddbMock.on(UpdateCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
     await expect(store.incrementSendViewedCount('s1', 'q_a', 1)).resolves.toBeUndefined();
-    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+    expect(transaction.ClientRequestToken).toMatch(/^[0-9a-f-]{36}$/);
+    expect(transaction.TransactItems).toHaveLength(1);
+    const input = transaction.TransactItems[0].Update;
     expect(input.TableName).toBe('test-prefix-qurl-views');
     expect(input.Key.qurl_id).toBe('__send_view_count__s1#00');
     expect(input.UpdateExpression).toBe('SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one');
@@ -1762,6 +1765,25 @@ describe('qurl sends', () => {
     expect(input.ExpressionAttributeValues[':shard']).toBe(0);
     expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + 30 * 24 * 60 * 60);
     expect(input.ReturnValues).toBeUndefined();
+  });
+
+  test('incrementSendViewedCount: conflict retries preserve the exact command and token', async () => {
+    const conflict = Object.assign(new Error('conflict'), { name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'TransactionConflict' }] });
+    ddbMock.on(TransactWriteCommand).rejectsOnce(conflict).resolves({});
+    await store.incrementSendViewedCount('s1', 'q_a', 1);
+    const calls = ddbMock.commandCalls(TransactWriteCommand);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].args[0]).toBe(calls[1].args[0]);
+    expect(calls[0].args[1].abortSignal).toBe(calls[1].args[1].abortSignal);
+    ddbMock.reset();
+    ddbMock.on(TransactWriteCommand).rejects(conflict);
+    await expect(store.incrementSendViewedCount('s1', 'q_a', 1)).rejects.toThrow('conflict');
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(7);
+    ddbMock.reset();
+    ddbMock.on(TransactWriteCommand).rejects(Object.assign(new Error('invalid'), { name: 'ValidationException' }));
+    await expect(store.incrementSendViewedCount('s1', 'q_a', 1)).rejects.toThrow('invalid');
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
   test('getSendViewedCount: small sends read one strong shard key', async () => {
@@ -1786,9 +1808,9 @@ describe('qurl sends', () => {
   });
 
   test('getSendViewedCount: expanded expectedCount still reads earlier one-shard writes', async () => {
-    ddbMock.on(UpdateCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
     await store.incrementSendViewedCount('s1', 'q_a', 1);
-    const writtenKey = ddbMock.commandCalls(UpdateCommand)[0].args[0].input.Key;
+    const writtenKey = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems[0].Update.Key;
     expect(writtenKey).toEqual({ qurl_id: '__send_view_count__s1#00' });
 
     ddbMock.reset();
@@ -1852,8 +1874,8 @@ describe('qurl sends', () => {
 
     ddbMock.reset();
     ddbMock.on(GetCommand).resolves({});
-    await expect(store.getSendRenderedCount('missing')).resolves.toBe(0);
-    await expect(store.getSendRenderedCount('')).resolves.toBe(0);
+    await expect(store.getSendRenderedCount('missing')).resolves.toBeNull();
+    await expect(store.getSendRenderedCount('')).resolves.toBeNull();
   });
 
   test('touchRenderedAt: failure-path debounce stamp — SETs last_rendered_at ONLY, no count, no condition', async () => {
@@ -1930,6 +1952,19 @@ describe('qurl sends', () => {
     const expectedCountPlaceholder = Object.entries(input.ExpressionAttributeValues)
       .find(([, val]) => val === 3)?.[0];
     expect(input.ConditionExpression).toBe(`attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`);
+  });
+
+  test('saveSendConfirmState: confirmed zero initializes the floor and large-send shard without resetting either', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.saveSendConfirmState('s1', { expectedCount: 20000, viewedCount: 0 });
+    const [config, shard] = ddbMock.commandCalls(UpdateCommand).map(call => call.args[0].input);
+    expect(config.UpdateExpression).toContain('last_rendered_count = if_not_exists(last_rendered_count, :initial_floor)');
+    expect(config.ExpressionAttributeValues[':initial_floor']).toBe(0);
+    expect(shard.Key).toEqual({ qurl_id: '__send_view_count__s1#00' });
+    expect(shard.UpdateExpression).toContain('viewed_count = if_not_exists(viewed_count, :zero)');
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).resolvesOnce({}).rejectsOnce(new Error('throttled'));
+    await expect(store.saveSendConfirmState('s1', { expectedCount: 20000, viewedCount: 0 })).resolves.toBe(true);
   });
 
   test('saveSendConfirmState: partial /qurl-add re-persist updates ONLY the passed keys — NEVER nulls the live token', async () => {
@@ -2336,7 +2371,7 @@ describe('qurl views', () => {
     expect(views.size).toBe(2);
   });
 
-  test.each([false, true])('getQurlViews: bounded backoff preserves completed rows (exhausted=%s)', async (exhausted) => {
+  test.each([false, true])('getQurlViews: bounded backoff rejects incomplete snapshots (exhausted=%s)', async (exhausted) => {
     jest.useFakeTimers();
     const timeout = jest.spyOn(global, 'setTimeout');
     try {
@@ -2354,7 +2389,7 @@ describe('qurl views', () => {
           } : {}),
         };
       });
-      const pending = store.getQurlViews(['q_a', 'q_b']);
+      const pending = store.getQurlViews(['q_a', 'q_b'], { consistentRead: true }).catch(error => error);
       await jest.runAllTimersAsync();
       const views = await pending;
       expect(attempt).toBe(4);
@@ -2364,10 +2399,10 @@ describe('qurl views', () => {
         [{ qurl_id: 'q_b' }], [{ qurl_id: 'q_b' }], [{ qurl_id: 'q_b' }],
       ]);
       expect(ddbMock.commandCalls(BatchGetCommand)[3].args[0].input.RequestItems['test-prefix-qurl-views'].ConsistentRead).toBe(true);
-      expect(views.get('q_a')).toEqual({ accessCount: 1, consumed: false });
+      if (!exhausted) expect(views.get('q_a')).toEqual({ accessCount: 1, consumed: false });
       expect(logger.warn.mock.calls).toEqual(exhausted
         ? [['qurl view read retries exhausted', { unprocessed_keys: 1 }]] : []);
-      if (exhausted) expect(views.has('q_b')).toBe(false);
+      if (exhausted) expect(views).toEqual(new Error('qurl view read incomplete after retries'));
       else expect(views.get('q_b')).toEqual({ accessCount: 2, consumed: true });
     } finally {
       timeout.mockRestore();
@@ -2576,4 +2611,26 @@ describe('authoritative link expiry persistence', () => {
 test('single send expiry validation runs before its write', async () => {
   await expect(store.recordQURLSend({ expiresAt: null })).rejects.toThrow(/expiry/i);
   expect(ddbMock.calls()).toHaveLength(0);
+});
+
+
+describe('sender count availability', () => {
+  test('a missing aggregate is unknown, while a present zero is valid', async () => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: {} });
+    await expect(store.getSendViewedCount('missing', 20000)).rejects.toThrow('unavailable');
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { 'test-prefix-qurl-views': [{ viewed_count: 0 }] } });
+    await expect(store.getSendViewedCount('s1', 20000)).resolves.toBe(0);
+  });
+
+  test.each([-1, 0.5, '3'])('a malformed shard is unknown (%s)', async count => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { 'test-prefix-qurl-views': [{ viewed_count: count }] } });
+    await expect(store.getSendViewedCount('s1', 20000)).rejects.toThrow('invalid');
+  });
+
+  test('persistent unprocessed shard keys cannot return a partial sum', async () => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { 'test-prefix-qurl-views': [{ viewed_count: 1 }] },
+      UnprocessedKeys: { 'test-prefix-qurl-views': { Keys: [{ qurl_id: '__send_view_count__s1#63' }] } } });
+    await expect(store.getSendViewedCount('s1', 20000)).rejects.toThrow('incomplete');
+    expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(2);
+  });
 });

@@ -472,9 +472,9 @@ async function recordQurlView({
 // 20000), so a full send is up to ⌈N/100⌉ = 200 sequential BatchGets.
 // The sender-counter fast-path now renders from fanout-scaled sharded
 // counters in this same table, so this BatchGet-all path is not on the
-// normal sub-second render path. It remains the monitor poll reader and a
-// legacy fallback for live rows created before the aggregate existed.
-async function getQurlViews(qurlIds) {
+// normal sub-second render path. Periodic monitor reconciliation and legacy
+// or incomplete-aggregate fallbacks still read these source facts.
+async function getQurlViews(qurlIds, { consistentRead = false } = {}) {
   if (!Array.isArray(qurlIds) || qurlIds.length === 0) return new Map();
   // Drop empties defensively — an empty qurl_id is a collision attractor.
   const keys = [...new Set(qurlIds.filter(Boolean))].map(id => ({ qurl_id: id }));
@@ -492,7 +492,7 @@ async function getQurlViews(qurlIds) {
     }
   };
   for (let i = 0; i < keys.length; i += CHUNK) {
-    let request = { Keys: keys.slice(i, i + CHUNK) };
+    let request = { Keys: keys.slice(i, i + CHUNK), ConsistentRead: consistentRead };
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const res = await ddb.send(new BatchGetCommand({
         RequestItems: { [TABLES.qurl_views]: request },
@@ -506,10 +506,13 @@ async function getQurlViews(qurlIds) {
       }
       // Retry only unfinished keys; bounded 50/100/200ms waits per chunk.
       await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
-      request = unprocessed;
+      request = { ...unprocessed, ConsistentRead: consistentRead };
     }
   }
-  if (unprocessedKeys > 0) logger.warn('qurl view read retries exhausted', { unprocessed_keys: unprocessedKeys });
+  if (unprocessedKeys > 0) {
+    logger.warn('qurl view read retries exhausted', { unprocessed_keys: unprocessedKeys });
+    throw new Error('qurl view read incomplete after retries');
+  }
   return out;
 }
 
@@ -1197,8 +1200,8 @@ async function getSendRenderState(sendId) {
 }
 
 const SEND_VIEW_COUNTER_MAX_SHARDS = 64;
-// Roughly half DynamoDB's ~1k WCU/s single-partition ceiling, leaving
-// burst headroom before the next power-of-two shard step kicks in.
+// Keep the existing shard layout across rolling workers. Transactional
+// increments use two write phases; this target is not a throughput guarantee.
 const SEND_VIEW_COUNTER_TARGET_WRITES_PER_SHARD = 500;
 const SEND_VIEW_COUNTER_PREFIX = '__send_view_count__';
 // Keep the optional inline qurl_id cache comfortably below DynamoDB's
@@ -1255,43 +1258,71 @@ async function incrementSendViewedCount(sendId, qurlId, expectedCount) {
   if (!qurlId) throw new Error('incrementSendViewedCount: qurlId is required');
   const shardCount = sendViewedCountShardCount(expectedCount);
   const shard = sendViewedCountShard(qurlId, shardCount);
-  await ddb.send(new UpdateCommand({
-    TableName: TABLES.qurl_views,
-    Key: { qurl_id: sendViewedCountKey(sendId, shard) },
-    UpdateExpression: 'SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one',
-    ExpressionAttributeValues: {
-      ':sid': sendId,
-      ':shard': shard,
-      ':exp': Math.floor(Date.now() / 1000) + QURL_VIEW_TTL_SECONDS,
-      ':one': 1,
-    },
-  }));
+  const command = new TransactWriteCommand({
+    // One token per logical increment makes SDK retries safe after a lost response.
+    ClientRequestToken: crypto.randomUUID(),
+    TransactItems: [{
+      Update: {
+        TableName: TABLES.qurl_views,
+        Key: { qurl_id: sendViewedCountKey(sendId, shard) },
+        UpdateExpression: 'SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one',
+        ExpressionAttributeValues: {
+          ':sid': sendId,
+          ':shard': shard,
+          ':exp': Math.floor(Date.now() / 1000) + QURL_VIEW_TTL_SECONDS,
+          ':one': 1,
+        },
+      },
+    }],
+  });
+  const signal = AbortSignal.timeout(3000);
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted();
+    try {
+      await ddb.send(command, { abortSignal: signal });
+      return;
+    } catch (err) {
+      const conflict = err.name === 'TransactionConflictException'
+        || (err.name === 'TransactionCanceledException'
+          && err.CancellationReasons?.some(reason => reason.Code === 'TransactionConflict'));
+      if (!conflict || signal.aborted || attempt >= 6) throw err;
+      // Preserve the command/token through contention retries and ambiguous SDK responses.
+      await new Promise(resolve => setTimeout(resolve, Math.min(250, 25 * 2 ** attempt) * (0.5 + Math.random())));
+    }
+  }
 }
 
 async function getSendViewedCount(sendId, expectedCount) {
-  if (!sendId) return 0;
+  if (!sendId) throw new Error('getSendViewedCount: sendId is required');
   const keys = sendViewedCountKeys(sendId, sendViewedCountShardCount(expectedCount));
   const res = await ddb.send(new BatchGetCommand({
     RequestItems: { [TABLES.qurl_views]: { Keys: keys, ConsistentRead: true } },
   }));
   let total = 0;
+  let found = false;
   const collect = (batch) => {
     for (const item of (batch.Responses && batch.Responses[TABLES.qurl_views]) || []) {
-      if (typeof item.viewed_count === 'number' && item.viewed_count > 0) {
-        total += item.viewed_count;
+      if (!Number.isSafeInteger(item.viewed_count) || item.viewed_count < 0) {
+        throw new Error('send viewed count shard is invalid');
       }
+      found = true;
+      total += item.viewed_count;
     }
   };
   collect(res);
   const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
   if (unprocessed && unprocessed.Keys && unprocessed.Keys.length > 0) {
-    // Single retry by design: if sustained DDB throttling still leaves a
-    // partial sum, the next non-coalesced render and the poll backstop
-    // re-read from source-of-truth qurl_views rows and correct the count.
-    collect(await ddb.send(new BatchGetCommand({
+    // A partial retry is unavailable, never a complete count. Callers fall
+    // back to source facts when this bounded read fails.
+    const retry = await ddb.send(new BatchGetCommand({
       RequestItems: { [TABLES.qurl_views]: { ...unprocessed, ConsistentRead: true } },
-    })));
+    }));
+    collect(retry);
+    if (retry.UnprocessedKeys?.[TABLES.qurl_views]?.Keys?.length > 0) {
+      throw new Error('send viewed count read incomplete after retry');
+    }
   }
+  if (!found || !Number.isSafeInteger(total)) throw new Error('send viewed count aggregate unavailable');
   return total;
 }
 
@@ -1299,7 +1330,7 @@ async function getSendViewedCount(sendId, expectedCount) {
 // uses this to avoid rendering below a fast-path edit that already advanced
 // last_rendered_count on another replica.
 async function getSendRenderedCount(sendId) {
-  if (!sendId) return 0;
+  if (!sendId) return null;
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
@@ -1307,7 +1338,7 @@ async function getSendRenderedCount(sendId) {
     ConsistentRead: true,
   }));
   const n = res.Item?.last_rendered_count;
-  return typeof n === 'number' && n > 0 ? n : 0;
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 // Monotonic AFTER-edit commit for the view counter (PR-B calls this
@@ -1448,6 +1479,11 @@ async function saveSendConfirmState(sendId, {
     values[placeholder] = val;
     if (attr === 'expected_count') expectedCountPlaceholder = placeholder;
   }
+  // The caller has confirmed the initial zero-count Discord edit. Preserve any newer floor.
+  if (viewedCount === 0) {
+    sets.push('last_rendered_count = if_not_exists(last_rendered_count, :initial_floor)');
+    values[':initial_floor'] = 0;
+  }
   if (sets.length === 0) return;
   const update = {
     TableName: TABLES.qurl_send_configs,
@@ -1464,6 +1500,19 @@ async function saveSendConfirmState(sendId, {
   }
   try {
     await ddb.send(new UpdateCommand(update));
+    if (viewedCount === 0 && Number.isSafeInteger(expectedCount) && expectedCount > 100) {
+      try {
+        await ddb.send(new UpdateCommand({
+          TableName: TABLES.qurl_views,
+          Key: { qurl_id: sendViewedCountKey(sendId, 0) },
+          UpdateExpression: 'SET viewed_count = if_not_exists(viewed_count, :zero), send_id = :sid, counter_shard = :zero, expires_at = :exp',
+          ExpressionAttributeValues: { ':zero': 0, ':sid': sendId,
+            ':exp': Math.floor(Date.now() / 1000) + QURL_VIEW_TTL_SECONDS },
+        }));
+      } catch (err) {
+        logger.warn('Send aggregate initialization failed; poll uses source facts', { sendId, error: err.message });
+      }
+    }
     return true;
   } catch (err) {
     if (err.name === 'ConditionalCheckFailedException' && expectedCountPlaceholder) {
