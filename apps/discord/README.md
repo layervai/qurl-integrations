@@ -663,5 +663,8 @@ fields @timestamp, @message
 The event groups distinguish recent walks, exact-count hot caches and failures.
 No matching rows with debug logging off means unavailable telemetry.
 The retired `/unlinked` command no longer uses an approximate-count threshold.
-Long slash-command walks update each waiting interaction every ten pages. A failed
-progress update does not abort the member walk or mark it fresh.
+Long slash-command walks offer progress every ten full pages, with at most one
+outstanding edit per interaction. A slow edit cannot stall the walk or other
+senders; each sender waits for its own outstanding edit before its final reply.
+A failed progress edit does not abort a successfully completed walk or prevent
+that completed walk from being marked fresh.

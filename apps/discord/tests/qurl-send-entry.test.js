@@ -816,6 +816,9 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     expect(page).toBe(11);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     expect(int.editReply.mock.calls.at(-1)[0].content).not.toMatch(/Loading server members/);
+    sendCooldowns.clear();
+    await handleQurlSend(int);
+    expect(page).toBe(11); // Progress delivery does not control completed-walk freshness.
   });
 
   test('coalesced member walks update each waiting slash command', async () => {
@@ -842,6 +845,47 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       expect(int.editReply).toHaveBeenCalledWith({ content: 'Loading server members… 10000 checked.' });
       expect(int.editReply.mock.calls.at(-1)[0].content).not.toMatch(/Loading server members/);
     }
+  });
+
+
+  test('a slow progress edit cannot stall the walk or another sender', async () => {
+    const first = makeInteraction({ options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
+      guildMembers: { '500000000000000007': {} } });
+    const second = makeInteraction({ userId: '500000000000000008', options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' } });
+    second.guild = first.guild;
+    first.memberPermissions = second.memberPermissions = { has: jest.fn(() => true) };
+    let releaseProgress;
+    first.editReply.mockImplementationOnce(() => new Promise(resolve => { releaseProgress = resolve; }));
+    let releaseWalk;
+    const gate = new Promise(resolve => { releaseWalk = resolve; });
+    let page = 0;
+    first.guild.members.list.mockImplementation(async () => {
+      if (++page === 1) await gate;
+      return { size: page <= 20 ? 1000 : 0, lastKey: () => String(page) };
+    });
+    const one = handleQurlSend(first);
+    const two = handleQurlSend(second);
+    await new Promise(resolve => setImmediate(resolve));
+    releaseWalk();
+    await two;
+    expect(page).toBe(21);
+    expect(first.editReply).toHaveBeenCalledTimes(1);
+    expect(second.editReply.mock.calls.at(-1)[0].content).not.toMatch(/Loading server members/);
+    releaseProgress({});
+    await one;
+    expect(first.editReply.mock.calls.at(-1)[0].content).not.toMatch(/Loading server members/);
+  });
+
+  test('a post-walk recipient error replaces progress with its final explanation', async () => {
+    const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
+      guildMembers: { '500000000000000007': { bot: true } } });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    let page = 0;
+    int.guild.members.list.mockImplementation(async () => ({ size: ++page <= 10 ? 1000 : 0, lastKey: () => String(page) }));
+    await handleQurlSend(int);
+    expect(int.editReply).toHaveBeenCalledWith({ content: 'Loading server members… 10000 checked.' });
+    expect(int.editReply.mock.calls.at(-1)[0].content).not.toMatch(/Loading server members/);
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
   });
 
   test('concurrent invocations in the same guild share one in-flight fetch', async () => {

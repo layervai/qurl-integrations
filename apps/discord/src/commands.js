@@ -415,11 +415,15 @@ async function prewarmGuildMembersCache(guild, logCtx, onProgress) {
     });
     return;
   }
+  const listener = onProgress ? { notify: onProgress, pending: null } : null;
   const existing = prewarmInFlight.get(guild.id);
   if (existing) {
-    if (onProgress) existing.progress.add(onProgress);
+    if (listener) existing.progress.add(listener);
     try { return await existing.promise; }
-    finally { existing.progress.delete(onProgress); }
+    finally {
+      existing.progress.delete(listener);
+      await listener?.pending;
+    }
   }
   const completed = completedPrewarms.get(guild);
   const age = completed ? Date.now() - completed.at : -1;
@@ -431,7 +435,7 @@ async function prewarmGuildMembersCache(guild, logCtx, onProgress) {
     return;
   }
   completedPrewarms.delete(guild);
-  const progress = new Set(onProgress ? [onProgress] : []);
+  const progress = new Set(listener ? [listener] : []);
   // Defer the first SDK call until the in-flight entry exists, even on a synchronous throw.
   const inFlight = Promise.resolve().then(async () => {
     try {
@@ -464,9 +468,12 @@ async function prewarmGuildMembersCache(guild, logCtx, onProgress) {
         // catch a class of failure where the mock differs from prod.
         const batch = await guild.members.list({ limit: DISCORD_MEMBERS_PAGE_SIZE, after, cache: true });
         if (batch.size === DISCORD_MEMBERS_PAGE_SIZE && (page + 1) % 10 === 0 && progress.size > 0) {
-          const updates = await Promise.allSettled([...progress].map(fn => Promise.resolve().then(() => fn(page + 1))));
-          if (updates.some(update => update.status === 'rejected')) {
-            logger.warn('members pre-warm progress update failed', { pages: page + 1 });
+          const pages = page + 1;
+          for (const waiter of progress) {
+            if (waiter.pending) continue; // At most one edit per waiter; never queue stale progress.
+            waiter.pending = Promise.resolve().then(() => waiter.notify(pages)).catch(() => {
+              logger.warn('members pre-warm progress update failed', { caller: logCtx?.caller, pages });
+            }).finally(() => { waiter.pending = null; });
           }
         }
         if (batch.size < DISCORD_MEMBERS_PAGE_SIZE) break;
@@ -532,7 +539,11 @@ async function prewarmGuildMembersCache(guild, logCtx, onProgress) {
     }
   });
   prewarmInFlight.set(guild.id, { promise: inFlight, progress });
-  return inFlight;
+  try { return await inFlight; }
+  finally {
+    progress.delete(listener);
+    await listener?.pending;
+  }
 }
 
 function sanitizeMessage(msg) {
