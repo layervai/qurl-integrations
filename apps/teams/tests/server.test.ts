@@ -232,7 +232,7 @@ describe('Teams HTTP body limits', () => {
     const router = (expressApp as unknown as { readonly router?: { readonly stack?: readonly { readonly name?: string; readonly route?: { readonly path?: string; readonly stack?: readonly { readonly name?: string }[] } }[] } }).router;
     const stack = router?.stack ?? [];
     const bodyParserIndex = stack.findIndex(layer => layer.name === 'jsonParser');
-    const messageRouteIndex = stack.findIndex(layer => layer.route?.path === '/api/messages');
+    const messageRouteIndex = stack.findIndex(layer => layer.route?.path === '/api/messages' && layer.route.stack?.[0]?.name === 'jsonParser');
     expect(bodyParserIndex).toBeGreaterThanOrEqual(0);
     expect(messageRouteIndex).toBeGreaterThan(bodyParserIndex);
     expect(stack[messageRouteIndex]?.route?.stack?.[0]?.name).toBe('jsonParser');
@@ -325,6 +325,8 @@ describe('Teams inbound authentication metric', () => {
       const base = `http://127.0.0.1:${address.port}`;
       for (const [method, path, body, status] of [
         ['POST', '/api/messages?private=do-not-log', '{}', 401],
+        ['POST', '/api/messages/', '{}', 401],
+        ['POST', '/API/Messages', '{}', 401],
         ['POST', '/api/messages', JSON.stringify({ padding: 'x'.repeat(256) }), 413],
         ['POST', '/unrelated', '{}', 404],
         ['POST', '/oauth/auth-test', '{}', 401],
@@ -335,9 +337,9 @@ describe('Teams inbound authentication metric', () => {
         await response.text();
       }
       const metrics = lines.map(line => JSON.parse(line) as Record<string, unknown>).filter(line => line.SignatureFailures === 1);
-      expect(metrics).toHaveLength(configured ? 1 : 0);
+      expect(metrics).toHaveLength(configured ? 3 : 0);
       if (configured) {
-        expect(metrics[0]).toEqual({
+        for (const metric of metrics) expect(metric).toEqual({
           level: 'WARN', message: 'Teams inbound authentication rejected', SignatureFailures: 1,
           _aws: { Timestamp: expect.any(Number), CloudWatchMetrics: [{
             Namespace: 'qurl-bot-teams-sandbox', Dimensions: [[]], Metrics: [{ Name: 'SignatureFailures', Unit: 'Count' }],

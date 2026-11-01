@@ -366,7 +366,8 @@ own lifecycle, as in the other integrations.
 
 The app emits `SignatureFailures` through the redacting JSON logger with
 `Dimensions: [[]]`, matching the shared runtime alarm. It records one count
-per completed inbound SDK 401 response, without request headers, payloads,
+per completed inbound SDK 401 response, with the same case and trailing-slash
+matching as its Express route, without request headers, payloads,
 identities, or query values. It does not perform a second JWT verification.
 `SignatureFailures` is the shared alarm name; the count includes missing JWTs
 and rejected claims as well as invalid signatures.
