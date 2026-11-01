@@ -1,0 +1,8 @@
+{
+  "name": "qurl-cloudflare-worker-example",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@layervai/qurl": "3.1.1"
+  }
+}

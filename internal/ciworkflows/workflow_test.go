@@ -3069,6 +3069,11 @@ type pullRequestTriggerSpec struct {
 // exactly the ones that guard cannot see.
 var otherPullRequestWorkflows = []pullRequestTriggerSpec{
 	{
+		path:  "edge-templates.yml",
+		paths: []string{"templates/**", ".github/workflows/edge-templates.yml"},
+		why:   "Tests only the standalone edge examples; no required context or application deployment.",
+	},
+	{
 		path:     "codeql.yml",
 		branches: []string{"main"},
 		why: "Deliberately narrow. CodeQL produces no required context, so a stacked PR " +
