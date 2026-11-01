@@ -540,7 +540,7 @@ describe('setup wait and shutdown drain', () => {
     } finally { finishDelete(); await task; }
   });
 
-  test('normal shutdown preserves the prior teardown budget after the ten-second link drain', async () => {
+  test.each([false, true])('shutdown preserves the session and storage budget (fatal=%s)', async fatal => {
     const fs = require('node:fs');
     const path = require('node:path');
     const vm = require('node:vm');
@@ -558,28 +558,55 @@ describe('setup wait and shutdown drain', () => {
     const exit = jest.fn(code => order.push(`exit:${code}`));
     const globals = {
       isShuttingDown: false, httpServer: {}, logger: { info: mockInfo, warn: mockWarn, error: mockError },
-      tryClose: async () => { order.push('http'); await sleep(5000); },
+      tryClose: async () => { order.push('http'); await sleep(fatal ? 5000 : 6000); },
       stopServerIntervals: () => order.push('intervals'),
       eventConsumer: { stop: async () => order.push('consumer') },
-      eventPublisher: { stop: async () => { order.push('publisher'); await sleep(3000); } },
+      eventPublisher: { stop: async () => { order.push('publisher'); await sleep(fatal ? 3000 : 4000); } },
+      stopAcceptingGuildWebhookSubscriptions: () => { order.push('admission-stop'); links.stopAcceptingGuildWebhookSubscriptions(); },
       drainGuildWebhookSubscriptions: async () => { order.push('link-start'); await links.drainGuildWebhookSubscriptions(); order.push('link-end'); },
       gatewayHeartbeatTimer: null, activeGuildCountTimer: null,
       config: { ENABLE_GATEWAY_HOT_STANDBY: true, ENABLE_GATEWAY_RESUME: true },
       controlChannelServer: {}, connectionWatchdog: {}, gatewayLeader: {},
       stopGatewayHotStandby: async () => order.push('control'),
       isGateway: true, gatewayShim: { stop: async () => order.push('seal') },
-      discordShutdown: async () => order.push('discord'), db: { close: async () => order.push('storage') },
+      discordShutdown: async () => order.push('discord'), db: { close: async () => { await sleep(fatal ? 1000 : 2000); order.push('storage'); } },
       runGracefulShutdown: options => runGracefulShutdown({ ...options, exit }),
     };
     vm.createContext(globals);
     vm.runInContext(source.slice(start, end), globals);
-    const shutdown = globals.gracefulShutdown();
+    const shutdown = globals.gracefulShutdown(fatal ? 1 : 0, { awaitGatewayLeader: !fatal });
     try {
-      await jest.advanceTimersByTimeAsync(19000);
+      await jest.advanceTimersByTimeAsync(23000);
       await shutdown;
-      expect(order).toEqual(['http', 'intervals', 'consumer', 'publisher', 'link-start', 'link-end', 'control', 'seal', 'storage', 'exit:0']);
+      expect(order).toEqual(['admission-stop', 'http', 'intervals', 'consumer', 'publisher',
+        ...(fatal ? [] : ['link-start', 'link-end']), 'control', 'seal', 'storage', `exit:${fatal ? 1 : 0}`]);
       expect(exit).toHaveBeenCalledTimes(1);
     } finally { finish(); await task; }
+  });
+
+  test('active push handoff stops new link admissions before starting the handoff', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const vm = require('node:vm');
+    const source = fs.readFileSync(path.join(__dirname, '../src/index.js'), 'utf8');
+    const start = source.indexOf('async function pushHandoffShutdown(');
+    const end = source.indexOf('async function signalShutdown(', start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const links = freshLinks();
+    const globals = {
+      isShuttingDown: false, gatewayLeader: {}, connectionWatchdog: {}, eventPublisher: {}, logger: {},
+      stopAcceptingGuildWebhookSubscriptions: links.stopAcceptingGuildWebhookSubscriptions,
+      runPushHandoffShutdown: async () => {
+        await expect(links.linkGuildWebhookSubscriptionForSetup(args)).resolves.toBe(false);
+        expect(mockEnsureWebhookSubscription).not.toHaveBeenCalled();
+        expect(mockAudit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+          expect.objectContaining({ reason: 'shutting-down' }));
+      },
+    };
+    vm.createContext(globals);
+    vm.runInContext(source.slice(start, end), globals);
+    await globals.pushHandoffShutdown();
   });
 
   test('known registration failure gives partial setup without changing its audit', async () => {

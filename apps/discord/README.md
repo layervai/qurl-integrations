@@ -484,7 +484,11 @@ Setup confirmation ends when the primary subscription is persisted and usable;
 slow best-effort sibling propagation does not delay a successful setup reply.
 Accepted work remains tracked through propagation and rollback DELETEs.
 Normal shutdown drains it for up to 10 seconds before session sealing and storage
-close. Its total hard ceiling is 20 seconds, preserving the prior 10-second
-teardown allowance. Configure a container stop grace of at least 30 seconds.
+close. Its total hard ceiling is 25 seconds, preserving the prior 10-second
+teardown allowance plus five seconds for final cleanup. Configure a container stop grace of at least 30 seconds.
 Managed Fargate tasks use that window. Active gateway push handoff keeps its
-existing 12-second ceiling and gains no wait after session shutdown.
+existing 12-second ceiling. Fatal shutdown keeps its existing 10-second graceful
+budget inside its 15-second backstop. Both paths stop new link admissions but
+skip the accepted-link drain to preserve session shutdown deadlines. Accepted
+work can be interrupted on those paths; this change does not establish complete
+shutdown safety for every gateway topology.

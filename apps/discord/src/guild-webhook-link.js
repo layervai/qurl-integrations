@@ -371,8 +371,12 @@ async function linkGuildWebhookSubscriptionForSetup(args) {
   return result?.ok === true;
 }
 
-async function drainGuildWebhookSubscriptions() {
+function stopAcceptingGuildWebhookSubscriptions() {
   guildLinksDraining = true;
+}
+
+async function drainGuildWebhookSubscriptions() {
+  stopAcceptingGuildWebhookSubscriptions();
   if (inFlightGuildLinks.size === 0) return true;
   const result = await waitForGuildLinkWork(Promise.allSettled([...inFlightGuildLinks]), 10_000);
   if (result === undefined) {
@@ -387,5 +391,6 @@ module.exports = {
   fireAndForgetLinkGuildWebhookSubscription,
   linkGuildWebhookSubscriptionForSetup,
   drainGuildWebhookSubscriptions,
+  stopAcceptingGuildWebhookSubscriptions,
   LINK_RESULTS,
 };
