@@ -675,3 +675,41 @@ describe('metadata apply image upload policy', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
+
+
+describe('metadata apply operator safety', () => {
+  test.each(['--skip-image', '--skipImages', '--dryrun', 'unexpected'])('rejects unknown CLI argument %s before token lookup or network', arg => {
+    const { spawnSync } = require('node:child_process');
+    const result = spawnSync(process.execPath, [path.join(__dirname, '../scripts/apply-discord-metadata.js'), arg], {
+      env: { ...process.env, DISCORD_TOKEN: '' }, encoding: 'utf8', timeout: 5000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/Unknown option|Unexpected argument/);
+    expect(result.stderr).not.toContain('DISCORD_TOKEN is required');
+  });
+
+  test('skip-images does not read any local asset files', async () => {
+    await main({ dryRun: true, skipImages: true, logger: quietLogger() });
+    const read = jest.spyOn(fs, 'readFileSync');
+    const exists = jest.spyOn(fs, 'existsSync');
+    try {
+      await main({ dryRun: true, skipImages: true, logger: quietLogger() });
+      expect(read).not.toHaveBeenCalled();
+      expect(exists).not.toHaveBeenCalled();
+    } finally { read.mockRestore(); exists.mockRestore(); }
+  });
+
+  test('skip-images still updates a changed username without image fields', async () => {
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()), jsonResponse({ username: 'Old Bot' }),
+      jsonResponse({ username: metadata.bot.unique_username }), jsonResponse(appResponse()),
+    );
+    await main({ skipImages: true, token: 'test-token', fetchImpl, logger: quietLogger() });
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({ username: metadata.bot.unique_username });
+    const appBody = JSON.parse(fetchImpl.mock.calls[3][1].body);
+    expect(appBody).not.toHaveProperty('icon');
+    expect(appBody).not.toHaveProperty('cover_image');
+  });
+});

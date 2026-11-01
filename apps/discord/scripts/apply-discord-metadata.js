@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-// Use --skip-images for repeat applies that must preserve existing image assets.
+// Default applies upload all four images on every run; use --skip-images
+// for repeat applies that must preserve existing image assets.
 
 const fs = require('fs');
 const path = require('path');
+const { parseArgs } = require('node:util');
 
 const root = path.resolve(__dirname, '..');
 const metadataPath = path.join(root, 'discord-metadata.json');
@@ -283,8 +285,8 @@ function assertExpectedApplication(app, doc = loadMetadata()) {
 }
 
 async function main({
-  dryRun = process.argv.includes('--dry-run'),
-  skipImages = process.argv.includes('--skip-images'),
+  dryRun = false,
+  skipImages = false,
   token = process.env.DISCORD_TOKEN,
   fetchImpl = fetch,
   logger = console,
@@ -438,8 +440,13 @@ async function main({
   }
 }
 
+async function runCli() {
+  const { values } = parseArgs({ options: { 'dry-run': { type: 'boolean' }, 'skip-images': { type: 'boolean' } } });
+  await main({ dryRun: values['dry-run'], skipImages: values['skip-images'] });
+}
+
 if (require.main === module) {
-  main().catch((err) => {
+  runCli().catch((err) => {
     console.error(err.message);
     if (err.retryAfter) console.error(`retry_after=${err.retryAfter}s`);
     if (err.body) console.error(JSON.stringify(err.body));
