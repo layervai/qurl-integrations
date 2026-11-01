@@ -104,8 +104,9 @@ function createDispatchProbe({ store, transport, publish, client, logger, now = 
         const row = await store.read(origin);
         if (stopped) return;
         if (row?.nonce === pending.nonce && Number.isFinite(row.ack_at)
-          && row.ack_at >= pending.started_at && row.ack_at <= pending.deadline) {
-          logger.audit(AUDIT_EVENTS.GATEWAY_DISPATCH_PROBE_OK, { latency_ms: row.ack_at - pending.started_at });
+          && row.ack_at <= pending.deadline) {
+          // The nonce fences old replies; a slightly behind worker clock is not a miss.
+          logger.audit(AUDIT_EVENTS.GATEWAY_DISPATCH_PROBE_OK, { latency_ms: Math.max(0, row.ack_at - pending.started_at) });
           pending = null;
         } else if (now() >= pending.deadline) {
           logger.audit(AUDIT_EVENTS.GATEWAY_DISPATCH_PROBE_MISSED);

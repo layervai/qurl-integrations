@@ -192,3 +192,11 @@ test('empty optional presence arrays are valid; a presence payload never enters 
   expect(validChunk({ ...data, presences: [{ user: { id: '345678901234567890' } }] })).toBe(false);
   await f.close();
 });
+
+
+test('a slightly behind worker clock cannot turn a fast current-nonce ACK into a missed probe', async () => {
+  const f = fixture(); f.advance(60_000); await f.probe.tick();
+  f.row().ack_at = 59_950; f.advance(10); await f.probe.tick();
+  expect(f.logger.audit).toHaveBeenCalledWith('gateway_dispatch_probe_ok', { latency_ms: 0 });
+  expect(f.logger.audit).not.toHaveBeenCalledWith('gateway_dispatch_probe_missed'); await f.close();
+});
