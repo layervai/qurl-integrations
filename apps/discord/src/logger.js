@@ -239,8 +239,8 @@ const logger = {
         // CloudWatch (the logger has no separate warn channel that
         // emits at error severity). Defense-in-depth alongside the
         // value redaction above. Report all matched keys once so callers can
-        // fix them in one pass; the adjacent audit record carries the event
-        // and dimensions without copying its data into this diagnostic.
+        // fix them in one pass. Event metadata stays in the structured audit
+        // record; stderr and stdout records need not arrive in order.
         const namedKeys = [...secretKeys].map(k => `"${sanitizeMessage(k)}"`).join(', ');
         console.error(`[${formatTimestamp()}] ERROR: logger.audit received sensitive key(s) [${namedKeys}]; value(s) redacted in emitted payload — caller must remove from meta`);
       }
