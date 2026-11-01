@@ -294,6 +294,8 @@ const AUDIT_EVENTS = {
   // alarm on activity_age_ms; alarm on missing healthy emissions.
   GATEWAY_HEARTBEAT_UNHEALTHY: 'gateway_heartbeat_unhealthy',
 
+  GATEWAY_INSTANCE_ID_COLLISION: 'gateway_instance_id_collision',
+
   // Bot added/removed from a guild. Single emission on the
   // guildCreate / guildDelete event. `guild_id` is in the payload
   // for log-grep / forensic queries; it MUST NOT be promoted to a

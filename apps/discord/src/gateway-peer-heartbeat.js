@@ -56,6 +56,8 @@
 //    network bytes start to matter; revisit then.
 
 const net = require('node:net');
+const { randomUUID } = require('node:crypto');
+const { AUDIT_EVENTS } = require('./constants');
 const {
   PutCommand,
   ScanCommand,
@@ -120,6 +122,9 @@ function createPeerHeartbeat({
     throw new Error('createPeerHeartbeat: lockHolder must be a non-empty string when provided');
   }
 
+  const writerId = randomUUID();
+  let hasWritten = false;
+
   function nowSeconds() {
     return Math.floor(clock() / 1000);
   }
@@ -136,6 +141,7 @@ function createPeerHeartbeat({
     const now = nowSeconds();
     const item = {
       instance_id: instanceId,
+      writer_id: writerId,
       ip,
       port,
       shard_id: shardId,
@@ -145,10 +151,20 @@ function createPeerHeartbeat({
     // Only write lock_holder if provided. DDB rejects undefined
     // attribute values and back-compat callers may not pass it.
     if (lockHolder) item.lock_holder = lockHolder;
-    await ddbClient.send(new PutCommand({
+    const result = await ddbClient.send(new PutCommand({
       TableName: tableName,
       Item: item,
+      ReturnValues: 'ALL_OLD',
     }));
+    const previous = result?.Attributes;
+    // Skip the first successful write: a normal restart can replace a fresh row.
+    if (hasWritten && typeof previous?.writer_id === 'string' && previous.writer_id
+      && previous.writer_id !== writerId
+      && Number.isSafeInteger(previous.updated_at) && Math.abs(now - previous.updated_at) < ttlSeconds
+      && Number.isSafeInteger(previous.expires_at) && previous.expires_at > now) {
+      logger.audit(AUDIT_EVENTS.GATEWAY_INSTANCE_ID_COLLISION);
+    }
+    hasWritten = true;
   }
 
   // Scan-and-filter for peers eligible to receive a push-handoff.

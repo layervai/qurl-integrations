@@ -716,3 +716,25 @@ sandbox bot and verify Discord accepts the `RESUME` from the second process
 using session state captured by the first.
 
 See `scripts/gateway-resume-spike.js` for the runbook.
+
+### Duplicate instance-ID alarm
+
+The heartbeat producer stamps each coordinator instance with a random `writer_id`.
+Its existing PutItem requests `ALL_OLD`, so it can detect a different recent
+writer on the same `instance_id` without a separate read or scan. After its first
+successful write, replacing another writer's unexpired row within the heartbeat
+TTL emits one dimensionless `gateway_instance_id_collision` audit event. The first
+write is excluded so a normal restart does not alert on its predecessor's row.
+The event carries no instance, writer, IP, guild or shard dimension.
+
+The paired infrastructure filter counts the event as `GatewayInstanceIdCollision`
+in `QurlBot` and alarms on one count in a minute through the existing Phase 1
+SNS route. Source preparation is not proof that the filter is deployed or its
+notification route works; rollout needs approved readback and a test alarm.
+
+This detects alternating writers; it does not repair split leadership. Stop the
+extra writer and restore unique task identities before resuming the pair.
+Legacy writers without `writer_id` cannot be identified by this detector; deploy
+all writers before relying on the alarm. A writer that never succeeds, or a
+collision that ends before either writer observes a replacement after startup,
+may not be reported. The existing row TTL and heartbeat cadence do not change.
