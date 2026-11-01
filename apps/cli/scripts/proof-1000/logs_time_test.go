@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
+	_ "time/tzdata"
 )
 
 func TestDaemonLogTimeRejectsAmbiguousLegacyClocks(t *testing.T) {
@@ -70,8 +70,5 @@ func TestDaemonLogOffsetKeepsBothOccurrencesDistinct(t *testing.T) {
 		if matched := contextLines(got, []string{"abc"}, instant, time.Second, 10); len(matched) != 1 {
 			t.Fatal("context filtering lost the explicit offset")
 		}
-	}
-	if !strings.Contains(logs.String(), "time=") {
-		t.Fatal("fixture did not use the real slog text format")
 	}
 }

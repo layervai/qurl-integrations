@@ -47,9 +47,6 @@ func scanDaemonLog(path string, since, until time.Time, needles *needleSet, red 
 	var out []string
 	for scanner.Scan() {
 		line := scanner.Text()
-		if len(line) < len(daemonLogTimeLayout) {
-			continue
-		}
 		at, ok := parseDaemonLogTime(line, time.Local)
 		if !ok || at.Before(since) || at.After(until) {
 			continue
@@ -172,7 +169,7 @@ func mentionsThrottle(line string) bool {
 func contextLines(lines, needles []string, at time.Time, window time.Duration, limit int) []string {
 	var out []string
 	for _, line := range lines {
-		if !mentionsAny(line, needles) || len(line) < len(daemonLogTimeLayout) {
+		if !mentionsAny(line, needles) {
 			continue
 		}
 		stamp, ok := parseDaemonLogTime(line, time.Local)
