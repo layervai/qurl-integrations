@@ -856,29 +856,7 @@ func (h *Handler) getDeliverySurfaceUnsupported(ctx context.Context, log *slog.L
 	if pa.ChannelType != "" {
 		log.Warn("agent confirm: unknown snapshotted channel_type for get surface; consulting fallback surface rules", "channel_type", pa.ChannelType)
 	}
-	if !isGPrefixedConversation(pa.ChannelID) {
-		// Slack's current private-channel/mpim ambiguity lives in the G-prefix
-		// family; unknown non-G surfaces proceed after the warning above.
-		return false
-	}
-	if h.cfg.ResolveConversationInfo == nil {
-		log.Warn("agent confirm: cannot classify G-prefixed get surface; proceeding with ephemeral delivery")
-		return false
-	}
-	// Keep confirm classification uncached: it is a one-time safety decision for a
-	// pending click, not a per-turn readability lookup.
-	rctx, cancel := context.WithTimeout(ctx, conversationsInfoResolveTimeout)
-	defer cancel()
-	info, err := h.cfg.ResolveConversationInfo(rctx, payload.Team.ID, payload.Enterprise.ID, pa.ChannelID)
-	if err != nil {
-		log.Warn("agent confirm: conversations.info failed for G-prefixed get surface; mpim boundary degraded; proceeding with ephemeral delivery", "error", err)
-		return false
-	}
-	if info.IsMPIM {
-		log.Info("agent confirm: refused get in resolved mpim before minting")
-		return true
-	}
-	return false
+	return h.getConversationUnsupported(ctx, log, payload.Team.ID, payload.Enterprise.ID, pa.ChannelID)
 }
 
 // deliverConfirmPrivate delivers a get's sensitive output (the one-time link on success,

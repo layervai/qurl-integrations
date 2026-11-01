@@ -312,6 +312,11 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		return
 	}
 
+	if !cmd.DM() && h.getConversationUnsupported(ctx, log, teamID, enterpriseID, channelID) {
+		h.finishGet(log, responseURL, getResult{}, &userError{msg: agentConfirmGetUnsupportedSurfaceReply})
+		return
+	}
+
 	if cmd.DM() && h.cfg.PostDMBlocks == nil {
 		h.finishGet(log, responseURL, getResult{}, errDMNotConfigured)
 		return
@@ -1018,4 +1023,31 @@ func humanizeRetry(d time.Duration) string {
 	}
 	mins := int(d.Minutes() + 0.5)
 	return fmt.Sprintf("%dm", mins)
+}
+
+// getConversationUnsupported shares the confirmed-mpim boundary across get entry points.
+// Missing scope or metadata keeps the existing private-channel ephemeral fallback.
+func (h *Handler) getConversationUnsupported(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID string) bool {
+	if !isGPrefixedConversation(channelID) {
+		// Slack's current private-channel/mpim ambiguity lives in the G-prefix
+		// family; ordinary channel and 1:1 DM ids need no lookup.
+		return false
+	}
+	if h.cfg.ResolveConversationInfo == nil {
+		log.Warn("get: cannot classify G-prefixed get surface; proceeding with ephemeral delivery")
+		return false
+	}
+	// Classify each mint independently; a cached name lookup is not delivery proof.
+	rctx, cancel := context.WithTimeout(ctx, conversationsInfoResolveTimeout)
+	defer cancel()
+	info, err := h.cfg.ResolveConversationInfo(rctx, teamID, enterpriseID, channelID)
+	if err != nil {
+		log.Warn("get: conversations.info failed for G-prefixed get surface; mpim boundary degraded; proceeding with ephemeral delivery")
+		return false
+	}
+	if info.IsMPIM {
+		log.Info("get: refused get in resolved mpim before minting")
+		return true
+	}
+	return false
 }
