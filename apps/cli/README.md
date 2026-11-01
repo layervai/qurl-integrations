@@ -861,11 +861,19 @@ qurl access revoke_grant <CRID> <decision-id> --version <current-version> -o jso
 
 Email capture and review disclose the consumer's verified email to the
 publisher; they are not anonymous access. Mailbox verification does not prove
-legal identity. Contract grants use an opaque consumer reference. Approve
-contract access only from a trusted publisher backend receipt and expiration;
-these commands do not verify payment with a payment processor.
+legal identity. Contract grants use an opaque consumer reference. Without a
+Stripe payment policy, approve contract access only from a trusted publisher
+backend receipt and expiration; these commands do not verify payment.
 The publisher backend can subscribe to `consumer.subscribed` webhooks.
 If its notification is pending, repeat the same receipt, expiry and version.
+
+For paid contracts, run `qurl payments connect -o json`, open the Stripe consent
+URL, then read `qurl payments account -o json`. Use that account and an active
+fixed Stripe price with `--stripe-account` and `--stripe-price` when publishing
+or configuring contract access. The service verifies payment; manual approval
+is unavailable. LayerV collects 3%, including subscription renewals. One-time
+prices accept `--payment-access-seconds`; zero lasts for the resource lifetime.
+Recurring prices require zero and grant only the paid invoice period.
 
 `qurl access --help` lists all owner actions. Changes require the current
 version. If session removal is pending, retry the exact removal and version;
@@ -875,9 +883,10 @@ returns a pending-session error, retry the same update. Do not invent a newer
 version or fall back to public or legacy access.
 
 <!-- TODO(upstream-contract): email backup follows qurl-service consumer access. -->
-When consumer access is enabled, the hosted preview card always offers
-**Email me an access link** as a backup to passkeys. Publishers cannot disable
-this option. The recipient verifies the mailbox and consents to disclose it to
+When consumer access is enabled, the hosted preview card offers
+**Email me an access link** as a backup to passkeys, except for Stripe paid
+contracts, which require a passkey. Publishers cannot disable the backup for
+other policies. The recipient verifies the mailbox and consents to disclose it to
 the publisher. Invitations, approval, entitlement, expiry, and revocation still
 apply. Email-backed grants are separate from passkey-backed grants; first use
 must pass the configured invitation, approval, or entitlement checks. Revoke
