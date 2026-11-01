@@ -1555,7 +1555,10 @@ describe('qurl sends', () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'sender', attachment_url: encryptedUrl, personal_message: 'hi' },
     });
-    const result = await store.getSendConfig('s1', 'sender');
+    const controller = new AbortController();
+    const result = await store.getSendConfig('s1', 'sender', { signal: controller.signal });
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
+    expect(ddbMock.commandCalls(GetCommand)[0].args[1]).toEqual({ abortSignal: controller.signal });
     expect(result.attachment_url).toBe('https://cdn.example/attachment');
   });
 
@@ -1568,6 +1571,7 @@ describe('qurl sends', () => {
       },
     });
     const result = await store.getSendConfig('s1', 'sender');
+    expect(ddbMock.commandCalls(GetCommand)[0].args[1]).toBeUndefined();
     expect(result).not.toHaveProperty('interaction_token');
     expect(JSON.stringify(result)).not.toContain('tok-LIVE-bearer-cred');
     expect(result.expires_in).toBe('24h');
@@ -1988,7 +1992,7 @@ describe('qurl sends', () => {
 
   test('getSendConfig: ownership check — returns undefined for wrong sender', async () => {
     ddbMock.on(GetCommand).resolves({
-      Item: { send_id: 's1', sender_discord_id: 'owner', personal_message: 'secret' },
+      Item: { send_id: 's1', sender_discord_id: 'owner', personal_message: 'secret', revoked_at: '2026-10-31T00:00:00Z' },
     });
     const result = await store.getSendConfig('s1', 'attacker');
     expect(result).toBeUndefined();
