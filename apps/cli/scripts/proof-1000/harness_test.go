@@ -137,7 +137,7 @@ func TestManifestPersistsAndResumes(t *testing.T) {
 func TestCollectDaemonLogsFiltersWindowAndNeedles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	stamp := func(at time.Time) string { return at.Local().Format(daemonLogTimeLayout) }
+	stamp := func(at time.Time) string { return "time=" + at.Format(time.RFC3339Nano) }
 	now := time.Now()
 	lines := []string{
 		stamp(now.Add(-2*time.Hour)) + " WARN old line crid=abc",
