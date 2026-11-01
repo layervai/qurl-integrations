@@ -18,6 +18,135 @@ const (
 	testRateLimitUserID = "UUSER001"
 )
 
+func TestCheckRateLimit_ClockSkewDoesNotResetPeerBudget(t *testing.T) {
+	ddb := newRateLimitDDB(true)
+	store := newRateLimitStore(ddb)
+	store.RateLimitEnabled = true
+	before := time.Date(2026, 6, 17, 12, 59, 59, 0, time.UTC)
+	after := before.Add(2 * time.Second)
+	granted := 0
+	for i := range 2 * defaultRateLimitLimit {
+		now := after
+		if i%2 != 0 {
+			now = before
+		}
+		store.Now = func() time.Time { return now }
+		allowed, _, err := store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if allowed {
+			granted++
+		}
+	}
+	if granted != defaultRateLimitLimit {
+		t.Fatalf("alternating clocks granted %d commands, want %d", granted, defaultRateLimitLimit)
+	}
+	item := ddb.items[rateLimitKey(testRateLimitTeamID, testRateLimitUserID)]
+	if got := readNumber(item, attrRateLimitWindow); got != after.Truncate(time.Hour).Unix() {
+		t.Fatalf("peer window reset backward: %d", got)
+	}
+	if got := readNumber(item, attrRateLimitExpiresAt); got != after.Truncate(time.Hour).Add(2*time.Hour).Unix() {
+		t.Fatalf("peer expiry changed: %d", got)
+	}
+}
+
+func TestCheckRateLimit_FarFutureWindowFailsClosedWithoutRepair(t *testing.T) {
+	for _, window := range []int64{
+		time.Date(2026, 6, 17, 14, 0, 0, 0, time.UTC).Unix(),
+		time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC).Unix(),
+		1<<63 - 1,
+	} {
+		t.Run(time.Unix(window, 0).String(), func(t *testing.T) {
+			ddb := newRateLimitDDB(true)
+			store := newRateLimitStore(ddb)
+			store.RateLimitEnabled = true
+			key := rateLimitKey(testRateLimitTeamID, testRateLimitUserID)
+			const expiry = int64(2_000_000_000)
+			ddb.items[key] = map[string]ddbtypes.AttributeValue{
+				attrSlackTeamID: stringAttr(key), attrRateLimitWindow: numberAttr(window),
+				attrRateLimitCount: numberAttr(1), attrRateLimitExpiresAt: numberAttr(expiry),
+			}
+			allowed, retry, err := store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
+			var storeErr *Error
+			if allowed || retry != 0 || !errors.As(err, &storeErr) || storeErr.Code != "rate_limit_clock_skew" {
+				t.Fatalf("far future result = %v, %s, %v; want clock-state failure", allowed, retry, err)
+			}
+			item := ddb.items[key]
+			if readNumber(item, attrRateLimitWindow) != window || readNumber(item, attrRateLimitCount) != 1 || readNumber(item, attrRateLimitExpiresAt) != expiry {
+				t.Fatalf("far-future counter was repaired or consumed: %#v", item)
+			}
+			if len(ddb.updateKeys) != 1 {
+				t.Fatalf("far-future check attempted %d updates, want only the initial conditional attempt", len(ddb.updateKeys))
+			}
+		})
+	}
+}
+
+func TestCheckRateLimit_FutureWindowMovesDuringIncrement(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		offset   time.Duration
+		count    int64
+		wantCode string
+	}{
+		{name: "peer consumed last slot", count: 30},
+		{name: "old writer reset backward", offset: -time.Hour, count: 1},
+		{name: "peer jumped too far", offset: time.Hour, count: 1, wantCode: ErrCodeRateLimitClockSkew},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ddb := newRateLimitDDB(true)
+			store := newRateLimitStore(ddb)
+			store.RateLimitEnabled = true
+			future := store.Now().Add(time.Hour)
+			key := rateLimitKey(testRateLimitTeamID, testRateLimitUserID)
+			ddb.items[key] = map[string]ddbtypes.AttributeValue{
+				attrSlackTeamID: stringAttr(key), attrRateLimitWindow: numberAttr(future.Unix()),
+				attrRateLimitCount: numberAttr(1), attrRateLimitExpiresAt: numberAttr(future.Add(2 * time.Hour).Unix()),
+			}
+			ddb.beforeUpdate = func(*dynamodb.UpdateItemInput) {
+				if len(ddb.updateKeys) == 2 {
+					ddb.items[key][attrRateLimitWindow] = numberAttr(future.Add(tc.offset).Unix())
+					ddb.items[key][attrRateLimitCount] = numberAttr(tc.count)
+				}
+			}
+			allowed, retry, err := store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
+			if allowed {
+				t.Fatal("raced window granted a slot")
+			}
+			if tc.wantCode == "" {
+				if err != nil || retry != 2*time.Hour {
+					t.Fatalf("settling race = %s, %v; want conservative peer retry", retry, err)
+				}
+			} else {
+				var storeErr *Error
+				if retry != 0 || !errors.As(err, &storeErr) || storeErr.Code != tc.wantCode {
+					t.Fatalf("far-future race = %s, %v; want %s", retry, err, tc.wantCode)
+				}
+			}
+			if len(ddb.updateKeys) != 2 || readNumber(ddb.items[key], attrRateLimitCount) != tc.count ||
+				readNumber(ddb.items[key], attrRateLimitWindow) != future.Add(tc.offset).Unix() {
+				t.Fatal("raced row was reset or consumed")
+			}
+		})
+	}
+}
+
+func TestResetRateLimitWindowRejectsBackwardRepair(t *testing.T) {
+	ddb := newRateLimitDDB(true)
+	store := newRateLimitStore(ddb)
+	key := rateLimitKey(testRateLimitTeamID, testRateLimitUserID)
+	now := store.Now()
+	future := now.Add(time.Hour).Unix()
+	ddb.items[key] = map[string]ddbtypes.AttributeValue{
+		attrSlackTeamID: stringAttr(key), attrRateLimitWindow: numberAttr(future), attrRateLimitCount: numberAttr(7),
+	}
+	ok, err := store.resetRateLimitWindow(context.Background(), key, now, now.Unix(), future)
+	if err != nil || ok || readNumber(ddb.items[key], attrRateLimitWindow) != future || readNumber(ddb.items[key], attrRateLimitCount) != 7 {
+		t.Fatalf("backward repair changed the counter: %v, %v", ok, err)
+	}
+}
+
 func TestCheckRateLimit_DisabledSkipsValidationAndDDB(t *testing.T) {
 	ddb := newRateLimitDDB(false)
 	store := newRateLimitStore(ddb)
@@ -329,6 +458,7 @@ func newRateLimitStore(client DynamoDBClient) *Store {
 }
 
 type rateLimitDDB struct {
+	beforeUpdate         func(*dynamodb.UpdateItemInput)
 	workspaceBound       bool
 	raceInitializeWindow bool
 	items                map[string]map[string]ddbtypes.AttributeValue
@@ -364,6 +494,9 @@ func (f *rateLimitDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ .
 func (f *rateLimitDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
 	key := rateLimitTestKey(in.Key)
 	f.updateKeys = append(f.updateKeys, key)
+	if f.beforeUpdate != nil {
+		f.beforeUpdate(in)
+	}
 
 	existing, present := f.items[key]
 	if f.raceInitializeWindow && aws.ToString(in.ConditionExpression) == "attribute_not_exists(#window)" {
@@ -418,8 +551,9 @@ func (f *rateLimitDDB) rateLimitConditionOK(cond string, item map[string]ddbtype
 		}
 		_, ok := item[attrRateLimitWindow]
 		return !ok, nil
-	case "#window = :old_window":
-		return present && readNumber(item, attrRateLimitWindow) == readNumber(vals, ":old_window"), nil
+	case "#window = :old_window AND #window < :window":
+		return present && readNumber(item, attrRateLimitWindow) == readNumber(vals, ":old_window") &&
+			readNumber(item, attrRateLimitWindow) < readNumber(vals, ":window"), nil
 	default:
 		return false, errors.New("unexpected ConditionExpression: " + cond)
 	}

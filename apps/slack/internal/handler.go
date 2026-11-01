@@ -136,6 +136,9 @@ func rateLimitErrorMessage(err error) string {
 		storeErr.Code == slackdata.ErrCodeWorkspaceNotBound {
 		return workspaceUnboundReply
 	}
+	if errors.As(err, &storeErr) && storeErr.Code == slackdata.ErrCodeRateLimitClockSkew {
+		return "Rate limiting needs an operator check. Please contact the bot administrator."
+	}
 	return serviceUnreachableMessage
 }
 
