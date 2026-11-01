@@ -603,7 +603,7 @@ module.exports = {
   // to the desired bound in their env; the voice-everyone path will then
   // partial-resolve up to that bound rather than refusing.
   // Operational implications a max-size send carries:
-  //   - up to ceil(20000/TOKENS_PER_RESOURCE) = 2000 re-uploads to
+  //   - up to ceil(20000/MINT_BATCH_SIZE) = 2000 mint requests to
   //     qurl-service per send (`mintLinksInBatches`).
   //   - Large DM fan-outs can outlast the ephemeral status edit window.
   //     The sender's view monitor stays capped at 14 minutes (#465),

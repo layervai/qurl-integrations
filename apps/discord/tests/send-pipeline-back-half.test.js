@@ -885,6 +885,43 @@ describe('revokeAllLinks', () => {
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1', { signal: expect.any(AbortSignal) });
   });
 
+  it('revokes 101 children under one parent through the real connector chunker', async () => {
+    const config = require('../src/config');
+    const previousUrl = config.CONNECTOR_URL;
+    const previousFetch = globalThis.fetch;
+    config.CONNECTOR_URL = 'https://connector.fixture.invalid';
+    const ids = Array.from({ length: 101 }, (_, i) => `q_bulk${i}`);
+    mockDb.getSendItems.mockResolvedValueOnce(ids.map((qurl_id, i) => ({
+      resource_id: 'res-1', recipient_discord_id: `bulk-user${i}`, qurl_id,
+    })));
+    const realRevoke = jest.requireActual('../src/connector').revokeMintedLinks;
+    mockRevokeMintedLinks.mockImplementationOnce(realRevoke);
+    const batches = [];
+    globalThis.fetch = jest.fn(async (url, options) => {
+      expect(url).toBe('https://connector.fixture.invalid/api/revoke_links');
+      expect(options.method).toBe('POST');
+      expect(options.signal.aborted).toBe(false);
+      const body = JSON.parse(options.body);
+      expect(body.resource_id).toBe('res-1');
+      batches.push(body.qurl_ids);
+      return { ok: true, status: 200, json: async () => ({
+        success: true, results: body.qurl_ids.map(qurl_id => ({ qurl_id, status: 'revoked' })),
+      }) };
+    });
+    try {
+      const result = await revokeAllLinks('send-bulk', 'sender-1', 'apikey');
+      expect(result).toMatchObject({ success: 101, total: 101, failureUserIds: [], finalizationFailed: false });
+      expect(batches).toHaveLength(11);
+      expect(batches.every(ids => ids.length > 0 && ids.length <= 10)).toBe(true);
+      expect(batches.flat()).toEqual(ids);
+      expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-bulk', 'sender-1', { signal: expect.any(AbortSignal) });
+      expect(require('../src/qurl').revokeResource).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = previousFetch;
+      config.CONNECTOR_URL = previousUrl;
+    }
+  });
+
   it('leaves the send retryable when the connector cannot confirm a child revoke', async () => {
     mockRevokeMintedLinks.mockRejectedValueOnce(new Error('Connector revoke_links failed (429)'));
     mockDb.getSendItems.mockResolvedValueOnce([
@@ -2137,7 +2174,33 @@ describe('handleAddRecipients — file path failure modes', () => {
     expect(mockSendDM).not.toHaveBeenCalled();
   });
 
-  it('surfaces "Link pool exhausted" on a 429 error from the location path (outer catch)', async () => {
+  test.each(['file', 'location'])('%s keeps quota copy after a later batch fails and revokes prior links', async kind => {
+    const isFile = kind === 'file';
+    mockDb.getSendConfig.mockResolvedValueOnce(isFile ? {
+      connector_resource_id: 'stored-resource', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    } : {
+      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower', expires_in: '30m',
+    });
+    if (isFile) mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'same-resource', fileBuffer: new ArrayBuffer(10) });
+    else mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'same-resource' });
+    const ids = Array.from({ length: 10 }, (_, i) => `q_quota${i}`);
+    mockMintLinks.mockResolvedValueOnce(ids.map(qurl_id => ({
+      qurl_id, qurl_link: `https://q.test/${qurl_id}`, expires_at: new Date(Date.now() + 86400000).toISOString(),
+    }))).mockRejectedValueOnce(Object.assign(new Error('account quota reached'), { apiCode: 'quota_exceeded', status: 403 }));
+    const users = Array.from({ length: 11 }, (_, i) => ({ id: `quota-user${i}`, username: `User${i}`, bot: false }));
+    const result = await handleAddRecipients('send-1', makeUsersCollection(users), makeInteraction(), 'apikey');
+    expect(result.msg).toBe('An account limit was reached. Check your qURL account usage before adding recipients.');
+    expect(result.delivered).toBe(0);
+    expect(mockMintLinks.mock.calls.map(call => call[0])).toEqual(['same-resource', 'same-resource']);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('same-resource', ids, 'apikey');
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('does not mislabel a 429 as an exhausted resource pool', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: 'https://maps.example.com/x',
       location_name: 'Eiffel Tower', expires_in: '30m',
@@ -2150,7 +2213,7 @@ describe('handleAddRecipients — file path failure modes', () => {
       makeInteraction(), 'apikey',
     );
 
-    expect(result.msg).toMatch(/pool exhausted/i);
+    expect(result.msg).toBe('Failed to create links for new recipients.');
   });
 });
 
@@ -2356,7 +2419,7 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
   });
 
-  it('file send uses the structured 403 quota code for share-limit copy without a failure alarm', async () => {
+  it('file send uses the structured 403 quota code for account-limit copy without a failure alarm', async () => {
     const interaction = makeInteraction();
     const originalFetch = globalThis.fetch;
     globalThis.fetch = jest.fn().mockResolvedValue({
@@ -2368,7 +2431,7 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     try {
       await executeSendPipeline(interaction, makePipelineParams());
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('has hit its share limit') }));
+      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('an account limit was reached') }));
       const failureCalls = logger.audit.mock.calls.filter(c => c[0] === 'qurl_send_create_link_failure');
       expect(failureCalls).toHaveLength(0);
     } finally {
@@ -3414,7 +3477,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
         reason: 'revoked_guard',
         failed_count: 1,
         total: 1,
-        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), error: 'delete failed' }],
+        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), qurl_ids: ['q_aaaaaaaaaa1'], error: 'delete failed' }],
       }),
     );
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);
@@ -3453,8 +3516,8 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(10);
-    expect(mockRevokeMintedLinks.mock.calls.map(call => call[0]).sort()).toEqual(
-      Array.from({ length: 10 }, (_, i) => `res-${i}`).sort(),
+    expect(mockRevokeMintedLinks.mock.calls.map(call => call[0])).toEqual(
+      Array(10).fill('res-0'),
     );
   });
 });
@@ -3606,19 +3669,17 @@ describe('mintLinksInBatches', () => {
     mockMintLinks
       .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
       .mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
-    const reuploadFn = jest.fn().mockResolvedValue({ resource_id: 'res-2' });
     const result = await mintLinksInBatches({
-      sendId: 'short-send', initialResourceId: 'res-1', reuploadFn,
+      sendId: 'short-send', initialResourceId: 'res-1',
       expiresAt: new Date().toISOString(), recipientCount: 21, apiKey: 'apikey',
     });
     expect(result).toHaveLength(11);
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
-    expect(reuploadFn).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', Array.from({ length: 10 }, (_, i) => `q_${i}`), 'apikey');
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-2', ['q_short'], 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_short'], 'apikey');
   });
 
-  it('mints once for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
+  it('mints once for recipientCount <= MINT_BATCH_SIZE (10)', async () => {
     mockMintLinks.mockResolvedValueOnce([
       { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString() },
       { qurl_id: 'q_2', qurl_link: 'https://q.test/2', expires_at: new Date(Date.now() + 86400000).toISOString() },
@@ -3626,7 +3687,6 @@ describe('mintLinksInBatches', () => {
 
     const result = await mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn(),
       expiresAt: new Date().toISOString(),
       recipientCount: 2,
       apiKey: 'apikey',
@@ -3637,24 +3697,22 @@ describe('mintLinksInBatches', () => {
     expect(result[0].resourceId).toBe('res-1');
   });
 
-  it('re-uploads + mints again when recipientCount > TOKENS_PER_RESOURCE', async () => {
+  it('keeps one resource across bounded batches beyond ten recipients', async () => {
     mockMintLinks
       .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
       .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
-    const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
 
     const result = await mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn,
       expiresAt: new Date().toISOString(),
       recipientCount: 11,
       apiKey: 'apikey',
     });
 
-    expect(reuploadFn).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     expect(result).toHaveLength(11);
-    expect(result[10].resourceId).toBe('res-2');
+    expect(result.every(link => link.resourceId === 'res-1')).toBe(true);
+    expect(mockMintLinks.mock.calls.map(call => call[0])).toEqual(['res-1', 'res-1']);
   });
 
   it('revokes earlier batches before rethrowing a later mint failure', async () => {
@@ -3666,7 +3724,6 @@ describe('mintLinksInBatches', () => {
 
     await expect(mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' }),
       expiresAt: new Date().toISOString(),
       recipientCount: 11,
       apiKey: 'apikey',
@@ -3692,7 +3749,6 @@ describe('mintLinksInBatches', () => {
 
     await expect(mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn(),
       expiresAt: new Date().toISOString(),
       recipientCount: 2,
       apiKey: 'apikey',
@@ -3705,12 +3761,28 @@ describe('mintLinksInBatches', () => {
 
     await expect(mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn(),
       expiresAt: new Date().toISOString(),
       recipientCount: 1,
       apiKey: 'apikey',
     })).rejects.toThrow('Connector mint_link returned a link without a qurl_link');
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_idonly'], 'apikey');
+  });
+
+  it('attempts later mint-failure cleanup batches after one revoke job fails', async () => {
+    const failure = Object.assign(new Error('mint failed'), { apiCode: 'quota_exceeded' });
+    const ids = Array.from({ length: 30 }, (_, i) => `q_cleanup${i}`);
+    for (let i = 0; i < ids.length; i += 10) {
+      mockMintLinks.mockResolvedValueOnce(ids.slice(i, i + 10).map(qurl_id => ({
+        qurl_id, qurl_link: `https://q.test/${qurl_id}`, expires_at: new Date(Date.now() + 86400000).toISOString(),
+      })));
+    }
+    mockMintLinks.mockRejectedValueOnce(failure);
+    mockRevokeMintedLinks.mockRejectedValueOnce(new Error('first cleanup job failed'));
+    await expect(mintLinksInBatches({ initialResourceId: 'res-1', recipientCount: 31, apiKey: 'apikey', expiresAt: new Date().toISOString() })).rejects.toBe(failure);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
+    expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toEqual(ids);
+    expect(mockRevokeMintedLinks.mock.calls.every(([resourceId, ids]) => resourceId === 'res-1' && ids.length <= 10)).toBe(true);
+    expect(logger.error).toHaveBeenCalledWith('Failed to revoke links after a mint failure', expect.objectContaining({ failed_count: 1, total: 3 }));
   });
 
   it('stops waiting on compensation at its budget and still surfaces the mint error', async () => {
@@ -3724,7 +3796,6 @@ describe('mintLinksInBatches', () => {
 
       const pending = mintLinksInBatches({
         initialResourceId: 'res-1',
-        reuploadFn: jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' }),
         expiresAt: new Date().toISOString(),
         recipientCount: 11,
         apiKey: 'apikey',
@@ -3747,13 +3818,13 @@ describe('mintLinksInBatches', () => {
 
     await expect(mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn(),
       expiresAt: new Date().toISOString(),
       recipientCount: 1,
       apiKey: 'apikey',
     })).rejects.toThrow('Connector mint_link returned 24 links for a 1-link batch');
     // Compensation covers the request plus 20 overflow ids, not the whole untrusted body.
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', minted.slice(0, 21).map(l => l.qurl_id), 'apikey');
+    expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toEqual(minted.slice(0, 21).map(l => l.qurl_id));
+    expect(mockRevokeMintedLinks.mock.calls.every(([parent, ids]) => parent === 'res-1' && ids.length <= 10)).toBe(true);
     expect(logger.error).toHaveBeenCalledWith('Connector mint_link over-minted', {
       resource_ref: resourceIdLogRef('res-1'), requested: 1, returned: 24,
       unrevoked_overflow_qurl_ids: ['q_x21', 'q_x22', 'q_x23'],
@@ -3764,7 +3835,6 @@ describe('mintLinksInBatches', () => {
   it('returns empty array when recipientCount = 0', async () => {
     const result = await mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn(),
       expiresAt: new Date().toISOString(),
       recipientCount: 0,
       apiKey: 'apikey',
@@ -3778,11 +3848,9 @@ describe('mintLinksInBatches', () => {
     mockMintLinks
       .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
       .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
-    const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
 
     await mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn,
       expiresAt: new Date().toISOString(),
       recipientCount: 11,
       apiKey: 'apikey',
@@ -4275,7 +4343,7 @@ describe.each(['file', 'maps'])('self-destruct timing copy for %s', resourceType
 });
 
 describe('initial-send compensation boundaries', () => {
-  test('chunked persistence failure revokes all 101 minted children without a false transaction alarm', async () => {
+  test('persistence failure attempts all 101 children even when one cleanup batch fails', async () => {
     const config = require('../src/config');
     const previousCap = config.QURL_SEND_MAX_RECIPIENTS;
     config.QURL_SEND_MAX_RECIPIENTS = 101;
@@ -4290,13 +4358,16 @@ describe('initial-send compensation boundaries', () => {
         })));
       }
       mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('partial BatchWrite failure'));
+      mockRevokeMintedLinks.mockRejectedValueOnce(new Error('first cleanup batch unavailable'));
       await executeSendPipeline(makeInteraction(), makePipelineParams({ recipients }));
       expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(11);
       expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toHaveLength(101);
       expect(mockSendDM).not.toHaveBeenCalled();
-      expect(logger.info).toHaveBeenCalledWith('Cleaned up freshly minted qURL links', {
-        sendId: expect.any(String), reason: 'persistence_failure', total: 11,
-      });
+      expect(mockRevokeMintedLinks.mock.calls.every(([, ids]) => ids.length <= 10)).toBe(true);
+      expect(new Set(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).size).toBe(101);
+      expect(logger.error).toHaveBeenCalledWith('Failed to clean up freshly minted qURL links', expect.objectContaining({
+        sendId: expect.any(String), reason: 'persistence_failure', failed_count: 1, total: 11,
+      }));
     } finally {
       config.QURL_SEND_MAX_RECIPIENTS = previousCap;
     }
@@ -4405,7 +4476,7 @@ describe('authoritative mint expiry — rejection and delivery deadline', () => 
   it.each([undefined, null, 0, '', 'not-a-time', '2000-01-01T00:00:00Z'])('compensates a mint with unusable expiry %s', async expires_at => {
     mockMintLinks.mockReset().mockResolvedValueOnce([{ qurl_id: 'q_expiry_bad', qurl_link: 'https://q.test/bad', expires_at }]);
     mockRevokeMintedLinks.mockReset().mockResolvedValue(undefined);
-    await expect(mintLinksInBatches({ initialResourceId: 'res-expiry', reuploadFn: jest.fn(), expiresAt: new Date(Date.now() + 86400000).toISOString(), recipientCount: 1, apiKey: 'apikey' })).rejects.toThrow(/valid future expiry/);
+    await expect(mintLinksInBatches({ initialResourceId: 'res-expiry', expiresAt: new Date(Date.now() + 86400000).toISOString(), recipientCount: 1, apiKey: 'apikey' })).rejects.toThrow(/valid future expiry/);
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-expiry', ['q_expiry_bad'], 'apikey');
   });
 

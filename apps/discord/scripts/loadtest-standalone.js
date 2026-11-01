@@ -63,11 +63,9 @@
  *   the bad count it is.
  *
  * Load shape:
- *   The file leg mirrors a real send's mintLinksInBatches: a resource's token
- *   pool is TOKENS_PER_RESOURCE deep, so it re-uploads each time the pool
- *   drains. --count N therefore issues ceil(N / TOKENS_PER_RESOURCE) uploads
- *   and the same number of mint calls per round — 10 of each at the default
- *   --count 100. See planMintBatches below.
+ *   The file leg mirrors a real send: one upload, then bounded mint requests
+ *   against that resource. --count N makes ceil(N / MINT_BATCH_SIZE) mint
+ *   calls per round. See planMintBatches below.
  *
  * Target safety:
  *   QURL_ENDPOINT and CONNECTOR_URL must BOTH resolve to a host this script
@@ -176,10 +174,10 @@ const {
   qurlApiErrorStatus,
 } = require('../src/utils/qurl-errors');
 
-// The same pool depth the send pipeline batches against — imported, not
+// The same request batch size as the send pipeline — imported, not
 // copied, so a change to the cap reaches this script instead of silently
-// leaving it issuing a different number of uploads than a real send.
-const { TOKENS_PER_RESOURCE } = require('../src/constants');
+// leaving it issuing a different number of mint requests than a real send.
+const { MINT_BATCH_SIZE } = require('../src/constants');
 
 const args = process.argv.slice(2);
 
@@ -1765,7 +1763,7 @@ function roundReportLine({ elapsed, round, results }) {
     // accumulates outside the try/catch, so counting only successes would put
     // a numerator and a denominator from different populations on one field.
     // reupFail= names the failed subset. Both segments drop out when there is
-    // nothing to say — at --count <= TOKENS_PER_RESOURCE the plan is a single
+    // nothing to say — at --count <= MINT_BATCH_SIZE the plan is a single
     // batch, so a bare `reup=0/0ms` would be pure noise.
     //
     // Read off `results` with `|| 0` rather than destructured, because this
@@ -2053,8 +2051,8 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
         : `Avg upload: ${avgUpload}ms, avg mint/round: ${noMintNote}`);
 
       // Uploads per round is the headline number for whether this test
-      // reproduces a real send's load: one initial upload plus one re-upload
-      // per drained pool, i.e. ceil(COUNT / TOKENS_PER_RESOURCE) in total.
+      // reproduces a real send's load. New rounds upload once; historical
+      // report inputs can still carry the old re-upload counters.
       //
       // Counts only rounds that got that far. A failed INITIAL upload throws
       // the round out before it reaches allResults, so unlike reupFail= those
@@ -2115,32 +2113,27 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
 }
 
 /**
- * Batch plan for minting `count` links against a token pool `tokensPerResource`
- * deep — the load-test mirror of mintLinksInBatches in ../src/commands.js.
+ * Batch plan for minting `count` links in bounded requests
+ * — the load-test mirror of mintLinksInBatches in ../src/commands.js.
  *
  * Extracted as a pure function because scripts/ sits outside this app's jest
  * `collectCoverageFrom`, so loop logic left inline here is unenforced. The plan
  * is data, so tests/loadtest-mint-batches.test.js can pin it without a
  * connector; runRound below only executes it.
  *
- * `reupload: true` marks every batch after the first, because the initial
- * resource arrives with a full pool and each batch drains it. That reproduces
- * mintLinksInBatches' `tokensUsed >= TOKENS_PER_RESOURCE && i > 0` guard: only
- * the final batch can be short, so at every i > 0 the previous batch was full
- * and tokensUsed has already reached the cap — the two conditions collapse into
- * `i > 0`. Kept as an explicit per-batch flag so the mirror stays legible if
- * the batcher's guard ever stops being equivalent.
+ * Each batch uses the initial upload. The batch size bounds one request;
+ * it is not a per-resource allowance.
  *
  * @param {number} count — links to mint across the whole plan.
- * @param {number} [tokensPerResource] — pool depth; defaults to TOKENS_PER_RESOURCE.
- * @returns {Array<{size: number, reupload: boolean}>} — empty when count <= 0.
+ * @param {number} [batchSize] — request batch size; defaults to MINT_BATCH_SIZE.
+ * @returns {Array<{size: number}>} — empty when count <= 0.
  *   Fractional counts are not gated here (0.5 plans one batch of 0.5); the
  *   CLI can't produce one, since parsePositiveInt admits only whole numbers.
  */
-function planMintBatches(count, tokensPerResource = TOKENS_PER_RESOURCE) {
+function planMintBatches(count, batchSize = MINT_BATCH_SIZE) {
   const batches = [];
-  for (let i = 0; i < count; i += tokensPerResource) {
-    batches.push({ size: Math.min(tokensPerResource, count - i), reupload: i > 0 });
+  for (let i = 0; i < count; i += batchSize) {
+    batches.push({ size: Math.min(batchSize, count - i) });
   }
   return batches;
 }
@@ -2150,6 +2143,7 @@ async function runRound(roundNum) {
   const results = {
     fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0,
     uploadMs: 0, mintMs: 0, locMs: 0,
+    // Kept for historical report inputs; new rounds never re-upload between batches.
     reuploads: 0, reuploadFail: 0, reuploadMs: 0,
     // True when the round stopped before doing everything it planned —
     // anywhere. Present and false rather than absent, so a round object's
@@ -2174,7 +2168,6 @@ async function runRound(roundNum) {
   // tally answers "what went wrong in THIS round", and a run-long map would
   // reprint every earlier round's messages at every flush.
   const fileErrors = new Map();
-  const reuploadErrors = new Map();
   const locErrors = new Map();
 
   // File pipeline
@@ -2217,14 +2210,7 @@ async function runRound(roundNum) {
     // filename and content type, that the hand-rolled form did. What is new
     // is the timeout and the two response checks.
     //
-    // Deliberately NOT wrapped, unlike the re-upload leg below: a failure here
-    // leaves nothing to mint against at all, so there is no partial round to
-    // salvage — it throws out of runRound, main reports the round FAILED and
-    // it never reaches allResults. The leg below states its own opposite
-    // policy and why. Don't "harmonize" the two.
-    //
-    // Hoisted: the re-upload leg below registers each fresh resource under
-    // the same filename, so a round's resources are one named series.
+    // A failed initial upload aborts the round before any links are minted.
     const uploadName = `loadtest-round${roundNum}.bin`;
     const uploadStart = performance.now();
     // Wrapped in trackCreate so the reclaim drain waits on it: the upload is
@@ -2244,27 +2230,9 @@ async function runRound(roundNum) {
     });
     results.uploadMs = performance.now() - uploadStart;
 
-    // Mint a pool at a time, re-uploading once each pool drains — the shape a
-    // real send takes through mintLinksInBatches (../src/commands.js).
-    //
-    // The re-upload leg is what makes this leg generate real load: reusing one
-    // resource_id for every batch spends the initial pool on batch 1 and takes
-    // `quota_exceeded` for the rest. tests/loadtest-mint-batches.test.js has
-    // the full regression narrative and the numbers.
+    // Match the bot: bounded mint batches against the initial resource.
     const expiresAt = expiryToISO('24h');
-    let currentResourceId = uploadResult.resource_id;
-    // Two tallies, not one flag apiece. #1173 kept the mint's "log the first
-    // error only" behind its own boolean precisely because a failed re-upload
-    // charges fileFail too, and keying the mint log off that count would
-    // swallow the first mint error on exactly the round most in need of one.
-    // Tallying by MESSAGE removes the need for either flag and answers the
-    // question behind both: a round mixing a systemic fault with transient
-    // 429s reports each, weighted by the attempts it took down.
-    //
-    // The two stay separate because they fail for different reasons and are
-    // read differently — a drained-pool re-upload fault and a mint rejection
-    // are not one population, and merging them would put a connector timeout
-    // and a quota error under one heading.
+    const currentResourceId = uploadResult.resource_id;
     for (const batch of planMintBatches(COUNT)) {
       // A sweep has started, or the run is out of time: stop before issuing
       // another create, same as the location leg and the round loop.
@@ -2274,38 +2242,6 @@ async function runRound(roundNum) {
       // issued every one of its batches — hours of traffic — before the clock
       // was consulted again between rounds.
       if (shouldStop()) { results.partial = true; results.mintPartial = true; break; }
-      if (batch.reupload) {
-        const reStart = performance.now();
-        let re = null;
-        try {
-          // Tracked and recorded exactly like the round's first upload. A
-          // re-upload mints a NEW parent resource, and the old one's tokens
-          // being spent does not make it go away — an unrecorded re-upload
-          // leaks a full resource per batch, which is the failure this ledger
-          // exists to prevent and the easiest one to miss when the leg was
-          // added for an unrelated reason.
-          re = await trackCreate(async () => {
-            const parsed = await reUploadBuffer(fileBuffer, uploadName, 'application/octet-stream');
-            recordResource(parsed.resource_id, 'upload');
-            return parsed;
-          });
-        } catch (e) {
-          tallyFailure(reuploadErrors, e.message, 1);
-          results.reuploadFail++;
-        }
-        results.reuploadMs += performance.now() - reStart;
-        // The previous resource's pool is spent, so there is nothing left to
-        // mint against — charge this batch as failed and keep going. That
-        // costs one batch per failed upload instead of abandoning the round,
-        // so a transient connector blip doesn't truncate the run.
-        if (!re) {
-          results.fileFail += batch.size;
-          continue;
-        }
-        currentResourceId = re.resource_id;
-        results.reuploads++;
-      }
-
       const mintStart = performance.now();
       try {
         await mintLinks(currentResourceId, { expiresAt, n: batch.size });
@@ -2314,15 +2250,9 @@ async function runRound(roundNum) {
         tallyFailure(fileErrors, e.message, batch.size);
         results.fileFail += batch.size;
       }
-      // Accumulated per batch rather than wrapped around the loop, so
-      // re-upload time stays out of the mint figure — otherwise the new leg
-      // would silently inflate reported mint latency.
+      // Keep initial upload latency outside the mint measurement.
       results.mintMs += performance.now() - mintStart;
     }
-    // Re-upload first: it runs first, and a mint failure is usually its
-    // consequence — a batch charged to fileFail because there was nothing to
-    // mint against reads as unexplained otherwise.
-    for (const line of errorTallyLines(reuploadErrors, 'File re-upload')) console.error(line);
     for (const line of errorTallyLines(fileErrors, 'File mint')) console.error(line);
   }
 
@@ -2610,12 +2540,12 @@ module.exports = {
   resolveArgErrors,
   // The payload a run without --file uploads
   generateTestPayload,
-  // Mint batching / token pool
+  // Mint request batching
   planMintBatches,
-  TOKENS_PER_RESOURCE,
+  MINT_BATCH_SIZE,
   // The round itself. Exported for tests/loadtest-round-accounting.test.js:
   // planMintBatches covers the batch *plan*, but the per-round accounting
-  // wrapped around it — which counter a failed re-upload charges, and which
+  // wrapped around it — which counter a failed mint charges, and which
   // latency lands in which figure — is stateful, lives here, and is reachable
   // no other way. main() is behind `require.main === module` and scripts/ is
   // outside jest's collectCoverageFrom, so without this line nothing enforces
