@@ -108,3 +108,14 @@ describe('handleConfirmSelfDestructSelect', () => {
     }));
   });
 });
+
+
+test.each(['deferred', 'replied'])('an already %s invalid self-destruct selection uses a follow-up', async flag => {
+  const interaction = makeInteraction();
+  interaction[flag] = true;
+  interaction.values = ['forged-value'];
+  await handleConfirmSelfDestructSelect(interaction, { flow_id: 'fid', row: { payload: {}, version: 1 } });
+  expect(interaction.reply).not.toHaveBeenCalled();
+  expect(interaction.followUp).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Unrecognized self-destruct value') }));
+  expect(mockTransitionFlow).not.toHaveBeenCalled();
+});

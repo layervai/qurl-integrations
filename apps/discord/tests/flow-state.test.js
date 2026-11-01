@@ -1019,7 +1019,8 @@ describe('flow-state.supersedeOrCreate', () => {
 
     const delCall = ddbMock.commandCalls(DeleteCommand)[0];
     expect(delCall.args[0].input.ConditionExpression)
-      .toBe('attribute_exists(flow_id) AND #s = :stage AND #v = :expected');
+      .toBe('attribute_exists(flow_id) AND #s = :stage AND #v = :expected AND #p = :expected_payload');
+    expect(delCall.args[0].input.ExpressionAttributeValues[':expected_payload']).toBeNull();
     expect(delCall.args[0].input.ExpressionAttributeValues[':expected']).toBe(3);
     expect(delCall.args[0].input.ExpressionAttributeValues[':stage']).toBe('awaiting_setup_button');
   });

@@ -158,6 +158,14 @@ jobs:
             -v "$PWD/scripts/smoke-flow-warning.js:/app/scripts/smoke-flow-warning.js:ro" \
             discord-bot-test node scripts/smoke-flow-warning.js
 
+      - name: Verify large recipient flow storage against DynamoDB Local
+        working-directory: apps/discord
+        run: |
+          docker run --rm --network host -e NODE_ENV=test \
+            -e DDB_TEST_ENDPOINT=http://127.0.0.1:8000 \
+            -v "$PWD/scripts/smoke-flow-recipients.js:/app/scripts/smoke-flow-recipients.js:ro" \
+            discord-bot-test node scripts/smoke-flow-recipients.js
+
       - name: Verify sender view counts against DynamoDB Local
         working-directory: apps/discord
         run: |

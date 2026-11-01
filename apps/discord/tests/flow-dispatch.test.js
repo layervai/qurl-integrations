@@ -9,13 +9,14 @@ jest.mock('../src/logger', () => ({
 
 jest.mock('../src/flow-state', () => ({
   loadFlow: jest.fn(),
+  hydrateFlowRecipients: jest.fn(),
 }));
 
 jest.mock('../src/config', () => ({
   SHARD_ID: '0:1',
 }));
 
-const { loadFlow } = require('../src/flow-state');
+const { loadFlow, hydrateFlowRecipients } = require('../src/flow-state');
 const logger = require('../src/logger');
 const {
   registerFlow,
@@ -203,7 +204,7 @@ describe('handleFlowInteraction', () => {
 
     await handleFlowInteraction(interaction);
 
-    expect(loadFlow).toHaveBeenCalledWith('0:1#g#c#u');
+    expect(loadFlow).toHaveBeenCalledWith('0:1#g#c#u', { defer_recipients: true });
     expect(handler).toHaveBeenCalledTimes(1);
     const [passedInteraction, ctx] = handler.mock.calls[0];
     expect(passedInteraction).toBe(interaction);
@@ -225,7 +226,7 @@ describe('handleFlowInteraction', () => {
 
     await handleFlowInteraction(interaction);
 
-    expect(loadFlow).toHaveBeenCalledWith('0:1#guild-789#channel-456#user-123');
+    expect(loadFlow).toHaveBeenCalledWith('0:1#guild-789#channel-456#user-123', { defer_recipients: true });
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
@@ -425,4 +426,80 @@ describe('handleFlowInteraction', () => {
     const ctx = handler.mock.calls[0][1];
     expect(ctx.flow_id).toBe('0:1#g#c#actual-user');
   });
+});
+
+describe('chunked flow acknowledgement boundary', () => {
+  beforeEach(() => { jest.clearAllMocks(); hydrateFlowRecipients.mockReset(); });
+  const metadata = { flow_id: '0:1#g#c#u', stage: 'chunked', version: 1, payload: {}, recipient_payload_deferred: true };
+  function ackInteraction(customId) {
+    const interaction = makeInteraction({ customId, editReply: jest.fn().mockResolvedValue(undefined) });
+    interaction.deferUpdate = jest.fn(async () => { interaction.deferred = true; });
+    return interaction;
+  }
+
+  test('acknowledges before loading recipients and only then invokes the handler', async () => {
+    const handler = jest.fn();
+    registerFlow('chunked_slow', { expectedStage: 'chunked', handler });
+    loadFlow.mockResolvedValue(metadata);
+    let finish;
+    hydrateFlowRecipients.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const interaction = ackInteraction('chunked_slow');
+    const task = handleFlowInteraction(interaction);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(interaction.deferUpdate).toHaveBeenCalledTimes(1);
+    expect(hydrateFlowRecipients).toHaveBeenCalledWith(metadata);
+    expect(handler).not.toHaveBeenCalled();
+    const full = { ...metadata, payload: { recipients: [{ id: 'one', alias: 'Alice' }] } };
+    finish(full);
+    await task;
+    expect(handler).toHaveBeenCalledWith(interaction, expect.objectContaining({ row: full }));
+    expect(interaction.deferUpdate.mock.invocationCallOrder[0]).toBeLessThan(hydrateFlowRecipients.mock.invocationCallOrder[0]);
+  });
+
+  test.each([10062, 40060, 'ECONNRESET'])('a failed acknowledgement (%s) stops before recipient reads or state work', async code => {
+    const handler = jest.fn();
+    const customId = `chunked_failed_${code}`;
+    registerFlow(customId, { expectedStage: 'chunked', handler });
+    loadFlow.mockResolvedValue(metadata);
+    const interaction = ackInteraction(customId);
+    interaction.deferUpdate.mockRejectedValue(Object.assign(new Error('ack failed'), { code }));
+    await handleFlowInteraction(interaction);
+    expect(hydrateFlowRecipients).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  test('modal/cancel metadata handlers do not wait for recipient data or pre-ack a modal', async () => {
+    const handler = jest.fn();
+    registerFlow('chunked_metadata', { expectedStage: 'chunked', handler, metadataOnly: true });
+    loadFlow.mockResolvedValue(metadata);
+    const interaction = ackInteraction('chunked_metadata');
+    await handleFlowInteraction(interaction);
+    expect(handler).toHaveBeenCalled();
+    expect(hydrateFlowRecipients).not.toHaveBeenCalled();
+    expect(interaction.deferUpdate).not.toHaveBeenCalled();
+  });
+
+  test('expiry during recipient reads clears the owned card without invoking its handler', async () => {
+    const handler = jest.fn();
+    registerFlow('chunked_expired', { expectedStage: 'chunked', handler });
+    loadFlow.mockResolvedValue(metadata);
+    hydrateFlowRecipients.mockResolvedValue(null);
+    const interaction = ackInteraction('chunked_expired');
+    await handleFlowInteraction(interaction);
+    expect(handler).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: SUPERSEDED_MSG, components: [] });
+  });
+});
+
+
+test('a recipient hydration error after acknowledgement gives an actionable follow-up', async () => {
+  const handler = jest.fn();
+  registerFlow('chunked_read_error', { expectedStage: 'chunked', handler });
+  loadFlow.mockResolvedValue({ stage: 'chunked', recipient_payload_deferred: true });
+  hydrateFlowRecipients.mockRejectedValue(new Error('missing recipient chunk'));
+  const interaction = makeInteraction({ customId: 'chunked_read_error', followUp: jest.fn().mockResolvedValue(undefined) });
+  interaction.deferUpdate = jest.fn(async () => { interaction.deferred = true; });
+  await handleFlowInteraction(interaction);
+  expect(handler).not.toHaveBeenCalled();
+  expect(interaction.followUp).toHaveBeenCalledWith(expect.objectContaining({ content: 'Something went wrong — please run the command again.' }));
 });

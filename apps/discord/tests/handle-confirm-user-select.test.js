@@ -63,6 +63,16 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Sending file/);
   });
 
+  test('repicking a canonical card preserves the recipient list format', async () => {
+    const int = makeSelectInteraction();
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: { ...initialPayload, recipients: [] }, version: 1 } });
+    const updated = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(updated.recipients).toEqual([{ id: u1, alias: expect.any(String) }]);
+    expect(updated).not.toHaveProperty('recipientIds');
+    expect(updated).not.toHaveProperty('recipientAliases');
+    expect(int.editReply).toHaveBeenCalled();
+  });
+
   test('empty pick → deferUpdate, no transition, no editReply', async () => {
     const int = makeSelectInteraction({ users: [] });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });

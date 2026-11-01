@@ -58,6 +58,16 @@ describe('handleConfirmSendClick', () => {
     );
   });
 
+  test('a canonical recipient card follows the normal send path', async () => {
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    const payload = { ...validPayload, recipients: [{ id: u1, alias: 'Saved Alice' }] };
+    delete payload.recipientIds;
+    mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringMatching(/Preparing send/) }));
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({ stage: SEND_STAGE_AWAITING_CONFIRM, reason: 'terminal' }));
+  });
+
   test('happy path → deferUpdate + deleteFlow + editReply "Preparing"', async () => {
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');

@@ -31,7 +31,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
     expect(menu.addOptions.mock.calls[0].some(option => option.value === '7d')).toBe(false);
   });
 
-  test('renders persisted alias when member-cache is empty', async () => {
+  test.each(['legacy', 'canonical'])('renders persisted alias when member-cache is empty (%s)', async format => {
     const payload = {
       resourceType: 'file',
       resourceLabel: 'x.png',
@@ -41,6 +41,11 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
       selfDestructSeconds: null,
       personalMessage: null,
     };
+    if (format === 'canonical') {
+      payload.recipients = [{ id: u1, alias: persistedAlias }];
+      delete payload.recipientIds;
+      delete payload.recipientAliases;
+    }
     const int = makeSelectInteraction({ value: '3d', guildMembers: {} });
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     expect(int.editReply).toHaveBeenCalled();
