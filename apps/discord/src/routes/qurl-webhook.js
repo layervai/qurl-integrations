@@ -54,11 +54,12 @@ function sanitizeForLog(s) {
 }
 
 const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
-// Unknown owners share the looser 150/min limit only with the same
-// (IP, owner) pair. A drifted owner cannot block siblings behind the NAT.
-// Keys hash the untrusted owner string to bound memory; this grants no trust.
-// The existing global entry cap and expiry still bound unique-owner floods.
+// Registry rebuilds need a looser budget than bad signatures: 150/min per
+// (IP, owner). Hashing bounds key size but grants no trust. A 1500/min IP
+// ceiling (ten owner budgets) also catches rotating bogus owners. Both limits
+// run only after an unknown-owner result, so registered NAT siblings bypass them.
 const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000 });
+const unknownOwnerIpLimiter = createBadSigLimiter({ max: 1500, windowMs: 60_000 });
 
 // Reason codes returned from verifyAndResolve. Caller maps them to
 // HTTP status + audit event + rate-limiter interaction in one place
@@ -1046,11 +1047,12 @@ router.post('/qurl', async (req, res) => {
     if (isHmacFailure) totalInWindow = badSigLimiter.recordBadSig(ip);
     else if (isUnknownOwner) {
       const ownerKey = `${ip}:${createHash('sha256').update(ownerId || '').digest('hex')}`;
-      if (unknownOwnerLimiter.shouldThrottle(ownerKey)) {
+      if (unknownOwnerIpLimiter.shouldThrottle(ip) || unknownOwnerLimiter.shouldThrottle(ownerKey)) {
         logger.warn('qURL webhook rate limit exceeded', { ip });
         logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, {});
         return res.status(429).json({ error: 'Too many invalid webhook attempts' });
       }
+      unknownOwnerIpLimiter.recordBadSig(ip);
       totalInWindow = unknownOwnerLimiter.recordBadSig(ownerKey);
     }
     // Audit-event split mirrors the threat-model split: OWNER_* are
@@ -1182,6 +1184,7 @@ router.post('/qurl', async (req, res) => {
 router.stopIntervals = function stopIntervals() {
   badSigLimiter.stopSweep();
   unknownOwnerLimiter.stopSweep();
+  unknownOwnerIpLimiter.stopSweep();
   clearInterval(senderCounterCacheSweepTimer);
   for (const { timer } of senderCounterFlushTimers.values()) clearTimeout(timer);
   senderCounterFlushTimers.clear();

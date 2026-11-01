@@ -421,9 +421,13 @@ describe('POST /webhooks/qurl — payload handling', () => {
 });
 
 describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () => {
-  beforeAll(() => {
+  beforeEach(() => {
     jest.resetModules();
+    mockPrimed = true;
+    mockOwnerSecrets.clear();
+    mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
   });
+  afterEach(() => require('../src/routes/qurl-webhook').stopIntervals());
   it('limits an unknown owner without blocking siblings behind the same IP', async () => {
     // eslint-disable-next-line global-require
     const isolatedSubs = require('../src/webhook-subscriptions');
@@ -461,7 +465,7 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
     expect(valid.status).toBe(200);
   });
 
-  it('bounds missing-owner attempts without consuming a registered owner budget', async () => {
+  it('bounds missing-owner attempts without blocking a registered owner', async () => {
     // eslint-disable-next-line global-require
     const isolatedApp = require('../src/server').app;
     const missingRaw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: undefined });
@@ -477,6 +481,29 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
       .post('/webhooks/qurl').set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(validRaw)).send(validRaw);
     expect(valid.status).toBe(200);
+  });
+
+  it('caps rotating unknown owners without blocking a registered owner', async () => {
+    const isolatedApp = require('../src/server').app;
+    for (let i = 0; i <= 1500; i++) {
+      const raw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: `usr_rotating_${i}` });
+      // eslint-disable-next-line no-await-in-loop
+      const response = await request(isolatedApp).post('/webhooks/qurl')
+        .set('Content-Type', 'application/json').set('QURL-Signature', signBody(raw)).send(raw);
+      expect(response.status).toBe(i < 1500 ? 401 : 429);
+    }
+    const raw = JSON.stringify(VALID_PAYLOAD);
+    const registered = await request(isolatedApp).post('/webhooks/qurl')
+      .set('Content-Type', 'application/json').set('QURL-Signature', signBody(raw)).send(raw);
+    expect(registered.status).toBe(200);
+  }, 15000);
+
+  it.each([123, {}, [], true])('rejects a non-string owner cleanly: %j', async owner_id => {
+    const isolatedApp = require('../src/server').app;
+    const raw = JSON.stringify({ ...VALID_PAYLOAD, owner_id });
+    const response = await request(isolatedApp).post('/webhooks/qurl')
+      .set('Content-Type', 'application/json').set('QURL-Signature', signBody(raw)).send(raw);
+    expect(response.status).toBe(401);
   });
 
 });
