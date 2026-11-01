@@ -33,7 +33,8 @@
 
 const { MessageFlags } = require('discord.js');
 const { buildFlowId } = require('./flow-id');
-const { loadFlow } = require('./flow-state');
+const { loadFlow, hydrateFlowRecipients } = require('./flow-state');
+const { deferUpdateOrStop } = require('./utils/interaction-ack');
 const { SHARD_ID } = require('./config');
 const logger = require('./logger');
 const {
@@ -73,7 +74,7 @@ const siblingMessages = new Map();
 //
 // Throws on duplicate registration — silently overwriting a handler
 // would mask a real bug (two modules claiming the same customId).
-function registerFlow(customId, { expectedStage, handler, siblingMessage }) {
+function registerFlow(customId, { expectedStage, handler, siblingMessage, metadataOnly = false }) {
   if (typeof customId !== 'string' || customId.length === 0) {
     throw new TypeError('flow-dispatch.registerFlow: customId must be a non-empty string');
   }
@@ -89,7 +90,8 @@ function registerFlow(customId, { expectedStage, handler, siblingMessage }) {
   if (handlers.has(customId)) {
     throw new Error(`flow-dispatch.registerFlow: customId ${JSON.stringify(customId)} is already registered`);
   }
-  handlers.set(customId, { expectedStage, handler });
+  if (typeof metadataOnly !== 'boolean') throw new TypeError('flow-dispatch.registerFlow: metadataOnly must be boolean');
+  handlers.set(customId, { expectedStage, handler, ...(metadataOnly && { metadataOnly: true }) });
   // The same `expectedStage` could be registered by multiple
   // customIds (e.g. a flow with parallel input components both at
   // the same stage). Last-wins is fine because the message
@@ -199,7 +201,7 @@ async function handleFlowInteraction(interaction) {
 
   let row;
   try {
-    row = await loadFlow(flow_id);
+    row = await loadFlow(flow_id, { defer_recipients: true });
   } catch (err) {
     logger.error('flow-dispatch: loadFlow failed', {
       customId, flow_id, error: err.message,
@@ -235,6 +237,14 @@ async function handleFlowInteraction(interaction) {
   // to re-issue loadFlow. handleRevokeSelect ignores it today
   // (single-shot stage); PR 6's setup-modal handler will consume it.
   try {
+    if (row.recipient_payload_deferred && !route.metadataOnly) {
+      if (!await deferUpdateOrStop(interaction, flow_id)) return;
+      row = await hydrateFlowRecipients(row);
+      if (!row) {
+        await interaction.editReply({ content: SUPERSEDED_MSG, components: [] });
+        return;
+      }
+    }
     await route.handler(interaction, { flow_id, row });
   } catch (err) {
     logger.error('flow-dispatch: handler threw', {

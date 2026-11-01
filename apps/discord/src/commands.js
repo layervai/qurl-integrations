@@ -2486,6 +2486,7 @@ registerFlow(CONFIRM_SEND_CUSTOM_ID, {
   handler: handleConfirmSendClick,
 });
 registerFlow(CONFIRM_CANCEL_CUSTOM_ID, {
+  metadataOnly: true,
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmCancelClick,
 });
@@ -2504,6 +2505,7 @@ registerFlow(CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID, {
   handler: handleConfirmSelfDestructSelect,
 });
 registerFlow(CONFIRM_NOTE_BUTTON_CUSTOM_ID, {
+  metadataOnly: true,
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmNoteButton,
 });

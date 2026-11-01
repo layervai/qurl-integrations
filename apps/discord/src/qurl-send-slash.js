@@ -17,6 +17,8 @@ const {
 const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
+const { readFlowRecipients, withFlowRecipients } = require('./flow-recipient-payload');
+const { deferUpdateOrStop } = require('./utils/interaction-ack');
 const logger = require('./logger');
 const {
   COLORS,
@@ -234,46 +236,6 @@ function emitMintFailureAudit(error, { sendId, kind }) {
 // Extracted to deduplicate ~13 identical `.catch(err => logger.warn(...))`
 // one-liners across this file.
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
-
-// A component interaction owns its flow mutation only after Discord accepts
-// its acknowledgement. SQS delivery and Gateway reconnects are at-least-once:
-// a duplicate interaction loses the one-shot deferUpdate race with Discord.
-// Continuing after that failure lets the unacknowledged copy mutate DDB, then
-// makes the acknowledged copy lose OCC and replace a valid card with the
-// "superseded" error. Stop at the acknowledgement boundary for every remote
-// or unknown error, not only Discord 10062/40060 responses: a transport failure
-// has an unknown outcome, so continuing could let an unacknowledged copy mutate
-// state. The one exception is discord.js's local InteractionAlreadyReplied
-// error when this same interaction object records that it already acknowledged.
-// If the sole delivery has a transport failure, Discord keeps its retry/toast
-// UX and the user can click again. Preserving state is the safer outcome.
-async function deferUpdateOrStop(interaction, flowId) {
-  try {
-    await interaction.deferUpdate();
-    return true;
-  } catch (err) {
-    // discord.js throws this locally when this interaction object already
-    // completed an acknowledgement. That means this copy still owns the
-    // action. Reconstructed duplicate deliveries use separate objects whose
-    // flags start false, so their rejected REST acknowledgement still stops.
-    if (err?.code === 'InteractionAlreadyReplied'
-        && (interaction.deferred || interaction.replied)) {
-      logger.debug('Interaction was already acknowledged by this handler; continuing', {
-        flow_id: flowId,
-        custom_id: interaction.customId ?? null,
-      });
-      return true;
-    }
-    logger.warn('Interaction acknowledgement failed — stopping before state change', {
-      flow_id: flowId,
-      custom_id: interaction.customId ?? null,
-      error_code: err?.code ?? err?.rawError?.code ?? null,
-      status_code: err?.status ?? null,
-      error: err?.message,
-    });
-    return false;
-  }
-}
 
 // --- qURL send helpers ---
 
@@ -5098,17 +5060,14 @@ async function handleQurlSlashSend(interaction, params) {
     // flow TTL, but the alternative is showing the raw snowflake).
     // resolveRecipientAlias returns the PLAIN form — markdown escape
     // happens at render time.
-    const recipientAliases = Object.fromEntries(
-      finalValid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
-    );
+    const storedRecipients = finalValid.map(u => ({ id: u.id, alias: resolveRecipientAlias(u, interaction) }));
     const payload = {
       resourceType: params.resourceType,
       attachment: params.attachment,
       locationUrl: params.locationUrl,
       locationName: params.locationName,
       resourceLabel: params.resourceLabel,
-      recipientIds,
-      recipientAliases,
+      ...withFlowRecipients({}, storedRecipients),
       voiceChannelId,
       // Mode token. Drives both the row layout (picker vs. pick-people-
       // -instead button) and the "To:" copy. Defaults to 'picker' at
@@ -5681,7 +5640,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       // Mirror payload.recipientIds (unchanged on the reject branch — no
       // transitionFlow fires here) so the user can recover their prior
       // valid selection on re-open instead of starting from empty.
-      recipientIds: payload.recipientIds || [],
+      recipientIds: readFlowRecipients(payload).map(recipient => recipient.id),
       recipientMode: RECIPIENT_MODE_PICKER,
     }),
   }).catch(logIgnoredDiscordErr);
@@ -5782,9 +5741,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     unavailableRoleCount,
     roleMentionsDeniedNames,
   });
-  const newRecipientAliases = Object.fromEntries(
-    valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
-  );
+  const newRecipients = valid.map(u => ({ id: u.id, alias: resolveRecipientAlias(u, interaction) }));
   // Asymmetry vs. the menu/modal handlers' no-op short-circuits:
   // the picker DOES NOT skip transitionFlow on a same-recipient-set
   // re-pick. Re-running here recomputes warningsBlock (droppedBots
@@ -5794,9 +5751,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // since the prior pick). All three are user-visible and worth
   // the version bump.
   const newPayload = {
-    ...payload,
-    recipientIds: valid.map((u) => u.id),
-    recipientAliases: newRecipientAliases,
+    ...withFlowRecipients(payload, newRecipients),
     warningsBlock: newWarningsBlock,
     selfIncluded,
     // Picker activity definitionally lands the card in picker-mode.
@@ -5817,6 +5772,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   let result;
   try {
     result = await transitionFlow(flow_id, row.version, {
+      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
@@ -5876,7 +5832,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId: payload.voiceChannelId,
       interaction,
-      recipientIds: newPayload.recipientIds,
+      recipientIds: readFlowRecipients(newPayload).map(recipient => recipient.id),
       recipientMode: RECIPIENT_MODE_PICKER,
     }),
   }).catch(logIgnoredDiscordErr);
@@ -6004,7 +5960,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       // Mirror payload.recipientIds (unchanged on the reject branch —
       // no transitionFlow fires) so the user can recover their prior
       // valid selection on re-open of the picker.
-      recipientIds: payload.recipientIds || [],
+      recipientIds: readFlowRecipients(payload).map(recipient => recipient.id),
       recipientMode: RECIPIENT_MODE_PICKER,
     }),
   }).catch(logIgnoredDiscordErr);
@@ -6102,13 +6058,9 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   const newWarningsBlock = renderRecipientWarnings({
     droppedBots,
   });
-  const newRecipientAliases = Object.fromEntries(
-    valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
-  );
+  const newRecipients = valid.map(u => ({ id: u.id, alias: resolveRecipientAlias(u, interaction) }));
   const newPayload = {
-    ...payload,
-    recipientIds: valid.map((u) => u.id),
-    recipientAliases: newRecipientAliases,
+    ...withFlowRecipients(payload, newRecipients),
     warningsBlock: newWarningsBlock,
     // Sender was excluded in `partitionRecipients` above with
     // `{ excludeSender: true }`, so `selfIncluded` is structurally
@@ -6123,6 +6075,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   let result;
   try {
     result = await transitionFlow(flow_id, row.version, {
+      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
@@ -6187,7 +6140,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId,
       interaction,
-      recipientIds: newPayload.recipientIds,
+      recipientIds: readFlowRecipients(newPayload).map(recipient => recipient.id),
       recipientMode: RECIPIENT_MODE_VOICE,
     }),
   }).catch(logIgnoredDiscordErr);
@@ -6234,9 +6187,7 @@ async function handleConfirmPickManual(interaction, { flow_id, row }) {
   // — the user is starting recipient selection over by definition of
   // having clicked "Pick people instead."
   const newPayload = {
-    ...payload,
-    recipientIds: [],
-    recipientAliases: {},
+    ...withFlowRecipients(payload, []),
     recipientMode: RECIPIENT_MODE_PICKER,
     selfIncluded: false,
     // Voice-mode's warningsBlock (e.g. droppedBots from voice members)
@@ -6247,6 +6198,7 @@ async function handleConfirmPickManual(interaction, { flow_id, row }) {
   let result;
   try {
     result = await transitionFlow(flow_id, row.version, {
+      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
@@ -6329,7 +6281,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId: payload.voiceChannelId,
       interaction,
-      recipientIds: payload.recipientIds || [],
+      recipientIds: readFlowRecipients(payload).map(recipient => recipient.id),
       recipientMode: RECIPIENT_MODE_PICKER,
     }),
   }).catch(logIgnoredDiscordErr);
@@ -6467,15 +6419,11 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   }
 
   const newWarningsBlock = renderRecipientWarnings({ droppedBots });
-  const newRecipientAliases = Object.fromEntries(
-    valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
-  );
+  const newRecipients = valid.map(u => ({ id: u.id, alias: resolveRecipientAlias(u, interaction) }));
   // TODO(upstream-contract): Discord caps MentionableSelect default_values at 25,
   // so @everyone replaces any truncated picker selection.
   const newPayload = {
-    ...payload,
-    recipientIds: valid.map((u) => u.id),
-    recipientAliases: newRecipientAliases,
+    ...withFlowRecipients(payload, newRecipients),
     warningsBlock: newWarningsBlock,
     selfIncluded,
     recipientMode: RECIPIENT_MODE_EVERYONE,
@@ -6483,6 +6431,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   let result;
   try {
     result = await transitionFlow(flow_id, row.version, {
+      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
@@ -6542,22 +6491,22 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
 // All four entry paths (picker, expiry, self-destruct, note modal)
 // defer-ack first, then re-render via editReply.
 async function rerenderConfirmCard(interaction, flow_id, newPayload) {
-  const recipientIds = Array.isArray(newPayload.recipientIds) ? newPayload.recipientIds : [];
+  const storedRecipients = readFlowRecipients(newPayload);
+  const recipientIds = storedRecipients.map(recipient => recipient.id);
   // Resolve each id through three layers, in priority order:
   //   1. members.cache — freshest data when populated
-  //   2. payload.recipientAliases — persisted at pick time, survives
+  //   2. stored recipient alias — persisted at pick time, survives
   //      cache eviction between pick and menu-click
   //   3. fabricated `user-${id}` fallback — last resort if both miss
   // resolveRecipientAlias does its own NFKC + bidi/zero-width strip
   // on whichever wins, so the rendered text is always sanitized.
-  // The aliases in persistedAliases were ALREADY produced by
+  // The persisted aliases were ALREADY produced by
   // resolveRecipientAlias at pick time — re-running it here is a
   // no-op because NFKC + bidi/zero-width strip have fixed points
   // after one pass. If sanitize semantics ever stop being idempotent,
   // this becomes a double-sanitize bug.
   const memberCache = interaction.guild?.members?.cache;
-  const persistedAliases = newPayload.recipientAliases || {};
-  const validRecipients = recipientIds.map((id) => {
+  const validRecipients = storedRecipients.map(({ id, alias }) => {
     // Asymmetric inputs through the same render path:
     //   - cache-hit returns a Discord.js User object (UNSANITIZED
     //     fields — username/displayName fresh from the gateway).
@@ -6577,7 +6526,6 @@ async function rerenderConfirmCard(interaction, flow_id, newPayload) {
     // username → user-${id}) hits the first branch consistently.
     // Asymmetric shape would be a footgun if anyone touches that
     // precedence later.
-    const alias = persistedAliases[id];
     return { id, displayName: alias || `user-${id}`, bot: false };
   });
   // recipientMode drives both row layout AND content prefix. Default
@@ -6685,6 +6633,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
   let result;
   try {
     result = await transitionFlow(flow_id, row.version, {
+      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
@@ -6747,6 +6696,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
   let result;
   try {
     result = await transitionFlow(flow_id, row.version, {
+      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
@@ -6874,6 +6824,7 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
   let result;
   try {
     result = await transitionFlow(flow_id, row.version, {
+      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: newPayload,
       terminal: false,
@@ -6960,7 +6911,8 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // "all left the server" copy below would be misleading for this
   // path (nobody left, nobody was ever there); distinct copy + flow
   // delete keeps the dispatcher's outer catch from masking the signal.
-  if (!Array.isArray(payload.recipientIds) || payload.recipientIds.length === 0) {
+  const recipientIds = readFlowRecipients(payload).map(recipient => recipient.id);
+  if (recipientIds.length === 0) {
     // Version-gate the delete: a concurrent UserSelect could have
     // transitioned the row between the dispatcher's loadFlow (which
     // fed our stale `payload` view) and this click. If `deleted:
@@ -6970,6 +6922,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
       expectedVersion: row.version,
+      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
     }).catch((err) => {
       logger.warn('handleConfirmSendClick: deleteFlow on empty-recipients failed', {
         flow_id, error: err && err.message,
@@ -6999,7 +6952,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // followUp below — without the split, a 429 / gateway blip would
   // silently shrink the delivered set with no signal.
   const [resolveResult, apiKeyResult] = await Promise.allSettled([
-    resolveRecipientUsers(interaction, payload.recipientIds),
+    resolveRecipientUsers(interaction, recipientIds),
     db.getGuildApiKey(interaction.guildId),
   ]);
   if (resolveResult.status === 'rejected') {
@@ -7044,6 +6997,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
       expectedVersion: row.version,
+      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
     }).catch((err) => {
       logger.warn('handleConfirmSendClick: deleteFlow on empty failed', {
         flow_id, error: err && err.message,
@@ -7120,6 +7074,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
     stage: SEND_STAGE_AWAITING_CONFIRM,
     reason: 'terminal',
     expectedVersion: row.version,
+      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
   });
   if (!deleteResult.deleted) {
     return interaction.followUp({
@@ -7222,6 +7177,7 @@ async function handleConfirmCancelClick(interaction, { flow_id, row }) {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
       expectedVersion: row.version,
+      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
     }));
   } catch (err) {
     logger.error('handleConfirmCancelClick: deleteFlow threw', {
