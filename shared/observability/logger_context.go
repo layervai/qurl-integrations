@@ -7,7 +7,7 @@ import (
 
 type loggerContextKey struct{}
 
-// WithLogger carries a logger through delivery seams. Callers supply a redacting handler.
+// WithLogger carries a logger through delivery seams. Callers must supply a redacting handler.
 func WithLogger(ctx context.Context, logger *slog.Logger) context.Context {
 	return context.WithValue(ctx, loggerContextKey{}, logger)
 }

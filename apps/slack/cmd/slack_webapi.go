@@ -349,7 +349,8 @@ func newSlackWebAPIPoster(lookup slackBotTokenLookup, userAgent, url, op string,
 	return &slackWebAPIPoster{lookup: lookup, invalidate: invalidate, userAgent: userAgent, url: url, op: op, respErr: respErr, httpClient: httpClient}
 }
 
-// Keep diagnostics at the root; only lookup IDs can collide with request correlation.
+// Scoped loggers own root correlation; nest lookup IDs to avoid duplicate keys.
+// Process calls keep their existing flat IDs. Diagnostics stay at the root.
 func slackOwnerLogAttrs(ctx context.Context, teamID, enterpriseID string) []slog.Attr {
 	team := slog.String("team_id", slackOwnerLogID(teamID))
 	enterprise := slog.String("enterprise_id", slackOwnerLogID(enterpriseID))

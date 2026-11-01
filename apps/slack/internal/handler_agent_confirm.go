@@ -436,6 +436,7 @@ func (h *Handler) handleAgentConfirmClick(w http.ResponseWriter, payload *intera
 	log := slog.With(
 		"surface", "agent_confirm",
 		"team_id", payload.Team.ID,
+		"enterprise_id", payload.Enterprise.ID,
 		"channel_id", payload.Channel.ID,
 		"user_id", payload.User.ID,
 		"approve", approve,

@@ -1303,7 +1303,7 @@ func TestSlackMarkdownFallbackKeepsDiagnosticFieldsAtRoot(t *testing.T) {
 			t.Cleanup(func() { slog.SetDefault(previous) })
 			ctx := context.Background()
 			if scoped {
-				ctx = observability.WithLogger(ctx, logger.With("event_id", "event-test", "team_id", "T12345678"))
+				ctx = observability.WithLogger(ctx, logger.With("event_id", "event-test", "team_id", "T12345678", "enterprise_id", "E12345678"))
 			}
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
