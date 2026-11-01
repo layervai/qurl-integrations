@@ -32,6 +32,7 @@ import { spawnSync } from 'node:child_process';
 import { appendFileSync, accessSync, constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { fetchWithTransientRetry } from './http';
+import { checkNativeCleanupConfig, observeBrowserCleanup, nativeCleanupDisposition, type NativeCleanupResult } from './nativeBrowserCleanup';
 
 /** Matches the tunnel view URL on ANY environment:
  *   https://r_<id>.qurl.site<.layerv.xyz|.layerv.ai|…>/views/<mint-id>
@@ -61,6 +62,8 @@ export interface ViewViaQurlLinkOptions {
   /** Browser launch headless? Defaults to true; set `PLAYWRIGHT_HEADED=1`
    *  (or `HEADLESS=0`) in the env to watch it run locally for debugging. */
   headless?: boolean;
+  /** Only the existing one-time negative arm expects an authenticated no-admission reply. */
+  expectedNoAdmission?: boolean;
   /** Require the sole iframe in the main document to be visible with this exact target in markup. */
   expectedIframeSrc?: string;
   /** Probe a known existing sibling through THIS session, without another knock. */
@@ -105,9 +108,12 @@ export async function viewViaQurlLink(
 ): Promise<ViewViaQurlLinkResult> {
   const timeoutMs = opts.timeoutMs ?? 30_000;
   let browser: Browser | undefined;
+  let cleanup: (() => Promise<NativeCleanupResult>) | undefined;
+  let contentPassed = false;
   try {
     browser = await chromium.launch({ headless: resolveHeadless(opts.headless) });
     const page = await (await browser.newContext()).newPage();
+    cleanup = await observeBrowserCleanup(page, qurlLink);
 
     // Wait on the tunnel-view RESPONSE, registered BEFORE goto so one that lands
     // mid-navigation isn't missed. Settle it into an always-resolving promise
@@ -170,13 +176,28 @@ export async function viewViaQurlLink(
           request_ids: probe.requestIDs,
           internal_authorize_403: 'pending_exact_request_id_readback_not_proved_by_wire_denial',
           persisted_target_path: 'pending_independent_native_state_readback',
-        }) + '\n', { mode: 0o600 });
+        }) + '\n', { mode: 0o600, flush: true });
       });
     }
+    contentPassed = true;
     return { status: resp.status(), url: resp.url() };
   } finally {
-    // Always tear the browser down — a leaked chromium would hang jest's worker exit.
-    await browser?.close();
+    let unresolved = false;
+    try {
+      if (cleanup) {
+        const result = await cleanup();
+        const state = nativeCleanupDisposition(result, opts.expectedNoAdmission === true, contentPassed);
+        unresolved = state === 'unresolved';
+        appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS!, JSON.stringify({
+          event: 'owned_native_cleanup', resource_id: opts.ownership.resource_id,
+          qurl_id: opts.ownership.qurl_id, observed_at: new Date().toISOString(),
+          ...result, state,
+        }) + '\n', { mode: 0o600, flush: true });
+      }
+    } catch { unresolved = true; }
+    finally { await browser?.close(); }
+    // Preserve content failures; the negative arm also needs authenticated no-admission proof.
+    if (unresolved && (contentPassed || opts.expectedNoAdmission)) throw new Error('owned native cleanup remains unresolved');
   }
 }
 
@@ -206,7 +227,7 @@ export async function recordAdmissionAttempt(link: string, child: ViewViaQurlLin
     child_binding: 'pending_independent_readback',
     // TODO(upstream-contract): NHP sessionControlAgentSessionPK hashes the standard-base64 STRING.
     agent_membership_pk: 'AGENT#' + createHash('sha256').update(identity.agent_public_key).digest('hex'),
-  }) + '\n', { mode: 0o600 });
+  }) + '\n', { mode: 0o600, flush: true });
 }
 
 // TODO(upstream-contract): qurl-service GET /v1/me returns data.owner_id.
@@ -222,11 +243,12 @@ async function readOwner(): Promise<string> {
 
 /** Fail before fixture creation if runner wiring, public trust or identity is unavailable. */
 export async function checkOwnershipConfig(): Promise<void> {
+  await checkNativeCleanupConfig();
   for (const name of ['QURL_OWNERSHIP_VERIFIER', 'QURL_OWNERSHIP_RECEIPTS', 'QURL_PUBLIC_CONFIG_URL', 'MINT_API_URL', 'QURL_API_KEY']) {
     if (!process.env[name]) throw new Error(`required ownership receipt configuration missing: ${name}`);
   }
   accessSync(process.env.QURL_OWNERSHIP_VERIFIER!, constants.X_OK);
-  appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS!, '', { mode: 0o600 });
+  appendFileSync(process.env.QURL_OWNERSHIP_RECEIPTS!, '', { mode: 0o600, flush: true });
   const result = spawnSync(process.env.QURL_OWNERSHIP_VERIFIER!, ['--check-config'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 16_384 });
   if (result.error || result.status !== 0) throw new Error('public ownership configuration failed');
   await readOwner();

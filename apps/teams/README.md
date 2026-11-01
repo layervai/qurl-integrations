@@ -221,6 +221,7 @@ itself enforces.
 | `AUTH0_CLIENT_SECRET_FALLBACK` | no | Second secret accepted during a rotation window. Remove it once the primary is cut over. |
 | `AUTH0_AUDIENCE` | yes | Access-token audience requested for the qURL API. |
 | `AUTH0_EXPECTED_AUDIENCE` | no | Deployment's independently configured expectation for `AUTH0_AUDIENCE`. A mismatch fails startup before listening. The managed runtime sets this to its reviewed qURL API origin; unset or blank preserves custom audience identifiers. Values are trimmed before comparison. |
+| `EMF_METRIC_NAMESPACE` | no | Shared runtime-injected CloudWatch namespace. Enables dimensionless `SignatureFailures` counts for SDK 401 responses on `POST /api/messages`. Missing tokens and invalid claims count as inbound authentication failures; body-limit, OAuth and other routes do not. Unset emits no metric. |
 | `HOST` | no | Listen address, default `127.0.0.1`. See the deployment note below. |
 | `PORT` | no | Listen port, default `3000`. Rejected unless an integer in 1-65535. |
 
@@ -360,3 +361,24 @@ JWT. That deletion also removes the matching replay record; key revocation
 alone does not. If setup reports a retained binding, complete this cleanup
 before reinstalling. Enrollment credentials and enrolled devices have their
 own lifecycle, as in the other integrations.
+
+### Inbound authentication and launch capacity
+
+The app emits `SignatureFailures` through the redacting JSON logger with
+`Dimensions: [[]]`, matching the shared runtime alarm. It records one count
+per completed inbound SDK 401 response, with the same case and trailing-slash
+matching as its Express route, without request headers, payloads,
+identities, or query values. It does not perform a second JWT verification.
+`SignatureFailures` is the shared alarm name; the count includes missing JWTs
+and rejected claims as well as invalid signatures.
+
+The Teams runtime remains in private infrastructure PR #1442; current
+infrastructure main has only the credential-state stack. Before a production
+launch, the rollout owner must prove metric/alarm binding on an approved test
+request and approve WAF limits against measured task capacity. The held runtime's
+10,000-request per-source five-minute limit, two small production tasks, and
+absence of a global cap are not capacity proof. Keep production launch on hold
+until an approved load test sets both the per-source and fleet limits and
+checks normal Teams traffic and distributed invalid-auth traffic. Teams uses
+SDK JWT validation; a Slack/Discord HMAC-presence WAF rule cannot replace it.
+This source change does not deploy the runtime or approve that capacity posture.

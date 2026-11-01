@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -199,7 +200,8 @@ type globalOpts struct {
 	resolvedSupervision connectorstate.RuntimeSupervision
 	// resolvedClientProduct is the validated QURL_CLIENT_PRODUCT, or empty. It
 	// is set by resolveSettings, so build API configs only after it has run.
-	resolvedClientProduct string
+	resolvedClientProduct         string
+	resolvedClientProductExplicit bool
 }
 
 // rootOption is a test hook for injecting process context.
@@ -219,6 +221,15 @@ func Main(version string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	root, opts := newRoot(version, output.Detect(), lookForSavedSkill)
+	if command, _, err := root.Find(os.Args[1:]); err == nil {
+		for current := command; current != nil; current = current.Parent() {
+			if current.Name() == daemonCommandName {
+				// Include daemon subcommands while keeping normal command diagnostics unchanged.
+				slog.SetDefault(slog.New(slog.NewTextHandler(opts.streams.Err, nil)))
+				break
+			}
+		}
+	}
 	return run(ctx, root, opts)
 }
 
@@ -305,7 +316,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 			// Task Scheduler starts `daemon run` directly. Redirect before
 			// settings resolution so a malformed profile or environment value is
 			// present in the durable log on the first background start.
-			if cmd.Name() == "run" && cmd.Parent() != nil && cmd.Parent().Name() == "daemon" {
+			if cmd.Name() == "run" && cmd.Parent() != nil && cmd.Parent().Name() == daemonCommandName {
 				stdoutPath, err := cmd.Flags().GetString("job-stdout-log")
 				if err != nil {
 					return err
@@ -381,6 +392,8 @@ func (o *globalOpts) nativeShareDaemon(stateDir, logDir string) (shareDaemonCont
 	if err != nil {
 		return nil, err
 	}
+	controller.ClientProduct = o.resolvedClientProduct
+	controller.ClientProductExplicit = o.resolvedClientProductExplicit
 	return controller, nil
 }
 
@@ -671,10 +684,12 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 const clientProductEnv = "QURL_CLIENT_PRODUCT"
 
 // resolveClientProduct returns the environment-only QURL_CLIENT_PRODUCT, or
-// empty. An empty value counts as unset; an invalid one is dropped with a
+// empty. Explicit empty clears installed attribution; unset or invalid values
+// preserve a running native daemon's product. Invalid values get a
 // verbose-only note.
 func (o *globalOpts) resolveClientProduct() string {
-	value, _ := o.lookupEnv(clientProductEnv)
+	value, present := o.lookupEnv(clientProductEnv)
+	o.resolvedClientProductExplicit = present && (value == "" || qurlapi.ValidClientProduct(value))
 	if value == "" || qurlapi.ValidClientProduct(value) {
 		return value
 	}

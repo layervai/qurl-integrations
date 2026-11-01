@@ -11,6 +11,19 @@ CommonJS, Jest + ts-jest.
 > resources in `afterAll` (see `helpers/cleanup.ts`), so runs clean up
 > after themselves.
 
+Cleanup retries each HTTP 429 once and shares at most ten seconds of retry
+waiting across a resource sweep or a message sweep. It honors `Retry-After`
+(seconds, fractional seconds, or an HTTP date); a hint above the remaining
+budget is reported without an early retry. Missing or invalid hints use a
+one-second delay; all retries wait at least 250 ms. Source and message cleanup
+do not retry other failures. Child cleanup keeps
+its existing three-attempt transient GET/DELETE policy, with at most one
+budgeted retry of a 429. Once the budget is spent, further 429s are reported
+without a retry. Resource failures
+retain their entries and fail the hook after all entries are attempted;
+message failures warn and continue. This bounds added waiting, not network
+request time; keep suite hook deadlines sized for their fixture count.
+
 ## Setup
 
 ```sh
@@ -166,3 +179,50 @@ This proves only input responses, stored paths, and API child cleanup. Root must
 separately bind the deployed API/config, six rejected requests' bounded metric
 labels and redacted DEBUG records, and normal flag restoration. It proves no
 NHP/native-session cleanup, Connector object lookup, or production result.
+
+### Owned browser native-session cleanup (Sandbox only)
+
+The normal Sandbox workflow can set `QURL_NATIVE_CLEANUP_ENABLED=1` after it
+builds the pinned NHP SDK and resolves its public `@layervai/nhp-js-agent/portal`
+export into `QURL_NATIVE_CLEANUP_PORTAL_MODULE`. The served, trusted qURL-link
+configuration must also enable native cleanup and browser session bootstrap.
+Before fixtures, the runner requires the expected built bundle hash and verifies
+both the served script name and its actual bytes/SRI.
+The ownership verifier keeps its separate source pin.
+
+The Node runner observes the actual relay request/reply before navigation. It
+keeps the signed link and original authenticated cleanup handle in memory only.
+Before closing the browser it retries all captured handles in paced rounds for
+at most five minutes, using the normal Go cleanup budget.
+Only `closed` completes a granted session. The existing second one-time arm
+requires one strictly authenticated denial with no successful or unknown grant;
+its receipt says `no_admission`, never `closed`. Missing, malformed or failed
+transport evidence fails that arm instead of passing as an ordinary denial. The private ownership artifact records counts and
+owned resource/link identifiers; it never stores keys, packets, or capabilities.
+A failed content assertion remains failed. Unresolved cleanup cannot turn a
+successful content test green. This does not recover keys from earlier runs.
+
+### URL-target one-use browser check (Sandbox only)
+
+The suite can join a normally authorized Sandbox live run with that verified
+ownership and native-cleanup configuration. For an isolated check, select only
+`tests/url-target-one-time.test.ts` and use `--reporters=default` to avoid the
+wider suite's bot reporter. This test needs
+the Sandbox API key, not bot/channel credentials, and sends no bot messages.
+Without the native-cleanup flag the optional suite skips. With it enabled,
+missing configuration or a non-Sandbox API fails before fixture creation.
+It adds a nonce to the Sandbox API's public `/health` URL and creates one
+one-use URL resource. A real browser must serve exactly `{"status":"healthy"}`
+from the isolated `q-` origin. A fresh browser context must then receive an
+authenticated denial, and management status must report one use or HTTP 404.
+
+The November 2026 Sandbox observation was a bootstrap redirect through
+`/.well-known/qurl/session` to the isolated origin's root, not a redirect to
+the target's public hostname. The predicate requires that document response
+and its JSON body; an origin change or timeout alone cannot pass.
+
+Mint intent and known IDs are fsynced into the private ownership JSONL before
+assertions. There is one POST attempt. Preserve the journal on every outcome;
+an ambiguous create or unconfirmed target binding requires owner recovery.
+The test revokes only the nonce-bound child/source it verified. Native CLOSED,
+authenticated no-admission, and API cleanup remain separate receipts.
