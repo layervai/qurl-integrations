@@ -643,7 +643,8 @@ The ceiling is a selection bound, not a delivery-rate or large-send capacity gua
 HTTP-only workers reuse a completed member walk for 60 seconds. The cache object
 and its size must still match. Failed, capped or stalled walks do not establish
 freshness. An exact gateway member count keeps its existing completeness check.
-Membership can lag during this short window; each send still uses its normal
+New joiners can be missed during this short window; the existing HTTP-only
+cache can also retain departed members. Each send still uses its normal
 recipient and grant checks. The worker does not retain a separate guild-ID map
 for completion timestamps.
 
@@ -654,11 +655,13 @@ aggregate counts and cache sizes, without guild or user IDs:
 ```text
 fields @timestamp, @message
 | filter @message like /members pre-warm (short-circuited|complete|failed|hit safety cap)/
+| parse @message /members pre-warm (?<event>short-circuited \([^)]*\)|complete|failed|hit safety cap)/
 | parse @message /"cache_size":(?<cache_size>[0-9]+)/
-| stats count(*) as events, max(cache_size) as largest_cache by bin(5m)
+| stats count(*) as events, max(cache_size) as largest_cache by event, bin(5m)
 ```
 
-Run the same filter with `short-circuited` or `complete` to compare their event
-counts. No matching rows with debug logging off means unavailable telemetry.
+The event groups distinguish recent walks, exact-count hot caches and failures.
+No matching rows with debug logging off means unavailable telemetry.
 The retired `/unlinked` command no longer uses an approximate-count threshold.
-Long walks still need incremental user progress feedback (issue #457).
+Long slash-command walks update each waiting interaction every ten pages. A failed
+progress update does not abort the member walk or mark it fresh.

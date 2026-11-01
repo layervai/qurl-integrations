@@ -396,7 +396,7 @@ const PREWARM_FRESH_MS = 60_000;
 // fields after it (`guild_id`, `cache_size`, etc.) override any
 // matching key in the caller's `logCtx`. Don't put `guild_id` in
 // `logCtx` at call sites expecting it to win — it won't.
-async function prewarmGuildMembersCache(guild, logCtx) {
+async function prewarmGuildMembersCache(guild, logCtx, onProgress) {
   if (!guild || !guild.members || typeof guild.members.list !== 'function') return;
   const cacheSize = guild.members.cache?.size ?? 0;
   // Only short-circuit on EXACT `memberCount` (gateway tier). The
@@ -416,7 +416,11 @@ async function prewarmGuildMembersCache(guild, logCtx) {
     return;
   }
   const existing = prewarmInFlight.get(guild.id);
-  if (existing) return existing;
+  if (existing) {
+    if (onProgress) existing.progress.add(onProgress);
+    try { return await existing.promise; }
+    finally { existing.progress.delete(onProgress); }
+  }
   const completed = completedPrewarms.get(guild);
   const age = completed ? Date.now() - completed.at : -1;
   if (guild.memberCount == null && completed?.cache === guild.members.cache
@@ -427,7 +431,9 @@ async function prewarmGuildMembersCache(guild, logCtx) {
     return;
   }
   completedPrewarms.delete(guild);
-  const inFlight = (async () => {
+  const progress = new Set(onProgress ? [onProgress] : []);
+  // Defer the first SDK call until the in-flight entry exists, even on a synchronous throw.
+  const inFlight = Promise.resolve().then(async () => {
     try {
       // REST `GET /guilds/{id}/members` rather than `guild.members.fetch()`
       // (no args): the latter sends REQUEST_GUILD_MEMBERS over the gateway
@@ -457,6 +463,12 @@ async function prewarmGuildMembersCache(guild, logCtx) {
         // this PR fixes, and the cache-merge regression test can't
         // catch a class of failure where the mock differs from prod.
         const batch = await guild.members.list({ limit: DISCORD_MEMBERS_PAGE_SIZE, after, cache: true });
+        if (batch.size === DISCORD_MEMBERS_PAGE_SIZE && (page + 1) % 10 === 0 && progress.size > 0) {
+          const updates = await Promise.allSettled([...progress].map(fn => Promise.resolve().then(() => fn(page + 1))));
+          if (updates.some(update => update.status === 'rejected')) {
+            logger.warn('members pre-warm progress update failed', { pages: page + 1 });
+          }
+        }
         if (batch.size < DISCORD_MEMBERS_PAGE_SIZE) break;
         // Collection is insertion-ordered against the API response, which
         // Discord sorts ascending by user_id — lastKey() is the right
@@ -518,8 +530,8 @@ async function prewarmGuildMembersCache(guild, logCtx) {
     } finally {
       prewarmInFlight.delete(guild.id);
     }
-  })();
-  prewarmInFlight.set(guild.id, inFlight);
+  });
+  prewarmInFlight.set(guild.id, { promise: inFlight, progress });
   return inFlight;
 }
 
@@ -5495,7 +5507,9 @@ async function handleQurlSlashSend(interaction, params) {
     const hasMassMention = MASS_MENTION_HINT_RE.test(recipientsRaw || '');
     const hasRoleMention = ROLE_MENTION_HINT_RE.test(recipientsRaw || '');
     if (hasMassMention && (canMentionEveryone || hasRoleMention)) {
-      await prewarmGuildMembersCache(interaction.guild, { caller: 'handleQurlSlashSend' });
+      await prewarmGuildMembersCache(interaction.guild, { caller: 'handleQurlSlashSend' }, pages => interaction.editReply({
+        content: `Loading server members… ${pages * DISCORD_MEMBERS_PAGE_SIZE} checked.`,
+      }));
     }
     const parsed = parseRecipientMentions(recipientsRaw, interaction, {
       allowMassMention: canMentionEveryone,
