@@ -3794,6 +3794,35 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
       .rejects.toThrow(/value=(?:🚀){64}…/u);
   });
 
+  test.each([
+    ['null', null], ['undefined', undefined], ['number', 123], ['string', 'user'],
+    ['array', []], ['missing id', { name: 'no-id' }], ['numeric id', { id: 123 }],
+    ['empty id', { id: '' }], ['blank id', { id: '  ' }],
+  ])('rejects an invalid recipient element before side effects: %s (#290)', async (_label, recipient) => {
+    const interaction = makeInteraction();
+    const { setCooldown, isOnCooldown } = _test;
+    setCooldown(interaction.user.id);
+    await expect(executeSendPipeline(interaction, makePipelineParams({
+      recipients: [{ id: 'valid' }, recipient],
+    }))).rejects.toThrow('recipients[1] must be an object with a non-empty string id');
+    expect(isOnCooldown(interaction.user.id)).toBe(false);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Internal error — send cancelled'),
+    }));
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  test('rejects a sparse recipient array before minting (#290)', async () => {
+    await expect(executeSendPipeline(makeInteraction(), makePipelineParams({
+      recipients: new Array(1),
+    }))).rejects.toThrow('recipients[0] must be an object with a non-empty string id');
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
+
   test('throws RangeError when recipients.length exceeds QURL_SEND_MAX_RECIPIENTS', async () => {
     const oversized = Array.from({ length: RECIPIENT_CAP + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }));
     const interaction = makeInteraction();

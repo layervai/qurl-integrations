@@ -1838,10 +1838,8 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //     when `resourceType === RESOURCE_TYPES.FILE`.
 //   - `expiresIn` must be a key of `EXPIRY_LABELS`.
 //   - `personalMessage` must be `null` or `string`.
-//   - `recipients` must be a non-empty array (element shape is
-//     `{ id: <discord-user-id>, username: <string> }`; the gate
-//     does NOT validate elements — only the array's outer shape +
-//     length ≤ `config.QURL_SEND_MAX_RECIPIENTS`).
+//   - `recipients` must be a non-empty, capped array of objects with
+//     a non-empty string id. Optional username fields are caller-provided.
 // Each gate clears the caller's stale ephemeral with a cancel-
 // edit then throws — the user still sees the outer catch's
 // generic followUp, but the gate's specific cancel replaces
@@ -2025,6 +2023,12 @@ async function executeSendPipeline(interaction, {
   }
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
     failGate(RangeError, `executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
+  }
+  for (const [index, recipient] of recipients.entries()) {
+    if (!recipient || typeof recipient !== 'object' || Array.isArray(recipient)
+        || typeof recipient.id !== 'string' || !recipient.id.trim()) {
+      failGate(TypeError, `executeSendPipeline: recipients[${index}] must be an object with a non-empty string id`);
+    }
   }
   // Add Recipients owns this snapshot; callers may retain or freeze their input.
   recipients = [...recipients];
