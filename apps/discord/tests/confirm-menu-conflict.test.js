@@ -72,3 +72,23 @@ test('rapid expiry then timer conflict displays the committed expiry and keeps t
   expect(card.content).not.toContain('30 seconds');
   expect(mockTransitionFlow).toHaveBeenCalledTimes(2);
 });
+
+test.each([undefined, 'malformed'])('a missing or malformed original nonce cannot refresh a card: %s', async sendNonce => {
+  mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+  mockLoadFlow.mockResolvedValueOnce({ stage: SEND_STAGE_AWAITING_CONFIRM,
+    payload: { ...payload, sendNonce } });
+  const interaction = interactionFor('7d');
+  await handleConfirmExpirySelect(interaction, { flow_id: 'fid', row: { version: 1, payload: { ...payload, sendNonce } } });
+  expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringMatching(/superseded/), components: [] });
+});
+
+test('a Discord redraw rejection still reaches the private recovery notice', async () => {
+  mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+  mockLoadFlow.mockResolvedValueOnce({ stage: SEND_STAGE_AWAITING_CONFIRM, payload });
+  const interaction = interactionFor('7d');
+  interaction.editReply.mockRejectedValueOnce(new Error('Discord temporarily unavailable'));
+  await handleConfirmExpirySelect(interaction, { flow_id: 'fid', row: { version: 1, payload } });
+  expect(interaction.followUp).toHaveBeenCalledWith({
+    content: expect.stringMatching(/another change landed first/i), flags: 64,
+  });
+});

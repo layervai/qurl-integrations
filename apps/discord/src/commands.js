@@ -7855,16 +7855,12 @@ async function rerenderConfirmCard(interaction, newPayload) {
   }).catch(logIgnoredDiscordErr);
 }
 
-// Expiry StringSelectMenu → update payload.expiresIn. Defense-in-depth
-// validation against EXPIRY_LABELS mirrors handleQurlSlashSend's slash-
-// option gate — Discord enforces the choice set server-side, but a
-// forged interaction could land an off-set value here.
 async function refreshConflictedConfirmCard(interaction, flow_id, row) {
   let fresh;
   try {
     fresh = await loadFlow(flow_id);
-  } catch (_err) {
-    logger.warn('confirm-card conflict refresh failed', { flow_id });
+  } catch (err) {
+    logger.warn('confirm-card conflict refresh failed', { flow_id, errorName: err?.name });
     return interaction.followUp({
       content: 'Could not refresh the card. Please try again.',
       flags: MessageFlags.Ephemeral,
@@ -7876,7 +7872,7 @@ async function refreshConflictedConfirmCard(interaction, flow_id, row) {
     && /^[a-f0-9]{16}$/.test(nonce) && fresh.payload?.sendNonce === nonce) {
     await rerenderConfirmCard(interaction, fresh.payload);
     return interaction.followUp({
-      content: 'Another change landed first. Re-pick if you still want to apply yours.',
+      content: 'Another change landed first. Try your change again if you still want it.',
       flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
   }
@@ -7886,6 +7882,10 @@ async function refreshConflictedConfirmCard(interaction, flow_id, row) {
   }).catch(logIgnoredDiscordErr);
 }
 
+// Expiry StringSelectMenu → update payload.expiresIn. Defense-in-depth
+// validation against EXPIRY_LABELS mirrors handleQurlSlashSend's slash-
+// option gate — Discord enforces the choice set server-side, but a
+// forged interaction could land an off-set value here.
 async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
   // `?.[0]` is paranoia, not load-bearing — Discord guarantees
   // `values` is an array for StringSelectMenu interactions. The
