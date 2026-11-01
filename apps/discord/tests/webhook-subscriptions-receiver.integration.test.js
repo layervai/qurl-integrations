@@ -68,7 +68,7 @@ describe('webhook-subscriptions → receiver integration (seam contract)', () =>
     expect(subs.isPrimed()).toBe(true);
 
     const payload = buildPayload({ ownerId: 'usr_integration' });
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const sig = qurlServiceSign(raw, 'sec_integration');
 
     const res = await request(app)
@@ -93,7 +93,7 @@ describe('webhook-subscriptions → receiver integration (seam contract)', () =>
     await subs.scanOnce();
 
     const payload = buildPayload({ ownerId: 'usr_unknown' });
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const sig = qurlServiceSign(raw, 'sec_known');
 
     const res = await request(app)
@@ -118,7 +118,7 @@ describe('webhook-subscriptions → receiver integration (seam contract)', () =>
     subs._setLastScanCompletedAtForTesting(Date.now() - 10 * 60_000);
 
     const payload = buildPayload({ ownerId: 'usr_unknown' });
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const sig = qurlServiceSign(raw, 'sec_known');
 
     const res = await request(app)

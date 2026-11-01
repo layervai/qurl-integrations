@@ -495,6 +495,8 @@ const AUDIT_EVENTS = {
   QURL_WEBHOOK_RECEIVED: 'qurl_webhook_received',
   // Sustained rate = SSM secret drift OR attacker probing.
   QURL_WEBHOOK_SIGNATURE_INVALID: 'qurl_webhook_signature_invalid',
+  // Signed delivery time is missing, malformed, or outside the clock window.
+  QURL_WEBHOOK_REPLAY_REJECTED: 'qurl_webhook_replay_rejected',
   // Legit traffic NEVER triggers — sustained rate = sustained attacker.
   QURL_WEBHOOK_RATE_LIMITED: 'qurl_webhook_rate_limited',
   // Sustained rate = qurl_views table hot.
