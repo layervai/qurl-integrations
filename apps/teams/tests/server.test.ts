@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { Readable } from 'node:stream';
 import type { Application, Request } from 'express';
 import express from 'express';
-import type { App } from '@microsoft/teams.apps';
+import { App, ExpressAdapter } from '@microsoft/teams.apps';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TeamsBot } from '../src/bot.js';
@@ -246,6 +246,30 @@ describe('Teams HTTP body limits', () => {
       tokenClient: {} as never, callback: {} as never, state: {} as never,
     });
     expect(expressApp.get('x-powered-by')).toBe(false);
+  });
+
+  it('rejects an oversized request through the real SDK constructor, router and HTTP server', async () => {
+    const expressApp = express();
+    const app = new App({
+      clientId: '00000000-0000-4000-8000-000000000001', clientSecret: 'test-secret',
+      tenantId: '00000000-0000-4000-8000-000000000002',
+      httpServerAdapter: new ExpressAdapter(expressApp), messagingEndpoint: '/api/messages',
+    });
+    const server = await createTeamsServer({
+      baseUrl: 'https://teams.example', expressApp, app,
+      tokenClient: {} as never, callback: {} as never, state: {} as never, maxBodyBytes: 128,
+    });
+    await new Promise<void>(resolve => { server.listen(0, '127.0.0.1', resolve); });
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Expected local TCP listener');
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/messages`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ padding: 'x'.repeat(256) }),
+      });
+      expect(response.status).toBe(413);
+      await response.text();
+    } finally { await new Promise<void>(resolve => { server.close(() => resolve()); }); }
   });
 
   it('enforces the configured body limit on the Teams message route', async () => {
