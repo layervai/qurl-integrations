@@ -2277,7 +2277,7 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
       logger.error.mockClear();
       mockDownloadAndUpload.mockRejectedValueOnce(Object.assign(new Error('upload failed'), fields));
       await executeSendPipeline(makeInteraction(), makePipelineParams());
-      const call = logger.error.mock.calls.find(c => c[0] === 'Failed to prepare QURL links');
+      const call = logger.error.mock.calls.find(c => c[0] === 'Failed to prepare qURL links');
       expect(call[1]).not.toHaveProperty('apiDetail');
       expect(JSON.stringify(logger.error.mock.calls)).not.toContain('RAW-UNREDACTED-BODY');
     }
@@ -2316,7 +2316,7 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
       api_code: 'qurl_creation_failed',
       status_code: 400,
     }));
-    expect(logger.error).toHaveBeenCalledWith('Failed to prepare QURL links', expect.objectContaining({
+    expect(logger.error).toHaveBeenCalledWith('Failed to prepare qURL links', expect.objectContaining({
       apiCode: 'qurl_creation_failed',
       status: 400,
       apiDetail: expect.stringContaining('unknown field'),
@@ -2350,7 +2350,7 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     await executeSendPipeline(interaction, makePipelineParams());
 
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to prepare QURL links',
+      'Failed to prepare qURL links',
       expect.objectContaining({
         status: 502,
         partial_link_count: 2,

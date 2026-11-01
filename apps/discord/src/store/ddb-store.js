@@ -409,7 +409,7 @@ async function recordQURLSendBatch(sends, options = {}) {
   }
 }
 
-// ── QURL views (webhook-fed view counter for /qurl send + /qurl map) ──
+// ── qURL views (webhook-fed view counter for /qurl send + /qurl map) ──
 
 // 30d TTL on `expires_at` (peer attribute name across every TTL table
 // in qurl-bot-ddb), refreshed on every write. Safely past the longest
@@ -2085,7 +2085,7 @@ async function close() {
 module.exports = {
   // Stats
   getStats,
-  // QURL sends
+  // qURL sends
   recordQURLSend, recordQURLSendBatch, updateSendDMStatus, markSendDMDelivered,
   getRecentSends, markSendRevoking, markSendRevoked, isSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
@@ -2095,7 +2095,7 @@ module.exports = {
   saveSendConfirmState,
   getSendRenderState, incrementSendViewedCount, getSendViewedCount,
   getSendRenderedCount, tryAdvanceRenderedCount, touchRenderedAt, tryClaimRenderAttempt, markConfirmTerminal,
-  // QURL views (webhook-fed)
+  // qURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs
   getGuildApiKey, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,

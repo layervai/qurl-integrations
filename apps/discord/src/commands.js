@@ -259,7 +259,7 @@ async function deferUpdateOrStop(interaction, flowId) {
 // the byte-identity unit test reads it where it always did.
 const { renderViewCounter } = require('./view-counter-render');
 
-// --- QURL send helpers ---
+// --- qURL send helpers ---
 
 function isGoogleMapsURL(url) {
   try {
@@ -1668,7 +1668,7 @@ const REVOKE_RUNNING_MSG = 'Revocation is still running. Run `/qurl revoke` agai
  *   the current resource's token pool is drained. Must return a fresh resource.
  * @param {string} opts.expiresAt — ISO string; forwarded to mintLinks.
  * @param {number} opts.recipientCount — number of tokens to mint in total.
- * @param {string} opts.apiKey — QURL API key.
+ * @param {string} opts.apiKey — qURL API key.
  * @param {?number} [opts.selfDestructSeconds] — when set, forwarded to mintLinks
  *   as `session_duration`. Each minted token gets an L7 session window matching
  *   the fileviewer's client-side self-destruct timer. null/undefined inherits
@@ -2183,7 +2183,7 @@ async function executeSendPipeline(interaction, {
     // silently bucketing as 'location'. quota_exceeded skip lives in emitMintFailureAudit.
     const kindMap = { [RESOURCE_TYPES.FILE]: 'file', [RESOURCE_TYPES.MAPS]: 'location' };
     emitMintFailureAudit(error, { sendId, kind: kindMap[resourceType] ?? null });
-    logger.error('Failed to prepare QURL links', {
+    logger.error('Failed to prepare qURL links', {
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
@@ -2237,7 +2237,7 @@ async function executeSendPipeline(interaction, {
   // Computed BEFORE recordQURLSendBatch so a malformed `expiresIn`
   // throwing in `expiryToMs` aborts the dispatch BEFORE any DDB rows
   // are written — otherwise the DB writes would happen, then the throw
-  // would bubble out with no DMs sent, leaving orphan QURL records
+  // would bubble out with no DMs sent, leaving orphan qURL records
   // with no recipient. The throw fires HERE (at the hoisted compute
   // site below, function-scoped) rather than at the per-recipient
   // render step inside batchSettled — that distinction matters for
@@ -2247,7 +2247,7 @@ async function executeSendPipeline(interaction, {
   const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
 
   // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
-  // still exist on the QURL side but there's no local record to revoke them
+  // still exist on the qURL side but there's no local record to revoke them
   // later — abort the send and surface the error instead of continuing to DMs.
   try {
     await db.recordQURLSendBatch(qurlLinks.map(link => ({
@@ -3157,7 +3157,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'No valid recipients selected (bots and yourself are excluded).', newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
-  // Create new QURL links for each resource type in the send config
+  // Create new qURL links for each resource type in the send config
   // recipientLinks[recipientId] = [{ qurlLink, resourceId, resType, label }]
   const recipientLinks = {};
   // connector_resource_id exists for file AND location sends because maps are
@@ -3405,7 +3405,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // `sendConfig.expires_in` throwing in `expiryToMs` aborts the
   // dispatch BEFORE any DDB rows are written — otherwise the DB
   // writes would happen, then the throw would bubble out with no DMs
-  // sent, leaving orphan QURL records with no recipient. The
+  // sent, leaving orphan qURL records with no recipient. The
   // `handleAddRecipients` path is especially exposed here because
   // sendConfig.expires_in is read from DDB (rather than validated
   // upstream like executeSendPipeline's slash-command param), so a
