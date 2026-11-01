@@ -563,7 +563,7 @@ type Config struct {
 	// resolve error never fails the turn.
 	ResolveChannelName ResolveChannelNameFunc
 
-	// ResolveConversationInfo resolves Slack conversation metadata for snapshot-less
+	// ResolveConversationInfo resolves Slack conversation metadata for get delivery and snapshot-less
 	// confirm delivery decisions. Current cards use the snapshotted Events API
 	// channel_type first, but legacy/snapshot-less G-prefixed gets can still use
 	// is_mpim to avoid minting an access link into a group DM until that surface is

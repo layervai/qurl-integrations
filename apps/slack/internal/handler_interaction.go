@@ -218,6 +218,10 @@ func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, respon
 		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
+	if h.getConversationUnsupported(ctx, log, teamID, enterpriseID, channelID) {
+		h.finishGet(log, responseURL, getResult{}, &userError{msg: agentConfirmGetUnsupportedSurfaceReply})
+		return
+	}
 	res, err := h.getWork(ctx, log, &getWorkArgs{
 		cmd:          cmd,
 		teamID:       teamID,
