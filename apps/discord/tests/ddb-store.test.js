@@ -2517,7 +2517,12 @@ describe('authoritative link expiry persistence', () => {
   test('single and batch writes retain epoch seconds without replacing requested duration', async () => {
     const row = { sendId: 'expiry-send', senderDiscordId: 'sender', recipientDiscordId: 'recipient', resourceId: 'resource', resourceType: 'file', qurlLink: 'https://q.test/1', expiresIn: '24h', expiresAt: 1800000900 };
     await store.recordQURLSend(row);
-    expect(ddbMock.commandCalls(PutCommand).at(-1).args[0].input.Item).toMatchObject({ expires_at: 1800000900, expires_in: '24h' });
+    expect(ddbMock.commandCalls(PutCommand).at(-1).args[0].input.Item).toEqual({
+      send_id: row.sendId, sender_discord_id: row.senderDiscordId, recipient_discord_id: row.recipientDiscordId,
+      resource_id: row.resourceId, resource_type: row.resourceType, qurl_link: row.qurlLink,
+      expires_at: row.expiresAt, expires_in: row.expiresIn, dm_status: 'pending', created_at: expect.any(String),
+      channel_id: undefined, target_type: undefined,
+    });
     await store.recordQURLSendBatch([row]);
     const request = ddbMock.commandCalls(BatchWriteCommand).at(-1).args[0].input;
     const item = Object.values(request.RequestItems)[0][0].PutRequest.Item;

@@ -311,6 +311,17 @@ describe('Connector client — coverage boost', () => {
       expect(ttlField.value).toBe('60');
     });
 
+    it('real mint client retains each enforced expiry from raw Connector JSON', async () => {
+      const links = [
+        { qurl_id: 'q-first', qurl_link: 'https://q.test/first', expires_at: '2099-01-01T00:15:00Z' },
+        { qurl_id: 'q-second', qurl_link: 'https://q.test/second', expires_at: '2099-01-01T00:30:00Z' },
+      ];
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, links }) });
+      const result = await connector.mintLinks('res-1', { expiresAt: '2099-01-08T00:00:00Z', n: 2 });
+      expect(result).toEqual(links);
+      expect(result.map(link => link.expires_at)).toEqual(links.map(link => link.expires_at));
+    });
+
     describe('mint admission retry', () => {
       let wait;
       beforeEach(() => {
