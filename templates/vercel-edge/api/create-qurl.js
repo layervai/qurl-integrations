@@ -43,7 +43,7 @@ export default async function handler(request) {
 	try {
 		const client = new QURLClient({
 			apiKey,
-			// SDK 3.1.1 needs a bound native fetch on Workers.
+			// TODO(upstream-contract): remove once the pinned SDK includes layervai/qurl-typescript#342.
 			fetch: globalThis.fetch.bind(globalThis),
 			timeout: 10_000,
 			maxRetries: 0,

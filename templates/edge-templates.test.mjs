@@ -45,10 +45,13 @@ for (const [name, path] of platforms) {
 			body,
 		} = {}) {
 			for (const key of Object.keys(env)) {
-				if (values[key] === undefined) delete process.env[key];
+				if (name !== "vercel-edge" || values[key] === undefined)
+					delete process.env[key];
 				else process.env[key] = values[key];
 			}
-			globalThis.Netlify = { env: { get: (key) => values[key] } };
+			if (name === "netlify-edge")
+				globalThis.Netlify = { env: { get: (key) => values[key] } };
+			else delete globalThis.Netlify;
 			const request = new Request(
 				"https://mint.example.com/api/create-qurl?target=https://evil.example",
 				{
