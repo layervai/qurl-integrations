@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -62,6 +63,27 @@ func TestFeedbackWebhookPoster(t *testing.T) {
 		}
 		if !strings.Contains(gotBody, "hello") {
 			t.Errorf("webhook received %q, want it to carry the payload", gotBody)
+		}
+	})
+
+	t.Run("default client rejects redirects", func(t *testing.T) {
+		t.Parallel()
+		var redirected atomic.Bool
+		destination := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+			redirected.Store(true)
+		}))
+		defer destination.Close()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, destination.URL, http.StatusFound)
+		}))
+		defer srv.Close()
+		post := newFeedbackWebhookPoster(srv.URL, "", nil)
+		err := post(context.Background(), []byte(`{"text":"local fixture"}`))
+		if err == nil || !strings.Contains(err.Error(), "302") {
+			t.Fatalf("want an error mentioning HTTP 302, got %v", err)
+		}
+		if redirected.Load() {
+			t.Fatal("default client followed the webhook redirect")
 		}
 	})
 
