@@ -166,7 +166,7 @@ router.get('/start', rateLimit, async (req, res) => {
   const { codeVerifier, codeChallenge } = createPkcePair();
   setQurlOAuthCookie(res, req, state);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
-  const authorizeUrl = buildAuth0AuthorizeUrl({ state, codeChallenge });
+  const authorizeUrl = buildAuth0AuthorizeUrl({ state, codeChallenge, nonce: verified.payload.nonce });
   return res.redirect(302, authorizeUrl.toString());
 });
 
@@ -319,7 +319,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       // qURL-OAuth-state verification result; this one carries the
       // Auth0 id_token JWKS verification result. Same shape, different
       // payload — keep them lexically separate to avoid reader confusion.
-      const idTokenVerified = await verifyAuth0IdToken(tokenJson.id_token);
+      const idTokenVerified = await verifyAuth0IdToken(tokenJson.id_token, verified.payload.nonce);
       if (idTokenVerified.ok) {
         if (typeof idTokenVerified.payload?.email === 'string') {
           qurlAccountEmail = idTokenVerified.payload.email;
@@ -498,7 +498,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
   // Interim #1366 evidence: compare this keyed, pseudonymous fingerprint
   // across bind events to detect qURL-owner changes. The id_token is
-  // JWKS-verified but not nonce-bound, so this is observability only; durable
+  // JWKS-verified and nonce-bound, but this remains observability only; durable
   // owner identity and fail-closed comparison belong in #1366.
   try {
     logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {

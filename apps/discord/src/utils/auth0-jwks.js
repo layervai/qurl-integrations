@@ -15,6 +15,7 @@
 const jose = require('jose');
 const config = require('../config');
 const logger = require('../logger');
+const { timingSafeStringEqual } = require('./cookies');
 
 let _jwksFn = null;
 
@@ -46,7 +47,7 @@ function getJwks() {
  * are audienced to the OAuth client, NOT to the API audience the
  * access_token uses).
  */
-async function verifyAuth0IdToken(idToken) {
+async function verifyAuth0IdToken(idToken, expectedNonce) {
   if (typeof idToken !== 'string' || !idToken) {
     return { ok: false, reason: 'no_token' };
   }
@@ -62,6 +63,9 @@ async function verifyAuth0IdToken(idToken) {
       // a clear answer site.
       clockTolerance: 0,
     });
+    if (!timingSafeStringEqual(payload.nonce, expectedNonce)) {
+      return { ok: false, reason: 'nonce_mismatch' };
+    }
     return { ok: true, payload };
   } catch (err) {
     // Severity split: signature/claim/JWKS failures are the only signal

@@ -37,7 +37,7 @@ const crypto = require('crypto');
 const express = require('express');
 const config = require('../config');
 const logger = require('../logger');
-const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
+const { signQurlOAuthState, verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { createPkcePair } = require('../utils/oauth-pkce');
 const { buildAuth0AuthorizeUrl } = require('../utils/auth0-authorize-url');
 const { rateLimit, installRateLimit } = require('../utils/oauth-rate-limit');
@@ -328,7 +328,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // Both setup cookies also use host prefixes to reject sibling-domain cookies.
   setQurlOAuthCookie(res, req, qurlState);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
-  const authorizeUrl = buildAuth0AuthorizeUrl({ state: qurlState, codeChallenge });
+  const authorizeUrl = buildAuth0AuthorizeUrl({ state: qurlState, codeChallenge, nonce: verifyQurlOAuthState(qurlState).payload.nonce });
   logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId });
   return res.redirect(302, authorizeUrl.toString());
 });

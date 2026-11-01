@@ -504,6 +504,7 @@ describe('qurl-oauth routes', () => {
       const body = JSON.parse(mintCall[1].body);
       const statePayload = JSON.parse(Buffer.from(state.split('.')[0], 'base64url').toString());
       expect(mintCall[1].headers['Idempotency-Key']).toBe(statePayload.n);
+      expect(require('../src/utils/auth0-jwks').verifyAuth0IdToken).toHaveBeenCalledWith(expect.any(String), statePayload.n);
       expect(mintCall[1].headers['Idempotency-Key']).toMatch(/^[a-f0-9]{32}$/);
       expect(body.kind).toBe('api_key');
       expect(body).not.toHaveProperty('key_type');
