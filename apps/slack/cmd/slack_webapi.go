@@ -1608,6 +1608,8 @@ func invalidateRejectedSlackToken(ownerID string, err error, invalidate func(str
 	return err
 }
 
+// slackAgentPostMessageResponseError distinguishes posted from fully delivered.
+// TODO(upstream-contract): Slack must retain message_truncated in warning or response_metadata.warnings.
 func slackAgentPostMessageResponseError(statusCode int, header http.Header, raw []byte) error {
 	if err := slackChatPostMessageResponseError(statusCode, header, raw); err != nil {
 		return err

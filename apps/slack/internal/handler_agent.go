@@ -1971,7 +1971,11 @@ func (h *Handler) deliverAgentText(log *slog.Logger, env *slackEventEnvelope, th
 	ctx, cancel := context.WithTimeout(observability.WithLogger(h.baseCtx, log), agentDeliveryBudget)
 	defer cancel()
 	if err := post(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, text); err != nil {
-		log.Error("agent: post reply failed", "error", err)
+		if errors.Is(err, ErrSlackMessageIncomplete) {
+			log.Warn("agent: reply posted without a complete receipt; keeping partial stream")
+		} else {
+			log.Error("agent: post reply failed", "error", err)
+		}
 		return false
 	}
 	return true

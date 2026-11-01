@@ -325,3 +325,22 @@ func TestPostAgentGeneratedReplyDoesNotRetryTruncatedBlocks(t *testing.T) {
 		t.Fatal("already-posted truncated blocks caused a second reply")
 	}
 }
+
+func TestPostAgentGeneratedReplyPreservesLegacyFeedbackWithoutStrictReceipt(t *testing.T) {
+	blocks := &blocksRecorder{}
+	h := NewHandler(Config{PostMessageBlocks: blocks.fn(),
+		PostFeedback: func(context.Context, []byte) error { return nil },
+		OpenView:     func(context.Context, string, string, []byte) error { return nil },
+	})
+	e := env(slackEventTypeAppMention, slackChannelTypeChannel, "U2", "", "", "")
+	fallback := func(context.Context, string, string, string, string, string) error {
+		t.Fatal("legacy feedback lost its buttons")
+		return nil
+	}
+	if h.postAgentGeneratedReply(slog.Default(), e, "100.1", "complete answer", fallback) {
+		t.Fatal("legacy blocks authorized cleanup without strict receipt")
+	}
+	if len(blocks.calls) != 1 {
+		t.Fatalf("feedback posts=%d", len(blocks.calls))
+	}
+}
