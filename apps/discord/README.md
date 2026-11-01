@@ -765,3 +765,34 @@ the cleanup-enqueue failure audit requires operator reconciliation using the
 saved guild credential. A missing webhook owner requires owner verification
 before deletion. Automatic deletion still requires the reference migration
 and cleanup worker; these records alone do not enable it.
+
+### Installation identity and activation gate
+
+`ENABLE_CREDENTIAL_LIFECYCLE` is off by default. Do not enable this foundation
+alone: the cleanup worker, transactional webhook references, approved legacy
+migration, storage bootstrap and Sandbox removal/reinstall journeys must be
+complete first. Boot requires the event shipper and durable Gateway resume path.
+
+When enabled, setup verifies the bot's current join time and the user's current
+Manage Server permission through the shared Discord REST client. It stores that
+installation with the key. Gateway observations fence older in-flight callbacks,
+even before a key exists. A replay cannot reactivate the same removed installation
+or mark a newer one removed. Key reads use a strong read and reject missing,
+removed or mismatched installations before global-key fallback. Legacy bindings
+without an installation identity require approved reauthorization; do not infer
+one from a row's update time.
+
+Gateway removal jobs contain no credentials. The old encrypted key remains in
+the guild row until a worker atomically retires the exact generation into cleanup
+facts. An unknown cold-resume installation requires provider reconciliation.
+Gateway observations and jobs must finish before later interactions for that
+guild are forwarded and before a resume checkpoint advances.
+
+For a local database check:
+
+```sh
+DDB_TEST_ENDPOINT=http://127.0.0.1:8000 node scripts/smoke-guild-lifecycle.js
+```
+
+The check refuses cloud endpoints and real AWS key shapes, creates disposable
+local tables, and deletes them afterward.

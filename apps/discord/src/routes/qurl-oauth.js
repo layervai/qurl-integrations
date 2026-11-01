@@ -334,8 +334,13 @@ router.get('/callback', rateLimit, async (req, res) => {
 
   let ownerBinding;
   try {
-    ownerBinding = await prepareGuildOwnerBinding(guildId, qurlAccountSubject);
+    ownerBinding = await prepareGuildOwnerBinding(guildId, qurlAccountSubject, discordUserId);
   } catch (err) {
+    if (err?.code === 'GUILD_SETUP_FORBIDDEN') {
+      return renderError(res, 403, 'Server setup permission required',
+        'A current server admin with Manage Server permission must run /qurl-admin setup.');
+    }
+
     const status = qurlApiErrorStatus(err);
     const conflict = err?.code === 'GUILD_OWNER_CONFLICT' || status === 401 || status === 403;
     const log = conflict ? logger.warn : logger.error;

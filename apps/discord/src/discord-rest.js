@@ -31,6 +31,49 @@
 const { Routes } = require('discord-api-types/v10');
 const { client } = require('./discord');
 const logger = require('./logger');
+const { canonicalJoinedAt } = require('./utils/guild-installation');
+
+// TODO(upstream-contract): Discord Guild Member joined_at anchors the bot
+// installation; unknown membership and permissions must fail closed.
+async function getBotGuildInstallation(guildId) {
+  try {
+    const signal = AbortSignal.timeout(10_000);
+    const botId = client.user?.id || (await client.rest.get(Routes.user(), { signal }))?.id;
+    if (typeof botId !== 'string' || !botId) return { ok: false };
+    const member = await client.rest.get(Routes.guildMember(guildId, botId), { signal });
+    const joinedAt = canonicalJoinedAt(member?.joined_at);
+    return joinedAt ? { ok: true, joinedAt } : { ok: false };
+  } catch (err) {
+    return { ok: false,
+      status: Number.isInteger(err?.status) ? err.status : undefined,
+      code: Number.isSafeInteger(err?.code) ? err.code : undefined };
+  }
+}
+
+async function getGuildSetupInstallation(guildId, discordUserId) {
+  try {
+    const signal = AbortSignal.timeout(10_000);
+    const [installation, guild, member] = await Promise.all([
+      getBotGuildInstallation(guildId),
+      client.rest.get(Routes.guild(guildId), { signal }),
+      client.rest.get(Routes.guildMember(guildId, discordUserId), { signal }),
+    ]);
+    if (!installation.ok || guild?.id !== guildId || member?.user?.id !== discordUserId
+        || !Array.isArray(member.roles) || !Array.isArray(guild.roles)) return { ok: false };
+    if (guild.owner_id === discordUserId) return installation;
+    const roleIds = new Set([guildId, ...member.roles]);
+    let permissions = 0n;
+    for (const role of guild.roles) {
+      if (!roleIds.has(role.id)) continue;
+      if (typeof role.permissions !== 'string' || !/^\d{1,30}$/.test(role.permissions)) return { ok: false };
+      permissions |= BigInt(role.permissions);
+    }
+    // Administrator implies ManageGuild, matching the command permission gate.
+    return (permissions & (8n | 32n)) !== 0n ? installation : { ok: false, reason: 'not_admin' };
+  } catch {
+    return { ok: false };
+  }
+}
 
 /**
  * Send a direct message to a Discord user via REST (no Gateway).
@@ -284,6 +327,8 @@ async function editInteractionReply(applicationId, token, payload) {
 // `../src/discord` don't crash require-time. No production consumer
 // needs a direct `rest` reference today.
 module.exports = {
+  getBotGuildInstallation,
+  getGuildSetupInstallation,
   sendDM,
   editDM,
   editInteractionReply,

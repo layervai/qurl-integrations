@@ -720,3 +720,11 @@ describe('invalidStateSecretValues', () => {
   });
 
 });
+
+
+test('credential lifecycle requires the durable resume path on both roles', () => {
+  for (const role of ['gateway', 'http']) {
+    expect(unsupportedRoleResumeCombo(role, false, true, true)).toContain('ENABLE_CREDENTIAL_LIFECYCLE');
+    expect(unsupportedRoleResumeCombo(role, true, true, true)).toBeNull();
+  }
+});

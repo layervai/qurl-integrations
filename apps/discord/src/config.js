@@ -653,6 +653,8 @@ module.exports = {
   // emergency redeploy. See `apps/discord/docs/zero-downtime-design.md`
   // → "Rollback cliff: ENABLE_EVENT_SHIPPER".
   ENABLE_EVENT_SHIPPER: process.env.ENABLE_EVENT_SHIPPER === 'true',
+  // Enable only with durable removal handling and the approved installation migration.
+  ENABLE_CREDENTIAL_LIFECYCLE: process.env.ENABLE_CREDENTIAL_LIFECYCLE === 'true',
   // Enable only after the short-lived probe table and alarm exist (#1383).
   ENABLE_DISPATCH_PROBE: process.env.ENABLE_DISPATCH_PROBE === 'true',
 

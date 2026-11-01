@@ -213,10 +213,12 @@ if (process.env.NODE_ENV === 'production') {
 // Role-agnostic by design: a `gateway`-role process doesn't mount the
 // OAuth callback, but env vars are uniform across roles in a single
 // deploy, so one role refusing to boot while another silently degrades
-// is worse than refusing both.
-const kekMissing = missingKekRequiredKeys(process.env, config.isQurlOAuthConfigured);
+// is worse than refusing both. Lifecycle workers also need the key; gateway
+// installation observations and removal jobs contain no credentials.
+const kekMissing = missingKekRequiredKeys(process.env, config.isQurlOAuthConfigured
+  || (config.ENABLE_CREDENTIAL_LIFECYCLE && PROCESS_ROLE !== 'gateway'));
 if (kekMissing.length > 0) {
-  logger.error(`qURL OAuth is configured (AUTH0_* set) but ${kekMissing.join(', ')} is missing — refusing to boot. Any deployment that persists qURL API keys must encrypt them at rest.`);
+  logger.error(`qURL credential persistence is enabled but ${kekMissing.join(', ')} is missing — refusing to boot. Any deployment that persists qURL API keys must encrypt them at rest.`);
   logger.error('Generate KEY_ENCRYPTION_KEY with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
   process.exit(1);
 }
@@ -294,6 +296,7 @@ const roleResumeConflict = unsupportedRoleResumeCombo(
   PROCESS_ROLE,
   config.ENABLE_GATEWAY_RESUME,
   config.ENABLE_EVENT_SHIPPER,
+  config.ENABLE_CREDENTIAL_LIFECYCLE,
 );
 if (roleResumeConflict) {
   logger.error(roleResumeConflict);

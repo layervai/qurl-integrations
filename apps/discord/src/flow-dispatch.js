@@ -37,6 +37,7 @@ const { loadFlow, hydrateFlowRecipients } = require('./flow-state');
 const { deferUpdateOrStop } = require('./utils/interaction-ack');
 const { SHARD_ID } = require('./config');
 const logger = require('./logger');
+const { GUILD_SETUP_REQUIRED_REPLY } = require('./utils/guild-installation');
 const {
   isUnsupportedQurlContext,
   UNSUPPORTED_CONTEXT_MSG,
@@ -247,12 +248,14 @@ async function handleFlowInteraction(interaction) {
     }
     await route.handler(interaction, { flow_id, row });
   } catch (err) {
-    logger.error('flow-dispatch: handler threw', {
+    const log = err?.code === 'GUILD_SETUP_REQUIRED' ? logger.info : logger.error;
+    log('flow-dispatch: handler threw', {
       customId, flow_id, error: err.message, stack: err.stack,
     });
     await safeReply(
       interaction,
-      'Something went wrong — please run the command again.',
+      err?.code === 'GUILD_SETUP_REQUIRED'
+        ? GUILD_SETUP_REQUIRED_REPLY : 'Something went wrong — please run the command again.',
     );
   }
 }

@@ -208,12 +208,68 @@ function publishDispatchProbe(packet, origin) {
   publishPacket(packet, origin);
 }
 
+const guildInstallations = new Map();
+const membershipWrites = new Map();
+
+function queueMembershipWrite(guildId, write) {
+  const prior = membershipWrites.get(guildId) || Promise.resolve();
+  const task = prior.then(write);
+  membershipWrites.set(guildId, task);
+  inFlightSends.add(task);
+  task.finally(() => {
+    inFlightSends.delete(task);
+    if (membershipWrites.get(guildId) === task) membershipWrites.delete(guildId);
+  }).catch(() => {
+    markDeliveryFailed();
+    logger.error('Event publisher: guild installation persistence is unconfirmed', {
+      kind: LOG_KINDS.UNHANDLED_REJECTION,
+    });
+  });
+}
+
+function observeGuildDispatch(packet) {
+  if (packet.t === 'READY') {
+    guildInstallations.clear();
+    return true;
+  }
+  if (!['GUILD_CREATE', 'GUILD_DELETE'].includes(packet.t) || packet.d?.unavailable === true) return false;
+  if (!running) {
+    markDeliveryFailed();
+    return true;
+  }
+  const guildId = packet.d?.id;
+  const { canonicalJoinedAt } = require('./utils/guild-installation');
+  if (packet.t === 'GUILD_CREATE') {
+    const joinedAt = canonicalJoinedAt(packet.d?.joined_at);
+    const prior = guildInstallations.get(guildId);
+    if (joinedAt && (!prior || joinedAt > prior.joinedAt
+        || (joinedAt === prior.joinedAt && packet.s >= prior.sequence))) {
+      guildInstallations.set(guildId, { joinedAt, sequence: packet.s });
+    }
+    queueMembershipWrite(guildId, () => require('./store').noteGuildInstallation(guildId, joinedAt));
+  } else {
+    const prior = guildInstallations.get(guildId);
+    // A replayed delete before the cached create cannot identify that newer
+    // installation. Reconcile it without marking the new one removed.
+    const current = prior && Number.isSafeInteger(packet.s) && packet.s > prior.sequence;
+    if (current) guildInstallations.delete(guildId);
+    queueMembershipWrite(guildId, () => require('./store').enqueueGuildRemoval({
+      guildId, joinedAt: current ? prior.joinedAt : null, eventId: `${SHARD_ID}:${packet.s}`,
+    }));
+  }
+  return true;
+}
+
 function publishPacket(packet, probeOrigin) {
   // Defense against a falsy packet (a future discord.js refactor or
   // test stub passing nothing) — gated once before the filter so
   // every subsequent access can use plain dot-notation. Cheaper
   // than `packet?.` on each access for the per-frame hot path.
   if (!packet) return;
+  if (config.ENABLE_CREDENTIAL_LIFECYCLE) {
+    if (deliveryFailed) return;
+    if (!probeOrigin && packet.op === GATEWAY_OP_DISPATCH && observeGuildDispatch(packet)) return;
+  }
   // Filter-first: the raw event fires on every dispatch (heartbeat
   // acks, presence updates, etc.). Bail before any work on the
   // non-interaction path. Order: `op` first because the comparison
@@ -270,7 +326,8 @@ function publishPacket(packet, probeOrigin) {
       QueueUrl: config.QURL_BOT_EVENTS_QUEUE_URL,
       MessageBody: JSON.stringify(envelope),
     });
-    sendPromise = sqsClient.send(cmd);
+    const pendingMembership = config.ENABLE_CREDENTIAL_LIFECYCLE && membershipWrites.get(packet.d?.guild_id);
+    sendPromise = pendingMembership ? pendingMembership.then(() => sqsClient.send(cmd)) : sqsClient.send(cmd);
   } catch (err) {
     markDeliveryFailed();
     logger.error('Event publisher: SendMessage threw synchronously (interaction lost)', {
@@ -402,6 +459,8 @@ function _resetStateForTest() {
   running = false;
   sqsClient = null;
   inFlightSends.clear();
+  guildInstallations.clear();
+  membershipWrites.clear();
   deliveryFailed = false;
   failureHandler = undefined;
   DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;

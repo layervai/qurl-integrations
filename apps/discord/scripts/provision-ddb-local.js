@@ -204,9 +204,9 @@ async function main() {
   console.log('Done.');
 }
 
-// Export the schema and one-table helper for schema/provisioning tests.
+// Share schema, provisioning and the local-only guard with native checks.
 // Requiring this module never validates the environment or calls DynamoDB.
-module.exports = { tables, ensureTable };
+module.exports = { tables, ensureTable, validateEnv };
 
 if (require.main === module) {
   main().catch(err => {

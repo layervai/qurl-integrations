@@ -40,6 +40,8 @@ const {
 
 const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
 const logger = require('../logger');
+const config = require('../config');
+const { canonicalJoinedAt, isCurrentGuildInstallation, GUILD_SETUP_REQUIRED_REPLY } = require('../utils/guild-installation');
 const {
   DM_STATUS,
   AUDIT_EVENTS,
@@ -156,7 +158,7 @@ const nowIso = () => new Date().toISOString();
 // skips these scans for routine worker-pressure collection.
 async function getStats() {
   const [configuredGuilds, totalSends] = await Promise.all([
-    countAll(TABLES.guild_configs),
+    countAll(TABLES.guild_configs, config.ENABLE_CREDENTIAL_LIFECYCLE),
     countAll(TABLES.qurl_sends),
   ]);
   return { configuredGuilds, totalSends };
@@ -168,11 +170,13 @@ async function getStats() {
 // pages exist. A naive single-call ScanCommand silently undercounts
 // once the table size pushes past ~1MB worth of items, with no
 // error signal. Accumulate Count across pages until LEK is empty.
-async function countAll(TableName) {
+async function countAll(TableName, configuredGuildsOnly = false) {
   let total = 0;
   let ExclusiveStartKey;
   do {
-    const res = await ddb.send(new ScanCommand({ TableName, Select: 'COUNT', ExclusiveStartKey }));
+    const res = await ddb.send(new ScanCommand({ TableName, Select: 'COUNT', ExclusiveStartKey,
+      ...(configuredGuildsOnly ? { FilterExpression: 'attribute_exists(qurl_api_key)' } : {}),
+    }));
     total += res.Count || 0;
     ExclusiveStartKey = res.LastEvaluatedKey;
   } while (ExclusiveStartKey);
@@ -1584,8 +1588,15 @@ async function getGuildApiKey(guildId) {
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
+    ...(config.ENABLE_CREDENTIAL_LIFECYCLE ? { ConsistentRead: true } : {}),
   }));
-  return res.Item ? decrypt(res.Item.qurl_api_key) : null;
+  const row = res.Item;
+  if (config.ENABLE_CREDENTIAL_LIFECYCLE && !isCurrentGuildInstallation(row)) {
+    const error = new Error(GUILD_SETUP_REQUIRED_REPLY);
+    error.code = 'GUILD_SETUP_REQUIRED';
+    throw error;
+  }
+  return row ? decrypt(row.qurl_api_key) : null;
 }
 
 // Observability around a key write must never fail that write, before or
@@ -1638,6 +1649,14 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
 // prior plaintext expectedApiKey (or null), checked again before conditional write.
 async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
   const door = normalizeSetupVia(via);
+  const installation = binding?.installationJoinedAt;
+  const previousInstallation = binding?.previousInstallationJoinedAt;
+  if ((config.ENABLE_CREDENTIAL_LIFECYCLE && !installation)
+      || (installation !== undefined && canonicalJoinedAt(installation) !== installation)
+      || (previousInstallation !== undefined && (!installation || previousInstallation >= installation
+        || canonicalJoinedAt(previousInstallation) !== previousInstallation))) {
+    throw new Error('Verified current installation is required for setup');
+  }
   // Validate on every call so caller drift (including a forgotten argument)
   // shows up on first setups too; such doors audit as unknown.
   if (door === SETUP_VIA.UNKNOWN) {
@@ -1661,10 +1680,28 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
       error.code = 'GUILD_SETUP_CHANGED';
       throw error;
     }
-    condition = '(attribute_not_exists(qurl_owner_id) OR qurl_owner_id = :owner) AND '
-      + (storedKey ? 'qurl_api_key = :prior' : 'attribute_not_exists(qurl_api_key)');
+    const reinstall = previousInstallation && installation !== previousInstallation;
+    if (reinstall && priorRow?.qurl_installation_joined_at !== previousInstallation) {
+      const error = new Error('Guild installation changed during setup');
+      error.code = 'GUILD_SETUP_CHANGED';
+      throw error;
+    }
+    condition = reinstall
+      ? '(attribute_not_exists(qurl_owner_id) OR qurl_owner_id = :previousOwner) AND qurl_installation_joined_at = :previousInstallation AND '
+      : '(attribute_not_exists(qurl_owner_id) OR qurl_owner_id = :owner) AND ';
+    condition += storedKey ? 'qurl_api_key = :prior' : 'attribute_not_exists(qurl_api_key)';
+    if (reinstall) {
+      ownerValues[':previousOwner'] = priorRow.qurl_owner_id ?? null;
+      ownerValues[':previousInstallation'] = previousInstallation;
+    }
     ownerValues[':owner'] = binding.ownerId;
     if (storedKey) ownerValues[':prior'] = storedKey;
+  }
+  if (installation) {
+    condition += ' AND (attribute_not_exists(observed_installation_joined_at) OR observed_installation_joined_at <= :installation)'
+      + ' AND (attribute_not_exists(qurl_installation_removed) OR qurl_installation_removed = :notRemoved OR observed_installation_joined_at < :installation)';
+    ownerValues[':installation'] = installation;
+    ownerValues[':notRemoved'] = false;
   }
   const sameKey = !!priorRow?.qurl_api_key && binding.expectedApiKey === apiKey;
   const keyId = sameKey ? (priorRow.qurl_key_id ?? null) : (binding?.keyId ?? null);
@@ -1692,7 +1729,8 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
     Key: { guild_id: guildId },
     UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)'
       + ', qurl_key_id = :keyId, qurl_key_kind = :keyKind, qurl_generation = :generation'
-      + (binding ? ', qurl_owner_id = :owner' : ''),
+      + (binding ? ', qurl_owner_id = :owner' : '')
+      + (installation ? ', qurl_installation_joined_at = :installation, observed_installation_joined_at = :installation, qurl_installation_removed = :notRemoved REMOVE qurl_removal_job_id, qurl_disconnected_at' : ''),
     ConditionExpression: condition,
     ExpressionAttributeValues: {
       ...ownerValues,
@@ -1734,7 +1772,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
         created_at: now, qurl_api_key: encryptStrict(decrypt(priorRow.qurl_api_key)),
         qurl_key_id: priorRow.qurl_key_id ?? null,
         qurl_key_kind: priorRow.qurl_key_kind ?? 'unknown',
-        qurl_owner_id: priorRow.qurl_owner_id ?? binding.ownerId,
+        qurl_owner_id: priorRow.qurl_owner_id ?? (previousInstallation ? null : binding.ownerId),
         qurl_generation: priorRow.qurl_generation ?? null,
         webhook_id: priorRow.webhook_id ?? null,
         webhook_owner_id: priorRow.webhook_owner_id ?? null,
@@ -1784,6 +1822,75 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
   }, { guildId, configuredBy, door });
 }
 
+async function noteGuildInstallation(guildId, joinedAt) {
+  const installation = canonicalJoinedAt(joinedAt);
+  if (typeof guildId !== 'string' || !guildId || !installation) throw new Error('Guild installation is invalid');
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.guild_configs, Key: { guild_id: guildId },
+      UpdateExpression: 'SET observed_installation_joined_at = :joined, qurl_installation_removed = :active',
+      // Keep the latest observation even before setup, fencing an older in-flight callback.
+      // An initial/replayed create never clears removal of the same installation.
+      ConditionExpression: 'attribute_not_exists(observed_installation_joined_at) OR observed_installation_joined_at < :joined',
+      ExpressionAttributeValues: { ':joined': installation, ':active': false },
+    }));
+    return true;
+  } catch (err) {
+    if (err?.name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+async function enqueueGuildRemoval({ guildId, joinedAt, eventId }) {
+  const installation = joinedAt == null ? null : canonicalJoinedAt(joinedAt);
+  if (typeof guildId !== 'string' || !guildId || (joinedAt != null && !installation)) {
+    throw new Error('Guild removal identity is invalid');
+  }
+  const jobId = crypto.randomUUID();
+  const job = {
+    pk: `JOB#${jobId}`, sk: 'META', job_id: jobId, guild_id: guildId,
+    reason: 'verify_removal', cleanup_state: 'pending', attempts: 0,
+    due_bucket: String(parseInt(jobId.slice(0, 2), 16) % 16), due_at: Date.now(),
+    created_at: nowIso(), expected_installation_joined_at: installation,
+    source_event_id: eventId,
+  };
+  const put = { TableName: TABLES.credential_lifecycle, Item: job,
+    ConditionExpression: 'attribute_not_exists(pk)' };
+  try {
+    if (installation) {
+      try {
+        await ddb.send(new TransactWriteCommand({
+          ClientRequestToken: jobId,
+          TransactItems: [
+            { Update: {
+              TableName: TABLES.guild_configs, Key: { guild_id: guildId },
+              UpdateExpression: 'SET qurl_installation_removed = :removed, qurl_removal_job_id = :job, qurl_disconnected_at = :now',
+              ConditionExpression: 'observed_installation_joined_at = :joined',
+              ExpressionAttributeValues: { ':joined': installation, ':removed': true, ':job': jobId, ':now': nowIso() },
+            } },
+            { Put: put },
+          ],
+        }));
+        return jobId;
+      } catch (err) {
+        if (!transactionGuardConditionFailed(err, 1)) throw err;
+        // A newer installation may be present while the old credential still
+        // awaits retirement. Queue reconciliation without marking the new one.
+      }
+    }
+    await ddb.send(new PutCommand(put));
+    return jobId;
+  } catch (err) {
+    // A lost reply must not advance the Gateway checkpoint without a durable job.
+    const saved = (await ddb.send(new GetCommand({
+      TableName: TABLES.credential_lifecycle, Key: { pk: job.pk, sk: job.sk }, ConsistentRead: true,
+    })))?.Item;
+    if (saved?.guild_id === guildId && saved.reason === job.reason
+        && saved.expected_installation_joined_at === installation) return jobId;
+    throw err;
+  }
+}
+
 // A subscription can be shared before its original caller saves the link.
 // Retain the capability for reference-aware cleanup; never revoke this active key.
 async function enqueueGuildWebhookCleanup({ guildId, apiKey, webhookId, webhookOwnerId }) {
@@ -1827,9 +1934,10 @@ async function getGuildConfig(guildId) {
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
+    ...(config.ENABLE_CREDENTIAL_LIFECYCLE ? { ConsistentRead: true } : {}),
   }));
   const row = res.Item;
-  if (!row) return row;
+  if (!row || (config.ENABLE_CREDENTIAL_LIFECYCLE && !isCurrentGuildInstallation(row))) return undefined;
   // Strip the api key before returning — callers that need it use
   // getGuildConfigWithApiKey explicitly. Underscore-prefix on the
   // dropped field is the idiomatic "intentionally unused" marker
@@ -2051,7 +2159,8 @@ async function clearGuildWebhookSubscription(guildId) {
 async function listCompleteGuildSubscriptionsByOwner(webhookOwnerId) {
   const rows = await scanAll(TABLES.guild_configs, { consistentRead: true });
   return rows
-    .filter(r => r.webhook_owner_id === webhookOwnerId && r.webhook_id)
+    .filter(r => r.webhook_owner_id === webhookOwnerId && r.webhook_id
+      && (!config.ENABLE_CREDENTIAL_LIFECYCLE || isCurrentGuildInstallation(r)))
     .map(r => ({ guildId: r.guild_id, webhookId: r.webhook_id }));
 }
 
@@ -2141,6 +2250,7 @@ async function scanGuildSubscriptions() {
   let provisionedCount = 0;
   let decryptFailCount = 0;
   for (const r of rows) {
+    if (config.ENABLE_CREDENTIAL_LIFECYCLE && !isCurrentGuildInstallation(r)) continue;
     // Owner-only default mappings are relationship records, not secret-bearing
     // cache entries. Omitting them lets scanOnce synthesize the default entry
     // from QURL_WEBHOOK_SECRET.
@@ -2264,7 +2374,7 @@ module.exports = {
   getGuildApiKey, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
   // Per-guild webhook subscriptions (BYOK view counter)
   setGuildWebhookSubscription, setGuildDefaultWebhookOwner, clearGuildWebhookSubscription,
-  enqueueGuildWebhookCleanup,
+  enqueueGuildWebhookCleanup, noteGuildInstallation, enqueueGuildRemoval,
   listCompleteGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
   // Lifecycle
   close, healthCheck,
