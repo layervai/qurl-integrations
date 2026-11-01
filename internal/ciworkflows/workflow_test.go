@@ -3111,23 +3111,27 @@ var otherPullRequestWorkflows = []pullRequestTriggerSpec{
 	},
 	{
 		path:                    "dependency-age-check-actions.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:                    "dependency-age-check-docker.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:                    "dependency-age-check-go.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:                    "dependency-age-check-pip.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:  "pr-title.yml",
