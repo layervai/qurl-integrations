@@ -366,12 +366,12 @@ describe('handleQurlSend — slash entry', () => {
     expect(reply.content).toMatch(/revoke.*menu open/);
   });
 
-  test('forwards expires-in + self-destruct + personal-message into payload', async () => {
+  test.each(['3d', '7d'])('forwards current or cached legacy expires-in %s into payload', async expiresIn => {
     const int = makeInteraction({
       options: {
         attachment: VALID_ATTACHMENT,
         recipients: '<@100000000000000001>',
-        'expires-in': '3d',
+        'expires-in': expiresIn,
         'self-destruct': '300',
         'personal-message': 'see you Tuesday',
       },
@@ -380,7 +380,7 @@ describe('handleQurlSend — slash entry', () => {
     await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.expiresIn).toBe('3d');
+    expect(payload.expiresIn).toBe(expiresIn);
     expect(payload.selfDestructSeconds).toBe(300);
     expect(payload.personalMessage).toBe('see you Tuesday');
   });

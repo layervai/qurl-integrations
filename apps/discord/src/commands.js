@@ -1980,7 +1980,7 @@ async function executeSendPipeline(interaction, {
   // DB and trips downstream when `expiryToISO` / `expiryToMs`
   // hit it. Validate at the boundary instead.
   if (!isValidSavedExpiry(expiresIn)) {
-    failGate(TypeError, `executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${truncForLog(expiresIn)})`);
+    failGate(TypeError, `executeSendPipeline: expiresIn must be one of ${[...Object.keys(EXPIRY_LABELS), '7d (legacy)'].join('|')} (got ${truncForLog(expiresIn)})`);
   }
 
   // `personalMessage` shape gate. The DM-embed renderer expects
@@ -2254,11 +2254,9 @@ async function executeSendPipeline(interaction, {
       // historical legacy /qurl send wizard rows ('channel') during the TTL drain
       // window. #318 drops the formatRevokeLabel non-'user' branch
       // once no revoke-visible row has `target_type !== 'user'` — the
-      // drain happens naturally as the revoke renderer filters on
-      // `expires_at`, so the gate is condition-driven (no live legacy
-      // rows surface in /qurl revoke) rather than date-driven. The
-      // Legacy rows can retain seven-day requested windows; verify their
-      // expiry before retiring this reader. No entry-gate fires because the
+      // drain requires a check of stored legacy rows before retiring
+      // the reader; seven-day requested windows do not prove actual expiry.
+      // No entry-gate fires because the
       // value can't drift — it's a literal, not a forwarded param.
       expiresIn, channelId: interaction.channelId, targetType: 'user',
       // guild_id persisted on each row so /qurl detect (#1101) can
@@ -4981,7 +4979,7 @@ function renderConfirmCardContent({
     const more = validRecipients.length > PREVIEW ? `, +${validRecipients.length - PREVIEW} more` : '';
     content += `\n**To:** ${validRecipients.length} user${validRecipients.length === 1 ? '' : 's'} (${previewNames}${more})\n`;
   }
-  content += `**Requested expiry:** ${EXPIRY_LABELS[expiresIn] || expiresIn}\n`;
+  content += `**Requested expiry:** ${EXPIRY_LABELS[expiresIn] || (expiresIn === '7d' ? '7 days' : expiresIn)}\n`;
   if (isPositiveFinite(selfDestructSeconds)) {
     content += `**Self-destruct:** ${formatSelfDestructLabel(selfDestructSeconds)}\n`;
     const note = formatSelfDestructTimingNote(selfDestructSeconds);
@@ -5218,7 +5216,8 @@ function renderConfirmCardRows({
   // back to defaulting the codebase-default '24h' option so the card
   // still shows SOMETHING meaningful.
   const hasExpiryMatch = isValidExpiry(expiresIn);
-  if (!hasExpiryMatch && expiresIn != null) {
+  const legacyExpiry = expiresIn === '7d';
+  if (!hasExpiryMatch && !legacyExpiry && expiresIn != null) {
     // Log so corrupted rows surface in forensics rather than just
     // getting papered over by the 24h fallback.
     logger.warn('renderConfirmCardRows: off-EXPIRY_LABELS expiresIn in payload — falling back to 24h default', {
@@ -5228,13 +5227,14 @@ function renderConfirmCardRows({
   rows.push(new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(CONFIRM_EXPIRY_SELECT_CUSTOM_ID)
+      .setPlaceholder(legacyExpiry ? 'Saved request: 7 days. Choose a new expiry to change it.' : 'Choose expiry')
       .setMinValues(1)
       .setMaxValues(1)
       .addOptions(
         ...EXPIRY_CHOICES.map((c) => ({
           label: c.name,
           value: c.value,
-          default: hasExpiryMatch ? c.value === expiresIn : c.value === '24h',
+          default: hasExpiryMatch ? c.value === expiresIn : !legacyExpiry && c.value === '24h',
         }))
       )
   ));
@@ -5467,7 +5467,8 @@ async function handleQurlSlashSend(interaction, params) {
     // Defense-in-depth: expiresIn comes from the slash command's choice
     // list which Discord enforces server-side, but a forged interaction
     // could carry an off-set value. EXPIRY_LABELS owns the closed set.
-    if (!isValidExpiry(expiresIn)) {
+    // Cached Discord command choices can still carry the retired 7d preset.
+    if (!isValidSavedExpiry(expiresIn)) {
       clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: '❌ Unrecognized expiry value. Re-run and pick from the list.',

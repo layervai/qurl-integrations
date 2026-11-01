@@ -14,6 +14,23 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
     return int;
   }
 
+  test('saved seven-day card shows its request without selecting a false 24-hour default', async () => {
+    const { StringSelectMenuBuilder } = require('discord.js');
+    StringSelectMenuBuilder.mockClear();
+    const int = makeSelectInteraction({ value: '300', guildMembers: {} });
+    await handleConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { version: 1, payload: {
+      resourceType: 'file', resourceLabel: 'x.png', recipientIds: [u1], recipientAliases: { [u1]: 'Alice' },
+      expiresIn: '7d', selfDestructSeconds: null, personalMessage: null,
+    } } });
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    expect(lastEdit.content).toContain('**Requested expiry:** 7 days');
+    const menu = StringSelectMenuBuilder.mock.results.map(result => result.value)
+      .find(builder => builder.setCustomId.mock.calls.some(([id]) => id === 'qurl_confirm_expiry'));
+    expect(menu.setPlaceholder).toHaveBeenCalledWith(expect.stringContaining('7 days'));
+    expect(menu.addOptions.mock.calls[0].some(option => option.default)).toBe(false);
+    expect(menu.addOptions.mock.calls[0].some(option => option.value === '7d')).toBe(false);
+  });
+
   test('renders persisted alias when member-cache is empty', async () => {
     const payload = {
       resourceType: 'file',
