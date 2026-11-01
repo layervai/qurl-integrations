@@ -44,6 +44,8 @@ export default {
 		try {
 			const client = new QURLClient({
 				apiKey,
+				// SDK 3.1.1 needs a bound native fetch on Workers.
+				fetch: globalThis.fetch.bind(globalThis),
 				timeout: 10_000,
 				maxRetries: 0,
 			});

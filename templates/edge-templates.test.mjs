@@ -29,7 +29,12 @@ for (const [name, path] of platforms) {
 		);
 		let calls = [];
 		let upstream = () => Response.json({ data }, { status: 201 });
-		globalThis.fetch = async (url, init) => {
+		globalThis.fetch = async function (url, init) {
+			assert.equal(
+				this,
+				globalThis,
+				"native fetch must keep its global receiver",
+			);
 			calls.push({ url: String(url), init });
 			return upstream();
 		};
