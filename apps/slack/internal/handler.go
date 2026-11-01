@@ -51,6 +51,9 @@ var ErrSlackRateLimited = errors.New("slack views.open rate limited")
 // a reauthorization problem instead of a generic delivery failure.
 var ErrSlackMissingScope = errors.New("slack missing_scope")
 
+// ErrSlackMessageIncomplete means Slack posted an agent reply without a complete receipt. Do not retry it.
+var ErrSlackMessageIncomplete = errors.New("slack agent message incomplete")
+
 var errSetupUsage = errors.New("setup usage")
 
 type setupCommand struct {
@@ -481,6 +484,9 @@ type Config struct {
 	// (see agentConfirmEnabled); production wires it in cmd/main.go.
 	PostMessageBlocks PostMessageBlocksFunc
 
+	// PostAgentMessageBlocks checks complete delivery before removing a partial stream.
+	PostAgentMessageBlocks PostMessageBlocksFunc
+
 	// PostDMBlocks posts a Block Kit direct message (conversations.open then a
 	// chat.postMessage with blocks) — the DM analog of PostMessageBlocks. It
 	// delivers the `/qurl get dm:true` minted link as an "Enter Portal" URL button
@@ -672,8 +678,8 @@ type AgentStreamStart struct {
 // token (enterpriseID for Grid token resolution). StartStream opens a stream on a
 // thread and returns the stream message's ts — the handle AppendStream/StopStream
 // address. AppendStream appends a markdown chunk; StopStream finalizes the message.
-// A nil port keeps the agent on the non-streaming post path. DeleteStream uses
-// the existing chat:write permission only after a full fallback reply is confirmed.
+// A nil port keeps the agent on the non-streaming post path. DeleteStream removes
+// the bot-owned stream message with the existing chat:write permission.
 type AgentStreamPort interface {
 	StartStream(ctx context.Context, start *AgentStreamStart) (streamTS string, err error)
 	AppendStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS, markdownText string) error

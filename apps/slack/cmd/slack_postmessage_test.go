@@ -975,6 +975,7 @@ func TestSlackPostReplyTruncationIsNotCompleteDelivery(t *testing.T) {
 	}{
 		{"truncated metadata", `{"ok":true,"response_metadata":{"warnings":["message_truncated"]}}`, true},
 		{"truncated legacy warning", `{"ok":true,"warning":"missing_charset, message_truncated"}`, true},
+		{"unreadable receipt metadata", `{"ok":true,"response_metadata":{"warnings":7}}`, true},
 		{"unrelated warning", `{"ok":true,"response_metadata":{"warnings":["missing_charset"]}}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -990,6 +991,24 @@ func TestSlackPostReplyTruncationIsNotCompleteDelivery(t *testing.T) {
 			if (err != nil) != tc.wantError || calls != 1 {
 				t.Fatalf("completeness receipt err=%v calls=%d", err, calls)
 			}
+			strictBlocks := newSlackPostAgentMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv), nil)
+			if err := strictBlocks(context.Background(), "T1", "", "C1", "parent.1", nil, "complete fallback"); (err != nil) != tc.wantError || calls != 2 {
+				t.Fatalf("agent block receipt err=%v calls=%d", err, calls)
+			}
+			ordinaryBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv), nil)
+			if err := ordinaryBlocks(context.Background(), "T1", "", "C1", "parent.1", nil, "ordinary message"); err != nil || calls != 3 {
+				t.Fatalf("ordinary block semantics changed err=%v calls=%d", err, calls)
+			}
 		})
+	}
+}
+
+func TestSlackTruncationReceiptIsAgentOnly(t *testing.T) {
+	raw := []byte(`{"ok":true,"response_metadata":{"warnings":["message_truncated"]}}`)
+	if err := slackChatPostMessageResponseError(http.StatusOK, nil, raw); err != nil {
+		t.Fatalf("ordinary posted message changed semantics: %v", err)
+	}
+	if err := slackAgentPostMessageResponseError(http.StatusOK, nil, raw); !errors.Is(err, internal.ErrSlackMessageIncomplete) {
+		t.Fatalf("agent receipt: %v", err)
 	}
 }

@@ -1956,7 +1956,9 @@ func (h *Handler) postAgentReply(log *slog.Logger, env *slackEventEnvelope, thre
 func (h *Handler) postAgentMarkdownReply(log *slog.Logger, env *slackEventEnvelope, threadTS, markdown string) bool {
 	post := h.cfg.PostMarkdownMessage
 	if post == nil {
-		post = h.cfg.PostMessage
+		// Without a strict receipt, preserve the partial even if the legacy post succeeds.
+		h.postAgentGeneratedReply(log, env, threadTS, markdown, h.cfg.PostMessage)
+		return false
 	}
 	return h.postAgentGeneratedReply(log, env, threadTS, markdown, post)
 }

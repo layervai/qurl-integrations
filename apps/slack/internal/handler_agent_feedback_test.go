@@ -38,10 +38,11 @@ func TestDeliverAgentResultGeneratedReplyIncludesFeedbackWhenWired(t *testing.T)
 	textPost, posts, mu := capturingPostMessage()
 	blocks := &blocksRecorder{}
 	h := NewHandler(Config{
-		PostMessage:       textPost,
-		PostMessageBlocks: blocks.fn(),
-		PostFeedback:      func(context.Context, []byte) error { return nil },
-		OpenView:          func(context.Context, string, string, []byte) error { return nil },
+		PostMessage:            textPost,
+		PostMessageBlocks:      blocks.fn(),
+		PostAgentMessageBlocks: blocks.fn(),
+		PostFeedback:           func(context.Context, []byte) error { return nil },
+		OpenView:               func(context.Context, string, string, []byte) error { return nil },
 	})
 	t.Cleanup(h.Wait)
 
@@ -74,10 +75,11 @@ func TestDeliverAgentProposalPreviewUsesRendererSpecificEncoding(t *testing.T) {
 	textPost, posts, mu := capturingPostMessage()
 	blocks := &blocksRecorder{}
 	h := NewHandler(Config{
-		PostMessage:       textPost,
-		PostMessageBlocks: blocks.fn(),
-		PostFeedback:      func(context.Context, []byte) error { return nil },
-		OpenView:          func(context.Context, string, string, []byte) error { return nil },
+		PostMessage:            textPost,
+		PostMessageBlocks:      blocks.fn(),
+		PostAgentMessageBlocks: blocks.fn(),
+		PostFeedback:           func(context.Context, []byte) error { return nil },
+		OpenView:               func(context.Context, string, string, []byte) error { return nil },
 	})
 	t.Cleanup(h.Wait)
 
@@ -104,7 +106,7 @@ func TestPostAgentGeneratedReplyFallsBackWhenFeedbackBlocksFail(t *testing.T) {
 	textPost, posts, mu := capturingPostMessage()
 	h := NewHandler(Config{
 		PostMessage: textPost,
-		PostMessageBlocks: func(context.Context, string, string, string, string, []any, string) error {
+		PostAgentMessageBlocks: func(context.Context, string, string, string, string, []any, string) error {
 			return context.DeadlineExceeded
 		},
 		PostFeedback: func(context.Context, []byte) error { return nil },
@@ -271,9 +273,10 @@ func TestAgentFeedbackControlsRequireFeedbackModal(t *testing.T) {
 	textPost, posts, mu := capturingPostMessage()
 	blocks := &blocksRecorder{}
 	h := NewHandler(Config{
-		PostMessage:       textPost,
-		PostMessageBlocks: blocks.fn(),
-		PostFeedback:      func(context.Context, []byte) error { return nil },
+		PostMessage:            textPost,
+		PostMessageBlocks:      blocks.fn(),
+		PostAgentMessageBlocks: blocks.fn(),
+		PostFeedback:           func(context.Context, []byte) error { return nil },
 	})
 	env := env(slackEventTypeAppMention, slackChannelTypeChannel, "U2", "", "", "")
 	h.deliverAgentResult(slog.Default(), env, "100.1", &agent.Result{Reply: "complete answer"})
@@ -300,5 +303,25 @@ func TestHandleAgentFeedbackClickRejectsUnknownRating(t *testing.T) {
 	h.Wait()
 	if w.Code != 200 || calls != 0 {
 		t.Fatalf("ack=%d feedback calls=%d, want 200/0", w.Code, calls)
+	}
+}
+
+func TestPostAgentGeneratedReplyDoesNotRetryTruncatedBlocks(t *testing.T) {
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{PostMessage: post,
+		PostAgentMessageBlocks: func(context.Context, string, string, string, string, []any, string) error {
+			return ErrSlackMessageIncomplete
+		},
+		PostFeedback: func(context.Context, []byte) error { return nil },
+		OpenView:     func(context.Context, string, string, []byte) error { return nil },
+	})
+	e := env(slackEventTypeAppMention, slackChannelTypeChannel, "U2", "", "", "")
+	if h.postAgentGeneratedReply(slog.Default(), e, "100.1", "complete answer", post) {
+		t.Fatal("truncated reply claimed complete delivery")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 0 {
+		t.Fatal("already-posted truncated blocks caused a second reply")
 	}
 }

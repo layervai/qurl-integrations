@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -66,12 +67,15 @@ func (h *Handler) agentFeedbackEnabled() bool {
 // when feedback is not wired. When it is wired, it posts the answer and native
 // feedback buttons atomically so no generated response can lose its affordance.
 func (h *Handler) postAgentGeneratedReply(log *slog.Logger, env *slackEventEnvelope, threadTS, text string, fallback PostMessageFunc) bool {
-	if !h.agentFeedbackEnabled() || h.cfg.PostMessageBlocks == nil {
+	if !h.agentFeedbackEnabled() || h.cfg.PostAgentMessageBlocks == nil {
 		return h.deliverAgentText(log, env, threadTS, text, fallback)
 	}
 	ctx, cancel := context.WithTimeout(observability.WithLogger(h.baseCtx, log), agentDeliveryBudget)
 	defer cancel()
-	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, agentGeneratedReplyBlocks(text), strings.TrimSpace(text)); err != nil {
+	if err := h.cfg.PostAgentMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, agentGeneratedReplyBlocks(text), strings.TrimSpace(text)); err != nil {
+		if errors.Is(err, ErrSlackMessageIncomplete) {
+			return false
+		}
 		log.Warn("agent: post generated reply with feedback failed; falling back to text", "error", err)
 		return h.deliverAgentText(log, env, threadTS, text, fallback)
 	}

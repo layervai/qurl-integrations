@@ -567,7 +567,7 @@ func newSlackPostEphemeralBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, 
 // rejects the markdown block shape in an older/limited surface, retry once with the
 // older markdown_text-only body so the answer still delivers.
 func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client, invalidate func(string)) internal.PostMessageFunc {
-	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient, invalidate)
+	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackAgentPostMessageResponseError, httpClient, invalidate)
 	var fallbackLogMu sync.Mutex
 	fallbackLogSeen := make(map[string]struct{})
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, markdownText string) error {
@@ -734,6 +734,15 @@ func slackChatPostMessageErrorCode(err error) string {
 // response parsing) with the text seam — only the JSON body differs.
 func newSlackPostMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client, invalidate func(string)) internal.PostMessageBlocksFunc {
 	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient, invalidate)
+	return slackPostMessageBlocksFunc(poster)
+}
+
+func newSlackPostAgentMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client, invalidate func(string)) internal.PostMessageBlocksFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackAgentPostMessageResponseError, httpClient, invalidate)
+	return slackPostMessageBlocksFunc(poster)
+}
+
+func slackPostMessageBlocksFunc(poster *slackWebAPIPoster) internal.PostMessageBlocksFunc {
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error {
 		body, err := json.Marshal(struct {
 			Channel  string `json:"channel"`
@@ -1438,26 +1447,14 @@ func slackWebAPIResponseError(op string, benign map[string]struct{}, statusCode 
 		return err
 	}
 	var out struct {
-		OK               bool   `json:"ok"`
-		Error            string `json:"error"`
-		Warning          string `json:"warning"`
-		ResponseMetadata struct {
-			Warnings []string `json:"warnings"`
-		} `json:"response_metadata"`
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		if snippet := slackAPIBodySnippet(raw); snippet != "" {
 			return fmt.Errorf("%s response JSON: %w: %s", op, err, snippet)
 		}
 		return fmt.Errorf("%s response JSON: %w", op, err)
-	}
-	if out.OK && op == "chat.postMessage" {
-		warnings := append(strings.Split(out.Warning, ","), out.ResponseMetadata.Warnings...)
-		for _, warning := range warnings {
-			if strings.TrimSpace(warning) == "message_truncated" {
-				return &slackWebAPIError{op: op, code: "message_truncated"}
-			}
-		}
 	}
 	return slackWebAPIResponseFieldsError(op, benign, header, out.OK, out.Error)
 }
@@ -1609,4 +1606,29 @@ func invalidateRejectedSlackToken(ownerID string, err error, invalidate func(str
 		}
 	}
 	return err
+}
+
+func slackAgentPostMessageResponseError(statusCode int, header http.Header, raw []byte) error {
+	if err := slackChatPostMessageResponseError(statusCode, header, raw); err != nil {
+		return err
+	}
+	var out struct {
+		Warning          string `json:"warning"`
+		ResponseMetadata struct {
+			Warnings []string `json:"warnings"`
+		} `json:"response_metadata"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return internal.ErrSlackMessageIncomplete
+	}
+	warnings := out.ResponseMetadata.Warnings
+	if out.Warning != "" {
+		warnings = append(warnings, strings.Split(out.Warning, ",")...)
+	}
+	for _, warning := range warnings {
+		if strings.TrimSpace(warning) == "message_truncated" {
+			return internal.ErrSlackMessageIncomplete
+		}
+	}
+	return nil
 }

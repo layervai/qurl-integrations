@@ -380,6 +380,7 @@ func run() error {
 		PostMarkdownMessage:         postMarkdownMessage,
 		AgentDisabled:               agentDisabled,
 		PostMessageBlocks:           postMessageBlocks,
+		PostAgentMessageBlocks:      newSlackPostAgentMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil, invalidateWorkspaceSlackToken),
 		PostDMBlocks:                postDMBlocks,
 		PostEphemeralBlocks:         postEphemeralBlocks,
 		AgentConfirmEnabled:         agentConfirmEnabled,

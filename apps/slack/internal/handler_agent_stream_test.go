@@ -529,13 +529,14 @@ func newStreamingAgentHandler(llm agent.LLM, port AgentStreamPort, blocks PostMe
 	post, posts, mu := capturingPostMessage()
 	mdPost := capturingPostMarkdownMessage(posts, mu)
 	return NewHandler(Config{
-		AgentLLM:            llm,
-		AgentStore:          store,
-		PostMessage:         post,
-		PostMarkdownMessage: mdPost,
-		PostMessageBlocks:   blocks,
-		AgentStream:         port,
-		AgentDefaultEnabled: true,
+		AgentLLM:               llm,
+		AgentStore:             store,
+		PostMessage:            post,
+		PostMarkdownMessage:    mdPost,
+		PostMessageBlocks:      blocks,
+		PostAgentMessageBlocks: blocks,
+		AgentStream:            port,
+		AgentDefaultEnabled:    true,
 	}), posts, mu
 }
 
@@ -636,18 +637,27 @@ func TestAgentStreamer_DiscardedStreamTextFallsBackToAPostedReply(t *testing.T) 
 	if got := port.appended(); got != abandoned {
 		t.Fatalf("only the already-delivered fragment should have reached Slack, got %q", got)
 	}
+	s.discardBrokenPartial(false)
+	if port.deletes != 0 {
+		t.Fatal("deleted narration before complete fallback")
+	}
+	s.discardBrokenPartial(true)
+	if port.deletes != 1 {
+		t.Fatal("abandoned narration survived complete fallback")
+	}
 }
 
 func TestProcessAgentEvent_BrokenStreamCleanupWaitsForCompleteFallback(t *testing.T) {
 	for _, tc := range []struct {
-		name                           string
-		feedback, blocksFail, textFail bool
-		wantDeletes                    int
+		name                                            string
+		feedback, blocksFail, blocksTruncated, textFail bool
+		wantDeletes                                     int
 	}{
 		{name: "text delivered", wantDeletes: 1},
 		{name: "text failed", textFail: true},
 		{name: "feedback delivered", feedback: true, wantDeletes: 1},
 		{name: "feedback fallback delivered", feedback: true, blocksFail: true, wantDeletes: 1},
+		{name: "feedback truncated", feedback: true, blocksTruncated: true},
 		{name: "both posts failed", feedback: true, blocksFail: true, textFail: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -663,6 +673,9 @@ func TestProcessAgentEvent_BrokenStreamCleanupWaitsForCompleteFallback(t *testin
 				if text != agentLLMReplyWithDisclaimer(hardenAgentMarkdown(reply)) {
 					t.Fatalf("fallback was incomplete: %q", text)
 				}
+				if tc.blocksTruncated {
+					t.Fatal("truncated blocks caused duplicate text post")
+				}
 				if tc.textFail {
 					return errors.New("fallback post failed")
 				}
@@ -674,12 +687,15 @@ func TestProcessAgentEvent_BrokenStreamCleanupWaitsForCompleteFallback(t *testin
 			if tc.feedback {
 				h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
 				h.cfg.PostFeedback = func(context.Context, []byte) error { return nil }
-				h.cfg.PostMessageBlocks = func(_ context.Context, _, _, _, _ string, _ []any, fallback string) error {
+				h.cfg.PostAgentMessageBlocks = func(_ context.Context, _, _, _, _ string, _ []any, fallback string) error {
 					if port.deletes != 0 {
 						t.Fatal("partial was deleted before block delivery")
 					}
 					if fallback != strings.TrimSpace(agentLLMReplyWithDisclaimer(hardenAgentMarkdown(reply))) {
 						t.Fatal("block fallback was incomplete")
+					}
+					if tc.blocksTruncated {
+						return ErrSlackMessageIncomplete
 					}
 					if tc.blocksFail {
 						return errors.New("block post failed")
