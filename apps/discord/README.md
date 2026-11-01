@@ -756,3 +756,12 @@ If a write reply is lost, setup checks the exact saved generation with a strong
 read. If it cannot confirm the outcome, it returns a confirmation-needed error
 and does not revoke the potentially active key. Operators must inspect the
 current guild generation and pending jobs before a customer repeats setup.
+
+If webhook linking cannot save its local record, it queues reference-aware
+cleanup instead of deleting the remote subscription. This also applies to a
+newly created subscription: another guild may have linked it concurrently.
+The cleanup-only job cannot revoke the active key. If the queue write fails,
+the cleanup-enqueue failure audit requires operator reconciliation using the
+saved guild credential. A missing webhook owner requires owner verification
+before deletion. Automatic deletion still requires the reference migration
+and cleanup worker; these records alone do not enable it.

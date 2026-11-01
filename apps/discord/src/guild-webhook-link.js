@@ -12,7 +12,6 @@ const logger = require('./logger');
 const { AUDIT_EVENTS, SETUP_VIA, normalizeSetupVia, describeSetupVia } = require('./constants');
 const {
   ensureWebhookSubscription,
-  deleteSubscription,
   WEBHOOK_ACTIONS,
   DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
   isTruthyEnvFlag,
@@ -37,46 +36,19 @@ function bridgeUrl() {
   return `${config.BASE_URL.replace(/\/+$/, '')}/webhooks/qurl`;
 }
 
-// Rollback is part of the accepted link task, so shutdown also drains its DELETE.
-// Failures are audited and never replace the original linking result.
-//
-// Audit-noise discrimination: 404 is swallowed inside the registrar
-// (concurrent-delete race; the goal state is already met). 401 is
-// the routine re-key signal — the admin revoked the key on
-// layerv.ai before our DELETE landed — so we log but DON'T audit
-// (would flood the alarm channel on every key rotation). 5xx and
-// network errors DO audit so an orphan-subscription leak is visible.
-function bestEffortDeleteSubscription({ apiKey, webhookId, guildId }) {
-  return deleteSubscription({ apiEndpoint: config.QURL_ENDPOINT, apiKey, webhookId })
-    .catch((dErr) => {
-      const status = dErr?.status;
-      logger.warn('Best-effort orphan-subscription delete threw', {
-        error: dErr?.message, status, webhookId, guildId,
-      });
-      if (status === 401) {
-        // Routine re-key — admin revoked the key on layerv.ai before
-        // our DELETE landed. Not alarm-worthy, but an orphan webhook
-        // is now stranded on qurl-service's account. Distinct audit
-        // event (NOT QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED) so a
-        // future orphan-subscription sweeper has a clean metric-
-        // filter grep target without needing a qurl-service-side
-        // list-and-diff. CloudWatch alarms should EXCLUDE this event.
-        logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_ORPHAN_LEFT_AFTER_401, {
-          guild_id: guildId, webhook_id: webhookId,
-        });
-        return;
-      }
-      // Audit any non-401 failure path INCLUDING network errors that
-      // surface as `status === undefined` (DNS, TLS, AbortError on
-      // timeout). Those previously fell through without an audit,
-      // hiding stranded orphans behind a single warn log.
-      logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED, {
-        guild_id: guildId,
-        status: status || null,
-        error_type: dErr?.name || 'unknown',
-        path: 'rollback',
-      });
+// Even a newly created subscription may already have a sibling reference.
+// Keep it until the durable worker can claim deletion against the reference set.
+async function deferSubscriptionCleanup({ apiKey, webhookId, webhookOwnerId, guildId }) {
+  try {
+    await db.enqueueGuildWebhookCleanup({ apiKey, webhookId, webhookOwnerId, guildId });
+  } catch (err) {
+    logger.warn('Webhook cleanup could not be queued; operator reconciliation required', {
+      guildId, errorType: err?.name || 'unknown',
     });
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED, {
+      guild_id: guildId, status: null, error_type: err?.name || 'unknown', path: 'cleanup-enqueue',
+    });
+  }
 }
 
 // Audit-emit helper for linkGuildWebhookSubscription's failure
@@ -216,12 +188,12 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
 
   const { webhookId, secret, action, ownerId: webhookOwnerId } = registered;
   if (typeof webhookOwnerId !== 'string' || !webhookOwnerId) {
-    const rollback = bestEffortDeleteSubscription({ apiKey, webhookId, guildId });
-    logger.warn('Per-guild webhook ownerId missing from registrar response; rollback requested', {
+    const cleanup = deferSubscriptionCleanup({ apiKey, webhookId, webhookOwnerId, guildId });
+    logger.warn('Per-guild webhook ownerId missing from registrar response; cleanup deferred', {
       guildId, webhookId, action,
     });
     auditLinkFailure(guildId, LINK_RESULTS.OWNER_MISSING);
-    await rollback;
+    await cleanup;
     return { ok: false, reason: LINK_RESULTS.OWNER_MISSING };
   }
 
@@ -232,20 +204,19 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       webhookOwnerId,
     });
   } catch (err) {
-    const rollback = bestEffortDeleteSubscription({ apiKey, webhookId, guildId });
+    const cleanup = deferSubscriptionCleanup({ apiKey, webhookId, webhookOwnerId, guildId });
     // ConditionalCheckFailedException from
     // setGuildWebhookSubscription's attribute_exists(qurl_api_key)
     // guard means setGuildApiKey wasn't called first (or its row
     // was wiped between the two writes). Treat as hard caller-bug:
-    // bail out without touching the cache. The wider rollback (orphan
-    // DELETE above) still runs.
+    // bail out without touching the cache. The cleanup request remains part of this task.
     const isOrphanGuard = err?.name === 'ConditionalCheckFailedException';
-    logger.warn('Per-guild webhook subscription persisted-create rollback', {
+    logger.warn('Per-guild webhook subscription persist failed; cleanup deferred', {
       error: err?.message, guildId, webhookId,
       orphan_guard_tripped: isOrphanGuard,
     });
     auditLinkFailure(guildId, LINK_RESULTS.PERSIST_FAILED);
-    await rollback;
+    await cleanup;
     return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };
   }
 
@@ -317,7 +288,7 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
   return result;
 }
 
-// Track accepted work through propagation and rollback. Setup callers can wait
+// Track accepted work through propagation and cleanup enqueue. Setup callers can wait
 // only for primary confirmation; description tags stay normalized in one place.
 const inFlightGuildLinks = new Set();
 let guildLinksDraining = false;

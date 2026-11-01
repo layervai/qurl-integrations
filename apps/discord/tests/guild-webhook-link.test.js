@@ -7,10 +7,12 @@ jest.mock('../src/qurl-webhook-registrar', () => ({
   deleteSubscription: mockDeleteSubscription,
 }));
 
+const mockEnqueueGuildWebhookCleanup = jest.fn();
 const mockSetGuildWebhookSubscription = jest.fn();
 const mockSetGuildDefaultWebhookOwner = jest.fn();
 const mockPropagateGuildWebhookSubscription = jest.fn();
 jest.mock('../src/store', () => ({
+  enqueueGuildWebhookCleanup: mockEnqueueGuildWebhookCleanup,
   setGuildWebhookSubscription: mockSetGuildWebhookSubscription,
   setGuildDefaultWebhookOwner: mockSetGuildDefaultWebhookOwner,
   propagateGuildWebhookSubscription: mockPropagateGuildWebhookSubscription,
@@ -66,6 +68,7 @@ beforeEach(() => {
     action: 'created',
     ownerId: 'usr_ok',
   });
+  mockEnqueueGuildWebhookCleanup.mockResolvedValue('cleanup-job');
   mockSetGuildWebhookSubscription.mockResolvedValue();
   mockSetGuildDefaultWebhookOwner.mockResolvedValue();
   mockPropagateGuildWebhookSubscription.mockResolvedValue({ updated: 0, failed: 0, skipped: 0 });
@@ -73,23 +76,33 @@ beforeEach(() => {
   mockResolveDefaultOwnerForApiKey.mockResolvedValue(null);
 });
 
-describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
-  it('fires bestEffortDeleteSubscription when setGuildWebhookSubscription throws', async () => {
+describe('linkGuildWebhookSubscription — partial-failure cleanup', () => {
+  it.each(['created', 'rotated', 'reused'])('does not delete a possibly shared %s subscription after a local failure', async (action) => {
+    mockEnsureWebhookSubscription.mockResolvedValueOnce({
+      webhookId: 'wh-shared', secret: 'sec-shared', ownerId: 'owner-shared', action,
+    });
+    mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('write reply lost'));
+    await linkGuildWebhookSubscription({ guildId: 'g-shared', apiKey: 'shared-key' });
+    expect(mockDeleteSubscription).not.toHaveBeenCalled();
+  });
+
+  it('queues cleanup when setGuildWebhookSubscription throws', async () => {
     mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('DDB throttled'));
     const result = await linkGuildWebhookSubscription({
       guildId: 'g1', apiKey: 'lv_guild_1',
     });
     expect(result).toEqual({ ok: false, reason: LINK_RESULTS.PERSIST_FAILED });
-    expect(mockDeleteSubscription).toHaveBeenCalledWith({
-      apiEndpoint: 'https://qurl.example', apiKey: 'lv_guild_1', webhookId: 'wh_ok',
+    expect(mockEnqueueGuildWebhookCleanup).toHaveBeenCalledWith({
+      apiKey: 'lv_guild_1', webhookId: 'wh_ok', webhookOwnerId: 'usr_ok', guildId: 'g1',
     });
+    expect(mockDeleteSubscription).not.toHaveBeenCalled();
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
       expect.objectContaining({ reason: LINK_RESULTS.PERSIST_FAILED, guild_id: 'g1' }),
     );
   });
 
-  it('rolls back + emits OWNER_MISSING failure audit when registrar response lacks ownerId', async () => {
+  it('defers cleanup + emits OWNER_MISSING failure audit when registrar response lacks ownerId', async () => {
     mockEnsureWebhookSubscription.mockResolvedValueOnce({
       webhookId: 'wh_no_owner', secret: 'sec_x', action: 'created', ownerId: undefined,
     });
@@ -97,9 +110,10 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
       guildId: 'g2', apiKey: 'lv_guild_2',
     });
     expect(result).toEqual({ ok: false, reason: LINK_RESULTS.OWNER_MISSING });
-    expect(mockDeleteSubscription).toHaveBeenCalledWith(expect.objectContaining({
-      webhookId: 'wh_no_owner',
+    expect(mockEnqueueGuildWebhookCleanup).toHaveBeenCalledWith(expect.objectContaining({
+      webhookId: 'wh_no_owner', webhookOwnerId: undefined,
     }));
+    expect(mockDeleteSubscription).not.toHaveBeenCalled();
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
       expect.objectContaining({ reason: LINK_RESULTS.OWNER_MISSING }),
@@ -358,48 +372,17 @@ describe('linkGuildWebhookSubscription — propagation parameter', () => {
   });
 });
 
-describe('linkGuildWebhookSubscription — bestEffortDeleteSubscription failure', () => {
-  it('emits SUBSCRIPTION_DELETE_FAILED audit when rollback DELETE rejects', async () => {
-    mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('DDB throttled'));
-    const dErr = new Error('qurl-service 500');
-    dErr.status = 500;
-    mockDeleteSubscription.mockRejectedValueOnce(dErr);
-    await linkGuildWebhookSubscription({
-      guildId: 'g_rollback_fail', apiKey: 'lv_x',
-    });
-    await new Promise(setImmediate);
-    expect(mockAudit).toHaveBeenCalledWith(
-      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED,
-      expect.objectContaining({ guild_id: 'g_rollback_fail', path: 'rollback' }),
-    );
-  });
-
-  it('does NOT emit DELETE_FAILED audit when DELETE 404s (registrar swallows)', async () => {
-    mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('DDB throttled'));
-    mockDeleteSubscription.mockResolvedValueOnce(undefined);
-    await linkGuildWebhookSubscription({
-      guildId: 'g_404', apiKey: 'lv_x',
-    });
-    await new Promise(setImmediate);
-    expect(mockAudit).not.toHaveBeenCalledWith(
-      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED,
-      expect.any(Object),
-    );
-  });
-
-  it('does NOT emit DELETE_FAILED audit when DELETE 401s (routine re-key)', async () => {
-    mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('DDB throttled'));
-    const dErr = new Error('qurl-service 401');
-    dErr.status = 401;
-    mockDeleteSubscription.mockRejectedValueOnce(dErr);
-    await linkGuildWebhookSubscription({
-      guildId: 'g_401', apiKey: 'lv_revoked',
-    });
-    await new Promise(setImmediate);
-    expect(mockAudit).not.toHaveBeenCalledWith(
-      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED,
-      expect.any(Object),
-    );
+describe('linkGuildWebhookSubscription — cleanup enqueue failure', () => {
+  it('audits a queue failure without deleting the subscription or exposing the error body', async () => {
+    mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('DDB unavailable'));
+    mockEnqueueGuildWebhookCleanup.mockRejectedValueOnce(new Error('PRIVATE credential body'));
+    const result = await linkGuildWebhookSubscription({ guildId: 'g-queue-fail', apiKey: 'secret-key' });
+    expect(result).toEqual({ ok: false, reason: LINK_RESULTS.PERSIST_FAILED });
+    expect(mockDeleteSubscription).not.toHaveBeenCalled();
+    expect(mockAudit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED,
+      expect.objectContaining({ guild_id: 'g-queue-fail', path: 'cleanup-enqueue' }));
+    expect(JSON.stringify(mockWarn.mock.calls)).not.toContain('PRIVATE credential body');
+    expect(JSON.stringify(mockWarn.mock.calls)).not.toContain('secret-key');
   });
 });
 
@@ -521,23 +504,23 @@ describe('setup wait and shutdown drain', () => {
     }
   });
 
-  test('rollback DELETE remains part of the accepted shutdown work', async () => {
+  test('cleanup enqueue remains part of the accepted shutdown work', async () => {
     const links = freshLinks();
-    let finishDelete;
+    let finishEnqueue;
     mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('persist unavailable'));
-    mockDeleteSubscription.mockReturnValueOnce(new Promise(resolve => { finishDelete = resolve; }));
+    mockEnqueueGuildWebhookCleanup.mockReturnValueOnce(new Promise(resolve => { finishEnqueue = resolve; }));
     const task = links.fireAndForgetLinkGuildWebhookSubscription(args);
     try {
       await jest.advanceTimersByTimeAsync(0);
-      expect(mockDeleteSubscription).toHaveBeenCalled();
+      expect(mockEnqueueGuildWebhookCleanup).toHaveBeenCalled();
       let drained = false;
       const drain = links.drainGuildWebhookSubscriptions().then(value => { drained = value; });
       await jest.advanceTimersByTimeAsync(0);
       expect(drained).toBe(false);
-      finishDelete();
+      finishEnqueue();
       await drain;
       expect(drained).toBe(true);
-    } finally { finishDelete(); await task; }
+    } finally { finishEnqueue(); await task; }
   });
 
   test.each([false, true])('shutdown preserves the session and storage budget (fatal=%s)', async fatal => {
