@@ -16,6 +16,7 @@ const accountActiveStatus = "active"
 // AccountManagement uses explicit account authority; linked device owners are unsupported.
 type AccountManagement interface {
 	Me(context.Context) (*Identity, error)
+	BatchCreate(context.Context, BatchCreateInput) (*BatchCreateResult, error)
 	ListAccessCodes(context.Context, int, string) (*AccountPage[AccessCode], error)
 	CreateAccessCode(context.Context, AccessCodeInput) (*CreatedAccessCode, error)
 	DeleteAccessCode(context.Context, string) error

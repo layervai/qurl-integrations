@@ -2087,3 +2087,39 @@ Ask the code owner for help if no link reached stdout.
 Pagination requires the producer account-page change (qurl-service #2021).
 Creation also requires that change's full-fleet exclusion of one-time codes from
 shared response replay. Local HTTP tests are not a Sandbox account journey.
+
+### Batch URL creation
+
+`qurl batch create --file batch.json -o json` sends up to 100 URL-create items
+in one account request. Omit `--file` or use `--file -` to read stdin. Input is
+limited to 1 MiB. Use fresh browser sign-in by default. For automation, select
+`--api-key-auth` with an explicit durable account key and `qurl:read,qurl:write`.
+The batch API denies device credentials; the CLI does not open a saved device.
+
+```json
+{"items":[
+  {"target_url":"https://app.example.com","expires_in":"1h"},
+  {"target_url":"https://other.example.com","one_time_use":false,"max_sessions":0}
+]}
+```
+
+Each item uses the public URL-create fields: `target_url`, optional `type: url`,
+`private`, `expires_in`, `one_time_use`, `max_sessions`, `session_duration`,
+`access_policy`, `label`, and `custom_domain`. Unknown item fields, duplicate
+fields and explicit nulls fail before sign-in. The service validates nested
+access policy, duration, plan limits and custom-domain ownership. Omitted
+privacy creates new resources as private and keeps an existing resource's
+privacy. Explicit false and zero values are preserved.
+
+The command sends one HTTP request, without automatic split, retry or generic
+response-cache replay. It returns every indexed result in input order. Any
+failed item gives a nonzero exit status, including a mixed 207 response or an
+all-failed 400 response. JSON stdout retains all results on those failures.
+Quiet stdout contains only successful links; failed-item details go to stderr.
+Keep stdout secure: successful results contain access links.
+
+Do not recreate successful items when a batch partly fails. Read each failed
+item's code and message before a new request. An unknown result or failed
+stdout can mean that links were created. Inspect the account's resources and
+links before retrying the whole batch. Local fixture tests do not prove the
+real Sandbox account journey.
