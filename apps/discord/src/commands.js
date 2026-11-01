@@ -3271,14 +3271,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           guildId: originalInteraction.guildId,
         });
       } catch (err) {
-        // Discord CDN URLs are signed and expire (~24h). If the re-download
-        // fails, surface a clear user-facing message; log the real error
-        // server-side so err.message (which may echo upstream response detail)
-        // never reaches a Discord reply. (The expiry-shaped user copy is
-        // pre-existing; decoupling it from the network case is tracked in #634.)
-        const isExpired = /403|expired|network|CDN/i.test(err.message || '');
+        // Only a permanent CDN response implies the source is unavailable.
+        // Network, connector upload, and mint failures can be retried.
+        const isExpired = [403, 404, 410].includes(err.cdnStatus);
         const msg = isExpired
-          ? 'Original attachment URL has expired. Please create a new send.'
+          ? 'Original attachment is no longer available. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', {
           sendId,
