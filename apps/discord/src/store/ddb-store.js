@@ -1925,6 +1925,198 @@ async function enqueueGuildWebhookCleanup({ guildId, apiKey, webhookId, webhookO
   return jobId;
 }
 
+// Claims are fenced by a random token. Failed and exhausted jobs retain their
+// encrypted capability; only a confirmed completion can erase it.
+async function claimCredentialCleanup(bucket, now = Date.now()) {
+  const page = await ddb.send(new QueryCommand({
+    TableName: TABLES.credential_lifecycle, IndexName: 'due-index',
+    KeyConditionExpression: 'due_bucket = :bucket AND due_at <= :now',
+    ExpressionAttributeValues: { ':bucket': String(bucket), ':now': now }, Limit: 8,
+  }));
+  for (const key of page.Items ?? []) {
+    const token = crypto.randomUUID();
+    try {
+      const result = await ddb.send(new UpdateCommand({
+        TableName: TABLES.credential_lifecycle, Key: { pk: key.pk, sk: key.sk },
+        UpdateExpression: 'SET lease_token = :token, due_at = :lease ADD attempts :one',
+        ConditionExpression: 'cleanup_state = :pending AND due_at <= :now AND attempts < :max',
+        ExpressionAttributeValues: { ':token': token, ':lease': now + 300_000, ':one': 1,
+          ':pending': 'pending', ':now': now, ':max': 7 }, ReturnValues: 'ALL_NEW',
+      }));
+      return result.Attributes;
+    } catch (err) { if (err?.name !== 'ConditionalCheckFailedException') throw err; }
+  }
+  return null;
+}
+
+async function finishCredentialCleanup(job, outcome, reason) {
+  const complete = outcome === 'complete';
+  const manual = outcome === 'manual' || job.attempts >= 6;
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.credential_lifecycle, Key: { pk: job.pk, sk: job.sk },
+    UpdateExpression: 'SET cleanup_state = :state, updated_at = :now, last_reason = :reason'
+      + (complete || manual ? ' REMOVE due_bucket, due_at, lease_token' : ', due_at = :due REMOVE lease_token')
+      + (complete ? ', qurl_api_key, webhook_secret' : ''),
+    ConditionExpression: 'lease_token = :token AND cleanup_state = :pending',
+    ExpressionAttributeValues: { ':state': complete ? 'complete' : manual ? 'manual' : 'pending',
+      ':now': nowIso(), ':reason': reason, ':token': job.lease_token, ':pending': 'pending',
+      ...(!complete && !manual ? { ':due': Date.now() + Math.min(3_600_000, 30_000 * (2 ** job.attempts)) } : {}) },
+  }));
+  return complete ? 'complete' : manual ? 'manual' : 'pending';
+}
+
+async function getGuildCleanupSnapshot(guildId) {
+  return (await ddb.send(new GetCommand({ TableName: TABLES.guild_configs,
+    Key: { guild_id: guildId }, ConsistentRead: true })))?.Item;
+}
+
+async function restoreGuildInstallation(job, row) {
+  if (!row.qurl_installation_removed || row.qurl_removal_job_id !== job.job_id) return false;
+  try {
+    await ddb.send(new UpdateCommand({ TableName: TABLES.guild_configs, Key: { guild_id: row.guild_id },
+      UpdateExpression: 'SET qurl_installation_removed = :active REMOVE qurl_removal_job_id, qurl_disconnected_at',
+      ConditionExpression: 'qurl_removal_job_id = :job AND qurl_api_key = :key AND qurl_installation_joined_at = :joined AND observed_installation_joined_at = :joined',
+      ExpressionAttributeValues: { ':active': false, ':job': job.job_id, ':key': row.qurl_api_key, ':joined': row.qurl_installation_joined_at } }));
+    return true;
+  } catch (err) { if (err?.name === 'ConditionalCheckFailedException') return false; throw err; }
+}
+
+async function retireGuildCredential(job, row) {
+  if (!row?.qurl_api_key) return null;
+  const references = await prepareGuildWebhookReferences(row.guild_id, row, null);
+  const generationCondition = row.qurl_generation === undefined
+    ? 'attribute_not_exists(qurl_generation)' : 'qurl_generation = :generation';
+  const installationCondition = row.qurl_installation_joined_at === undefined
+    ? 'attribute_not_exists(qurl_installation_joined_at)' : 'qurl_installation_joined_at = :joined';
+  const credential = {
+    qurl_api_key: encryptStrict(decrypt(row.qurl_api_key)), qurl_key_id: row.qurl_key_id ?? null,
+    qurl_key_kind: row.qurl_key_kind ?? 'unknown', qurl_owner_id: row.qurl_owner_id ?? null,
+    qurl_generation: row.qurl_generation ?? null, webhook_id: row.webhook_id ?? null,
+    webhook_owner_id: row.webhook_owner_id ?? null,
+    webhook_secret: row.webhook_secret ? encryptStrict(decrypt(row.webhook_secret)) : null,
+  };
+  const values = Object.fromEntries(Object.entries(credential).map(([key, value]) => [`:${key}`, value]));
+  await sendLifecycleTransaction(new TransactWriteCommand({ ClientRequestToken: crypto.randomUUID(), TransactItems: [
+    { Update: {
+      TableName: TABLES.guild_configs, Key: { guild_id: row.guild_id },
+      // Keep observed_installation_joined_at: it fences delayed OAuth callbacks.
+      UpdateExpression: 'SET updated_at = :now REMOVE qurl_api_key, qurl_key_id, qurl_key_kind, qurl_owner_id, qurl_generation, qurl_installation_joined_at, configured_by, configured_at, webhook_id, webhook_owner_id, webhook_secret',
+      ConditionExpression: `qurl_api_key = :key AND ${generationCondition} AND ${installationCondition}`
+        + ['webhook_id', 'webhook_owner_id', 'webhook_secret'].map(field => row[field] === undefined
+          ? ` AND attribute_not_exists(${field})` : ` AND ${field} = :old_${field}`).join(''),
+      ExpressionAttributeValues: { ':now': nowIso(), ':key': row.qurl_api_key,
+        ...(row.qurl_generation === undefined ? {} : { ':generation': row.qurl_generation }),
+        ...(row.qurl_installation_joined_at === undefined ? {} : { ':joined': row.qurl_installation_joined_at }),
+        ...Object.fromEntries(['webhook_id', 'webhook_owner_id', 'webhook_secret'].filter(field => row[field] !== undefined)
+          .map(field => [`:old_${field}`, row[field]])) },
+    } },
+    { Update: {
+      TableName: TABLES.credential_lifecycle, Key: { pk: job.pk, sk: job.sk },
+      UpdateExpression: 'SET reason = :reason, ' + Object.keys(credential).map(key => `${key} = :${key}`).join(', '),
+      ConditionExpression: 'lease_token = :token AND cleanup_state = :pending',
+      ExpressionAttributeValues: { ...values, ':reason': 'removed_credential', ':token': job.lease_token, ':pending': 'pending' },
+    } }, ...references,
+  ] }));
+  return { ...job, ...credential, reason: 'removed_credential' };
+}
+
+// The caller must establish that all regions and all writers use this authority.
+// A table scan is migration work, never proof that a subscription is unreferenced.
+async function backfillGuildWebhookReferences(cursor) {
+  const page = await ddb.send(new ScanCommand({ TableName: TABLES.guild_configs, ConsistentRead: true,
+    Limit: 100, ...(cursor ? { ExclusiveStartKey: cursor } : {}) }));
+  let registered = 0;
+  for (const row of page.Items ?? []) {
+    if (!webhookReferencePair(row)) continue;
+    const pair = webhookReferencePair(row);
+    if ((config.QURL_API_KEY && row.qurl_api_key && decrypt(row.qurl_api_key) === config.QURL_API_KEY)
+        || (config.QURL_WEBHOOK_SECRET && row.webhook_secret && decrypt(row.webhook_secret) === config.QURL_WEBHOOK_SECRET)) {
+      await ddb.send(new UpdateCommand({ TableName: TABLES.credential_lifecycle, Key: { pk: pair.pk, sk: 'HEAD' },
+        UpdateExpression: 'SET system_reference = :yes', ExpressionAttributeValues: { ':yes': true } }));
+    }
+    const actions = await prepareGuildWebhookReferences(row.guild_id, null, row);
+    await sendLifecycleTransaction(new TransactWriteCommand({ ClientRequestToken: crypto.randomUUID(), TransactItems: [
+      { ConditionCheck: { TableName: TABLES.guild_configs, Key: { guild_id: row.guild_id },
+        ConditionExpression: 'webhook_owner_id = :owner AND webhook_id = :webhook',
+        ExpressionAttributeValues: { ':owner': row.webhook_owner_id, ':webhook': row.webhook_id } } }, ...actions,
+    ] }));
+    registered++;
+  }
+  return { cursor: page.LastEvaluatedKey, registered };
+}
+
+async function migrateGuildWebhookReferences(scope, { allWritersAdopted = false } = {}) {
+  if (!allWritersAdopted || !scope || scope !== config.CREDENTIAL_CLEANUP_SCOPE
+      || !config.ENABLE_CREDENTIAL_LIFECYCLE || !config.QURL_API_KEY || !config.QURL_WEBHOOK_SECRET
+      || !config.DISCORD_CLIENT_ID || !process.env.AWS_REGION) {
+    throw new Error('Full fleet writer adoption, default subscription protection and matching cleanup scope are required');
+  }
+  const Key = { pk: 'MIGRATION#WEBHOOK_REFERENCES', sk: scope };
+  const generation = crypto.randomUUID();
+  await ddb.send(new PutCommand({ TableName: TABLES.credential_lifecycle,
+    Item: { ...Key, cleanup_state: 'migrating', generation, started_at: nowIso(), migration_lease_until: Date.now() + 3_600_000, bot_application_id: config.DISCORD_CLIENT_ID,
+      writer_region: process.env.AWS_REGION, table_prefix: TABLE_PREFIX, all_writers_adopted: true },
+    ConditionExpression: 'attribute_not_exists(pk) OR (cleanup_state = :migrating AND migration_lease_until < :now)',
+    ExpressionAttributeValues: { ':migrating': 'migrating', ':now': Date.now() } }));
+  let cursor;
+  let registered = 0;
+  for (let page = 0; page < 10000; page++) {
+    const result = await backfillGuildWebhookReferences(cursor);
+    registered += result.registered;
+    cursor = result.cursor;
+    if (!cursor) {
+      await ddb.send(new UpdateCommand({ TableName: TABLES.credential_lifecycle, Key,
+        UpdateExpression: 'SET cleanup_state = :ready, completed_at = :now',
+        ConditionExpression: '#generation = :generation AND cleanup_state = :migrating',
+        ExpressionAttributeNames: { '#generation': 'generation' },
+        ExpressionAttributeValues: { ':ready': 'ready', ':now': nowIso(), ':generation': generation, ':migrating': 'migrating' } }));
+      return { registered };
+    }
+  }
+  throw new Error('Reference backfill page limit reached; authority remains closed');
+}
+
+async function claimWebhookCleanup(job, scope) {
+  if (typeof scope !== 'string' || !scope) throw new Error('Cleanup authority scope is required');
+  const pair = webhookReferencePair(job);
+  if (!pair) throw new Error('Cleanup webhook identity is required');
+  try {
+    await sendLifecycleTransaction(new TransactWriteCommand({ ClientRequestToken: crypto.randomUUID(), TransactItems: [
+      { ConditionCheck: { TableName: TABLES.credential_lifecycle, Key: { pk: 'MIGRATION#WEBHOOK_REFERENCES', sk: scope },
+        ConditionExpression: 'cleanup_state = :ready AND bot_application_id = :bot AND writer_region = :region AND table_prefix = :prefix AND all_writers_adopted = :yes',
+        ExpressionAttributeValues: { ':ready': 'ready', ':bot': config.DISCORD_CLIENT_ID || '',
+          ':region': process.env.AWS_REGION || '', ':prefix': TABLE_PREFIX, ':yes': true } } },
+      { ConditionCheck: { TableName: TABLES.credential_lifecycle, Key: { pk: job.pk, sk: job.sk },
+        ConditionExpression: 'lease_token = :token AND cleanup_state = :pending',
+        ExpressionAttributeValues: { ':token': job.lease_token, ':pending': 'pending' } } },
+      { Update: { TableName: TABLES.credential_lifecycle, Key: { pk: pair.pk, sk: 'HEAD' },
+        UpdateExpression: 'SET cleanup_state = :deleting, cleanup_job_id = :job, webhook_owner_id = :owner, webhook_id = :webhook',
+        ConditionExpression: '(attribute_not_exists(reference_count) OR reference_count = :zero) AND (attribute_not_exists(system_reference) OR system_reference = :no) AND (attribute_not_exists(cleanup_state) OR cleanup_state = :active OR (cleanup_state = :deleting AND cleanup_job_id = :job))',
+        ExpressionAttributeValues: { ':zero': 0, ':no': false, ':active': 'active', ':deleting': 'deleting',
+          ':job': job.job_id, ':owner': pair.ownerId, ':webhook': pair.webhookId } } },
+    ] }));
+    return true;
+  } catch (err) {
+    if (err?.name === 'TransactionCanceledException'
+        && err.CancellationReasons?.some(reason => reason.Code === 'ConditionalCheckFailed')) {
+      const head = (await ddb.send(new GetCommand({ TableName: TABLES.credential_lifecycle,
+        Key: { pk: pair.pk, sk: 'HEAD' }, ConsistentRead: true })))?.Item;
+      if (head?.cleanup_state === 'deleted') return 'deleted';
+      if (head?.system_reference || head?.reference_count > 0) return 'referenced';
+      return false;
+    }
+    throw err;
+  }
+}
+
+async function completeWebhookCleanup(job) {
+  const pair = webhookReferencePair(job);
+  await ddb.send(new UpdateCommand({ TableName: TABLES.credential_lifecycle, Key: { pk: pair.pk, sk: 'HEAD' },
+    UpdateExpression: 'SET cleanup_state = :deleted',
+    ConditionExpression: 'cleanup_state = :deleting AND cleanup_job_id = :job',
+    ExpressionAttributeValues: { ':deleted': 'deleted', ':deleting': 'deleting', ':job': job.job_id } }));
+}
+
 // Raw delete. No qurl-service subscription teardown. Today there is no
 // production caller; a future /qurl unlink orchestrator must perform
 // reference-aware cleanup before calling this, or explicitly record the orphan
@@ -2548,6 +2740,8 @@ module.exports = {
   setGuildWebhookSubscription, setGuildDefaultWebhookOwner, clearGuildWebhookSubscription,
   enqueueGuildWebhookCleanup, noteGuildInstallation, enqueueGuildRemoval,
   listCompleteGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
+  claimCredentialCleanup, finishCredentialCleanup, getGuildCleanupSnapshot, restoreGuildInstallation, retireGuildCredential,
+  backfillGuildWebhookReferences, migrateGuildWebhookReferences, claimWebhookCleanup, completeWebhookCleanup,
   // Lifecycle
   close, healthCheck,
   // Test-only: surface the prefixed table-name map so

@@ -724,7 +724,7 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
         { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
         { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
       ] } }),
-      'DELETE /v1/webhooks/wh_b': () => ({ status: 404, body: { error: 'not found' } }),
+      'DELETE /v1/webhooks/wh_b': () => ({ status: 404, body: { error: { code: 'not_found', detail: 'Webhook not found', instance: '/v1/webhooks/wh_b' } } }),
       'POST /v1/webhooks/wh_a/secret': () => ({ body: { data: { webhook_id: 'wh_a', secret: 'whsec_rot_server_generated' } } }),
     });
     const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
@@ -1266,7 +1266,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         'GET /v1/webhooks': () => ({ body: { data: [
           deadOrphan({ webhook_id: 'wh_already_gone' }),
         ] } }),
-        'DELETE /v1/webhooks/wh_already_gone': () => ({ status: 404, body: { error: 'not found' } }),
+        'DELETE /v1/webhooks/wh_already_gone': () => ({ status: 404, body: { error: { code: 'not_found', detail: 'Webhook not found', instance: '/v1/webhooks/wh_already_gone' } } }),
         'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       const result = await ensureWebhookSubscription(BOT_OPTS);
@@ -1950,4 +1950,18 @@ it('reuses a persisted format-drift response across registrar runs without rotat
   } finally {
     warn.mockRestore();
   }
+});
+
+// Typed absence is required before a cleanup caller can discard its capability.
+describe('deleteSubscription absence confirmation', () => {
+  const { deleteSubscription } = require('../src/qurl-webhook-registrar');
+  test.each([
+    { status: 404, body: '<html>Not found</html>' },
+    { status: 404, body: { error: { code: 'not_found', detail: 'Webhooks feature not enabled', instance: '/v1/webhooks/wh' } } },
+    { status: 404, body: { error: { code: 'not_found', detail: 'Webhook not found', instance: '/v1/webhooks/other' } } },
+    { status: 200, body: '<html>proxy success</html>' },
+  ])('rejects unconfirmed deletion %j', async response => {
+    mockFetchResponses({ 'DELETE /v1/webhooks/wh': () => response });
+    await expect(deleteSubscription({ apiEndpoint: 'https://api.test', apiKey: 'secret', webhookId: 'wh' })).rejects.toBeDefined();
+  });
 });

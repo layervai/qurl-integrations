@@ -811,3 +811,33 @@ The local lifecycle check covers shared references, relink during deletion,
 owner replacement, legacy reference registration, propagation, and protected
 default mappings. CI runs it against its existing DynamoDB Local service. The
 cleanup worker and full-fleet reference backfill still gate physical deletion.
+
+Credential cleanup worker (draft, off by default):
+
+`ENABLE_CREDENTIAL_CLEANUP_WORKER=true` requires the lifecycle writers and
+`CREDENTIAL_CLEANUP_SCOPE`. Do not enable it until the upstream self-revocation
+route is deployed and the real Sandbox journey passes. Only HTTP replicas run
+this worker. Jobs have fenced five-minute claims, bounded retries, and no TTL.
+Unknown membership, uncertain remote replies, missing capabilities, and exhausted
+jobs retain their encrypted facts for operator recovery. Manual jobs emit
+`credential_cleanup_failed`; the rollout must wire this signal to
+an operational alarm before enabling the worker.
+
+Before enabling physical webhook deletion, establish a single authoritative
+writer region and table for this bot application. Every writer in every region
+must use the transactional reference code; direct or older writers invalidate the
+proof. Set the same scope on the worker and migration task. Run
+`node scripts/backfill-credential-references.js` for a read-only count, then run
+it with `--apply --all-writers-adopted` only after recording full fleet adoption.
+The migration protects known global subscription capabilities and counts legacy
+rows, including inactive rows. Changed rows fail the migration. A failed or
+interrupted migration grants no authority; rerun after its one-hour migration
+lease expires. It starts again and uses idempotent members. A completed migration
+is not overwritten. Changing topology or admitting an old writer requires stopping
+cleanup and establishing a new scope and full backfill.
+
+Never turn a `manual` job into `complete` on the basis of a cold HTTP 401 or a
+generic HTTP 404. Recover with the correct owner credential, confirm remote state,
+and preserve the installation observation row. The worker does not delete shared
+or global API keys. Completed jobs erase their retained credential and webhook
+secret; retry and manual jobs preserve both.

@@ -61,3 +61,5 @@ apps/discord/railway.json
 proof-1000-runs/
 # binary that `go build ./apps/cli/scripts/...` drops at the repo root
 /proof-1000
+
+!apps/discord/scripts/backfill-credential-references.js
