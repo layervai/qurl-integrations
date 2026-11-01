@@ -155,6 +155,9 @@ async function main() {
 
     await client.send(new DeleteCommand({ TableName: table, Key: { flow_id: chunkKey } }));
     await assert.rejects(loadFlow(flow_id), /missing or mismatched/);
+    await assert.rejects(transitionFlow(flow_id, parent.version, { stage_to: stage, terminal: false,
+      set_expires_at: expires + 720, expectedPayload: parent.payload }), /missing or mismatched/);
+    assert.equal((await get(flow_id)).payload, parent.payload);
     await client.send(new PutCommand({ TableName: table, Item: chunk }));
     assert.deepEqual((await loadFlow(flow_id)).payload, payload);
     // A broken live set can be replaced without reading its missing children.
@@ -169,7 +172,10 @@ async function main() {
     await client.send(new UpdateCommand({ TableName: table, Key: { flow_id }, UpdateExpression: 'SET expires_at = :expired',
       ExpressionAttributeValues: { ':expired': Math.floor(Date.now() / 1000) - 1 } }));
     assert.equal(await loadFlow(flow_id), null);
-    assert.equal((await loadFlow(flow_id, { include_expired: true })).stage, stage);
+    const expiredMetadata = await loadFlow(flow_id, { include_expired: true });
+    assert.equal(expiredMetadata.stage, stage);
+    assert.equal(expiredMetadata.recipient_payload_deferred, true);
+    assert.equal(await hydrateFlowRecipients(expiredMetadata), null);
     assert.equal((await supersedeOrCreate({ flow_id, stage, payload: { sendNonce: 'replacement' }, ttl_seconds: 180 })).created, true);
     assert.deepEqual((await loadFlow(flow_id)).payload, { sendNonce: 'replacement' });
     process.stdout.write('PASS local flow recipients: 20,000 aliases round-trip through 79 encrypted chunks; parent fits; compressed chunks are bounded; payload/TTL transitions, same-version replacement and expiry-staging races are safe; incomplete write/read and missing chunks fail closed; expired slot recovery works.\n');

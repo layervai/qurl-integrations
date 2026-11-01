@@ -513,9 +513,9 @@ async function loadFlow(flow_id, { grace_seconds = 0, include_expired = false, d
     return null;
   }
   const rawPayload = decryptPayload(item.payload);
-  const deferred = defer_recipients && rawPayload && Object.hasOwn(rawPayload, RECIPIENT_SET_FIELD);
-  const payload = deferred || (include_expired && now > expires)
-    ? rawPayload : await expandRecipientPayload(rawPayload);
+  const deferred = rawPayload && Object.hasOwn(rawPayload, RECIPIENT_SET_FIELD)
+    && (defer_recipients || (include_expired && now > expires));
+  const payload = deferred ? rawPayload : await expandRecipientPayload(rawPayload);
   if (!include_expired && nowEpochSeconds() > expires + grace_seconds) return null;
   const row = {
     flow_id: item.flow_id,
@@ -534,6 +534,7 @@ async function loadFlow(flow_id, { grace_seconds = 0, include_expired = false, d
 // The dispatcher acknowledges the interaction before the bounded chunk fan-out.
 async function hydrateFlowRecipients(row) {
   if (!row?.recipient_payload_deferred) return row;
+  if (nowEpochSeconds() > row.expires_at) return null;
   const { recipient_payload_deferred: _deferred, ...hydrated } = row;
   hydrated.payload = await expandRecipientPayload(row.payload);
   if (nowEpochSeconds() > row.expires_at) return null;
@@ -611,6 +612,7 @@ async function hydrateFlowRecipients(row) {
 // observed value; on `result: 'conflict'`, the caller's intent
 // is still the relevant correlator because the observed value
 // is what beat them.)
+// Chunk storage failures throw; conflict/not_found describe conditional parent outcomes.
 async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, terminal, set_expires_at, expectedPayload }) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.transitionFlow: flow_id must be a non-empty string');

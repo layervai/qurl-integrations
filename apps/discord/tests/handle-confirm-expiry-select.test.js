@@ -154,3 +154,14 @@ describe('handleConfirmExpirySelect', () => {
   });
 
 });
+
+
+test.each(['deferred', 'replied'])('an already %s invalid expiry selection uses a follow-up', async flag => {
+  const interaction = makeInteraction();
+  interaction[flag] = true;
+  interaction.values = ['forged-value'];
+  await handleConfirmExpirySelect(interaction, { flow_id: 'fid', row: { payload: {}, version: 1 } });
+  expect(interaction.reply).not.toHaveBeenCalled();
+  expect(interaction.followUp).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Unrecognized expiry value') }));
+  expect(mockTransitionFlow).not.toHaveBeenCalled();
+});

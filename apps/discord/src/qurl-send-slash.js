@@ -6608,14 +6608,12 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
   // guard catches a forged interaction missing the field entirely;
   // legitimate UI paths always provide it.
   const picked = interaction.values?.[0];
-  // Validate before deferring so the forgery branch can use `reply`
-  // (the cheaper, single-call ack) instead of `followUp` after a
-  // wasted deferUpdate. Symmetric with the self-destruct handler.
+  // Chunked routes may already be acknowledged by the dispatcher.
   if (!picked || !isValidExpiry(picked)) {
     logger.warn('handleConfirmExpirySelect: forged off-set expiry value', {
       flow_id, value: truncForLog(picked),
     });
-    return interaction.reply({
+    return interaction[interaction.deferred || interaction.replied ? 'followUp' : 'reply']({
       content: '❌ Unrecognized expiry value. Re-pick from the list.',
       flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
@@ -6671,7 +6669,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
   // `?.[0]` paranoia (see expiry handler) — legitimate
   // StringSelectMenu interactions always carry the values array.
   const pickedValue = interaction.values?.[0];
-  // Validate against the closed legitimate set BEFORE acknowledging.
+  // Validate against the closed legitimate set before any flow mutation.
   // Discord enforces the choice list server-side; an off-set value
   // here means a forged interaction. Silently mapping forged values
   // to null would clear a user's previously-set timer on every probe
@@ -6680,7 +6678,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
     logger.warn('handleConfirmSelfDestructSelect: forged off-set self-destruct value', {
       flow_id, value: truncForLog(pickedValue),
     });
-    return interaction.reply({
+    return interaction[interaction.deferred || interaction.replied ? 'followUp' : 'reply']({
       content: '❌ Unrecognized self-destruct value. Re-pick from the list.',
       flags: MessageFlags.Ephemeral,
     }).catch(logIgnoredDiscordErr);
