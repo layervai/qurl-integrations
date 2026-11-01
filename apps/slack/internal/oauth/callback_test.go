@@ -3081,3 +3081,121 @@ func TestCallbackLegacyRotationHealsRowForNextRotation(t *testing.T) {
 		t.Errorf("second rotation must revoke the healed key_id %q, got %#v", healed.KeyID, revoked)
 	}
 }
+
+func (f *fakeWorkspaceStore) SetInitialAPIKeyWithMetadata(ctx context.Context, ws, key, keyID, prefix, account, by string) error {
+	f.mu.Lock()
+	conflict := f.existingKey != "" && f.existingKeyID != "" && f.existingKeyID != keyID
+	f.mu.Unlock()
+	if conflict {
+		return auth.ErrWorkspaceAPIKeyConflict
+	}
+	return f.SetAPIKeyWithMetadata(ctx, ws, key, keyID, prefix, account, by)
+}
+
+// overlappingSetupStore holds both mints at the save boundary, then picks one winner.
+type overlappingSetupStore struct {
+	*fakeWorkspaceStore
+	arrived  int
+	ready    chan struct{}
+	winnerMu sync.Mutex
+	winner   string
+}
+
+func (s *overlappingSetupStore) SetInitialAPIKeyWithMetadata(ctx context.Context, _, _, keyID, _, _, _ string) error {
+	s.winnerMu.Lock()
+	s.arrived++
+	if s.arrived == 2 {
+		close(s.ready)
+	}
+	s.winnerMu.Unlock()
+	select {
+	case <-s.ready:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.winnerMu.Lock()
+	defer s.winnerMu.Unlock()
+	if s.winner != "" && s.winner != keyID {
+		return auth.ErrWorkspaceAPIKeyConflict
+	}
+	s.winner = keyID
+	return nil
+}
+
+func TestOverlappingLegacySetupRevokesOnlyLosingKey(t *testing.T) {
+	cfg, base, _ := newCallbackCfgStoreMinter(t)
+	store := &overlappingSetupStore{fakeWorkspaceStore: base, ready: make(chan struct{})}
+	tracker := &countingTracker{}
+	cfg.Provider = store
+	cfg.AsyncTracker = tracker
+	minters := []*fakeMinter{
+		{apiKey: "secret-1", keyID: "key-1", keyPrefix: "prefix-1"},
+		{apiKey: "secret-2", keyID: "key-2", keyPrefix: "prefix-2"},
+	}
+	var wg sync.WaitGroup
+	results := make(chan bool, 2)
+	for _, minter := range minters {
+		attempt := cfg
+		attempt.Minter = minter
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, ok := mintAndPersist(httptest.NewRecorder(), attempt, "access", testTeamID, testUserID, "account")
+			results <- ok
+		}()
+	}
+	wg.Wait()
+	tracker.wg.Wait()
+	close(results)
+	successes := 0
+	for ok := range results {
+		if ok {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful saves = %d, want 1", successes)
+	}
+	for _, minter := range minters {
+		if minter.keyID == store.winner {
+			if len(minter.revokedKeys) != 0 {
+				t.Fatal("saved key was revoked")
+			}
+		} else if len(minter.revokedKeys) != 1 || minter.revokedKeys[0] != minter.keyID {
+			t.Fatalf("losing key was not revoked: %v", minter.revokedKeys)
+		}
+	}
+}
+
+func TestMintAndPersistReportsSetupConflict(t *testing.T) {
+	for _, binding := range []bool{false, true} {
+		t.Run(strconv.FormatBool(binding), func(t *testing.T) {
+			logs := captureDefaultSlogJSON(t)
+			cfg, store, minter := newCallbackCfgStoreMinter(t)
+			store.setErr = auth.ErrWorkspaceAPIKeyConflict
+			minter.bindingBacked = binding
+			tracker := &countingTracker{}
+			cfg.AsyncTracker = tracker
+			rec := httptest.NewRecorder()
+			_, ok := mintAndPersist(rec, cfg, "access", testTeamID+"\r\nforged", testUserID, testAdminSub)
+			tracker.wg.Wait()
+			records := logs()
+			if len(records) != 1 || records[0]["team_id"] != testTeamID+"forged" {
+				t.Fatalf("conflict log must strip line breaks: %#v", records)
+			}
+			if ok || rec.Code != http.StatusConflict {
+				t.Fatalf("ok=%t status=%d", ok, rec.Code)
+			}
+			if !strings.Contains(rec.Body.String(), "Another setup attempt saved") {
+				t.Fatalf("missing conflict guidance: %s", rec.Body.String())
+			}
+			want := 1
+			if binding {
+				want = 0
+			}
+			if len(minter.revokedKeys) != want {
+				t.Fatalf("revoke calls=%v want=%d", minter.revokedKeys, want)
+			}
+		})
+	}
+}

@@ -356,7 +356,7 @@ function revokeStaleCustomOrigin(previousBase, normalizedBase) {
         void (chrome.runtime && chrome.runtime.lastError);
         res();
       });
-    } catch (_err) {
+    } catch {
       res();
     }
   });
@@ -658,7 +658,7 @@ function normalizeQurlApiBase(value) {
   let parsed;
   try {
     parsed = new URL(trimmed);
-  } catch (err) {
+  } catch {
     throw new Error(apiGetMessage(
       'config_invalid_url_error',
       'qURL server URL must be a valid http(s) URL.'
@@ -723,7 +723,7 @@ function getQurlHostPermissionPattern(baseUrl) {
 function isDefaultQurlOrigin(baseUrl) {
   try {
     return new URL(baseUrl).origin === DEFAULT_QURL_API_ORIGIN;
-  } catch (_err) {
+  } catch {
     return false;
   }
 }

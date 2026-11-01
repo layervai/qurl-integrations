@@ -409,6 +409,27 @@ commands and `QURL_CONNECTOR_RUNTIME_DIR` (environment-only) selects the
 directory that holds its control socket; see
 [External supervision](#external-supervision).
 
+`QURL_CLIENT_PRODUCT` (environment-only) lets a host app bundling the CLI
+identify its product/version, for example `qurl-desktop/1.2.3`. Set it in the
+environment that runs the CLI. Native background jobs carry
+the validated value from installation, including an explicit empty value.
+Setting a valid product or an explicit empty value changes or clears the
+managed daemon on the next publish/start. An unset or invalid value preserves
+a running native daemon's installed attribution.
+External supervisors set it in their own daemon environment; CLI invocations
+can name a different product without restarting that external daemon.
+A terminal with no product variable can use the host app's running daemon
+without replacing it. An explicit native product change replaces the job and
+briefly restarts its desired-on shares.
+It must be a single RFC 9110
+`name/version` product with nonempty token-only parts, at most 64 bytes in
+total, and not named `qurl-cli` (case-insensitive). Valid values prefix the User-Agent:
+`qurl-desktop/1.2.3 qurl-cli/<version>`. Unset, empty, or invalid values leave
+the CLI User-Agent unchanged; invalid values produce a one-line note only with
+`--verbose`. Use only a product name and version, no user or device
+identifiers. Only the CLI's own qURL API client sends it; the connector
+runtime's own requests do not carry it.
+
 Also honored: `QURL_DEPLOYMENT` (a sandbox or custom deployment settings file;
 production settings are included in releases; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
 `QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the
@@ -686,13 +707,46 @@ state path is long, an app container for example, needs.
 Name a directory qURL owns. Startup creates missing directories with mode
 `0700`. An existing directory must be owned by the caller, must not be a
 symlink, and must already have mode `0700`; startup rejects it otherwise
-without changing its permissions. Use a separate
-dedicated directory for each state namespace; the socket address is the
-directory alone, so two namespaces sharing one runtime directory resolve to
-the same socket and lifecycle commands for one will address the other's
-daemon. Set the variable identically for the daemon and for every command that
-addresses the same state directory — a command run without it resolves a
-different address and reports the daemon absent.
+without changing its permissions. Use a separate directory for each state
+namespace. New control requests identify their namespace and refuse a daemon
+serving another one, before reloading it or replacing a native job.
+
+After binding, the daemon saves its runtime directory in the owner-only
+`daemon-runtime-dir.json` file in its state directory. A later command without
+`QURL_CONNECTOR_RUNTIME_DIR` recovers that address, so a plain terminal can
+reach a daemon started by Desktop. An explicit runtime directory still takes
+precedence. An invalid or unsafe marker is an error; the command does not fall
+back to another address and install a competing job. At startup, the namespace
+owner can replace a corrupt regular marker; unsafe file types still fail.
+This recovery requires
+the daemon to have started with this CLI version. Older clients omit the new
+namespace header and retain their existing control behavior; use this CLI
+version for namespace isolation. A running native job at an unknown socket is
+never replaced automatically. A native job that refuses its arguments reports
+its ownership without opening routes, so the next start, restart, or publish
+can replace it safely. Wait for startup, or restart the owning app
+with the updated CLI. Commands wait up to three seconds for a starting native
+job, and read its runtime hint again before deciding it is unreachable.
+
+An older daemon using a pinned runtime directory needs an owner-controlled
+stop before the updated CLI can install its replacement. This includes an
+older binary holding a refused job without IPC, or a job at a moved socket.
+`qurl restart` is a
+resource command and cannot bypass this ownership check. Quit the app that
+started a foreground daemon. For a native job, first inspect its arguments
+in launchd, systemd, or Task Scheduler and confirm `--state-dir` names your
+namespace. Then stop that exact job through the same service manager. Retry
+`qurl start <resource>` or publish with the updated CLI. The stopped job can
+be replaced; a running job with unverified ownership cannot.
+A refused native job also keeps the namespace lease: foreground mode cannot
+take over until that owner stops. Use a background start/publish to replace
+a verified refused job, or stop its owner before foreground mode.
+
+The saved runtime hint persists after shutdown or a reboot. A deleted runtime
+directory is recreated by its owner. Unsetting the environment variable does
+not clear the saved choice. To return to automatic address selection, stop the
+verified owner, remove only `daemon-runtime-dir.json` from its state directory,
+then start the owner again without an explicit runtime directory.
 
 Windows named pipes have no length limit, so the pipe address ignores this
 variable entirely: a value left in the environment there has no effect and is
@@ -807,11 +861,21 @@ qurl access revoke_grant <CRID> <decision-id> --version <current-version> -o jso
 
 Email capture and review disclose the consumer's verified email to the
 publisher; they are not anonymous access. Mailbox verification does not prove
-legal identity. Contract grants use an opaque consumer reference. Approve
-contract access only from a trusted publisher backend receipt and expiration;
-these commands do not verify payment with a payment processor.
+legal identity. Contract grants use an opaque consumer reference. Without a
+Stripe payment policy, approve contract access only from a trusted publisher
+backend receipt and expiration; these commands do not verify payment.
 The publisher backend can subscribe to `consumer.subscribed` webhooks.
 If its notification is pending, repeat the same receipt, expiry and version.
+
+For paid contracts, first run `qurl account setup` to link the device to your
+publisher account. Run `qurl payments connect -o json` and open the consent URL
+yourself. Finish setup in LayerV billing while signed in to that publisher account.
+Then read `qurl payments account -o json`. Use that account and an active
+fixed Stripe price with `--stripe-account` and `--stripe-price` when publishing
+or configuring contract access. The service verifies payment; manual approval
+is unavailable. LayerV collects 3%, including subscription renewals. One-time
+prices accept `--payment-access-seconds`; zero lasts for the resource lifetime.
+Recurring prices require zero and grant only the paid invoice period.
 
 `qurl access --help` lists all owner actions. Changes require the current
 version. If session removal is pending, retry the exact removal and version;
@@ -821,9 +885,10 @@ returns a pending-session error, retry the same update. Do not invent a newer
 version or fall back to public or legacy access.
 
 <!-- TODO(upstream-contract): email backup follows qurl-service consumer access. -->
-When consumer access is enabled, the hosted preview card always offers
-**Email me an access link** as a backup to passkeys. Publishers cannot disable
-this option. The recipient verifies the mailbox and consents to disclose it to
+When consumer access is enabled, the hosted preview card offers
+**Email me an access link** as a backup to passkeys, except for Stripe paid
+contracts, which require a passkey. Publishers cannot disable the backup for
+other policies. The recipient verifies the mailbox and consents to disclose it to
 the publisher. Invitations, approval, entitlement, expiry, and revocation still
 apply. Email-backed grants are separate from passkey-backed grants; first use
 must pass the configured invitation, approval, or entitlement checks. Revoke

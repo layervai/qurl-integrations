@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -368,6 +369,11 @@ type Config struct {
 	APIKey string
 	// Version is the CLI version, used in the User-Agent header.
 	Version string
+	// ClientProduct is an optional RFC 9110 name/version product. When
+	// ValidClientProduct accepts it, it precedes the CLI product in the
+	// User-Agent for host-app attribution; otherwise it is ignored. It is
+	// self-reported: use only a product name and version, never an identifier.
+	ClientProduct string
 	// Verbose, when non-nil, receives one already-redacted diagnostic line
 	// per transport event.
 	Verbose func(format string, args ...any)
@@ -385,6 +391,31 @@ type Config struct {
 	// attempts and bounded backoffs. Redirects are always refused because
 	// credentials must not follow a Location header to another origin.
 	HTTPClient *http.Client
+}
+
+// clientProductPattern is an RFC 9110 product with a required version; both
+// parts use token characters.
+var clientProductPattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+// maxClientProductLen bounds Config.ClientProduct in bytes.
+const maxClientProductLen = 64
+
+// cliProduct is the CLI's own User-Agent product name.
+const cliProduct = "qurl-cli"
+
+// ClientProductRule describes what ValidClientProduct accepts, for diagnostics.
+// TestClientProductRuleMatchesLimits keeps the byte limit in step with
+// maxClientProductLen, which a const string cannot format.
+const ClientProductRule = "name/version with token characters (e.g. myapp/1.2.3), at most 64 bytes, not named " + cliProduct
+
+// ValidClientProduct reports whether product is one name/version product of
+// at most maxClientProductLen bytes that Config.ClientProduct may put in the
+// User-Agent.
+func ValidClientProduct(product string) bool {
+	// The CLI's own product name is reserved so a host cannot pose as the CLI;
+	// the pattern allows one "/", so the prefix is exactly the name.
+	return len(product) <= maxClientProductLen && clientProductPattern.MatchString(product) &&
+		!strings.HasPrefix(strings.ToLower(product), cliProduct+"/")
 }
 
 type client struct {
