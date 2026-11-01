@@ -196,8 +196,8 @@ const (
 // carry an env infix still reaches the admin surface instead of falling
 // through to the user one.
 //
-// Help and standalone slash replies use the invoked command name. Other static
-// usage/modal copy retains the production literal when no slash name is carried.
+// Help, get/list/aliases setup hints and create deprecation use the invoked name.
+// Other admin/action/modal paths retain production hints until they carry it.
 const adminCommandSuffix = "-admin"
 
 // isAdminCommand reports whether the invoked slash command is the admin
@@ -1489,7 +1489,8 @@ func (h *Handler) dispatchUserCommand(requestCtx context.Context, w http.Respons
 		// `$slug` or a channel `$alias`. Surface a deprecation hint
 		// instead of an "unknown subcommand" so existing users hitting
 		// muscle memory get a direct redirect to the new shape.
-		respondSlack(w, fmt.Sprintf("`%s create` is no longer supported. Use `%s get <$id|$alias>` instead — run `%s list` to see your resources.", command, command, command))
+		userCommand := userCommandName(command)
+		respondSlack(w, fmt.Sprintf("`%s create` is no longer supported. Use `%s get <$id|$alias>` instead — run `%s list` to see your resources.", userCommand, userCommand, userCommand))
 	case text == "list":
 		// Exact match only: the looser `HasPrefix(text, "list")` form
 		// matched `listing`, `lists`, `list-foo` (silently routing

@@ -18,11 +18,13 @@ func TestHelpSourceUsesExplicitCommandTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	found := 0
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || (fn.Name.Name != "userHelpMessage" && fn.Name.Name != "adminHelpMessage") {
 			continue
 		}
+		found++
 		ast.Inspect(fn.Body, func(node ast.Node) bool {
 			literal, ok := node.(*ast.BasicLit)
 			if !ok || literal.Kind != token.STRING {
@@ -37,6 +39,9 @@ func TestHelpSourceUsesExplicitCommandTokens(t *testing.T) {
 			}
 			return true
 		})
+	}
+	if found != 2 {
+		t.Fatalf("inspected %d help functions, want both", found)
 	}
 }
 
@@ -62,11 +67,13 @@ func TestStandaloneRepliesUseInvokedCommand(t *testing.T) {
 }
 
 func TestSetupFailureUsesInvokedCommand(t *testing.T) {
-	for _, command := range []string{"/qurl", "/qurl-sandbox", "/qurl-sandbox-admin", ""} {
-		want := userCommandName(command)
-		got := authErrorMessage(auth.ErrWorkspaceNotConfigured, command)
-		if !strings.Contains(got, "`"+want+" setup <email>`") {
-			t.Errorf("command %q: %s", command, got)
+	for _, tc := range []struct{ command, want string }{
+		{"/qurl", "/qurl"}, {"/qurl-sandbox", "/qurl-sandbox"},
+		{"/qurl-sandbox-admin", "/qurl-sandbox"}, {"", "/qurl"},
+	} {
+		got := authErrorMessage(auth.ErrWorkspaceNotConfigured, tc.command)
+		if !strings.Contains(got, "`"+tc.want+" setup <email>`") {
+			t.Errorf("command %q: %s", tc.command, got)
 		}
 	}
 }
