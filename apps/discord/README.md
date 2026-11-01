@@ -596,3 +596,9 @@ The live apply uses Discord v10's documented current-user fields
 (`username`, `avatar`, `banner`) and current-application fields (`description`,
 `icon`, `cover_image`, `tags`, `install_params`); an application PATCH failure
 is fatal, while bot image failures are reported as partial applies.
+
+### Mint batches and account limits
+
+File and location sends upload once per preparation, then mint against the returned resource in requests of at most ten links. Ten is a request size, not a share limit. The current service reports `max_tokens_per_qurl: -1` as a deprecated compatibility field: there is no per-resource qURL cap. Re-uploading identical content can return the same resource and does not reset account usage. Other account limits, access rules and resource status still apply. Structured `quota_exceeded` failures direct users to their account usage; they do not promise that another upload will fix the limit.
+
+Add Recipients still resolves the retained file or location through the connector once before minting. It does not re-upload between batches. If a later mint or persistence step fails, known child links are still revoked before delivery. The standalone load test follows the same single-upload pattern and retains old re-upload counters only to read historical report inputs.

@@ -22,7 +22,7 @@ const MAX_CDN_REDIRECTS = 3;
 // processes at most 10 unique ids under one 55s handler deadline. Leave 10s for
 // response transport so the caller, not an accidental race, owns the bound.
 // The endpoint rejects larger requests atomically, so chunk rather than couple
-// to commands.js's independently tunable TOKENS_PER_RESOURCE. The same chunk
+// to commands.js's independently tunable MINT_BATCH_SIZE. The same chunk
 // feeds the SDK fallback, so its size is CONNECTOR_REVOKE_MAX_IDS below. A 404
 // is remembered only within one call, so each resource re-probes the route on
 // purpose: a process-wide negative cache would hide the route once enabled.
@@ -423,9 +423,8 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
 
 /**
  * Re-register an already-downloaded file buffer with the connector.
- * Creates a new qURL resource (with a fresh token pool) without
- * re-downloading from Discord CDN. Used when the per-resource token
- * quota (10) is exhausted and more recipients need links.
+ * Used by the standalone load test without a Discord CDN download.
+ * Identical content can resolve to an existing resource.
  */
 async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds) {
   filename = sanitizeFilename(filename);
@@ -531,7 +530,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   // cross-wired token into a caller's logs.
   validateResourceId(resourceId);
   // Bound `n` defensively — callers in this codebase already cap at 10
-  // (TOKENS_PER_RESOURCE) or 50 (recipient max), but mintLinks is exported
+  // (MINT_BATCH_SIZE) or 50 (recipient max), but mintLinks is exported
   // so validate at the API boundary. Negative or non-integer values would
   // make the qURL backend behave unpredictably; 100 is a comfortable ceiling.
   if (!Number.isInteger(n) || n < 1 || n > 100) {

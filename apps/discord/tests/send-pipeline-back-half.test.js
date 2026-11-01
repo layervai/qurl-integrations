@@ -2137,7 +2137,7 @@ describe('handleAddRecipients — file path failure modes', () => {
     expect(mockSendDM).not.toHaveBeenCalled();
   });
 
-  it('surfaces "Link pool exhausted" on a 429 error from the location path (outer catch)', async () => {
+  it('does not mislabel a 429 as an exhausted resource pool', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: 'https://maps.example.com/x',
       location_name: 'Eiffel Tower', expires_in: '30m',
@@ -2150,7 +2150,7 @@ describe('handleAddRecipients — file path failure modes', () => {
       makeInteraction(), 'apikey',
     );
 
-    expect(result.msg).toMatch(/pool exhausted/i);
+    expect(result.msg).toBe('Failed to create links for new recipients.');
   });
 });
 
@@ -2356,7 +2356,7 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
   });
 
-  it('file send uses the structured 403 quota code for share-limit copy without a failure alarm', async () => {
+  it('file send uses the structured 403 quota code for account-limit copy without a failure alarm', async () => {
     const interaction = makeInteraction();
     const originalFetch = globalThis.fetch;
     globalThis.fetch = jest.fn().mockResolvedValue({
@@ -2368,7 +2368,7 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     try {
       await executeSendPipeline(interaction, makePipelineParams());
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('has hit its share limit') }));
+      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('an account limit was reached') }));
       const failureCalls = logger.audit.mock.calls.filter(c => c[0] === 'qurl_send_create_link_failure');
       expect(failureCalls).toHaveLength(0);
     } finally {
@@ -3452,9 +3452,9 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(result.newRecipients).toEqual([]);
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
-    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(10);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks.mock.calls.map(call => call[0]).sort()).toEqual(
-      Array.from({ length: 10 }, (_, i) => `res-${i}`).sort(),
+      ['res-0'],
     );
   });
 });
@@ -3613,12 +3613,11 @@ describe('mintLinksInBatches', () => {
     });
     expect(result).toHaveLength(11);
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
-    expect(reuploadFn).toHaveBeenCalledTimes(1);
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', Array.from({ length: 10 }, (_, i) => `q_${i}`), 'apikey');
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-2', ['q_short'], 'apikey');
+    expect(reuploadFn).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', [...Array.from({ length: 10 }, (_, i) => `q_${i}`), 'q_short'], 'apikey');
   });
 
-  it('mints once for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
+  it('mints once for recipientCount <= MINT_BATCH_SIZE (10)', async () => {
     mockMintLinks.mockResolvedValueOnce([
       { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString() },
       { qurl_id: 'q_2', qurl_link: 'https://q.test/2', expires_at: new Date(Date.now() + 86400000).toISOString() },
@@ -3637,7 +3636,7 @@ describe('mintLinksInBatches', () => {
     expect(result[0].resourceId).toBe('res-1');
   });
 
-  it('re-uploads + mints again when recipientCount > TOKENS_PER_RESOURCE', async () => {
+  it('keeps one resource across bounded batches beyond ten recipients', async () => {
     mockMintLinks
       .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
       .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
@@ -3651,10 +3650,11 @@ describe('mintLinksInBatches', () => {
       apiKey: 'apikey',
     });
 
-    expect(reuploadFn).toHaveBeenCalledTimes(1);
+    expect(reuploadFn).not.toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     expect(result).toHaveLength(11);
-    expect(result[10].resourceId).toBe('res-2');
+    expect(result.every(link => link.resourceId === 'res-1')).toBe(true);
+    expect(mockMintLinks.mock.calls.map(call => call[0])).toEqual(['res-1', 'res-1']);
   });
 
   it('revokes earlier batches before rethrowing a later mint failure', async () => {
@@ -4291,11 +4291,11 @@ describe('initial-send compensation boundaries', () => {
       }
       mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('partial BatchWrite failure'));
       await executeSendPipeline(makeInteraction(), makePipelineParams({ recipients }));
-      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(11);
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
       expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toHaveLength(101);
       expect(mockSendDM).not.toHaveBeenCalled();
       expect(logger.info).toHaveBeenCalledWith('Cleaned up freshly minted qURL links', {
-        sendId: expect.any(String), reason: 'persistence_failure', total: 11,
+        sendId: expect.any(String), reason: 'persistence_failure', total: 1,
       });
     } finally {
       config.QURL_SEND_MAX_RECIPIENTS = previousCap;
