@@ -31,6 +31,7 @@ import { jsonConsoleSink, RedactingLogger } from './logger.js';
 import { toTeamsActivity } from './activity.js';
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
+const MESSAGING_ENDPOINT = '/api/messages';
 const ACTIVITY_TIMEOUT_MS = 30_000;
 // ponytail: match Slack's 50-slot process pool; split by tenant if load requires it.
 const MAX_ACTIVE_MESSAGES = 50;
@@ -48,6 +49,7 @@ export interface TeamsServerOptions {
   readonly callback: OAuthCallbackCore;
   readonly state: OAuthStateManager;
   readonly maxBodyBytes?: number;
+  readonly metricNamespace?: string;
   readonly logger?: Logger;
 }
 
@@ -155,6 +157,22 @@ export function installOAuthRoutes(options: TeamsServerOptions): void {
 /** Official Teams SDK owns POST /api/messages, Activity routing, JWT
  * validation, and Connector responses. qURL OAuth remains separate. */
 export async function createTeamsServer(options: TeamsServerOptions): Promise<Server> {
+  // TODO(upstream-contract): the shared runtime alarm uses its injected namespace
+  // and the dimensionless SignatureFailures aggregate, including missing JWTs.
+  const metricNamespace = options.metricNamespace?.trim();
+  options.expressApp.post(MESSAGING_ENDPOINT, (_request, response, next) => {
+    if (metricNamespace && options.logger) {
+      response.once('finish', () => {
+        if (response.statusCode === 401) options.logger?.warn('Teams inbound authentication rejected', {
+          _aws: { Timestamp: Date.now(), CloudWatchMetrics: [{
+            Namespace: metricNamespace, Dimensions: [[]], Metrics: [{ Name: 'SignatureFailures', Unit: 'Count' }],
+          }] },
+          SignatureFailures: 1,
+        });
+      });
+    }
+    next();
+  });
   // ExpressAdapter also installs express.json() for its message route and
   // consumes req.body. Parsing first is supported by Express and preserves
   // qURL's intentional 1 MiB Activity limit for cards and attachments. This
@@ -320,7 +338,7 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     clientSecret: appPassword,
     tenantId: botTenantId,
     httpServerAdapter: new ExpressAdapter(expressApp),
-    messagingEndpoint: '/api/messages',
+    messagingEndpoint: MESSAGING_ENDPOINT,
     ...(serviceUrl === undefined ? {} : { serviceUrl }),
     // Keep mention normalization in the existing qURL Activity adapter.
     activity: { mentions: { stripText: false } },
@@ -366,7 +384,10 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
       catch (error) { logger.warn('Teams conversation capture failed', { error }); }
     }
   });
-  const server = await createTeamsServer({ baseUrl, app, expressApp, tokenClient, callback, state: oauthState, logger });
+  const server = await createTeamsServer({
+    baseUrl, app, expressApp, tokenClient, callback, state: oauthState, logger,
+    metricNamespace: process.env.EMF_METRIC_NAMESPACE?.trim() ?? '',
+  });
   const host = process.env.HOST?.trim() || DEFAULT_HOST;
   const port = Number(process.env.PORT?.trim() || '3000');
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('PORT is invalid');
