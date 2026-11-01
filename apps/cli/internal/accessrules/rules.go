@@ -206,6 +206,23 @@ func BuiltIns() []Definition {
 	}
 }
 
+// OnlyFirstPersonID selects the Only the first person preset wherever a rule is chosen.
+const OnlyFirstPersonID = "once"
+
+// OnlyFirstPersonLabel is the preset's name on every surface.
+const OnlyFirstPersonLabel = "Only the first person"
+
+// OnlyFirstPerson is Anyone with the link on a single-use link that expires
+// like any temporary link. It is a preset, never saved as a rule.
+func OnlyFirstPerson() Definition {
+	return Definition{ID: OnlyFirstPersonID, Name: OnlyFirstPersonLabel, Mode: ModePublic, LinkLimits: &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}
+}
+
+// IsOnlyFirstPerson reports whether selector names the preset by its ID or exact name.
+func IsOnlyFirstPerson(selector string) bool {
+	return selector == OnlyFirstPersonID || selector == OnlyFirstPersonLabel
+}
+
 // Policy expands this preset into an independent resource policy snapshot.
 func (d *Definition) Policy(version int64) qurl.ConsumerAccessPolicy {
 	return qurl.ConsumerAccessPolicy{Mode: d.Mode, Version: version, ContractID: d.ContractID, EmailDomain: d.EmailDomain, AllowedEmails: slices.Clone(d.AllowedEmails), ApprovalExpiresIn: d.approvalExpiresIn()}
@@ -338,11 +355,11 @@ func Find(selector string, lists ...[]Definition) (Definition, error) {
 	}
 }
 
-// NameTaken reports whether another custom rule or a built-in already uses
-// d's name, ignoring case and surrounding space.
+// NameTaken reports whether another custom rule, a built-in or Only the first
+// person already uses d's name, ignoring case and surrounding space.
 func NameTaken(items []Definition, d *Definition) bool {
 	name := strings.TrimSpace(d.Name)
-	return slices.ContainsFunc(append(BuiltIns(), items...), func(other Definition) bool {
+	return slices.ContainsFunc(append(append(BuiltIns(), OnlyFirstPerson()), items...), func(other Definition) bool {
 		return other.ID != d.ID && strings.EqualFold(strings.TrimSpace(other.Name), name)
 	})
 }

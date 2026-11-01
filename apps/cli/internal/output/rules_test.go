@@ -19,44 +19,61 @@ func TestAccessModesMatchCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	type copyText struct {
+		ID      string `json:"id"`
+		Label   string `json:"label"`
+		Summary string `json:"summary"`
+	}
 	var catalog struct {
-		Presentation map[string]struct {
-			Label string `json:"label"`
-			Level *int   `json:"level"`
-		} `json:"presentation"`
+		Defaults     []copyText          `json:"defaults"`
+		Presentation map[string]copyText `json:"presentation"`
 	}
 	if err = json.Unmarshal(raw, &catalog); err != nil {
 		t.Fatal(err)
 	}
 	if len(catalog.Presentation) != len(accessModes) {
-		t.Fatalf("catalog has %d modes, CLI labels %d", len(catalog.Presentation), len(accessModes))
+		t.Fatalf("catalog has %d modes, CLI %d", len(catalog.Presentation), len(accessModes))
 	}
-	for mode, want := range catalog.Presentation {
-		level := 0
-		if want.Level != nil {
-			level = *want.Level
+	for _, m := range accessModes {
+		if want := catalog.Presentation[m.mode]; m.label != want.Label || m.line != want.Summary {
+			t.Errorf("%s: CLI has %q %q, catalog %q %q", m.mode, m.label, m.line, want.Label, want.Summary)
 		}
-		if got := accessModes[mode]; got.label != want.Label || got.level != level {
-			t.Errorf("%s: CLI has %q level %d, catalog %q level %d", mode, got.label, got.level, want.Label, level)
+	}
+	if len(catalog.Defaults) != len(defaultRules) {
+		t.Fatalf("catalog has %d defaults, CLI %d", len(catalog.Defaults), len(defaultRules))
+	}
+	for i, d := range defaultRules {
+		if want := catalog.Defaults[i]; d.id != want.ID || d.label != want.Label || d.line != want.Summary {
+			t.Errorf("default %d: CLI has %q %q %q, catalog %q %q %q", i, d.id, d.label, d.line, want.ID, want.Label, want.Summary)
 		}
 	}
 }
 
-func TestAccessRulesListBuiltInsByProtection(t *testing.T) {
+func TestAccessRulesListShowsDefaultsThenSavedRules(t *testing.T) {
 	var out, stderr bytes.Buffer
-	snapshot := accessrules.Snapshot{BuiltIns: accessrules.BuiltIns()}
+	snapshot := accessrules.Snapshot{BuiltIns: accessrules.BuiltIns(), Items: []accessrules.Definition{{ID: "11111111-1111-4111-8111-111111111111", Name: "Acme team", Mode: "email_domain", EmailDomain: "acme.com"}}, LocalVersion: 2, Sync: "local"}
 	if err := newTestPrinter(&out, &stderr, FormatText, false, false, false).AccessRules(&snapshot); err != nil {
 		t.Fatal(err)
 	}
-	var ids []string
-	for _, line := range strings.Split(out.String(), "\n") {
-		if id, _, ok := strings.Cut(line, "  "); ok && strings.HasPrefix(id, "builtin.") {
-			ids = append(ids, id)
-		}
+	want := `Default access rules
+  Anyone with the link   Anyone who gets the link can open it.
+  Only the first person  Works for whoever opens it first. Then it’s used up.
+  People you invite      Only the email addresses you add can open it.
+  People you approve     They confirm their email and ask. You approve each person.
+
+Your rules
+  11111111-1111-4111-8111-111111111111  "Acme team"  People at acme.com
+
+Version: 2
+Sync: local
+`
+	if out.String() != want {
+		t.Fatalf("list\n%s\nwant\n%s", out.String(), want)
 	}
-	want := "builtin.public builtin.email_capture builtin.invite_only builtin.review builtin.keys"
-	if got := strings.Join(ids, " "); got != want {
-		t.Fatalf("built-in order %q, want %q", got, want)
+	for _, hidden := range []string{"Devices you approve", "verified email", "Minimal", "Strong"} {
+		if strings.Contains(out.String(), hidden) {
+			t.Errorf("list shows %q", hidden)
+		}
 	}
 }
 
@@ -67,9 +84,10 @@ func TestAccessRuleSummaryUsesContractCopy(t *testing.T) {
 	}{
 		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}, "Anyone with the link · links expire in 1 hour · single-use"},
 		{accessrules.Definition{Mode: "review", ApprovalExpiresIn: new("7d")}, "People you approve · approvals last 7 days"},
-		{accessrules.Definition{Mode: "email_domain", EmailDomain: "studio.com"}, "People at studio.com"},
-		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "90m", SessionDuration: new("1d")}}, "Anyone with the link · links expire in 90 minutes · sessions last 1 day"},
-		{accessrules.Definition{Mode: "keys"}, "Devices you approve"},
+		{accessrules.Definition{Mode: "email_domain", EmailDomain: "acme.com"}, "People at acme.com"},
+		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "90m", SessionDuration: new("1d")}}, "Anyone with the link · links expire in 90 minutes · stays open for 1 day"},
+		{accessrules.Definition{Mode: "keys"}, "Devices you approve · approvals until you remove them"},
+		{accessrules.Definition{Mode: "email_domain", EmailDomain: "acme.com", AllowedEmails: []string{"a@b.com", "c@d.com"}}, "People at acme.com, plus 2 other people"},
 	} {
 		if got := AccessRuleSummary(&tc.rule); got != tc.want {
 			t.Errorf("summary %q, want %q", got, tc.want)

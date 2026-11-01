@@ -27,10 +27,10 @@ const (
 )
 
 func rulesCmd(opts *globalOpts) *cobra.Command {
-	command := &cobra.Command{Use: "rules", Short: "Manage saved access rules for future shares", Long: "Use ready-made access rules or save your own. Rules work locally before account linking. Changing or deleting a saved rule leaves existing shares unchanged.", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
+	command := &cobra.Command{Use: "rules", Short: "Manage access rules for future shares", Long: "Share with a default access rule or save your own. Rules work locally before account linking. Changing or deleting a saved rule leaves existing shares unchanged.", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
 	command.AddCommand(ruleCreateCmd(opts))
 	command.AddCommand(&cobra.Command{Use: "capabilities", Short: "Report supported access rules without signing in", Args: noArgs, RunE: func(_ *cobra.Command, _ []string) error { return opts.printer().AccessRuleCapabilities() }})
-	command.AddCommand(&cobra.Command{Use: "list", Short: "List ready-made and saved access rules", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	command.AddCommand(&cobra.Command{Use: "list", Short: "List the default access rules and your saved rules", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		store, err := opts.ruleStore()
 		if err != nil {
 			return ruleCommandError(err)
@@ -154,6 +154,9 @@ func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (ac
 	}
 	if strings.TrimSpace(selector) == "" {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("--rule requires an access rule ID or exact name"))
+	}
+	if accessrules.IsOnlyFirstPerson(selector) {
+		return accessrules.OnlyFirstPerson(), nil
 	}
 	// Built-in IDs need no saved state, so a damaged rules file cannot block them.
 	if rule, err := accessrules.Find(selector, accessrules.BuiltIns()); err == nil && rule.ID == selector {
@@ -345,8 +348,8 @@ type ruleSettingFlags struct {
 
 func (f *ruleSettingFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.expiresIn, "expires-in", "", "public rules: each shared link expires after this long, such as 1h or 7d (1m to 30d)")
-	cmd.Flags().BoolVar(&f.oneBrowser, "one-browser", false, "public rules: Single-use link: only the first person to open it gets in (alias --once)")
-	cmd.Flags().StringVar(&f.sessionLength, "session-length", "", "public rules: how long each visit lasts, such as 30m (1s to 24h)")
+	cmd.Flags().BoolVar(&f.oneBrowser, "one-browser", false, "public rules: Only the first person. Anyone else sees that the link no longer works (alias --once)")
+	cmd.Flags().StringVar(&f.sessionLength, "session-length", "", "public rules: Stays open for: how long they can use it after opening the link, such as 30m (1s to 24h)")
 	cmd.Flags().StringVar(&f.approvals, "approvals-last", "", "review and keys rules: 1d, 7d, 30d, 90d or never (default: never)")
 	// --once is the short spelling of --one-browser.
 	cmd.Flags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
@@ -404,15 +407,15 @@ func ruleCreateCmd(opts *globalOpts) *cobra.Command {
 	var settings ruleSettingFlags
 	cmd := &cobra.Command{Use: "create <name>", Short: "Create a named access rule", Long: `Create a named access rule for future shares.
 
-Links you share (public rules): limits apply to links you share from this
-item. The item's permanent address isn't used with limits: publishing shares
-a temporary link, and later qurl share links for the item use the same limits
-unless --ttl or --session-duration say otherwise.
-Approvals last (review and keys rules) is how long each approval lasts; the
-service enforces it for every approver.`, Example: `  qurl rules create Team --mode keys --approvals-last 30d
-  qurl rules create Colleagues --mode email_domain --email-domain example.com
-  qurl rules create "Quick look" --mode public --expires-in 1h --one-browser
-  qurl rules create Reviewers --mode review --approvals-last 7d`, Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+Who can open it (--mode):
+` + output.AccessModeHelp() + `
+
+Public rules with --expires-in share a link that expires instead of the
+item's permanent address; qurl share makes later links with the same limits.
+Approvals last (review and keys rules) is how long each approval lasts.`, Example: `  qurl rules create "Acme team" --mode email_domain --email-domain acme.com
+  qurl rules create "Quick look" --mode public --expires-in 1h --session-length 30m
+  qurl rules create "Client review" --mode review --approvals-last 7d
+  qurl rules create "Lab devices" --mode keys --approvals-last 30d`, Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if cmd.Flags().Changed(consumerContract) && mode != accessrules.ModeContract {
 			return exitcode.UsageError(errors.New("--contract applies only to --mode contract"))
 		}
@@ -449,7 +452,7 @@ service enforces it for every approver.`, Example: `  qurl rules create Team --m
 		return opts.printer().AccessRule(&definition)
 	}}
 	cmd.Flags().StringVar(&mode, modeFlag, "", "public, keys, invite_only, email_capture, email_domain, review or contract")
-	cmd.Flags().StringVar(&domain, "email-domain", "", "email domain for domain access, such as example.com")
+	cmd.Flags().StringVar(&domain, "email-domain", "", "email domain for domain access, such as acme.com")
 	cmd.Flags().StringVar(&contract, consumerContract, "", "integration reference for Custom access, where your service decides who gets in")
 	cmd.Flags().StringVar(&emailsFile, "emails-file", "", "use - to read optional additional email addresses as a JSON array")
 	settings.register(cmd)
@@ -500,9 +503,9 @@ func ruleInputError(d *accessrules.Definition) error {
 	}):
 		return errors.New("rule names must be 1 to 120 characters, without control characters")
 	case d.Mode == accessrules.ModeEmailDomain && !validWith(func(p *accessrules.Definition) { p.AllowedEmails = nil }):
-		return errors.New("--email-domain must be a domain such as example.com")
+		return errors.New("--email-domain must be a domain such as acme.com")
 	case d.Mode == accessrules.ModeEmailDomain:
-		return errors.New("--emails-file must list each email address once, such as name@example.com")
+		return errors.New("--emails-file must list each email address once, such as name@acme.com")
 	default:
 		return errors.New("--contract must be 1 to 128 letters, digits, hyphens or underscores")
 	}
@@ -511,23 +514,32 @@ func ruleInputError(d *accessrules.Definition) error {
 // applyRuleToShare runs once the resource exists. A new public share keeps
 // the rule's link limits for later links and gets a temporary link minted with
 // them in published.LimitedLink. A share that already existed keeps what it
-// was created with, and published.OtherSettings says when the rule differs.
+// was created with, with or without a rule, so publishing it again mints a
+// fresh link with its saved limits; published.OtherSettings says when the
+// chosen rule differs.
 func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, published *qurlapi.Published) error {
-	if rule == nil {
+	existing := published.FoundExisting != nil && *published.FoundExisting
+	if rule == nil && !existing {
 		return nil
 	}
-	id, limits := published.CRID, rule.LinkLimits
-	if published.FoundExisting != nil && *published.FoundExisting {
+	id := published.CRID
+	var limits *accessrules.LinkLimits
+	if rule != nil {
+		limits = rule.LinkLimits
+	}
+	if existing {
 		kept, err := o.savedLinkLimits(ctx, id)
 		if err != nil && !errors.Is(err, errNoSavedLinkLimits) {
 			return err
 		}
-		approvals := ""
-		if published.ConsumerAccess != nil {
-			approvals = published.ConsumerAccess.ApprovalExpiresIn
+		if rule != nil {
+			approvals := ""
+			if published.ConsumerAccess != nil {
+				approvals = published.ConsumerAccess.ApprovalExpiresIn
+			}
+			policy := rule.Policy(1)
+			published.OtherSettings = !accessrules.SameEffectiveLinkLimits(kept, limits) || approvals != policy.ApprovalExpiresIn
 		}
-		policy := rule.Policy(1)
-		published.OtherSettings = !accessrules.SameEffectiveLinkLimits(kept, limits) || approvals != policy.ApprovalExpiresIn
 		limits = kept
 	} else if limits != nil {
 		store, err := o.shareRuleStore()

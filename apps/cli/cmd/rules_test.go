@@ -145,7 +145,7 @@ func TestRulesHumanCreateNeedsNoUUIDOrVersion(t *testing.T) {
 		t.Fatalf("create printed more than the new rule: %q", text.stdout.String())
 	}
 	listed := runCLI(t, &runOpts{args: []string{"rules", "list", "-q"}, env: map[string]string{}, shareStateDir: dir})
-	if lines := strings.Split(strings.TrimSpace(listed.stdout.String()), "\n"); listed.code != 0 || len(lines) != 8 || !slices.Contains(lines, id) || strings.Contains(listed.stdout.String(), "Version") {
+	if lines := strings.Split(strings.TrimSpace(listed.stdout.String()), "\n"); listed.code != 0 || len(lines) != 7 || !slices.Contains(lines, id) || strings.Contains(listed.stdout.String(), "Version") {
 		t.Fatalf("quiet list %q", listed.stdout.String())
 	}
 }

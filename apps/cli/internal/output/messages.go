@@ -128,8 +128,8 @@ const (
 	// settings it was created with, not the chosen rule's.
 	msgPublishSettingsDiffer = "This item is already shared with other settings. Use qurl access configure to change it."
 
-	// msgWorksOnce follows a single-use link in a text document; %s is its CRID.
-	msgWorksOnce = "Single-use. Run qurl share %s for a new link."
+	// msgWorksOnce follows an Only the first person link in a text document; %s is its CRID.
+	msgWorksOnce = "Only the first person can open it. Run qurl share %s for a new link."
 
 	// msgPublishFoundExisting is the text-document note for that same case:
 	// what happened, then the one next step.

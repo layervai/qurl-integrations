@@ -9,32 +9,38 @@
     {"id": "builtin.keys", "name": "Devices you approve", "mode": "keys"}
   ],
   "examples": [
-    {"id": "11111111-1111-4111-8111-111111111111", "name": "People at Example", "mode": "email_domain", "email_domain": "example.com", "allowed_emails": ["Partner@outside.example"]},
+    {"id": "11111111-1111-4111-8111-111111111111", "name": "Acme team", "mode": "email_domain", "email_domain": "acme.com", "allowed_emails": ["Partner@outside.example"]},
     {"id": "22222222-2222-4222-8222-222222222222", "name": "Customers", "mode": "contract", "contract_id": "customer-entitlement"}
+  ],
+  "defaults": [
+    {"id": "public", "label": "Anyone with the link", "summary": "Anyone who gets the link can open it.", "mode": "public"},
+    {"id": "once", "label": "Only the first person", "summary": "Works for whoever opens it first. Then it’s used up.", "mode": "public", "link_limits": {"one_time_use": true, "expires_in": "1h"}},
+    {"id": "invite_only", "label": "People you invite", "summary": "Only the email addresses you add can open it.", "mode": "invite_only"},
+    {"id": "review", "label": "People you approve", "summary": "They confirm their email and ask. You approve each person.", "mode": "review"}
   ],
   "presentation": {
     "public": {
-      "label": "Anyone with the link", "summary": "Opens for anyone who has the link.", "level": 1, "level_name": "Minimal",
+      "label": "Anyone with the link", "summary": "Anyone who gets the link can open it.", "level": 1, "level_name": "Minimal",
       "if_forwarded": "Opens for them too.", "they_will": "Just open the link.", "you_will": "Do nothing.", "you_will_see": "Not who opened it."
     },
     "email_capture": {
-      "label": "Anyone with a verified email", "summary": "Anyone can open it after confirming an email. You’ll see who.", "level": 2, "level_name": "Basic",
+      "label": "Anyone with a verified email", "summary": "Anyone can open it after confirming their email.", "level": 2, "level_name": "Basic",
       "if_forwarded": "Opens once they confirm their own email.", "they_will": "Confirm their email with a passkey or an emailed link.", "you_will": "Do nothing.", "you_will_see": "Each person’s email."
     },
     "email_domain": {
-      "label": "Work or school email", "summary": "Only email addresses at a domain you choose, like studio.com.", "level": 3, "level_name": "Moderate",
+      "label": "Work or school email", "summary": "Only people with an email at your domain can open it.", "level": 3, "level_name": "Moderate",
       "if_forwarded": "Opens only with an email at your domain.", "they_will": "Confirm a work or school email with a passkey or an emailed link.", "you_will": "Choose the domain once.", "you_will_see": "Each person’s email."
     },
     "invite_only": {
-      "label": "People you invite", "summary": "Only the email addresses you add. Forwarded links won’t open.", "level": 4, "level_name": "Strong",
+      "label": "People you invite", "summary": "Only the email addresses you add can open it.", "level": 4, "level_name": "Strong",
       "if_forwarded": "Won’t open.", "they_will": "Confirm the invited email with a passkey or an emailed link.", "you_will": "Add each person’s email.", "you_will_see": "Each person’s email."
     },
     "review": {
-      "label": "People you approve", "summary": "Anyone can ask. Only people you approve get in.", "level": 4, "level_name": "Strong",
+      "label": "People you approve", "summary": "They confirm their email and ask. You approve each person.", "level": 4, "level_name": "Strong",
       "if_forwarded": "They can ask. It stays closed until you approve.", "they_will": "Confirm their email with a passkey or an emailed link, then wait for you.", "you_will": "Approve or decline each request.", "you_will_see": "Each request, before anyone gets in."
     },
     "keys": {
-      "label": "Devices you approve", "summary": "Only passkeys and devices you approve. Forwarded links won’t open.", "level": 5, "level_name": "Strongest",
+      "label": "Devices you approve", "summary": "No email needed. They send you their passkey’s details, and you approve it.", "level": 5, "level_name": "Strongest",
       "if_forwarded": "They can send their own passkey details. It stays closed until you approve.", "they_will": "Create a passkey and send you its approval details.", "you_will": "Approve each passkey or device.", "you_will_see": "Each approved device."
     },
     "contract": {

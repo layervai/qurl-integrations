@@ -97,6 +97,11 @@ CRID. A flag that asks for what the existing resource is not is refused:
 --allow-device-key or --allow-requests for a public resource, --public for a
 private one.
 
+To choose who can open it, pass --rule with a default access rule's name or
+a saved rule's ID or name (see "qurl rules list"). --rule once is Only the
+first person: a link that works for whoever opens it first and expires in an
+hour.
+
 Authorized users open the resource with "qurl get <CRID>". The --quiet flag
 prints only the CRID. Use --foreground for CI or daemon debugging; that process
 owns the share and turns it off when it exits.`,
@@ -105,6 +110,8 @@ owns the share and turns it off when it exits.`,
   qurl publish https://api.example.com/reports
   qurl publish https://docs.example.com/handbook --public
   qurl publish https://wiki.example.com/team --allow-requests
+  qurl publish https://app.acme.com --rule once
+  qurl publish https://app.acme.com --rule "People you approve"
   qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -165,7 +172,7 @@ owns the share and turns it off when it exits.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&ruleSelector, ruleFlag, "", "access rule ID or exact saved name for this publication")
+	cmd.Flags().StringVar(&ruleSelector, ruleFlag, "", "access rule: once, a default rule's name, or a saved rule's ID or name")
 	cmd.Flags().StringVar(&ruleFile, ruleFileFlag, "", "use - to publish the access rule snapshot from standard input")
 	cmd.Flags().StringVar(&consumerMode, "access", "", "private access mode: keys, invite_only, email_capture, review or contract")
 	cmd.Flags().StringVar(&contractID, "contract", "", "publisher contract identifier for contract access")

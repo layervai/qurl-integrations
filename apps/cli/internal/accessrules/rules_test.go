@@ -74,6 +74,13 @@ func TestFrozenCatalogContract(t *testing.T) {
 		Modes         []string     `json:"modes"`
 		BuiltIns      []Definition `json:"built_ins"`
 		Examples      []Definition `json:"examples"`
+		Defaults      []struct {
+			ID         string      `json:"id"`
+			Label      string      `json:"label"`
+			Summary    string      `json:"summary"`
+			Mode       string      `json:"mode"`
+			LinkLimits *LinkLimits `json:"link_limits"`
+		} `json:"defaults"`
 		// Display copy shared by every surface; output checks labels and levels.
 		Presentation map[string]struct {
 			Label       string  `json:"label"`
@@ -102,6 +109,16 @@ func TestFrozenCatalogContract(t *testing.T) {
 	for _, d := range catalog.BuiltIns {
 		if d.Name != catalog.Presentation[d.Mode].Label {
 			t.Errorf("built-in %s is named %q, not its mode's label", d.ID, d.Name)
+		}
+	}
+	once := OnlyFirstPerson()
+	if len(catalog.Defaults) != 4 || catalog.Defaults[1].ID != once.ID || catalog.Defaults[1].Label != once.Name ||
+		catalog.Defaults[1].Mode != once.Mode || !SameLinkLimits(catalog.Defaults[1].LinkLimits, once.LinkLimits) {
+		t.Fatal("Only the first person drifted from the catalog's defaults")
+	}
+	for _, d := range catalog.Defaults {
+		if d.Label != catalog.Presentation[d.Mode].Label && d.ID != once.ID {
+			t.Errorf("default %s is labeled %q, not its mode's label", d.ID, d.Label)
 		}
 	}
 	for _, d := range catalog.Examples {

@@ -56,7 +56,7 @@ func TestRulesCreateTakesSettingsForItsModeOnly(t *testing.T) {
 		}
 	}
 	listed := runCLI(t, &runOpts{args: []string{"rules", "list"}, env: map[string]string{}, shareStateDir: dir})
-	for _, want := range []string{"Anyone with the link · links expire in 1 hour · single-use · sessions last 30 minutes", "People you approve · approvals last 7 days"} {
+	for _, want := range []string{"Anyone with the link · links expire in 1 hour · single-use · stays open for 30 minutes", "People you approve · approvals last 7 days"} {
 		if !strings.Contains(listed.stdout.String(), want) {
 			t.Errorf("list lacks %q:\n%s", want, listed.stdout.String())
 		}
@@ -150,7 +150,7 @@ func TestPublishSaysASingleUseLinkWorksOnce(t *testing.T) {
 	scriptMint(t, srv, &mints)
 	rule := `{"id":"11111111-1111-4111-8111-111111111111","name":"Once","mode":"public","link_limits":{"expires_in":"1h","one_time_use":true}}`
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--color", "never", "publish", "https://api.example.com", "--rule-file", "-"}, stdin: strings.NewReader(rule), shareStateDir: connectorStateTestDir(t), tty: true})
-	want := "Single-use. Run qurl share " + srv.Key.CRID + " for a new link."
+	want := "Only the first person can open it. Run qurl share " + srv.Key.CRID + " for a new link."
 	if result.code != 0 || !strings.Contains(result.stdout.String(), want) || len(mints) != 1 || mints[0]["one_time_use"] != true {
 		t.Fatalf("publish %d mints %v\n%s%s", result.code, mints, result.stdout.String(), result.stderr.String())
 	}
@@ -241,5 +241,40 @@ func TestRepublishTreatsAnExplicitDefaultAsTheSameSettings(t *testing.T) {
 	}
 	if len(mints) != 2 {
 		t.Fatalf("mints = %d, want the first link and the existing share's link", len(mints))
+	}
+}
+
+func TestPublishRuleOnceMintsAndRepublishMintsAgain(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	var mints []map[string]any
+	scriptMint(t, srv, &mints)
+	for i, args := range [][]string{{"--rule", "once"}, {"--rule", "Only the first person"}, {"--public"}} {
+		scriptPublish(t, srv, false, i > 0, nil, nil)
+		args = append([]string{"--endpoint", srv.URL, "publish", "https://api.example.com", "-o", "json"}, args...)
+		result := runCLI(t, &runOpts{args: args, shareStateDir: dir})
+		var out struct {
+			Link struct {
+				SingleUse bool `json:"single_use"`
+			} `json:"link"`
+		}
+		if result.code != 0 || json.Unmarshal(result.stdout.Bytes(), &out) != nil || !out.Link.SingleUse {
+			t.Fatalf("publish %v: %d %s %s", args, result.code, result.stdout.String(), result.stderr.String())
+		}
+	}
+	if len(mints) != 3 {
+		t.Fatalf("mints = %d, want one per publish", len(mints))
+	}
+	for i, got := range mints {
+		if got["expires_in"] != "1h" || got["one_time_use"] != true {
+			t.Errorf("mint %d sent %v", i, got)
+		}
+	}
+}
+
+func TestRuleNamedOnlyTheFirstPersonIsTaken(t *testing.T) {
+	result := runCLI(t, &runOpts{args: []string{"rules", "create", "only the first person", "--mode", "public"}, env: map[string]string{}, shareStateDir: connectorStateTestDir(t)})
+	if result.code == 0 || !strings.Contains(result.stderr.String(), "already exists") {
+		t.Fatalf("create %d %s", result.code, result.stderr.String())
 	}
 }
