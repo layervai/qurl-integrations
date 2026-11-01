@@ -1,70 +1,20 @@
-
 const { planMintBatches, MINT_BATCH_SIZE } = require('../scripts/loadtest-standalone');
 
-function batcherShape(recipientCount, tokensPerResource) {
-  const shape = [];
-  for (let i = 0; i < recipientCount; i += tokensPerResource) {
-    const batchSize = Math.min(tokensPerResource, recipientCount - i);
-    shape.push({ size: batchSize, reupload: false });
-  }
-  return shape;
-}
-
-describe('planMintBatches — batch size', () => {
-  test('defaults to MINT_BATCH_SIZE when no batch size is passed', () => {
-    expect(planMintBatches(25)).toEqual(planMintBatches(25, MINT_BATCH_SIZE));
-  });
-});
-
-describe('planMintBatches — the regression this guards', () => {
-  test('the default --count 100 round plans 10 batches, none of them re-uploads', () => {
-    const plan = planMintBatches(100);
-    expect(plan).toHaveLength(10);
-    expect(plan.filter((b) => b.reupload)).toHaveLength(0);
-    expect(plan.reduce((s, b) => s + b.size, 0)).toBe(100);
+describe('bounded mint request plan', () => {
+  test('the default hundred-link round makes ten bounded requests', () => {
+    expect(MINT_BATCH_SIZE).toBe(10);
+    expect(planMintBatches(100)).toEqual(Array.from({ length: 10 }, () => ({ size: 10 })));
   });
 
-  test('no batch re-uploads identical content', () => {
-    const plan = planMintBatches(100);
-    expect(plan[0].reupload).toBe(false);
-    expect(plan.slice(1).every((b) => !b.reupload)).toBe(true);
-  });
-
-  test('no batch ever exceeds the request batch size', () => {
-    for (const count of [1, 9, 10, 11, 99, 100, 101, 1000]) {
-      const plan = planMintBatches(count);
-      expect(plan.every((b) => b.size >= 1 && b.size <= MINT_BATCH_SIZE)).toBe(true);
-      expect(plan.reduce((s, b) => s + b.size, 0)).toBe(count);
-    }
-  });
-});
-
-describe('planMintBatches — boundaries', () => {
   test.each([
-    [1, [{ size: 1, reupload: false }]],
-    [9, [{ size: 9, reupload: false }]],
-    [10, [{ size: 10, reupload: false }]],
-    [11, [{ size: 10, reupload: false }, { size: 1, reupload: false }]],
-    [20, [{ size: 10, reupload: false }, { size: 10, reupload: false }]],
-  ])('count %i plans %j', (count, expected) => {
+    [0, []], [-1, []], [1, [{ size: 1 }]], [10, [{ size: 10 }]],
+    [11, [{ size: 10 }, { size: 1 }]],
+    [25, [{ size: 10 }, { size: 10 }, { size: 5 }]],
+  ])('plans %i links', (count, expected) => {
     expect(planMintBatches(count)).toEqual(expected);
   });
 
-  test.each([0, -1, -10])('count %i plans nothing', (count) => {
-    expect(planMintBatches(count)).toEqual([]);
-  });
-});
-
-describe('planMintBatches — equivalence with mintLinksInBatches', () => {
-  const counts = [1, 5, 9, 10, 11, 15, 19, 20, 21, 50, 99, 100, 101, 250];
-
-  test.each(counts)('count %i matches the batcher loop shape', (count) => {
-    expect(planMintBatches(count)).toEqual(batcherShape(count, MINT_BATCH_SIZE));
-  });
-
-  test.each([1, 2, 3, 7, 50])('batch size %i keeps the shapes equal', (depth) => {
-    for (const count of counts) {
-      expect(planMintBatches(count, depth)).toEqual(batcherShape(count, depth));
-    }
+  test('a caller can select a smaller request size without changing the total', () => {
+    expect(planMintBatches(8, 3)).toEqual([{ size: 3 }, { size: 3 }, { size: 2 }]);
   });
 });

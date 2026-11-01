@@ -88,6 +88,7 @@ function ddbSendConfigGuardFitsTransaction(sends = []) {
 // Keep in sync with Discord's own 25MB attachment limit.
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 
+// Shared with the standalone load test, which cannot import commands.js without a store.
 // Bound each connector mint request; this is not a per-resource quota.
 const MINT_BATCH_SIZE = 10;
 // Over-minted children beyond the requested count that mint-failure
@@ -588,8 +589,8 @@ const AUDIT_EVENTS = {
   // it does NOT split on `reason`, because a systemic outage can be a 4xx
   // (the 2026-05-13 incident was a sub-floor-session_duration 400) — and
   // pages on a sustained spike. `reason`/`kind` are forensic + dashboard
-  // dimensions, not the alarm gate. `quota_exceeded` — the one genuinely
-  // account-limit condition — is skipped at source below, so it can't inflate the metric.
+  // dimensions, not the alarm gate. User-resolvable `quota_exceeded` failures
+  // are skipped at source so account limits cannot inflate the outage metric.
   //
   // Everything else emits, by design. Other "expected, user-recoverable"
   // conditions — an expired Discord CDN URL (Add Recipients on a >24h-old

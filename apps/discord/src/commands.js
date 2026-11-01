@@ -1649,8 +1649,8 @@ const REVOKE_RUNNING_MSG = 'Revocation is still running. Run `/qurl revoke` agai
 /**
  * Mint bounded request batches against the uploaded resource.
  * TODO(upstream-contract): GET /v1/quota reports unlimited qURLs per resource.
- * Re-uploading identical
- * content returns the same resource and cannot reset an allowance.
+ * Re-uploading identical content can return the same resource and cannot
+ * reset an allowance.
  *
  * @param {object} opts
  * @param {string} opts.initialResourceId — resource_id from the upload
@@ -3187,7 +3187,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         const isExpired = [403, 404, 410].includes(err.cdnStatus);
         const msg = isExpired
           ? 'Original attachment is no longer available. Please create a new send.'
-          : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
+          : err.apiCode === 'quota_exceeded'
+            ? 'An account limit was reached. Check your qURL account usage before adding recipients.'
+            : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', {
           sendId,
           error: err.message,

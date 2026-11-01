@@ -2125,15 +2125,15 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
  * it is not a per-resource allowance.
  *
  * @param {number} count — links to mint across the whole plan.
- * @param {number} [tokensPerResource] — request batch size; defaults to MINT_BATCH_SIZE.
- * @returns {Array<{size: number, reupload: boolean}>} — empty when count <= 0.
+ * @param {number} [batchSize] — request batch size; defaults to MINT_BATCH_SIZE.
+ * @returns {Array<{size: number}>} — empty when count <= 0.
  *   Fractional counts are not gated here (0.5 plans one batch of 0.5); the
  *   CLI can't produce one, since parsePositiveInt admits only whole numbers.
  */
-function planMintBatches(count, tokensPerResource = MINT_BATCH_SIZE) {
+function planMintBatches(count, batchSize = MINT_BATCH_SIZE) {
   const batches = [];
-  for (let i = 0; i < count; i += tokensPerResource) {
-    batches.push({ size: Math.min(tokensPerResource, count - i), reupload: false });
+  for (let i = 0; i < count; i += batchSize) {
+    batches.push({ size: Math.min(batchSize, count - i) });
   }
   return batches;
 }
