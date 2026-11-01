@@ -2994,7 +2994,7 @@ async function executeSendPipeline(interaction, {
           interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
         }
-        // Revoke attempted but failed — leave the failure message.
+        // An active local revoke owns its final reply. Persisted success wins after a failed attempt.
         if (revokeInFlight) return;
         if (revokedElsewhere) {
           interaction.editReply({ content: 'Links for this send have already been revoked.', components: [] }).catch(logIgnoredDiscordErr);

@@ -2670,6 +2670,23 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     } finally { clearCooldown('sender-1'); }
   });
 
+  it('confirmed external revoke replaces an earlier local failure with authoritative state', async () => {
+    const { collect, end, interaction, makeClick } = await setupRevocableSend();
+    mockRevokeMintedLinks.mockReset();
+    mockRevokeMintedLinks.mockResolvedValue(undefined);
+    mockDb.getSendItems.mockReset().mockRejectedValueOnce(new Error('local revoke unavailable'));
+    const click = makeClick('revoke');
+    try {
+      await collect(click);
+      expect(click.editReply.mock.calls.at(-1)[0].content).toContain('Failed to revoke');
+      mockDb.getSendConfig.mockResolvedValueOnce({ revoked_at: '2026-10-31T00:00:00Z' });
+      await end(null, 'time');
+      expect(interaction.editReply.mock.calls.at(-1)[0]).toEqual({
+        content: 'Links for this send have already been revoked.', components: [],
+      });
+    } finally { clearCooldown('sender-1'); }
+  });
+
   it('management expiry keeps the safe closed view when the state read fails', async () => {
     const { end, interaction } = await setupRevocableSend();
     mockDb.getSendConfig.mockRejectedValueOnce(new Error('store unavailable'));
