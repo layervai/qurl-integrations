@@ -251,3 +251,7 @@ func (oauthRebindTokenTransport) RoundTrip(*http.Request) (*http.Response, error
 		Body:       io.NopCloser(strings.NewReader(`{"access_token":"auth0-access","id_token":"auth0-id-token"}`)),
 	}, nil
 }
+
+func (s *oauthRebindWorkspaceStore) SetInitialAPIKeyWithMetadata(ctx context.Context, ws, key, keyID, prefix, account, by string) error {
+	return s.SetAPIKeyWithMetadata(ctx, ws, key, keyID, prefix, account, by)
+}
