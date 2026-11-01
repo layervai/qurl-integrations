@@ -736,3 +736,23 @@ crash gap and replays the exact increment transaction to prove it counts once.
 The gap remains visible to source reads; monitor tests prove recovery. These
 are local request counts, not production latency or capacity
 measurements. Main rollout and real cross-replica Sandbox proof remain held.
+
+### Pending credential cleanup
+
+Guild OAuth setup stores the minted key ID and marks the key as dedicated to
+that guild. A supplied admin key remains shared. Re-entering the same key
+preserves its existing mint provenance.
+
+A replacement saves the old encrypted credential and webhook reference in a
+`credential-lifecycle` job in the same DynamoDB transaction as the new key.
+If that job cannot be saved, setup fails and keeps the saved key. These jobs
+have no TTL. They must remain until upstream cleanup is confirmed. Legacy
+keys with unknown provenance require operator review; do not revoke a key
+that may be used outside this guild. Bootstrap the lifecycle table before
+this writer is deployed. This writer alone does not revoke keys or delete
+webhooks; the cleanup worker and reference migration remain required.
+
+If a write reply is lost, setup checks the exact saved generation with a strong
+read. If it cannot confirm the outcome, it returns a confirmation-needed error
+and does not revoke the potentially active key. Operators must inspect the
+current guild generation and pending jobs before a customer repeats setup.

@@ -453,7 +453,7 @@ describe('qurl-oauth routes', () => {
       expect(globalThis.fetch.mock.calls[1][0]).toBe('http://localhost:9999/v1/me');
       expect(globalThis.fetch.mock.calls[1][1].headers.Authorization).toBe('Bearer legacy-saved-key');
       expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'new-saved-key', 'admin-2', 'oauth', {
-        ownerId: 'auth0|abc', expectedApiKey: 'legacy-saved-key',
+        ownerId: 'auth0|abc', expectedApiKey: 'legacy-saved-key', keyId: 'new-key-id', keyKind: 'dedicated',
       });
     });
 
@@ -506,6 +506,23 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain(expected);
       expect(res.text).not.toContain('PRIVATE upstream detail');
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
+      expect(discord.sendDM).not.toHaveBeenCalled();
+    });
+
+    it('does not revoke a minted key when its persistence outcome is uncertain', async () => {
+      const state = signCallbackState('guild-1', 'admin-2');
+      db.setGuildApiKey.mockRejectedValueOnce(Object.assign(new Error('confirmation unavailable'), {
+        code: 'GUILD_SETUP_UNCONFIRMED',
+      }));
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'jwt', id_token: 'verified.jwt.sig' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { key_id: 'new-id', api_key: 'new-secret' } }) });
+      const res = await request(app).get(`/oauth/qurl/callback?code=grant&state=${encodeURIComponent(state)}`)
+        .set('Cookie', cookieFor(state));
+      expect(res.status).toBe(503);
+      expect(res.text).toContain('before starting setup again');
+      expect(res.text).not.toContain('new-secret');
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
       expect(discord.sendDM).not.toHaveBeenCalled();
     });
 
@@ -639,7 +656,7 @@ describe('qurl-oauth routes', () => {
       }
       expect(res.text).toContain('/qurl send is ready');
       expect(res.text).not.toContain('/qurl map');
-      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', 'oauth', { ownerId: 'auth0|abc', expectedApiKey: null });
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', 'oauth', { ownerId: 'auth0|abc', expectedApiKey: null, keyId: 'key-123', keyKind: 'dedicated' });
       expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
         guild_id: 'guild-1',
         configured_by: 'admin-2',
@@ -711,7 +728,7 @@ describe('qurl-oauth routes', () => {
         'lv_live_abc',
         'admin-2',
         'oauth',
-        { ownerId: 'auth0|abc', expectedApiKey: null },
+        { ownerId: 'auth0|abc', expectedApiKey: null, keyId: 'key-123', keyKind: 'dedicated' },
       );
       expect(logger.audit).toHaveBeenCalledWith(
         AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
@@ -749,7 +766,7 @@ describe('qurl-oauth routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
-      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc', 'admin-2', 'oauth', { ownerId: 'auth0|abc', expectedApiKey: null });
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc', 'admin-2', 'oauth', { ownerId: 'auth0|abc', expectedApiKey: null, keyId: 'key-123', keyKind: 'dedicated' });
       expect(discord.sendDM).toHaveBeenCalledWith(
         'admin-2', expect.stringContaining('qURL is connected'),
       );

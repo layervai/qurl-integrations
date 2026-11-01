@@ -120,6 +120,7 @@ const TABLES = Object.freeze({
   qurl_send_configs: `${TABLE_PREFIX}qurl-send-configs`,
   qurl_views: `${TABLE_PREFIX}qurl-views`,
   guild_configs: `${TABLE_PREFIX}guild-configs`,
+  credential_lifecycle: `${TABLE_PREFIX}credential-lifecycle`,
 });
 
 // No region fallback: a local process must not silently select a production
@@ -1645,6 +1646,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
   // Unbound writes can create a first setup only; rotations require a verified binding.
   let condition = 'attribute_not_exists(qurl_api_key) AND attribute_not_exists(qurl_owner_id)';
   const ownerValues = {};
+  let priorRow;
   if (binding) {
     if (typeof binding.ownerId !== 'string' || !binding.ownerId.trim()) {
       throw new Error('Guild owner identity is required');
@@ -1652,7 +1654,8 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
     const snapshot = await ddb.send(new GetCommand({
       TableName: TABLES.guild_configs, Key: { guild_id: guildId }, ConsistentRead: true,
     }));
-    const storedKey = snapshot?.Item?.qurl_api_key;
+    priorRow = snapshot?.Item;
+    const storedKey = priorRow?.qurl_api_key;
     if ((storedKey ? decrypt(storedKey) : null) !== binding.expectedApiKey) {
       const error = new Error('Guild key changed during setup');
       error.code = 'GUILD_SETUP_CHANGED';
@@ -1663,6 +1666,18 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
     ownerValues[':owner'] = binding.ownerId;
     if (storedKey) ownerValues[':prior'] = storedKey;
   }
+  const sameKey = !!priorRow?.qurl_api_key && binding.expectedApiKey === apiKey;
+  const keyId = sameKey ? (priorRow.qurl_key_id ?? null) : (binding?.keyId ?? null);
+  const keyKind = sameKey
+    ? (priorRow.qurl_key_kind === 'dedicated' ? 'dedicated' : 'shared')
+    : (binding?.keyKind ?? 'shared');
+  if (keyId !== null && (typeof keyId !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(keyId))) {
+    throw new Error('Guild key ID is invalid');
+  }
+  if (!['dedicated', 'shared'].includes(keyKind)
+      || (keyKind === 'dedicated' && ((!sameKey && door !== SETUP_VIA.OAUTH) || !keyId))) {
+    throw new Error('Dedicated guild keys require an OAuth mint ID');
+  }
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
   // configured_by=…, updated_at=…` deliberately preserved
@@ -1672,14 +1687,18 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
   // row, including resetting configured_at. Mirror createLink's
   // shape: UpdateCommand with `if_not_exists(configured_at, :u)`
   // so first-write sets it and re-keys leave it alone.
-  const res = await ddb.send(new UpdateCommand({
+  const update = {
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
     UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)'
+      + ', qurl_key_id = :keyId, qurl_key_kind = :keyKind, qurl_generation = :generation'
       + (binding ? ', qurl_owner_id = :owner' : ''),
     ConditionExpression: condition,
     ExpressionAttributeValues: {
       ...ownerValues,
+      ':keyId': keyId,
+      ':keyKind': keyKind,
+      ':generation': crypto.randomUUID(),
       ':k': encrypt(apiKey),
       ':b': configuredBy,
       ':u': now,
@@ -1693,10 +1712,70 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
     // no-op on a re-key. scripts/smoke-setup-audit.js checks this with real
     // writes (DynamoDB Local in CI; --aws for a disposable sandbox table).
     ReturnValues: 'UPDATED_OLD',
-  }));
-  // Hand the helper only the non-secret prior fields: the old encrypted key is
-  // reduced to a presence flag here, so it is structurally out of reach.
-  const prior = res?.Attributes ?? {};
+  };
+  let prior;
+  try {
+    if (priorRow?.qurl_api_key && binding.expectedApiKey !== apiKey) {
+      // Retain the only old-owner capability before replacing it; no remote work
+      // runs inside setup. Match webhook fields so a concurrent relink cannot vanish.
+      for (const field of ['webhook_id', 'webhook_owner_id', 'webhook_secret']) {
+        if (priorRow[field] === undefined) {
+          update.ConditionExpression += ` AND attribute_not_exists(${field})`;
+        } else {
+          update.ConditionExpression += ` AND ${field} = :prior_${field}`;
+          update.ExpressionAttributeValues[`:prior_${field}`] = priorRow[field];
+        }
+      }
+      const jobId = crypto.randomUUID();
+      const job = {
+        pk: `JOB#${jobId}`, sk: 'META', job_id: jobId, guild_id: guildId,
+        reason: 'rekey', cleanup_state: 'pending', attempts: 0,
+        due_bucket: String(parseInt(jobId.slice(0, 2), 16) % 16), due_at: Date.now(),
+        created_at: now, qurl_api_key: priorRow.qurl_api_key,
+        qurl_key_id: priorRow.qurl_key_id ?? null,
+        qurl_key_kind: priorRow.qurl_key_kind ?? 'unknown',
+        qurl_owner_id: priorRow.qurl_owner_id ?? binding.ownerId,
+        qurl_generation: priorRow.qurl_generation ?? null,
+        webhook_id: priorRow.webhook_id ?? null,
+        webhook_owner_id: priorRow.webhook_owner_id ?? null,
+        webhook_secret: priorRow.webhook_secret ?? null,
+      };
+      const { ReturnValues: _dropReturnValues, ...transactionUpdate } = update;
+      await ddb.send(new TransactWriteCommand({
+          ClientRequestToken: jobId,
+          TransactItems: [
+            { Update: transactionUpdate },
+            { Put: { TableName: TABLES.credential_lifecycle, Item: job,
+              ConditionExpression: 'attribute_not_exists(pk)' } },
+          ],
+        }));
+      prior = priorRow;
+    } else {
+      const res = await ddb.send(new UpdateCommand(update));
+      prior = res?.Attributes ?? {};
+    }
+  } catch (err) {
+    if (err?.name === 'ConditionalCheckFailedException' || transactionGuardConditionFailed(err, 1)) {
+      const changed = new Error('Guild setup changed during replacement');
+      changed.code = 'GUILD_SETUP_CHANGED';
+      throw changed;
+    }
+    // A lost write reply is not proof of failure. Never revoke a possibly saved
+    // key: confirm this exact generation or leave the outcome for recovery.
+    let saved;
+    try {
+      saved = (await ddb.send(new GetCommand({
+        TableName: TABLES.guild_configs, Key: { guild_id: guildId }, ConsistentRead: true,
+      })))?.Item;
+    } catch {}
+    if (saved?.qurl_generation !== update.ExpressionAttributeValues[':generation']
+        || saved?.qurl_api_key !== update.ExpressionAttributeValues[':k']) {
+      const uncertain = new Error('Guild key persistence could not be confirmed');
+      uncertain.code = 'GUILD_SETUP_UNCONFIRMED';
+      throw uncertain;
+    }
+    prior = priorRow ?? {};
+  }
   auditSetupAdminChange({
     configuredBy: prior.configured_by,
     configuredAt: prior.configured_at,

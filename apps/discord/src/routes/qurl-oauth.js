@@ -435,15 +435,20 @@ router.get('/callback', rateLimit, async (req, res) => {
       'A network error occurred while provisioning your qURL key. Please run /qurl-admin setup again.');
   }
 
-  // 3. Persist the key with an owner and saved-key condition. The
-  //    previous key (if any) remains valid on qurl-service until the
-  //    admin manually revokes it via layerv.ai.
+  // Retain any replaced credential in the same transaction for durable cleanup.
   try {
-    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH, ownerBinding);
+    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH, {
+      ...ownerBinding, keyId, keyKind: 'dedicated',
+    });
   } catch (err) {
     logger.error('Failed to persist guild API key after successful mint', {
       error: err?.message, guildId, discordUserId, keyId,
     });
+    if (err?.code === 'GUILD_SETUP_UNCONFIRMED') {
+      return renderError(res, 503, 'Server setup needs confirmation',
+        'The key was created, but its saved state could not be confirmed. '
+        + 'Contact your layerv.ai admin before starting setup again.');
+    }
     // Key was minted but not stored. Best-effort delete on qurl-service
     // so retries don't pile up orphan keys under the admin's account.
     // Fire-and-forget — even if the cleanup fails, the user-facing 500

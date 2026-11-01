@@ -109,5 +109,54 @@
         "AttributeType": "S"
       }
     ]
+  },
+  {
+    "name": "credential-lifecycle",
+    "keySchema": [
+      {
+        "AttributeName": "pk",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "sk",
+        "KeyType": "RANGE"
+      }
+    ],
+    "attributes": [
+      {
+        "AttributeName": "pk",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "sk",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "due_bucket",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "due_at",
+        "AttributeType": "N"
+      }
+    ],
+    "gsis": [
+      {
+        "IndexName": "due-index",
+        "KeySchema": [
+          {
+            "AttributeName": "due_bucket",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "due_at",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "KEYS_ONLY"
+        }
+      }
+    ]
   }
 ]
