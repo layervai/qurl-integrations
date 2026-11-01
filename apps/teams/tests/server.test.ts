@@ -18,6 +18,7 @@ import { OAuthCoreError } from '../src/errors.js';
 import { createProductionTeamsConfig, createTeamsServer, httpsIssuer, httpsOrigin, installOAuthRoutes, isMainModule } from '../src/server.js';
 import type { OAuthStateManager } from '../src/state.js';
 import { TeamsSdkMessagePoster } from '../src/teams-sdk.js';
+import { jsonConsoleSink, RedactingLogger } from '../src/logger.js';
 
 const OPAQUE_STATE = Buffer.alloc(32, 1).toString('base64url');
 
@@ -231,7 +232,7 @@ describe('Teams HTTP body limits', () => {
     const router = (expressApp as unknown as { readonly router?: { readonly stack?: readonly { readonly name?: string; readonly route?: { readonly path?: string; readonly stack?: readonly { readonly name?: string }[] } }[] } }).router;
     const stack = router?.stack ?? [];
     const bodyParserIndex = stack.findIndex(layer => layer.name === 'jsonParser');
-    const messageRouteIndex = stack.findIndex(layer => layer.route?.path === '/api/messages');
+    const messageRouteIndex = stack.findIndex(layer => layer.route?.path === '/api/messages' && layer.route.stack?.[0]?.name === 'jsonParser');
     expect(bodyParserIndex).toBeGreaterThanOrEqual(0);
     expect(messageRouteIndex).toBeGreaterThan(bodyParserIndex);
     expect(stack[messageRouteIndex]?.route?.stack?.[0]?.name).toBe('jsonParser');
@@ -293,6 +294,57 @@ describe('Teams HTTP body limits', () => {
     const error = await new Promise<unknown>(resolve => parser(request, {}, resolve));
     expect(error).toMatchObject({ status: 413, type: 'entity.too.large' });
     expect(server).toBeDefined();
+  });
+});
+
+describe('Teams inbound authentication metric', () => {
+  it.each([true, false])('reports only SDK auth rejections with configured namespace=%s', async configured => {
+    const lines: string[] = [];
+    const sink = { debug: vi.fn(), info: vi.fn(), warn: (line: string) => { lines.push(line); }, error: vi.fn() };
+    const expressApp = express();
+    const app = new App({
+      clientId: '00000000-0000-4000-8000-000000000001', clientSecret: 'test-secret',
+      tenantId: '00000000-0000-4000-8000-000000000002',
+      httpServerAdapter: new ExpressAdapter(expressApp), messagingEndpoint: '/api/messages',
+    });
+    const server = await createTeamsServer({
+      baseUrl: 'https://teams.example', expressApp, app,
+      tokenClient: {} as never, callback: {} as never, state: {} as never, maxBodyBytes: 128,
+      logger: new RedactingLogger(jsonConsoleSink(sink)),
+      metricNamespace: configured ? 'qurl-bot-teams-sandbox' : '',
+    });
+    expressApp.get('/api/messages', (_request, response) => { response.sendStatus(401); });
+    expressApp.post('/oauth/auth-test', (_request, response) => { response.sendStatus(401); });
+    await new Promise<void>(resolve => { server.listen(0, '127.0.0.1', resolve); });
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Expected local TCP listener');
+      const base = `http://127.0.0.1:${address.port}`;
+      for (const [method, path, body, status] of [
+        ['POST', '/api/messages?private=do-not-log', '{}', 401],
+        ['POST', '/api/messages/', '{}', 401],
+        ['POST', '/API/Messages', '{}', 401],
+        ['POST', '/api/messages', JSON.stringify({ padding: 'x'.repeat(256) }), 413],
+        ['POST', '/unrelated', '{}', 404],
+        ['POST', '/oauth/auth-test', '{}', 401],
+        ['GET', '/api/messages', undefined, 401],
+      ] as const) {
+        const response = await fetch(`${base}${path}`, { method, headers: { 'content-type': 'application/json' }, ...(body === undefined ? {} : { body }) });
+        expect(response.status).toBe(status);
+        await response.text();
+      }
+      const metrics = lines.map(line => JSON.parse(line) as Record<string, unknown>).filter(line => line.SignatureFailures === 1);
+      expect(metrics).toHaveLength(configured ? 3 : 0);
+      if (configured) {
+        for (const metric of metrics) expect(metric).toEqual({
+          level: 'WARN', message: 'Teams inbound authentication rejected', SignatureFailures: 1,
+          _aws: { Timestamp: expect.any(Number), CloudWatchMetrics: [{
+            Namespace: 'qurl-bot-teams-sandbox', Dimensions: [[]], Metrics: [{ Name: 'SignatureFailures', Unit: 'Count' }],
+          }] },
+        });
+      }
+      expect(lines.join('')).not.toContain('do-not-log');
+    } finally { await new Promise<void>(resolve => { server.close(() => resolve()); }); }
   });
 });
 
