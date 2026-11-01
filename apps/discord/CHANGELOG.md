@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.9](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.8...discord-v0.2.9) (2026-11-01)
+
+
+### Bug Fixes
+
+* **slack:** prevent concurrent setup key overwrites ([#1881](https://github.com/layervai/qurl-integrations/issues/1881)) ([5e5efdb](https://github.com/layervai/qurl-integrations/commit/5e5efdb1f0a48da477a8f8bf112511f69c8592ef))
+
 ## [0.2.8](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.7...discord-v0.2.8) (2026-09-29)
 
 
