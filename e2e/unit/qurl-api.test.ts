@@ -541,3 +541,22 @@ test('child cleanup reports a refused delete', async () => {
     .mockResolvedValueOnce(new Response(null, { status: 403 }));
   await expect(qurl.revokeChild(mintUrl, apiKey, qurlId)).rejects.toThrow('revocation: 403');
 });
+
+
+test.each([1, 30, 86400])('connector mint forwards session duration %ss and retains child cleanup identity', async seconds => {
+  const link = { qurl_link: 'https://qurl.link/#fixture', qurl_id: 'child', expires_at: '2026-11-01T00:00:00Z' };
+  fetchMock.mockResolvedValueOnce(jsonResponse({ links: [link] }));
+  await expect(qurl.mintConnectorView('https://upload.example.com/api', 'source/id', apiKey, {
+    expiresAt: link.expires_at, sessionDurationSeconds: seconds,
+  })).resolves.toEqual(link);
+  expect(fetchMock).toHaveBeenCalledWith('https://upload.example.com/api/mint_link/source%2Fid', expect.objectContaining({
+    body: JSON.stringify({ n: 1, expires_at: link.expires_at, one_time_use: true, session_duration: `${seconds}s` }),
+  }));
+});
+
+test.each([0, -1, 0.5, 86401, NaN, Infinity])('connector mint rejects invalid duration %s before any request', async seconds => {
+  await expect(qurl.mintConnectorView('https://upload.example.com/api', 'source', apiKey, {
+    expiresAt: '2026-11-01T00:00:00Z', sessionDurationSeconds: seconds,
+  })).rejects.toThrow('sessionDurationSeconds');
+  expect(fetchMock).not.toHaveBeenCalled();
+});
