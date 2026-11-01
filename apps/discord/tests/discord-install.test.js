@@ -732,8 +732,12 @@ describe('Discord install callback', () => {
       expect(installRes.status).toBe(302);
       expect(setupRes.status).toBe(302);
       const stableParams = (location) => [...new URL(location).searchParams.entries()]
-        .filter(([key]) => !['state', 'code_challenge'].includes(key))
+        .filter(([key]) => !['state', 'nonce', 'code_challenge'].includes(key))
         .sort(([left], [right]) => left.localeCompare(right));
+      for (const location of [installRes.headers.location, setupRes.headers.location]) {
+        const params = new URL(location).searchParams;
+        expect(params.get('nonce')).toBe(verifyQurlOAuthState(params.get('state')).payload.nonce);
+      }
       expect(stableParams(installRes.headers.location))
         .toEqual(stableParams(setupRes.headers.location));
     });

@@ -7,10 +7,11 @@ function qurlOAuthCallbackUrl() {
   return `${config.BASE_URL}/oauth/qurl/callback`;
 }
 
-function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
+function buildAuth0AuthorizeUrl({ state, codeChallenge, nonce }) {
   if (typeof state !== 'string' || !state
-      || typeof codeChallenge !== 'string' || !codeChallenge) {
-    throw new TypeError('state and codeChallenge must be non-empty strings');
+      || typeof codeChallenge !== 'string' || !codeChallenge
+      || typeof nonce !== 'string' || !/^[a-f0-9]{32}$/.test(nonce)) {
+    throw new TypeError('state/codeChallenge and a 32-hex-character nonce are required');
   }
   if (config.isAuth0EmailConnectionRejected) {
     throw new Error('Auth0 email connection policy was rejected');
@@ -25,11 +26,7 @@ function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
   // no refresh-token use, so offline_access is deliberately absent.
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
-  // OIDC nonce is deliberately absent: the id_token comes from the
-  // client-secret-authenticated back-channel exchange, and its claims feed
-  // only the success-page readout and an audit fingerprint—not authorization.
-  // State + same-browser cookie + PKCE bind the setup itself. Add and verify a
-  // nonce if an id_token claim ever becomes an authorization input.
+  authorizeUrl.searchParams.set('nonce', nonce);
   authorizeUrl.searchParams.set('state', state);
   authorizeUrl.searchParams.set('code_challenge', codeChallenge);
   authorizeUrl.searchParams.set('code_challenge_method', 'S256');

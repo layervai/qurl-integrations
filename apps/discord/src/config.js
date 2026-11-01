@@ -278,6 +278,11 @@ const isQurlOAuthConfigured = Boolean(
   && process.env.AUTH0_CLIENT_SECRET
   && process.env.AUTH0_AUDIENCE,
 );
+// Optional endpoint-owned contract, matching Slack's startup drift guard.
+const expectedAuth0Audience = (process.env.AUTH0_EXPECTED_AUDIENCE || '').trim();
+if (isQurlOAuthConfigured && expectedAuth0Audience && process.env.AUTH0_AUDIENCE !== expectedAuth0Audience) {
+  throw new Error('AUTH0_AUDIENCE must exactly match AUTH0_EXPECTED_AUDIENCE for this qURL endpoint');
+}
 // A rejected pin blocks setup only while OAuth is configured, where it could
 // otherwise send an unpinned authorize redirect. Without AUTH0_* no redirect
 // is ever built, so the legacy paste path stays available.

@@ -4,6 +4,7 @@
 // experience and CSRF posture live in the PR #177 description; Stage-2
 // confused-deputy mitigation is documented in discord-install.js.
 const express = require('express');
+const crypto = require('crypto');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
@@ -36,6 +37,15 @@ const { linkGuildWebhookSubscriptionForSetup } = require('../guild-webhook-link'
 const AUTH0_TIMEOUT_MS = 15000;
 const QURL_SERVICE_TIMEOUT_MS = 15000;
 const ORPHAN_DELETE_TIMEOUT_MS = 10000;
+// TODO(upstream-contract): keep mint codes/statuses and owner-scoped response replay aligned with qURL.
+const KEY_MINT_FAILURES = new Map([
+  ['email_verification_required', [403, 'Verify your qURL account email', 'Verify your qURL account email, then start setup again.']],
+  ['account_frozen', [403, 'qURL account unavailable', 'Your qURL account is frozen. Contact your layerv.ai admin before trying setup again.']],
+  ['scope_delegation_denied', [403, 'qURL permissions unavailable', 'Your account does not permit the required qURL permissions. Ask your layerv.ai admin to allow qURL read and write access.']],
+  ['invalid_audience', [401, 'qURL sign-in configuration error', 'The bot operator must correct the Auth0 audience for this qURL endpoint before setup can continue.']],
+  ['insufficient_scope', [401, 'qURL sign-in permissions missing', 'Sign in again and grant qURL read and write access. If this repeats, ask the bot operator to check the Auth0 scopes.']],
+]);
+
 
 const router = express.Router();
 
@@ -158,7 +168,7 @@ router.get('/start', rateLimit, async (req, res) => {
   const { codeVerifier, codeChallenge } = createPkcePair();
   setQurlOAuthCookie(res, req, state);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
-  const authorizeUrl = buildAuth0AuthorizeUrl({ state, codeChallenge });
+  const authorizeUrl = buildAuth0AuthorizeUrl({ state, codeChallenge, nonce: verified.payload.nonce });
   return res.redirect(302, authorizeUrl.toString());
 });
 
@@ -311,7 +321,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       // qURL-OAuth-state verification result; this one carries the
       // Auth0 id_token JWKS verification result. Same shape, different
       // payload — keep them lexically separate to avoid reader confusion.
-      const idTokenVerified = await verifyAuth0IdToken(tokenJson.id_token);
+      const idTokenVerified = await verifyAuth0IdToken(tokenJson.id_token, verified.payload.nonce);
       if (idTokenVerified.ok) {
         if (typeof idTokenVerified.payload?.email === 'string') {
           qurlAccountEmail = idTokenVerified.payload.email;
@@ -349,6 +359,8 @@ router.get('/callback', rateLimit, async (req, res) => {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
+        // A fresh grant must not replay a key revoked after a failed save.
+        'Idempotency-Key': crypto.createHmac('sha256', verified.payload.nonce).update(code).digest('hex'),
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
@@ -377,6 +389,12 @@ router.get('/callback', rateLimit, async (req, res) => {
         });
         return renderError(res, 429, 'qURL API key limit reached',
           'Your qURL account has hit its API key limit. Delete an unused key in your layerv.ai dashboard, or upgrade your plan, then run /qurl-admin setup again.');
+      }
+
+      const knownFailure = KEY_MINT_FAILURES.get(problemCode);
+      if (knownFailure && mintResp.status === knownFailure[0]) {
+        logger.warn('qURL API key mint refused', { status: mintResp.status, problemCode, guildId });
+        return renderError(res, ...knownFailure);
       }
 
       logger.error('qURL API key mint failed', {
@@ -483,7 +501,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
   // Interim #1366 evidence: compare this keyed, pseudonymous fingerprint
   // across bind events to detect qURL-owner changes. The id_token is
-  // JWKS-verified but not nonce-bound, so this is observability only; durable
+  // JWKS-verified and nonce-bound, but this remains observability only; durable
   // owner identity and fail-closed comparison belong in #1366.
   try {
     logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {

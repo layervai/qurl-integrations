@@ -22,8 +22,8 @@
 // session — there's no consumed-nonce store. The practical impact is
 // bounded because Auth0's `code` parameter is single-use and short-lived
 // (so the second presentation needs a fresh Auth0 grant), and a re-mint
-// on the bot side is an idempotent upsert in guild_configs. The signed
-// state is NOT a one-shot token; it's an integrity envelope. PR copy and
+// on the bot side uses a separate retry key per Auth0 grant before the
+// guild_configs upsert. The signed state is NOT a one-shot token; it's an integrity envelope. PR copy and
 // route comments avoid the "single-use" framing for that reason.
 const crypto = require('crypto');
 const { createStateSigner } = require('./oauth-state');
@@ -139,6 +139,7 @@ function verifyQurlOAuthState(state) {
   if (payload?.k !== STATE_KIND) return { ok: false, reason: 'wrong_kind' };
   if (typeof payload.g !== 'string' || !payload.g) return { ok: false, reason: 'no_guild_id' };
   if (typeof payload.u !== 'string' || !payload.u) return { ok: false, reason: 'no_user_id' };
+  if (typeof payload.n !== 'string' || !/^[a-f0-9]{32}$/.test(payload.n)) return { ok: false, reason: 'invalid_nonce' };
   if (typeof payload.e !== 'number') return { ok: false, reason: 'no_expiry' };
   if (Math.floor(Date.now() / 1000) >= payload.e) return { ok: false, reason: 'expired' };
   return {

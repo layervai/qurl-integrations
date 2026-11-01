@@ -37,7 +37,7 @@ const crypto = require('crypto');
 const express = require('express');
 const config = require('../config');
 const logger = require('../logger');
-const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
+const { signQurlOAuthState, verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { createPkcePair } = require('../utils/oauth-pkce');
 const { buildAuth0AuthorizeUrl } = require('../utils/auth0-authorize-url');
 const { rateLimit, installRateLimit } = require('../utils/oauth-rate-limit');
@@ -320,6 +320,11 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    redirect to Auth0; the existing /oauth/qurl/callback will finish
   //    the flow (mint qurl-service API key, persist, DM admin).
   const qurlState = signQurlOAuthState(guildId, discordUserId);
+  const qurlStateVerified = verifyQurlOAuthState(qurlState);
+  if (!qurlStateVerified.ok) {
+    logger.error('Generated qURL setup state failed verification', { reason: qurlStateVerified.reason });
+    return renderError(res, 500, 'Could not start qURL setup', 'Please start again from Add to Discord.');
+  }
   const { codeVerifier, codeChallenge } = createPkcePair();
   // Same double-submit CSRF cookie /oauth/qurl/start sets — Stage-2
   // chain shares the cookie with the qurl-oauth callback. Together with
@@ -328,7 +333,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // Both setup cookies also use host prefixes to reject sibling-domain cookies.
   setQurlOAuthCookie(res, req, qurlState);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
-  const authorizeUrl = buildAuth0AuthorizeUrl({ state: qurlState, codeChallenge });
+  const authorizeUrl = buildAuth0AuthorizeUrl({ state: qurlState, codeChallenge, nonce: qurlStateVerified.payload.nonce });
   logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId });
   return res.redirect(302, authorizeUrl.toString());
 });
