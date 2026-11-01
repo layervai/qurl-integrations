@@ -158,7 +158,7 @@ func (b *agentBackend) authClientForTurn(ctx context.Context, op string, tc *age
 		return c, "", nil
 	}
 	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
-		return nil, workspaceNotSetupMessage, nil
+		return nil, workspaceNotSetupMessage(commandUser), nil
 	}
 	_, err = b.fail(op, err)
 	return nil, "", err

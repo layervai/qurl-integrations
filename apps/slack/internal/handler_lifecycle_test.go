@@ -411,8 +411,8 @@ func TestHandleLifecycleEvent_RetainsRowsUpdatedAfterEventCutoff(t *testing.T) {
 
 	if err := h.cfg.AdminStore.BindWorkspace(context.Background(), &slackdata.WorkspaceMapping{
 		TeamID:  testAdminTeamID,
-		OwnerID: testAdminOwnerID,
-	}, testAdminUserID); err != nil {
+		OwnerID: testAdminUserID,
+	}); err != nil {
 		t.Fatalf("BindWorkspace fresh row: %v", err)
 	}
 	if err := h.cfg.AdminStore.ExposeResourceToChannel(context.Background(), testAdminTeamID, "C_fresh", "r_fresh"); err != nil {

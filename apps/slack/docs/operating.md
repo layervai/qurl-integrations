@@ -1009,6 +1009,43 @@ enabled on `workspace_mappings.expires_at`. Durable workspace binding rows must
 not write `expires_at`; DynamoDB TTL is table-wide and would reap any real row
 that accidentally carried a numeric value.
 
+## Conversation-mode controls
+
+These values are source defaults when the task does not set an override. Check
+the task definition and environment overrides before changing a deployment.
+The process reads these controls at startup; replace the task after a change.
+
+| Variable | Source default | Meaning |
+| --- | --- | --- |
+| `QURL_AGENT_DISABLED` | `false` | Deployment-wide kill switch. `true` disables the agent. An invalid boolean also disables it. |
+| `QURL_AGENT_CONFIRM_ENABLED` | `false` | Enables mutation confirmation only when the read-only agent and block-message delivery are wired. An invalid boolean keeps it off. |
+| `QURL_AGENT_DEFAULT_ENABLED` | `false` | Default for workspaces without their own agent toggle. An explicit workspace choice takes precedence. An invalid boolean keeps the default off. |
+| `QURL_AGENT_MAX_TURNS_PER_USER_PER_HOUR` | `30` | Per-user turn cap within a workspace. `0` removes this cap. |
+| `QURL_AGENT_MAX_TURNS_PER_TEAM_PER_HOUR` | `300` | Workspace turn cap. `0` removes this cap. |
+
+Turn caps use fixed UTC hour buckets. A user or workspace can consume up to
+twice its cap within a few seconds across an hour boundary, even with healthy
+storage. These caps do not impose a hard spend limit. Missing, negative, or invalid integer
+values use the source default. These are cost backstops: a rate-counter storage
+failure allows the turn and logs this message:
+
+`agent: turn-rate counter failed; allowing turn (fail-open)`
+
+Alert on that message and the deployment's matching alarm. Turns rejected by the user cap do not
+increment the workspace counter.
+
+Keep 30/300 as the initial guardrails. Before changing them, review pilot turn
+usage, rejected turns, model usage, and the workflows that customers need.
+A higher cap does not establish capacity, and `0` removes that protection.
+Enablement flags do not replace model credentials, storage, Slack scopes, or
+message-delivery checks. Verify those paths in the target environment before
+broad enablement. Check the startup conversation-mode and confirm-mode state
+logs after task replacement. Confirm mode can be live while ephemeral block
+delivery is missing; the startup warning says channel get approvals will fail
+after minting. Resolve that warning before enabling those workflows. Boolean
+controls accept Go `ParseBool` forms such as `true`, `false`, `1`, and `0`;
+`yes` and `enable` are invalid.
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -1151,3 +1188,25 @@ budgeted at 800 ms and the `views.open` call at 1500 ms, leaving headroom inside
 Slack's roughly three-second trigger window. Sustained p99 latency near either
 budget should be treated as an operator action item before customers see setup
 window-expired prompts.
+
+## Async pool pressure
+
+A rejected worker in the shared async pool emits `event=async_pool_rejected`. This includes slash commands, interactions, and conversation turns; each caller chooses its reply. Use this CloudWatch Logs Insights query to find sustained pressure without matching on message text:
+
+```text
+filter event = "async_pool_rejected"
+| stats count(*) as drops by bin(1m)
+| filter drops >= 3
+```
+
+This event counts shared-pool rejections, including the slash-command busy acknowledgment. It does not count every command failure or rejection from a separate follow-up gate. Group by `command` when you need the slash-command breakdown; rejections without that field appear in an empty group. Check request latency and dependency health before raising concurrency limits.
+
+### Broken agent stream cleanup (#709)
+
+If native streaming breaks, the bot posts the complete non-proposal reply before deleting its abandoned partial bubble. Both the text path and the feedback-block path must confirm complete delivery. Slack's `message_truncated` warning is a failed completeness receipt, even when `ok` is true. A failed fallback keeps the partial; a failed delete leaves the confirmed full reply and logs a cleanup warning. Healthy streams, proposal narration, blank replies, and failed-start attempts are not cleanup targets. Cleanup uses the bot's existing `chat:write` permission and a bounded delivery context. This source change does not enable streaming or authorize a live Slack test.
+
+For incomplete agent reply receipts, search for
+`agent: reply posted without a complete receipt; not retrying`.
+This means Slack posted a reply, but it did not confirm complete delivery; the
+bot does not retry that message or remove the original partial stream. Search
+`agent: could not remove abandoned partial stream` for a failed cleanup delete.

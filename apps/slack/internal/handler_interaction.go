@@ -522,22 +522,40 @@ func respondConnectorInstallModalError(w http.ResponseWriter, message string) {
 	})
 }
 
+// tunnelWebRefKindForEnvironment is the shared typed/modal compatibility policy.
+func tunnelWebRefKindForEnvironment(env tunnelInstallEnvironment) (tunnelInstallWebRefKind, bool) {
+	switch env {
+	case tunnelEnvDocker:
+		return tunnelWebRefKindContainer, true
+	case tunnelEnvCompose:
+		return tunnelWebRefKindService, true
+	case tunnelEnvECSFargate, tunnelEnvKubernetes:
+		return tunnelWebRefKindNone, true
+	default:
+		return tunnelWebRefKindNone, false
+	}
+}
+
 func tunnelWebRefValidationMessage(env tunnelInstallEnvironment, value string) string {
 	if value == "" {
 		return ""
 	}
-	switch env {
-	case tunnelEnvCompose:
+	kind, known := tunnelWebRefKindForEnvironment(env)
+	if !known {
+		return "Choose a target environment before setting a Docker service or container."
+	}
+	switch kind {
+	case tunnelWebRefKindService:
 		if dockerComposeServicePattern.MatchString(value) {
 			return ""
 		}
 		return "Use a Docker Compose service name with letters, numbers, underscores, or hyphens. Dots are not allowed."
-	case tunnelEnvDocker:
+	case tunnelWebRefKindContainer:
 		if dockerContainerRefPattern.MatchString(value) {
 			return ""
 		}
 		return "Use a Docker container name or ID with letters, numbers, dots, underscores, or hyphens."
-	case tunnelEnvECSFargate, tunnelEnvKubernetes:
+	case tunnelWebRefKindNone:
 		return "Leave blank for ECS/Fargate and Kubernetes; those installs run the sidecar inside the same task or pod."
 	default:
 		return "Choose a target environment before setting a Docker service or container."
@@ -551,17 +569,18 @@ func tunnelWebRefKindValidationMessage(env tunnelInstallEnvironment, kind tunnel
 	if kind == tunnelWebRefKindNone {
 		return ""
 	}
-	if env == tunnelEnvCompose {
-		if kind == tunnelWebRefKindService {
-			return ""
-		}
-		return "Use `service:<name>` with Docker Compose installs."
+	expected, known := tunnelWebRefKindForEnvironment(env)
+	if known && kind == expected {
+		return ""
+	}
+	if expected == tunnelWebRefKindService {
+		return "Use `service:<service-name>` with Docker Compose installs."
 	}
 	if kind == tunnelWebRefKindService {
-		return "Use `service:<name>` only with `env:docker-compose`; use `container:<name>` or `web_container:<name>` for Docker container installs."
+		return "Use `service:<service-name>` only with `env:docker-compose`; use `container:<container-name>` or `web_container:<container-name>` for Docker container installs."
 	}
-	if kind == tunnelWebRefKindContainer && env != tunnelEnvDocker {
-		return "Use `container:<name>` or `web_container:<name>` only with Docker container installs."
+	if kind == tunnelWebRefKindContainer {
+		return "Use `container:<container-name>` or `web_container:<container-name>` only with Docker container installs."
 	}
 	return ""
 }

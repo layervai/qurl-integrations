@@ -18,10 +18,14 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/httpbody"
 	"github.com/layervai/qurl-integrations/shared/auth"
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 const slackViewsOpenURL = "https://slack.com/api/views.open"
-const defaultSlackAPIUserAgent = "qurl-slack/unknown"
+
+// TODO(upstream-contract): keep bot attribution/log consumers aligned with this wire product.
+const slackUserAgentProduct = "qurl-bot-slack"
+const defaultSlackAPIUserAgent = slackUserAgentProduct + "/unknown"
 
 // slackViewsOpenTimeout is the HTTP-client fallback upper bound for every
 // views.open request made by this client. Callers can still pass a tighter
@@ -348,6 +352,17 @@ func newSlackWebAPIPoster(lookup slackBotTokenLookup, userAgent, url, op string,
 	return &slackWebAPIPoster{lookup: lookup, invalidate: invalidate, userAgent: userAgent, url: url, op: op, respErr: respErr, httpClient: httpClient}
 }
 
+// Scoped loggers own root correlation; nest lookup IDs to avoid duplicate keys.
+// Process calls keep their existing flat IDs. Diagnostics stay at the root.
+func slackOwnerLogAttrs(ctx context.Context, teamID, enterpriseID string) []slog.Attr {
+	team := slog.String("team_id", slackOwnerLogID(teamID))
+	enterprise := slog.String("enterprise_id", slackOwnerLogID(enterpriseID))
+	if _, scoped := observability.LoggerFromContext(ctx); scoped {
+		return []slog.Attr{slog.Group("slack_api", team, enterprise)}
+	}
+	return []slog.Attr{team, enterprise}
+}
+
 // postOnce resolves one owner's bot token (workspace team or, on the Grid fallback,
 // the enterprise org) and POSTs the already-marshaled body, returning the (size-bounded)
 // response body alongside the parsed error. Most seams ignore the body (via post); only
@@ -393,10 +408,7 @@ func (p *slackWebAPIPoster) postOnce(ctx context.Context, ownerID string, body [
 // Returns the successful (or last) attempt's response body.
 func (p *slackWebAPIPoster) gridPost(ctx context.Context, teamID, enterpriseID string, body []byte) ([]byte, error) {
 	raw, err := p.postOnce(ctx, teamID, body)
-	if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-		return raw, err
-	}
-	if enterpriseID == "" || enterpriseID == teamID {
+	if !auth.SlackGridFallbackAllowed(teamID, enterpriseID, err) {
 		return raw, err
 	}
 	// Parity with openViewWithGridFallback's warn: a breadcrumb so an operator
@@ -405,13 +417,11 @@ func (p *slackWebAPIPoster) gridPost(ctx context.Context, teamID, enterpriseID s
 	// Keep exact Slack owner IDs for diagnostics when they match Slack's owner ID
 	// alphabet; malformed IDs are replaced so this shared warning does not log
 	// arbitrary caller-controlled strings.
-	slog.LogAttrs(
+	observability.Logger(ctx).LogAttrs(
 		ctx,
 		slog.LevelWarn,
 		"workspace Slack bot token missing; retrying with Enterprise Grid install token",
-		slog.String("op", p.op),
-		slog.String("team_id", slackOwnerLogID(teamID)),
-		slog.String("enterprise_id", slackOwnerLogID(enterpriseID)),
+		append(slackOwnerLogAttrs(ctx, teamID, enterpriseID), slog.String("op", p.op))...,
 	)
 	return p.postOnce(ctx, enterpriseID, body)
 }
@@ -557,7 +567,7 @@ func newSlackPostEphemeralBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, 
 // rejects the markdown block shape in an older/limited surface, retry once with the
 // older markdown_text-only body so the answer still delivers.
 func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client, invalidate func(string)) internal.PostMessageFunc {
-	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient, invalidate)
+	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackAgentPostMessageResponseError, httpClient, invalidate)
 	var fallbackLogMu sync.Mutex
 	fallbackLogSeen := make(map[string]struct{})
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, markdownText string) error {
@@ -581,16 +591,12 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 			fallbackLogSeen[fallbackLogKey] = struct{}{}
 		}
 		fallbackLogMu.Unlock()
-		logAttrs := []slog.Attr{
-			slog.String("team_id", slackOwnerLogID(teamID)),
-			slog.String("enterprise_id", slackOwnerLogID(enterpriseID)),
-			slog.String("error_code", errorCode),
-			slog.Any("error", err),
-		}
+		logAttrs := append(slackOwnerLogAttrs(ctx, teamID, enterpriseID),
+			slog.String("error_code", errorCode), slog.Any("error", err))
 		if fallbackLogAlreadySeen {
-			slog.LogAttrs(ctx, slog.LevelDebug, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
+			observability.Logger(ctx).LogAttrs(ctx, slog.LevelDebug, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
 		} else {
-			slog.LogAttrs(ctx, slog.LevelInfo, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
+			observability.Logger(ctx).LogAttrs(ctx, slog.LevelInfo, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
 		}
 		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {
@@ -728,6 +734,15 @@ func slackChatPostMessageErrorCode(err error) string {
 // response parsing) with the text seam — only the JSON body differs.
 func newSlackPostMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client, invalidate func(string)) internal.PostMessageBlocksFunc {
 	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient, invalidate)
+	return slackPostMessageBlocksFunc(poster)
+}
+
+func newSlackPostAgentMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client, invalidate func(string)) internal.PostMessageBlocksFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackAgentPostMessageResponseError, httpClient, invalidate)
+	return slackPostMessageBlocksFunc(poster)
+}
+
+func slackPostMessageBlocksFunc(poster *slackWebAPIPoster) internal.PostMessageBlocksFunc {
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error {
 		body, err := json.Marshal(struct {
 			Channel  string `json:"channel"`
@@ -792,21 +807,23 @@ func newSlackAppHomePublishFuncWithTokenLookup(lookup slackBotTokenLookup, userA
 }
 
 const (
-	slackChatStartStreamURL  = "https://slack.com/api/chat.startStream"
-	slackChatAppendStreamURL = "https://slack.com/api/chat.appendStream"
-	slackChatStopStreamURL   = "https://slack.com/api/chat.stopStream"
+	slackChatStartStreamURL   = "https://slack.com/api/chat.startStream"
+	slackChatAppendStreamURL  = "https://slack.com/api/chat.appendStream"
+	slackChatStopStreamURL    = "https://slack.com/api/chat.stopStream"
+	slackChatDeleteMessageURL = "https://slack.com/api/chat.delete"
 )
 
 // slackAgentStreamPort implements [internal.AgentStreamPort] over Slack's native AI-app
-// streaming. startStream reads the response for the stream ts; appendStream/stopStream
-// are fire-and-forget. All three share the per-team token lookup + Grid fallback poster.
+// streaming. Start returns the stream handle; append, stop and delete check Slack receipts.
+// All four share the per-team token lookup, invalidation and Grid fallback poster.
 type slackAgentStreamPort struct {
 	start *slackWebAPIPoster
 	appnd *slackWebAPIPoster
 	stop  *slackWebAPIPoster
+	del   *slackWebAPIPoster
 }
 
-func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, startURL, appendURL, stopURL string, httpClient *http.Client, invalidate func(string)) internal.AgentStreamPort {
+func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, startURL, appendURL, stopURL, deleteURL string, httpClient *http.Client, invalidate func(string)) internal.AgentStreamPort {
 	if httpClient == nil {
 		// One shared client across start/append×N/stop so a streamed turn's verb sequence
 		// reuses keep-alive connections (parity with the assistant/reactions ports).
@@ -821,6 +838,7 @@ func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgen
 		start: mk(startURL, "chat.startStream"),
 		appnd: mk(appendURL, "chat.appendStream"),
 		stop:  mk(stopURL, "chat.stopStream"),
+		del:   mk(deleteURL, "chat.delete"),
 	}
 }
 
@@ -880,6 +898,17 @@ func (p *slackAgentStreamPort) StopStream(ctx context.Context, teamID, enterpris
 		return fmt.Errorf("chat.stopStream request marshal: %w", err)
 	}
 	return p.stop.post(ctx, teamID, enterpriseID, body)
+}
+
+func (p *slackAgentStreamPort) DeleteStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string) error {
+	body, err := json.Marshal(struct {
+		Channel string `json:"channel"`
+		TS      string `json:"ts"`
+	}{Channel: channelID, TS: streamTS})
+	if err != nil {
+		return fmt.Errorf("chat.delete request marshal: %w", err)
+	}
+	return p.del.post(ctx, teamID, enterpriseID, body)
 }
 
 // slackResolveChannelNameFromConversationInfo projects the conversations.info seam
@@ -960,10 +989,7 @@ func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLook
 	}
 	return func(ctx context.Context, teamID, enterpriseID, channelID string) (internal.ConversationInfo, error) {
 		info, err := get(ctx, teamID, channelID)
-		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-			return info, err
-		}
-		if enterpriseID == "" || enterpriseID == teamID {
+		if !auth.SlackGridFallbackAllowed(teamID, enterpriseID, err) {
 			return info, err
 		}
 		return get(ctx, enterpriseID, channelID)
@@ -995,10 +1021,7 @@ func newSlackAgentThreadHistoryFuncWithTokenLookup(lookup slackBotTokenLookup, u
 	}
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, oldestTS string) ([]internal.AgentThreadMessage, error) {
 		messages, err := read(ctx, teamID, channelID, threadTS, oldestTS)
-		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-			return messages, err
-		}
-		if enterpriseID == "" || enterpriseID == teamID {
+		if !auth.SlackGridFallbackAllowed(teamID, enterpriseID, err) {
 			return messages, err
 		}
 		return read(ctx, enterpriseID, channelID, threadTS, oldestTS)
@@ -1316,10 +1339,7 @@ func newSlackChannelMembershipFuncWithTokenLookup(lookup slackBotTokenLookup, us
 	}
 	return func(ctx context.Context, teamID, enterpriseID, channelID, userID string) (bool, error) {
 		member, err := isMember(ctx, teamID, channelID, userID)
-		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-			return member, err
-		}
-		if enterpriseID == "" || enterpriseID == teamID {
+		if !auth.SlackGridFallbackAllowed(teamID, enterpriseID, err) {
 			return member, err
 		}
 		return isMember(ctx, enterpriseID, channelID, userID)
@@ -1586,4 +1606,31 @@ func invalidateRejectedSlackToken(ownerID string, err error, invalidate func(str
 		}
 	}
 	return err
+}
+
+// slackAgentPostMessageResponseError distinguishes posted from fully delivered.
+// TODO(upstream-contract): Slack must retain message_truncated in warning or response_metadata.warnings.
+func slackAgentPostMessageResponseError(statusCode int, header http.Header, raw []byte) error {
+	if err := slackChatPostMessageResponseError(statusCode, header, raw); err != nil {
+		return err
+	}
+	var out struct {
+		Warning          string `json:"warning"`
+		ResponseMetadata struct {
+			Warnings []string `json:"warnings"`
+		} `json:"response_metadata"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return internal.ErrSlackMessageIncomplete
+	}
+	warnings := out.ResponseMetadata.Warnings
+	if out.Warning != "" {
+		warnings = append(warnings, strings.Split(out.Warning, ",")...)
+	}
+	for _, warning := range warnings {
+		if strings.TrimSpace(warning) == "message_truncated" {
+			return internal.ErrSlackMessageIncomplete
+		}
+	}
+	return nil
 }

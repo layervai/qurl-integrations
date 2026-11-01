@@ -67,7 +67,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("aliases: API key lookup failed", "error", err)
-		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
+		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err, values.Get(fieldCommand)))
 		return
 	}
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, userID, teamID)
@@ -113,10 +113,13 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	lines := make([]string, 0, len(groups))
 	unresolved := 0
 	for i := range groups {
+		if len(groups[i].aliases) == 0 {
+			continue
+		}
 		// Empty IDs and direct-URL bindings never join. A missing real resource
 		// degrades to aliases only and counts toward the pagination-gap signal.
 		var r client.Resource
-		if rid := groups[i].resourceID; rid != "" && !isLegacyDirectURLBinding(rid) {
+		if rid := groups[i].resourceID; isJoinableAliasResourceID(rid) {
 			var ok bool
 			if r, ok = byID[rid]; !ok {
 				unresolved++
@@ -147,16 +150,8 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	}
 
 	if hasMore && unresolved > 0 {
-		// A bound tunnel resolved to alias-only AND the page reports more
-		// resources past it. Two causes share this signal because
-		// page.HasMore is a master-list flag ("more resources of any
-		// type", not "more tunnels" — until the #531 server-side filter):
-		// the bound resource may be paginated out, OR the binding may be
-		// stale (its resource was deleted but the DDB row remains). The
-		// message names both so operators don't only chase pagination.
-		// One triage line for "why doesn't `$foo` show its slug?"; arms
-		// the #555 follow-up. Additive only — the rendered rows are
-		// unchanged.
+		// A missing resource can be on a later page or have a stale binding;
+		// the workspace cursor alone cannot distinguish those cases.
 		log.Warn("aliases: listing may be incomplete — a bound resource was not on the scanned page (paginated out, or the binding is stale)",
 			"unresolved_groups", unresolved, "scan_limit", listResourcesScanLimit, "team_id", teamID, "channel_id", channelID)
 	}
@@ -164,35 +159,32 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	body := "*Aliases configured for this channel:*\n" +
 		"_Format: `$<id>` → the aliases that resolve to it. Run `/qurl get` with the ID or any alias._\n" +
 		strings.Join(lines, "\n")
+	if hasMore && unresolved > 0 {
+		body += "\n_Some resource details were not on this page. A resource may be on a later page, or its binding may be stale._"
+	}
 	_ = h.postResponse(log, responseURL, body)
+}
+
+func isJoinableAliasResourceID(id string) bool {
+	return id != "" && !isLegacyDirectURLBinding(id)
 }
 
 // groupsNeedResolution reports whether any group has a joinable resource ID.
 // Empty IDs and legacy direct-URL bindings cannot join the resource list.
 func groupsNeedResolution(groups []aliasGroup) bool {
 	for i := range groups {
-		if groups[i].resourceID != "" && !isLegacyDirectURLBinding(groups[i].resourceID) {
+		if isJoinableAliasResourceID(groups[i].resourceID) {
 			return true
 		}
 	}
 	return false
 }
 
-// resourcesByResourceID fetches one page of the workspace's resources
-// and indexes them by resource_id for the slug join in processAliases
-// (see the call site for why the list path, not the per-id path, is the
-// reliable slug source). Every resource on the page is indexed —
-// intentionally NOT filtered to type=tunnel like /qurl list — so a
-// legacy URL binding still resolves its target_url and renders the escaped
-// "<url> (legacy URL) → $alias" line.
-//
-// Best-effort: a fetch failure yields (nil, false) — a nil-map lookup
-// returns the zero-value Resource, so the caller degrades each row to
-// alias-only. Bounded to one [listResourcesScanLimit] page; hasMore
-// reports page.HasMore so the caller can flag a binding that may simply
-// be paginated out. (Same cap as /qurl list; the incomplete-listing
-// follow-up is tracked in #555, which depends on the #531 server-side
-// type=tunnel filter.)
+// resourcesByResourceID indexes one workspace page for both URL and tunnel
+// alias details. The list response carries the labels needed for this join.
+// A failed fetch yields (nil, false), so rows degrade to alias-only.
+// The lookup is bounded to [listResourcesScanLimit]; hasMore lets the caller
+// explain an unresolved detail without assuming pagination or a stale binding.
 func resourcesByResourceID(ctx context.Context, log *slog.Logger, c *client.Client) (map[string]client.Resource, bool) {
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
 	if err != nil {

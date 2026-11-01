@@ -2,9 +2,12 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 const (
@@ -63,17 +66,26 @@ func (h *Handler) agentFeedbackEnabled() bool {
 // postAgentGeneratedReply preserves the existing text/Markdown delivery seam
 // when feedback is not wired. When it is wired, it posts the answer and native
 // feedback buttons atomically so no generated response can lose its affordance.
-func (h *Handler) postAgentGeneratedReply(log *slog.Logger, env *slackEventEnvelope, threadTS, text string, fallback PostMessageFunc) {
-	if !h.agentFeedbackEnabled() || h.cfg.PostMessageBlocks == nil {
-		h.deliverAgentText(log, env, threadTS, text, fallback)
-		return
+func (h *Handler) postAgentGeneratedReply(log *slog.Logger, env *slackEventEnvelope, threadTS, text string, fallback PostMessageFunc) bool {
+	postBlocks := h.cfg.PostAgentMessageBlocks
+	completeReceipt := postBlocks != nil
+	if postBlocks == nil {
+		postBlocks = h.cfg.PostMessageBlocks
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
+	if !h.agentFeedbackEnabled() || postBlocks == nil {
+		return h.deliverAgentText(log, env, threadTS, text, fallback)
+	}
+	ctx, cancel := context.WithTimeout(observability.WithLogger(h.baseCtx, log), agentDeliveryBudget)
 	defer cancel()
-	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, agentGeneratedReplyBlocks(text), strings.TrimSpace(text)); err != nil {
+	if err := postBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, agentGeneratedReplyBlocks(text), strings.TrimSpace(text)); err != nil {
+		if errors.Is(err, ErrSlackMessageIncomplete) {
+			log.Warn("agent: reply posted without a complete receipt; not retrying")
+			return false
+		}
 		log.Warn("agent: post generated reply with feedback failed; falling back to text", "error", err)
-		h.deliverAgentText(log, env, threadTS, text, fallback)
+		return h.deliverAgentText(log, env, threadTS, text, fallback)
 	}
+	return completeReceipt
 }
 
 // postAgentProposalPreview keeps each renderer on its own escaping regime:
@@ -85,7 +97,7 @@ func (h *Handler) postAgentProposalPreview(log *slog.Logger, env *slackEventEnve
 		h.deliverAgentText(log, env, threadTS, fallbackText, h.cfg.PostMessage)
 		return
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
+	ctx, cancel := context.WithTimeout(observability.WithLogger(h.baseCtx, log), agentDeliveryBudget)
 	defer cancel()
 	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, agentGeneratedReplyBlocks(agentProposalMarkdownPreview(summary)), fallbackText); err != nil {
 		log.Warn("agent: post proposal preview with feedback failed; falling back to text", "error", err)

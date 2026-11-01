@@ -569,7 +569,7 @@ func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState,
 	defer bindCancel()
 	bindErr := cfg.AdminStore.BindWorkspace(bindCtx,
 		&WorkspaceMapping{TeamID: verified.TeamID, OwnerID: verified.UserID},
-		verified.UserID)
+	)
 	if bindErr == nil {
 		return true
 	}

@@ -290,12 +290,8 @@ func TestHandleAliases_ListResourcesFailureDegradesToAliasOnly(t *testing.T) {
 	}
 }
 
-// runProcessAliasesCapturingLogs calls processAliases directly with an
-// injected logger so a test can assert on operator-facing log lines —
-// the incomplete-listing triage warning isn't visible in the response
-// body. Returns the captured logs and the rendered response_url body.
-// processAliases POSTs synchronously when called directly (not via the
-// async worker), so the body is complete on return.
+// runProcessAliasesCapturingLogs captures both the operator log and reply.
+// Calling processAliases directly keeps response_url delivery synchronous.
 func runProcessAliasesCapturingLogs(t *testing.T, h *Handler, channelID string) (logs, rendered string) {
 	t.Helper()
 	var body []byte
@@ -313,12 +309,8 @@ func runProcessAliasesCapturingLogs(t *testing.T, h *Handler, channelID string) 
 	return buf.String(), parseSlackText(t, body)
 }
 
-// TestHandleAliases_IncompleteListingLogsTriageWarning fences the #555
-// arming signal: when the workspace has more resources past the scanned
-// page (page.HasMore) AND a bound tunnel's resource_id wasn't on that
-// page, the handler emits one operator-facing warning so "why doesn't
-// `$foo` show its slug?" is triageable from logs. The user-facing rows
-// are unchanged (still alias-only); only the log differs.
+// An unresolved resource plus more pages produces an operator warning and
+// an accurate user-facing note; the alias-only row remains visible.
 func TestHandleAliases_IncompleteListingLogsTriageWarning(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
@@ -333,12 +325,15 @@ func TestHandleAliases_IncompleteListingLogsTriageWarning(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 
-	logs, _ := runProcessAliasesCapturingLogs(t, h, "C_test")
+	logs, rendered := runProcessAliasesCapturingLogs(t, h, "C_test")
 	if !strings.Contains(logs, "listing may be incomplete") {
 		t.Errorf("expected incomplete-listing warning, got logs: %q", logs)
 	}
 	if !strings.Contains(logs, "unresolved_groups=1") {
 		t.Errorf("expected unresolved_groups=1 in warning, got logs: %q", logs)
+	}
+	if !strings.Contains(rendered, "Some resource details were not on this page") || !strings.Contains(rendered, "later page, or its binding may be stale") {
+		t.Errorf("missing accurate detail note: %q", rendered)
 	}
 }
 
@@ -350,17 +345,25 @@ func TestHandleAliases_CompleteListingLogsNoWarning(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
 		"bastion": "r_resolved01",
+		"":        "r_hidden_without_alias",
+		"legacy":  "https://legacy.example.com/private?token=do-not-render",
 	})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_resolved01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "resolved"},
+			{testKeyResourceID: "r_resolved01", testKeyType: client.ResourceTypeURL, testKeyTargetURL: "https://resolved.example.com"},
 		}, "next-cursor", true)
 	})
 	h := newAdminTestHandler(t, ts)
 
-	logs, _ := runProcessAliasesCapturingLogs(t, h, "C_test")
+	logs, rendered := runProcessAliasesCapturingLogs(t, h, "C_test")
 	if strings.Contains(logs, "listing may be incomplete") {
 		t.Errorf("incomplete-listing warning fired when every binding resolved: %q", logs)
+	}
+	if strings.Contains(rendered, "Some resource details") {
+		t.Errorf("detail note on complete resolution: %q", rendered)
+	}
+	if !strings.Contains(rendered, "broken binding") || strings.Contains(rendered, "do-not-render") {
+		t.Errorf("legacy binding lost its private repair-only rendering: %q", rendered)
 	}
 }
 
@@ -402,6 +405,9 @@ func TestHandleAliases_PartialUnresolvedCompletePageNoWarning(t *testing.T) {
 	// Page complete → a stale/deleted binding is not a pagination gap.
 	if strings.Contains(logs, "listing may be incomplete") {
 		t.Errorf("triage warning fired on a complete page (stale binding is not pagination): %q", logs)
+	}
+	if strings.Contains(rendered, "Some resource details") {
+		t.Errorf("detail note on a complete page: %q", rendered)
 	}
 }
 

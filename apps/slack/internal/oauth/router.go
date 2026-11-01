@@ -207,7 +207,7 @@ type WorkspaceMapping struct {
 // first admin. Optional — when nil (admin storage disabled) the callback
 // skips the bind with a slog.Warn so the API-key surface stays functional.
 type AdminStore interface {
-	BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin string) error
+	BindWorkspace(ctx context.Context, m *WorkspaceMapping) error
 }
 
 // BindConflictCode names the slackdata.Error.Code values BindWorkspace

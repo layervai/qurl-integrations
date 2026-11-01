@@ -209,7 +209,7 @@ func run() error {
 		return fmt.Errorf("DDBProvider init: %w", err)
 	}
 	var authProvider auth.Provider = ddbProvider
-	userAgent := "qurl-slack/" + version
+	userAgent := slackUserAgentProduct + "/" + version
 
 	maxConcurrentAsync := readMaxConcurrentAsync()
 	maxConcurrentFollowupAsync := readMaxConcurrentFollowupAsync()
@@ -288,7 +288,7 @@ func run() error {
 	// the assistant pane. Always wired (same token lookup + Grid fallback); inert until the
 	// assistant:write scope + the pane (Agents & AI Apps) are enabled, and only engaged for
 	// a pane turn — otherwise the agent posts the reply normally.
-	agentStream := newSlackAgentStreamPortWithTokenLookup(workspaceTokenLookup, userAgent, slackChatStartStreamURL, slackChatAppendStreamURL, slackChatStopStreamURL, nil, invalidateWorkspaceSlackToken)
+	agentStream := newSlackAgentStreamPortWithTokenLookup(workspaceTokenLookup, userAgent, slackChatStartStreamURL, slackChatAppendStreamURL, slackChatStopStreamURL, slackChatDeleteMessageURL, nil, invalidateWorkspaceSlackToken)
 	agentDisabled := readAgentKillSwitch()
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	agentChannelFollowups := readAgentChannelFollowups()
@@ -380,6 +380,7 @@ func run() error {
 		PostMarkdownMessage:         postMarkdownMessage,
 		AgentDisabled:               agentDisabled,
 		PostMessageBlocks:           postMessageBlocks,
+		PostAgentMessageBlocks:      newSlackPostAgentMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil, invalidateWorkspaceSlackToken),
 		PostDMBlocks:                postDMBlocks,
 		PostEphemeralBlocks:         postEphemeralBlocks,
 		AgentConfirmEnabled:         agentConfirmEnabled,

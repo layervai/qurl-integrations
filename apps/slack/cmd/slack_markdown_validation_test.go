@@ -169,6 +169,7 @@ func TestRunSlackMarkdownRendererValidationPostsEvidenceWithoutAssistantConfig(t
 		startStreamURL:        srv.URL,
 		appendStreamURL:       srv.URL,
 		stopStreamURL:         srv.URL,
+		deleteMessageURL:      srv.URL + "/chat.delete",
 		userAgent:             testSlackValidationUA,
 		now:                   func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
 		httpClient:            srv.Client(),
@@ -243,6 +244,7 @@ func TestRunSlackMarkdownRendererValidationPostsAssistantSurface(t *testing.T) {
 		startStreamURL:           srv.URL + testSlackValidationStartPath,
 		appendStreamURL:          srv.URL + testSlackValidationAppendPath,
 		stopStreamURL:            srv.URL + testSlackValidationStopPath,
+		deleteMessageURL:         srv.URL + "/chat.delete",
 		userAgent:                testSlackValidationUA,
 		assistantChannelID:       testSlackAssistantChannel,
 		assistantThreadTS:        testSlackAssistantThreadTS,
@@ -301,6 +303,7 @@ func TestRunSlackMarkdownRendererValidationFailsOnPartialAssistantConfig(t *test
 		startStreamURL:        srv.URL,
 		appendStreamURL:       srv.URL,
 		stopStreamURL:         srv.URL,
+		deleteMessageURL:      srv.URL + "/chat.delete",
 		userAgent:             testSlackValidationUA,
 		now:                   func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
 		httpClient:            srv.Client(),
@@ -441,6 +444,7 @@ func TestRunSlackMarkdownRendererValidationMarksAssistantSurfaceFailed(t *testin
 		startStreamURL:           srv.URL + testSlackValidationStartPath,
 		appendStreamURL:          srv.URL + testSlackValidationAppendPath,
 		stopStreamURL:            srv.URL + testSlackValidationStopPath,
+		deleteMessageURL:         srv.URL + "/chat.delete",
 		userAgent:                testSlackValidationUA,
 		assistantChannelID:       testSlackAssistantChannel,
 		assistantThreadTS:        testSlackAssistantThreadTS,
@@ -774,6 +778,7 @@ func TestStreamSlackMarkdownValidationCaseUsesAssistantStreamShape(t *testing.T)
 		startStreamURL:           srv.URL + testSlackValidationStartPath,
 		appendStreamURL:          srv.URL + testSlackValidationAppendPath,
 		stopStreamURL:            srv.URL + testSlackValidationStopPath,
+		deleteMessageURL:         srv.URL + "/chat.delete",
 		userAgent:                testSlackValidationUA,
 		httpClient:               srv.Client(),
 	}, slackMarkdownValidationCase{
@@ -846,6 +851,10 @@ func (p *emptyStreamTSValidationPort) StopStream(context.Context, string, string
 	return nil
 }
 
+func (*emptyStreamTSValidationPort) DeleteStream(context.Context, string, string, string, string) error {
+	panic("empty stream handle must never be deleted")
+}
+
 func TestStreamSlackMarkdownValidationCaseRecordsAppendFailure(t *testing.T) {
 	t.Parallel()
 	var paths []string
@@ -874,6 +883,7 @@ func TestStreamSlackMarkdownValidationCaseRecordsAppendFailure(t *testing.T) {
 		startStreamURL:           srv.URL + testSlackValidationStartPath,
 		appendStreamURL:          srv.URL + testSlackValidationAppendPath,
 		stopStreamURL:            srv.URL + testSlackValidationStopPath,
+		deleteMessageURL:         srv.URL + "/chat.delete",
 		userAgent:                testSlackValidationUA,
 		httpClient:               srv.Client(),
 	}, slackMarkdownValidationCase{

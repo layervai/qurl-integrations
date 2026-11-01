@@ -3,6 +3,8 @@ package internal
 import (
 	"context"
 	"log/slog"
+
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 // assistantThreadTitle is the title set on a freshly-opened Assistants-container
@@ -149,7 +151,7 @@ func (h *Handler) postAssistantDisclosure(ctx context.Context, log *slog.Logger,
 	if h.cfg.PostMessage == nil {
 		return
 	}
-	if err := h.cfg.PostMessage(ctx, teamID, enterpriseID, at.ChannelID, at.ThreadTS, agentAIDisclosure); err != nil {
+	if err := h.cfg.PostMessage(observability.WithLogger(ctx, log), teamID, enterpriseID, at.ChannelID, at.ThreadTS, agentAIDisclosure); err != nil {
 		log.Warn("agent: post assistant disclosure failed", "error", err)
 	}
 }

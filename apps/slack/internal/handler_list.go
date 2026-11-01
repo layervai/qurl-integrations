@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -19,11 +20,8 @@ import (
 // backing `/qurl list`, `/qurl aliases`, and the URL resource-alias fallback in
 // `/qurl get`.
 //
-//   - `/qurl list` pages through resources until every resource in the channel
-//     allow-set has been seen (see [Handler.fetchAllowedResources]) — tunnels
-//     and URL resources alike — so the listing is complete regardless of how the
-//     owner's full resource set sorts (#590). The page size only affects how many
-//     requests that walk takes, not which resources render.
+//   - `/qurl list` uses selected metadata. Producers without that route retain
+//     the bounded catalog walk in [Handler.fetchAllowedResourcesLegacy].
 //   - `/qurl aliases` and the `/qurl get` URL resource-alias fallback each scan
 //     a SINGLE page. A bound/aliased resource_id past this page surfaces the
 //     triage warning in [Handler.processAliases] (aliases) or is missed by the
@@ -413,7 +411,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("list: API key lookup failed", "error", err)
-		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
+		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err, values.Get(fieldCommand)))
 		return
 	}
 
@@ -640,38 +638,77 @@ func isURLResource(r *client.Resource) bool {
 	return r.Type == client.ResourceTypeURL || (r.Type == "" && r.TargetURL != "")
 }
 
-// listMaxResourcePages bounds how many `/v1/resources` pages
-// [Handler.fetchAllowedResources] will walk. It is a safety backstop, not an
-// expected limit: the walk normally stops as soon as every allow-set member is
-// found (the common case is the first page). The cap only bites when an
-// allow-set id is never found — e.g. a stale channel binding to a resource the
-// owner has since deleted — which would otherwise scan to the end of the
-// owner's resource list on every call. At listResourcesScanLimit (100) rows
-// per page this covers far more resources than any real workspace holds, so a
-// capped walk can only ever drop an id the owner's list no longer contains
-// (fail-safe under-disclosure, never a live listed resource).
+// listMaxResourcePages bounds catalog work only for producers without metadata
+// lookup. Missing bindings can reach this cap; they never authorize pruning.
 const listMaxResourcePages = 50
 
-// fetchAllowedResources returns the live resources — tunnels AND URL resources —
-// protected in the current channel, by paging `/v1/resources` until every
-// resource_id in the channel allow-set has been seen (or the listing is
-// exhausted / the page cap is hit). This is the channel-scoped disclosure half
-// of `/qurl list`: a member sees exactly the resources they could `/qurl get`
-// here.
-//
-// Paging until the allow-set is satisfied — rather than scanning a single fixed
-// page and filtering it — is the #590 fix: a resource protected in this channel
-// can no longer be omitted for sorting past the page window. Allow-set ids are
-// matched as resources stream past and the walk stops as soon as the last one is
-// found, so a workspace whose exposed resources all land on the first page still
-// costs a single request (no regression to the common case).
-//
-// Allow-set membership is matched here; non-mintable / revoked rows are dropped
-// by filterListableResources (tunnels + URL resources). (#596 introduced this as
-// fetchAllowedTunnels; it was generalized to all listable resource types when
-// #599's URL-resource support merged, so the channel-scoped #590 paging fix now
-// covers URL resources too.)
+const listMetadataConcurrency = 5
+
+// fetchAllowedResources reads only channel-bound metadata. Missing IDs do not
+// cause catalog scans or remove bindings: a later request can resolve them again.
+// Old producers retain the bounded catalog walk until the metadata route is deployed.
 func (h *Handler) fetchAllowedResources(ctx context.Context, log *slog.Logger, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+	if len(allowed) == 0 {
+		return []client.Resource{}, nil
+	}
+	ids := make([]string, 0, len(allowed))
+	for id := range allowed {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	firstEnd := min(len(ids), client.ResourceBatchGetMaxIDs)
+	first, err := c.BatchGetResources(ctx, ids[:firstEnd])
+	if err != nil {
+		var apiErr *client.APIError
+		// TODO(upstream-contract): batch-get returns 200 [] for missing IDs;
+		// only absent routes use 404/405. Auth and store errors fail closed.
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusMethodNotAllowed) {
+			log.Debug("list: metadata route unavailable; using bounded catalog lookup", "status", apiErr.StatusCode)
+			return h.fetchAllowedResourcesLegacy(ctx, log, c, allowed)
+		}
+		return nil, err
+	}
+	batches := (len(ids) + client.ResourceBatchGetMaxIDs - 1) / client.ResourceBatchGetMaxIDs
+	results := make([][]client.Resource, batches)
+	batchCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	results[0] = first
+	sem := make(chan struct{}, listMetadataConcurrency)
+	var wg sync.WaitGroup
+launch:
+	for batch := 1; batch < batches; batch++ {
+		select {
+		case sem <- struct{}{}:
+		case <-batchCtx.Done():
+			break launch
+		}
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			start := index * client.ResourceBatchGetMaxIDs
+			resources, err := c.BatchGetResources(batchCtx, ids[start:min(start+client.ResourceBatchGetMaxIDs, len(ids))])
+			if err != nil {
+				cancel(err)
+				return
+			}
+			results[index] = resources
+		}(batch)
+	}
+	wg.Wait()
+	if cause := context.Cause(batchCtx); cause != nil {
+		return nil, cause
+	}
+	matched := make([]client.Resource, 0, len(ids))
+	for _, resources := range results {
+		matched = append(matched, resources...)
+	}
+	log.Debug("list: resource metadata lookup complete", "requested", len(ids), "returned", len(matched))
+	return filterListableResources(matched), nil
+}
+
+// fetchAllowedResourcesLegacy satisfies the full channel allow-set across pages (#590/#596/#599), up to the cap.
+func (h *Handler) fetchAllowedResourcesLegacy(ctx context.Context, log *slog.Logger, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
 	pending := make(map[string]struct{}, len(allowed))
 	for id := range allowed {
 		pending[id] = struct{}{}

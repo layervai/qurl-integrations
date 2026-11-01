@@ -275,7 +275,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 	if cmd.Subcommand != SubcmdGet {
 		// Defensive: dispatcher routed `get*` here but the parser
 		// disagreed. Fall through to the unknown-subcommand reply.
-		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
+		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `%s help`.", echoText(text), userCommandName(values.Get(fieldCommand))))
 		return
 	}
 	// Defensive: a successful parseGet always sets cmd.Alias (the tunnel
@@ -322,6 +322,7 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		work = h.cridWork
 	}
 	res, err := work(ctx, log, &getWorkArgs{
+		command:      values.Get(fieldCommand),
 		cmd:          cmd,
 		teamID:       teamID,
 		enterpriseID: enterpriseID,
@@ -371,6 +372,7 @@ func mapCoreError(log *slog.Logger, err error, generic string) string {
 
 // getWorkArgs bundles the closure inputs for [Handler.getWork].
 type getWorkArgs struct {
+	command      string
 	cmd          *Command
 	teamID       string
 	enterpriseID string
@@ -553,7 +555,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 		return getResult{}, &userError{msg: rateLimitMessage(retry, "")}
 	}
 
-	input := client.CreateInput{
+	input := &client.CreateInput{
 		// One-time use is the only mode for `/qurl get` — there is no
 		// `once` flag; every minted link burns on first redemption.
 		OneTimeUse: true,
@@ -568,7 +570,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	c, err := h.authenticatedClient(ctx, args.teamID)
 	if err != nil {
 		log.Error("get: API key lookup failed", "error", err)
-		return getResult{}, &userError{msg: authErrorMessage(err)}
+		return getResult{}, &userError{msg: authErrorMessage(err, args.command)}
 	}
 
 	out, err := c.Create(ctx, input)

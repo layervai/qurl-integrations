@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
-	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. Run `/qurl setup <email>` to connect it."
+	authFailureMessage      = "Failed to authenticate. Please check your qURL API key configuration."
+	workspaceNotSetupFormat = "qURL isn't connected to this workspace yet. Run `%s setup <email>` to connect it."
 	// setupStateMintBudget combines with adminGateBudget on /qurl setup's
 	// synchronous path. 800ms + 1.5s leaves at least 700ms of Slack's 3s ack
 	// window for parsing, response encoding, and network overhead. The OAuth
@@ -50,6 +50,9 @@ var ErrSlackRateLimited = errors.New("slack views.open rate limited")
 // ErrSlackMissingScope lets Slack Web API adapters surface `missing_scope` as
 // a reauthorization problem instead of a generic delivery failure.
 var ErrSlackMissingScope = errors.New("slack missing_scope")
+
+// ErrSlackMessageIncomplete means Slack posted an agent reply without a complete receipt. Do not retry it.
+var ErrSlackMessageIncomplete = errors.New("slack agent message incomplete")
 
 var errSetupUsage = errors.New("setup usage")
 
@@ -114,13 +117,17 @@ func SlackRateLimitRetryAfter(err error) string {
 	return ""
 }
 
+func workspaceNotSetupMessage(command string) string {
+	return fmt.Sprintf(workspaceNotSetupFormat, userCommandName(command))
+}
+
 // authErrorMessage maps an APIKey-lookup error to the right user-facing
 // reply. The ErrWorkspaceNotConfigured sentinel is the "admin hasn't run
 // /qurl setup yet" path — surface a useful next-action instead of the
 // generic auth-failure string.
-func authErrorMessage(err error) string {
+func authErrorMessage(err error, command string) string {
 	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
-		return workspaceNotSetupMessage
+		return workspaceNotSetupMessage(command)
 	}
 	return authFailureMessage
 }
@@ -192,16 +199,8 @@ const (
 // carry an env infix still reaches the admin surface instead of falling
 // through to the user one.
 //
-// SCOPE OF THE REWRITE: only the help text is rewritten to the invoked
-// command name (userHelpMessage / adminHelpMessage, via ReplaceAll). Static
-// error / usage / retry copy elsewhere (tunnelInstallUsage, the alias usage
-// strings, modal-error and rate-limit messages, empty-state hints) bakes in
-// the prod `/qurl-admin` / `/qurl` literal and is deliberately NOT rewritten.
-// That drift is accepted: non-prod (env-infix) installs are operator-only
-// internal sandboxes, where a retry hint naming the prod command is a
-// non-issue, and customer installs are always prod where the literals are
-// already correct. Threading the invoked command through every error site
-// isn't worth the churn for that audience.
+// Help, get/list/aliases setup hints and create deprecation use the invoked name.
+// Other admin/action/modal paths retain production hints until they carry it.
 const adminCommandSuffix = "-admin"
 
 // isAdminCommand reports whether the invoked slash command is the admin
@@ -235,6 +234,9 @@ func isAdminCommand(command string) bool {
 // literals; if Slack's command tokens ever stopped being backtick-free this
 // assumption (documented on isAdminCommand) would need revisiting.
 func userCommandName(command string) string {
+	if command == "" {
+		command = commandUser
+	}
 	return strings.TrimSuffix(command, adminCommandSuffix)
 }
 
@@ -482,6 +484,9 @@ type Config struct {
 	// (see agentConfirmEnabled); production wires it in cmd/main.go.
 	PostMessageBlocks PostMessageBlocksFunc
 
+	// PostAgentMessageBlocks checks complete delivery before removing a partial stream.
+	PostAgentMessageBlocks PostMessageBlocksFunc
+
 	// PostDMBlocks posts a Block Kit direct message (conversations.open then a
 	// chat.postMessage with blocks) — the DM analog of PostMessageBlocks. It
 	// delivers the `/qurl get dm:true` minted link as an "Enter Portal" URL button
@@ -673,12 +678,13 @@ type AgentStreamStart struct {
 // token (enterpriseID for Grid token resolution). StartStream opens a stream on a
 // thread and returns the stream message's ts — the handle AppendStream/StopStream
 // address. AppendStream appends a markdown chunk; StopStream finalizes the message.
-// A nil port keeps the agent on the non-streaming post path; all three require the
-// assistant:write scope.
+// A nil port keeps the agent on the non-streaming post path. DeleteStream removes
+// the bot-owned stream message with the existing chat:write permission.
 type AgentStreamPort interface {
 	StartStream(ctx context.Context, start *AgentStreamStart) (streamTS string, err error)
 	AppendStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS, markdownText string) error
 	StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string, blocks []any) error
+	DeleteStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string) error
 }
 
 // ResolveChannelNameFunc resolves a channel id to its human name via
@@ -1490,7 +1496,8 @@ func (h *Handler) dispatchUserCommand(requestCtx context.Context, w http.Respons
 		// `$slug` or a channel `$alias`. Surface a deprecation hint
 		// instead of an "unknown subcommand" so existing users hitting
 		// muscle memory get a direct redirect to the new shape.
-		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <$id|$alias>` instead — run `/qurl list` to see your resources.")
+		userCommand := userCommandName(command)
+		respondSlack(w, fmt.Sprintf("`%s create` is no longer supported. Use `%s get <$id|$alias>` instead — run `%s list` to see your resources.", userCommand, userCommand, userCommand))
 	case text == "list":
 		// Exact match only: the looser `HasPrefix(text, "list")` form
 		// matched `listing`, `lists`, `list-foo` (silently routing
@@ -2558,11 +2565,8 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 // with ":warning: not configured". The admin verbs live on `/qurl-admin`
 // (see [Handler.adminHelpMessage]); a pointer line routes admins there.
 func (h *Handler) userHelpMessage(command string) string {
-	// command is non-empty here — handleSlashCommand normalizes an empty
-	// payload to commandUser before dispatch — so the ReplaceAll below
-	// always has a non-empty base (an empty base would strip every `/qurl`).
 	lines := []string{
-		"*/qurl* — Create and manage qURLs from Slack",
+		"*{{user_cmd}}* — Create and manage qURLs from Slack",
 		"",
 		"*Commands:*",
 	}
@@ -2572,13 +2576,13 @@ func (h *Handler) userHelpMessage(command string) string {
 	// the OAuth callback still owns key reuse/replacement. Append the owner
 	// parenthetical only there so the help text matches the deployment's
 	// actual behavior.
-	setupLine := "• `/qurl setup <email>` — Connect qURL to your Slack workspace"
+	setupLine := "• `{{user_cmd}} setup <email>` — Connect qURL to your Slack workspace"
 	if h.cfg.AdminStore != nil {
 		setupLine += " (whoever first runs it is the only one who can re-run it — this keeps the workspace's qURL account from being switched to someone else)"
 	}
 	lines = append(lines, setupLine)
 	if h.canAdvertiseUninstall() {
-		lines = append(lines, "• `/qurl uninstall` — Disconnect qURL from this Slack workspace")
+		lines = append(lines, "• `{{user_cmd}} uninstall` — Disconnect qURL from this Slack workspace")
 	}
 	if h.cfg.AdminStore != nil {
 		// Glossary so the `$slug` / `$alias` tokens in the verbs and in
@@ -2592,25 +2596,25 @@ func (h *Handler) userHelpMessage(command string) string {
 		// advertises a verb whose only reply would be the not-configured
 		// error (same rule as `/qurl aliases` below).
 		lines = append(lines,
-			"• `/qurl setup <email> --rotate` — Replace the workspace qURL key on the same qURL account",
-			"• `/qurl setup <email> --repoint` — Move the workspace to a different qURL account (cross-account moves route to an operator)",
-			"_A CRID is a resource's permanent identifier. Use a listed `$id` or `$alias` with `/qurl get`, or the CRID with `/qurl crid`. Several aliases can point to one resource._",
+			"• `{{user_cmd}} setup <email> --rotate` — Replace the workspace qURL key on the same qURL account",
+			"• `{{user_cmd}} setup <email> --repoint` — Move the workspace to a different qURL account (cross-account moves route to an operator)",
+			"_A CRID is a resource's permanent identifier. Use a listed `$id` or `$alias` with `{{user_cmd}} get`, or the CRID with `{{user_cmd}} crid`. Several aliases can point to one resource._",
 			"",
-			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
+			"• `{{user_cmd}} get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
 		)
 		// Gate on PostDMBlocks (the seam deliverGetDM uses to deliver the Enter Portal
 		// button), matching getWork's dm:true refusal — so help never advertises dm:true
 		// when its only reply would be ":warning: DM delivery is not configured".
 		if h.cfg.PostDMBlocks != nil {
-			lines = append(lines, "• `/qurl get <$id|$alias> dm:true` — DM the link to you instead of posting it in-channel")
+			lines = append(lines, "• `{{user_cmd}} get <$id|$alias> dm:true` — DM the link to you instead of posting it in-channel")
 		}
 		lines = append(lines,
-			"• `/qurl get <$id|$alias> reason:\"…\"` — Create a qURL, recording a reason in the audit log",
-			"• `/qurl crid <CRID>` — Create a qURL for a resource in this channel by its CRID (same flags as `/qurl get`)",
+			"• `{{user_cmd}} get <$id|$alias> reason:\"…\"` — Create a qURL, recording a reason in the audit log",
+			"• `{{user_cmd}} crid <CRID>` — Create a qURL for a resource in this channel by its CRID (same flags as `{{user_cmd}} get`)",
 		)
 	}
 	lines = append(lines,
-		"• `/qurl list` — List the resources available to you",
+		"• `{{user_cmd}} list` — List the resources available to you",
 	)
 	if h.cfg.AdminStore != nil {
 		// aliases reads channel_policies through the AdminStore (NOT the
@@ -2619,36 +2623,22 @@ func (h *Handler) userHelpMessage(command string) string {
 		// otherwise help could advertise `/qurl aliases` on a deploy where
 		// it replies ":warning: not configured".
 		lines = append(lines,
-			"• `/qurl aliases` — List this channel's aliases and the resource each one points to",
+			"• `{{user_cmd}} aliases` — List this channel's aliases and the resource each one points to",
 		)
 	}
 	if h.cfg.PostFeedback != nil {
 		// feedback needs no AdminStore/setup — only the PostFeedback seam —
 		// so it gates on that alone and shows even when admin storage is disabled.
 		lines = append(lines,
-			"• `/qurl feedback` — Send a bug report or feature request to the qURL team",
+			"• `{{user_cmd}} feedback` — Send a bug report or feature request to the qURL team",
 		)
 	}
 	lines = append(lines,
-		"• `/qurl help` — Show this help message",
+		"• `{{user_cmd}} help` — Show this help message",
 		"",
-		"Admins: run `/qurl-admin help` for resource setup, alias, and admin commands.",
+		"Admins: run `{{admin_cmd}} help` for resource setup, alias, and admin commands.",
 	)
-	// The lines are authored with the prod command names (`/qurl`,
-	// `/qurl-admin`). Rewrite the `/qurl` prefix to the invoked user
-	// command so a non-prod env renders its own names — and because every
-	// admin literal here is `/qurl-admin` == `/qurl` + adminCommandSuffix,
-	// the same replace also fixes the admin pointer line
-	// (`/qurl-sandbox` → `/qurl-sandbox-admin help`). command is the user
-	// command on this surface, so the replacement is a no-op in prod.
-	//
-	// MAINTAINER INVARIANT: ReplaceAll is blind, so every `/qurl` substring
-	// in `lines` must be a command literal — keep non-command prose (URLs
-	// like `qurl.link`, `/qurl-foo` examples) free of the lowercase `/qurl`
-	// token, or a non-prod env rewrites them too.
-	// TestHelpMessagesContainOnlyCommandTokens guards this: a stray
-	// non-command slash token fails there.
-	return strings.ReplaceAll(strings.Join(lines, "\n"), commandUser, command)
+	return strings.NewReplacer("{{user_cmd}}", userCommandName(command), "{{admin_cmd}}", adminCommandName(command)).Replace(strings.Join(lines, "\n"))
 }
 
 // adminHelpMessage renders the `/qurl-admin help` text — the admin-gated
@@ -2663,8 +2653,6 @@ func (h *Handler) userHelpMessage(command string) string {
 // cosmetic picker hint — Slack does not gate slash-command invocation on
 // workspace-admin role — not the enforcement boundary.
 func (h *Handler) adminHelpMessage(command string) string {
-	// command is non-empty here (normalized in handleSlashCommand); see
-	// userHelpMessage for why the ReplaceAll below needs a non-empty base.
 	// The verbs are grouped under bold section headers (Protect resources,
 	// Aliases, Manage resources, Admins) rather than one flat bullet list —
 	// the admin surface grew long enough that a flat list was hard to scan. Each
@@ -2673,7 +2661,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 	// AdminStore are wired in lockstep (both from the QURL_*_TABLE env vars; see
 	// cmd/main.go), so the sections appear and disappear together.
 	lines := []string{
-		"*/qurl-admin* — Admin commands for qURL in Slack",
+		"*{{admin_cmd}}* — Admin commands for qURL in Slack",
 	}
 	appendSectionHeader := func(title string) {
 		lines = append(lines, "", title)
@@ -2686,20 +2674,20 @@ func (h *Handler) adminHelpMessage(command string) string {
 		appendSectionHeader("*Protect resources*")
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
-				"• `/qurl-admin protect` — Guided chooser for qURL Connector setup or existing URL resources (recommended)",
-				"• `/qurl-admin protect-connector` — Guided connector setup for web apps and HTTP APIs (Docker, Docker Compose, ECS/Fargate, Kubernetes)",
-				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed Connector setup for web apps and HTTP APIs; creates an enrollment token and binds `$<id>` in this channel",
-				"• `/qurl-admin protect-url` — Guided URL picker; choose an existing URL resource and channel alias",
-				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Typed: protect an existing URL resource in this channel",
-				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Typed: protect an existing no-alias URL resource in this channel",
-				"• Typed connector options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
+				"• `{{admin_cmd}} protect` — Guided chooser for qURL Connector setup or existing URL resources (recommended)",
+				"• `{{admin_cmd}} protect-connector` — Guided connector setup for web apps and HTTP APIs (Docker, Docker Compose, ECS/Fargate, Kubernetes)",
+				"• `{{admin_cmd}} protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed Connector setup for web apps and HTTP APIs; creates an enrollment token and binds `$<id>` in this channel",
+				"• `{{admin_cmd}} protect-url` — Guided URL picker; choose an existing URL resource and channel alias",
+				"• `{{admin_cmd}} protect-url $<alias> [as:$channel-alias]` — Typed: protect an existing URL resource in this channel",
+				"• `{{admin_cmd}} protect-url url:<target-url> as:$channel-alias` — Typed: protect an existing no-alias URL resource in this channel",
+				"• Typed connector options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<container-name>` or `web_container:<container-name>`; Compose accepts `service:<service-name>`; `env:compose` also works",
 			)
 		} else {
 			lines = append(lines,
-				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Create a sidecar enrollment token and bind `$<id>` in this channel",
-				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Protect an existing URL resource in this channel",
-				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Protect an existing no-alias URL resource in this channel",
-				"  Guided setup (bare `/qurl-admin protect-connector` / `protect-url`) is not enabled in this deployment; use the typed forms above.",
+				"• `{{admin_cmd}} protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Create a sidecar enrollment token and bind `$<id>` in this channel",
+				"• `{{admin_cmd}} protect-url $<alias> [as:$channel-alias]` — Protect an existing URL resource in this channel",
+				"• `{{admin_cmd}} protect-url url:<target-url> as:$channel-alias` — Protect an existing no-alias URL resource in this channel",
+				"  Guided setup (bare `{{admin_cmd}} protect-connector` / `protect-url`) is not enabled in this deployment; use the typed forms above.",
 			)
 		}
 	}
@@ -2720,8 +2708,8 @@ func (h *Handler) adminHelpMessage(command string) string {
 		// channel_policies through it.
 		appendSectionHeader("*Aliases*")
 		lines = append(lines,
-			"• `/qurl-admin set-alias $<alias> $<id>` — Point an alias at a qURL Connector ID in this channel",
-			"• `/qurl-admin unset-alias $<alias>` — Remove an alias from this channel",
+			"• `{{admin_cmd}} set-alias $<alias> $<id>` — Point an alias at a qURL Connector ID in this channel",
+			"• `{{admin_cmd}} unset-alias $<alias>` — Remove an alias from this channel",
 		)
 	}
 	if h.cfg.AdminStore != nil {
@@ -2742,34 +2730,29 @@ func (h *Handler) adminHelpMessage(command string) string {
 		//     so it doesn't collide with `/qurl list`.
 		appendSectionHeader("*Manage resources*")
 		lines = append(lines,
-			"• `/qurl-admin set-display-name $<id> <display name>` — Set a qURL Connector's friendly Display Name shown in `/qurl list`",
-			"• `/qurl-admin unset-display-name $<id>` — Reset a qURL Connector's Display Name to the default",
-			"• `/qurl-admin revoke $<id>` — Revoke a protected resource and all its qURLs",
+			"• `{{admin_cmd}} set-display-name $<id> <display name>` — Set a qURL Connector's friendly Display Name shown in `{{user_cmd}} list`",
+			"• `{{admin_cmd}} unset-display-name $<id>` — Reset a qURL Connector's Display Name to the default",
+			"• `{{admin_cmd}} revoke $<id>` — Revoke a protected resource and all its qURLs",
 		)
 		appendSectionHeader("*Admins*")
 		lines = append(lines,
-			"• `/qurl-admin add @user` — Promote a Slack user to admin",
-			"• `/qurl-admin remove @user` — Demote a Slack user from admin",
-			"• `/qurl-admin transfer-ownership @user` — Owner-only: hand off who may reconnect qURL for this workspace",
-			"• `/qurl-admin admins` — List who connected qURL (the owner) and the current admins",
+			"• `{{admin_cmd}} add @user` — Promote a Slack user to admin",
+			"• `{{admin_cmd}} remove @user` — Demote a Slack user from admin",
+			"• `{{admin_cmd}} transfer-ownership @user` — Owner-only: hand off who may reconnect qURL for this workspace",
+			"• `{{admin_cmd}} admins` — List who connected qURL (the owner) and the current admins",
 		)
 		appendSectionHeader("*Conversation mode*")
 		lines = append(lines,
-			"• `/qurl-admin agent on` — Let members @mention or DM the qURL Secure Access Agent in this workspace",
-			"• `/qurl-admin agent off` — Turn conversation mode off for this workspace",
-			"• `/qurl-admin agent` — Show whether conversation mode is on for this workspace",
+			"• `{{admin_cmd}} agent on` — Let members @mention or DM the qURL Secure Access Agent in this workspace",
+			"• `{{admin_cmd}} agent off` — Turn conversation mode off for this workspace",
+			"• `{{admin_cmd}} agent` — Show whether conversation mode is on for this workspace",
 		)
 	}
 	// Always-present anchor: the sections above are all gated on sandbox wiring,
 	// so without this line a no-store deploy would render just the header with no
 	// verbs. Mirrors the `/qurl help` line on the user surface.
-	lines = append(lines, "", "• `/qurl-admin help` — Show this help message")
-	// Authored with the prod admin command name; rewrite to the invoked
-	// admin command so a non-prod env renders its own (`/qurl-sandbox-admin`
-	// …). Every admin literal here is the full `/qurl-admin`, so a single
-	// replace covers them all; command is the admin command on this
-	// surface, so the replacement is a no-op in prod.
-	return strings.ReplaceAll(strings.Join(lines, "\n"), commandAdmin, command)
+	lines = append(lines, "", "• `{{admin_cmd}} help` — Show this help message")
+	return strings.NewReplacer("{{user_cmd}}", userCommandName(command), "{{admin_cmd}}", adminCommandName(command)).Replace(strings.Join(lines, "\n"))
 }
 
 // respondMethodNotAllowed writes 405 with an RFC 7231 §6.5.5 Allow header.

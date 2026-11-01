@@ -20,7 +20,7 @@ import (
 const (
 	// TODO(upstream-contract): keep this digest in lockstep with the
 	// origins/s3-static-connector image promoted for Slack S3 website installs.
-	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3"
+	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:6ff85afd1b0d96211f22bcbdbd950778e6616df8295274a89a6a5f1af7b44ce8"
 	defaultS3WebsiteDescription   = "Slack qURL Connector install for S3 website"
 	defaultS3WebsiteIndexDocument = "index.html"
 	// TODO(upstream-contract): keep in lockstep with
@@ -500,7 +500,7 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("S3 website install: failed to get API key", "error", sanitizeLogValue(err.Error()))
-		return nil, authErrorMessage(err), err
+		return nil, authErrorMessage(err, commandUser), err
 	}
 
 	ownerID, err := resolveInstallOwnerID(ctx, c, log, "S3 website install", args.Slug)
@@ -1059,25 +1059,30 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 	if err != nil {
 		return "", err
 	}
+	volumeInstructions, err := renderECSEFSVolumeInstructions(args.Slug)
+	if err != nil {
+		return "", err
+	}
 	intro := strings.Join([]string{
 		"Use this as an " + ecsFargateChecklistText + ".",
-		"Write the temporary enrollment token to `enrollment-token` on a read-only qurl-bootstrap EFS access point; never place it in task environment or argv.",
+		"Write the temporary enrollment token to `enrollment-token` on the qurl-bootstrap EFS access point (read-only to the task role); never place it in task environment or argv.",
 		"Run both containers in the same task; Fargate awsvpc networking lets the qURL Connector reach the private S3 origin on `127.0.0.1:" + strconv.Itoa(s3WebsiteOriginPort) + "`.",
 		"Both containers are essential, so a failure of either one restarts the whole task.",
 		"The START dependency orders container launch only, so the qURL Connector may log local connection errors until the origin is listening.",
 		"The task role needs s3:GetObject on the objects and s3:ListBucket on the bucket.",
 		s3WebsitePreflightNotice,
-		"Configure qurl-agent-state for POSIX UID/GID `65532:65532`, and mount qurl-config and qurl-bootstrap read-only. Do not share qurl-agent-state across concurrently running sidecars.",
 		"Both generated containers drop every Linux capability.",
+		"The log group is shared across installs. Each task has separate `origin/" + s3WebsiteOriginContainerName + "/<task-id>` and `qurl/qurl/<task-id>` streams; filter by task ID to find one install. For separate access or retention, replace both `awslogs-group` values with an install-specific group and update the execution role permissions.",
 	}, " ")
 	return intro + "\n\n" +
-		"1. Store the enrollment token from the separate DM as the read-only qurl-bootstrap/enrollment-token file. This message intentionally does not contain it.\n\n" +
-		"2. Put share.yaml at `/etc/qurl/share.yaml` on the qurl-config EFS access point:\n\n" +
+		"1. " + volumeInstructions + "\n\n" +
+		"2. Store the enrollment token from the separate DM as `enrollment-token` at the qurl-bootstrap access-point root. This message intentionally does not contain it.\n\n" +
+		"3. Put share.yaml at the qurl-config access-point root (the container reads `/etc/qurl/share.yaml`):\n\n" +
 		configBlock + "\n\n" +
-		"3. Add these two containers to the same task definition and replace each `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
+		"4. Add these two containers to the same task definition and replace each `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
 		containerBlock + "\n\n" +
-		"4. Create the CloudWatch Logs group `" + s3WebsiteECSLogGroup + "` in the ECS task region if it does not already exist.\n" +
-		"5. Add EFS-backed qurl-agent-state, qurl-config, and qurl-bootstrap volumes. After qURL connects, deploy a warm-start revision without the bootstrap mount/flag, verify reconnect, then delete the enrollment-token file.", nil
+		"5. Create the CloudWatch Logs group `" + s3WebsiteECSLogGroup + "` in the ECS task region if it does not already exist.\n" +
+		"6. " + ecsWarmStartInstructions, nil
 }
 
 func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -1115,9 +1120,9 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 				{Name: "QURL_ENDPOINT", Value: endpoint},
 			},
 			MountPoints: []ecsMountPoint{
-				{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/qurl-volume"},
-				{SourceVolume: "qurl-config", ContainerPath: "/etc/qurl", ReadOnly: true},
-				{SourceVolume: "qurl-bootstrap", ContainerPath: "/run/secrets/qurl", ReadOnly: true},
+				{SourceVolume: ecsAgentStateVolume, ContainerPath: "/var/lib/qurl-volume"},
+				{SourceVolume: ecsConfigVolume, ContainerPath: "/etc/qurl", ReadOnly: true},
+				{SourceVolume: ecsBootstrapVolume, ContainerPath: "/run/secrets/qurl", ReadOnly: true},
 			},
 			LogConfiguration: awslogsConfiguration(s3WebsiteECSLogGroup, "qurl"),
 			LinuxParameters:  hardenedECSLinuxParameters(),

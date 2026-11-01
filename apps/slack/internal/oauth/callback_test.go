@@ -1563,24 +1563,22 @@ type fakeAdminStore struct {
 	mu        sync.Mutex
 	gotTeamID string
 	gotOwner  string
-	gotSeed   string
 	calls     int
 	err       error
 }
 
-func (f *fakeAdminStore) BindWorkspace(_ context.Context, m *WorkspaceMapping, seedAdmin string) error {
+func (f *fakeAdminStore) BindWorkspace(_ context.Context, m *WorkspaceMapping) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	f.gotTeamID = m.TeamID
 	f.gotOwner = m.OwnerID
-	f.gotSeed = seedAdmin
 	return f.err
 }
 
 // TestCallbackSeedsAdminOnBind fences the load-bearing collapse: a
 // successful /qurl setup must call BindWorkspace with the verified
-// state's userID as seedAdmin and the Auth0 sub as OwnerID. Without
+// state's Slack userID as OwnerID. Without
 // this, the workspace gets an API key but no admin row — every
 // subsequent /qurl admin command would reply "you are not an admin."
 func TestCallbackSeedsAdminOnBind(t *testing.T) {
@@ -1607,16 +1605,13 @@ func TestCallbackSeedsAdminOnBind(t *testing.T) {
 	}
 	// OwnerID is the Slack user ID of the /setup invoker (workspace
 	// owner in the LayerV admin model). It must equal verified.UserID
-	// — the same value as seedAdmin — by construction at first bind.
+	// and supplies both the owner and original admin seed at first bind.
 	// The id_token sub claim is still required at OAuth-callback time
 	// (verifier runs upstream of this) but no longer persisted; the
 	// security gate it provides is still in place via the
 	// `qurlSub == ""` check in checkBindAllowed.
 	if admin.gotOwner != testUserID {
 		t.Errorf("BindWorkspace OwnerID: got %q want %q (must equal verified.UserID — the Slack user who ran /setup)", admin.gotOwner, testUserID)
-	}
-	if admin.gotSeed != testUserID {
-		t.Errorf("BindWorkspace seedAdmin: got %q want %q (must come from verified state's userID)", admin.gotSeed, testUserID)
 	}
 }
 
@@ -2762,8 +2757,8 @@ func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
 	}
 	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	admin.mu.Lock()
-	if admin.calls != 1 || admin.gotSeed != testUserID {
-		t.Errorf("first attempt: BindWorkspace must run BEFORE mint and seed the admin row (calls=%d seed=%q)", admin.calls, admin.gotSeed)
+	if admin.calls != 1 || admin.gotOwner != testUserID {
+		t.Errorf("first attempt: BindWorkspace must run BEFORE mint and seed the admin row (calls=%d owner=%q)", admin.calls, admin.gotOwner)
 	}
 	admin.mu.Unlock()
 	store.mu.Lock()
