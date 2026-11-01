@@ -768,11 +768,12 @@ completed_flows        = count(FLOW_DELETED)
 silently_dropped_flows = total_flows - completed_flows
 ```
 
-Every `createFlow()` emits `FLOW_CREATED`; every explicit `deleteFlow()`
-(terminal stage, abort, admin cleanup) emits `FLOW_DELETED`. TTL-reaped
-flows — the silent-drop case the SLI is designed to catch — emit no event
-by design, because DDB TTL deletion is asynchronous and a synchronous
-"reaped" signal would require a separate sweeper. Counting the difference
+Every `createFlow()` emits `FLOW_CREATED`; ordinary explicit `deleteFlow()`
+calls (terminal stage, abort, admin cleanup) emit `FLOW_DELETED`. Expired-only
+recovery emits `FLOW_REAPED` instead, including expired same-stage predecessors,
+preserving the abandoned-flow count. This event is a structured log; it has no
+dedicated CloudWatch metric filter. Native DDB TTL deletion is asynchronous and
+emits no application event. Counting the difference
 captures every unclean drop: process crash mid-flow, worker hang, TTL reap
 of an abandoned flow.
 
