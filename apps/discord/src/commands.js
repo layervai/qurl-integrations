@@ -1362,6 +1362,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   let renderedGeneration = 0;
   let lastSourceSnapshotAt = null;
   let aggregateUsable = true;
+  let lastStrongFinalCount = null;
   let allDone = false;
 
   // A tick that began before addRecipients must not render its stale view map.
@@ -1568,7 +1569,8 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       if (trackingGeneration !== genAtStart || !interaction) return;
       // Only source facts can settle the monitor. Final reads are strong so a
       // committed first-view fact cannot lag its aggregate and strand the loop.
-      const verifyFinal = Math.max(aggregate ?? 0, displayedFloor) >= expectedCount;
+      const finalCandidate = Math.max(aggregate ?? 0, displayedFloor);
+      const verifyFinal = finalCandidate >= expectedCount && finalCandidate !== lastStrongFinalCount;
       if (aggregate === null || verifyFinal) {
         const views = await db.getQurlViews([...trackedQurlIds], { consistentRead: verifyFinal });
         if (trackingGeneration !== genAtStart || !interaction) return;
@@ -1580,6 +1582,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
           viewed++;
         }
         lastSourceSnapshotAt = Date.now();
+        if (verifyFinal) lastStrongFinalCount = finalCandidate;
         if (verifyFinal && viewed < expectedCount) {
           aggregateUsable = false;
           aggregate = null;

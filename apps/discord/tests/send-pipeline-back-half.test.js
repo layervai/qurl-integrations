@@ -4910,6 +4910,39 @@ describe('monitorLinkStatus — aggregate reads with source reconciliation', () 
     expect(monitor.getFullMsg()).toContain('2 viewed / 99 pending');
   });
 
+  it('an inflated complete floor gets one strong audit, then uses the normal source read cost', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(101);
+    const { monitor, interaction } = start();
+    await jest.advanceTimersByTimeAsync(13000);
+    expect(mockDb.getQurlViews.mock.calls.map(call => call[1].consistentRead)).toEqual([true, false, false]);
+    expect(mockDb.getSendViewedCount).not.toHaveBeenCalled();
+    expect(interaction.editReply).not.toHaveBeenCalled();
+    // A confirmed floor is preserved; reconciliation does not erase an old overcount.
+    expect(monitor.getFullMsg()).toContain('101 viewed / 0 pending');
+  });
+
+  it('an unavailable large-send floor falls back to source without reading the aggregate', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockRejectedValue(new Error('floor unavailable'));
+    start();
+    await jest.advanceTimersByTimeAsync(8000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(mockDb.getSendViewedCount).not.toHaveBeenCalled();
+  });
+
+  it('an incomplete source read never establishes freshness and retries on the next tick', async () => {
+    mockDb.getQurlViews.mockRejectedValueOnce(new Error('qurl view read incomplete after retries')).mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(0);
+    mockDb.getSendViewedCount.mockResolvedValue(1);
+    const { interaction } = start();
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(interaction.editReply).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(mockDb.getSendViewedCount).not.toHaveBeenCalled();
+  });
+
   it('recipient additions during a final edit repaint the new total and keep polling', async () => {
     mockDb.getQurlViews.mockResolvedValue(firstView());
     let finishEdit;

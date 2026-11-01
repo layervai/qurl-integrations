@@ -710,8 +710,13 @@ still reads source. This keeps the normal five-second poll cadence and existing
 webhook fast path, but a new source-only crash gap can take 30 seconds plus the
 next tick/read time to repair instead of the old next-tick recovery. Known floors
 never move backward, and a failed final edit does not stop the monitor or advance
-the stored floor. Source facts are checked with a strong read before aggregate
-completion can settle the monitor. An already confirmed external floor does not
+the stored floor. Reconciliation repairs undercounts only: it cannot lower an
+already confirmed floor, including an old overcount created by pre-upgrade
+workers. Rolling-worker and old-row behavior still needs the held Sandbox proof.
+Source facts are checked with a strong read before aggregate
+completion can settle the monitor. Each candidate final count gets one complete
+strong audit; a contradicted floor then uses normal source reads rather than
+repeating strong full-fanout reads. An already confirmed external floor does not
 trigger a duplicate edit. Recipient additions during an edit keep polling the
 new total; a late edit receipt after stop cannot write a floor.
 
