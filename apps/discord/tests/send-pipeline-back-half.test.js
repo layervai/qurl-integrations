@@ -4150,7 +4150,7 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(mockSendChannelMessage).toHaveBeenCalledWith(
       'channel-everyone',
       expect.objectContaining({
-        content: expect.stringMatching(/shared something with everyone in this server via \*\*qURL\*\*\. Check your DMs from qURL\./),
+        content: expect.stringMatching(/shared something with everyone in this server via \*\*qURL\*\*\. Check your DMs\./),
       }),
     );
   });
@@ -4162,7 +4162,7 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(mockSendChannelMessage).toHaveBeenCalledWith(
       'channel-voice',
       expect.objectContaining({
-        content: expect.stringMatching(/shared something with everyone in this voice channel via \*\*qURL\*\*\. Check your DMs from qURL\./),
+        content: expect.stringMatching(/shared something with everyone in this voice channel via \*\*qURL\*\*\. Check your DMs\./),
       }),
     );
   });

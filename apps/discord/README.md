@@ -579,8 +579,10 @@ Exit codes:
   not finish applying; earlier bot fields may already be applied. Inspect the
   Discord response, wait for `retry_after` if
   present, and rerun after fixing the API error.
-- `4` — pre-flight token/app verification failed before writes. Fix the token,
-  app ID, or public key mismatch before rerunning.
+- `4` — pre-flight verification failed before writes. This includes identity
+  mismatches, network errors, timeouts and temporary API refusals. Check the
+  error first: fix a token/app mismatch, or wait for `retry_after` when the
+  failure is temporary. No fields were written by that run.
 
 Application name and legal URLs are Developer Portal-only. Discord's
 Edit Current Application API does not list legal URLs as writable fields, so
