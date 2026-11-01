@@ -66,7 +66,8 @@ const ROLE_COLORS = {
 const TIMEOUTS = {
   BUTTON_INTERACTION: 60000,  // 1 minute
   DEFER_REPLY: 3000,          // 3 seconds
-  QURL_REVOKE_WINDOW: 900000, // 15 minutes - button stays active, /qurl revoke works forever
+  // TODO(upstream-contract): Discord tokens last 15m; collectors subtract age and close headroom.
+  QURL_REVOKE_WINDOW: 900000, // /qurl revoke remains available after this token expires
 };
 
 // Limits

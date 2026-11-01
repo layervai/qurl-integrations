@@ -199,6 +199,7 @@ const {
 
 function makeInteraction(overrides = {}) {
   return {
+    createdTimestamp: Date.now(),
     user: { id: 'sender-1', username: 'Sender' },
     channelId: 'ch-1',
     editReply: jest.fn().mockResolvedValue(undefined),
@@ -2542,6 +2543,30 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       errorName: 'WeirdFailure',
       errorMessage: '42',
     }));
+  });
+});
+
+describe('management collector interaction-token deadline', () => {
+  it.each([
+    [0, 890000, 1800000900], [300000, 590000, 1800000600],
+    [899000, 1, 1800000001], [-5000, 890000, 1800000900], [null, 1, 900],
+  ])('reserves the close/read budget after an interaction age of %s ms', async (age, expectedTime, expectedExpiry) => {
+    const now = 1800000000000;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    const response = { createMessageComponentCollector: jest.fn(() => ({ on: jest.fn() })) };
+    const interaction = makeInteraction({
+      createdTimestamp: age === null ? undefined : now - age,
+      token: 'fixture-token', applicationId: 'fixture-app',
+      editReply: jest.fn().mockResolvedValue(response),
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_one', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValueOnce({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    try {
+      await executeSendPipeline(interaction, makePipelineParams());
+      expect(response.createMessageComponentCollector).toHaveBeenCalledWith(expect.objectContaining({ time: expectedTime }));
+      expect(mockDb.saveSendConfirmState.mock.calls[0][1].confirmExpiresAt).toBe(expectedExpiry);
+    } finally { clock.mockRestore(); }
   });
 });
 

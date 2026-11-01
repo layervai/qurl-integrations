@@ -2493,6 +2493,9 @@ async function executeSendPipeline(interaction, {
   // applicationId is the standard discord.js Interaction property (set on
   // the reconstructed worker interaction too, from the raw gateway
   // application_id); no `client` fallback needed.
+  const interactionCreatedAt = Number.isFinite(interaction.createdTimestamp)
+    ? Math.min(Date.now(), interaction.createdTimestamp)
+    : 0;
   const counterDegraded = qurlLinks.some(l => !l.qurlId);
   if (delivered > 0 && interaction.token && !counterDegraded) {
     try {
@@ -2512,19 +2515,9 @@ async function executeSendPipeline(interaction, {
         // omit qurlId.
         confirmQurlIds: qurlLinks.map(l => l.qurlId).filter(Boolean),
         viewedCount: 0,
-        // Epoch seconds. Aligned to the real Discord interaction-token TTL
-        // (~15 min), NOT a minute past it: getSendRenderState self-defends
-        // by treating a past value as absent, so setting this to ~15 min
-        // makes the fast-path stop trusting the token right when Discord
-        // kills it — closing the dead-token retry window where a view
-        // between token-death and self-defense would fire a PATCH that
-        // 401s. Kept ABOVE the 14-min monitor cap so the fast-path stays
-        // live for the whole window the token is actually valid (a value
-        // ≤14 min would self-defend while the monitor + token are still
-        // good). This also bounds the sensitive token's at-rest life until
-        // the qurl-bot-ddb DDB TTL on confirm_expires_at lands
-        // (infra repo #1227) to physically reap the row.
-        confirmExpiresAt: Math.floor(Date.now() / 1000) + 15 * 60,
+        // Token expiry is measured from interaction creation, including time spent minting.
+        // Unknown creation time expires closed; DDB self-defense then hides the bearer token.
+        confirmExpiresAt: Math.floor((interactionCreatedAt + TIMEOUTS.QURL_REVOKE_WINDOW) / 1000),
       });
     } catch (err) {
       logger.error('saveSendConfirmState failed; webhook view-counter fast-path disabled for this send (poll backstop still renders)', {
@@ -2589,9 +2582,12 @@ async function executeSendPipeline(interaction, {
     // recipients + buttonRow closure for up to an hour.
     let collector;
     try {
+      // Discord tokens age from creation, not from when a slow send finishes.
+      // Leave 10s for the bounded state read and final edit; unknown age closes promptly.
+      const tokenAgeMs = Date.now() - interactionCreatedAt;
       collector = response.createMessageComponentCollector({
         filter: (i) => i.user.id === interaction.user.id,
-        time: TIMEOUTS.QURL_REVOKE_WINDOW,
+        time: Math.max(1, TIMEOUTS.QURL_REVOKE_WINDOW - tokenAgeMs - 10_000),
       });
     } catch (err) {
       logger.error('Failed to create button collector', { sendId, error: err.message });

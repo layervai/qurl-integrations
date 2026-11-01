@@ -223,6 +223,7 @@ function makeInteraction({
   const optGetAttachment = jest.fn((name) => options[name] ?? null);
 
   const interaction = {
+    createdTimestamp: Date.now(),
     user: { id: userId, username: 'Sender' },
     guildId,
     channelId,
