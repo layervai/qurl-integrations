@@ -1035,7 +1035,12 @@ usage, rejected turns, model usage, and the workflows that customers need.
 A higher cap does not establish capacity, and `0` removes that protection.
 Enablement flags do not replace model credentials, storage, Slack scopes, or
 message-delivery checks. Verify those paths in the target environment before
-broad enablement.
+broad enablement. Check the startup conversation-mode and confirm-mode state
+logs after task replacement. Confirm mode can be live while ephemeral block
+delivery is missing; the startup warning says channel get approvals will fail
+after minting. Resolve that warning before enabling those workflows. Boolean
+controls accept Go `ParseBool` forms such as `true`, `false`, `1`, and `0`;
+`yes` and `enable` are invalid.
 
 ## Environment variables
 
