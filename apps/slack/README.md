@@ -152,7 +152,7 @@ read-only on those access points. Attach an explicit file-system policy; the
 absent/default policy permits full mount-target access. Scope grants to each
 role and access point, and deny config/bootstrap writes for the task role only,
 without denying the provisioning principal. See the [ECS EFS task volume
-contract](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specify-efs-config.html)
+contract](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specify-efs-config.html),
 [EFS access-point directory rules](https://docs.aws.amazon.com/efs/latest/ug/enforce-root-directory-access-point.html),
 and [EFS IAM/default-policy rules](https://docs.aws.amazon.com/efs/latest/ug/iam-access-control-nfs-efs.html).
 

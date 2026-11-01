@@ -84,11 +84,12 @@ type ecsLogConfiguration struct {
 }
 
 const (
-	ecsAgentStateVolume     = "qurl-agent-state"
-	ecsConfigVolume         = "qurl-config"
-	ecsBootstrapVolume      = "qurl-bootstrap"
-	ecsFargateChecklistText = "ECS/Fargate task-definition checklist"
-	connectorContainerName  = "qurl"
+	ecsWarmStartInstructions = "After qURL connects, deploy a warm-start revision without the --enrollment-token-file flag and path, qurl-bootstrap mount, or qurl-bootstrap entry in task volumes. Remove the bootstrap access point from task-role ClientMount allows in both identity and file-system policies. Verify reconnect from qurl-agent-state, then delete the enrollment-token file."
+	ecsAgentStateVolume      = "qurl-agent-state"
+	ecsConfigVolume          = "qurl-config"
+	ecsBootstrapVolume       = "qurl-bootstrap"
+	ecsFargateChecklistText  = "ECS/Fargate task-definition checklist"
+	connectorContainerName   = "qurl"
 	// TODO(upstream-contract): keep in lockstep with the qurl image USER.
 	ecsConnectorUser                = "65532:65532"
 	ecsLogRegionOption              = "awslogs-region"
@@ -133,9 +134,10 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		configBlock + "\n\n" +
 		"3. Add this non-essential qURL sidecar container to the same task definition as the target container:\n\n" +
 		containerBlock + "\n\n" +
-		"4. " + volumeInstructions + "\n\nAfter the task logs show qURL connected, deploy a warm-start revision without `--enrollment-token-file` or the qurl-bootstrap mount; verify it reconnects from qurl-agent-state, then delete the enrollment-token file.", nil
+		"4. " + volumeInstructions + "\n\n" + ecsWarmStartInstructions, nil
 }
 
+// TODO(upstream-contract): recheck ECS EFS fields, access-point roots, and EFS default-policy behavior when AWS changes them.
 func renderECSEFSVolumeInstructions(slug string) (string, error) {
 	if !tunnelSlugPattern.MatchString(slug) {
 		return "", fmt.Errorf("invalid ECS volume slug %q", slug)
@@ -164,7 +166,7 @@ func renderECSEFSVolumeInstructions(slug string) (string, error) {
 		"Create separate EFS access points rooted at `/qurl/" + slug + "/agent-state`, `/qurl/" + slug + "/config`, and `/qurl/" + slug + "/bootstrap`, respectively. Set each access point's POSIX user and root CreationInfo owner to UID/GID `" + ecsConnectorUser + "`, with root permissions `0700`. These paths belong on the access points; task volume rootDirectory stays `/`. " +
 		"Use a separate provisioning principal with ClientMount and ClientWrite on the config/bootstrap access points to write these files through those access points. Write `share.yaml` at the config access-point root and `enrollment-token` at the bootstrap access-point root; the container sees `/etc/qurl/share.yaml` and `/run/secrets/qurl/enrollment-token`. qURL creates `state/` under the agent-state root. " +
 		"Use a different slug and access points for every concurrently running sidecar. Keep one active task per agent-state access point. Stop the old task before its replacement mounts the same state; for an ECS service use desiredCount 1, deployment maximumPercent 100 and minimumHealthyPercent 0. " +
-		"Attach an explicit file-system policy: the absent/default policy grants full access to clients that can reach a mount target. In the task identity policy and file-system policy, allow elasticfilesystem:ClientMount on the file-system ARN for the task role, conditioned on the three access-point ARNs via elasticfilesystem:AccessPointArn; allow elasticfilesystem:ClientWrite only on agent-state. Separately allow the provisioning principal mount/write on config/bootstrap. Add a task-role-only Deny for ClientWrite on config/bootstrap so wider grants cannot enable writes; do not deny the provisioning principal. Allow NFS TCP 2049 from the task security group to EFS mount targets.", nil
+		"Attach an explicit file-system policy: the absent/default policy grants full access to clients that can reach a mount target. In the task identity policy and file-system policy, allow elasticfilesystem:ClientMount on the file-system ARN for the task role, conditioned on the three access-point ARNs via elasticfilesystem:AccessPointArn; allow elasticfilesystem:ClientWrite on that file-system ARN only with the agent-state access-point ARN condition. Separately allow the provisioning principal mount/write on config/bootstrap. Add a task-role-only Deny for ClientWrite on config/bootstrap so wider grants cannot enable writes; do not deny the provisioning principal. Allow NFS TCP 2049 from the task security group to EFS mount targets.", nil
 }
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (string, error) {
