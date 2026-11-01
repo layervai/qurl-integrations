@@ -1652,21 +1652,21 @@ describe('qurl sends', () => {
   test.each([
     ['revoked_at', true, { revoked_at: 'when' }],
     ['revoking_at', false, { revoking_at: 'when' }],
-  ])('getSendRenderState: %s yields terminal=%s', async (_field, terminal, revocationState) => {
+  ])('getSendRenderState: %s yields fastPathOff=%s', async (_field, fastPathOff, revocationState) => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', ...revocationState, confirm_qurl_ids: ['q_a', 'q_b'] },
     });
     const viaRevoke = await store.getSendRenderState('s1');
-    expect(viaRevoke.fastPathOff).toBe(terminal);
+    expect(viaRevoke.fastPathOff).toBe(fastPathOff);
     expect(viaRevoke.qurlIds).toEqual(['q_a', 'q_b']);
     expect(viaRevoke.expectedCount).toBe(0);
     expect(viaRevoke.lastRenderedCount).toBe(0);
 
     ddbMock.reset();
     ddbMock.on(GetCommand).resolves({ Item: { send_id: 's2', confirm_terminal: true } });
-    const viaTerminalFlag = await store.getSendRenderState('s2');
-    expect(viaTerminalFlag.fastPathOff).toBe(true);
-    expect(viaTerminalFlag.qurlIds).toEqual([]); // absent → [] not undefined
+    const viaLegacyFlag = await store.getSendRenderState('s2');
+    expect(viaLegacyFlag.fastPathOff).toBe(true);
+    expect(viaLegacyFlag.qurlIds).toEqual([]); // absent → [] not undefined
   });
 
   test.each([

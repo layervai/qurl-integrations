@@ -316,8 +316,8 @@ describe('sender view-counter fast-path — content-only (buttons preserved)', (
   });
 });
 
-describe('sender view-counter fast-path — terminal skip', () => {
-  it('a terminal (revoked/closed) confirmation is NOT resurrected', async () => {
+describe('sender view-counter fast-path — disabled token edits', () => {
+  it('a revoked/closed token confirmation is NOT edited', async () => {
     mockGetSendRenderState.mockResolvedValue(armedState({ fastPathOff: true }));
     await signedRequest();
     await flushCounter();

@@ -1156,7 +1156,8 @@ async function getSendConfig(sendId, senderDiscordId) {
 //
 // `fastPathOff` disarms token edits after revoke, window close or add-degrade.
 // It does not describe display liveness: polling may still own a bare display.
-// Read the old flag while rows and replicas migrate. `qurlIds` is an optional inline cache
+// shortcut: retain the legacy read until old rows migrate (#875); this table has no TTL.
+// `qurlIds` is an optional inline cache
 // of minted qurl_ids for small sends; large sends deliberately store []
 // so the row stays well below DDB's item limit and the rare fallback reads
 // recipient rows via getSendItems instead.

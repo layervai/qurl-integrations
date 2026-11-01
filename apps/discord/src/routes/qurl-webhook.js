@@ -768,8 +768,8 @@ function editSenderCounterInBackground({
         return { status: 'no-state' };
       }
 
-      // 3. TERMINAL CHECK FIRST. A revoked / window-closed / otherwise
-      //    frozen confirmation must NOT be resurrected by a late view
+      // 3. FAST-PATH-OFF CHECK FIRST. A revoked / window-closed / otherwise
+      //    disarmed token display must NOT be edited by a late view
       //    edit — checked before anything else so we never even read the
       //    send items for a dead display.
       if (state.fastPathOff) {

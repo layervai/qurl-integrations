@@ -2898,7 +2898,7 @@ async function executeSendPipeline(interaction, {
               // the send to view-counter-degraded (the monitor renders bare
               // baseMsg from here on). The fast-path can't see that, so
               // DISARM it by marking the confirmation terminal — its
-              // terminal guard then skips, leaving the (bare) poll render
+              // fast-path-off guard then skips, leaving the (bare) poll render
               // as the sole renderer. Matches the send-time degraded gate.
               if ((addResult.newLinks || []).some(l => !l?.qurlId)) {
                 db.markConfirmFastPathOff(sendId).catch((err) => {
