@@ -126,15 +126,17 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		"Create the shared CloudWatch Logs group `/ecs/qurl-connector` in the task region and let the task execution role write to it. Each task has a separate `qurl/qurl/<task-id>` stream; filter by task ID to find one install. For separate access or retention, replace `awslogs-group` with an install-specific group and update the execution role permissions.",
 		"Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.",
 		"The generated sidecar drops every Linux capability.",
+		"This shared-state sidecar template requires a single-task application service and replacement downtime. Replicated application tasks must not share this connector state.",
 		"Its ECS restart policy retries the non-essential qURL container indefinitely after the 60-second minimum run window without restarting the target application container.",
 	}, " ")
 	return intro + "\n\n" +
-		"1. First create the access points and provisioning policy in step 4. Store the enrollment token from the separate DM as the read-only `enrollment-token` file at the qurl-bootstrap access-point root. This message intentionally does not contain the token.\n\n" +
-		"2. Put share.yaml at the qurl-config access-point root (the container reads `/etc/qurl/share.yaml`):\n\n" +
+		"1. " + volumeInstructions + "\n\n" +
+		"2. Store the enrollment token from the separate DM as the `enrollment-token` file at the qurl-bootstrap access-point root. This message intentionally does not contain the token.\n\n" +
+		"3. Put share.yaml at the qurl-config access-point root (the container reads `/etc/qurl/share.yaml`):\n\n" +
 		configBlock + "\n\n" +
-		"3. Add this non-essential qURL sidecar container to the same task definition as the target container:\n\n" +
+		"4. Add this non-essential qURL sidecar container to the same task definition as the target container:\n\n" +
 		containerBlock + "\n\n" +
-		"4. " + volumeInstructions + "\n\n5. " + ecsWarmStartInstructions, nil
+		"5. " + ecsWarmStartInstructions, nil
 }
 
 // TODO(upstream-contract): recheck ECS EFS fields, access-point roots, and EFS default-policy behavior when AWS changes them.

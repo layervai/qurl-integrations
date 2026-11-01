@@ -26,6 +26,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"warm-start revision",
 		"maximumPercent 100 and minimumHealthyPercent 0",
 		"Store the enrollment token from the separate DM",
+		"single-task application service and replacement downtime",
 		"message intentionally does not contain the token",
 		testTunnelImageRef,
 		"Put share.yaml at the qurl-config access-point root",
@@ -138,7 +139,7 @@ func TestRenderedECSVolumeArtifactsMatchBothInstallers(t *testing.T) {
 					} `json:"efsVolumeConfiguration"`
 				} `json:"volumes"`
 			}
-			if err := json.Unmarshal([]byte(blocks[5]), &task); err != nil {
+			if err := json.Unmarshal([]byte(blocks[1]), &task); err != nil {
 				t.Fatalf("task volumes JSON: %v", err)
 			}
 			if len(task.Volumes) != 3 {
@@ -158,11 +159,11 @@ func TestRenderedECSVolumeArtifactsMatchBothInstallers(t *testing.T) {
 			var containers []ecsContainerDefinition
 			if kind == "tunnel" {
 				var container ecsContainerDefinition
-				if err := json.Unmarshal([]byte(blocks[3]), &container); err != nil {
+				if err := json.Unmarshal([]byte(blocks[5]), &container); err != nil {
 					t.Fatal(err)
 				}
 				containers = []ecsContainerDefinition{container}
-			} else if err := json.Unmarshal([]byte(blocks[3]), &containers); err != nil {
+			} else if err := json.Unmarshal([]byte(blocks[5]), &containers); err != nil {
 				t.Fatal(err)
 			}
 			mounts := 0
