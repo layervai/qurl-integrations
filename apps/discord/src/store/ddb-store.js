@@ -1724,13 +1724,18 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
   // row, including resetting configured_at. Mirror createLink's
   // shape: UpdateCommand with `if_not_exists(configured_at, :u)`
   // so first-write sets it and re-keys leave it alone.
+  const detachOldWebhook = config.ENABLE_CREDENTIAL_LIFECYCLE && webhookReferencePair(priorRow)
+    && priorRow.webhook_owner_id !== binding?.ownerId;
+  const removeFields = installation ? ['qurl_removal_job_id', 'qurl_disconnected_at'] : [];
+  if (detachOldWebhook) removeFields.push('webhook_id', 'webhook_secret', 'webhook_owner_id');
   const update = {
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
     UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)'
       + ', qurl_key_id = :keyId, qurl_key_kind = :keyKind, qurl_generation = :generation'
       + (binding ? ', qurl_owner_id = :owner' : '')
-      + (installation ? ', qurl_installation_joined_at = :installation, observed_installation_joined_at = :installation, qurl_installation_removed = :notRemoved REMOVE qurl_removal_job_id, qurl_disconnected_at' : ''),
+      + (installation ? ', qurl_installation_joined_at = :installation, observed_installation_joined_at = :installation, qurl_installation_removed = :notRemoved' : '')
+      + (removeFields.length ? ` REMOVE ${removeFields.join(', ')}` : ''),
     ConditionExpression: condition,
     ExpressionAttributeValues: {
       ...ownerValues,
@@ -1751,9 +1756,12 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
     // writes (DynamoDB Local in CI; --aws for a disposable sandbox table).
     ReturnValues: 'UPDATED_OLD',
   };
+  const referenceActions = config.ENABLE_CREDENTIAL_LIFECYCLE && webhookReferencePair(priorRow)
+    ? await prepareGuildWebhookReferences(guildId, priorRow, detachOldWebhook ? null : priorRow) : [];
+  const retireKey = priorRow?.qurl_api_key && binding.expectedApiKey !== apiKey;
   let prior;
   try {
-    if (priorRow?.qurl_api_key && binding.expectedApiKey !== apiKey) {
+    if (retireKey || referenceActions.length || detachOldWebhook) {
       // Retain the only old-owner capability before replacing it; no remote work
       // runs inside setup. Match webhook fields so a concurrent relink cannot vanish.
       for (const field of ['webhook_id', 'webhook_owner_id', 'webhook_secret']) {
@@ -1764,36 +1772,37 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
           update.ExpressionAttributeValues[`:prior_${field}`] = priorRow[field];
         }
       }
-      const jobId = crypto.randomUUID();
-      const job = {
-        pk: `JOB#${jobId}`, sk: 'META', job_id: jobId, guild_id: guildId,
-        reason: 'rekey', cleanup_state: 'pending', attempts: 0,
-        due_bucket: String(parseInt(jobId.slice(0, 2), 16) % 16), due_at: Date.now(),
-        created_at: now, qurl_api_key: encryptStrict(decrypt(priorRow.qurl_api_key)),
-        qurl_key_id: priorRow.qurl_key_id ?? null,
-        qurl_key_kind: priorRow.qurl_key_kind ?? 'unknown',
-        qurl_owner_id: priorRow.qurl_owner_id ?? (previousInstallation ? null : binding.ownerId),
-        qurl_generation: priorRow.qurl_generation ?? null,
-        webhook_id: priorRow.webhook_id ?? null,
-        webhook_owner_id: priorRow.webhook_owner_id ?? null,
-        webhook_secret: priorRow.webhook_secret ? encryptStrict(decrypt(priorRow.webhook_secret)) : null,
-      };
+      const actions = [...referenceActions];
+      if (retireKey) {
+        const jobId = crypto.randomUUID();
+        const job = {
+          pk: `JOB#${jobId}`, sk: 'META', job_id: jobId, guild_id: guildId,
+          reason: 'rekey', cleanup_state: 'pending', attempts: 0,
+          due_bucket: String(parseInt(jobId.slice(0, 2), 16) % 16), due_at: Date.now(),
+          created_at: now, qurl_api_key: encryptStrict(decrypt(priorRow.qurl_api_key)),
+          qurl_key_id: priorRow.qurl_key_id ?? null,
+          qurl_key_kind: priorRow.qurl_key_kind ?? 'unknown',
+          qurl_owner_id: priorRow.qurl_owner_id ?? (previousInstallation ? null : binding.ownerId),
+          qurl_generation: priorRow.qurl_generation ?? null,
+          webhook_id: priorRow.webhook_id ?? null,
+          webhook_owner_id: priorRow.webhook_owner_id ?? null,
+          webhook_secret: priorRow.webhook_secret ? encryptStrict(decrypt(priorRow.webhook_secret)) : null,
+        };
+        actions.push({ Put: { TableName: TABLES.credential_lifecycle, Item: job,
+          ConditionExpression: 'attribute_not_exists(pk)' } });
+      } else if (detachOldWebhook) actions.push(webhookRetirementPut(guildId, priorRow));
       const { ReturnValues: _dropReturnValues, ...transactionUpdate } = update;
-      await ddb.send(new TransactWriteCommand({
-          ClientRequestToken: jobId,
-          TransactItems: [
-            { Update: transactionUpdate },
-            { Put: { TableName: TABLES.credential_lifecycle, Item: job,
-              ConditionExpression: 'attribute_not_exists(pk)' } },
-          ],
-        }));
+      await sendLifecycleTransaction(new TransactWriteCommand({
+        ClientRequestToken: crypto.randomUUID(),
+        TransactItems: [{ Update: transactionUpdate }, ...actions],
+      }));
       prior = priorRow;
     } else {
       const res = await ddb.send(new UpdateCommand(update));
       prior = res?.Attributes ?? {};
     }
   } catch (err) {
-    if (err?.name === 'ConditionalCheckFailedException' || transactionGuardConditionFailed(err, 1)) {
+    if (err?.name === 'ConditionalCheckFailedException' || transactionGuardConditionFailed(err, DDB_TRANSACTION_MAX_ACTIONS)) {
       const changed = new Error('Guild setup changed during replacement');
       changed.code = 'GUILD_SETUP_CHANGED';
       throw changed;
@@ -1966,6 +1975,136 @@ async function getGuildConfigWithApiKey(guildId) {
 // payloads). Keeping them plain avoids a decrypt() on every cache prime
 // and lets ad-hoc DDB queries by owner work without round-tripping
 // through the crypto module.
+async function sendLifecycleTransaction(command) {
+  for (let attempt = 0; ; attempt += 1) {
+    try { return await ddb.send(command); } catch (err) {
+      if (!transactionWriteRetryable(err) || attempt >= 2) throw err;
+      await new Promise(resolve => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
+}
+
+function webhookReferencePair(row) {
+  const ownerId = row?.webhook_owner_id;
+  const webhookId = row?.webhook_id;
+  if (typeof ownerId !== 'string' || !ownerId || typeof webhookId !== 'string' || !webhookId) return null;
+  return { ownerId, webhookId, pk: `WH#${crypto.createHash('sha256').update(JSON.stringify([ownerId, webhookId])).digest('hex')}` };
+}
+
+function webhookHeadUpdate(pair, delta, systemReference = false) {
+  return { Update: {
+    TableName: TABLES.credential_lifecycle, Key: { pk: pair.pk, sk: 'HEAD' },
+    UpdateExpression: 'SET cleanup_state = if_not_exists(cleanup_state, :active), webhook_owner_id = if_not_exists(webhook_owner_id, :owner), webhook_id = if_not_exists(webhook_id, :webhook)'
+      + (systemReference ? ', system_reference = :system' : '') + ' ADD reference_count :delta',
+    ConditionExpression: delta < 0
+      ? 'cleanup_state = :active AND reference_count >= :one AND webhook_owner_id = :owner AND webhook_id = :webhook'
+      : '(attribute_not_exists(cleanup_state) OR cleanup_state = :active) AND (attribute_not_exists(webhook_owner_id) OR webhook_owner_id = :owner) AND (attribute_not_exists(webhook_id) OR webhook_id = :webhook)',
+    ExpressionAttributeValues: { ':active': 'active', ':owner': pair.ownerId, ':webhook': pair.webhookId,
+      ':delta': delta, ...(delta < 0 ? { ':one': 1 } : {}), ...(systemReference ? { ':system': true } : {}) },
+  } };
+}
+
+async function prepareGuildWebhookReferences(guildId, before, after, systemReference = false) {
+  const oldPair = webhookReferencePair(before);
+  const newPair = webhookReferencePair(after);
+  const memberKey = pair => ({ pk: pair.pk, sk: `GUILD#${guildId}` });
+  const readMember = async pair => pair ? (await ddb.send(new GetCommand({
+    TableName: TABLES.credential_lifecycle, Key: memberKey(pair), ConsistentRead: true,
+  })))?.Item : null;
+  const samePair = oldPair?.pk === newPair?.pk;
+  const [oldMember, newMember] = await Promise.all([
+    oldPair && !samePair ? readMember(oldPair) : null,
+    newPair ? readMember(newPair) : null,
+  ]);
+  const actions = [];
+  if (oldPair && !samePair) {
+    if (oldMember) {
+      actions.push(webhookHeadUpdate(oldPair, -1, systemReference), { Delete: {
+        TableName: TABLES.credential_lifecycle, Key: memberKey(oldPair), ConditionExpression: 'attribute_exists(pk)',
+      } });
+    } else if (systemReference) actions.push(webhookHeadUpdate(oldPair, 0, true));
+  }
+  if (newPair) {
+    if (newMember) {
+      actions.push({ ConditionCheck: {
+        TableName: TABLES.credential_lifecycle, Key: { pk: newPair.pk, sk: 'HEAD' },
+        ConditionExpression: 'cleanup_state = :active AND reference_count >= :one AND webhook_owner_id = :owner AND webhook_id = :webhook',
+        ExpressionAttributeValues: { ':active': 'active', ':one': 1, ':owner': newPair.ownerId, ':webhook': newPair.webhookId },
+      } });
+    } else {
+      actions.push(webhookHeadUpdate(newPair, 1), { Put: {
+        TableName: TABLES.credential_lifecycle,
+        Item: { ...memberKey(newPair), guild_id: guildId, webhook_owner_id: newPair.ownerId, webhook_id: newPair.webhookId },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      } });
+    }
+  }
+  return actions;
+}
+
+function webhookRetirementPut(guildId, row) {
+  const jobId = crypto.randomUUID();
+  const authorized = row.qurl_owner_id === row.webhook_owner_id;
+  return { Put: {
+    TableName: TABLES.credential_lifecycle,
+    Item: {
+      pk: `JOB#${jobId}`, sk: 'META', job_id: jobId, guild_id: guildId,
+      reason: 'webhook_relink', cleanup_state: 'pending', attempts: 0,
+      due_bucket: String(parseInt(jobId.slice(0, 2), 16) % 16), due_at: Date.now(), created_at: nowIso(),
+      qurl_api_key: authorized && row.qurl_api_key ? encryptStrict(decrypt(row.qurl_api_key)) : undefined,
+      qurl_key_kind: 'shared', revoke_key: false,
+      webhook_id: row.webhook_id, webhook_owner_id: row.webhook_owner_id,
+      webhook_secret: row.webhook_secret ? encryptStrict(decrypt(row.webhook_secret)) : undefined,
+    },
+    ConditionExpression: 'attribute_not_exists(pk)',
+  } };
+}
+
+function guildWebhookChanged() {
+  const error = new Error('Guild webhook references changed during setup');
+  error.name = 'ConditionalCheckFailedException';
+  error.code = 'GUILD_SETUP_CHANGED';
+  return error;
+}
+
+async function writeGuildWebhookWithReferences(guildId, row, after, update, systemReference = false) {
+  if (!isCurrentGuildInstallation(row)) {
+    const error = new Error(GUILD_SETUP_REQUIRED_REPLY);
+    error.code = 'GUILD_SETUP_REQUIRED';
+    throw error;
+  }
+  if (after?.webhook_owner_id && after.webhook_owner_id !== row.qurl_owner_id) {
+    const error = new Error('Webhook owner does not match the saved credential owner');
+    error.code = 'GUILD_WEBHOOK_OWNER_MISMATCH';
+    throw error;
+  }
+  const conditions = [update.ConditionExpression || 'attribute_exists(qurl_api_key)',
+    'qurl_api_key = :referenceKey',
+    'qurl_installation_joined_at = :referenceJoin AND observed_installation_joined_at = :referenceJoin',
+    '(attribute_not_exists(qurl_installation_removed) OR qurl_installation_removed = :referenceActive)'];
+  const values = { ...update.ExpressionAttributeValues, ':referenceKey': row.qurl_api_key,
+    ':referenceJoin': row.qurl_installation_joined_at, ':referenceActive': false };
+  for (const [field] of DEFAULT_OWNER_CAS_FIELDS) {
+    if (Object.hasOwn(row, field)) {
+      conditions.push(`${field} = :reference_${field}`);
+      values[`:reference_${field}`] = row[field];
+    } else conditions.push(`attribute_not_exists(${field})`);
+  }
+  const actions = await prepareGuildWebhookReferences(guildId, row, after, systemReference);
+  if (webhookReferencePair(row)?.pk !== webhookReferencePair(after)?.pk && webhookReferencePair(row)) {
+    actions.push(webhookRetirementPut(guildId, row));
+  }
+  const command = new TransactWriteCommand({
+    ClientRequestToken: crypto.randomUUID(),
+    TransactItems: [{ Update: { ...update, ConditionExpression: conditions.join(' AND '), ExpressionAttributeValues: values } }, ...actions],
+  });
+  try { await sendLifecycleTransaction(command); } catch (err) {
+    if (err?.name === 'TransactionCanceledException'
+        && err.CancellationReasons?.some(reason => reason?.Code === 'ConditionalCheckFailed')) throw guildWebhookChanged();
+    throw err;
+  }
+}
+
 async function setGuildWebhookSubscription(guildId, { webhookId, webhookSecret, webhookOwnerId }) {
   if (!guildId || !webhookId || !webhookSecret || !webhookOwnerId) {
     throw new Error('setGuildWebhookSubscription: guildId, webhookId, webhookSecret, webhookOwnerId all required');
@@ -1977,18 +2116,28 @@ async function setGuildWebhookSubscription(guildId, { webhookId, webhookSecret, 
   // webhook_* attrs but no api key — receiver would have a secret
   // but no link to the linking admin's identity. Mirrors the
   // attribute_exists pattern in propagateGuildWebhookSubscription.
-  await ddb.send(new UpdateCommand({
+  const update = {
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
     ConditionExpression: 'attribute_exists(qurl_api_key)',
     UpdateExpression: 'SET webhook_id = :wid, webhook_secret = :wsec, webhook_owner_id = :woid, updated_at = :u',
     ExpressionAttributeValues: {
       ':wid': webhookId,
-      ':wsec': encrypt(webhookSecret),
+      ':wsec': config.ENABLE_CREDENTIAL_LIFECYCLE ? encryptStrict(webhookSecret) : encrypt(webhookSecret),
       ':woid': webhookOwnerId,
       ':u': nowIso(),
     },
-  }));
+  };
+  if (!config.ENABLE_CREDENTIAL_LIFECYCLE) {
+    await ddb.send(new UpdateCommand(update));
+    return;
+  }
+  const row = (await ddb.send(new GetCommand({
+    TableName: TABLES.guild_configs, Key: { guild_id: guildId }, ConsistentRead: true,
+  })))?.Item;
+  await writeGuildWebhookWithReferences(guildId, row, {
+    webhook_id: webhookId, webhook_owner_id: webhookOwnerId,
+  }, update);
 }
 
 function decryptDefaultOwnerGuildApiKey(ciphertext) {
@@ -2092,7 +2241,10 @@ async function setGuildDefaultWebhookOwner(
     ExpressionAttributeValues: values,
   };
   try {
-    await ddb.send(new UpdateCommand(update));
+    if (config.ENABLE_CREDENTIAL_LIFECYCLE) {
+      await writeGuildWebhookWithReferences(guildId, row, { webhook_owner_id: webhookOwnerId }, update,
+        hasStoredSecret && row.webhook_owner_id === webhookOwnerId);
+    } else await ddb.send(new UpdateCommand(update));
   } catch (err) {
     if (err?.name !== 'ConditionalCheckFailedException') throw err;
 
@@ -2120,10 +2272,12 @@ async function setGuildDefaultWebhookOwner(
     // Retry once for unchanged plaintext with new encryption randomness. Keep
     // every webhook CAS predicate; a second concurrent mutation still fails,
     // under the documented KEY_CHANGED code (recovery: re-run /qurl-admin setup).
-    await ddb.send(new UpdateCommand({
-      ...update,
-      ExpressionAttributeValues: { ...values, ':storedApiKey': latestRow.qurl_api_key },
-    })).catch((retryErr) => {
+    const retryUpdate = { ...update, ExpressionAttributeValues: { ...values, ':storedApiKey': latestRow.qurl_api_key } };
+    const retry = config.ENABLE_CREDENTIAL_LIFECYCLE
+      ? writeGuildWebhookWithReferences(guildId, latestRow, { webhook_owner_id: webhookOwnerId }, retryUpdate,
+        hasStoredSecret && row.webhook_owner_id === webhookOwnerId)
+      : ddb.send(new UpdateCommand(retryUpdate));
+    await retry.catch((retryErr) => {
       throw retryErr?.name === 'ConditionalCheckFailedException' ? defaultOwnerKeyChangedError() : retryErr;
     });
   }
@@ -2133,12 +2287,20 @@ async function setGuildDefaultWebhookOwner(
 // A future caller must first prove no sibling references the old subscription
 // before deleting it, or explicitly record/accept the orphan; see #1380.
 async function clearGuildWebhookSubscription(guildId) {
-  await ddb.send(new UpdateCommand({
+  const update = {
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
     UpdateExpression: 'REMOVE webhook_id, webhook_secret, webhook_owner_id SET updated_at = :u',
     ExpressionAttributeValues: { ':u': nowIso() },
-  }));
+  };
+  if (!config.ENABLE_CREDENTIAL_LIFECYCLE) {
+    await ddb.send(new UpdateCommand(update));
+    return;
+  }
+  const row = (await ddb.send(new GetCommand({
+    TableName: TABLES.guild_configs, Key: { guild_id: guildId }, ConsistentRead: true,
+  })))?.Item;
+  await writeGuildWebhookWithReferences(guildId, row, null, update);
 }
 
 // Returns complete DDB-backed subscription rows for one webhook owner.
@@ -2192,24 +2354,34 @@ async function propagateGuildWebhookSubscription(
 
   const updatedAt = nowIso();
   const encryptedSecret = encrypt(webhookSecret);
-  const results = await Promise.allSettled(siblings.map((s) => ddb.send(new UpdateCommand({
-    TableName: TABLES.guild_configs,
-    Key: { guild_id: s.guildId },
-    UpdateExpression: 'SET webhook_id = :wid, webhook_secret = :wsec, updated_at = :u',
-    // listCompleteGuildSubscriptionsByOwner drops rows without webhook_id (owner-only
-    // mappings), so :expectedWebhookId is always defined here.
-    // Defense against a race where the row was cleared between
-    // listCompleteGuildSubscriptionsByOwner and this write — never mint
-    // subscription state on a row that opted out.
-    ConditionExpression: 'webhook_owner_id = :expectedOwner AND webhook_id = :expectedWebhookId',
-    ExpressionAttributeValues: {
-      ':wid': webhookId,
-      ':wsec': encryptedSecret,
-      ':u': updatedAt,
-      ':expectedOwner': webhookOwnerId,
-      ':expectedWebhookId': s.webhookId,
-    },
-  }))));
+  const results = await Promise.allSettled(siblings.map(async (s) => {
+    const update = {
+      TableName: TABLES.guild_configs,
+      Key: { guild_id: s.guildId },
+      UpdateExpression: 'SET webhook_id = :wid, webhook_secret = :wsec, updated_at = :u',
+      // listCompleteGuildSubscriptionsByOwner drops rows without webhook_id (owner-only
+      // mappings), so :expectedWebhookId is always defined here.
+      // Defense against a race where the row was cleared between
+      // listCompleteGuildSubscriptionsByOwner and this write — never mint
+      // subscription state on a row that opted out.
+      ConditionExpression: 'webhook_owner_id = :expectedOwner AND webhook_id = :expectedWebhookId',
+      ExpressionAttributeValues: {
+        ':wid': webhookId,
+        ':wsec': encryptedSecret,
+        ':u': updatedAt,
+        ':expectedOwner': webhookOwnerId,
+        ':expectedWebhookId': s.webhookId,
+      },
+    };
+    if (!config.ENABLE_CREDENTIAL_LIFECYCLE) return ddb.send(new UpdateCommand(update));
+    const row = (await ddb.send(new GetCommand({
+      TableName: TABLES.guild_configs, Key: { guild_id: s.guildId }, ConsistentRead: true,
+    })))?.Item;
+    if (row?.webhook_owner_id !== webhookOwnerId || row?.webhook_id !== s.webhookId) throw guildWebhookChanged();
+    return writeGuildWebhookWithReferences(s.guildId, row, {
+      webhook_owner_id: webhookOwnerId, webhook_id: webhookId,
+    }, update);
+  }));
 
   let updated = 0;
   let failed = 0;
@@ -2219,7 +2391,7 @@ async function propagateGuildWebhookSubscription(
     // ConditionalCheckFailedException = sibling cleared, converted to an
     // owner-only mapping, or re-linked between list and write. The winning
     // concurrent state is authoritative; count it separately from failures.
-    if (r.reason?.name === 'ConditionalCheckFailedException') { skipped += 1; continue; }
+    if (r.reason?.name === 'ConditionalCheckFailedException' || r.reason?.code === 'GUILD_SETUP_REQUIRED') { skipped += 1; continue; }
     failed += 1;
   }
   return { updated, failed, skipped };

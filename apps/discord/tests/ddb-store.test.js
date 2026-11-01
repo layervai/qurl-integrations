@@ -173,7 +173,6 @@ describe('guild configs', () => {
     expect(job.qurl_key_kind).toBe('unknown');
     expect(job.cleanup_state).toBe('pending');
     expect(job).not.toHaveProperty('expires_at');
-    expect(transaction.ClientRequestToken).toBe(job.job_id);
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     expect(input.ConditionExpression).toContain('qurl_owner_id = :owner');
     expect(input.ConditionExpression).toContain('qurl_api_key = :prior');
@@ -327,6 +326,22 @@ describe('guild configs', () => {
       observed_installation_joined_at: '2026-10-01T00:00:00.000000000Z' } });
     await expect(store.getGuildApiKey('g')).resolves.toBe('key');
     expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
+  });
+
+  test('transaction conflicts retry the exact same key replacement request', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: mockCiphertext('old-key') } });
+    const requests = [];
+    ddbMock.on(TransactWriteCommand).callsFake(input => {
+      requests.push(JSON.stringify(input));
+      if (requests.length === 1) throw Object.assign(new Error('conflict'), {
+        name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'TransactionConflict' }],
+      });
+      return {};
+    });
+    await store.setGuildApiKey('g', 'new-key', 'admin', 'oauth', { ownerId: 'owner', expectedApiKey: 'old-key' });
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toBe(requests[1]);
+    expect(JSON.parse(requests[0]).ClientRequestToken).toEqual(expect.any(String));
   });
 
   test('a changed key snapshot fails before the update', async () => {
