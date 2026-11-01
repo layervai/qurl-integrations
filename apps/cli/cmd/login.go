@@ -86,7 +86,7 @@ external identity is reopened, never replaced.`,
 			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
 				return err
 			}
-			key, err := readSecret(opts, "qURL API key (input hidden): ")
+			key, err := readSecret(opts, "qURL API key (input hidden): ", msgNoKeyProvided)
 			if err != nil {
 				return err
 			}
@@ -202,7 +202,7 @@ const maxLocalKeyDescriptor = 1 << 20
 // readSecret reads a secret from piped stdin or an interactive hidden
 // prompt. It never echoes and never hangs: piped-but-empty input is an
 // error, not a wait.
-func readSecret(opts *globalOpts, prompt string) (string, error) {
+func readSecret(opts *globalOpts, prompt, emptyMessage string) (string, error) {
 	if !opts.streams.InIsTTY {
 		scanner := bufio.NewScanner(opts.streams.In)
 		if scanner.Scan() {
@@ -213,7 +213,7 @@ func readSecret(opts *globalOpts, prompt string) (string, error) {
 		if err := scanner.Err(); err != nil {
 			return "", err
 		}
-		return "", exitcode.UsageError(errors.New(msgNoKeyProvided))
+		return "", exitcode.UsageError(errors.New(emptyMessage))
 	}
 
 	if _, err := fmt.Fprint(opts.streams.Err, prompt); err != nil {
@@ -229,11 +229,11 @@ func readSecret(opts *globalOpts, prompt string) (string, error) {
 		return "", printErr
 	}
 	if err != nil {
-		return "", fmt.Errorf("read key: %w", err)
+		return "", fmt.Errorf("read secret: %w", err)
 	}
 	secret := strings.TrimSpace(string(secretBytes))
 	if secret == "" {
-		return "", exitcode.UsageError(errors.New(msgNoKeyProvided))
+		return "", exitcode.UsageError(errors.New(emptyMessage))
 	}
 	return secret, nil
 }

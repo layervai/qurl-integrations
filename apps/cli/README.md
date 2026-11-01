@@ -2050,3 +2050,40 @@ video only after Play. Use `-o json` for structured revision, media and job stat
 A revision conflict never retries automatically. The API owns verification and
 all limits. Supervisors may also GET/PATCH `/v1/resources/{id}/preview` and POST
 `/v1/resources/{id}/preview/uploads` through the existing `qurl request` command.
+
+### Access codes
+
+`qurl access-codes` requires a system-tier account for management. The account
+must own the resource. Browser sign-in is the default. For automation, select
+`--api-key-auth` with an explicit durable account key in `QURL_API_KEY_FILE` or
+`QURL_API_KEY`. List requires `qurl:read`; create and delete also require
+`qurl:write`. Device credentials and linked-device owner selection are not used.
+
+```sh
+qurl access-codes create RESOURCE --name "Build preview" --max-uses 1 -o json
+qurl access-codes list --limit 20 -o json
+qurl access-codes list --limit 20 --cursor OPAQUE_NEXT_CURSOR -o json
+qurl access-codes delete acd_EXAMPLE_ID
+qurl access-codes redeem
+```
+
+RESOURCE is a public resource key or CRID. `--expires-at` accepts a future
+RFC3339 timestamp. `--max-uses 0` means unlimited use. Create prints the secret
+once; keep stdout secure. Quiet create prints only that secret. Lists contain
+metadata and never the secret. `delete` revokes the nonsecret `acd_` ID.
+
+Redeem reads the `ac_` secret from stdin or a hidden terminal prompt. Never put
+the secret in argv or a shell command literal. A secret-manager pipe is suitable.
+Redemption sends no account credential, waits until three seconds have passed
+since input began, then prints the returned HTTPS link. It does not open the
+link. This measured delay meets the service input-timing rule.
+
+Writes and redemption make one request. If creation or output fails, list the
+records, identify the known unused record, and revoke its ID before creating
+another. The CLI cannot recover the secret or safely guess which code to revoke.
+An uncertain redemption can have consumed a use; do not retry automatically.
+Ask the code owner for help if no link reached stdout.
+
+Pagination requires the producer account-page change (qurl-service #2021).
+Creation also requires that change's full-fleet exclusion of one-time codes from
+shared response replay. Local HTTP tests are not a Sandbox account journey.
