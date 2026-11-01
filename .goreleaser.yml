@@ -140,6 +140,11 @@ homebrew_casks:
       - manpages/qurl-account.1
       - manpages/qurl-account-setup.1
       - manpages/qurl-account-recover.1
+      - manpages/qurl-api-keys.1
+      - manpages/qurl-api-keys-list.1
+      - manpages/qurl-api-keys-create.1
+      - manpages/qurl-api-keys-update.1
+      - manpages/qurl-api-keys-revoke.1
       - manpages/qurl-login.1
       - manpages/qurl-publish.1
       - manpages/qurl-preview.1
