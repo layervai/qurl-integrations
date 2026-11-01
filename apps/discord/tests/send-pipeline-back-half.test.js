@@ -2546,7 +2546,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
 });
 
 describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)', () => {
-  async function setupRevocableSend(recipients = [{ id: 'u1', username: 'Alice' }]) {
+  async function setupRevocableSend(recipients = [{ id: 'u1', username: 'Alice' }], selfDestructSeconds = null) {
     const collectHandlers = {};
     const response = {
       createMessageComponentCollector: jest.fn(() => ({
@@ -2584,7 +2584,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     });
 
     await executeSendPipeline(interaction, makePipelineParams({
-      recipients,
+      recipients, selfDestructSeconds,
     }));
     expect(collectHandlers.collect).toEqual(expect.any(Function));
     const sendId = mockDb.saveSendConfig.mock.calls[0][0].sendId;
@@ -2922,7 +2922,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(2);
   });
 
-  it.each([false, true])('allows Add after failed Revoke and labels an original attachment (%s)', async (attachmentMode) => {
+  it.each([[false, 0.5], [true, 0.5], [false, 5], [true, 5]])('allows Add after failed Revoke and labels an original attachment (%s, %s)', async (attachmentMode, seconds) => {
     const recipients = attachmentMode
       ? Array.from({ length: 100 }, (_, i) => ({ id: `original${i}`, username: `original_recipient_${i}_${'x'.repeat(70)}` }))
       : undefined;
@@ -2930,7 +2930,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
     try {
       config.QURL_SEND_MAX_RECIPIENTS = 101;
-      const { collect, makeClick, interaction } = await setupRevocableSend(recipients);
+      const { collect, makeClick, interaction } = await setupRevocableSend(recipients, seconds);
       expect(interaction.editReply.mock.calls.some(([payload]) => Boolean(payload.files))).toBe(attachmentMode);
       mockDb.getSendItems.mockReset();
       mockDb.getSendItems.mockRejectedValueOnce(new Error('ddb unavailable'));
@@ -2988,6 +2988,10 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       } else {
         expect(updated.content).not.toContain('Attached recipients.txt');
       }
+      const note = seconds === 0.5
+        ? 'Access uses a one-second minimum; open content may briefly continue loading.'
+        : 'Access stops at the timer; open content may briefly continue loading.';
+      expect(updated.content.split('\n')).toContain(note);
       expect(updated.content.length).toBeLessThanOrEqual(2000);
       expect(updated.files).toBeUndefined();
       expect(selectInteraction.editReply).toHaveBeenCalledWith({
@@ -4055,5 +4059,30 @@ describe('send-confirm audit correlation', () => {
     expect(new Set(dispatches.map(([, meta]) => meta.send_nonce))).toEqual(new Set([
       nonce === '0123456789abcdef' ? nonce : undefined,
     ]));
+  });
+});
+
+describe.each(['file', 'maps'])('self-destruct timing copy for %s', resourceType => {
+  test.each([
+    [0.5, 'Access uses a one-second minimum; open content may briefly continue loading.'],
+    [0.75, 'Access uses a one-second minimum; open content may briefly continue loading.'],
+    [1, 'Access stops at the timer; open content may briefly continue loading.'],
+    [2, 'Access stops at the timer; open content may briefly continue loading.'],
+    [5, 'Access stops at the timer; open content may briefly continue loading.'],
+    [30, 'Access stops at the timer; open content may briefly continue loading.'],
+    [60, null], [300, null], [null, null],
+  ])('preview and recap keep the note on its own line (%s seconds)', (seconds, note) => {
+    const preview = _test.renderConfirmCardContent({
+      resourceType, resourceLabel: 'shared content', validRecipients: [], expiresIn: '1h',
+      selfDestructSeconds: seconds,
+    });
+    const recap = renderSendConfirm({
+      delivered: 1, expiresIn: '1h', selfDestructSeconds: seconds,
+      failedNamesPlain: [], successNames: ['alice'], showAll: false,
+    }).content;
+    for (const content of [preview, recap]) {
+      if (note) expect(content.split('\n')).toContain(note);
+      else expect(content).not.toContain('open content may briefly continue loading');
+    }
   });
 });

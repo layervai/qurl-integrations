@@ -47,6 +47,7 @@ const {
   expiryToISO,
   expiryToMs,
   formatSelfDestructLabel,
+  formatSelfDestructTimingNote,
   formatSelfDestructSegment,
   isPositiveFinite,
   selfDestructSelectValueToSeconds,
@@ -5041,6 +5042,8 @@ function renderConfirmCardContent({
   content += `**Expires:** ${EXPIRY_LABELS[expiresIn] || expiresIn}\n`;
   if (isPositiveFinite(selfDestructSeconds)) {
     content += `**Self-destruct:** ${formatSelfDestructLabel(selfDestructSeconds)}\n`;
+    const note = formatSelfDestructTimingNote(selfDestructSeconds);
+    if (note) content += `${note}\n`;
   }
   if (personalMessage) {
     // `personalMessage` is pre-sanitized: sanitizeMessage already
