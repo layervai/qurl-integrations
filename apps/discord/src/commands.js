@@ -1059,6 +1059,8 @@ function buildDeliveryEmbed({
   senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage,
   renderActionsAsMarkdown = false,
 }) {
+  const destinationDomain = qurlLink == null ? TRUST.DESTINATION_DOMAIN : new URL(qurlLink).hostname;
+  if (!destinationDomain) throw new TypeError('Delivery link must have a hostname');
   // Discord's `<t:N:R>` markdown wants a positive integer Unix-seconds
   // value; anything else renders a misleading recipient surface (e.g.
   // `<t:0:R>` → "56 years ago", `<t:undefined:R>` → literal text,
@@ -1171,11 +1173,7 @@ function buildDeliveryEmbed({
     .setColor(COLORS.QURL_BRAND)
     .setAuthor(authorOpts)
     .setDescription(descLines.join('\n'))
-    // Footer reinforces the destination domain — same trust idea as a
-    // browser showing where a link points before you click. Literal
-    // string (not interpolated from qurlLink) keeps the recipient
-    // surface stable even if a future minted link uses a subdomain.
-    .setFooter({ text: `opens ${TRUST.DESTINATION_DOMAIN}` });
+    .setFooter({ text: `opens ${destinationDomain}` });
 }
 
 // Convenience wrapper used by executeSendPipeline. Short links preserve
@@ -2350,6 +2348,8 @@ async function executeSendPipeline(interaction, {
         personalMessage,
       });
       result = await sendDM(link.recipientId, dmPayload);
+    } catch (err) {
+      logger.warn('Recipient delivery failed before completion', { sendId, errorName: err.name });
     } finally {
       logger.audit(result.ok === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId, send_nonce: confirmationNonce });
     }
@@ -3528,16 +3528,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     let result = { ok: false };
     try {
       // links.slice(0, 10) caps at Discord's 10-embed-per-message
-      // limit. Short links share one identical EmbedBuilder and keep
-      // the original packed buttons. Long qv2 links need their own
-      // Markdown action in each embed and send no components.
-      // packBulkDeliveryComponents enforces 1 <= len <= 10 with
-      // fail-loud throws; the upstream guard at line 2372 above
-      // (`if (!links || links.length === 0)`) is what keeps us out
-      // of the lower-bound throw. If a future refactor splits this
-      // dispatch loop or drops that guard, the throw will surface
-      // here at the helper boundary — see packBulkDeliveryComponents
-      // docstring for the contract.
+      // limit. Each embed names its link's host. Long qv2 links put
+      // actions in the embed instead of Discord components.
+      // The earlier empty-links guard keeps the bulk packer input nonempty.
       const cappedLinks = links.slice(0, 10);
       const renderActionsAsMarkdown = cappedLinks.some(
         link => requiresMarkdownDeliveryActions(link.qurlLink),
@@ -3549,18 +3542,18 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         expiresAt,
         personalMessage: sendConfig.personal_message,
       };
-      const allEmbeds = renderActionsAsMarkdown
-        ? cappedLinks.map(link => buildDeliveryEmbed({
-          ...embedArgs,
-          qurlLink: link.qurlLink,
-          renderActionsAsMarkdown: true,
-        }))
-        : Array(cappedLinks.length).fill(buildDeliveryEmbed(embedArgs));
+      const allEmbeds = cappedLinks.map(link => buildDeliveryEmbed({
+        ...embedArgs,
+        qurlLink: link.qurlLink,
+        renderActionsAsMarkdown,
+      }));
       const allComponents = renderActionsAsMarkdown
         ? []
         : packBulkDeliveryComponents(cappedLinks.map(link => link.qurlLink));
 
       result = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
+    } catch (err) {
+      logger.warn('Recipient delivery failed before completion', { sendId, errorName: err.name });
     } finally {
       logger.audit(result.ok === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
     }

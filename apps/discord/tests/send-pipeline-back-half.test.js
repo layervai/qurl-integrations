@@ -186,8 +186,6 @@ const {
   renderViewCounter,
   REVOKE_TRUNC_LIMIT,
   handleAddRecipients,
-  buildDeliveryEmbed,
-  packBulkDeliveryComponents,
   mintLinksInBatches,
   cleanupFreshMintedLinks,
   activeMonitors,
@@ -3421,7 +3419,7 @@ describe('handleAddRecipients — happy path (location)', () => {
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
     mockMintLinks.mockResolvedValueOnce([
       { qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
-      { qurl_id: 'q_2', qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
+      { qurl_id: 'q_2', qurl_link: 'https://other.example/2', resource_id: 'res-loc-new' },
     ]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
@@ -3434,6 +3432,8 @@ describe('handleAddRecipients — happy path (location)', () => {
       makeInteraction(), 'apikey',
     );
 
+    expect(mockSendDM.mock.calls[0][1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens q.test' });
+    expect(mockSendDM.mock.calls[1][1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens other.example' });
     expect(result.delivered).toBe(2);
     expect(result.failed).toBe(0);
     expect(result.msg).toMatch(/Added 2 recipients/);
@@ -3467,6 +3467,7 @@ describe('handleAddRecipients — happy path (location)', () => {
 
     expect(mockSendDM).toHaveBeenCalledTimes(1);
     const [, payload] = mockSendDM.mock.calls[0];
+    expect(payload.embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens q.test' });
     expect(payload.components).toHaveLength(1);
     const buttons = payload.components[0].components;
     expect(buttons).toHaveLength(2);
@@ -3496,36 +3497,6 @@ describe('handleAddRecipients — happy path (location)', () => {
     const description = payload.embeds[0].setDescription.mock.calls[0][0];
     expect(description).toContain(`[🚪 Step Through](${qv2Link})`);
     expect(description).toContain('[🛡️ What is qURL?](https://layerv.ai/qurl/)');
-  });
-
-  it('shares one EmbedBuilder reference across N>1 embeds in the bulk payload primitives', () => {
-    const qurlLinks = ['https://q.test/share-file', 'https://q.test/share-loc'];
-    const embed = buildDeliveryEmbed({
-      senderAlias: 'Sender',
-      guildName: 'Guild',
-      guildIconUrl: null,
-      expiresAt: Math.floor(Date.now() / 1000) + 3600,
-      personalMessage: null,
-    });
-    const payload = {
-      embeds: Array(qurlLinks.length).fill(embed),
-      components: packBulkDeliveryComponents(qurlLinks),
-    };
-
-    expect(payload.embeds).toHaveLength(2);
-    expect(payload.embeds[0]).toBe(payload.embeds[1]);
-    if (typeof payload.embeds[0].toJSON === 'function') {
-      expect(payload.embeds[0].toJSON()).toEqual(payload.embeds[1].toJSON());
-    }
-    const urls = payload.components
-      .flatMap(row => row.components)
-      .map(b => b.setURL.mock.calls[0]?.[0])
-      .filter(Boolean);
-    expect(urls).toEqual([
-      'https://q.test/share-file',
-      'https://q.test/share-loc',
-      'https://layerv.ai/qurl/',
-    ]);
   });
 
   it('does not emit upload_success for unsupported mixed file + location configs', async () => {
@@ -3778,12 +3749,13 @@ describe('executeSendPipeline — guild_id threading (#1101)', () => {
   it('threads interaction.guildId into BOTH mintLinks and recordQURLSendBatch (file send)', async () => {
     const interaction = makeInteraction({ guildId: 'guild-1' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://door.acme.com/#at_test', resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
     await executeSendPipeline(interaction, makePipelineParams());
 
+    expect(mockSendDM.mock.calls[0][1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens door.acme.com' });
     expect(mockMintLinks).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ guildId: 'guild-1' }),
@@ -4309,5 +4281,41 @@ describe('initial-send compensation boundaries', () => {
       }
       expect(mockSendDM).not.toHaveBeenCalled();
     } finally { if (mode === 'timeout') jest.useRealTimers(); }
+  });
+});
+
+describe('destination footer — per-recipient failure isolation', () => {
+  it.each(['initial', 'add'].flatMap(path => ['malformed', 'hostless', 'send-throws'].map(failure => [path, failure])))('persists a failed recipient while delivering its sibling (%s, %s)', async (path, failure) => {
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-new' });
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      resource_type: 'maps', actual_url: 'https://maps.example.com/x', expires_in: '30m',
+    });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_id: 'q_bad', qurl_link: failure === 'malformed' ? 'not a URL' : failure === 'hostless' ? 'mailto:x@example.com' : 'https://bad.example/#secret', resource_id: 'res-new' },
+      { qurl_id: 'q_good', qurl_link: 'https://other.example/link', resource_id: 'res-new' },
+    ]);
+    mockSendDM.mockImplementation(async recipientId => {
+      if (failure === 'send-throws' && recipientId === 'u1') throw new Error('secret delivery failure');
+      return { ok: true, channelId: 'dm-c', messageId: 'dm-m' };
+    });
+    const recipients = [
+      { id: 'u1', username: 'Alice', bot: false },
+      { id: 'u2', username: 'Bob', bot: false },
+    ];
+    if (path === 'initial') {
+      await executeSendPipeline(makeInteraction(), { ...makePipelineParams(), recipients });
+    } else {
+      const result = await handleAddRecipients('send-1', makeUsersCollection(recipients), makeInteraction(), 'apikey');
+      expect(result).toMatchObject({ delivered: 1, failed: 1 });
+    }
+    expect(mockSendDM).toHaveBeenCalledTimes(failure === 'send-throws' ? 2 : 1);
+    expect(mockSendDM.mock.calls.at(-1)[0]).toBe('u2');
+    expect(mockSendDM.mock.calls.at(-1)[1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens other.example' });
+    expect(logger.warn).toHaveBeenCalledWith('Recipient delivery failed before completion', {
+      sendId: expect.any(String), errorName: failure === 'send-throws' ? 'Error' : 'TypeError',
+    });
+    expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith(expect.any(String), 'u1', 'failed');
+    expect(mockDb.markSendDMDelivered).toHaveBeenCalledWith(expect.any(String), 'u2', 'dm-c', 'dm-m');
   });
 });
