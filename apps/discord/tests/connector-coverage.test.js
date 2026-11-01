@@ -1,3 +1,4 @@
+const { resourceIdLogRef } = require('../src/utils/resource-id');
 
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
@@ -446,6 +447,9 @@ describe('Connector client — coverage boost', () => {
         const getBody = captureMintBody();
         await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: 30 });
         expect(getBody().session_duration).toBe('30s');
+        expect(require('../src/logger').info).toHaveBeenCalledWith('Minted links', {
+          resource_ref: resourceIdLogRef('r_xyz'), count: 1,
+        });
       });
 
       it('clamps 0.5 (fileviewer preset) to "1s" — qurl-service MinSessionDuration floor', async () => {
@@ -829,7 +833,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
 
     expect(logger.info).toHaveBeenCalledWith('Uploaded to connector', {
       md5_prefix: MD5_PREFIX,
-      resource_id: 'r1',
+      resource_ref: resourceIdLogRef('r1'),
     });
     assertNoFullHashLeaked();
   });
@@ -844,7 +848,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
 
     expect(logger.info).toHaveBeenCalledWith('Re-uploaded to connector (new resource)', {
       md5_prefix: MD5_PREFIX,
-      resource_id: 'r2',
+      resource_ref: resourceIdLogRef('r2'),
     });
     assertNoFullHashLeaked();
   });
@@ -862,7 +866,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
 
     expect(logger.info).toHaveBeenCalledWith('Uploaded JSON to connector', {
       md5_prefix: MD5_PREFIX,
-      resource_id: 'r3',
+      resource_ref: resourceIdLogRef('r3'),
     });
     assertNoFullHashLeaked();
   });
@@ -885,7 +889,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
 
     expect(logger.info).toHaveBeenCalledWith('Uploaded to connector', {
       md5_prefix: undefined,
-      resource_id: 'r4',
+      resource_ref: resourceIdLogRef('r4'),
     });
     assertNoFullHashLeaked();
   });
@@ -912,7 +916,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
 
     expect(logger.info).toHaveBeenCalledWith('Uploaded to connector', {
       md5_prefix: undefined,
-      resource_id: 'r5',
+      resource_ref: resourceIdLogRef('r5'),
     });
     assertNoFullHashLeaked();
   });

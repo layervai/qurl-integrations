@@ -146,6 +146,19 @@ Saved queries for `Failed to prepare QURL links` must use
 `Failed to prepare qURL links` after this source is deployed. API names,
 environment variables, headers, and storage method names keep their exact spelling.
 
+Upload, mint, create, and revoke logs use `resource_ref` instead of raw
+`resource_id`; create logs also use `crid_ref` instead of raw `crid`.
+To find a known resource in logs, compute its reference from the repository root:
+
+```sh
+node -e 'console.log(require("./apps/discord/src/utils/resource-id").resourceIdLogRef(process.argv[1]))' RESOURCE_ID
+```
+
+The reference is `sha256:` plus the first 12 lowercase hex digits of the
+SHA-256 hash of the exact UTF-8 identifier. It is a log lookup hint; confirm
+the resource in the owner-scoped store before taking action. Update saved
+queries that used the old raw ID fields.
+
 Each mint request allows 65 seconds for the connector’s 55-second deadline
 and response transport. Only the connector’s `request_admission_rejected` 429
 with `success: false` and an empty `links` array is retried, up to five times,
@@ -394,6 +407,18 @@ up to an hour to propagate (single-server installs appear right away). If they
 still don't show, confirm the bot was invited with the **Use Application
 Commands** permission.
 
+**Add Recipients failed after a storage timeout** — a final guarded transaction
+can commit while its response is lost. The handler sends no DMs and tries to
+revoke the qURLs just minted for the new recipients. Successful cleanup can
+leave `qurl_sends` rows that
+point at revoked children. Treat those as failed-delivery residue during
+status/revoke triage. The sender sees “Failed to save link records. Recipients
+were not messaged.” Find `recordQURLSendBatch failed in addRecipients; aborting
+before DMs` and the same send ID in cleanup logs. `Failed to clean up freshly
+minted Add Recipients qURL resources` or `Add Recipients cleanup still running
+at its wait budget` means revocation is unconfirmed. Use the send ID and available cleanup
+references to investigate which grants remain before manual cleanup.
+
 ## License
 
 [MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.
@@ -602,3 +627,13 @@ is fatal, while bot image failures are reported as partial applies.
 File and location sends upload once per preparation, then mint against the returned resource in requests of at most ten links. Ten is a request size, not a share limit. The current service reports `max_tokens_per_qurl: -1` as a deprecated compatibility field: there is no per-resource qURL cap. Re-uploading identical content can return the same resource and does not reset account usage. Other account limits, access rules and resource status still apply. Structured `quota_exceeded` failures direct users to their account usage; they do not promise that another upload will fix the limit.
 
 Add Recipients still resolves the retained file or location through the connector once before minting. It does not re-upload between batches. If a later mint or persistence step fails, known child links are still revoked before delivery. The standalone load test follows the same single-upload pattern and retains old re-upload counters only to read historical report inputs.
+
+### Guild scope in the revoke menu
+
+In multi-tenant mode, `/qurl revoke` lists only sends recorded for the invoking guild. Legacy rows without `guild_id` stay hidden; the bot does not infer their guild from the sender. Both send-recording methods write the provided guild on each recipient row. Before live adoption, verify that retained rows have the scope needed for the menu or complete their approved retirement path. The sender-index search remains bounded to ten pages of 100 rows; heavy history in other guilds can exhaust that window. This change does not claim complete cross-guild history coverage or backfill legacy records.
+
+### Recipient-cap policy
+
+Keep one `QURL_SEND_MAX_RECIPIENTS` setting for explicit users, role expansion, voice/stage expansion, `@everyone`, and recipient pickers. Its source default remains 20,000, including the previously selected voice/stage size. A workspace that uses that default also gets the same ceiling for non-voice selections; `@everyone` still requires its existing permission. Operators who need a smaller blast radius must lower the shared setting, which also lowers the voice ceiling. No separate voice-only setting is introduced.
+
+The ceiling is a selection bound, not a delivery-rate or large-send capacity guarantee. Other permissions and operation limits still apply. The large-send warning is visibility, not permission or proof that a send can finish within its interaction window. Keep the existing main-adoption, quota, load and rollout gates; this policy decision does not authorize a live blast or remove those gates.

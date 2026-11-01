@@ -301,7 +301,7 @@ func (e *environment) preflight(ctx context.Context, opts *options) error {
 	if list.ExitCode != cliExitOK {
 		return fmt.Errorf("qurl list failed (exit %d): %s", list.ExitCode, e.redactor.apply(lastErrorLine(list.Stderr)))
 	}
-	status, running, err := connectordaemon.IPCClient{SocketPath: e.SocketPath}.Status(ctx)
+	status, running, err := connectordaemon.IPCClient{SocketPath: e.SocketPath, StateDir: e.StateDir}.Status(ctx)
 	if err != nil {
 		return fmt.Errorf("daemon status over %s: %w", e.SocketPath, err)
 	}

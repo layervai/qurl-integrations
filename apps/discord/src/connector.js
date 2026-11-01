@@ -415,7 +415,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
 
   logger.info('Uploaded to connector', {
     md5_prefix: md5Prefix(result.hash),
-    resource_id: result.resource_id,
+    resource_ref: resourceIdLogRef(result.resource_id),
   });
 
   return result;
@@ -451,7 +451,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerT
 
   logger.info('Re-uploaded to connector (new resource)', {
     md5_prefix: md5Prefix(result.hash),
-    resource_id: result.resource_id,
+    resource_ref: resourceIdLogRef(result.resource_id),
   });
 
   return result;
@@ -645,7 +645,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
     throw new Error('Connector mint_link returned no links array');
   }
 
-  logger.info('Minted links', { resource_id: resourceId, count: result.links.length });
+  logger.info('Minted links', { resource_ref: resourceIdLogRef(resourceId), count: result.links.length });
   return result.links;
 }
 
@@ -1366,7 +1366,7 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
 
   logger.info('Uploaded JSON to connector', {
     md5_prefix: md5Prefix(result.hash),
-    resource_id: result.resource_id,
+    resource_ref: resourceIdLogRef(result.resource_id),
   });
 
   return result;

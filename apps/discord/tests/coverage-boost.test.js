@@ -111,6 +111,11 @@ afterAll(() => {
   crypto.randomUUID = originalRandomUUID;
 });
 
+afterAll(() => {
+  crypto.randomBytes = originalRandomBytes;
+  crypto.randomUUID = originalRandomUUID;
+});
+
 beforeEach(() => {
   jest.clearAllMocks();
   embedInstances.length = 0;

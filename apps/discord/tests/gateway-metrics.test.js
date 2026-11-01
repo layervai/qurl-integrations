@@ -397,6 +397,29 @@ describe('startActiveGuildCount', () => {
     );
   });
 
+  test('waits for a ready cache and skips reconnect gaps', () => {
+    const client = fakeClient({ guildCount: 0 });
+    let ready = false;
+    client.isReady = () => ready;
+    startActiveGuildCount(client, { intervalMs: 1_000 });
+    jest.advanceTimersByTime(2_000);
+    expect(logger.audit).not.toHaveBeenCalled();
+
+    client.guilds.cache.size = 7;
+    ready = true;
+    jest.advanceTimersByTime(1_000);
+    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.ACTIVE_GUILD_COUNT, { count: 7 });
+
+    ready = false;
+    client.guilds.cache.size = 0;
+    jest.advanceTimersByTime(1_000);
+    expect(logger.audit).toHaveBeenCalledTimes(1);
+
+    ready = true;
+    jest.advanceTimersByTime(1_000);
+    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.ACTIVE_GUILD_COUNT, { count: 0 });
+  });
+
   test('skips emission when guilds cache is missing', () => {
     const client = { isReady: () => true, ws: {} };
     startActiveGuildCount(client, { intervalMs: 1_000 });
