@@ -81,6 +81,38 @@ afterAll(async () => {
 });
 
 describe('guild configs', () => {
+  test.each(['owner', undefined])('unlinked webhook cleanup retains encrypted capability for owner %p without key revocation', async (webhookOwnerId) => {
+    ddbMock.on(PutCommand).resolves({});
+    const jobId = await store.enqueueGuildWebhookCleanup({
+      guildId: 'g', apiKey: 'still-active-key', webhookId: 'wh', webhookOwnerId,
+    });
+    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    expect(input.TableName).toBe('test-prefix-credential-lifecycle');
+    expect(input.Item).toMatchObject({ job_id: jobId, reason: 'unlinked_webhook',
+      webhook_id: 'wh', webhook_owner_id: webhookOwnerId ?? null,
+      qurl_key_kind: 'shared', revoke_key: false, cleanup_state: 'pending' });
+    expect(input.Item.qurl_api_key).toBe(mockCiphertext('still-active-key'));
+    expect(input.Item).not.toHaveProperty('expires_at');
+    expect(input.ConditionExpression).toBe('attribute_not_exists(pk)');
+  });
+
+  test('unlinked webhook jobs refuse a missing encryption key', async () => {
+    mockEncryptStrict.mockImplementationOnce(() => { throw new Error('Encryption required'); });
+    await expect(store.enqueueGuildWebhookCleanup({ guildId: 'g', apiKey: 'key', webhookId: 'wh' }))
+      .rejects.toThrow('Encryption required');
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  test.each([
+    { guildId: '', apiKey: 'key', webhookId: 'wh' },
+    { guildId: 'g', apiKey: '', webhookId: 'wh' },
+    { guildId: 'g', apiKey: 'key', webhookId: '' },
+    { guildId: 'g', apiKey: 'key', webhookId: 'wh', webhookOwnerId: 123 },
+  ])('unlinked webhook jobs reject incomplete target %j', async (target) => {
+    await expect(store.enqueueGuildWebhookCleanup(target)).rejects.toThrow();
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
   test('owner-bound key writes compare the exact saved ciphertext', async () => {
     const ciphertext = mockCiphertext('saved-key');
     ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: ciphertext } });

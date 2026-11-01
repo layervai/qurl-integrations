@@ -1784,6 +1784,31 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
   }, { guildId, configuredBy, door });
 }
 
+// A subscription can be shared before its original caller saves the link.
+// Retain the capability for reference-aware cleanup; never revoke this active key.
+async function enqueueGuildWebhookCleanup({ guildId, apiKey, webhookId, webhookOwnerId }) {
+  if ([guildId, apiKey, webhookId].some(value => typeof value !== 'string' || !value.trim())) {
+    throw new Error('Guild, credential and webhook ID are required for cleanup');
+  }
+  if (webhookOwnerId != null && (typeof webhookOwnerId !== 'string' || !webhookOwnerId.trim())) {
+    throw new Error('Webhook owner is invalid');
+  }
+  const jobId = crypto.randomUUID();
+  await ddb.send(new PutCommand({
+    TableName: TABLES.credential_lifecycle,
+    Item: {
+      pk: `JOB#${jobId}`, sk: 'META', job_id: jobId, guild_id: guildId,
+      reason: 'unlinked_webhook', cleanup_state: 'pending', attempts: 0,
+      due_bucket: String(parseInt(jobId.slice(0, 2), 16) % 16), due_at: Date.now(),
+      created_at: nowIso(), qurl_api_key: encryptStrict(apiKey),
+      qurl_key_kind: 'shared', revoke_key: false,
+      webhook_id: webhookId, webhook_owner_id: webhookOwnerId ?? null,
+    },
+    ConditionExpression: 'attribute_not_exists(pk)',
+  }));
+  return jobId;
+}
+
 // Raw delete. No qurl-service subscription teardown. Today there is no
 // production caller; a future /qurl unlink orchestrator must perform
 // reference-aware cleanup before calling this, or explicitly record the orphan
@@ -2239,6 +2264,7 @@ module.exports = {
   getGuildApiKey, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
   // Per-guild webhook subscriptions (BYOK view counter)
   setGuildWebhookSubscription, setGuildDefaultWebhookOwner, clearGuildWebhookSubscription,
+  enqueueGuildWebhookCleanup,
   listCompleteGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
   // Lifecycle
   close, healthCheck,

@@ -88,6 +88,16 @@ async function main() {
     assert(jobs.every(job => job.cleanup_state === 'pending' && !('expires_at' in job)));
     assert.equal(jobs.filter(job => job.qurl_key_kind === 'shared').length, 1);
     assert.deepEqual(jobs.filter(job => job.qurl_key_kind === 'dedicated').map(job => job.qurl_key_id).sort(), ['key-three', 'key-two']);
+    await store.enqueueGuildWebhookCleanup({
+      guildId: 'smoke-guild', apiKey: 'still-active-shared-key', webhookId: 'synthetic-webhook',
+      webhookOwnerId: 'synthetic-owner',
+    });
+    const unlinked = (await ddb.send(new ScanCommand({ TableName: lifecycleTable, ConsistentRead: true })))
+      .Items.filter(job => job.reason === 'unlinked_webhook');
+    assert.equal(unlinked.length, 1);
+    assert.equal(decrypt(unlinked[0].qurl_api_key), 'still-active-shared-key');
+    assert.equal(unlinked[0].revoke_key, false);
+    assert.equal(unlinked[0].webhook_id, 'synthetic-webhook');
     const winner = await read();
     await client.send(new DeleteTableCommand({ TableName: lifecycleTable }));
     created.splice(created.indexOf(lifecycleTable), 1);
