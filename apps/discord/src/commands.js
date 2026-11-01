@@ -1681,6 +1681,7 @@ const REVOKE_RUNNING_MSG = 'Revocation is still running. Run `/qurl revoke` agai
  *   mintLinks is only reached via this batcher on the real send paths.
  *   Optional/back-compat — omitting it leaves the mint body unchanged.
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
+ * A short result has scheduled cleanup and must never be delivered.
  */
 async function mintLinksInBatches({ sendId, initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
   const allLinks = [];

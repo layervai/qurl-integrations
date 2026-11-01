@@ -4106,22 +4106,26 @@ describe('initial-send compensation boundaries', () => {
     const previousCap = config.QURL_SEND_MAX_RECIPIENTS;
     config.QURL_SEND_MAX_RECIPIENTS = 101;
     try {
-    const recipients = Array.from({ length: 101 }, (_, i) => ({ id: `large${i}`, username: `large${i}` }));
-    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-large-0', fileBuffer: Buffer.from('x') });
-    for (let offset = 0; offset < 101; offset += 10) {
-      const resourceId = `res-large-${offset / 10}`;
-      if (offset) mockReUploadBuffer.mockResolvedValueOnce({ resource_id: resourceId });
-      mockMintLinks.mockResolvedValueOnce(recipients.slice(offset, offset + 10).map((_, i) => ({
-        qurl_id: `q_large${offset + i}`, qurl_link: `https://q.test/${offset + i}`, resource_id: resourceId,
-      })));
+      const recipients = Array.from({ length: 101 }, (_, i) => ({ id: `large${i}`, username: `large${i}` }));
+      mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-large-0', fileBuffer: Buffer.from('x') });
+      for (let offset = 0; offset < 101; offset += 10) {
+        const resourceId = `res-large-${offset / 10}`;
+        if (offset) mockReUploadBuffer.mockResolvedValueOnce({ resource_id: resourceId });
+        mockMintLinks.mockResolvedValueOnce(recipients.slice(offset, offset + 10).map((_, i) => ({
+          qurl_id: `q_large${offset + i}`, qurl_link: `https://q.test/${offset + i}`, resource_id: resourceId,
+        })));
+      }
+      mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('partial BatchWrite failure'));
+      await executeSendPipeline(makeInteraction(), makePipelineParams({ recipients }));
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(11);
+      expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toHaveLength(101);
+      expect(mockSendDM).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith('Cleaned up freshly minted qURL links', {
+        sendId: expect.any(String), reason: 'persistence_failure', total: 11,
+      });
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = previousCap;
     }
-    mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('partial BatchWrite failure'));
-    await executeSendPipeline(makeInteraction(), makePipelineParams({ recipients }));
-    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(11);
-    expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toHaveLength(101);
-    expect(mockSendDM).not.toHaveBeenCalled();
-    expect(logger.error).not.toHaveBeenCalledWith('Cleaning up oversized send batch after possible persistence', expect.anything());
-    } finally { config.QURL_SEND_MAX_RECIPIENTS = previousCap; }
   });
   test.each(['failure', 'timeout'])('short-mint %s still returns the original failure copy once', async mode => {
     if (mode === 'timeout') jest.useFakeTimers();
@@ -4139,6 +4143,10 @@ describe('initial-send compensation boundaries', () => {
       expect(interaction.editReply.mock.calls.filter(([reply]) => reply.content === 'Only 1 of 2 links could be created. Please try again.')).toHaveLength(1);
       expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Only 1 of 2 links could be created. Please try again.' });
       expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+      if (mode === 'failure') {
+        expect(logger.error).toHaveBeenCalledWith('Failed to clean up freshly minted qURL links',
+          expect.objectContaining({ reason: 'short_mint', failed_count: 1 }));
+      }
       expect(mockSendDM).not.toHaveBeenCalled();
     } finally { if (mode === 'timeout') jest.useRealTimers(); }
   });
