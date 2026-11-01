@@ -11,9 +11,14 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
+const accountActiveStatus = "active"
+
 // AccountManagement uses explicit account authority; linked device owners are unsupported.
 type AccountManagement interface {
 	Me(context.Context) (*Identity, error)
+	ListAccessCodes(context.Context, int, string) (*AccountPage[AccessCode], error)
+	CreateAccessCode(context.Context, AccessCodeInput) (*CreatedAccessCode, error)
+	DeleteAccessCode(context.Context, string) error
 	ListDomains(context.Context, int, string) (*AccountPage[AccountDomain], error)
 	GetAccountDomain(context.Context, string) (*AccountDomain, error)
 	RegisterAccountDomain(context.Context, string) (*AccountDomain, error)

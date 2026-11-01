@@ -63,8 +63,6 @@ type WebhookDelivery struct {
 	CompletedAt  string `json:"completed_at,omitempty"`
 }
 
-const webhookActiveStatus = "active"
-
 var webhookIDPattern = regexp.MustCompile(`^wh_[A-Za-z0-9_-]{16}$`)
 var webhookSecretPattern = regexp.MustCompile(`^whsec_[A-Za-z0-9_-]{43}$`)
 var webhookDeliveryIDPattern = regexp.MustCompile(`^wd_[A-Za-z0-9_-]{16}$`)
@@ -94,7 +92,7 @@ func ValidateWebhookInput(input WebhookInput, create bool) error {
 	if input.Description != nil && (!utf8.ValidString(*input.Description) || utf8.RuneCountInString(*input.Description) > 500) {
 		return fmt.Errorf("%w: description must be valid text within 500 characters", qurl.ErrInvalidResourceRequest)
 	}
-	if input.Status != nil && *input.Status != webhookActiveStatus && *input.Status != "disabled" {
+	if input.Status != nil && *input.Status != accountActiveStatus && *input.Status != "disabled" {
 		return fmt.Errorf("%w: status must be active or disabled", qurl.ErrInvalidResourceRequest)
 	}
 	if input.Events != nil {
@@ -152,7 +150,7 @@ func (c *client) ListWebhooks(ctx context.Context, limit int, cursor string) (*A
 }
 
 func validWebhook(item *Webhook) bool {
-	return webhookIDPattern.MatchString(item.ID) && item.OwnerID != "" && item.URL != "" && (item.Status == webhookActiveStatus || item.Status == "disabled")
+	return webhookIDPattern.MatchString(item.ID) && item.OwnerID != "" && item.URL != "" && (item.Status == accountActiveStatus || item.Status == "disabled")
 }
 
 func decodeWebhook(reply *restReply, status int, id string) (*Webhook, error) {
@@ -189,7 +187,7 @@ func (c *client) CreateWebhook(ctx context.Context, input WebhookInput) (*Webhoo
 	if err != nil {
 		return nil, err
 	}
-	if item.URL != *input.URL || !sameWebhookEvents(item.Events, *input.Events) || item.Status != webhookActiveStatus || (input.Description != nil && item.Description != *input.Description) {
+	if item.URL != *input.URL || !sameWebhookEvents(item.Events, *input.Events) || item.Status != accountActiveStatus || (input.Description != nil && item.Description != *input.Description) {
 		return nil, fmt.Errorf("%w: created webhook differs from request", qurl.ErrInvalidAPIResponse)
 	}
 	return item, nil

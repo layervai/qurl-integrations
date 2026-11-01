@@ -18,7 +18,7 @@ import (
 )
 
 func TestAccountAPIKeyModeIsExplicitAndScoped(t *testing.T) {
-	for _, group := range []string{"webhooks", "domains"} {
+	for _, group := range []string{"webhooks", "domains", "access-codes"} {
 		for _, write := range []bool{false, true} {
 			t.Run(group+map[bool]string{false: "/read", true: "/write"}[write], func(t *testing.T) {
 				calls := 0
@@ -66,6 +66,9 @@ func TestAccountAPIKeyModeIsExplicitAndScoped(t *testing.T) {
 				args := []string{"--endpoint", server.URL, "--output", "json", group, "--api-key-auth", "list"}
 				if write {
 					id := "secure.example.com"
+					if group == "access-codes" {
+						id = commandAccessCodeID
+					}
 					if group == "webhooks" {
 						id = webhookCommandID
 					}
