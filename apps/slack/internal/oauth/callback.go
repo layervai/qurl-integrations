@@ -1040,7 +1040,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	// storage is disabled (see SetAPIKeyWithMetadata).
 	if perr := cfg.Provider.SetInitialAPIKeyWithMetadata(persistCtx, teamID, apiKey, keyID, keyPrefix, qurlAccountID, userID); perr != nil {
 		if errors.Is(perr, auth.ErrWorkspaceAPIKeyConflict) {
-			slog.Info("oauth/callback another setup attempt stored the workspace key", "team_id", teamID, "key_id", keyID)
+			slog.Info("oauth/callback another setup attempt stored the workspace key", "team_id", strings.ReplaceAll(strings.ReplaceAll(teamID, "\n", ""), "\r", ""), "key_id", keyID)
 			if !minted.BindingBacked {
 				scheduleOrphanRevoke(cfg, accessToken, keyID, teamID)
 			}

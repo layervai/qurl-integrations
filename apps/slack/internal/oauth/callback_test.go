@@ -3170,14 +3170,19 @@ func TestOverlappingLegacySetupRevokesOnlyLosingKey(t *testing.T) {
 func TestMintAndPersistReportsSetupConflict(t *testing.T) {
 	for _, binding := range []bool{false, true} {
 		t.Run(strconv.FormatBool(binding), func(t *testing.T) {
+			logs := captureDefaultSlogJSON(t)
 			cfg, store, minter := newCallbackCfgStoreMinter(t)
 			store.setErr = auth.ErrWorkspaceAPIKeyConflict
 			minter.bindingBacked = binding
 			tracker := &countingTracker{}
 			cfg.AsyncTracker = tracker
 			rec := httptest.NewRecorder()
-			_, ok := mintAndPersist(rec, cfg, "access", testTeamID, testUserID, testAdminSub)
+			_, ok := mintAndPersist(rec, cfg, "access", testTeamID+"\r\nforged", testUserID, testAdminSub)
 			tracker.wg.Wait()
+			records := logs()
+			if len(records) != 1 || records[0]["team_id"] != testTeamID+"forged" {
+				t.Fatalf("conflict log must strip line breaks: %#v", records)
+			}
 			if ok || rec.Code != http.StatusConflict {
 				t.Fatalf("ok=%t status=%d", ok, rec.Code)
 			}
