@@ -50,7 +50,19 @@ var accountSignInPage = template.Must(template.New("account-signin").Parse(accou
 // TODO(upstream-contract): Auth0 serves /authorize and /oauth/token and honors
 // prompt=login consent with an explicit connection. The qURL audience accepts
 // the scopes below; linking requires qurl:agent and verified account identity.
-func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Context, string) error) (_ string, retErr error) {
+func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Context, string) error) (string, error) {
+	return signInAccount(ctx, cfg, openBrowser, "openid email qurl:read qurl:write qurl:agent")
+}
+
+// SignInAccountForManagement requests only the permissions an explicit admin command needs.
+func SignInAccountForManagement(ctx context.Context, cfg *Config, openBrowser func(context.Context, string) error, scopes []string) (string, error) {
+	if err := ValidateAccountKeyScopes(scopes); err != nil {
+		return "", err
+	}
+	return signInAccount(ctx, cfg, openBrowser, "openid email "+strings.Join(scopes, " "))
+}
+
+func signInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Context, string) error, scopes string) (_ string, retErr error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 	defer func() {
@@ -96,7 +108,7 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	}
 	defer func() { _ = listener.Close() }()
 	codes := make(chan string, 1)
-	query := url.Values{"response_type": {"code"}, "prompt": {"login consent"}, "client_id": {settings.ClientID}, "redirect_uri": {accountCallback}, "audience": {settings.Audience}, "scope": {"openid email qurl:read qurl:write qurl:agent"}, accountStateParam: {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
+	query := url.Values{"response_type": {"code"}, "prompt": {"login consent"}, "client_id": {settings.ClientID}, "redirect_uri": {accountCallback}, "audience": {settings.Audience}, "scope": {scopes}, accountStateParam: {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
 	authorizeURL := &url.URL{Scheme: schemeHTTPS, Host: settings.Domain, Path: "/authorize", RawQuery: query.Encode()}
 	mux := accountBrowserHandler(state, authorizeURL, codes)
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, MaxHeaderBytes: 16384}

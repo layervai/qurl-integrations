@@ -501,10 +501,39 @@ sealed directory with `file` set. `file` over a plaintext directory is the
 ordinary case and opens normally. Both refusals exit with code 3. Use a different state directory rather
 than switching in place.
 
+## Account API keys
+
+Account key administration uses a fresh browser sign-in for each command. The
+account token stays in memory. Listing requests read access; mutations also request
+write access. Creating a key with `qurl:agent` or `qurl:keys` asks for that permission
+explicitly in browser consent. Normal resource commands keep using this machine's
+device identity. If your account has several owners, select one with `--owner`.
+Without `--owner`, an account with several owners returns the available IDs and
+makes no change.
+
+```sh
+qurl api-keys list --owner 'auth0|example' --output json
+qurl api-keys create --owner 'auth0|example' --name 'CI reader' --scopes qurl:read --output json
+qurl api-keys update key_Ab0123456789 --owner 'auth0|example' --name 'Build reader'
+qurl api-keys revoke key_Ab0123456789 --owner 'auth0|example'
+```
+
+Creation prints the new secret in `api_key` for JSON, in the text result, or by
+itself with `--quiet`. Keep that result in your secret store. Listing and renaming
+never print a secret. A list is one bounded page; use `next_cursor` from JSON with
+`--cursor` to read the next page. `--status all` includes revoked credentials and
+unknown future credential kinds remain visible.
+
+If creation or writing its result fails, the error gives an `--idempotency-key`.
+Repeat the same name, scopes and owner with that key within 24 hours to recover
+the original result. Changing the request under the same key is a conflict.
+This command does not store the browser token or replace the device credential.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
+| `qurl api-keys list/create/update/revoke` | Manage account credentials after a fresh browser sign-in |
 | `qurl publish <target-url>` | Publish a remote URL or serve a local app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |

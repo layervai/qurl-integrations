@@ -82,6 +82,7 @@ type globalOpts struct {
 	openBrowser func(ctx context.Context, link string) error
 	// Browser authentication is injected separately from command wiring tests.
 	signInAccount func(context.Context, *qurlapi.Config, func(context.Context, string) error) (string, error)
+	signInAdmin   func(context.Context, *qurlapi.Config, func(context.Context, string) error, []string) (string, error)
 	// httpClient is the HTTP client every qURL API client sends with. Nil is
 	// the production default; the test harness injects one that refuses a
 	// request to any host other than this machine.
@@ -274,6 +275,7 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 		backgroundShareGOOS:  runtime.GOOS,
 		keyStorageNoticeGOOS: runtime.GOOS,
 		signInAccount:        qurlapi.SignInAccount,
+		signInAdmin:          qurlapi.SignInAccountForManagement,
 	}
 	for _, opt := range options {
 		opt(opts)
@@ -354,6 +356,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 
 	cmd.AddCommand(
 		accountCmd(opts),
+		apiKeysCmd(opts),
 		publishCmd(opts),
 		shareCmd(opts),
 		grantsCmd(opts),
