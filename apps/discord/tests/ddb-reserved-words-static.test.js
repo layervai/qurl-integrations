@@ -203,12 +203,13 @@ describe('DDB reserved-words static check — full src scan', () => {
     // defeat the check. Today's expected dynamic sites:
     //   - flow-state.js (a few template-with-expression Filter/Update)
     //   - ddb-store.js (setGuildDefaultWebhookOwner's audited CAS join)
+    //   - ddb-store.js (setGuildApiKey: qurl_api_key/qurl_owner_id CAS; neither reserved)
     // If this assertion fires, audit each newly-dynamic expression
     // against the reserved-words list manually + raise the ceiling.
     const dynamic = [];
     for (const f of files) {
       dynamic.push(...findViolations(f).filter(v => v.dynamic));
     }
-    expect(dynamic.length).toBeLessThan(8);
+    expect(dynamic.length).toBeLessThan(9);
   });
 });

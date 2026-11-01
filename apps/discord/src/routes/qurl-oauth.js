@@ -8,10 +8,13 @@ const crypto = require('crypto');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
+const { prepareGuildOwnerBinding } = require('../guild-owner');
+const { qurlApiErrorStatus } = require('../utils/qurl-errors');
 const { AUDIT_EVENTS, SETUP_VIA, GUILD_WEBHOOK_PENDING_NOTICE } = require('../constants');
 const { sendDM } = require('../discord');
 const {
   verifyQurlOAuthState,
+  signQurlOAuthRedirectState,
   fingerprintQurlAccountSubject,
   qurlAccountFingerprintKeyEpoch,
 } = require('../utils/qurl-oauth-state');
@@ -154,7 +157,7 @@ router.get('/start', rateLimit, async (req, res) => {
     return renderError(res, 503, 'qURL setup not provisioned',
       'The bot operator needs to set KEY_ENCRYPTION_KEY (encryption-at-rest) before qURL setup can store keys safely.');
   }
-  const state = singleStringParam(req.query.state);
+  let state = singleStringParam(req.query.state);
   const verified = verifyQurlOAuthState(state);
   if (!verified.ok) {
     logger.warn('qURL OAuth start rejected invalid state', { reason: verified.reason });
@@ -165,10 +168,19 @@ router.get('/start', rateLimit, async (req, res) => {
   // Same-browser flows pass; leaked URLs in other browsers fail.
   // Cookie shape (__Host- prefix, Path=/, HttpOnly, SameSite=Lax,
   // Secure) lives in utils/oauth-cookies.js.
+  // Start the authentication clock at this redirect, not when the setup link was made.
+  state = signQurlOAuthRedirectState(state);
+  if (!state) {
+    return renderError(res, 400, 'Invalid setup link', 'This setup link has expired.');
+  }
+  const redirectState = verifyQurlOAuthState(state);
+  if (!redirectState.ok) {
+    return renderError(res, 500, 'Could not start qURL setup', 'Please start again from Discord.');
+  }
   const { codeVerifier, codeChallenge } = createPkcePair();
   setQurlOAuthCookie(res, req, state);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
-  const authorizeUrl = buildAuth0AuthorizeUrl({ state, codeChallenge, nonce: verified.payload.nonce });
+  const authorizeUrl = buildAuth0AuthorizeUrl({ state, codeChallenge, nonce: redirectState.payload.nonce });
   return res.redirect(302, authorizeUrl.toString());
 });
 
@@ -253,11 +265,12 @@ router.get('/callback', rateLimit, async (req, res) => {
   // re-bind or replay the verifier. Path-must-match invariant lives in
   // the clear helpers.
   clearQurlOAuthCookies(res);
-  const { guildId, discordUserId } = verified.payload;
+  const { guildId, discordUserId, authStartedAt } = verified.payload;
+  if (!Number.isSafeInteger(authStartedAt)) {
+    return renderError(res, 400, 'Invalid setup link', 'Start a new setup flow to verify a fresh sign-in.');
+  }
 
-  // 1. Exchange the code for an access_token + id_token (Auth0 token
-  //    endpoint). The id_token's `email` claim feeds the success-page
-  //    binding readout (sanity-check display, not a security boundary).
+  // Exchange the code, then verify the identity before any owner or key change.
   let accessToken;
   let qurlAccountEmail;
   let qurlAccountSubject;
@@ -300,52 +313,37 @@ router.get('/callback', rateLimit, async (req, res) => {
       logger.error('Auth0 token response missing or non-string access_token');
       return renderError(res, 502, 'Authorization failed', 'Auth0 returned an unexpected response. Please run /qurl-admin setup again.');
     }
-    // id_token email extraction with full JWKS verification. The email
-    // is the load-bearing visual cue against the Stage-2 confused-
-    // deputy class — promoting the security claim from "trust Auth0's
-    // TLS response" to "verify the JWT signature against Auth0's
-    // JWKS" closes the asterisk on that mitigation. See PR #177
-    // follow-up issue #178 / section B.
-    //
-    // Failure to verify is non-fatal: the qURL key still gets minted
-    // (the access_token mint already succeeded above) and the success
-    // page renders without the qURL-account-email line. Ops sees a
-    // logger.debug for triage. We do NOT fall back to unverified
-    // decode — a forged email would be worse than no email.
-    // id_token is optional (Auth0 may legitimately omit on a non-openid
-    // grant); strict-string check prevents a numeric/null value from
-    // being passed into jose.jwtVerify which would surface as a
-    // confusing decode error rather than a clean "no email" path.
-    if (typeof tokenJson.id_token === 'string' && tokenJson.id_token) {
-      // Distinct local — the outer `verified` (line ~258) carries the
-      // qURL-OAuth-state verification result; this one carries the
-      // Auth0 id_token JWKS verification result. Same shape, different
-      // payload — keep them lexically separate to avoid reader confusion.
-      const idTokenVerified = await verifyAuth0IdToken(tokenJson.id_token, verified.payload.nonce);
-      if (idTokenVerified.ok) {
-        if (typeof idTokenVerified.payload?.email === 'string') {
-          qurlAccountEmail = idTokenVerified.payload.email;
-        }
-        const subject = idTokenVerified.payload?.sub;
-        if (typeof subject === 'string' && subject) {
-          qurlAccountSubject = subject;
-        }
-      } else {
-        // Severity at this call site mirrors auth0-jwks.js's internal
-        // split (round-9 item #6): clock-skew expiry is benign + noisy;
-        // signature/claim/JWKS failures are the only signal of a forged
-        // or wrong-tenant id_token attempt and need to surface above
-        // default prod log filters.
-        const benign = idTokenVerified.reason === 'ERR_JWT_EXPIRED';
-        const log = benign ? logger.debug : logger.warn;
-        log('id_token verification failed (non-fatal — success page renders without email)', {
-          reason: idTokenVerified.reason,
-        });
-      }
+    if (typeof tokenJson.id_token !== 'string' || !tokenJson.id_token) {
+      return renderError(res, 403, 'Fresh sign-in required', 'The sign-in did not return a verified identity.');
     }
+    const identity = await verifyAuth0IdToken(tokenJson.id_token, {
+      nonce: verified.payload.nonce,
+      startedAt: authStartedAt,
+    });
+    if (!identity.ok || typeof identity.payload?.sub !== 'string' || !identity.payload.sub) {
+      logger.warn('qURL setup identity verification refused', { guildId, reason: identity.reason });
+      return renderError(res, 403, 'Fresh sign-in required',
+        'Sign in again with the qURL account that owns this Discord server setup.');
+    }
+    qurlAccountSubject = identity.payload.sub;
+    if (typeof identity.payload.email === 'string') qurlAccountEmail = identity.payload.email;
   } catch (err) {
     logger.error('Auth0 token exchange threw', { error: err?.message });
     return renderError(res, 502, 'Authorization failed', 'A network error occurred during the Auth0 handshake. Please run /qurl-admin setup again.');
+  }
+
+  let ownerBinding;
+  try {
+    ownerBinding = await prepareGuildOwnerBinding(guildId, qurlAccountSubject);
+  } catch (err) {
+    const status = qurlApiErrorStatus(err);
+    const conflict = err?.code === 'GUILD_OWNER_CONFLICT' || status === 401 || status === 403;
+    const log = conflict ? logger.warn : logger.error;
+    log('qURL setup owner verification refused', { guildId, code: err?.code, status, errorType: err?.name });
+    return conflict
+      ? renderError(res, 409, 'Server ownership could not be verified',
+        'Use the existing qURL owner account. If its saved key is no longer valid or ownership must change, contact the bot operator.')
+      : renderError(res, 503, 'Setup is temporarily unavailable', 'The existing server connection is unchanged. Try again shortly.');
   }
 
   // 2. Mint a guild-scoped qURL API key via POST /v1/api-keys, owned by
@@ -437,13 +435,11 @@ router.get('/callback', rateLimit, async (req, res) => {
       'A network error occurred while provisioning your qURL key. Please run /qurl-admin setup again.');
   }
 
-  // 3. Persist the key. setGuildApiKey is idempotent (upsert) — the
+  // 3. Persist the key with an owner and saved-key condition. The
   //    previous key (if any) remains valid on qurl-service until the
   //    admin manually revokes it via layerv.ai.
-  // TODO(#1366): persist the verified qURL owner identity and reject a
-  // setup re-run that would silently repoint this guild to another owner.
   try {
-    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH);
+    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH, ownerBinding);
   } catch (err) {
     logger.error('Failed to persist guild API key after successful mint', {
       error: err?.message, guildId, discordUserId, keyId,
@@ -471,6 +467,11 @@ router.get('/callback', rateLimit, async (req, res) => {
       .catch((dErr) => logger.warn('Best-effort orphan-key delete threw', {
         error: dErr?.message, keyId, guildId,
       }));
+    if (err?.code === 'GUILD_OWNER_CONFLICT' || err?.code === 'GUILD_SETUP_CHANGED'
+        || err?.name === 'ConditionalCheckFailedException') {
+      return renderError(res, 409, 'Server setup changed',
+        'Another setup changed this server. Start again with the existing qURL owner account.');
+    }
     return renderError(res, 500, 'qURL key provisioned but not stored',
       'Your qURL API key was created but the bot could not save it. Please run /qurl-admin setup again. '
       + 'If this keeps happening, contact your layerv.ai admin.');
@@ -499,10 +500,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       guildId,
     });
   }
-  // Interim #1366 evidence: compare this keyed, pseudonymous fingerprint
-  // across bind events to detect qURL-owner changes. The id_token is
-  // JWKS-verified and nonce-bound, but this remains observability only; durable
-  // owner identity and fail-closed comparison belong in #1366.
+  // Audit fingerprints remain optional; authorization uses the durable owner ID.
   try {
     logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
       guild_id: guildId,

@@ -48,12 +48,17 @@ function getJwks() {
  * are audienced to the OAuth client, NOT to the API audience the
  * access_token uses).
  */
-async function verifyAuth0IdToken(idToken, expectedNonce) {
+async function verifyAuth0IdToken(idToken, binding) {
   if (typeof idToken !== 'string' || !idToken) {
     return { ok: false, reason: 'no_token' };
   }
   if (!config.AUTH0_DOMAIN || !config.AUTH0_CLIENT_ID) {
     return { ok: false, reason: 'auth0_not_configured' };
+  }
+  if (!binding || typeof binding !== 'object'
+      || !Number.isSafeInteger(binding.startedAt) || binding.startedAt < 0
+      || typeof binding.nonce !== 'string' || !binding.nonce) {
+    return { ok: false, reason: 'setup_identity_not_bound_or_fresh' };
   }
   try {
     const { payload } = await jose.jwtVerify(idToken, getJwks(), {
@@ -63,9 +68,14 @@ async function verifyAuth0IdToken(idToken, expectedNonce) {
       // negligible. Explicit so a future "tolerate skew?" question has
       // a clear answer site.
       clockTolerance: 0,
+      requiredClaims: ['sub', 'exp', 'iat', 'nonce', 'auth_time'],
     });
-    if (!timingSafeStringEqual(payload.nonce, expectedNonce)) {
-      return { ok: false, reason: 'nonce_mismatch' };
+    if (!timingSafeStringEqual(payload.nonce, binding.nonce)
+        || typeof payload.sub !== 'string' || !payload.sub
+        || !Number.isSafeInteger(payload.auth_time)
+        || payload.auth_time < binding.startedAt - 5
+        || payload.auth_time > Math.floor(Date.now() / 1000) + 5) {
+      return { ok: false, reason: 'setup_identity_not_bound_or_fresh' };
     }
     return { ok: true, payload };
   } catch (err) {

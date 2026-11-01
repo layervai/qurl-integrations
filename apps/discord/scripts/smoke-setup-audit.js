@@ -39,11 +39,11 @@ async function main() {
     }))).Item;
     await store.setGuildApiKey('smoke-guild', 'smoke-key-one', 'admin-one', 'oauth');
     const first = await read();
-    await store.setGuildApiKey('smoke-guild', 'smoke-key-two', 'admin-one', 'paste');
+    await store.setGuildApiKey('smoke-guild', 'smoke-key-two', 'admin-one', 'paste', { ownerId: 'synthetic-owner', expectedApiKey: 'smoke-key-one' });
     const prior = await read();
     assert.equal(lines.length, 0, 'First setup and same-admin re-key must be silent');
     assert.equal(prior.configured_at, first.configured_at);
-    await store.setGuildApiKey('smoke-guild', 'smoke-key-three', 'admin-two', 'oauth');
+    await store.setGuildApiKey('smoke-guild', 'smoke-key-three', 'admin-two', 'oauth', { ownerId: 'synthetic-owner', expectedApiKey: 'smoke-key-two' });
     assert.equal(lines.length, 1, 'Admin change must emit exactly one audit');
     assert.deepEqual(JSON.parse(lines[0]).audit, {
       event: 'qurl_setup_admin_changed', agent: 'discord', guild_id: 'smoke-guild',
@@ -51,6 +51,29 @@ async function main() {
       via: 'oauth', prior_configured_at: first.configured_at, prior_updated_at: prior.updated_at,
     });
     assert.equal(await store.getGuildApiKey('smoke-guild'), 'smoke-key-three');
+    assert.equal((await read()).qurl_owner_id, 'synthetic-owner');
+    const { prepareGuildOwnerBinding } = require('../src/guild-owner');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { throw new Error('A bound owner must not revalidate its saved key'); };
+    try {
+      assert.deepEqual(await prepareGuildOwnerBinding('smoke-guild', 'synthetic-owner'), {
+        ownerId: 'synthetic-owner', expectedApiKey: 'smoke-key-three',
+      });
+      await assert.rejects(prepareGuildOwnerBinding('smoke-guild', 'another-owner'),
+        { code: 'GUILD_OWNER_CONFLICT' });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    await assert.rejects(store.setGuildApiKey('smoke-guild', 'wrong-owner-key', 'admin-two', 'oauth', {
+      ownerId: 'another-owner', expectedApiKey: 'smoke-key-three',
+    }), { name: 'ConditionalCheckFailedException' });
+    const results = await Promise.allSettled(['race-one', 'race-two'].map(key =>
+      store.setGuildApiKey('smoke-guild', key, 'admin-two', 'oauth', {
+        ownerId: 'synthetic-owner', expectedApiKey: 'smoke-key-three',
+      })));
+    assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+    await assert.rejects(store.setGuildApiKey('smoke-guild', 'unverified-key', 'admin-two', 'paste'),
+      { name: 'ConditionalCheckFailedException' });
     assert(!lines[0].includes('smoke-key'));
   } finally {
     console.log = log;

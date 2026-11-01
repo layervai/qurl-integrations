@@ -1633,13 +1633,35 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
   }
 }
 
-// `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
-async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
+// `via` names the setup door. `binding` carries the verified ownerId and the
+// prior plaintext expectedApiKey (or null), checked again before conditional write.
+async function setGuildApiKey(guildId, apiKey, configuredBy, via, binding) {
   const door = normalizeSetupVia(via);
   // Validate on every call so caller drift (including a forgotten argument)
   // shows up on first setups too; such doors audit as unknown.
   if (door === SETUP_VIA.UNKNOWN) {
     bestEffortLog(() => logger.warn('Unrecognized setup door; any admin-change audit for this write records via=unknown', { ...describeSetupVia(via), guildId }));
+  }
+  // Unbound writes can create a first setup only; rotations require a verified binding.
+  let condition = 'attribute_not_exists(qurl_api_key) AND attribute_not_exists(qurl_owner_id)';
+  const ownerValues = {};
+  if (binding) {
+    if (typeof binding.ownerId !== 'string' || !binding.ownerId.trim()) {
+      throw new Error('Guild owner identity is required');
+    }
+    const snapshot = await ddb.send(new GetCommand({
+      TableName: TABLES.guild_configs, Key: { guild_id: guildId }, ConsistentRead: true,
+    }));
+    const storedKey = snapshot?.Item?.qurl_api_key;
+    if ((storedKey ? decrypt(storedKey) : null) !== binding.expectedApiKey) {
+      const error = new Error('Guild key changed during setup');
+      error.code = 'GUILD_SETUP_CHANGED';
+      throw error;
+    }
+    condition = '(attribute_not_exists(qurl_owner_id) OR qurl_owner_id = :owner) AND '
+      + (storedKey ? 'qurl_api_key = :prior' : 'attribute_not_exists(qurl_api_key)');
+    ownerValues[':owner'] = binding.ownerId;
+    if (storedKey) ownerValues[':prior'] = storedKey;
   }
   const now = nowIso();
   // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
@@ -1653,8 +1675,11 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   const res = await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
-    UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
+    UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)'
+      + (binding ? ', qurl_owner_id = :owner' : ''),
+    ConditionExpression: condition,
     ExpressionAttributeValues: {
+      ...ownerValues,
       ':k': encrypt(apiKey),
       ':b': configuredBy,
       ':u': now,
