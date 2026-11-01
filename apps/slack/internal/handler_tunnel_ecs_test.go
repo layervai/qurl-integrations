@@ -19,16 +19,17 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"Fargate's awsvpc network mode",
 		ecsFargateRegionPlaceholderNote,
 		"127.0.0.1:9090",
-		"POSIX UID/GID `65532:65532`",
+		"UID/GID `65532:65532`",
 		`"readonlyRootFilesystem": true`,
 		`"restartPolicy": {`,
 		`"restartAttemptPeriod": 60`,
 		"warm-start revision",
 		"maximumPercent 100 and minimumHealthyPercent 0",
 		"Store the enrollment token from the separate DM",
+		"single-task application service and replacement downtime",
 		"message intentionally does not contain the token",
 		testTunnelImageRef,
-		"Put share.yaml at `/etc/qurl/share.yaml`",
+		"Put share.yaml at the qurl-config access-point root",
 		testTunnelLocalPort9090Line,
 		"crid: '" + testTunnelCRID + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
@@ -56,8 +57,8 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	if strings.Contains(got, `\u003c`) || strings.Contains(got, `\u003e`) {
 		t.Fatalf("ECS instructions escaped placeholder angle brackets:\n%s", got)
 	}
-	if gotFenceCount := strings.Count(got, "```"); gotFenceCount != 4 {
-		t.Fatalf("ECS instructions rendered %d code fences, want 4 for two independently copyable artifacts:\n%s", gotFenceCount, got)
+	if gotFenceCount := strings.Count(got, "```"); gotFenceCount != 6 {
+		t.Fatalf("ECS instructions rendered %d code fences, want 6 for three independently copyable artifacts:\n%s", gotFenceCount, got)
 	}
 
 	containerJSON, err := renderECSSidecarContainerJSON(args, testTunnelImageRef)
@@ -98,5 +99,119 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	}
 	if _, ok := env["LAYERV_KNOCK_RESOURCE_ID"]; ok {
 		t.Fatal("ECS environment rendered the advanced knock-resource override")
+	}
+}
+
+func TestRenderedECSVolumeArtifactsMatchBothInstallers(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"tunnel", "s3-website"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			var instructions, slug string
+			var err error
+			if kind == "tunnel" {
+				args := testTunnelInstallArgs()
+				slug = args.Slug
+				instructions, err = renderECSFargateTunnelInstructions(args, testTunnelImageRef)
+			} else {
+				args := testS3WebsiteArgs(tunnelEnvECSFargate)
+				slug = args.Slug
+				instructions, err = renderECSS3WebsiteInstructions(args, testTunnelImageRef, testTunnelImageRef)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			blocks := strings.Split(instructions, "```")
+			if len(blocks) != 7 {
+				t.Fatalf("want three complete copyable artifacts, got %d fences", len(blocks)-1)
+			}
+			var task struct {
+				Volumes []struct {
+					Name string `json:"name"`
+					EFS  struct {
+						FileSystemID      string `json:"fileSystemId"`
+						RootDirectory     string `json:"rootDirectory"`
+						TransitEncryption string `json:"transitEncryption"`
+						Authorization     struct {
+							AccessPointID string `json:"accessPointId"`
+							IAM           string `json:"iam"`
+						} `json:"authorizationConfig"`
+					} `json:"efsVolumeConfiguration"`
+				} `json:"volumes"`
+			}
+			if err := json.Unmarshal([]byte(blocks[1]), &task); err != nil {
+				t.Fatalf("task volumes JSON: %v", err)
+			}
+			if len(task.Volumes) != 3 {
+				t.Fatalf("want three volumes, got %d", len(task.Volumes))
+			}
+			volumes, accessPoints := map[string]bool{}, map[string]bool{}
+			for _, volume := range task.Volumes {
+				if volumes[volume.Name] || accessPoints[volume.EFS.Authorization.AccessPointID] {
+					t.Fatal("duplicate volume or shared access-point placeholder")
+				}
+				volumes[volume.Name] = true
+				accessPoints[volume.EFS.Authorization.AccessPointID] = true
+				if volume.EFS.FileSystemID != "<efs-file-system-id>" || volume.EFS.RootDirectory != "/" || volume.EFS.TransitEncryption != "ENABLED" || volume.EFS.Authorization.IAM != "ENABLED" || volume.EFS.Authorization.AccessPointID != "<"+volume.Name+"-access-point-id>" {
+					t.Fatalf("unsafe or incomplete EFS volume: %+v", volume)
+				}
+			}
+			var containers []ecsContainerDefinition
+			if kind == "tunnel" {
+				var container ecsContainerDefinition
+				if err := json.Unmarshal([]byte(blocks[5]), &container); err != nil {
+					t.Fatal(err)
+				}
+				containers = []ecsContainerDefinition{container}
+			} else if err := json.Unmarshal([]byte(blocks[5]), &containers); err != nil {
+				t.Fatal(err)
+			}
+			mounts := 0
+			for _, container := range containers {
+				for _, mount := range container.MountPoints {
+					mounts++
+					if !volumes[mount.SourceVolume] {
+						t.Fatalf("mount references absent task volume %q", mount.SourceVolume)
+					}
+					if mount.ReadOnly != (mount.SourceVolume != "qurl-agent-state") {
+						t.Fatalf("unsafe mount %+v", mount)
+					}
+				}
+			}
+			if mounts != 3 {
+				t.Fatalf("want three corresponding mounts, got %d", mounts)
+			}
+			for _, want := range []string{"/qurl/" + slug + "/agent-state", "/qurl/" + slug + "/config", "/qurl/" + slug + "/bootstrap", "rootDirectory stays `/`", "POSIX user and root CreationInfo owner", "0700", "different slug and access points", "one active task", "maximumPercent 100 and minimumHealthyPercent 0", "file-system ARN", "elasticfilesystem:AccessPointArn", "/etc/qurl/share.yaml", "/run/secrets/qurl/enrollment-token", "separate provisioning principal", "Attach an explicit file-system policy", "absent/default policy grants full access", "task-role-only Deny", "do not deny the provisioning principal", "qurl-bootstrap entry in task volumes", "both identity and file-system policies"} {
+				if !strings.Contains(instructions, want) {
+					t.Fatalf("missing EFS setup rule %q", want)
+				}
+			}
+		})
+	}
+}
+
+func TestECSEFSVolumeInstructionsRejectUnsafeSlug(t *testing.T) {
+	t.Parallel()
+	for _, slug := range []string{"", "other/../../shared", "bad`slug", "bad\nslug"} {
+		if _, err := renderECSEFSVolumeInstructions(slug); err == nil {
+			t.Fatalf("accepted unsafe slug %q", slug)
+		}
+	}
+}
+
+func TestS3ECSSlugValidationMatchesSharedVolumePaths(t *testing.T) {
+	t.Parallel()
+	for _, slug := range []string{"abc", "a-b", strings.Repeat("a", 64)} {
+		values := map[string]map[string]interactionStateValue{s3WebsiteInstallBlockSlug: {s3WebsiteInstallActionSlug: {Value: slug}}}
+		fieldErrors := map[string]string{}
+		got, _ := parseConnectorSlugAndShortcut(values, s3WebsiteInstallBlockSlug, s3WebsiteInstallActionSlug, s3WebsiteInstallBlockShortcut, s3WebsiteInstallActionShortcut, fieldErrors)
+		if len(fieldErrors) != 0 {
+			t.Fatalf("S3 slug %q rejected: %v", slug, fieldErrors)
+		}
+		args := testS3WebsiteArgs(tunnelEnvECSFargate)
+		args.Slug = got
+		if _, err := renderECSS3WebsiteInstructions(args, testTunnelImageRef, testTunnelImageRef); err != nil {
+			t.Fatalf("S3 slug %q cannot render: %v", slug, err)
+		}
 	}
 }

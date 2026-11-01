@@ -135,6 +135,27 @@ channel alias, the local port, and where you'll run it (Docker, Docker Compose,
 ECS/Fargate, or Kubernetes). qURL replies with copy-paste deploy steps tailored
 to that choice, plus a one-shot enrollment token that expires after one hour.
 
+ECS/Fargate output includes separate config YAML, container JSON, and task-volume JSON
+artifacts. The volume sample enables EFS IAM and transit encryption. Replace
+its file-system and access-point placeholders, then create separate per-slug
+state, config, and bootstrap access points as the output describes. Keep one
+active sidecar per state access point; use a different slug and access points
+for concurrent sidecars. Put `share.yaml` at the config access-point root, which
+mounts at `/etc/qurl/share.yaml`. The earlier `/work/qurl-proxy.yaml` layout is
+retired. The temporary enrollment file goes at the bootstrap access-point root;
+keep the state volume after enrollment. The task-volume `rootDirectory` stays
+`/`: the access point supplies the per-slug root.
+
+Seed config/bootstrap files through their access points from a separate
+provisioning principal with mount/write access. Keep the runtime task role
+read-only on those access points. Attach an explicit file-system policy; the
+absent/default policy permits full mount-target access. Scope grants to each
+role and access point, and deny config/bootstrap writes for the task role only,
+without denying the provisioning principal. See the [ECS EFS task volume
+contract](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specify-efs-config.html),
+[EFS access-point directory rules](https://docs.aws.amazon.com/efs/latest/ug/enforce-root-directory-access-point.html),
+and [EFS IAM/default-policy rules](https://docs.aws.amazon.com/efs/latest/ug/iam-access-control-nfs-efs.html).
+
 **qURL Connector for an S3 hosted website** — for a private S3 static website.
 The guided form asks for the connector ID, optional channel alias, target
 environment, bucket, region, optional prefix, and index document. qURL replies
