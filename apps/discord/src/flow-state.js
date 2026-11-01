@@ -73,7 +73,7 @@ const { AUDIT_EVENTS } = require('./constants');
 const { parseFlowId } = require('./flow-id');
 const { randomUUID } = require('node:crypto');
 const { gzipSync, gunzipSync } = require('node:zlib');
-const { readFlowRecipients } = require('./flow-recipient-payload');
+const { RECIPIENT_SET_FIELD, readFlowRecipients } = require('./flow-recipient-payload');
 
 // Module-load validations. Same fail-fast pattern as ddb-store.js
 // (DDB_TABLE_PREFIX + AWS_REGION). flow-state intentionally
@@ -169,7 +169,6 @@ function nowEpochSeconds() {
 // useful. Whole-blob encryption keeps the DDB attribute shape
 // predictable (always a single `payload` string column) regardless
 // of flow type.
-const RECIPIENT_SET_FIELD = '__qurl_recipient_set';
 const RECIPIENT_CHUNK_SIZE = 256;
 const RECIPIENT_MAX_CHUNKS = 100; // Bounded storage budget; covers the default 20,000 recipients.
 const RECIPIENT_READ_KEYS = 4;
@@ -197,6 +196,7 @@ async function writeRecipientChunks(items, signal) {
 
 async function encryptPayload(payload, expiresAt) {
   if (payload == null) return null;
+  if (Object.hasOwn(payload, RECIPIENT_SET_FIELD)) throw new TypeError('Flow recipients must be hydrated before writing');
   if (Object.hasOwn(payload, 'recipients')) {
     readFlowRecipients(payload);
     payload = { ...payload };
@@ -231,8 +231,6 @@ async function encryptPayload(payload, expiresAt) {
   }
   const inline = { ...payload };
   delete inline.recipients;
-  delete inline.recipientIds;
-  delete inline.recipientAliases;
   inline[RECIPIENT_SET_FIELD] = { version: 1, id, parts: items.length, count: payload.recipients.length };
   const encoded = encryptStrict(JSON.stringify(inline));
   if (Buffer.byteLength(encoded) > FLOW_INLINE_PAYLOAD_BYTES) throw new Error('Flow metadata exceeds inline size limit');
@@ -1070,7 +1068,7 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
   // physical reap hasn't fired (#273). Without the opt-in, an
   // orphan at the supersede-mismatch stage would be invisible
   // here and the next deleteFlow would fail by stage gate.
-  let surviving = await loadFlow(flow_id, { include_expired: true });
+  let surviving = await loadFlow(flow_id, { include_expired: true, defer_recipients: true });
   if (!surviving) {
     // Row vanished between createFlow conflict and the peek (TTL
     // reap on a stuck-orphan, or a concurrent supersede won the
@@ -1110,7 +1108,7 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
     // Lost the OCC race or the row evaporated. Re-peek so the
     // caller sees the current state (could be a sibling flow's
     // fresh row, or another supersede's fresh same-stage row).
-    surviving = await loadFlow(flow_id, { include_expired: true });
+    surviving = await loadFlow(flow_id, { include_expired: true, defer_recipients: true });
     return { created: false, surviving };
   }
 
@@ -1124,7 +1122,7 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
   // Lost the create race to a third caller that slipped in
   // between our delete and our retry. Same return shape — the
   // surviving peek tells the caller what to do.
-  surviving = await loadFlow(flow_id, { include_expired: true });
+  surviving = await loadFlow(flow_id, { include_expired: true, defer_recipients: true });
   return { created: false, surviving };
 }
 

@@ -490,3 +490,16 @@ describe('chunked flow acknowledgement boundary', () => {
     expect(interaction.editReply).toHaveBeenCalledWith({ content: SUPERSEDED_MSG, components: [] });
   });
 });
+
+
+test('a recipient hydration error after acknowledgement gives an actionable follow-up', async () => {
+  const handler = jest.fn();
+  registerFlow('chunked_read_error', { expectedStage: 'chunked', handler });
+  loadFlow.mockResolvedValue({ stage: 'chunked', recipient_payload_deferred: true });
+  hydrateFlowRecipients.mockRejectedValue(new Error('missing recipient chunk'));
+  const interaction = makeInteraction({ customId: 'chunked_read_error', followUp: jest.fn().mockResolvedValue(undefined) });
+  interaction.deferUpdate = jest.fn(async () => { interaction.deferred = true; });
+  await handleFlowInteraction(interaction);
+  expect(handler).not.toHaveBeenCalled();
+  expect(interaction.followUp).toHaveBeenCalledWith(expect.objectContaining({ content: 'Something went wrong — please run the command again.' }));
+});

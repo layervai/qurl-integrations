@@ -5067,6 +5067,7 @@ async function handleQurlSlashSend(interaction, params) {
       locationUrl: params.locationUrl,
       locationName: params.locationName,
       resourceLabel: params.resourceLabel,
+      // Keep new flows legacy until the reader fleet rollout is complete.
       ...withFlowRecipients({}, storedRecipients),
       voiceChannelId,
       // Mode token. Drives both the row layout (picker vs. pick-people-
@@ -7074,7 +7075,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
     stage: SEND_STAGE_AWAITING_CONFIRM,
     reason: 'terminal',
     expectedVersion: row.version,
-      ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
+    ...(row.payloadSnapshot !== undefined && { expectedPayload: row.payloadSnapshot }),
   });
   if (!deleteResult.deleted) {
     return interaction.followUp({

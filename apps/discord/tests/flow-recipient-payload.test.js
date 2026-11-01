@@ -29,3 +29,10 @@ test('repicking a canonical flow preserves its format and drops stale legacy fie
   expect(old.recipients).toBe(recipients);
   expect(old.recipientIds).toHaveLength(2);
 });
+
+
+test('unexpanded recipient references fail closed, even alongside other fields', () => {
+  for (const payload of [{}, legacy, { recipients }]) {
+    expect(() => readFlowRecipients({ ...payload, __qurl_recipient_set: {} })).toThrow('must be hydrated');
+  }
+});

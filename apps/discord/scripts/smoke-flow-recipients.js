@@ -49,6 +49,10 @@ async function main() {
     assert.equal(metadata.recipient_payload_deferred, true);
     assert.equal(metadata.payload.recipients, undefined);
     assert(!Object.keys(metadata).includes('payloadSnapshot'));
+    await assert.rejects(createFlow({ flow_id: '0:1#fixture-guild#fixture-channel#reference-copy', stage, payload: metadata.payload, expires_at: expires }), /hydrated before writing/);
+    await assert.rejects(transitionFlow(flow_id, 1, { stage_to: stage, payload: metadata.payload, terminal: false,
+      set_expires_at: expires + 180, expectedPayload: metadata.payloadSnapshot }), /hydrated before writing/);
+    assert.equal((await get(flow_id)).payload, parent.payload);
     const hydrated = await hydrateFlowRecipients(metadata);
     assert.deepEqual(hydrated.payload, payload);
     assert.equal(hydrated.payloadSnapshot, metadata.payloadSnapshot);
@@ -153,6 +157,13 @@ async function main() {
     await assert.rejects(loadFlow(flow_id), /missing or mismatched/);
     await client.send(new PutCommand({ TableName: table, Item: chunk }));
     assert.deepEqual((await loadFlow(flow_id)).payload, payload);
+    // A broken live set can be replaced without reading its missing children.
+    const brokenID = '0:1#fixture-guild#fixture-channel#broken-live';
+    await createFlow({ flow_id: brokenID, stage, payload, expires_at: expires });
+    const brokenRef = JSON.parse(decrypt((await get(brokenID)).payload)).__qurl_recipient_set;
+    await client.send(new DeleteCommand({ TableName: table, Key: { flow_id: `__flow_recipients__${brokenRef.id}#0` } }));
+    assert.equal((await supersedeOrCreate({ flow_id: brokenID, stage, payload: { sendNonce: 'restart' }, ttl_seconds: 180 })).created, true);
+    assert.deepEqual((await loadFlow(brokenID)).payload, { sendNonce: 'restart' });
     // Expired slot cleanup must not depend on chunks that TTL may already have reaped.
     await client.send(new DeleteCommand({ TableName: table, Key: { flow_id: chunkKey } }));
     await client.send(new UpdateCommand({ TableName: table, Key: { flow_id }, UpdateExpression: 'SET expires_at = :expired',

@@ -1,5 +1,8 @@
+const RECIPIENT_SET_FIELD = '__qurl_recipient_set';
+
 // Read both formats before any worker starts creating canonical recipient lists.
 function readFlowRecipients(payload) {
+  if (Object.hasOwn(payload, RECIPIENT_SET_FIELD)) throw new TypeError('Flow recipients must be hydrated before use');
   if (Object.hasOwn(payload, 'recipients')) {
     if (!Array.isArray(payload.recipients) || payload.recipients.some(recipient => !recipient
         || typeof recipient.id !== 'string' || !recipient.id || typeof recipient.alias !== 'string')) {
@@ -26,4 +29,4 @@ function withFlowRecipients(payload, recipients) {
   return next;
 }
 
-module.exports = { readFlowRecipients, withFlowRecipients };
+module.exports = { RECIPIENT_SET_FIELD, readFlowRecipients, withFlowRecipients };
