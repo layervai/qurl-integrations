@@ -154,6 +154,8 @@ homebrew_casks:
       - manpages/qurl-webhooks-rotate-secret.1
       - manpages/qurl-webhooks-events.1
       - manpages/qurl-webhooks-deliveries.1
+      - manpages/qurl-batch.1
+      - manpages/qurl-batch-create.1
       - manpages/qurl-access-codes.1
       - manpages/qurl-access-codes-list.1
       - manpages/qurl-access-codes-create.1
