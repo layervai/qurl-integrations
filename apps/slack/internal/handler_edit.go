@@ -402,7 +402,7 @@ func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta 
 	c, err := h.authenticatedClient(ctx, meta.TeamID)
 	if err != nil {
 		log.Error("tunnel edit: API key lookup failed", "error", err)
-		_ = h.postResponse(log, meta.ResponseURL, ":warning: "+authErrorMessage(err))
+		_ = h.postResponse(log, meta.ResponseURL, ":warning: "+authErrorMessage(err, commandUser))
 		return
 	}
 
