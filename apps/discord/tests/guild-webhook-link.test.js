@@ -487,12 +487,99 @@ describe('setup wait and shutdown drain', () => {
     const task = links.fireAndForgetLinkGuildWebhookSubscription(args);
     const drain = links.drainGuildWebhookSubscriptions();
     await expect(links.fireAndForgetLinkGuildWebhookSubscription(args)).resolves.toEqual({ ok: false, reason: LINK_RESULTS.SHUTTING_DOWN });
+    expect(mockAudit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED, { guild_id: args.guildId, reason: LINK_RESULTS.SHUTTING_DOWN });
     await jest.advanceTimersByTimeAsync(10_000);
     await expect(drain).resolves.toBe(false);
     expect(mockWarn).toHaveBeenCalledWith('Guild webhook link shutdown drain timed out', { in_flight: 1 });
     finish();
     await task;
     expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test('primary persistence confirms setup while sibling propagation remains tracked', async () => {
+    const links = freshLinks();
+    let finishPropagation;
+    mockPropagateGuildWebhookSubscription.mockReturnValueOnce(new Promise(resolve => { finishPropagation = resolve; }));
+    const setup = links.linkGuildWebhookSubscriptionForSetup(args);
+    let confirmed;
+    setup.then(value => { confirmed = value; });
+    try {
+      await jest.advanceTimersByTimeAsync(0);
+      expect(mockSetGuildWebhookSubscription).toHaveBeenCalled();
+      expect(confirmed).toBe(true);
+      let drained = false;
+      const drain = links.drainGuildWebhookSubscriptions().then(value => { drained = value; });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(drained).toBe(false);
+      finishPropagation({ updated: 0, failed: 0, skipped: 0 });
+      await drain;
+      expect(drained).toBe(true);
+      expect(mockAudit.mock.calls.filter(([event]) => event === AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED)).toHaveLength(1);
+    } finally {
+      finishPropagation({ updated: 0, failed: 0, skipped: 0 });
+      await setup;
+    }
+  });
+
+  test('rollback DELETE remains part of the accepted shutdown work', async () => {
+    const links = freshLinks();
+    let finishDelete;
+    mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('persist unavailable'));
+    mockDeleteSubscription.mockReturnValueOnce(new Promise(resolve => { finishDelete = resolve; }));
+    const task = links.fireAndForgetLinkGuildWebhookSubscription(args);
+    try {
+      await jest.advanceTimersByTimeAsync(0);
+      expect(mockDeleteSubscription).toHaveBeenCalled();
+      let drained = false;
+      const drain = links.drainGuildWebhookSubscriptions().then(value => { drained = value; });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(drained).toBe(false);
+      finishDelete();
+      await drain;
+      expect(drained).toBe(true);
+    } finally { finishDelete(); await task; }
+  });
+
+  test('normal shutdown preserves the prior teardown budget after the ten-second link drain', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const vm = require('node:vm');
+    const { runGracefulShutdown } = require('../src/gateway-shutdown-helpers');
+    const source = fs.readFileSync(path.join(__dirname, '../src/index.js'), 'utf8');
+    const start = source.indexOf('async function gracefulShutdownTeardown(');
+    const end = source.indexOf('async function pushHandoffShutdown(', start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const links = freshLinks();
+    const finish = pendingRegistration();
+    const task = links.fireAndForgetLinkGuildWebhookSubscription(args);
+    const order = [];
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const exit = jest.fn(code => order.push(`exit:${code}`));
+    const globals = {
+      isShuttingDown: false, httpServer: {}, logger: { info: mockInfo, warn: mockWarn, error: mockError },
+      tryClose: async () => { order.push('http'); await sleep(5000); },
+      stopServerIntervals: () => order.push('intervals'),
+      eventConsumer: { stop: async () => order.push('consumer') },
+      eventPublisher: { stop: async () => { order.push('publisher'); await sleep(3000); } },
+      drainGuildWebhookSubscriptions: async () => { order.push('link-start'); await links.drainGuildWebhookSubscriptions(); order.push('link-end'); },
+      gatewayHeartbeatTimer: null, activeGuildCountTimer: null,
+      config: { ENABLE_GATEWAY_HOT_STANDBY: true, ENABLE_GATEWAY_RESUME: true },
+      controlChannelServer: {}, connectionWatchdog: {}, gatewayLeader: {},
+      stopGatewayHotStandby: async () => order.push('control'),
+      isGateway: true, gatewayShim: { stop: async () => order.push('seal') },
+      discordShutdown: async () => order.push('discord'), db: { close: async () => order.push('storage') },
+      runGracefulShutdown: options => runGracefulShutdown({ ...options, exit }),
+    };
+    vm.createContext(globals);
+    vm.runInContext(source.slice(start, end), globals);
+    const shutdown = globals.gracefulShutdown();
+    try {
+      await jest.advanceTimersByTimeAsync(19000);
+      await shutdown;
+      expect(order).toEqual(['http', 'intervals', 'consumer', 'publisher', 'link-start', 'link-end', 'control', 'seal', 'storage', 'exit:0']);
+      expect(exit).toHaveBeenCalledTimes(1);
+    } finally { finish(); await task; }
   });
 
   test('known registration failure gives partial setup without changing its audit', async () => {

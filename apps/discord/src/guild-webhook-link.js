@@ -1,6 +1,7 @@
 // Per-guild qurl-service webhook linking. Default-owner guilds reuse the
 // Lambda-managed subscription; different owners get a BYOK subscription.
-// Called from the two setGuildApiKey call sites + the backfill script.
+// Setup waits for primary confirmation; accepted propagation drains on shutdown.
+// The backfill script can await the full task.
 // Never re-throws to the caller: the OAuth callback / /qurl-admin setup
 // should succeed for key linking even when view-counter wiring fails
 // (the polling fallback covers it until the link is retried or remediated).
@@ -36,10 +37,8 @@ function bridgeUrl() {
   return `${config.BASE_URL.replace(/\/+$/, '')}/webhooks/qurl`;
 }
 
-// Fire-and-forget DELETE used by linkGuildWebhookSubscription's
-// rollback paths. Intentionally not awaited: the orphan-on-
-// qurl-service is itself ephemeral (it 401s every delivery on a
-// stale key) and the audit event is the operator-visible signal.
+// Rollback is part of the accepted link task, so shutdown also drains its DELETE.
+// Failures are audited and never replace the original linking result.
 //
 // Audit-noise discrimination: 404 is swallowed inside the registrar
 // (concurrent-delete race; the goal state is already met). 401 is
@@ -48,7 +47,7 @@ function bridgeUrl() {
 // (would flood the alarm channel on every key rotation). 5xx and
 // network errors DO audit so an orphan-subscription leak is visible.
 function bestEffortDeleteSubscription({ apiKey, webhookId, guildId }) {
-  deleteSubscription({ apiEndpoint: config.QURL_ENDPOINT, apiKey, webhookId })
+  return deleteSubscription({ apiEndpoint: config.QURL_ENDPOINT, apiKey, webhookId })
     .catch((dErr) => {
       const status = dErr?.status;
       logger.warn('Best-effort orphan-subscription delete threw', {
@@ -104,7 +103,7 @@ function auditLinkFailure(guildId, reason, extra) {
 // caller that ever wants to put user-controlled text here should
 // instead sanitize to `[A-Za-z0-9=,_-]` (Discord user IDs are
 // decimal snowflakes; flow-tag literals are author-controlled).
-async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContext }) {
+async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContext, onLinked }) {
   if (!guildId || !apiKey) {
     auditLinkFailure(guildId || '<missing>', LINK_RESULTS.MISSING_ARGS);
     return { ok: false, reason: LINK_RESULTS.MISSING_ARGS };
@@ -180,7 +179,9 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED, {
       guild_id: guildId, action: WEBHOOK_ACTIONS.REUSED, default_owner: true,
     });
-    return { ok: true, action: WEBHOOK_ACTIONS.REUSED };
+    const result = { ok: true, action: WEBHOOK_ACTIONS.REUSED };
+    onLinked?.(result);
+    return result;
   }
 
   let registered = null;
@@ -215,11 +216,12 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
 
   const { webhookId, secret, action, ownerId: webhookOwnerId } = registered;
   if (typeof webhookOwnerId !== 'string' || !webhookOwnerId) {
-    bestEffortDeleteSubscription({ apiKey, webhookId, guildId });
-    logger.warn('Per-guild webhook ownerId missing from registrar response; rolled back', {
+    const rollback = bestEffortDeleteSubscription({ apiKey, webhookId, guildId });
+    logger.warn('Per-guild webhook ownerId missing from registrar response; rollback requested', {
       guildId, webhookId, action,
     });
     auditLinkFailure(guildId, LINK_RESULTS.OWNER_MISSING);
+    await rollback;
     return { ok: false, reason: LINK_RESULTS.OWNER_MISSING };
   }
 
@@ -230,7 +232,7 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       webhookOwnerId,
     });
   } catch (err) {
-    bestEffortDeleteSubscription({ apiKey, webhookId, guildId });
+    const rollback = bestEffortDeleteSubscription({ apiKey, webhookId, guildId });
     // ConditionalCheckFailedException from
     // setGuildWebhookSubscription's attribute_exists(qurl_api_key)
     // guard means setGuildApiKey wasn't called first (or its row
@@ -243,6 +245,7 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       orphan_guard_tripped: isOrphanGuard,
     });
     auditLinkFailure(guildId, LINK_RESULTS.PERSIST_FAILED);
+    await rollback;
     return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };
   }
 
@@ -262,6 +265,13 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       error: err?.message, guildId,
     });
   }
+
+  const result = { ok: true, action };
+  logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED, {
+    guild_id: guildId, action,
+  });
+  // The primary is usable now; propagation remains part of the tracked task.
+  onLinked?.(result);
 
   // Sibling rows under the same owner may hold a pre-rotate secret.
   // Best-effort propagation; scanOnce's updatedAt tiebreaker still
@@ -304,24 +314,18 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     });
   }
 
-  logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED, {
-    guild_id: guildId, action,
-  });
-  return { ok: true, action };
+  return result;
 }
 
-// Fire-and-forget wrapper for the two splice points (commands.js
-// `/qurl-admin setup` paste flow + qurl-oauth.js OAuth callback). Centralizes
-// the .catch + descriptionContext format so the two call sites stay
-// in sync — a future audit-log shape change should touch one place.
-//
-// Keep accepted background work visible to the shutdown drain.
+// Track accepted work through propagation and rollback. Setup callers can wait
+// only for primary confirmation; description tags stay normalized in one place.
 const inFlightGuildLinks = new Set();
 let guildLinksDraining = false;
 
-function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, configuredBy }) {
+function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, configuredBy, onLinked }) {
   if (guildLinksDraining) {
-    logger.warn('Guild webhook link skipped during shutdown');
+    logger.warn('Guild webhook link skipped during shutdown', { guildId });
+    auditLinkFailure(guildId || '<missing>', LINK_RESULTS.SHUTTING_DOWN);
     return Promise.resolve({ ok: false, reason: LINK_RESULTS.SHUTTING_DOWN });
   }
   const door = normalizeSetupVia(via);
@@ -335,6 +339,7 @@ function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, confi
   const task = linkGuildWebhookSubscription({
     guildId,
     apiKey,
+    onLinked,
     // Same normalization as the setup audit, so both record the same door.
     descriptionContext: `via=${door}, configuredBy=${configuredBy}`,
   }).catch((err) => logger.warn('linkGuildWebhookSubscription contract drift — threw unexpectedly', {
@@ -358,9 +363,11 @@ async function waitForGuildLinkWork(task, timeoutMs) {
 }
 
 async function linkGuildWebhookSubscriptionForSetup(args) {
-  const task = fireAndForgetLinkGuildWebhookSubscription(args);
-  // A timeout only bounds the response; the tracked task keeps running.
-  const result = await waitForGuildLinkWork(task, config.QURL_WEBHOOK_SETUP_WAIT_MS).catch(() => undefined);
+  let confirmLinked;
+  const primary = new Promise(resolve => { confirmLinked = resolve; });
+  const task = fireAndForgetLinkGuildWebhookSubscription({ ...args, onLinked: confirmLinked });
+  // Primary confirmation ends the response wait; the full task keeps draining.
+  const result = await waitForGuildLinkWork(Promise.race([primary, task]), config.QURL_WEBHOOK_SETUP_WAIT_MS).catch(() => undefined);
   return result?.ok === true;
 }
 

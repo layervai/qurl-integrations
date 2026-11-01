@@ -195,7 +195,7 @@ setup) means required to use that feature.
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `QURL_WEBHOOK_SECRET` | Default webhook | Shared HMAC secret written by the registrar Lambda; required in every process that links guild webhooks when a default subscription exists. |
 | `QURL_WEBHOOK_PURE_BYOK` | No | Set to `true` only when the deployment intentionally has no default webhook subscription. |
-| `QURL_WEBHOOK_SETUP_WAIT_MS` | No | Setup response wait in milliseconds, 1–5000 (default 3000). A timeout shows a view-counting notice and leaves subscription work running. Shutdown drains accepted links for up to 10 seconds. |
+| `QURL_WEBHOOK_SETUP_WAIT_MS` | No | Primary subscription-confirmation wait in milliseconds, 1–5000 (default 3000). A timeout shows a view-counting notice and leaves accepted work running. |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
 | `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete OAuth setup (defaults to `http://localhost:3000`). Local customer-install testing must use `localhost` or HTTPS because its `__Host-` session cookie is always `Secure`. |
 | `AUTH0_EMAIL_CONNECTION` | No | Auth0 connection pinned on setup/install authorize redirects (e.g. `email`). Unset or `PLACEHOLDER` sends no pin; a malformed value blocks every `/qurl-admin setup` entry path until corrected. |
@@ -477,3 +477,14 @@ Sandbox traffic after rollout before using it in a production dashboard.
 TTL deletion does not emit `send_confirm_expired`: DynamoDB reaping is delayed
 and no stream hook is added here. Exact expiry-event counts are unavailable.
 Do not infer an exact expiry count from open-minus-delivered cards.
+
+### Setup and shutdown budgets
+
+Setup confirmation ends when the primary subscription is persisted and usable;
+slow best-effort sibling propagation does not delay a successful setup reply.
+Accepted work remains tracked through propagation and rollback DELETEs.
+Normal shutdown drains it for up to 10 seconds before session sealing and storage
+close. Its total hard ceiling is 20 seconds, preserving the prior 10-second
+teardown allowance. Configure a container stop grace of at least 30 seconds.
+Managed Fargate tasks use that window. Active gateway push handoff keeps its
+existing 12-second ceiling and gains no wait after session shutdown.

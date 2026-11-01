@@ -695,7 +695,7 @@ async function gracefulShutdownTeardown({
   // built the hot-standby surface.
   //
   // Normal shutdown awaits both stop calls; a wedged final renew is bounded
-  // by runGracefulShutdown's 10 s force-exit. IDENTIFY-fatal shutdown still
+  // by runGracefulShutdown's 20 s normal force-exit. IDENTIFY-fatal shutdown still
   // invokes both idempotent stop methods to set their guards, but does not
   // await work parked behind manager.connect(). Earlier HTTP/publisher drains
   // can still consume the exit deadline before the session flush. A resumable
@@ -751,6 +751,9 @@ async function gracefulShutdown(code = 0, {
 } = {}) {
   return runGracefulShutdown({
     code,
+    // Preserve the prior 10s teardown budget in addition to the 10s link drain.
+    // TODO(upstream-contract): managed Fargate tasks allow 30s before SIGKILL.
+    ceilingMs: 20_000,
     claimShutdown: () => {
       if (isShuttingDown) return false;
       isShuttingDown = true;
