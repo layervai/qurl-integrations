@@ -2994,8 +2994,9 @@ async function executeSendPipeline(interaction, {
           interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
         }
-        // An active local revoke owns its final reply. Persisted success wins after a failed attempt.
+        // An active local revoke owns its final reply.
         if (revokeInFlight) return;
+        // Persisted success wins after a failed attempt; revoked_at also fences refreshed webhook renders.
         if (revokedElsewhere) {
           interaction.editReply({ content: 'Links for this send have already been revoked.', components: [] }).catch(logIgnoredDiscordErr);
           return;

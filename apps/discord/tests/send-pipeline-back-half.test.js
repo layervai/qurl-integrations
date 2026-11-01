@@ -2691,7 +2691,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     const { end, interaction } = await setupRevocableSend();
     mockDb.getSendConfig.mockRejectedValueOnce(new Error('store unavailable'));
     try {
-      await expect(end(null, 'time')).resolves.not.toThrow();
+      await expect(end(null, 'time')).resolves.toBeUndefined();
       expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain('Management window closed');
       expect(logger.warn).toHaveBeenCalledWith('Could not check send revoked state when management closed', expect.objectContaining({ error: 'store unavailable' }));
     } finally { clearCooldown('sender-1'); }
