@@ -180,7 +180,7 @@ func TestRenderedECSVolumeArtifactsMatchBothInstallers(t *testing.T) {
 			if mounts != 3 {
 				t.Fatalf("want three corresponding mounts, got %d", mounts)
 			}
-			for _, want := range []string{"/qurl/" + slug + "/agent-state", "/qurl/" + slug + "/config", "/qurl/" + slug + "/bootstrap", "rootDirectory stays `/`", "POSIX user and root CreationInfo owner", "0700", "different slug and access points", "one active task", "maximumPercent 100 and minimumHealthyPercent 0", "file-system ARN", "elasticfilesystem:AccessPointArn", "/etc/qurl/share.yaml", "/run/secrets/qurl/enrollment-token", "separate provisioning principal", "do not grant the task role write access to config/bootstrap"} {
+			for _, want := range []string{"/qurl/" + slug + "/agent-state", "/qurl/" + slug + "/config", "/qurl/" + slug + "/bootstrap", "rootDirectory stays `/`", "POSIX user and root CreationInfo owner", "0700", "different slug and access points", "one active task", "maximumPercent 100 and minimumHealthyPercent 0", "file-system ARN", "elasticfilesystem:AccessPointArn", "/etc/qurl/share.yaml", "/run/secrets/qurl/enrollment-token", "separate provisioning principal", "Attach an explicit file-system policy", "absent/default policy grants full access", "task-role-only Deny", "do not deny the provisioning principal"} {
 				if !strings.Contains(instructions, want) {
 					t.Fatalf("missing EFS setup rule %q", want)
 				}

@@ -148,9 +148,13 @@ keep the state volume after enrollment. The task-volume `rootDirectory` stays
 
 Seed config/bootstrap files through their access points from a separate
 provisioning principal with mount/write access. Keep the runtime task role
-read-only on those access points, including in the file-system policy. See the [ECS EFS task volume
+read-only on those access points. Attach an explicit file-system policy; the
+absent/default policy permits full mount-target access. Scope grants to each
+role and access point, and deny config/bootstrap writes for the task role only,
+without denying the provisioning principal. See the [ECS EFS task volume
 contract](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specify-efs-config.html)
-and [EFS access-point directory rules](https://docs.aws.amazon.com/efs/latest/ug/enforce-root-directory-access-point.html).
+[EFS access-point directory rules](https://docs.aws.amazon.com/efs/latest/ug/enforce-root-directory-access-point.html),
+and [EFS IAM/default-policy rules](https://docs.aws.amazon.com/efs/latest/ug/iam-access-control-nfs-efs.html).
 
 **qURL Connector for an S3 hosted website** — for a private S3 static website.
 The guided form asks for the connector ID, optional channel alias, target
