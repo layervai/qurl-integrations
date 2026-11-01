@@ -37,6 +37,7 @@ const { linkGuildWebhookSubscriptionForSetup } = require('../guild-webhook-link'
 const AUTH0_TIMEOUT_MS = 15000;
 const QURL_SERVICE_TIMEOUT_MS = 15000;
 const ORPHAN_DELETE_TIMEOUT_MS = 10000;
+// TODO(upstream-contract): keep mint codes/statuses and owner-scoped response replay aligned with qURL.
 const KEY_MINT_FAILURES = new Map([
   ['email_verification_required', [403, 'Verify your qURL account email', 'Verify your qURL account email, then start setup again.']],
   ['account_frozen', [403, 'qURL account unavailable', 'Your qURL account is frozen. Contact your layerv.ai admin before trying setup again.']],
