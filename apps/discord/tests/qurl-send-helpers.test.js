@@ -2344,7 +2344,7 @@ describe('constants + exports', () => {
   test('CONTRACT: executeSendPipeline never reads personalMessageRaw', () => {
     const fs = require('fs');
     const path = require('path');
-    const src = fs.readFileSync(path.resolve(__dirname, '../src/commands.js'), 'utf8');
+    const src = fs.readFileSync(path.resolve(__dirname, '../src/qurl-send-slash.js'), 'utf8');
     const startMarker = 'async function executeSendPipeline(';
     const startIdx = src.indexOf(startMarker);
     expect(startIdx).toBeGreaterThanOrEqual(0);

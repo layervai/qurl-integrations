@@ -114,6 +114,7 @@ jest.mock('../../src/flow-state', () => ({
 
 const commands = require('../../src/commands');
 const { _test } = commands;
+const sendSlash = require('../../src/qurl-send-slash');
 const logger = require('../../src/logger');
 const { sendDM: mockSendDM } = require('../../src/discord');
 const { mintLinks: mockMintLinks } = require('../../src/connector');
@@ -129,9 +130,6 @@ const {
   parseLocationInput,
   resolveLocation,
   RESOLVE_REASON,
-  handleAutocomplete,
-  _resetAutocompleteFailureBurst,
-  AUTOCOMPLETE_FAILURE_LOG_BURST,
   safeDecodeURIComponent,
   SEND_STAGE_AWAITING_CONFIRM,
   CONFIRM_USER_SELECT_CUSTOM_ID,
@@ -151,13 +149,18 @@ const {
   SELF_DESTRUCT_NO_TIMER_CHOICE,
   isOnCooldown,
   setCooldown,
-  setDetectCooldown,
   clearCooldown,
   sendCooldowns,
   executeSendPipeline,
   getActiveFileSends,
   setActiveFileSends,
   resolveRoleNames,
+} = sendSlash;
+const {
+  handleAutocomplete,
+  _resetAutocompleteFailureBurst,
+  AUTOCOMPLETE_FAILURE_LOG_BURST,
+  setDetectCooldown,
   handleQurlDetect,
   detectCooldowns,
   isOnDetectCooldown,
@@ -175,7 +178,7 @@ const {
   handleConfirmNoteModal,
   handleConfirmVoiceEveryone,
   handleConfirmPickManual,
-} = commands;
+} = sendSlash;
 
 const SENDER_ID = '900000000000000001';
 
