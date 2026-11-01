@@ -288,6 +288,13 @@ up to an hour to propagate (single-server installs appear right away). If they
 still don't show, confirm the bot was invited with the **Use Application
 Commands** permission.
 
+**Add Recipients failed after a storage timeout** — a final guarded transaction
+can commit while its response is lost. The bot sends no DMs and tries to revoke
+the qURLs just minted for the new recipients. Successful cleanup can leave
+`qurl_sends` rows pointing at revoked children; treat these as failed-delivery
+residue during status/revoke triage. If cleanup fails or exceeds its wait
+budget, revocation is unconfirmed. Check the grants before manual row cleanup.
+
 ## License
 
 [MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.
