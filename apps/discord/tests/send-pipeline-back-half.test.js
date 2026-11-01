@@ -2168,6 +2168,28 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
 });
 
 describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, primary site)', () => {
+  it('location upload failure emits the location kind and upstream status', async () => {
+    mockUploadJsonToConnector.mockRejectedValueOnce(
+      Object.assign(new Error('connector 502'), { status: 502 }),
+    );
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, makePipelineParams({
+      resourceType: 'maps',
+      attachment: null,
+      locationUrl: 'https://maps.example.com/place',
+      locationName: 'Example place',
+    }));
+    expect(mockUploadJsonToConnector).toHaveBeenCalledTimes(1);
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      kind: 'location', reason: 'upstream_5xx', status_code: 502,
+    }));
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenLastCalledWith({
+      content: 'Failed to create links. Please try again.',
+    });
+  });
+
   it('primary site never logs apiDetail for quota_exceeded or an unmarked apiCode', async () => {
     for (const fields of [
       { apiCode: 'quota_exceeded', apiDetail: 'RAW-UNREDACTED-BODY' },
