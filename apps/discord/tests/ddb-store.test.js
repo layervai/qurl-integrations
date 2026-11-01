@@ -1749,9 +1749,12 @@ describe('qurl sends', () => {
 
   test('incrementSendViewedCount: increments a sharded qurl_views counter row, not the send config hot row', async () => {
     const before = Math.floor(Date.now() / 1000);
-    ddbMock.on(UpdateCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
     await expect(store.incrementSendViewedCount('s1', 'q_a', 1)).resolves.toBeUndefined();
-    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+    expect(transaction.ClientRequestToken).toMatch(/^[0-9a-f-]{36}$/);
+    expect(transaction.TransactItems).toHaveLength(1);
+    const input = transaction.TransactItems[0].Update;
     expect(input.TableName).toBe('test-prefix-qurl-views');
     expect(input.Key.qurl_id).toBe('__send_view_count__s1#00');
     expect(input.UpdateExpression).toBe('SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one');
@@ -1786,9 +1789,9 @@ describe('qurl sends', () => {
   });
 
   test('getSendViewedCount: expanded expectedCount still reads earlier one-shard writes', async () => {
-    ddbMock.on(UpdateCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
     await store.incrementSendViewedCount('s1', 'q_a', 1);
-    const writtenKey = ddbMock.commandCalls(UpdateCommand)[0].args[0].input.Key;
+    const writtenKey = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems[0].Update.Key;
     expect(writtenKey).toEqual({ qurl_id: '__send_view_count__s1#00' });
 
     ddbMock.reset();
@@ -1930,6 +1933,19 @@ describe('qurl sends', () => {
     const expectedCountPlaceholder = Object.entries(input.ExpressionAttributeValues)
       .find(([, val]) => val === 3)?.[0];
     expect(input.ConditionExpression).toBe(`attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`);
+  });
+
+  test('saveSendConfirmState: confirmed zero initializes the floor and large-send shard without resetting either', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.saveSendConfirmState('s1', { expectedCount: 20000, viewedCount: 0 });
+    const [config, shard] = ddbMock.commandCalls(UpdateCommand).map(call => call.args[0].input);
+    expect(config.UpdateExpression).toContain('last_rendered_count = if_not_exists(last_rendered_count, :initial_floor)');
+    expect(config.ExpressionAttributeValues[':initial_floor']).toBe(0);
+    expect(shard.Key).toEqual({ qurl_id: '__send_view_count__s1#00' });
+    expect(shard.UpdateExpression).toContain('viewed_count = if_not_exists(viewed_count, :zero)');
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).resolvesOnce({}).rejectsOnce(new Error('throttled'));
+    await expect(store.saveSendConfirmState('s1', { expectedCount: 20000 })).resolves.toBe(true);
   });
 
   test('saveSendConfirmState: partial /qurl-add re-persist updates ONLY the passed keys — NEVER nulls the live token', async () => {
@@ -2354,7 +2370,7 @@ describe('qurl views', () => {
           } : {}),
         };
       });
-      const pending = store.getQurlViews(['q_a', 'q_b']).catch(error => error);
+      const pending = store.getQurlViews(['q_a', 'q_b'], { consistentRead: true }).catch(error => error);
       await jest.runAllTimersAsync();
       const views = await pending;
       expect(attempt).toBe(4);

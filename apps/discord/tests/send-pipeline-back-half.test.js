@@ -400,10 +400,8 @@ describe('monitorLinkStatus — shared monotonic floor with the webhook fast-pat
     mockDb.getSendRenderedCount.mockResolvedValueOnce(2);
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
-    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining('👀 2 viewed / 1 pending'),
-    }));
-    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('send-1', 2);
+    expect(interaction.editReply).not.toHaveBeenCalled();
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalled();
     expect(monitor.getFullMsg()).toBe('Sent to 3 users\n👀 2 viewed / 1 pending');
     monitor.stop();
   });
@@ -4766,7 +4764,8 @@ describe('monitorLinkStatus — aggregate reads with source reconciliation', () 
 
   const firstView = () => new Map([[TWO_LINK_SET[0].qurlId, { accessCount: 1 }]]);
   const bothViews = () => new Map(TWO_LINK_SET.map(link => [link.qurlId, { accessCount: 1 }]));
-  function start(links = TWO_LINK_SET, interaction = makeInteraction()) {
+  const largeLinks = [...TWO_LINK_SET, ...Array.from({ length: 99 }, (_, i) => ({ ...TWO_LINK_SET[0], qurlId: `extra_${i}`, recipientId: `extra_r${i}` }))];
+  function start(links = largeLinks, interaction = makeInteraction()) {
     return { interaction, monitor: monitorLinkStatus('aggregate-send', interaction, links,
       links.map((link, i) => ({ id: link.recipientId, username: `User${i}` })),
       '1h', 'Sent', { components: [] }, links.length) };
@@ -4796,10 +4795,10 @@ describe('monitorLinkStatus — aggregate reads with source reconciliation', () 
     mockDb.getQurlViews.mockResolvedValue(bothViews()); // Source committed; shard ADD never ran.
     await jest.advanceTimersByTimeAsync(25000);
     expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
-    expect(monitor.getFullMsg()).toContain('1 viewed / 1 pending');
+    expect(monitor.getFullMsg()).toContain('1 viewed / 100 pending');
     await jest.advanceTimersByTimeAsync(5000);
     expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
-    expect(monitor.getFullMsg()).toContain('2 viewed / 0 pending');
+    expect(monitor.getFullMsg()).toContain('2 viewed / 99 pending');
     expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('aggregate-send', 2);
   });
 
@@ -4811,10 +4810,10 @@ describe('monitorLinkStatus — aggregate reads with source reconciliation', () 
       await jest.advanceTimersByTimeAsync(3000);
       mockDb.getQurlViews.mockResolvedValue(bothViews());
       if (scenario === 'missing' || scenario === 'partial') mockDb.getSendViewedCount.mockRejectedValue(new Error(scenario));
-      else mockDb.getSendViewedCount.mockResolvedValue(scenario === 'below floor' ? 0 : scenario === 'above expected' ? 3 : NaN);
+      else mockDb.getSendViewedCount.mockResolvedValue(scenario === 'below floor' ? 0 : scenario === 'above expected' ? 102 : NaN);
       await jest.advanceTimersByTimeAsync(5000);
       expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
-      expect(monitor.getFullMsg()).toContain('2 viewed / 0 pending');
+      expect(monitor.getFullMsg()).toContain('2 viewed / 99 pending');
     },
   );
 
@@ -4831,16 +4830,17 @@ describe('monitorLinkStatus — aggregate reads with source reconciliation', () 
   it('a failed final aggregate edit stays live and retries without advancing the floor', async () => {
     mockDb.getQurlViews.mockResolvedValue(firstView());
     mockDb.getSendRenderedCount.mockResolvedValue(1);
-    mockDb.getSendViewedCount.mockResolvedValue(2);
+    mockDb.getSendViewedCount.mockResolvedValue(101);
     const { monitor, interaction } = start();
     await jest.advanceTimersByTimeAsync(3000);
+    mockDb.getQurlViews.mockResolvedValue(new Map(largeLinks.map(link => [link.qurlId, { accessCount: 1 }])));
     interaction.editReply.mockRejectedValueOnce(new Error('temporary edit failure'));
     await jest.advanceTimersByTimeAsync(5000);
-    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalledWith('aggregate-send', 2);
-    expect(monitor.getFullMsg()).toContain('1 viewed / 1 pending');
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalledWith('aggregate-send', 101);
+    expect(mockDb.getQurlViews).toHaveBeenLastCalledWith(expect.any(Array), { consistentRead: true });
     await jest.advanceTimersByTimeAsync(5000);
-    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('aggregate-send', 2);
-    expect(monitor.getFullMsg()).toContain('2 viewed / 0 pending');
+    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('aggregate-send', 101);
+    expect(monitor.getFullMsg()).toContain('101 viewed / 0 pending');
   });
 
   it('adding recipients invalidates the previous source snapshot', async () => {
@@ -4852,7 +4852,7 @@ describe('monitorLinkStatus — aggregate reads with source reconciliation', () 
     monitor.addRecipients(1, [{ ...TWO_LINK_SET[0], qurlId: 'q_new', recipientId: 'r3' }]);
     await jest.advanceTimersByTimeAsync(5000);
     expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
-    expect(mockDb.getQurlViews.mock.calls.at(-1)[0]).toHaveLength(3);
+    expect(mockDb.getQurlViews.mock.calls.at(-1)[0]).toHaveLength(102);
   });
 
   it('a clock rollback forces source reconciliation', async () => {
@@ -4865,4 +4865,80 @@ describe('monitorLinkStatus — aggregate reads with source reconciliation', () 
     await jest.advanceTimersByTimeAsync(5000);
     expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
   });
+  it('a fast-path floor advance does not send a duplicate Discord edit', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(2);
+    const { interaction, monitor } = start();
+    await jest.advanceTimersByTimeAsync(3000);
+    mockDb.getSendRenderedCount.mockResolvedValue(2);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(interaction.editReply).not.toHaveBeenCalled();
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalled();
+    expect(monitor.getFullMsg()).toContain('2 viewed / 99 pending');
+  });
+
+  it('small unchanged sends make one source read per tick without extra floor or aggregate reads', async () => {
+    mockDb.getQurlViews.mockResolvedValue(new Map());
+    start(TWO_LINK_SET);
+    await jest.advanceTimersByTimeAsync(8000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(mockDb.getSendRenderedCount).not.toHaveBeenCalled();
+    expect(mockDb.getSendViewedCount).not.toHaveBeenCalled();
+  });
+
+  it('a known aggregate gap disables repeated aggregate reads', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(0);
+    start();
+    await jest.advanceTimersByTimeAsync(18000);
+    expect(mockDb.getSendViewedCount).toHaveBeenCalledTimes(1);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(4);
+  });
+
+  it('an aggregate completion cannot settle before all source facts exist', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(101);
+    const { monitor } = start();
+    await jest.advanceTimersByTimeAsync(8000);
+    expect(mockDb.getQurlViews).toHaveBeenLastCalledWith(expect.any(Array), { consistentRead: true });
+    expect(monitor.getFullMsg()).toContain('1 viewed / 100 pending');
+    mockDb.getQurlViews.mockResolvedValue(bothViews());
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(monitor.getFullMsg()).toContain('2 viewed / 99 pending');
+  });
+
+  it('recipient additions during a final edit repaint the new total and keep polling', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    let finishEdit;
+    const interaction = makeInteraction();
+    interaction.editReply.mockImplementationOnce(() => new Promise(resolve => { finishEdit = resolve; }));
+    const { monitor } = start(ONE_LINK_SET, interaction);
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(typeof finishEdit).toBe('function');
+    monitor.addRecipients(1, [TWO_LINK_SET[1]]);
+    finishEdit({});
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain('1 viewed / 1 pending');
+    mockDb.getQurlViews.mockResolvedValue(bothViews());
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(monitor.getFullMsg()).toContain('2 viewed / 0 pending');
+  });
+
+  it('an edit confirmed after stop cannot write a new stored floor', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    let finishEdit;
+    const interaction = makeInteraction();
+    interaction.editReply.mockImplementationOnce(() => new Promise(resolve => { finishEdit = resolve; }));
+    const { monitor } = start(ONE_LINK_SET, interaction);
+    await jest.advanceTimersByTimeAsync(3000);
+    monitor.stop();
+    finishEdit({});
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledTimes(1);
+  });
+
 });

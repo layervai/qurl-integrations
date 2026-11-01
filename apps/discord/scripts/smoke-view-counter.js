@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const { randomBytes, randomUUID } = require('node:crypto');
 const { DynamoDBClient, CreateTableCommand, DeleteTableCommand } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, BatchGetCommand, PutCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, BatchGetCommand, TransactWriteCommand } = require('@aws-sdk/lib-dynamodb');
 
 async function main() {
   const endpoint = process.env.DDB_TEST_ENDPOINT;
@@ -34,9 +34,21 @@ async function main() {
     const ids = Array.from({ length: 20000 }, (_, i) => (i + 1).toString(16).padStart(32, '0'));
     assert.equal(await store.getSendRenderedCount(sendId), null);
     await assert.rejects(store.getSendViewedCount(sendId, 20000), /unavailable/);
+    await store.saveSendConfirmState(sendId, { expectedCount: 20000, viewedCount: 0 });
+    assert.equal(await store.getSendRenderedCount(sendId), 0);
+    assert.equal(await store.getSendViewedCount(sendId, 20000), 0);
+    let incrementInput;
+    DynamoDBDocumentClient.prototype.send = function (command, options) {
+      if (command instanceof TransactWriteCommand) incrementInput = command.input;
+      return originalSend.call(this, command, options);
+    };
     await store.recordQurlView({ qurlId: ids[0], accessCount: 1, consumed: true, eventId: 'fixture-first' });
     await store.incrementSendViewedCount(sendId, ids[0], 20000);
-    await client.send(new PutCommand({ TableName: configsTable, Item: { send_id: sendId, last_rendered_count: 0 } }));
+    assert(incrementInput?.ClientRequestToken);
+    await client.send(new TransactWriteCommand(incrementInput)); // Retry after a lost response.
+    assert.equal(await store.getSendViewedCount(sendId, 20000), 1);
+    await store.saveSendConfirmState(sendId, { expectedCount: 20000 });
+    assert.equal(await store.getSendViewedCount(sendId, 20000), 1); // Initialization cannot reset a live count.
     assert.equal(await store.getSendRenderedCount(sendId), 0);
     const reads = [];
     DynamoDBDocumentClient.prototype.send = function (command, options) {
@@ -57,7 +69,7 @@ async function main() {
     await store.recordQurlView({ qurlId: ids[1], accessCount: 1, consumed: true, eventId: 'fixture-source-only' });
     assert.equal((await store.getQurlViews(ids.slice(0, 2))).size, 2);
     assert.equal(await store.getSendViewedCount(sendId, 20000), 1);
-    process.stdout.write('PASS local store: 200 source pages versus one 64-key aggregate read; known zero differs from missing; source-only crash gap remains recoverable.\n');
+    process.stdout.write('PASS local store: 200 source pages versus one 64-key aggregate read; known zero differs from missing; transaction replay counts once; source-only crash gap is visible to source reads.\n');
   } finally {
     DynamoDBDocumentClient.prototype.send = originalSend;
     try { for (const table of created.reverse()) await client.send(new DeleteTableCommand({ TableName: table })); }

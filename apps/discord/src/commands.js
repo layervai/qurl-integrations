@@ -1359,7 +1359,9 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 
   let viewed = 0;
   let displayedFloor = 0;
+  let renderedGeneration = 0;
   let lastSourceSnapshotAt = null;
+  let aggregateUsable = true;
   let allDone = false;
 
   // A tick that began before addRecipients must not render its stale view map.
@@ -1541,27 +1543,34 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     if (viewCounterDegraded || trackedQurlIds.size === 0) return;
     try {
       const genAtStart = trackingGeneration;
-      const previousShown = displayedFloor;
+      const useAggregate = trackedQurlIds.size > 100 && aggregateUsable;
       let floor = null;
-      try { floor = await db.getSendRenderedCount(sendId); }
-      catch (err) { logger.debug('Monitor floor-read failed; rendering local poll count', { sendId, error: err.message }); }
+      const readFloor = async () => {
+        try { floor = await db.getSendRenderedCount(sendId); }
+        catch (err) { logger.debug('Monitor floor-read failed; rendering local poll count', { sendId, error: err.message }); }
+        if (Number.isSafeInteger(floor) && floor >= 0) displayedFloor = Math.max(displayedFloor, floor);
+      };
+      if (useAggregate) await readFloor();
       if (trackingGeneration !== genAtStart || !interaction) return;
       const haveFloor = Number.isSafeInteger(floor) && floor >= 0;
-      if (haveFloor) displayedFloor = Math.max(displayedFloor, floor);
       const age = lastSourceSnapshotAt === null ? -1 : Date.now() - lastSourceSnapshotAt;
       let aggregate = null;
-      if (haveFloor && age >= 0 && age < SOURCE_RECONCILE_MS) {
+      if (useAggregate && haveFloor && age >= 0 && age < SOURCE_RECONCILE_MS) {
         try {
           const count = await db.getSendViewedCount(sendId, expectedCount);
           if (Number.isSafeInteger(count) && count >= Math.max(viewed, displayedFloor)
               && count <= expectedCount) aggregate = count;
+          else aggregateUsable = false; // A known gap must not add a failed aggregate read to every source poll.
         } catch (err) {
           logger.debug('Monitor aggregate unavailable; reconciling source', { sendId, error: err.message });
         }
       }
       if (trackingGeneration !== genAtStart || !interaction) return;
-      if (aggregate === null) {
-        const views = await db.getQurlViews([...trackedQurlIds]);
+      // Only source facts can settle the monitor. Final reads are strong so a
+      // committed first-view fact cannot lag its aggregate and strand the loop.
+      const verifyFinal = Math.max(aggregate ?? 0, displayedFloor) >= expectedCount;
+      if (aggregate === null || verifyFinal) {
+        const views = await db.getQurlViews([...trackedQurlIds], { consistentRead: verifyFinal });
         if (trackingGeneration !== genAtStart || !interaction) return;
         for (const [qurlId, view] of views) {
           if (!(view.accessCount > 0)) continue;
@@ -1571,14 +1580,30 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
           viewed++;
         }
         lastSourceSnapshotAt = Date.now();
+        if (verifyFinal && viewed < expectedCount) {
+          aggregateUsable = false;
+          aggregate = null;
+        }
       }
-      const rendered = Math.max(viewed, displayedFloor, aggregate ?? 0);
-      if (rendered <= previousShown) return;
+      let rendered = Math.max(viewed, displayedFloor, aggregate ?? 0);
+      if (rendered <= displayedFloor && renderedGeneration === trackingGeneration) {
+        if (viewed >= expectedCount) { allDone = true; clearTimeout(timer); }
+        return;
+      }
+      // Small sends retain one source BatchGet per unchanged tick, without extra floor/aggregate reads.
+      if (!useAggregate) await readFloor();
+      if (trackingGeneration !== genAtStart || !interaction) return;
+      rendered = Math.max(rendered, displayedFloor);
+      if (rendered <= displayedFloor && renderedGeneration === trackingGeneration) {
+        if (viewed >= expectedCount) { allDone = true; clearTimeout(timer); }
+        return;
+      }
       const pending = Math.max(0, expectedCount - rendered);
       const ok = await safeEdit({ content: buildStatusMsg(rendered), components: pending > 0 ? [buttonRow] : [] });
-      if (!ok) return; // Neither settle nor advance a count the user has not seen.
+      if (!ok || !interaction || stopped) return; // Never commit a failed or stopped render.
       displayedFloor = Math.max(displayedFloor, rendered);
-      if (pending === 0) { allDone = true; clearTimeout(timer); }
+      renderedGeneration = genAtStart;
+      if (viewed >= expectedCount && trackingGeneration === genAtStart) { allDone = true; clearTimeout(timer); }
       try { await db.tryAdvanceRenderedCount(sendId, rendered); }
       catch (err) {
         logger.debug('Monitor floor-advance failed (non-CCFE); fast-path/poll self-heal on next tick', { sendId, error: err.message });
