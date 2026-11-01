@@ -3081,3 +3081,73 @@ func TestCallbackLegacyRotationHealsRowForNextRotation(t *testing.T) {
 		t.Errorf("second rotation must revoke the healed key_id %q, got %#v", healed.KeyID, revoked)
 	}
 }
+
+func (f *fakeWorkspaceStore) SetInitialAPIKeyWithMetadata(ctx context.Context, ws, key, keyID, prefix, account, by string) error {
+	return f.SetAPIKeyWithMetadata(ctx, ws, key, keyID, prefix, account, by)
+}
+
+// overlappingSetupStore holds both mints at the save boundary, then picks one winner.
+type overlappingSetupStore struct {
+	*fakeWorkspaceStore
+	arrived  sync.WaitGroup
+	winnerMu sync.Mutex
+	winner   string
+}
+
+func (s *overlappingSetupStore) SetInitialAPIKeyWithMetadata(_ context.Context, _, _, keyID, _, _, _ string) error {
+	s.arrived.Done()
+	s.arrived.Wait()
+	s.winnerMu.Lock()
+	defer s.winnerMu.Unlock()
+	if s.winner != "" && s.winner != keyID {
+		return errors.New("conditional save conflict")
+	}
+	s.winner = keyID
+	return nil
+}
+
+func TestOverlappingLegacySetupRevokesOnlyLosingKey(t *testing.T) {
+	cfg, base, _ := newCallbackCfgStoreMinter(t)
+	store := &overlappingSetupStore{fakeWorkspaceStore: base}
+	store.arrived.Add(2)
+	tracker := &countingTracker{}
+	cfg.Provider = store
+	cfg.AsyncTracker = tracker
+	minters := []*fakeMinter{
+		{apiKey: "secret-1", keyID: "key-1", keyPrefix: "prefix-1"},
+		{apiKey: "secret-2", keyID: "key-2", keyPrefix: "prefix-2"},
+	}
+	var wg sync.WaitGroup
+	results := make(chan bool, 2)
+	for _, minter := range minters {
+		attempt := cfg
+		attempt.Minter = minter
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, ok := mintAndPersist(httptest.NewRecorder(), attempt, "access", testTeamID, testUserID, "account")
+			results <- ok
+		}()
+	}
+	wg.Wait()
+	tracker.wg.Wait()
+	close(results)
+	successes := 0
+	for ok := range results {
+		if ok {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful saves = %d, want 1", successes)
+	}
+	for _, minter := range minters {
+		if minter.keyID == store.winner {
+			if len(minter.revokedKeys) != 0 {
+				t.Fatal("saved key was revoked")
+			}
+		} else if len(minter.revokedKeys) != 1 || minter.revokedKeys[0] != minter.keyID {
+			t.Fatalf("losing key was not revoked: %v", minter.revokedKeys)
+		}
+	}
+}

@@ -60,6 +60,12 @@ type stampingWriter struct {
 func stampingWriters() []stampingWriter {
 	return []stampingWriter{
 		{
+			method: "SetInitialAPIKeyWithMetadata",
+			invoke: func(ctx context.Context, p *DDBProvider) error {
+				return p.SetInitialAPIKeyWithMetadata(ctx, testTeamID, testNewAPIKey, testKeyID, testKeyPrefix, testQURLAccount, "U_ADMIN")
+			},
+		},
+		{
 			method: "SetAPIKeyWithMetadata",
 			invoke: func(ctx context.Context, p *DDBProvider) error {
 				return p.SetAPIKeyWithMetadata(ctx, testTeamID, testNewAPIKey, testKeyID, testKeyPrefix, testQURLAccount, "U_ADMIN")
