@@ -292,7 +292,10 @@ function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
 //      moved dispatch to SQS.
 // Returns the operator-facing message on rejection or null on
 // success. Same string-or-null shape as unsupportedRoleShipperCombo.
-function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled) {
+function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, credentialLifecycleEnabled = false) {
+  if (credentialLifecycleEnabled && !resumeEnabled) {
+    return 'ENABLE_CREDENTIAL_LIFECYCLE=true requires ENABLE_GATEWAY_RESUME=true and its durable publication checkpoint.';
+  }
   if (!resumeEnabled) return null;
   if (role === 'combined') {
     return (

@@ -30,6 +30,17 @@ describe('handleConfirmSendClick', () => {
     sendNonce: 'nonce-1',
   };
 
+  test('a removed installation stops before global fallback and tells the sender to run setup', async () => {
+    expect(require('../src/config').QURL_API_KEY).toBeTruthy();
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    int.customId = CONFIRM_SEND_CUSTOM_ID;
+    mockDb.getGuildApiKey.mockRejectedValueOnce(Object.assign(new Error('setup required'), { code: 'GUILD_SETUP_REQUIRED' }));
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('/qurl-admin setup') }));
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDeleteFlow).not.toHaveBeenCalled();
+  });
+
   test.each([
     [10062, 'Unknown interaction'],
     ['ECONNRESET', 'socket reset'],

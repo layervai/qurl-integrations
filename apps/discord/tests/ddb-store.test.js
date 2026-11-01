@@ -53,6 +53,7 @@ process.env.DDB_TABLE_PREFIX = 'test-prefix-';
 process.env.AWS_REGION = 'us-east-2';
 
 const store = require('../src/store/ddb-store');
+const config = require('../src/config');
 const logger = require('../src/logger');
 const { AUDIT_EVENTS, SETUP_VIA } = require('../src/constants');
 
@@ -68,6 +69,7 @@ function defaultOwnerArgs(overrides = {}) {
 }
 
 beforeEach(() => {
+  config.ENABLE_CREDENTIAL_LIFECYCLE = false;
   logger.audit.mockReset();
   logger.error.mockReset();
   logger.warn.mockReset();
@@ -81,6 +83,49 @@ afterAll(async () => {
 });
 
 describe('guild configs', () => {
+  test('gateway installation observation cannot reactivate the same or older removed installation', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.noteGuildInstallation('g', '2026-10-01T00:00:00Z');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ConditionExpression).toContain('observed_installation_joined_at < :joined');
+    expect(input.ConditionExpression).not.toContain('attribute_exists(qurl_api_key)');
+    ddbMock.on(UpdateCommand).rejects({ name: 'ConditionalCheckFailedException' });
+    await expect(store.noteGuildInstallation('g', '2026-10-01T00:00:00Z')).resolves.toBe(false);
+  });
+
+  test('a known removal blocks only its installation and creates a durable nonsecret job atomically', async () => {
+    ddbMock.on(TransactWriteCommand).resolves({});
+    const jobId = await store.enqueueGuildRemoval({ guildId: 'g', joinedAt: '2026-10-01T00:00:00Z', eventId: '0:123' });
+    const input = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+    expect(input.TransactItems[0].Update.ConditionExpression).toContain('observed_installation_joined_at = :joined');
+    expect(input.TransactItems[0].Update.ExpressionAttributeValues[':removed']).toBe(true);
+    expect(input.TransactItems[1].Put.Item).toMatchObject({ job_id: jobId, reason: 'verify_removal',
+      expected_installation_joined_at: '2026-10-01T00:00:00.000000000Z' });
+    expect(input.TransactItems[1].Put.Item).not.toHaveProperty('qurl_api_key');
+  });
+
+  test('unknown or stale removal queues reconciliation without marking a fresh installation', async () => {
+    ddbMock.on(TransactWriteCommand).rejects({ name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }] });
+    ddbMock.on(PutCommand).resolves({});
+    await store.enqueueGuildRemoval({ guildId: 'g', joinedAt: '2026-10-01T00:00:00Z' });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    await store.enqueueGuildRemoval({ guildId: 'g' });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(2);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('lost removal write reply requires a strong job readback before checkpointing', async () => {
+    let job;
+    ddbMock.on(TransactWriteCommand).callsFake(input => {
+      job = input.TransactItems[1].Put.Item;
+      throw new Error('reply lost');
+    });
+    ddbMock.on(GetCommand).callsFake(() => ({ Item: job }));
+    await expect(store.enqueueGuildRemoval({ guildId: 'g', joinedAt: '2026-10-01T00:00:00Z' })).resolves.toBeDefined();
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
+  });
+
   test.each(['owner', undefined])('unlinked webhook cleanup retains encrypted capability for owner %p without key revocation', async (webhookOwnerId) => {
     ddbMock.on(PutCommand).resolves({});
     const jobId = await store.enqueueGuildWebhookCleanup({
@@ -236,6 +281,52 @@ describe('guild configs', () => {
     })).rejects.toThrow('Encryption key is missing');
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  test('a new installation can conditionally replace its former billing owner', async () => {
+    const oldJoin = '2026-10-01T00:00:00.000000000Z';
+    const newJoin = '2026-10-02T00:00:00.000000000Z';
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: mockCiphertext('old-key'),
+      qurl_owner_id: 'old-owner', qurl_installation_joined_at: oldJoin } });
+    ddbMock.on(TransactWriteCommand).resolves({});
+    await store.setGuildApiKey('g', 'new-key', 'new-admin', 'oauth', {
+      ownerId: 'new-owner', expectedApiKey: 'old-key', keyId: 'new-id', keyKind: 'dedicated',
+      installationJoinedAt: newJoin, previousInstallationJoinedAt: oldJoin,
+    });
+    const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems;
+    expect(items[0].Update.ConditionExpression).toContain('qurl_installation_joined_at = :previousInstallation');
+    expect(items[0].Update.ExpressionAttributeValues).toMatchObject({
+      ':previousOwner': 'old-owner', ':owner': 'new-owner', ':installation': newJoin,
+    });
+    expect(items[1].Put.Item.qurl_owner_id).toBe('old-owner');
+  });
+
+  test('enabled lifecycle refuses setup without a verified installation', async () => {
+    config.ENABLE_CREDENTIAL_LIFECYCLE = true;
+    await expect(store.setGuildApiKey('g', 'key', 'admin', 'oauth', {
+      ownerId: 'owner', expectedApiKey: null,
+    })).rejects.toThrow('Verified current installation');
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test.each([
+    undefined,
+    { qurl_api_key: mockCiphertext('key') },
+    { qurl_api_key: mockCiphertext('key'), qurl_installation_joined_at: 'A', observed_installation_joined_at: 'B' },
+    { qurl_api_key: mockCiphertext('key'), qurl_installation_joined_at: 'A', observed_installation_joined_at: 'A', qurl_installation_removed: true },
+  ])('inactive or unknown installation cannot return a key or allow global fallback %j', async (row) => {
+    config.ENABLE_CREDENTIAL_LIFECYCLE = true;
+    ddbMock.on(GetCommand).resolves({ Item: row });
+    await expect(store.getGuildApiKey('g')).rejects.toMatchObject({ code: 'GUILD_SETUP_REQUIRED' });
+  });
+
+  test('the active current installation returns its key', async () => {
+    config.ENABLE_CREDENTIAL_LIFECYCLE = true;
+    ddbMock.on(GetCommand).resolves({ Item: { qurl_api_key: mockCiphertext('key'),
+      qurl_installation_joined_at: '2026-10-01T00:00:00.000000000Z',
+      observed_installation_joined_at: '2026-10-01T00:00:00.000000000Z' } });
+    await expect(store.getGuildApiKey('g')).resolves.toBe('key');
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
   });
 
   test('a changed key snapshot fails before the update', async () => {

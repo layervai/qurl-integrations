@@ -10,6 +10,10 @@ process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
 process.env.GUILD_ID = '123456789012345678';
 process.env.TRUST_PROXY = '1';
 
+jest.mock('../src/discord-rest', () => ({
+  ...jest.requireActual('../src/discord-rest'), getGuildSetupInstallation: jest.fn(),
+}));
+
 jest.mock('../src/discord', () => ({
   sendDM: jest.fn().mockResolvedValue(true),
   assignContributorRole: jest.fn(),
@@ -105,6 +109,8 @@ function expectQurlOAuthCookiesCleared(res) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  config.ENABLE_CREDENTIAL_LIFECYCLE = false;
+  require('../src/discord-rest').getGuildSetupInstallation.mockReset();
   rateLimitStore.clear();
   globalThis.fetch = originalFetch;
 });
@@ -507,6 +513,20 @@ describe('qurl-oauth routes', () => {
       expect(res.text).not.toContain('PRIVATE upstream detail');
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
       expect(discord.sendDM).not.toHaveBeenCalled();
+    });
+
+    it('rejects a former server admin before minting a key even after successful Auth0 login', async () => {
+      config.ENABLE_CREDENTIAL_LIFECYCLE = true;
+      require('../src/discord-rest').getGuildSetupInstallation.mockResolvedValue({ ok: false, reason: 'not_admin' });
+      const state = signCallbackState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({ ok: true,
+        json: async () => ({ access_token: 'jwt', id_token: 'verified.jwt.sig' }) });
+      const res = await request(app).get(`/oauth/qurl/callback?code=grant&state=${encodeURIComponent(state)}`)
+        .set('Cookie', cookieFor(state));
+      expect(res.status).toBe(403);
+      expect(res.text).toContain('Manage Server permission');
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
     it('does not revoke a minted key when its persistence outcome is uncertain', async () => {

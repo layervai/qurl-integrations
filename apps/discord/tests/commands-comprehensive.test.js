@@ -299,6 +299,23 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     );
   });
 
+  it('treats setup-required as an expected reply instead of a command failure', async () => {
+    stubQurlExecute(() => { throw Object.assign(new Error('setup needed'), { code: 'GUILD_SETUP_REQUIRED' }); });
+    const interaction = makeInteraction({ commandName: 'qurl' });
+    await handleCommand(interaction);
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('/qurl-admin setup') }));
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ success: true, failure_type: null }));
+  });
+
+  it('reports a failed setup-required reply as a reply failure', async () => {
+    stubQurlExecute(() => { throw Object.assign(new Error('setup needed'), { code: 'GUILD_SETUP_REQUIRED' }); });
+    const interaction = makeInteraction({ commandName: 'qurl', reply: jest.fn().mockRejectedValue(new Error('delivery failed')) });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ success: false, failure_type: 'reply_failed' }));
+  });
+
   it('emits failure_type=handler_error when execute() throws', async () => {
     stubQurlExecute(() => { throw new Error('db crash'); });
     const interaction = makeInteraction({ commandName: 'qurl' });

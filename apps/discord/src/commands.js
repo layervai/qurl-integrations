@@ -143,6 +143,7 @@ const {
   linkGuildWebhookSubscriptionForSetup,
 } = require('./guild-webhook-link');
 const { prepareGuildOwnerBinding } = require('./guild-owner');
+const { GUILD_SETUP_REQUIRED_REPLY } = require('./utils/guild-installation');
 const {
   flowIdForInteraction,
   registerFlow,
@@ -851,9 +852,13 @@ async function handleSetupModal(interaction, { flow_id }) {
   }
 
   try {
-    const binding = await prepareGuildOwnerBinding(interaction.guildId, identity.owner_id);
+    const binding = await prepareGuildOwnerBinding(interaction.guildId, identity.owner_id, interaction.user.id);
     await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE, binding);
   } catch (err) {
+    if (err?.code === 'GUILD_SETUP_FORBIDDEN') {
+      return interaction.editReply({ content: 'A current server admin with Manage Server permission must run `/qurl-admin setup`.' });
+    }
+
     const status = qurlApiErrorStatus(err);
     const changed = err?.code === 'GUILD_SETUP_CHANGED' || err?.name === 'ConditionalCheckFailedException';
     const conflict = err?.code === 'GUILD_OWNER_CONFLICT' || status === 401 || status === 403;
@@ -2400,14 +2405,16 @@ async function handleCommand(interaction) {
     await command.execute(interaction);
     emitInteractionMetric(true, null);
   } catch (error) {
-    logger.error(`Error executing ${interaction.commandName}`, { error: error.message });
+    const setupRequired = error?.code === 'GUILD_SETUP_REQUIRED';
+    if (!setupRequired) logger.error(`Error executing ${interaction.commandName}`, { error: error.message });
     // Any throw after setCooldown (e.g. deferReply failure, modal timeout path
     // that bubbles) would leave the user in a 30s block for an action that
     // never completed. clearCooldown is idempotent and a no-op for commands
     // that don't use it, so call unconditionally.
     clearCooldown(interaction.user.id);
     const reply = {
-      content: 'There was an error executing this command.',
+      content: error?.code === 'GUILD_SETUP_REQUIRED'
+        ? GUILD_SETUP_REQUIRED_REPLY : 'There was an error executing this command.',
       flags: MessageFlags.Ephemeral,
     };
 
@@ -2417,7 +2424,7 @@ async function handleCommand(interaction) {
     // ack_timeout on the reply may override (user-visible "did not
     // respond"). Asymmetric vs. the stale-registration path above
     // (which tags reply_failed) because there's no prior execute() there.
-    let failureType = isAckTimeoutError(error) ? 'ack_timeout' : 'handler_error';
+    let failureType = setupRequired ? null : (isAckTimeoutError(error) ? 'ack_timeout' : 'handler_error');
     try {
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp(reply);
@@ -2427,8 +2434,9 @@ async function handleCommand(interaction) {
     } catch (replyError) {
       logger.error('Failed to send error response', { error: replyError.message });
       if (isAckTimeoutError(replyError)) failureType = 'ack_timeout';
+      else if (setupRequired) failureType = 'reply_failed';
     }
-    emitInteractionMetric(false, failureType);
+    emitInteractionMetric(setupRequired && failureType === null, failureType);
   }
 }
 

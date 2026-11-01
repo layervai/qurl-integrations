@@ -373,6 +373,15 @@ describe('handleFlowInteraction', () => {
     await expect(handleFlowInteraction(interaction)).resolves.toBeUndefined();
   });
 
+  it('gives setup instructions for a disconnected installation', async () => {
+    const handler = jest.fn().mockRejectedValue(Object.assign(new Error('setup needed'), { code: 'GUILD_SETUP_REQUIRED' }));
+    registerFlow('route_setup_required', { expectedStage: 'awaiting', handler });
+    loadFlow.mockResolvedValue({ flow_id: '0:1#g#c#u', stage: 'awaiting', version: 1 });
+    const interaction = makeInteraction({ customId: 'route_setup_required' });
+    await handleFlowInteraction(interaction);
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('/qurl-admin setup') }));
+  });
+
   it('catches handler throws and replies a generic error', async () => {
     const handler = jest.fn().mockRejectedValue(new Error('downstream API died'));
     registerFlow('route_throws', { expectedStage: 'awaiting', handler });

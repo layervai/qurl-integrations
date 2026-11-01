@@ -1,3 +1,4 @@
+const { GUILD_SETUP_REQUIRED_REPLY } = require('./utils/guild-installation');
 const {
   MessageFlags,
   EmbedBuilder,
@@ -6954,6 +6955,12 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
     resolveRecipientUsers(interaction, recipientIds),
     db.getGuildApiKey(interaction.guildId),
   ]);
+  if (apiKeyResult.status === 'rejected' && apiKeyResult.reason?.code === 'GUILD_SETUP_REQUIRED') {
+    clearCooldown(interaction.user.id);
+    return interaction.followUp({
+      content: GUILD_SETUP_REQUIRED_REPLY, flags: MessageFlags.Ephemeral,
+    }).catch(logIgnoredDiscordErr);
+  }
   if (resolveResult.status === 'rejected') {
     logger.error('handleConfirmSendClick: resolveRecipientUsers threw', {
       flow_id, error: resolveResult.reason && resolveResult.reason.message,

@@ -9,6 +9,7 @@ jest.mock('../src/logger', () => ({
 
 jest.mock('../src/discord', () => {
   const mockRestInstance = {
+    get: jest.fn(),
     post: jest.fn(),
     put: jest.fn(),
     delete: jest.fn(),
@@ -26,6 +27,7 @@ const { sendDM, editDM, sendChannelMessage, addRoleToMember, removeRoleFromMembe
 const logger = require('../src/logger');
 
 beforeEach(() => {
+  restMock.get.mockReset();
   restMock.post.mockReset();
   restMock.put.mockReset();
   restMock.delete.mockReset();
@@ -315,4 +317,45 @@ it('treats unobserved DM-edit code 50007 as a warning without changing the faile
   expect(result).toEqual({ ok: false, expected: false, code: 50007, reason: undefined });
   expect(logger.warn).toHaveBeenCalledWith('Failed to edit DM', expect.objectContaining({ code: 50007, status: 403 }));
   expect(logger.info).not.toHaveBeenCalled();
+});
+
+
+describe('installation and current setup authority', () => {
+  const { getBotGuildInstallation, getGuildSetupInstallation } = require('../src/discord-rest');
+  const joinedAt = '2026-10-01T01:02:03.123456+00:00';
+  const expected = '2026-10-01T01:02:03.123456000Z';
+  function responses({ permissions = '32', userId = 'admin', ownerId = 'other', joined = joinedAt } = {}) {
+    restMock.get.mockImplementation(async route => {
+      if (route === '/users/@me') return { id: 'bot' };
+      if (route === '/guilds/g/members/bot') return { joined_at: joined };
+      if (route === '/guilds/g/members/admin') return { user: { id: userId }, roles: ['staff'] };
+      if (route === '/guilds/g') return { id: 'g', owner_id: ownerId, roles: [
+        { id: 'g', permissions: '0' }, { id: 'staff', permissions },
+      ] };
+      throw new Error('Unexpected route');
+    });
+  }
+  it.each(['32', '8'])('allows current permission %s and retains the exact installation time', async permissions => {
+    responses({ permissions });
+    await expect(getGuildSetupInstallation('g', 'admin')).resolves.toEqual({ ok: true, joinedAt: expected });
+    expect(restMock.get.mock.calls.every(([, options]) => options.signal instanceof AbortSignal)).toBe(true);
+  });
+  it('allows the current guild owner', async () => {
+    responses({ permissions: '0', ownerId: 'admin' });
+    await expect(getGuildSetupInstallation('g', 'admin')).resolves.toEqual({ ok: true, joinedAt: expected });
+  });
+  it.each([
+    { permissions: '0' }, { permissions: 'not-a-bitfield' },
+    { userId: 'another-user' }, { joined: null },
+  ])('refuses stale or malformed setup authority %j', async options => {
+    responses(options);
+    await expect(getGuildSetupInstallation('g', 'admin')).resolves.toEqual(
+      options.permissions === '0' ? { ok: false, reason: 'not_admin' } : { ok: false });
+  });
+  it('returns only coarse provider status when membership cannot be read', async () => {
+    restMock.get.mockRejectedValue(Object.assign(new Error('PRIVATE provider body'), { status: 403, code: 50001 }));
+    await expect(getBotGuildInstallation('g')).resolves.toEqual({ ok: false, status: 403, code: 50001 });
+    await expect(getGuildSetupInstallation('g', 'admin')).resolves.toEqual({ ok: false });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('PRIVATE provider body');
+  });
 });
