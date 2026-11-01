@@ -529,11 +529,46 @@ Repeat the same name, scopes and owner with that key within 24 hours to recover
 the original result. Changing the request under the same key is a conflict.
 This command does not store the browser token or replace the device credential.
 
+## Account webhooks
+
+Webhook commands use a fresh browser sign-in for each invocation. They manage
+subscriptions owned by the signed-in account. Linked device-owner selection is
+not supported. Tokens stay in memory. Reads request read access; writes also
+request write access.
+
+```sh
+qurl webhooks events --output json
+qurl webhooks list --limit 20 --output json
+qurl webhooks create --url https://receiver.example/hook --events qurl.created,qurl.revoked --output json
+qurl webhooks get wh_0123456789abcdef
+qurl webhooks update wh_0123456789abcdef --description '' --status disabled
+qurl webhooks deliveries wh_0123456789abcdef --limit 20 --output json
+qurl webhooks rotate-secret wh_0123456789abcdef --output json
+qurl webhooks delete wh_0123456789abcdef
+```
+
+Create and rotate-secret print the signing secret in `secret` for JSON, in the
+text result, or alone with `--quiet`. Store it securely and configure your
+receiver. Rotation immediately invalidates the old secret. Other commands omit
+signing secrets. Delivery output also omits endpoint response bodies and error
+text, which can contain secrets.
+
+Writes make one HTTP attempt and do not send an idempotency key. After an
+uncertain create, list your webhooks before another create. If the endpoint
+exists but its secret is unavailable, explicitly rotate its secret. After an
+uncertain rotation or failed secret output, explicitly rotate again and configure
+the latest secret. Do not put these writes in an automatic retry loop.
+
+Lists and deliveries return one page. Use JSON `next_cursor` with `--cursor` for
+the next page. The event catalog is not a delivery guarantee. The API reference
+currently marks `qurl.expired` and `resource.closed` as not yet delivered.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `qurl api-keys list/create/update/revoke` | Manage account credentials after a fresh browser sign-in |
+| `qurl webhooks` | Manage account webhook subscriptions, signing secrets, and delivery metadata |
 | `qurl publish <target-url>` | Publish a remote URL or serve a local app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |

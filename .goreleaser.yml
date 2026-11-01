@@ -145,6 +145,15 @@ homebrew_casks:
       - manpages/qurl-api-keys-create.1
       - manpages/qurl-api-keys-update.1
       - manpages/qurl-api-keys-revoke.1
+      - manpages/qurl-webhooks.1
+      - manpages/qurl-webhooks-list.1
+      - manpages/qurl-webhooks-get.1
+      - manpages/qurl-webhooks-create.1
+      - manpages/qurl-webhooks-update.1
+      - manpages/qurl-webhooks-delete.1
+      - manpages/qurl-webhooks-rotate-secret.1
+      - manpages/qurl-webhooks-events.1
+      - manpages/qurl-webhooks-deliveries.1
       - manpages/qurl-login.1
       - manpages/qurl-publish.1
       - manpages/qurl-preview.1
