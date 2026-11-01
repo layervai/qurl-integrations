@@ -518,6 +518,9 @@ developer-portal app:
    Messages, Embed Links, Use Slash Commands).
 5. Copy the bot token.
 
+This script targets the sandbox app only. A production apply needs a separate
+reviewed metadata change.
+
 The repeatable metadata source of truth is `discord-metadata.json`. With a
 target bot token in `DISCORD_TOKEN`, operators can apply the bot/app fields
 that Discord exposes through API (`description`, `icon`, `cover_image`, tags,

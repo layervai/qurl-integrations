@@ -12,6 +12,7 @@ let metadataCache;
 const oneMiB = 1024 * 1024;
 const twoMiB = 2 * oneMiB;
 const aspectRatioTolerance = 0.01; // Absolute ratio delta; keep committed brand assets on exact target ratios.
+// Local asset guardrails; these are not Discord API limits.
 const imageRules = {
   'bot.avatar': { maxBytes: oneMiB, minWidth: 128, minHeight: 128, aspect: [1, 1] },
   'bot.banner': { maxBytes: twoMiB, minWidth: 600, minHeight: 240 },
@@ -309,7 +310,7 @@ async function main({
       cover_image: dataUri(doc.application.cover_image, 'application.cover_image'),
     }),
     tags: doc.application.tags,
-    // Discord v10 Edit Current Application documents install_params as writable.
+    // TODO(upstream-contract): Discord v10 Edit Current Application documents install_params as writable.
     install_params: doc.application.install_params,
   };
 
@@ -414,7 +415,7 @@ async function main({
     logger.warn(`Developer Portal action required: application name remains ${JSON.stringify(updatedApp.name)}; update it to ${JSON.stringify(doc.application.name)} in Discord Developer Portal.`);
   }
 
-  // Discord's application object exposes legal URLs, but the v10 Edit Current
+  // TODO(upstream-contract): Discord's application object exposes legal URLs, but the v10 Edit Current
   // Application params do not list them as writable fields; verify in portal.
   logger.log(`Portal-only URLs: terms=${doc.application.terms_of_service_url}, privacy=${doc.application.privacy_policy_url}`);
   if (hadPartialFailure) {
