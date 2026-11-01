@@ -40,3 +40,9 @@ func validSlackBotTokenPrefix(token string) bool {
 	return strings.HasPrefix(token, "xoxb-") ||
 		strings.HasPrefix(token, "xoxe.xoxb-")
 }
+
+// SlackGridFallbackAllowed permits an org token only when the workspace has no
+// configured token. Transport, storage and Slack API failures must not switch owners.
+func SlackGridFallbackAllowed(teamID, enterpriseID string, err error) bool {
+	return errors.Is(err, ErrSlackBotTokenNotConfigured) && enterpriseID != "" && enterpriseID != teamID
+}
