@@ -99,7 +99,7 @@ func (h *Handler) newAgentBackend(log *slog.Logger) *agentBackend {
 // and memoized for the turn.
 func (b *agentBackend) channelAllowed(ctx context.Context, tc *agent.TurnContext) (map[string]struct{}, error) {
 	b.allowedOnce.Do(func() {
-		b.allowed, b.allowedErr = b.store.AllowedResourceIDsForChannel(ctx, tc.TeamID, tc.ChannelID)
+		b.allowed, b.allowedErr = b.store.ChannelScopedResourceIDs(ctx, tc.TeamID, tc.ChannelID)
 	})
 	return b.allowed, b.allowedErr
 }
@@ -158,7 +158,7 @@ func (b *agentBackend) authClientForTurn(ctx context.Context, op string, tc *age
 		return c, "", nil
 	}
 	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
-		return nil, workspaceNotSetupMessage, nil
+		return nil, workspaceNotSetupMessage(commandUser), nil
 	}
 	_, err = b.fail(op, err)
 	return nil, "", err
@@ -360,7 +360,7 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 	// Channel alias first. No `allowed`-set gate here (unlike the slug branch
 	// below): LookupChannelAlias reads only THIS channel's alias_bindings, so it is
 	// inherently same-channel — no cross-channel leak — and
-	// AllowedResourceIDsForChannel unions alias_bindings into the allowed set, so a
+	// ChannelScopedResourceIDs unions alias_bindings into the allowed set, so a
 	// bound rid is in `allowed` by construction; a gate would be a no-op. (A binding
 	// to a since-deleted workspace resource would resolve here while list_resources
 	// omits it, but gating on `allowed` wouldn't change that — the rid is still in

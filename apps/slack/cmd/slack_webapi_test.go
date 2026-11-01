@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/shared/auth"
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 const (
@@ -156,7 +158,7 @@ func TestSlackOpenViewFuncUsesWorkspaceTokenLookup(t *testing.T) {
 	openView := newSlackOpenViewFuncWithTokenLookup(func(_ context.Context, teamID string) (string, error) {
 		gotTeam = teamID
 		return "xoxb-workspace-token", nil
-	}, testSlackWebAPIUserAgent, srv.URL, slackOpenViewTestClient(srv))
+	}, testSlackWebAPIUserAgent, srv.URL, slackOpenViewTestClient(srv), nil)
 	if err := openView(context.Background(), "T_lookup", "trigger_test", []byte(`{"type":"modal"}`)); err != nil {
 		t.Fatalf("views.open: %v", err)
 	}
@@ -199,7 +201,7 @@ func TestSlackUserLookupFuncWithTokenLookup(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv), nil)
 	for _, tc := range []struct {
 		name string
 		user string
@@ -257,7 +259,7 @@ func TestSlackUserLookupDrainsOversizedResponse(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}, nil
 	})}
 
-	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, "https://slack.test/users.info", httpClient)
+	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, "https://slack.test/users.info", httpClient, nil)
 	if _, err := lookup(context.Background(), "T_lookup", "", "UHUGE"); err == nil ||
 		err.Error() != "users.info response exceeded 65536 bytes" {
 		t.Fatalf("SlackUserLookup oversized response error = %v, want response limit error", err)
@@ -288,7 +290,7 @@ func TestSlackUserLookupFuncWithTokenLookupRequiresWorkspaceToken(t *testing.T) 
 			t.Fatalf("ownership transfer lookup must not fall back to the Enterprise Grid token")
 		}
 		return "", fmt.Errorf("unexpected token owner %q", ownerID)
-	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv), nil)
 
 	ok, err := lookup(context.Background(), testGridTeamID, testGridEnterpriseID, "UGRIDUSER")
 	if !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
@@ -323,7 +325,7 @@ func TestSlackUserLookupFuncWithTokenLookupPropagatesWorkspaceTokenErrors(t *tes
 			t.Fatalf("ownership transfer lookup must not fall back to the Enterprise Grid token")
 		}
 		return "", fmt.Errorf("unexpected token owner %q", ownerID)
-	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv), nil)
 
 	ok, err := lookup(context.Background(), testGridTeamID, testGridEnterpriseID, "UGRIDUSER")
 	if err == nil {
@@ -649,7 +651,7 @@ func TestSlackOpenViewFuncLookupErrorSkipsRequest(t *testing.T) {
 
 	openView := newSlackOpenViewFuncWithTokenLookup(func(context.Context, string) (string, error) {
 		return "", errors.New("missing workspace token")
-	}, testSlackWebAPIUserAgent, srv.URL, slackOpenViewTestClient(srv))
+	}, testSlackWebAPIUserAgent, srv.URL, slackOpenViewTestClient(srv), nil)
 	err := openView(context.Background(), "T_missing", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "token lookup") {
 		t.Fatalf("error = %v, want token lookup error", err)
@@ -1141,7 +1143,7 @@ func TestSlackWebAPIPosterGridFallbackWarningSanitizesOwnerIDs(t *testing.T) {
 			return testSlackValidationToken, nil
 		}
 		return "", auth.ErrSlackBotTokenNotConfigured
-	}, testSlackValidationUA, srv.URL, "chat.postMessage", slackChatPostMessageResponseError, slackWebAPITestClient(srv))
+	}, testSlackValidationUA, srv.URL, "chat.postMessage", slackChatPostMessageResponseError, slackWebAPITestClient(srv), nil)
 
 	if _, err := poster.gridPost(context.Background(), teamID, enterpriseID, []byte(`{"channel":"C123","text":"hello"}`)); err != nil {
 		t.Fatalf("gridPost: %v", err)
@@ -1153,6 +1155,13 @@ func TestSlackWebAPIPosterGridFallbackWarningSanitizesOwnerIDs(t *testing.T) {
 	if !strings.Contains(got, fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(teamID))) ||
 		!strings.Contains(got, fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(enterpriseID))) {
 		t.Fatalf("fallback warning did not log sanitized owner markers: %s", got)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["slack_api"] != nil || record["team_id"] != fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(teamID)) || record["op"] != "chat.postMessage" {
+		t.Fatalf("process log shape changed: %v", record)
 	}
 }
 
@@ -1190,7 +1199,7 @@ func TestSlackReadResponseLimits(t *testing.T) {
 		call   func(context.Context, *http.Client, string) error
 	}{
 		{"conversations.info", 65536, func(ctx context.Context, client *http.Client, endpoint string) error {
-			_, err := newSlackResolveConversationInfoFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, endpoint, client)(ctx, "T_test", "", "C_test")
+			_, err := newSlackResolveConversationInfoFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, endpoint, client, nil)(ctx, "T_test", "", "C_test")
 			return err
 		}},
 		{"conversations.replies", 524288, func(ctx context.Context, client *http.Client, endpoint string) error {
@@ -1221,6 +1230,118 @@ func TestSlackReadResponseLimits(t *testing.T) {
 			want := fmt.Sprintf("%s response exceeded %d bytes", tc.method, tc.limit)
 			if err == nil || err.Error() != want {
 				t.Fatalf("oversized response = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
+func TestSlackPostMessageGridFallbackKeepsRequestCorrelation(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(observability.NewRedactingJSONHandler(&logs, nil)).With("surface", "agent", "event_id", "event-test", "team_id", "T12345678", "enterprise_id", "E12345678")
+	ctx := observability.WithLogger(context.Background(), logger)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"1700000000.000100"}`))
+	}))
+	t.Cleanup(srv.Close)
+	post := newSlackPostMessageFuncWithTokenLookup(func(_ context.Context, ownerID string) (string, error) {
+		if ownerID == "E12345678" {
+			return testSlackValidationToken, nil
+		}
+		return "", auth.ErrSlackBotTokenNotConfigured
+	}, testSlackValidationUA, srv.URL, slackWebAPITestClient(srv), nil)
+	if err := post(ctx, "T12345678", "E12345678", "C12345678", "100.1", "reply"); err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("one structured warning required: %v", err)
+	}
+	for key, want := range map[string]string{"surface": "agent", "event_id": "event-test", "team_id": "T12345678", "enterprise_id": "E12345678", "level": "WARN", "op": "chat.postMessage"} {
+		if record[key] != want {
+			t.Errorf("%s = %v, want %s", key, record[key], want)
+		}
+	}
+	lookup, ok := record["slack_api"].(map[string]any)
+	if !ok || lookup["team_id"] != "T12345678" || lookup["enterprise_id"] != "E12345678" {
+		t.Fatalf("missing grouped lookup metadata: %v", record["slack_api"])
+	}
+	decoder := json.NewDecoder(bytes.NewReader(logs.Bytes()))
+	if _, err := decoder.Token(); err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]bool{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, ok := token.(string)
+		if !ok {
+			t.Fatalf("object key has type %T", token)
+		}
+		if keys[key] {
+			t.Fatalf("duplicate top-level log key %q", key)
+		}
+		keys[key] = true
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if strings.Contains(logs.String(), testSlackValidationToken) {
+		t.Fatal("fallback log exposed a token")
+	}
+}
+
+func TestSlackMarkdownFallbackKeepsDiagnosticFieldsAtRoot(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		t.Run(strconv.FormatBool(scoped), func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := slog.New(observability.NewRedactingJSONHandler(&logs, nil))
+			previous := slog.Default()
+			slog.SetDefault(logger)
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			ctx := context.Background()
+			if scoped {
+				ctx = observability.WithLogger(ctx, logger.With("event_id", "event-test", "team_id", "T12345678", "enterprise_id", "E12345678"))
+			}
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if requests.Add(1) == 1 {
+					_, _ = w.Write([]byte(`{"ok":false,"error":"invalid_blocks"}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			t.Cleanup(server.Close)
+			post := newSlackPostMarkdownMessageFuncWithTokenLookup(func(context.Context, string) (string, error) {
+				return testSlackValidationToken, nil
+			}, testSlackValidationUA, server.URL, slackWebAPITestClient(server), nil)
+			if err := post(ctx, "T12345678", "E12345678", "C12345678", "100.1", "reply"); err != nil {
+				t.Fatal(err)
+			}
+			if requests.Load() != 2 {
+				t.Fatalf("requests = %d", requests.Load())
+			}
+			var record map[string]any
+			if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+				t.Fatal(err)
+			}
+			if record["error_code"] != "invalid_blocks" || record["error"] == nil {
+				t.Fatalf("diagnostics moved from root: %v", record)
+			}
+			_, grouped := record["slack_api"]
+			if grouped != scoped {
+				t.Fatalf("grouped IDs = %v, request logger = %v", grouped, scoped)
+			}
+			if record["team_id"] != "T12345678" {
+				t.Fatal("root team identity was lost")
+			}
+			if scoped && record["event_id"] != "event-test" {
+				t.Fatal("request event identity was lost")
+			}
+			if strings.Contains(logs.String(), testSlackValidationToken) {
+				t.Fatal("token in fallback log")
 			}
 		})
 	}

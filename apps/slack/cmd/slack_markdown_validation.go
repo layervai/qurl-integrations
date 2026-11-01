@@ -95,6 +95,7 @@ type slackMarkdownValidationConfig struct {
 	startStreamURL           string
 	appendStreamURL          string
 	stopStreamURL            string
+	deleteMessageURL         string
 	userAgent                string
 	timeout                  time.Duration
 	now                      func() time.Time
@@ -190,6 +191,7 @@ func parseSlackMarkdownValidationConfig(args []string, getenv func(string) strin
 		startStreamURL:           slackChatStartStreamURL,
 		appendStreamURL:          slackChatAppendStreamURL,
 		stopStreamURL:            slackChatStopStreamURL,
+		deleteMessageURL:         slackChatDeleteMessageURL,
 		userAgent:                "qurl-slack-markdown-validator/" + version,
 		timeout:                  defaultSlackMarkdownValidationTimeout,
 		now:                      time.Now,
@@ -550,11 +552,11 @@ func postSlackMarkdownCompatibilityValidationCase(ctx context.Context, cfg *slac
 }
 
 func newSlackMarkdownValidationStreamPort(cfg *slackMarkdownValidationConfig) internal.AgentStreamPort {
-	return newSlackAgentStreamPortWithTokenLookup(staticSlackMarkdownValidationTokenLookup(cfg.token), cfg.userAgent, cfg.startStreamURL, cfg.appendStreamURL, cfg.stopStreamURL, cfg.httpClient)
+	return newSlackAgentStreamPortWithTokenLookup(staticSlackMarkdownValidationTokenLookup(cfg.token), cfg.userAgent, cfg.startStreamURL, cfg.appendStreamURL, cfg.stopStreamURL, cfg.deleteMessageURL, cfg.httpClient, nil)
 }
 
 func newSlackMarkdownValidationPostMessagePoster(cfg *slackMarkdownValidationConfig) *slackWebAPIPoster {
-	return newSlackWebAPIPoster(staticSlackMarkdownValidationTokenLookup(cfg.token), cfg.userAgent, cfg.postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, cfg.httpClient)
+	return newSlackWebAPIPoster(staticSlackMarkdownValidationTokenLookup(cfg.token), cfg.userAgent, cfg.postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, cfg.httpClient, nil)
 }
 
 func streamSlackMarkdownValidationCaseWithPort(ctx context.Context, cfg *slackMarkdownValidationConfig, port internal.AgentStreamPort, tc slackMarkdownValidationCase) (slackMarkdownValidationCaseResult, error) {

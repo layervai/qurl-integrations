@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/shared/client/clienttest"
 )
 
 const (
@@ -1488,11 +1490,11 @@ func TestRevokeAPIKey(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if err := c.RevokeAPIKey(context.Background(), "key_tunnel_bootstrap"); err != nil {
+	if err := c.RevokeAPIKey(context.Background(), " \tkey_Aa0123456789\n"); err != nil {
 		t.Fatalf("RevokeAPIKey: %v", err)
 	}
-	if gotMethod != http.MethodDelete || gotPath != "/v1/api-keys/key_tunnel_bootstrap" {
-		t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_tunnel_bootstrap", gotMethod, gotPath)
+	if gotMethod != http.MethodDelete || gotPath != "/v1/api-keys/key_Aa0123456789" {
+		t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_Aa0123456789", gotMethod, gotPath)
 	}
 }
 
@@ -1500,8 +1502,8 @@ func TestRevokeAPIKeyReturnsAPIErrorOnFailure(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete || r.URL.Path != "/v1/api-keys/key_missing" {
-			t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_missing", r.Method, r.URL.Path)
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/api-keys/key_Zz9876543210" {
+			t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_Zz9876543210", r.Method, r.URL.Path)
 		}
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":{"title":"not found","status":404,"detail":"key already gone"}}`))
@@ -1509,13 +1511,31 @@ func TestRevokeAPIKeyReturnsAPIErrorOnFailure(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	err := c.RevokeAPIKey(context.Background(), "key_missing")
+	err := c.RevokeAPIKey(context.Background(), "key_Zz9876543210")
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("RevokeAPIKey error = %v, want APIError", err)
 	}
 	if apiErr.StatusCode != http.StatusNotFound || apiErr.Detail != "key already gone" {
 		t.Fatalf("APIError = %+v, want 404 key already gone", apiErr)
+	}
+}
+
+func TestRevokeAPIKeyRejectsMalformedIDsBeforeHTTP(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	c := testClient(srv.URL, "test-key")
+	for _, id := range []string{"k_123456789012", "key_", "key_12345678901", "key_1234567890123", "KEY_Aa0123456789", "key_Aa012345678/", "key_Aa012345678?", "key_Aa012345678#", "key_Aa012345678%", "key_Aa012345678_", "key_Aa012345678-", "key_Aa012345678é", "key_Aa012345678\n9", "../key_Aa0123456789", "lv_live_synthetic"} {
+		if err := c.RevokeAPIKey(context.Background(), id); !errors.Is(err, ErrRevokeAPIKeyInvalidID) {
+			t.Errorf("invalid id unexpectedly accepted: %q, error %v", id, err)
+		}
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("malformed IDs made %d HTTP requests", requests.Load())
 	}
 }
 
@@ -1553,11 +1573,7 @@ func TestGetResourceDecodesDetailEnvelope(t *testing.T) {
 			http.Error(w, "unexpected request", http.StatusInternalServerError)
 			return
 		}
-		// Mirrors qurl-service ResourceDetailResponse: resource beside a qurls preview.
-		apiEnvelope(t, w, map[string]any{
-			"resource": map[string]any{"resource_id": "r_abc123test", "type": "tunnel", "status": "active"},
-			"qurls":    []any{},
-		})
+		apiEnvelope(t, w, clienttest.ResourceDetailData("r_abc123test", ResourceTypeTunnel, testTunnelSlug))
 	}))
 	defer srv.Close()
 
@@ -1566,8 +1582,8 @@ func TestGetResourceDecodesDetailEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetResource: %v", err)
 	}
-	if got.ResourceID != "r_abc123test" || got.Type != ResourceTypeTunnel {
-		t.Fatalf("GetResource = %+v, want tunnel r_abc123test", got)
+	if got.ResourceID != "r_abc123test" || got.Type != ResourceTypeTunnel || got.Slug != testTunnelSlug {
+		t.Fatalf("GetResource = %+v, want tunnel r_abc123test with slug %s", got, testTunnelSlug)
 	}
 }
 
@@ -1806,33 +1822,24 @@ func TestUpdateResourceInputMarshalAliasWire(t *testing.T) {
 	}
 }
 
-// TestHasAnyFieldSetCoversAllFields walks UpdateResourceInput's struct
-// fields via reflection and asserts that setting *each one alone* makes
-// hasAnyFieldSet return true. Catches the failure mode where a future
-// contributor adds a new mutable field but forgets to update
-// hasAnyFieldSet — without this test, a no-op PATCH that exercises only
-// the new field would slip past the guard.
-//
-// The reflection walk is intentionally narrow: pointer fields get a
-// pointer to a zero value of the target type; bool fields flip to true.
-// Skip the test (with a t.Skip) for any field whose type isn't covered;
-// adding such a field here is a nudge to extend the helper. Today's
-// surface (4 fields: Description, Alias, ClearAlias, CustomDomain) is fully covered.
+// All mutable fields count as updates; header-only metadata must not.
 func TestHasAnyFieldSetCoversAllFields(t *testing.T) {
 	emptyStr := ""
 	cases := []struct {
 		name  string
 		input UpdateResourceInput
+		want  bool
 	}{
-		{"Description", UpdateResourceInput{Description: &emptyStr}},
-		{"Alias", UpdateResourceInput{Alias: &emptyStr}},
-		{"ClearAlias", UpdateResourceInput{ClearAlias: true}},
-		{"CustomDomain", UpdateResourceInput{CustomDomain: &emptyStr}},
+		{"Description", UpdateResourceInput{Description: &emptyStr}, true},
+		{"Alias", UpdateResourceInput{Alias: &emptyStr}, true},
+		{"ClearAlias", UpdateResourceInput{ClearAlias: true}, true},
+		{"CustomDomain", UpdateResourceInput{CustomDomain: &emptyStr}, true},
+		{"IdempotencyKey", UpdateResourceInput{IdempotencyKey: "header-only"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if !tc.input.hasAnyFieldSet() {
-				t.Errorf("hasAnyFieldSet should be true with %s set; got false", tc.name)
+			if got := tc.input.hasAnyFieldSet(); got != tc.want {
+				t.Errorf("hasAnyFieldSet with %s: got %v, want %v", tc.name, got, tc.want)
 			}
 		})
 	}
@@ -2573,5 +2580,113 @@ func TestMe(t *testing.T) {
 				t.Fatalf("Me = %+v; an empty api_key object must not count as a principal", got)
 			}
 		})
+	}
+}
+
+func TestUpdateResourceIdempotencyHeaderAndBody(t *testing.T) {
+	var mu sync.Mutex
+	var headers []string
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		mu.Lock()
+		headers = append(headers, r.Header.Get(HeaderIdempotencyKey))
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+	description := "same change"
+	for _, key := range []string{"", strings.Repeat("a", 32)} {
+		_, err := testClient(srv.URL, "test-key").UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{Description: &description, IdempotencyKey: key})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(headers) != 2 || headers[0] != "" || headers[1] != strings.Repeat("a", 32) {
+		t.Fatalf("headers: %q", headers)
+	}
+	if len(bodies) != 2 || bodies[0] != bodies[1] || strings.Contains(bodies[1], "Idempotency") {
+		t.Fatalf("bodies differ or contain header key: %q", bodies)
+	}
+}
+
+func TestUpdateResourceIdempotencyPreservedAcrossRetry(t *testing.T) {
+	var attempts atomic.Int32
+	key := strings.Repeat("b", 32)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(HeaderIdempotencyKey); got != key {
+			t.Errorf("retry key: got %q, want %q", got, key)
+		}
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+	description := "retry safely"
+	c := New(srv.URL, "test-key", WithRetry(1), withDelaysForTest())
+	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{Description: &description, IdempotencyKey: key}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts: %d", attempts.Load())
+	}
+}
+
+func TestUpdateResourceIdempotencyRejectsBadKeysBeforeTransport(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); apiEnvelope(t, w, map[string]any{}) }))
+	defer srv.Close()
+	for _, key := range []string{"bad\nkey", " leading", "trailing ", "nonascii-é", strings.Repeat("x", MaxIdempotencyKeyLength+1)} {
+		t.Run(key, func(t *testing.T) {
+			description := "change"
+			_, err := testClient(srv.URL, "test-key").UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{Description: &description, IdempotencyKey: key})
+			want := ErrIdempotencyKeyInvalid
+			if len(key) > MaxIdempotencyKeyLength {
+				want = ErrIdempotencyKeyTooLong
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("got %v, want %v", err, want)
+			}
+		})
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("invalid keys made %d requests", calls.Load())
+	}
+}
+
+func TestUpdateResourceRetryMetadataValidationBoundary(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		apiEnvelope(t, w, map[string]any{})
+	}))
+	defer srv.Close()
+	emptyAlias := ""
+	for _, tc := range []struct {
+		name  string
+		input UpdateResourceInput
+		want  error
+	}{
+		{"key-only-is-not-an-update", UpdateResourceInput{IdempotencyKey: strings.Repeat("k", 32)}, ErrUpdateResourceNoFieldsSet},
+		{"bad-key-before-alias-conflict", UpdateResourceInput{IdempotencyKey: "bad\nkey", Alias: &emptyAlias, ClearAlias: true}, ErrIdempotencyKeyInvalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := testClient(srv.URL, "test-key").UpdateResource(context.Background(), testResourceID, &tc.input)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("got %v, want %v", err, tc.want)
+			}
+		})
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("invalid metadata made %d requests", calls.Load())
 	}
 }

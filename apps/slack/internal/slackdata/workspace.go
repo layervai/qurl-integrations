@@ -130,11 +130,8 @@ const addAdminDisambiguationBudget = 300 * time.Millisecond
 // user-ID grammar — `U…` (workspace) or `W…` (Enterprise Grid) prefix
 // followed by 8-63 uppercase-alphanumeric chars (9-64 chars total).
 //
-// This is the single source of truth for the Slack-ID shape check. Two callers
-// depend on it: the handler interpolates owner_id into `<@%s>` mrkdwn mentions
-// (a malformed value must not break out of the mention surface), and
-// BindWorkspace uses it to detect a pre-pivot Auth0-sub owner_id so it can
-// self-heal a legacy row (see BindWorkspace).
+// Shared by mention safety and ownership validation. BindWorkspace also uses
+// it to detect a pre-pivot Auth0-sub owner_id when reclaiming a legacy row.
 func LooksLikeSlackUserID(s string) bool {
 	if len(s) < 9 || len(s) > 64 {
 		return false
@@ -233,8 +230,7 @@ func (s *Store) SetAgentEnabled(ctx context.Context, teamID string, enabled bool
 	if teamID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "SetAgentEnabled: team_id is required"}
 	}
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -244,8 +240,8 @@ func (s *Store) SetAgentEnabled(ctx context.Context, teamID string, enabled bool
 		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ")"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":v":        boolAttr(enabled),
-			exprNow:     stringAttr(nowISO),
-			exprNowNano: unixNanoAttr(now),
+			exprNow:     updatedAt,
+			exprNowNano: updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -287,16 +283,17 @@ func (s *Store) AgentEnabledFor(ctx context.Context, teamID string) (value, set 
 // Called from /oauth/qurl/callback BEFORE the API key is minted on
 // qurl-service — bind acts as the gate so a rebind-refused outcome
 // can't overwrite the existing admin's stored credential. The
-// seedAdmin becomes the only entry in admin_slack_user_ids;
-// additional admins are added later via /qurl-admin admin add.
+// OwnerID becomes the only entry in admin_slack_user_ids for admin-list
+// display. CheckAdmin grants the owner directly from owner_id; additional
+// admins are added later via /qurl-admin admin add.
 //
 // OwnerID is the Slack user ID of the first /setup invoker — written
 // once at first bind, never mutated by /qurl admin add. Only the
 // owner can re-run /setup; other admins can run the rest of the
 // admin verbs but cannot re-point the workspace's qURL credential.
 //
-// Returns 409 (via *Error) if the row already exists. Two sub-cases:
-//   - the existing row's owner_id matches the caller's seedAdmin →
+// Returns 409 (via *Error) if the row already exists. Three sub-cases:
+//   - the existing row's owner_id matches the caller's OwnerID →
 //     ErrCodeWorkspaceAlreadyBoundToCaller. The callback treats this
 //     as idempotent success and continues to the key stage, which
 //     reuses a healthy key or mints only when the key is missing or
@@ -316,19 +313,17 @@ func (s *Store) AgentEnabledFor(ctx context.Context, teamID string) (value, set 
 // Surfacing same-owner as 409 (instead of silently overwriting) is
 // intentional: PutItem would replace the entire row including any
 // admin_slack_user_ids added after the first bind.
-func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin string) error {
+func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping) error {
 	if m == nil || m.TeamID == "" || m.OwnerID == "" {
 		return &Error{
 			StatusCode: http.StatusBadRequest,
 			Title:      "BindWorkspace: team_id and owner_id are required",
 		}
 	}
-	if seedAdmin == "" {
-		return &Error{
-			StatusCode: http.StatusBadRequest,
-			Title:      "BindWorkspace: seed_admin user_id is required",
-		}
+	if !LooksLikeSlackUserID(m.OwnerID) {
+		return &Error{StatusCode: http.StatusBadRequest, Title: "BindWorkspace: owner_id must be a Slack user ID"}
 	}
+	ownerID := m.OwnerID
 	// Capture `now` once: the same logical bind action's CreatedAt
 	// fallback and updated_at attribute should reflect the same
 	// instant rather than two sub-microsecond-apart readings of
@@ -345,15 +340,11 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	// would clobber later-added admins. Both deserve the 409 signal;
 	// the post-CCFE disambiguation read below distinguishes the two
 	// cases so the callback can branch idempotent vs. rebind-refused.
-	// owner_id and seed_admin_slack_user_id are equal by construction at
-	// first bind (the callback passes verified.UserID for both), not by
-	// coincidence. They're kept distinct because their long-term roles
-	// diverge: owner_id is the mutable-someday gate anchor (the #539
-	// transfer verb would rewrite it), while seed_admin_slack_user_id is
-	// the write-once forensic record of who originally claimed the workspace.
+	// Initial owner and forensic seed share one verified Slack ID. The
+	// stored seed remains separate so a later ownership transfer cannot rewrite it.
 	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName:           aws.String(s.WorkspaceMappingsName),
-		Item:                workspaceMappingItem(m.TeamID, m.OwnerID, seedAdmin, created, now),
+		Item:                workspaceMappingItem(m.TeamID, ownerID, created, now),
 		ConditionExpression: aws.String("attribute_not_exists(slack_team_id)"),
 	})
 	if err == nil {
@@ -414,7 +405,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 		// silently locking the original owner out at the qurl-service
 		// layer (workspace_keys reassigned to a different auth0_subject).
 		existingOwner := readString(check.Item, attrOwnerID)
-		if existingOwner == seedAdmin {
+		if existingOwner == ownerID {
 			return &Error{
 				StatusCode: http.StatusConflict,
 				Code:       ErrCodeWorkspaceAlreadyBoundToCaller,
@@ -437,12 +428,12 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 			// Log the provider prefix (e.g. `auth0|`) — not the full sub —
 			// so on-call can confirm "yes, pre-pivot row" from CloudWatch
 			// without a DDB read. The prefix carries no per-user identifier.
-			slog.Warn("BindWorkspace: existing owner_id is shape-bad (pre-pivot Auth0 sub) — reclaiming row for caller (first-come-claims)", "team_id", m.TeamID, "new_owner", seedAdmin, "legacy_owner_prefix", LegacyOwnerPrefix(existingOwner), "legacy_owner_len", len(existingOwner))
+			slog.Warn("BindWorkspace: existing owner_id is shape-bad (pre-pivot Auth0 sub) — reclaiming row for caller (first-come-claims)", "team_id", m.TeamID, "new_owner", ownerID, "legacy_owner_prefix", LegacyOwnerPrefix(existingOwner), "legacy_owner_len", len(existingOwner))
 			// Preserve the orphaned row's original created_at so the reclaim
 			// keeps the one durable signal that this workspace predates the
 			// #510 migration (the comment on reclaimLegacyWorkspace explains
 			// the fallback when it's absent).
-			return s.reclaimLegacyWorkspace(ctx, m, seedAdmin, existingOwner, readString(check.Item, attrCreatedAt))
+			return s.reclaimLegacyWorkspace(ctx, m, existingOwner, readString(check.Item, attrCreatedAt))
 		}
 		if existingOwner == "" {
 			// A row exists but carries no owner_id. This shouldn't happen —
@@ -475,17 +466,18 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 // differ only in their ConditionExpression, so the item shape lives in
 // one place. See BindWorkspace for why owner_id and
 // seed_admin_slack_user_id are kept as distinct attributes.
-func workspaceMappingItem(teamID, ownerID, seedAdmin string, created, now time.Time) map[string]ddbtypes.AttributeValue {
+func workspaceMappingItem(teamID, ownerID string, created, now time.Time) map[string]ddbtypes.AttributeValue {
+	updatedAt, updatedAtNano := updatedAtAttrs(now)
 	return map[string]ddbtypes.AttributeValue{
 		attrSlackTeamID:        stringAttr(teamID),
 		attrOwnerID:            stringAttr(ownerID),
-		attrSeedAdminSlackUser: stringAttr(seedAdmin),
+		attrSeedAdminSlackUser: stringAttr(ownerID),
 		attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
-			Value: []string{seedAdmin},
+			Value: []string{ownerID},
 		},
 		attrCreatedAt:     stringAttr(created.Format(time.RFC3339)),
-		attrUpdatedAt:     stringAttr(now.UTC().Format(time.RFC3339)),
-		attrUpdatedAtNano: unixNanoAttr(now),
+		attrUpdatedAt:     updatedAt,
+		attrUpdatedAtNano: updatedAtNano,
 	}
 }
 
@@ -500,13 +492,13 @@ func workspaceMappingItem(teamID, ownerID, seedAdmin string, created, now time.T
 // the loser's condition fails because the owner_id is no longer the
 // legacy value, and it surfaces AlreadyBound — the same refusal any
 // non-owner rebind gets.
-func (s *Store) reclaimLegacyWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin, legacyOwner, existingCreatedAt string) error {
+func (s *Store) reclaimLegacyWorkspace(ctx context.Context, m *WorkspaceMapping, legacyOwner, existingCreatedAt string) error {
 	now := s.nowOrDefault().UTC()
 	created := m.CreatedAt
 	if created.IsZero() {
 		created = now
 	}
-	item := workspaceMappingItem(m.TeamID, m.OwnerID, seedAdmin, created, now)
+	item := workspaceMappingItem(m.TeamID, m.OwnerID, created, now)
 	// Preserve the orphaned row's original created_at verbatim when the
 	// disambiguation read found one — it's the durable "this predates
 	// #510" signal, and keeping the raw string avoids a parse/format
@@ -561,8 +553,7 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 			Title:      "AddAdmin: team_id and target_user_id are required",
 		}
 	}
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -578,8 +569,8 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":uids":     &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
 			":uid":      stringAttr(targetUserID),
-			exprNow:     stringAttr(nowISO),
-			exprNowNano: unixNanoAttr(now),
+			exprNow:     updatedAt,
+			exprNowNano: updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -730,8 +721,7 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 			Title:      "RemoveAdmin: cannot remove the workspace owner",
 		}
 	}
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -747,8 +737,8 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":uids":     &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
 			":uid":      stringAttr(targetUserID),
-			exprNow:     stringAttr(nowISO),
-			exprNowNano: unixNanoAttr(now),
+			exprNow:     updatedAt,
+			exprNowNano: updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -789,19 +779,20 @@ func (s *Store) TransferOwnership(ctx context.Context, teamID, currentOwnerID, n
 	if newOwnerID != currentOwnerID {
 		ownerSet = append(ownerSet, newOwnerID)
 	}
-	nowISO := s.nowOrDefault().UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrUpdatedAt + " = " + exprNow + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
+		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
 		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ") AND " + attrOwnerID + " = :current_owner"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":current_owner": stringAttr(currentOwnerID),
 			":new_owner":     stringAttr(newOwnerID),
 			":owner_set":     &ddbtypes.AttributeValueMemberSS{Value: ownerSet},
-			exprNow:          stringAttr(nowISO),
+			exprNow:          updatedAt,
+			exprNowNano:      updatedAtNano,
 		},
 	})
 	if err == nil {

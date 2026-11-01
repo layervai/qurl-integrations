@@ -520,15 +520,8 @@ func TestCommandNameConstantsStayInSync(t *testing.T) {
 	}
 }
 
-// TestHelpMessagesContainOnlyCommandTokens guards the MAINTAINER INVARIANT
-// documented on userHelpMessage / adminHelpMessage: the help lines are
-// authored with prod command names and rewritten to the invoked command via
-// a blind strings.ReplaceAll, so every `/qurl…` token in the rendered help
-// must be a real command literal (`/qurl` or `/qurl-admin`). A future help
-// line introducing a non-command slash token — a `/qurl-docs` link, a
-// `/qurl-foo` example — would be silently mangled in a non-prod env (where
-// the command is named e.g. `/qurl-sandbox`). Fail here instead of shipping
-// a garbled help message.
+// TestHelpMessagesContainOnlyCommandTokens checks rendered command names.
+// The separate source-token test prevents raw command literals in help templates.
 func TestHelpMessagesContainOnlyCommandTokens(t *testing.T) {
 	// Fully wire the handler (aliasStore + AdminStore + OpenView) so every
 	// gated help line renders — maximizes the set of tokens under test.
@@ -555,7 +548,7 @@ func TestHelpMessagesContainOnlyCommandTokens(t *testing.T) {
 	} {
 		for _, tok := range tokenRe.FindAllString(tc.rendered, -1) {
 			if !allowed[tok] {
-				t.Errorf("%s help contains non-command slash token %q; the blind ReplaceAll rewrite would mangle it in a non-prod env (see the MAINTAINER INVARIANT on userHelpMessage)", tc.surface, tok)
+				t.Errorf("%s help contains non-command slash token %q; help must render only its explicit command tokens", tc.surface, tok)
 			}
 		}
 	}
@@ -804,14 +797,14 @@ func newUninstallRevokeTestHandler(t *testing.T, provider auth.Provider, revokeS
 func TestSlashCommandUninstallRevokesUpstreamKeyThenDisconnects(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
-		keyID:                 "key_workspace_001",
+		keyID:                 "key_Workspace001",
 	}
 	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
 
 	resp := slashUninstallAsAdmin(t, h)
 
-	if calls, keyID := rec.snapshot(); calls != 1 || keyID != "key_workspace_001" {
-		t.Fatalf("upstream revoke DELETE calls=%d keyID=%q, want 1 and %q", calls, keyID, "key_workspace_001")
+	if calls, keyID := rec.snapshot(); calls != 1 || keyID != "key_Workspace001" {
+		t.Fatalf("upstream revoke DELETE calls=%d keyID=%q, want 1 and %q", calls, keyID, "key_Workspace001")
 	}
 	if provider.deleteCalls != 1 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
@@ -833,7 +826,7 @@ func TestSlashCommandUninstallRevokesUpstreamKeyThenDisconnects(t *testing.T) {
 func TestSlashCommandUninstallRevokeAlreadyAbsentTreatedAsRevoked(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
-		keyID:                 "key_workspace_404",
+		keyID:                 "key_Workspace404",
 	}
 	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNotFound)
 
@@ -870,6 +863,26 @@ func TestSlashCommandUninstallLegacyRowWithoutKeyIDDisconnectsLocally(t *testing
 	}
 }
 
+func TestSlashCommandUninstallMalformedStoredKeyIDDisconnectsLocally(t *testing.T) {
+	for _, keyID := range []string{"key_invalid", " \t"} {
+		provider := &revokingAuthProvider{recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"}, keyID: keyID}
+		h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
+		resp := slashUninstallAsAdmin(t, h)
+		if calls, _ := rec.snapshot(); calls != 0 {
+			t.Fatalf("invalid saved ID made %d upstream calls", calls)
+		}
+		if provider.deleteCalls != 1 {
+			t.Fatalf("local delete calls=%d, want 1", provider.deleteCalls)
+		}
+		if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
+			t.Fatalf("missing upstream-key caveat: %q", resp[respFieldText])
+		}
+		if strings.Contains(resp[respFieldText], "API key has been revoked") {
+			t.Fatal("claimed an upstream revoke without one")
+		}
+	}
+}
+
 // TestSlashCommandUninstallRevokeForbiddenFallsBackToLocalOnly pins the confirmed
 // qurl-service contract (#805): a live workspace key authenticates the self-revoke
 // with API-key auth, which qurl-service categorically forbids (403), so this is
@@ -878,7 +891,7 @@ func TestSlashCommandUninstallLegacyRowWithoutKeyIDDisconnectsLocally(t *testing
 func TestSlashCommandUninstallRevokeForbiddenFallsBackToLocalOnly(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
-		keyID:                 "key_workspace_403",
+		keyID:                 "key_Workspace403",
 	}
 	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusForbidden)
 
@@ -903,7 +916,7 @@ func TestSlashCommandUninstallRevokeForbiddenFallsBackToLocalOnly(t *testing.T) 
 func TestSlashCommandUninstallRevokeUnauthorizedFallsBackToLocalOnly(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
-		keyID:                 "key_workspace_401",
+		keyID:                 "key_Workspace401",
 	}
 	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusUnauthorized)
 
@@ -923,7 +936,7 @@ func TestSlashCommandUninstallRevokeUnauthorizedFallsBackToLocalOnly(t *testing.
 func TestSlashCommandUninstallRevokeServerErrorAbortsWithoutDelete(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
-		keyID:                 "key_workspace_500",
+		keyID:                 "key_Workspace500",
 	}
 	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusInternalServerError)
 
@@ -943,7 +956,7 @@ func TestSlashCommandUninstallRevokeServerErrorAbortsWithoutDelete(t *testing.T)
 func TestSlashCommandUninstallKeyIDReadErrorAbortsWithoutDelete(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
-		keyID:                 "key_workspace_x",
+		keyID:                 "key_Workspace00x",
 		keyIDErr:              errors.New("ddb transient"),
 	}
 	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
@@ -974,7 +987,7 @@ func TestSlashCommandUninstallKeyIDReadErrorAbortsWithoutDelete(t *testing.T) {
 func TestSlashCommandUninstallKeyIDReadNotConfiguredDisconnectsLocally(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
-		keyID:                 "key_workspace_notcfg",
+		keyID:                 "key_NotConfig001",
 		keyIDErr:              auth.ErrWorkspaceNotConfigured,
 	}
 	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
@@ -1002,7 +1015,7 @@ func TestSlashCommandUninstallClientBuildErrorAbortsWithoutDelete(t *testing.T) 
 	// succeeds but before the upstream DELETE.
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key", apiKeyErr: errors.New("kms decrypt failed")},
-		keyID:                 "key_workspace_build_err",
+		keyID:                 "key_BuildError01",
 	}
 	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
 
@@ -1029,7 +1042,7 @@ func TestSlashCommandUninstallKeyVanishedBetweenReadsDisconnectsLocally(t *testi
 	// rather than aborting — no upstream DELETE is attempted.
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: ""}, // APIKey → ErrWorkspaceNotConfigured
-		keyID:                 "key_workspace_vanished",
+		keyID:                 "key_Vanished0001",
 	}
 	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
 
@@ -1056,7 +1069,7 @@ func TestSlashCommandUninstallRevokeSucceedsButLocalRowAlreadyGoneReportsRevoked
 	// currently connected".
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key", deleteErr: auth.ErrWorkspaceNotConfigured},
-		keyID:                 "key_workspace_race",
+		keyID:                 "key_Race00000001",
 	}
 	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
 
@@ -1083,7 +1096,7 @@ func TestSlashCommandUninstallRevokeSucceedsButDeleteFailsReportsRetry(t *testin
 	// fails, so the admin is told to retry, which self-heals on the next uninstall.
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key", deleteErr: errors.New("ddb write failed")},
-		keyID:                 "key_workspace_delfail",
+		keyID:                 "key_DeleteFail01",
 	}
 	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
 
@@ -2303,9 +2316,8 @@ func TestSlashCommandSetup_RepliesNotConfiguredWhenOAuthOff(t *testing.T) {
 	}
 }
 
-// Empty-body fence: locks the contract so a future ParseQuery
-// substitution can't silently change the empty-text help fallback.
-func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
+// A signed body still needs a workspace before command dispatch.
+func TestSlashCommand_EmptyBodyRequiresWorkspace(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(""))
 	sig, ts := signSlackBody(t, "")
@@ -2315,16 +2327,13 @@ func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
-		t.Fatalf("signed empty body: status = %d, want 200 (help branch); body=%s", w.Code, w.Body.String())
+		t.Fatalf("signed empty body: status = %d, want 200 (workspace error); body=%s", w.Code, w.Body.String())
 	}
 	var result map[string]string
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// Assert on `/qurl help` — the unconditional help marker. (`/qurl get`
-	// is now gated on AdminStore, which this handler doesn't wire, so it's
-	// no longer a reliable "help rendered" signal here.)
-	if !strings.Contains(result["text"], "/qurl help") {
-		t.Errorf("signed empty body did not produce help; got: %q", result["text"])
+	if !strings.Contains(result["text"], "missing Slack workspace ID") {
+		t.Errorf("signed empty body omitted workspace error: %q", result["text"])
 	}
 }

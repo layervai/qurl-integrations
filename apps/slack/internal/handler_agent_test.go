@@ -2974,3 +2974,78 @@ func TestDeliverAgentResult_MarkdownSeamFallsBackToText(t *testing.T) {
 		t.Fatalf("want the answer delivered via the text seam, got %+v", *posts)
 	}
 }
+
+func TestAgentReplyDeliveryCarriesRequestLogger(t *testing.T) {
+	cases := []string{"text", "generated", "proposal", "confirm-card", "dm", "dm-blocks", "ephemeral", "ephemeral-blocks", "assistant", "stream-start", "stream-delivery"}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			parent, cancel := context.WithTimeout(context.Background(), agentDeliveryBudget)
+			defer cancel()
+			var logs bytes.Buffer
+			logger := slog.New(observability.NewRedactingJSONHandler(&logs, nil)).With("event_id", "event-test")
+			calls := 0
+			record := func(ctx context.Context) error {
+				calls++
+				if observability.Logger(ctx) != logger {
+					t.Error("delivery seam lost request correlation")
+				}
+				if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) <= 0 || time.Until(deadline) > agentDeliveryBudget {
+					t.Error("delivery seam lost bounded context")
+				}
+				return nil
+			}
+			post := func(ctx context.Context, _, _, _, _, _ string) error { return record(ctx) }
+			h := &Handler{baseCtx: parent, cfg: Config{
+				AgentStore:             &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"},
+				PostMessage:            post,
+				PostAgentMessageBlocks: func(ctx context.Context, _, _, _, _ string, _ []any, _ string) error { return record(ctx) },
+				PostMessageBlocks:      func(ctx context.Context, _, _, _, _ string, _ []any, _ string) error { return record(ctx) },
+				PostEphemeral:          func(ctx context.Context, _, _, _, _, _, _ string) error { return record(ctx) },
+				PostEphemeralBlocks:    func(ctx context.Context, _, _, _, _, _ string, _ []any, _ string) error { return record(ctx) },
+				OpenView:               func(context.Context, string, string, []byte) error { return nil },
+				PostFeedback:           func(context.Context, []byte) error { return nil },
+				AgentStream:            &recordingStreamPort{},
+			}}
+			env := &slackEventEnvelope{TeamID: "T12345678"}
+			env.Event.ChannelType = slackChannelTypeIM
+			payload := &interactionPayload{}
+			switch name {
+			case "text":
+				h.deliverAgentText(logger, env, "100.1", "reply", post)
+			case "generated":
+				h.postAgentGeneratedReply(logger, env, "100.1", "reply", post)
+			case "proposal":
+				h.postAgentProposalPreview(logger, env, "100.1", "summary")
+			case "confirm-card":
+				h.postAgentConfirmScoped(logger, env, "100.1", "", &agent.Proposal{Summary: "review", Action: agent.ActionGet})
+			case "dm":
+				h.deliverConfirmDM(parent, logger, payload, "100.1", "reply", nil)
+			case "dm-blocks":
+				h.deliverConfirmDM(parent, logger, payload, "100.1", "reply", []any{})
+			case "ephemeral":
+				h.deliverConfirmEphemeral(parent, logger, payload, "100.1", "reply", nil)
+			case "ephemeral-blocks":
+				h.deliverConfirmEphemeral(parent, logger, payload, "100.1", "reply", []any{})
+			case "assistant":
+				h.postAssistantDisclosure(parent, logger, "T12345678", "", &assistantThread{ChannelID: "D123", ThreadTS: "100.1"})
+			case "stream-start":
+				stream := h.newAgentReplyStreamer(parent, logger, env, "100.1")
+				if stream == nil {
+					t.Fatal("missing streamer")
+				}
+				_ = record(stream.ctx)
+			case "stream-delivery":
+				stream := h.newAgentReplyStreamer(parent, logger, env, "100.1")
+				if stream == nil {
+					t.Fatal("missing streamer")
+				}
+				ctx, done := stream.deliveryCtx()
+				defer done()
+				_ = record(ctx)
+			}
+			if calls != 1 {
+				t.Fatalf("delivery calls = %d", calls)
+			}
+		})
+	}
+}

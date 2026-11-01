@@ -32,6 +32,8 @@ import (
 // existing PK/SK; no GSI, no SK reshape, no data migration (the table
 // is empty pending Slack bot sandbox deploy).
 type AliasStore interface {
+	// LookupChannelAliasConsistent reads the current binding; missing is not an error.
+	LookupChannelAliasConsistent(ctx context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error)
 	// BindChannelAlias atomically binds aliasName→resourceID on
 	// (teamID, channelID). Implementations issue a DynamoDB UpdateItem
 	// `SET alias_bindings.#a = :rid` with
@@ -277,13 +279,13 @@ func (h *Handler) aliasValidate(w http.ResponseWriter, values url.Values, verb s
 // qurl-service before the DDB write, so it runs on [runAsync]'s own ctx
 // (~25s) and calls [aliasValidate] directly — it never needs the sync
 // timer this helper layers on.
-func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb string) (ctx context.Context, cancel context.CancelFunc, teamID, channelID string, ok bool) {
+func (h *Handler) aliasPreamble(requestCtx context.Context, w http.ResponseWriter, values url.Values, verb string) (ctx context.Context, cancel context.CancelFunc, teamID, channelID string, ok bool) {
 	cancel = func() {}
 	teamID, channelID, ok = h.aliasValidate(w, values, verb)
 	if !ok {
 		return
 	}
-	ctx, cancel = context.WithTimeout(h.baseCtx, aliasSyncTimeout)
+	ctx, cancel = context.WithTimeout(requestCtx, aliasSyncTimeout)
 	return
 }
 
@@ -294,11 +296,11 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 // prod per cmd/main.go SetAliasStore, is non-nil for CheckAdmin) and that
 // the caller is a qURL admin (requireAdminSync). Returns false (and has
 // written the reply) when either fails; callers `if !h.requireAliasAdminGate(...) { return }`.
-func (h *Handler) requireAliasAdminGate(w http.ResponseWriter, teamID string, values url.Values, action AdminAction) bool {
+func (h *Handler) requireAliasAdminGate(requestCtx context.Context, w http.ResponseWriter, teamID string, values url.Values, action AdminAction) bool {
 	if !h.requireAdminStoreSync(w) {
 		return false
 	}
-	return h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), action)
+	return h.requireAdminSync(requestCtx, w, teamID, strings.TrimSpace(values.Get(fieldUserID)), action)
 }
 
 // handleSetAlias routes `/qurl-admin set-alias $<alias> <target>`.
@@ -321,7 +323,7 @@ func (h *Handler) requireAliasAdminGate(w http.ResponseWriter, teamID string, va
 // Slug targets do a qurl-service lookup before the DDB write, so they
 // ack immediately and post the final result (ephemerally — admin-verb
 // feedback is admin-only) via response_url.
-func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleSetAlias(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	rest := stripSetAliasPrefix(text)
 
@@ -353,7 +355,7 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// the usage reply rather than a bare denial. The gate's guarantee is "no
 	// slug resolve or store mutation before the admin check," not "no parser
 	// feedback to non-admins."
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionSetAlias) {
+	if !h.requireAliasAdminGate(requestCtx, w, teamID, values, AdminActionSetAlias) {
 		return
 	}
 	slug := strings.TrimPrefix(args.Target, "$")
@@ -392,6 +394,15 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 }
 
 func (h *Handler) resolveAndBindTunnelSlugAliasResult(ctx context.Context, log *slog.Logger, teamID, channelID, alias, slug string) actionCoreResult {
+	// Avoid upstream lookup for known duplicates; the conditional bind still owns races.
+	_, found, err := h.aliasStore.LookupChannelAliasConsistent(ctx, teamID, channelID, alias)
+	if err != nil {
+		log.Error("setalias precheck failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
+		return newActionCoreResult(false, "Failed to update alias. Please try again.", "Alias could not be updated.")
+	}
+	if found {
+		return aliasAlreadyBoundResult(alias)
+	}
 	resourceID, err := h.resolveTunnelSlugAliasTarget(ctx, teamID, slug)
 	if err != nil {
 		log.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias, "slug", slug)
@@ -410,7 +421,7 @@ func (h *Handler) resolveAndBindTunnelSlugAliasResult(ctx context.Context, log *
 	// narrow — claude-bot review #5 on the prior single-alias version.
 	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID)
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
-		return newActionCoreResult(false, fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias), "Alias is already bound in this channel.")
+		return aliasAlreadyBoundResult(alias)
 	}
 	if err != nil {
 		log.Error("setalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
@@ -424,6 +435,10 @@ func (h *Handler) resolveAndBindTunnelSlugAliasResult(ctx context.Context, log *
 	// redaction is needed.
 	logAliasBound(teamID, channelID, alias, slug, resourceID)
 	return newActionCoreResult(true, fmt.Sprintf("Alias `$%s` now points to qURL Connector `$%s` in this channel.", alias, slug), "Alias now points to the qURL Connector in this channel.")
+}
+
+func aliasAlreadyBoundResult(alias string) actionCoreResult {
+	return newActionCoreResult(false, fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias), "Alias is already bound in this channel.")
 }
 
 func logAliasBound(teamID, channelID, alias, slug, resourceID string) {
@@ -474,7 +489,7 @@ func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug
 // isn't bound surfaces as slackdata.ErrAliasNotFound and is rendered as
 // "no such alias on this channel." Other aliases on the same channel
 // are untouched.
-func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleUnsetAlias(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	rest := stripUnsetAliasPrefix(text)
 
@@ -484,7 +499,7 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
-	ctx, cancel, teamID, channelID, ok := h.aliasPreamble(w, values, "unsetalias")
+	ctx, cancel, teamID, channelID, ok := h.aliasPreamble(requestCtx, w, values, "unsetalias")
 	if !ok {
 		return
 	}
@@ -493,7 +508,7 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 	// Admin gate, in code (see requireAliasAdminGate). Runs after
 	// aliasPreamble (IDs + store-wired check) but before UnbindChannelAlias,
 	// so a non-admin is denied before any store write.
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionUnsetAlias) {
+	if !h.requireAliasAdminGate(requestCtx, w, teamID, values, AdminActionUnsetAlias) {
 		return
 	}
 

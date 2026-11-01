@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 // agentStreamFlushBytes coalesces text deltas: the streamer buffers until it has at least
@@ -32,7 +33,7 @@ func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, e
 		return nil
 	}
 	return &agentReplyStreamer{
-		ctx:             ctx,
+		ctx:             observability.WithLogger(ctx, log),
 		baseCtx:         h.baseCtx,
 		log:             log,
 		port:            h.cfg.AgentStream,
@@ -180,7 +181,7 @@ func (s *agentReplyStreamer) stop(ctx context.Context, blocks []any) {
 // stream unfinished. Mirrors postAgentReply, which delivers off h.baseCtx with
 // the same agentDeliveryBudget.
 func (s *agentReplyStreamer) deliveryCtx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(s.baseCtx, agentDeliveryBudget)
+	return context.WithTimeout(observability.WithLogger(s.baseCtx, s.log), agentDeliveryBudget)
 }
 
 // finalizeReply finalizes a SUCCESSFUL turn and reports whether the stream delivered the
@@ -201,6 +202,8 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 		// together into one message — "Let me check the res" immediately followed by
 		// the real answer. Take the broken-stream fallback instead: stop what the user
 		// already saw, and let the caller post the complete answer as its own message.
+		s.pending.Reset()
+		s.broken = true // Abandoned narration also needs cleanup after a complete reply.
 		s.stop(ctx, nil)
 		return false
 	}
@@ -256,6 +259,20 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 		return false
 	}
 	return result.Proposal == nil
+}
+
+// discardBrokenPartial runs only after the complete non-proposal fallback was posted.
+func (s *agentReplyStreamer) discardBrokenPartial(deliveredReply bool) {
+	if s == nil || !deliveredReply || !s.broken || s.streamTS == "" {
+		return
+	}
+	ctx, cancel := s.deliveryCtx()
+	defer cancel()
+	if err := s.port.DeleteStream(ctx, s.teamID, s.enterprise, s.channelID, s.streamTS); err != nil {
+		s.log.Warn("agent: could not remove abandoned partial stream", "error", err)
+		return
+	}
+	s.streamTS = ""
 }
 
 // finalizeError finalizes a FAILED turn and reports whether it was handled (so the caller

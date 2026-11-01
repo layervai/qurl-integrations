@@ -43,7 +43,7 @@ const (
 	attrResourceID = "resource_id"
 )
 
-// AllowedResourceIDsForChannel returns the union of resource IDs the
+// ChannelScopedResourceIDs returns the union of resource IDs the
 // (teamID, channelID) channel_policies row authorizes in that channel —
 // the channel-scoped set that gates both `/qurl get` mint (via
 // handler_get.go's allowedResourceIDsForGet) and `/qurl list` disclosure
@@ -61,7 +61,7 @@ const (
 //
 // Either surface allows the row to mint. As of #589 this set is also
 // the `/qurl list` disclosure scope again (not just the mint gate) —
-// see the TODO below and apps/slack/docs/list-disclosure.md. Single-row
+// see apps/slack/docs/list-disclosure.md. Single-row
 // GetItem; no pagination needed.
 //
 // Known asymmetry vs [ResolvePolicy]: this function does NOT read the
@@ -74,19 +74,11 @@ const (
 // Revisit when the migration completes.
 //
 // Missing row → empty set (no policy = no access, fail-closed).
-//
-// TODO(#464): rename when next touched. The name dates from an era
-// where both `/qurl list` (non-admin disclosure) and `/qurl get
-// $r_<id>` (mint-time capability) consumed it. #234 made `/qurl list`
-// channel-scoped; #459 reverted that (leaving only `get` on this set);
-// #589 re-introduced the channel scope, so today BOTH disclosure and
-// capability consume it again (see apps/slack/docs/list-disclosure.md).
-// A name like `ChannelScopedResourceIDs` would reflect that shared role.
-func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
+func (s *Store) ChannelScopedResourceIDs(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
 	if teamID == "" || channelID == "" {
 		return nil, &Error{
 			StatusCode: http.StatusBadRequest,
-			Title:      "AllowedResourceIDsForChannel: team_id and channel_id are required",
+			Title:      "ChannelScopedResourceIDs: team_id and channel_id are required",
 		}
 	}
 	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
@@ -97,7 +89,7 @@ func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channe
 		},
 	})
 	if err != nil {
-		return nil, ddbToError("AllowedResourceIDsForChannel", err)
+		return nil, ddbToError("ChannelScopedResourceIDs", err)
 	}
 	if len(out.Item) == 0 {
 		return map[string]struct{}{}, nil
@@ -162,6 +154,15 @@ func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID
 // `/qurl aliases` to see what's available here, or contact your
 // Slack admin to add it." copy for all three.
 func (s *Store) LookupChannelAlias(ctx context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error) {
+	return s.lookupChannelAlias(ctx, teamID, channelID, aliasName, false)
+}
+
+// LookupChannelAliasConsistent observes a completed unbind before refusing a new bind.
+func (s *Store) LookupChannelAliasConsistent(ctx context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error) {
+	return s.lookupChannelAlias(ctx, teamID, channelID, aliasName, true)
+}
+
+func (s *Store) lookupChannelAlias(ctx context.Context, teamID, channelID, aliasName string, consistent bool) (resourceID string, found bool, err error) {
 	if teamID == "" || channelID == "" || aliasName == "" {
 		return "", false, &Error{
 			StatusCode: http.StatusBadRequest,
@@ -169,7 +170,8 @@ func (s *Store) LookupChannelAlias(ctx context.Context, teamID, channelID, alias
 		}
 	}
 	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
+		TableName:      aws.String(s.ChannelPoliciesName),
+		ConsistentRead: aws.Bool(consistent),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),
@@ -250,7 +252,7 @@ func (s *Store) GetChannelPolicy(ctx context.Context, teamID, channelID string) 
 // and the UpdateItem materializes the row if it doesn't exist yet (matching
 // BindChannelAlias's lazy-create posture). It does NOT touch alias_bindings —
 // the install channel's implicit grant rides on the slug alias binding, and
-// [AllowedResourceIDsForChannel] unions both surfaces, so a tunnel is
+// [ChannelScopedResourceIDs] unions both surfaces, so a tunnel is
 // "available in a channel" iff its id is in that union regardless of which
 // surface carries it.
 func (s *Store) ExposeResourceToChannel(ctx context.Context, teamID, channelID, resourceID string) error {
@@ -266,7 +268,7 @@ func (s *Store) ExposeResourceToChannel(ctx context.Context, teamID, channelID, 
 // attribute (DDB forbids empty sets). It deliberately does NOT remove any
 // alias_bindings entry: a channel that still has a `$alias` bound to this
 // resource (e.g. the install channel's slug alias) stays in
-// [AllowedResourceIDsForChannel]'s union and remains available there. Fully
+// [ChannelScopedResourceIDs]'s union and remains available there. Fully
 // revoking such a channel means unbinding its aliases too (the Edit modal's
 // aliases field, or `/qurl-admin unset-alias`).
 func (s *Store) RevokeResourceFromChannel(ctx context.Context, teamID, channelID, resourceID string) error {
@@ -280,8 +282,7 @@ func (s *Store) updateChannelResourceSet(ctx context.Context, operation, updateV
 			Title:      operation + ": team_id, channel_id, and resource_id are required",
 		}
 	}
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -291,8 +292,8 @@ func (s *Store) updateChannelResourceSet(ctx context.Context, operation, updateV
 		UpdateExpression: aws.String("SET " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " " + updateVerb + " " + attrAllowedResourceIDs + " :rids"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":rids":     &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
-			exprNow:     stringAttr(nowISO),
-			exprNowNano: unixNanoAttr(now),
+			exprNow:     updatedAt,
+			exprNowNano: updatedAtNano,
 		},
 	})
 	if err != nil {
@@ -379,8 +380,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	// alias_bindings key that pointed at it. The DELETE uses the literal attribute
 	// name (matching RevokeResourceFromChannel); only the user-controlled alias
 	// keys are name-aliased.
-	now := s.nowOrDefault()
-	nowISO := now.UTC().Format(time.RFC3339)
+	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	expr := "SET #updated_at = " + exprNow + ", " + exprUpdatedAtNano + " = " + exprNowNano
 	names := map[string]string{
 		"#updated_at":     attrUpdatedAt,
@@ -407,8 +407,8 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 		UpdateExpression: aws.String(expr),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":rid":      &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
-			exprNow:     stringAttr(nowISO),
-			exprNowNano: unixNanoAttr(now),
+			exprNow:     updatedAt,
+			exprNowNano: updatedAtNano,
 		},
 		ExpressionAttributeNames: names,
 	}
@@ -420,7 +420,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 
 // ChannelsForResource returns the channel IDs in teamID whose channel_policies
 // row makes resourceID available — i.e. resourceID is in
-// [AllowedResourceIDsForChannel] for that channel (the union of
+// [ChannelScopedResourceIDs] for that channel (the union of
 // `allowed_resource_ids` and `alias_bindings.values()`). It backs the
 // `/qurl list` Edit modal's "expose to channels" pre-fill so an admin sees
 // every channel a tunnel already reaches before adding more — and so the
@@ -589,7 +589,7 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 // allowedResourceIDsFromItem returns the set of resource IDs a channel_policies
 // item makes available: the union of its `allowed_resource_ids` SS and its
 // `alias_bindings` map values (empty IDs dropped). This is the single
-// definition of "a tunnel is available in a channel" — [Store.AllowedResourceIDsForChannel]
+// definition of "a tunnel is available in a channel" — [Store.ChannelScopedResourceIDs]
 // returns it after a point GetItem, and [channelItemAllowsResource] membership-
 // tests it inside the [Store.ChannelsForResource] Query loop. Keeping the union
 // in one place stops those two surfaces from drifting if a third grant source

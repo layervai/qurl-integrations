@@ -134,7 +134,8 @@ const (
 
 	apiKeyValidationProjectionKey        = "#api_key"
 	apiKeyValidationProjectionDataKey    = "#data_key"
-	apiKeyValidationProjectionExpression = apiKeyValidationProjectionKey + ", " + apiKeyValidationProjectionDataKey
+	apiKeyValidationProjectionTTL        = "#credential_ttl"
+	apiKeyValidationProjectionExpression = apiKeyValidationProjectionKey + ", " + apiKeyValidationProjectionDataKey + ", " + apiKeyValidationProjectionTTL
 
 	// DDB ExpressionAttributeValues placeholders for the current time,
 	// shared by the workspace_state UpdateExpression callers below.
@@ -660,6 +661,23 @@ func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consi
 	return string(pt), newAPIKeyCacheToken(ctBlob.Value, wrappedKey.Value), nil
 }
 
+// TODO(upstream-contract): Keep the TTL column and fixed security_event value
+// in sync with the infra repo durable workspace-state table and credential TTL
+// metric filter. Track the producer/filter rollout together in public issue #934.
+const (
+	credentialTTLAttribute        = "ttl"
+	credentialTTLSecurityEventKey = "security_event"
+	credentialTTLSecurityEvent    = "workspace_credential_ttl_present"
+)
+
+// Durable credential rows share a table with expiring OAuth state. A TTL
+// on a credential row can delete live credentials; never log its contents.
+func warnCredentialTTL(ctx context.Context, item map[string]ddbtypes.AttributeValue) {
+	if _, present := item[credentialTTLAttribute]; present {
+		slog.WarnContext(ctx, "durable workspace credential row has unexpected TTL", credentialTTLSecurityEventKey, credentialTTLSecurityEvent)
+	}
+}
+
 func (p *DDBProvider) fetchAPIKeyItem(ctx context.Context, workspaceID string, consistentRead bool, operation string) (map[string]ddbtypes.AttributeValue, error) {
 	// Eventually-consistent read is correct for normal APIKey lookup: the
 	// per-workspace key only changes on (re-)install, and the few-ms
@@ -683,6 +701,7 @@ func (p *DDBProvider) fetchAPIKeyItem(ctx context.Context, workspaceID string, c
 	if out == nil || len(out.Item) == 0 {
 		return nil, fmt.Errorf("%s: workspace %q: %w", operation, workspaceID, ErrWorkspaceNotConfigured)
 	}
+	warnCredentialTTL(ctx, out.Item)
 	return out.Item, nil
 }
 
@@ -711,6 +730,7 @@ func (p *DDBProvider) cachedAPIKeyStillCurrent(ctx context.Context, workspaceID 
 		ExpressionAttributeNames: map[string]string{
 			apiKeyValidationProjectionKey:     attrQURLAPIKey,
 			apiKeyValidationProjectionDataKey: attrDataKeyCT,
+			apiKeyValidationProjectionTTL:     credentialTTLAttribute,
 		},
 		ConsistentRead: aws.Bool(true),
 	})
@@ -720,6 +740,7 @@ func (p *DDBProvider) cachedAPIKeyStillCurrent(ctx context.Context, workspaceID 
 	if out == nil || len(out.Item) == 0 {
 		return false, nil
 	}
+	warnCredentialTTL(ctx, out.Item)
 	ctBlob, ok := out.Item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(ctBlob.Value) == 0 {
 		return false, nil
@@ -860,6 +881,8 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 	if out == nil || len(out.Item) == 0 {
 		return "", fmt.Errorf("DDBProvider.SlackBotToken: workspace %q: %w", workspaceID, ErrSlackBotTokenNotConfigured)
 	}
+
+	warnCredentialTTL(ctx, out.Item)
 
 	// Rows can exist before a Slack app install because /qurl setup writes the
 	// qURL API key first. Missing Slack columns are expected in that state.

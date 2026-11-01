@@ -8,11 +8,12 @@
 # go.mod requires go 1.26.10. SHA-pinned to the multi-arch index digest, same as
 # the rest of the repo's base images — GOTOOLCHAIN stays the image default
 # `local`, so there's no unpinned build-time toolchain fetch.
-FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS build
 
 WORKDIR /src
 
 COPY go.mod go.sum ./
+# Keep modules in the layer: the GHA backend does not export cache mounts.
 RUN go mod download
 
 # `internal/` and `shared/` are copied before `apps/slack/` so an app-only edit
@@ -26,7 +27,10 @@ COPY apps/slack/ ./apps/slack/
 # preceding source/dep layers. Don't move it up.
 ARG VERSION=dev
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+# Compile on the builder's native CPU; only the output targets ARM64.
+# Cache mounts help local rebuilds; fresh CI runners must refill their contents.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
     go build -trimpath -mod=readonly -ldflags="-s -w -X main.version=${VERSION}" \
     -o /out/qurl-bot-slack ./apps/slack/cmd/
 

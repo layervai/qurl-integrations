@@ -220,8 +220,8 @@ func run() error {
 		return fmt.Errorf("invalid SLACK_BOT_TOKEN: %w", err)
 	}
 	workspaceTokenLookup, invalidateWorkspaceSlackToken := newWorkspaceSlackTokenLookupWithInvalidation(ddbProvider, slackBotToken, slackWorkspaceTokenCacheTTL, time.Now)
-	openView := newSlackOpenViewFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsOpenURL, nil)
-	slackUserLookup := newSlackUserLookupFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackUsersInfoURL, nil)
+	openView := newSlackOpenViewFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsOpenURL, nil, invalidateWorkspaceSlackToken)
+	slackUserLookup := newSlackUserLookupFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackUsersInfoURL, nil, invalidateWorkspaceSlackToken)
 	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "")
 
 	postFeedback := buildPostFeedback(userAgent)
@@ -232,17 +232,17 @@ func run() error {
 	// PostMessageBlocks wired AND AgentConfirmEnabled true (Handler.agentConfirmEnabled).
 	// Both PostMessage seams share the per-workspace token lookup + Grid fallback with
 	// the slash-command modals.
-	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
+	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil, invalidateWorkspaceSlackToken)
 	// DM seam for secret-bearing user deliveries (`/qurl get dm:true` and qURL
 	// Connector enrollment tokens). Same token lookup + Grid fallback as channel posts.
-	postDM := newSlackPostDMFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil)
+	postDM := newSlackPostDMFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil, invalidateWorkspaceSlackToken)
 	// chat.postEphemeral seam: delivers a get's one-time link privately in a channel as a
 	// standalone ephemeral (the response_url ephemeral collides with the card-replace).
-	postEphemeral := newSlackPostEphemeralFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostEphemeralURL, nil)
+	postEphemeral := newSlackPostEphemeralFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostEphemeralURL, nil, invalidateWorkspaceSlackToken)
 	// standard-Markdown seam for the agent's free-text answer, so a channel reply
 	// renders like the streaming pane while still carrying a fallback.
-	postMarkdownMessage := newSlackPostMarkdownMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
-	postMessageBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
+	postMarkdownMessage := newSlackPostMarkdownMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil, invalidateWorkspaceSlackToken)
+	postMessageBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil, invalidateWorkspaceSlackToken)
 	// Block Kit DM + ephemeral seams: deliver a minted `/qurl get` (dm:true) or
 	// agent-confirm channel link as an "Enter Portal" URL button rather than a raw
 	// hyperlink. Same token lookup + Grid fallback as their text siblings above.
@@ -251,18 +251,18 @@ func run() error {
 	// unwired seam fails channel get approvals AFTER the mint is burned — logConfirmModeState
 	// warns loudly at boot. PostDMBlocks is only for `/qurl get dm:true`, which is refused
 	// pre-mint when it's nil (getWork), so that path degrades gracefully.
-	postDMBlocks := newSlackPostDMBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil)
-	postEphemeralBlocks := newSlackPostEphemeralBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostEphemeralURL, nil)
+	postDMBlocks := newSlackPostDMBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil, invalidateWorkspaceSlackToken)
+	postEphemeralBlocks := newSlackPostEphemeralBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostEphemeralURL, nil, invalidateWorkspaceSlackToken)
 	// reactions.add/remove seam for the agent's best-effort "working on it" ack. Always
 	// wired (same token lookup as the post seams); inert until the agent surface is live
 	// and needs the reactions:write scope in the Slack manifest to actually land.
-	agentReactions := newSlackReactionPortWithTokenLookup(workspaceTokenLookup, userAgent, slackReactionsAddURL, slackReactionsRemoveURL, nil)
+	agentReactions := newSlackReactionPortWithTokenLookup(workspaceTokenLookup, userAgent, slackReactionsAddURL, slackReactionsRemoveURL, nil, invalidateWorkspaceSlackToken)
 	// conversations.info metadata seam for surface-specific confirm decisions (notably
 	// refusing group-DM get links before minting until mpim delivery is proven safe).
-	agentResolveConversationInfo := newSlackResolveConversationInfoFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsInfoURL, nil)
+	agentResolveConversationInfo := newSlackResolveConversationInfoFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsInfoURL, nil, invalidateWorkspaceSlackToken)
 	// conversations.replies seam for zero-copy agent continuity. Recent thread
 	// context is read from Slack for each turn and is never stored by LayerV.
-	agentThreadHistory := newSlackAgentThreadHistoryFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsRepliesURL, nil)
+	agentThreadHistory := newSlackAgentThreadHistoryFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsRepliesURL, nil, invalidateWorkspaceSlackToken)
 	// Channel-name projection so the agent's system prompt can render "#general
 	// (C123)". Shares the same conversations.info closure as the confirm surface
 	// classifier; degrades to the bare channel id until the relevant
@@ -273,22 +273,22 @@ func run() error {
 	// scoped). Always wired (same token lookup + channels:read / groups:read scopes as the
 	// name resolver); fail-closed, so until the scopes are in the manifest it answers
 	// missing_scope and the pane stays on the un-scoped DM.
-	agentChannelMembership := newSlackChannelMembershipFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsMembersURL, nil)
+	agentChannelMembership := newSlackChannelMembershipFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsMembersURL, nil, invalidateWorkspaceSlackToken)
 	// assistant.threads.* seam for the Assistants-container UX (first-run title +
 	// suggested prompts, and the per-turn "thinking…" status). Always wired (same token
 	// lookup); inert until the "Agents & AI Apps" manifest toggle + assistant:write scope
 	// are set (the events don't arrive, and the calls would no-op, until then).
-	agentAssistantThreads := newSlackAssistantThreadsPortWithTokenLookup(workspaceTokenLookup, userAgent, slackAssistantSetTitleURL, slackAssistantSetSuggestedPromptsURL, slackAssistantSetStatusURL, nil)
+	agentAssistantThreads := newSlackAssistantThreadsPortWithTokenLookup(workspaceTokenLookup, userAgent, slackAssistantSetTitleURL, slackAssistantSetSuggestedPromptsURL, slackAssistantSetStatusURL, nil, invalidateWorkspaceSlackToken)
 	// views.publish seam for the App Home review surface (a user's own recent confirmed
 	// actions). Always wired (same token lookup); inert until the manifest's App Home tab
 	// feature + app_home_opened subscription are set — the event doesn't arrive, and the
 	// view would no-op, until then.
-	agentAppHomePublish := newSlackAppHomePublishFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsPublishURL, nil)
+	agentAppHomePublish := newSlackAppHomePublishFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsPublishURL, nil, invalidateWorkspaceSlackToken)
 	// chat.startStream/appendStream/stopStream seam for native AI-app reply streaming in
 	// the assistant pane. Always wired (same token lookup + Grid fallback); inert until the
 	// assistant:write scope + the pane (Agents & AI Apps) are enabled, and only engaged for
 	// a pane turn — otherwise the agent posts the reply normally.
-	agentStream := newSlackAgentStreamPortWithTokenLookup(workspaceTokenLookup, userAgent, slackChatStartStreamURL, slackChatAppendStreamURL, slackChatStopStreamURL, nil)
+	agentStream := newSlackAgentStreamPortWithTokenLookup(workspaceTokenLookup, userAgent, slackChatStartStreamURL, slackChatAppendStreamURL, slackChatStopStreamURL, slackChatDeleteMessageURL, nil, invalidateWorkspaceSlackToken)
 	agentDisabled := readAgentKillSwitch()
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	agentChannelFollowups := readAgentChannelFollowups()
@@ -380,6 +380,7 @@ func run() error {
 		PostMarkdownMessage:         postMarkdownMessage,
 		AgentDisabled:               agentDisabled,
 		PostMessageBlocks:           postMessageBlocks,
+		PostAgentMessageBlocks:      newSlackPostAgentMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil, invalidateWorkspaceSlackToken),
 		PostDMBlocks:                postDMBlocks,
 		PostEphemeralBlocks:         postEphemeralBlocks,
 		AgentConfirmEnabled:         agentConfirmEnabled,

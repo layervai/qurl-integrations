@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -34,8 +35,8 @@ const (
 // idempotency-store table is `hash(owner_id:idempotency_key:method:path)`).
 //
 // Callers don't set this header directly — pass IdempotencyKey on the
-// per-request input struct (currently CreateInput.IdempotencyKey) and the
-// client wires the header. The constant is exported only so observability
+// per-request input struct (CreateInput, CreateAPIKeyInput, UpdateResourceInput).
+// The client wires the header. The constant is exported only so observability
 // code can grep for it consistently across logs and request inspectors.
 //
 // Key construction guidance (apply to every caller — not just Slack):
@@ -117,6 +118,24 @@ var ErrCreateAPIKeyMissingKind = errors.New("create api key: kind is required")
 
 // ErrRevokeAPIKeyEmptyID is returned by RevokeAPIKey when keyID is empty.
 var ErrRevokeAPIKeyEmptyID = errors.New("revoke api key: key_id is empty")
+
+// ErrRevokeAPIKeyInvalidID reports a malformed v1 API-key identity.
+var ErrRevokeAPIKeyInvalidID = errors.New("revoke api key: invalid key_id")
+
+// TODO(upstream-contract): matches the v1 service key_id contract; suffixes
+// are case-sensitive alphanumeric identities, not API-key secrets or hex IDs.
+var apiKeyIDPattern = regexp.MustCompile(`^key_[A-Za-z0-9]{12}$`)
+
+// ValidateAPIKeyID checks an already-trimmed v1 key_id before a revoke call.
+func ValidateAPIKeyID(keyID string) error {
+	if keyID == "" {
+		return ErrRevokeAPIKeyEmptyID
+	}
+	if !apiKeyIDPattern.MatchString(keyID) {
+		return ErrRevokeAPIKeyInvalidID
+	}
+	return nil
+}
 
 // ErrDeleteResourceEmptyID is returned by DeleteResource when resourceID
 // is empty.
@@ -768,16 +787,14 @@ type APIKey struct {
 // ([ErrUpdateResourceNoFieldsSet]) — symmetric with Create's
 // no-target guard.
 //
-// Retry-safety invariant: every field on this struct MUST be
-// field-idempotent until Idempotency-Key plumbing lands (#148).
-// do() retries 5xx/429 with the buffered body, so a successfully-
-// applied PATCH that returns 502 will be re-applied on retry — that's
-// safe iff a second apply is a no-op (which is true for setting alias
-// to a value, clearing alias, setting description, etc., but NOT for
-// counters, appends, or audit-log-per-call semantics). Adding a
-// non-idempotent field requires #148 first; the [Client.UpdateResource]
-// doc-comment carries a TODO marker.
+// Retries without an IdempotencyKey require field-idempotent updates:
+// an ambiguous 5xx can repeat counters, appends, or per-call audit entries.
 type UpdateResourceInput struct {
+	// TODO(upstream-contract): qURL must honor retry keys on resource PATCHes.
+	// IdempotencyKey is an optional retry key sent only as a request header.
+	// Use a new key per distinct update; reuse it only for retries of that update.
+	// See [HeaderIdempotencyKey] for key construction.
+	IdempotencyKey string `json:"-"`
 	// Description: pass `&""` to clear the field server-side (no
 	// `ClearDescription` sentinel — the empty string is the clear
 	// semantic). Pass nil to leave unchanged. NOT trimmed by the
@@ -1096,8 +1113,8 @@ func (c *Client) CreateAPIKey(ctx context.Context, input *CreateAPIKeyInput) (*A
 // RevokeAPIKey revokes a qURL API key by key_id.
 func (c *Client) RevokeAPIKey(ctx context.Context, keyID string) error {
 	keyID = strings.TrimSpace(keyID)
-	if keyID == "" {
-		return ErrRevokeAPIKeyEmptyID
+	if err := ValidateAPIKeyID(keyID); err != nil {
+		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/api-keys/"+url.PathEscape(keyID), http.NoBody)
 	if err != nil {
@@ -1131,23 +1148,14 @@ func (c *Client) DeleteResource(ctx context.Context, resourceID string) error {
 // must first resolve the alias to its resource_id.
 //
 // Validation order (first match wins): trim resourceID → empty
-// resourceID → nil input → no-fields-set → trim Alias → exclusivity
+// resourceID → nil input → no-fields-set → retry key → trim Alias → exclusivity
 // → empty-Alias-pointer. The exclusivity-before-empty-pointer leg is
 // pinned by TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst;
 // the alias-trim leg is pinned by TestUpdateResourceTrimsAliasPointer
 // and TestUpdateResourceWhitespaceOnlyAliasRejected.
 //
-// Retry semantics: do() retries 5xx/429 with the buffered body, so a
-// successfully-applied PATCH that returns 502 will be re-applied on retry.
-// All currently-supported PATCH fields (alias, description, custom_domain,
-// alias clearing) are field-idempotent — the second apply is a no-op.
-// Adding a non-idempotent field (a counter, an append, etc.) would break
-// this contract; callers should plumb Idempotency-Key (tracked at #148)
-// before that happens. Until #148 lands, callers needing at-least-once
-// retry safety should dedupe on `(owner_id, resource_id)` server-side.
-//
-// TODO(#148): plumb Idempotency-Key on this method before any
-// non-idempotent PATCH field lands.
+// Retry semantics: do() preserves the buffered body and optional retry key.
+// Without a key, callers must use field-idempotent updates.
 func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *UpdateResourceInput) (*Resource, error) {
 	// Normalize then validate: surrounding whitespace is silently
 	// stripped so " r_existing01 " hits the wire as
@@ -1162,6 +1170,9 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 	}
 	if !input.hasAnyFieldSet() {
 		return nil, ErrUpdateResourceNoFieldsSet
+	}
+	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
+		return nil, err
 	}
 	// Trim *input.Alias for symmetry with the resourceID trim contract.
 	// Shallow-copy input so the trim doesn't mutate the caller's struct,
@@ -1197,6 +1208,10 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/resources/"+url.PathEscape(resourceID), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	if input.IdempotencyKey != "" {
+		req.Header.Set(HeaderIdempotencyKey, input.IdempotencyKey)
 	}
 
 	var out Resource

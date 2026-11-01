@@ -11,7 +11,7 @@ import (
 // for the Validate() pairing check.
 type noopAdminStore struct{}
 
-func (*noopAdminStore) BindWorkspace(_ context.Context, _ *WorkspaceMapping, _ string) error {
+func (*noopAdminStore) BindWorkspace(_ context.Context, _ *WorkspaceMapping) error {
 	return nil
 }
 

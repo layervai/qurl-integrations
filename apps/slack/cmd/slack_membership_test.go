@@ -37,7 +37,7 @@ func membershipServer(t *testing.T, bodies ...string) (*httptest.Server, *[]memb
 
 func TestSlackChannelMembership_FoundAndRequestShape(t *testing.T) {
 	srv, got := membershipServer(t, `{"ok":true,"members":["U1","U2","U3"]}`)
-	fn := newSlackChannelMembershipFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	fn := newSlackChannelMembershipFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 
 	member, err := fn(context.Background(), "T1", "", "C9", "U2")
 	if err != nil || !member {
@@ -58,7 +58,7 @@ func TestSlackChannelMembership_FoundAndRequestShape(t *testing.T) {
 
 func TestSlackChannelMembership_NotFound(t *testing.T) {
 	srv, _ := membershipServer(t, `{"ok":true,"members":["U1","U3"]}`)
-	fn := newSlackChannelMembershipFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	fn := newSlackChannelMembershipFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 
 	member, err := fn(context.Background(), "T1", "", "C9", "U2")
 	if err != nil || member {
@@ -71,7 +71,7 @@ func TestSlackChannelMembership_PagingFindsOnSecondPage(t *testing.T) {
 		`{"ok":true,"members":["U1"],"response_metadata":{"next_cursor":"CURSOR2"}}`,
 		`{"ok":true,"members":["U2"]}`,
 	)
-	fn := newSlackChannelMembershipFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	fn := newSlackChannelMembershipFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 
 	member, err := fn(context.Background(), "T1", "", "C9", "U2")
 	if err != nil || !member {
@@ -94,7 +94,7 @@ func TestSlackChannelMembership_BoundedScanStopsAtTwoPages(t *testing.T) {
 		`{"ok":true,"members":["U3"],"response_metadata":{"next_cursor":"C2"}}`,
 		`{"ok":true,"members":["U2"],"response_metadata":{"next_cursor":"C3"}}`,
 	)
-	fn := newSlackChannelMembershipFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	fn := newSlackChannelMembershipFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 
 	member, err := fn(context.Background(), "T1", "", "C9", "U2")
 	if err != nil || member {
@@ -107,7 +107,7 @@ func TestSlackChannelMembership_BoundedScanStopsAtTwoPages(t *testing.T) {
 
 func TestSlackChannelMembership_SlackError(t *testing.T) {
 	srv, _ := membershipServer(t, `{"ok":false,"error":"missing_scope"}`)
-	fn := newSlackChannelMembershipFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	fn := newSlackChannelMembershipFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 
 	if _, err := fn(context.Background(), "T1", "", "C9", "U2"); err == nil {
 		t.Fatal("a Slack ok:false must surface as an error (the caller fails closed)")
@@ -126,7 +126,7 @@ func TestSlackChannelMembership_GridFallback(t *testing.T) {
 		}
 		return "xoxb-e1", nil // the E1 org token
 	}
-	fn := newSlackChannelMembershipFuncWithTokenLookup(lookup, "qurl-slack/test", srv.URL, srv.Client())
+	fn := newSlackChannelMembershipFuncWithTokenLookup(lookup, "qurl-slack/test", srv.URL, srv.Client(), nil)
 
 	member, err := fn(context.Background(), "T1", "E1", "C9", "U2")
 	if err != nil || !member {

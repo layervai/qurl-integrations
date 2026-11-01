@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/shared/client"
+	"github.com/layervai/qurl-integrations/shared/client/clienttest"
 )
 
 // Revoke fixtures. The slug/alias is what the user types (`revoke $<alias>`);
@@ -118,12 +119,7 @@ func newRevokeHandlerWithDeleteStatus(t *testing.T, status int, body string) *Ha
 func addRevokeResourceRead(t *testing.T, ts *adminTestServers, resourceID, resourceType string) {
 	t.Helper()
 	ts.addCustomer(http.MethodGet, "/v1/resources/"+resourceID, func(w http.ResponseWriter, _ *http.Request) {
-		respondQURLEnvelope(t, w, map[string]any{"resource": map[string]any{
-			"resource_id": resourceID,
-			"type":        resourceType,
-			"slug":        testRevokeAlias,
-			"status":      client.StatusActive,
-		}, "qurls": []any{}})
+		respondQURLEnvelope(t, w, clienttest.ResourceDetailData(resourceID, resourceType, testRevokeAlias))
 	})
 }
 
@@ -598,7 +594,7 @@ func TestRevokeResource_PurgesChannelBindings(t *testing.T) {
 		t.Errorf("unrelated alias %q was wrongly removed (rid=%q, found=%v, err=%v)", keepAlias, rid, found, err)
 	}
 	// C_test's allow-set no longer carries the revoked id, but still carries the survivor.
-	cTest, err := store.AllowedResourceIDsForChannel(ctx, testAdminTeamID, "C_test")
+	cTest, err := store.ChannelScopedResourceIDs(ctx, testAdminTeamID, "C_test")
 	if err != nil {
 		t.Fatalf("allow-set read (C_test): %v", err)
 	}
@@ -609,7 +605,7 @@ func TestRevokeResource_PurgesChannelBindings(t *testing.T) {
 		t.Errorf("survivor id missing from C_test allow-set: %v", cTest)
 	}
 	// The team-wide sweep reached the other channel and cleared its SS membership.
-	cOther, err := store.AllowedResourceIDsForChannel(ctx, testAdminTeamID, otherChannelID)
+	cOther, err := store.ChannelScopedResourceIDs(ctx, testAdminTeamID, otherChannelID)
 	if err != nil {
 		t.Fatalf("allow-set read (%s): %v", otherChannelID, err)
 	}

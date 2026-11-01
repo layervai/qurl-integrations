@@ -402,7 +402,7 @@ func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta 
 	c, err := h.authenticatedClient(ctx, meta.TeamID)
 	if err != nil {
 		log.Error("tunnel edit: API key lookup failed", "error", err)
-		_ = h.postResponse(log, meta.ResponseURL, ":warning: "+authErrorMessage(err))
+		_ = h.postResponse(log, meta.ResponseURL, ":warning: "+authErrorMessage(err, commandUser))
 		return
 	}
 
@@ -520,7 +520,7 @@ type channelExposureResult struct {
 	revoked []string // channels whose access was fully removed
 	// aliasRetained holds channels whose allowed_resource_ids grant was cleared
 	// but that STILL expose the resource via a surviving alias binding — so they
-	// remain in AllowedResourceIDsForChannel's union (listable/mintable there).
+	// remain in ChannelScopedResourceIDs's union (listable/mintable there).
 	// Reported distinctly so the admin isn't told a channel was revoked when an
 	// alias still grants access; fully revoking means unbinding that alias too.
 	aliasRetained []string
@@ -593,7 +593,7 @@ func (h *Handler) reconcileChannelExposure(ctx context.Context, log *slog.Logger
 		}
 		// RevokeResourceFromChannel only clears the allowed_resource_ids grant. A
 		// channel that ALSO exposes this resource via an alias binding (ChannelsForResource
-		// pre-fills both surfaces) stays in AllowedResourceIDsForChannel's union and
+		// pre-fills both surfaces) stays in ChannelScopedResourceIDs's union and
 		// remains listable/mintable here, so reporting it as "revoked" would be false.
 		// The alias_bindings surface is untouched by the delete above, so this re-read
 		// isn't subject to the SS delete's eventual-consistency lag.
@@ -614,7 +614,7 @@ func (h *Handler) reconcileChannelExposure(ctx context.Context, log *slog.Logger
 // RevokeResourceFromChannel (allowed_resource_ids only) does not touch — so it's
 // safe to call right after a revoke without an eventual-consistency race on the
 // just-deleted set member. Used to tell a clean revoke apart from one where a
-// surviving alias keeps the resource in AllowedResourceIDsForChannel's union.
+// surviving alias keeps the resource in ChannelScopedResourceIDs's union.
 // A read error is treated as "no alias" (false): the SS grant was already
 // cleared, so the plain "revoked" summary is the safe, non-alarming default
 // rather than a caveat we could not confirm.

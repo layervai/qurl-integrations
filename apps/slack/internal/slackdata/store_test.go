@@ -158,20 +158,20 @@ func TestError_ErrorsAsRoundTrip(t *testing.T) {
 }
 
 // TestBindWorkspace_ValidationGuards fences the input-validation
-// surface: zero/missing team_id / owner_id / seed_admin produce a
+// surface: missing fields or malformed owner IDs produce a
 // 400 [*Error] before the DDB call. Without this, the DDB request
 // would land a ValidationException whose error string is less
 // actionable for the handler.
 func TestBindWorkspace_ValidationGuards(t *testing.T) {
 	cases := []struct {
-		name      string
-		mapping   *WorkspaceMapping
-		seedAdmin string
+		name    string
+		mapping *WorkspaceMapping
 	}{
-		{"nil mapping", nil, "U"},
-		{"empty team_id", &WorkspaceMapping{OwnerID: "u_owner"}, "U"},
-		{"empty owner_id", &WorkspaceMapping{TeamID: "T"}, "U"},
-		{"empty seed_admin", &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, ""},
+		{"nil mapping", nil},
+		{"empty team_id", &WorkspaceMapping{OwnerID: "UOWNER001"}},
+		{"empty owner_id", &WorkspaceMapping{TeamID: "T"}},
+		{"Auth0 owner_id", &WorkspaceMapping{TeamID: "T", OwnerID: "auth0|legacy"}},
+		{"malformed Slack owner_id", &WorkspaceMapping{TeamID: "T", OwnerID: "U1234567>"}},
 	}
 	store := newStore(&stubDDB{
 		putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
@@ -181,7 +181,7 @@ func TestBindWorkspace_ValidationGuards(t *testing.T) {
 	})
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := store.BindWorkspace(context.Background(), c.mapping, c.seedAdmin)
+			err := store.BindWorkspace(context.Background(), c.mapping)
 			var ae *Error
 			if !errors.As(err, &ae) {
 				t.Fatalf("got %v, want *Error", err)
@@ -221,7 +221,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -254,7 +254,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -279,7 +279,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -310,7 +310,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -340,7 +340,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				}}, nil
 			},
 		})
-		_ = store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, testCallerSlackID)
+		_ = store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		if !disambigConsistent {
 			t.Errorf("disambig GetItem ConsistentRead = false, want true (regression would replay the eventual-consistency race)")
 		}
@@ -362,7 +362,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				return nil, errors.New("transport blip")
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -407,7 +407,7 @@ func TestBindWorkspace_ReclaimsLegacyAuth0SubRow(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		if err != nil {
 			t.Fatalf("BindWorkspace reclaim: got %v, want nil (legacy row should be reclaimed)", err)
 		}
@@ -456,7 +456,7 @@ func TestBindWorkspace_ReclaimsLegacyAuth0SubRow(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -516,11 +516,11 @@ func TestBindWorkspace_WritesSeedAdminAttribute(t *testing.T) {
 	})
 	const (
 		teamID    = "T_seed"
-		ownerID   = "auth0|owner-1"
-		seedAdmin = "USEEDADMIN"
+		ownerID   = "USEEDADMIN"
+		seedAdmin = ownerID
 	)
 	if err := store.BindWorkspace(context.Background(),
-		&WorkspaceMapping{TeamID: teamID, OwnerID: ownerID}, seedAdmin); err != nil {
+		&WorkspaceMapping{TeamID: teamID, OwnerID: ownerID}); err != nil {
 		t.Fatalf("BindWorkspace: %v", err)
 	}
 	if captured == nil {
@@ -547,7 +547,7 @@ func TestBindWorkspace_TransportErrorMapsTo503(t *testing.T) {
 			return nil, errors.New("dial tcp: timeout")
 		},
 	})
-	err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, testCallerSlackID)
+	err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID})
 	var ae *Error
 	if !errors.As(err, &ae) {
 		t.Fatalf("got %v, want *Error", err)
@@ -611,6 +611,8 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	})
+	now := time.Date(2026, 10, 31, 12, 34, 56, 123456789, time.FixedZone("test", -6*60*60))
+	store.Now = func() time.Time { return now }
 	if err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID); err != nil {
 		t.Fatalf("TransferOwnership: %v", err)
 	}
@@ -620,7 +622,13 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 	if table := aws.ToString(got.TableName); table != "ws" {
 		t.Errorf("TableName = %q, want ws", table)
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, updated_at = :now ADD admin_slack_user_ids :owner_set" {
+	if stamp, ok := got.ExpressionAttributeValues[exprNowNano].(*ddbtypes.AttributeValueMemberN); !ok || stamp.Value != strconv.FormatInt(now.UnixNano(), 10) {
+		t.Fatalf("ownership transfer purge stamp = %#v", got.ExpressionAttributeValues[exprNowNano])
+	}
+	if stamp, ok := got.ExpressionAttributeValues[exprNow].(*ddbtypes.AttributeValueMemberS); !ok || stamp.Value != "2026-10-31T18:34:56Z" {
+		t.Fatalf("ownership transfer display stamp = %#v", got.ExpressionAttributeValues[exprNow])
+	}
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :owner_set" {
 		t.Errorf("UpdateExpression = %q", exp)
 	}
 	if cond := aws.ToString(got.ConditionExpression); cond != "attribute_exists(slack_team_id) AND owner_id = :current_owner" {
@@ -860,6 +868,9 @@ func TestLookupChannelAlias_HappyPath(t *testing.T) {
 	}
 	if captured == nil {
 		t.Fatal("GetItem was not called")
+	}
+	if aws.ToBool(captured.ConsistentRead) {
+		t.Fatal("ordinary alias reads must retain their eventual-read cost")
 	}
 	if aws.ToString(captured.TableName) != "cp" {
 		t.Errorf("TableName = %q, want cp", aws.ToString(captured.TableName))
@@ -1663,4 +1674,16 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 			t.Fatalf("deleted channels = %v, want %v", deletedChannels, want)
 		}
 	})
+}
+
+func TestLookupChannelAliasConsistent(t *testing.T) {
+	var captured *dynamodb.GetItemInput
+	store := newStore(&stubDDB{getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+		captured = in
+		return &dynamodb.GetItemOutput{}, nil
+	}})
+	_, found, err := store.LookupChannelAliasConsistent(context.Background(), "T1", "C1", "prod-db")
+	if err != nil || found || captured == nil || !aws.ToBool(captured.ConsistentRead) {
+		t.Fatalf("consistent precheck: found=%v err=%v input=%+v", found, err, captured)
+	}
 }

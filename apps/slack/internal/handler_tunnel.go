@@ -332,8 +332,8 @@ func tunnelInstallUsage() string {
 		"Usage:",
 		"• `/qurl-admin protect-connector` for guided setup",
 		"Guided setup is exactly `/qurl-admin protect-connector` with no arguments; add arguments only when using typed setup.",
-		"• Docker: `/qurl-admin protect-connector <id|$id> [port:8080] [alias:$alias] [env:docker] [container:<name>|web_container:<name>]`",
-		"• Compose: `/qurl-admin protect-connector <id|$id> env:docker-compose [port:8080] [alias:$alias] [service:<name>]`",
+		"• Docker: `/qurl-admin protect-connector <id|$id> [port:8080] [alias:$alias] [env:docker] [container:<container-name>|web_container:<container-name>]`",
+		"• Compose: `/qurl-admin protect-connector <id|$id> env:docker-compose [port:8080] [alias:$alias] [service:<service-name>]`",
 		"• ECS/Fargate or Kubernetes: `/qurl-admin protect-connector <id|$id> env:ecs-fargate|kubernetes [port:8080] [alias:$alias]`",
 		"`env:compose` is accepted as shorthand for `env:docker-compose`.",
 		"Example: `/qurl-admin protect-connector prod-dashboard port:8080`",
@@ -375,7 +375,7 @@ func (e tunnelInstallEnvironment) label() (string, error) {
 // [opts]` is the typed power-user form that skips the modal. This is the
 // single-word rename of the former two-word `tunnel install` (the resource type
 // is still a "tunnel" internally — see client.ResourceTypeTunnel).
-func (h *Handler) handleExposeConnector(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleExposeConnector(requestCtx context.Context, w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	if tunnelInstallWizardRequest(text) {
 		h.handleTunnelInstallWizard(w, values)
@@ -402,7 +402,7 @@ func (h *Handler) handleExposeConnector(w http.ResponseWriter, values url.Values
 		respondSlack(w, ":warning: missing channel_id in slash command payload")
 		return
 	}
-	if !h.requireAdminSync(w, teamID, userID, AdminActionExposeConnector) {
+	if !h.requireAdminSync(requestCtx, w, teamID, userID, AdminActionExposeConnector) {
 		return
 	}
 
@@ -580,10 +580,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 // unchanged. Shared by the guided tunnel installer and `/qurl feedback`.
 func (h *Handler) openViewWithGridFallback(ctx context.Context, log *slog.Logger, teamID, enterpriseID, triggerID string, view []byte) error {
 	err := h.cfg.OpenView(ctx, teamID, triggerID, view)
-	if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-		return err
-	}
-	if enterpriseID == "" || enterpriseID == teamID {
+	if !auth.SlackGridFallbackAllowed(teamID, enterpriseID, err) {
 		return err
 	}
 	log.Warn("workspace Slack bot token missing; retrying modal with Enterprise Grid install token",
@@ -689,7 +686,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("tunnel install: failed to get API key", "error", err)
-		return nil, authErrorMessage(err), err
+		return nil, authErrorMessage(err, commandUser), err
 	}
 	connectorAPIURL := strings.TrimSpace(h.cfg.ConnectorAPIURL)
 	if err := ValidateConnectorAPIURL(connectorAPIURL); err != nil {

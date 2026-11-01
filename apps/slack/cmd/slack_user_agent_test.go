@@ -15,7 +15,7 @@ func TestSlackDefaultUserAgentWireProduct(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer server.Close()
-	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", server.URL, server.Client())
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", server.URL, server.Client(), nil)
 	if err := post(context.Background(), "T1", "", "C1", "", "hello"); err != nil {
 		t.Fatal(err)
 	}

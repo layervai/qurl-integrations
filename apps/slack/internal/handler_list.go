@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -19,11 +20,8 @@ import (
 // backing `/qurl list`, `/qurl aliases`, and the URL resource-alias fallback in
 // `/qurl get`.
 //
-//   - `/qurl list` pages through resources until every resource in the channel
-//     allow-set has been seen (see [Handler.fetchAllowedResources]) — tunnels
-//     and URL resources alike — so the listing is complete regardless of how the
-//     owner's full resource set sorts (#590). The page size only affects how many
-//     requests that walk takes, not which resources render.
+//   - `/qurl list` uses selected metadata. Producers without that route retain
+//     the bounded catalog walk in [Handler.fetchAllowedResourcesLegacy].
 //   - `/qurl aliases` and the `/qurl get` URL resource-alias fallback each scan
 //     a SINGLE page. A bound/aliased resource_id past this page surfaces the
 //     triage warning in [Handler.processAliases] (aliases) or is missed by the
@@ -338,7 +336,7 @@ const listFooterButtons = "Tap *Create qURL* on any row with a button, or copy a
 // then a channel-bound alias when the resource has no alias.
 //
 // The listing is CHANNEL-SCOPED: a member sees only the tunnels in this
-// channel's [slackdata.Store.AllowedResourceIDsForChannel] set (the union of
+// channel's [slackdata.Store.ChannelScopedResourceIDs] set (the union of
 // its `allowed_resource_ids` and `alias_bindings` values) — the same definition
 // `/qurl get` mints against and `/qurl aliases` lists. A resource available in
 // another channel does not appear here until an admin makes it available here
@@ -381,7 +379,7 @@ func (h *Handler) listChannelScope(ctx context.Context, log *slog.Logger, respon
 		_ = h.postResponse(log, responseURL, ":warning: Admin features are not configured for this deployment.")
 		return nil, false
 	}
-	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
+	allowed, err := h.cfg.AdminStore.ChannelScopedResourceIDs(ctx, teamID, channelID)
 	if err != nil {
 		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "list: channel allow-set fetch failed — failing closed", "error", err, "team_id", teamID, "channel_id", channelID)
 		_ = h.postResponse(log, responseURL, ":warning: "+serviceUnreachableMessage)
@@ -413,7 +411,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("list: API key lookup failed", "error", err)
-		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
+		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err, values.Get(fieldCommand)))
 		return
 	}
 
@@ -442,12 +440,18 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	}
 
 	// Map each resource_id to its channel-bound `$alias` shortcuts so each row
-	// can show them next to the resource's primary token. Best-effort: a fetch
-	// failure renders without the channel alias extras. Built BEFORE the sort
-	// because the sort keys on [resourceDisplayTokenForList], including tunnel
+	// can show them next to the resource's primary token. The alias snapshot
+	// must load before choosing tokens: channel aliases can shadow slugs. Built
+	// before the sort, which keys on [resourceDisplayTokenForList], including tunnel
 	// rows whose first bound alias becomes the primary token when they have no
 	// intrinsic token — the sort key must match what the row renders.
 	aliasMap := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
+	// listChannelScope already rejected missing AdminStore and empty channel.
+	// Nil here means the second policy read failed, so tokens are unverified.
+	if aliasMap == nil {
+		_ = h.postResponse(log, responseURL, serviceUnreachableMessage)
+		return
+	}
 	channelAliasOwners := channelAliasOwnersByAlias(aliasMap)
 	sharedAliases := sharedResourceAliases(resources)
 	tunnelSlugOwners := tunnelSlugOwnersBySlug(resources)
@@ -634,38 +638,77 @@ func isURLResource(r *client.Resource) bool {
 	return r.Type == client.ResourceTypeURL || (r.Type == "" && r.TargetURL != "")
 }
 
-// listMaxResourcePages bounds how many `/v1/resources` pages
-// [Handler.fetchAllowedResources] will walk. It is a safety backstop, not an
-// expected limit: the walk normally stops as soon as every allow-set member is
-// found (the common case is the first page). The cap only bites when an
-// allow-set id is never found — e.g. a stale channel binding to a resource the
-// owner has since deleted — which would otherwise scan to the end of the
-// owner's resource list on every call. At listResourcesScanLimit (100) rows
-// per page this covers far more resources than any real workspace holds, so a
-// capped walk can only ever drop an id the owner's list no longer contains
-// (fail-safe under-disclosure, never a live listed resource).
+// listMaxResourcePages bounds catalog work only for producers without metadata
+// lookup. Missing bindings can reach this cap; they never authorize pruning.
 const listMaxResourcePages = 50
 
-// fetchAllowedResources returns the live resources — tunnels AND URL resources —
-// protected in the current channel, by paging `/v1/resources` until every
-// resource_id in the channel allow-set has been seen (or the listing is
-// exhausted / the page cap is hit). This is the channel-scoped disclosure half
-// of `/qurl list`: a member sees exactly the resources they could `/qurl get`
-// here.
-//
-// Paging until the allow-set is satisfied — rather than scanning a single fixed
-// page and filtering it — is the #590 fix: a resource protected in this channel
-// can no longer be omitted for sorting past the page window. Allow-set ids are
-// matched as resources stream past and the walk stops as soon as the last one is
-// found, so a workspace whose exposed resources all land on the first page still
-// costs a single request (no regression to the common case).
-//
-// Allow-set membership is matched here; non-mintable / revoked rows are dropped
-// by filterListableResources (tunnels + URL resources). (#596 introduced this as
-// fetchAllowedTunnels; it was generalized to all listable resource types when
-// #599's URL-resource support merged, so the channel-scoped #590 paging fix now
-// covers URL resources too.)
+const listMetadataConcurrency = 5
+
+// fetchAllowedResources reads only channel-bound metadata. Missing IDs do not
+// cause catalog scans or remove bindings: a later request can resolve them again.
+// Old producers retain the bounded catalog walk until the metadata route is deployed.
 func (h *Handler) fetchAllowedResources(ctx context.Context, log *slog.Logger, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+	if len(allowed) == 0 {
+		return []client.Resource{}, nil
+	}
+	ids := make([]string, 0, len(allowed))
+	for id := range allowed {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	firstEnd := min(len(ids), client.ResourceBatchGetMaxIDs)
+	first, err := c.BatchGetResources(ctx, ids[:firstEnd])
+	if err != nil {
+		var apiErr *client.APIError
+		// TODO(upstream-contract): batch-get returns 200 [] for missing IDs;
+		// only absent routes use 404/405. Auth and store errors fail closed.
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusMethodNotAllowed) {
+			log.Debug("list: metadata route unavailable; using bounded catalog lookup", "status", apiErr.StatusCode)
+			return h.fetchAllowedResourcesLegacy(ctx, log, c, allowed)
+		}
+		return nil, err
+	}
+	batches := (len(ids) + client.ResourceBatchGetMaxIDs - 1) / client.ResourceBatchGetMaxIDs
+	results := make([][]client.Resource, batches)
+	batchCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	results[0] = first
+	sem := make(chan struct{}, listMetadataConcurrency)
+	var wg sync.WaitGroup
+launch:
+	for batch := 1; batch < batches; batch++ {
+		select {
+		case sem <- struct{}{}:
+		case <-batchCtx.Done():
+			break launch
+		}
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			start := index * client.ResourceBatchGetMaxIDs
+			resources, err := c.BatchGetResources(batchCtx, ids[start:min(start+client.ResourceBatchGetMaxIDs, len(ids))])
+			if err != nil {
+				cancel(err)
+				return
+			}
+			results[index] = resources
+		}(batch)
+	}
+	wg.Wait()
+	if cause := context.Cause(batchCtx); cause != nil {
+		return nil, cause
+	}
+	matched := make([]client.Resource, 0, len(ids))
+	for _, resources := range results {
+		matched = append(matched, resources...)
+	}
+	log.Debug("list: resource metadata lookup complete", "requested", len(ids), "returned", len(matched))
+	return filterListableResources(matched), nil
+}
+
+// fetchAllowedResourcesLegacy satisfies the full channel allow-set across pages (#590/#596/#599), up to the cap.
+func (h *Handler) fetchAllowedResourcesLegacy(ctx context.Context, log *slog.Logger, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
 	pending := make(map[string]struct{}, len(allowed))
 	for id := range allowed {
 		pending[id] = struct{}{}
@@ -749,8 +792,8 @@ func resourceDisplayToken(r *client.Resource, boundAliases []string) string {
 	return tunnelDisplayToken(r, boundAliases)
 }
 
-// resourceDisplayTokenForList mirrors /qurl get precedence so list rows never
-// advertise a Create qURL token that would resolve to a different resource.
+// resourceDisplayTokenForList applies get precedence to the list snapshot.
+// The click handler resolves the token again against current channel policy.
 func resourceDisplayTokenForList(r *client.Resource, boundAliases []string, sharedResourceAliases map[string]struct{}, channelAliasOwners, tunnelSlugOwners map[string]string) (token, blockedAlias string) {
 	if isURLResource(r) && r.Alias != "" {
 		_, shared := sharedResourceAliases[r.Alias]
@@ -770,7 +813,22 @@ func resourceDisplayTokenForList(r *client.Resource, boundAliases []string, shar
 			return "", r.Alias
 		}
 	}
-	return resourceDisplayToken(r, boundAliases), ""
+	token = resourceDisplayToken(r, boundAliases)
+	if isTunnelResource(r) && token != "" {
+		owner, found := channelAliasOwners[token]
+		if !found {
+			owner, found = tunnelSlugOwners[token]
+		}
+		// Channel aliases win over slugs; an unbound tunnel resource alias
+		// is not part of get's URL-only resource-alias fallback.
+		shadowed := found && owner != r.ResourceID
+		unboundResourceAlias := !found && r.Slug == "" && r.Alias != "" && token == r.Alias
+		if shadowed || unboundResourceAlias {
+			// Both alias inputs come from the same resource-keyed policy snapshot.
+			return firstAliasOtherThan(boundAliases, token), token
+		}
+	}
+	return token, ""
 }
 
 func tunnelSlugOwnersBySlug(resources []client.Resource) map[string]string {
@@ -832,7 +890,7 @@ func formatResourceListLineWithToken(r *client.Resource, boundAliases []string, 
 	if isURLResource(r) {
 		return formatURLListLineWithToken(r, boundAliases, token, blockedAlias)
 	}
-	return formatTunnelListLine(r, boundAliases)
+	return formatTunnelListLine(r, boundAliases, token, blockedAlias)
 }
 
 // formatTunnelListLine renders one tunnel resource as a single text
@@ -867,13 +925,19 @@ func formatResourceListLineWithToken(r *client.Resource, boundAliases []string, 
 // always set — install seeds a default and admins refine it with
 // `/qurl-admin set-display-name` — so it normally renders. The empty guard
 // is defensive only.
-func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
-	token := tunnelDisplayToken(r, boundAliases)
+func formatTunnelListLine(r *client.Resource, boundAliases []string, token, blockedAlias string) string {
 	var line string
 	if token == "" {
-		line = "• " + mrkdwnCodeSpan(r.ResourceID) + " (no ID — ask your Slack admin to set one)"
+		if blockedAlias != "" {
+			line = "• " + mrkdwnCodeSpan(r.ResourceID) + " (ID " + mrkdwnTokenSpan(blockedAlias) + " cannot select this resource here — ask your Slack admin to set a channel alias)"
+		} else {
+			line = "• " + mrkdwnCodeSpan(r.ResourceID) + " (no ID — ask your Slack admin to set one)"
+		}
 	} else {
 		line = "• " + mrkdwnTokenSpan(token)
+		if blockedAlias != "" {
+			line += " (ID " + mrkdwnTokenSpan(blockedAlias) + " cannot select this resource here)"
+		}
 	}
 	if extras := extraAliasTokens(boundAliases, token); len(extras) > 0 {
 		line += " (" + aliasNoun(len(extras)) + ": " + strings.Join(extras, ", ") + ")"
@@ -915,7 +979,7 @@ func formatResourceListSectionWithToken(r *client.Resource, boundAliases []strin
 	if isURLResource(r) {
 		return formatURLListSectionWithToken(r, boundAliases, token, blockedAlias)
 	}
-	return formatTunnelListSection(r, boundAliases, token)
+	return formatTunnelListSection(r, boundAliases, token, blockedAlias)
 }
 
 // formatTunnelListSection renders one tunnel as the mrkdwn body of a `section`
@@ -930,17 +994,24 @@ func formatResourceListSectionWithToken(r *client.Resource, boundAliases []strin
 // keeps the Display Name (the only human-readable handle such a row has), and
 // spells out that it can't be used until an admin sets an ID — matching the
 // fallback's "(no ID …)" honesty, which also retains the Display Name.
-func formatTunnelListSection(r *client.Resource, boundAliases []string, token string) string {
+func formatTunnelListSection(r *client.Resource, boundAliases []string, token, blockedAlias string) string {
 	var b strings.Builder
 	if token == "" {
 		b.WriteString("*" + mrkdwnCodeSpan(r.ResourceID) + "*")
 		if r.Description != "" {
 			b.WriteString("\n" + escapeMrkdwnText(r.Description))
 		}
-		b.WriteString("\n_No ID set — ask your Slack admin to set one._")
+		if blockedAlias != "" {
+			b.WriteString("\n_ID " + mrkdwnTokenSpan(blockedAlias) + " cannot select this resource here — ask your Slack admin to set a channel alias._")
+		} else {
+			b.WriteString("\n_No ID set — ask your Slack admin to set one._")
+		}
 		return b.String()
 	}
 	b.WriteString("*" + mrkdwnTokenSpan(token) + "*")
+	if blockedAlias != "" {
+		b.WriteString("\n_ID " + mrkdwnTokenSpan(blockedAlias) + " cannot select this resource here._")
+	}
 	if r.Description != "" {
 		b.WriteString("\n" + escapeMrkdwnText(r.Description))
 	}
@@ -1012,27 +1083,18 @@ func mrkdwnCodeSpan(text string) string {
 	return "`" + escapeMrkdwnCode(text) + "`"
 }
 
-// channelAliasesByResourceID builds resource_id → sorted channel-bound
-// `$alias` shortcuts from the channel's policy entries, so /qurl list
-// can show every alias that resolves to each tunnel. Best-effort:
-// AdminStore-nil, empty channel, or a fetch failure yields nil (rows
-// render slug-only) — the listing must still render.
-//
-// Cost: one GetChannelPolicy (GetItem) per /qurl list, purely for the
-// cosmetic alias display — a second point read of the same channel_policies
-// row the scope gate already read via AllowedResourceIDsForChannel. The two
-// have different shapes (this returns alias→resource entries; the gate returns
-// the membership set), so they're kept as separate reads rather than folded;
-// both are cheap GetItems on a tiny row behind the dominant upstream
-// ListResources call. Acceptable for the discovery surface; fold into one read
-// if this path ever gets hot.
+// channelAliasesByResourceID returns the verified channel aliases grouped by
+// resource. Nil means unavailable; a non-nil empty map is a successful read.
+// List needs this snapshot for token ownership as well as alias display.
+// This keeps the existing second GetItem after the membership read; it adds
+// no store or upstream calls.
 func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logger, teamID, channelID string) map[string][]string {
 	if h.cfg.AdminStore == nil || channelID == "" {
 		return nil
 	}
 	entries, err := h.cfg.AdminStore.GetChannelPolicy(ctx, teamID, channelID)
 	if err != nil {
-		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelDebug), "list: channel-policy fetch for alias display failed — rendering slug-only",
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "list: channel-policy fetch for alias display failed",
 			"error", err, "team_id", teamID, "channel_id", channelID)
 		return nil
 	}

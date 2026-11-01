@@ -48,7 +48,7 @@ func channelInfoServer(t *testing.T) (srv *httptest.Server, auths func() []strin
 
 func TestResolveChannelNameSeam_OKAndError(t *testing.T) {
 	srv, auths := channelInfoServer(t)
-	resolveInfo := newSlackResolveConversationInfoFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	resolveInfo := newSlackResolveConversationInfoFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 	resolve := slackResolveChannelNameFromConversationInfo(resolveInfo)
 
 	name, err := resolve(context.Background(), "T1", "", "C_ok")
@@ -68,7 +68,7 @@ func TestResolveChannelNameSeam_OKAndError(t *testing.T) {
 
 func TestResolveConversationInfoSeam_OKAndMPIM(t *testing.T) {
 	srv, _ := channelInfoServer(t)
-	resolve := newSlackResolveConversationInfoFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	resolve := newSlackResolveConversationInfoFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client(), nil)
 
 	ch, err := resolve(context.Background(), "T1", "", "C_ok")
 	if err != nil || ch.Name != testConversationNameGeneral || ch.IsMPIM {
@@ -90,7 +90,7 @@ func TestResolveChannelNameSeam_GridFallback(t *testing.T) {
 		}
 		return testTokenXoxbOrg, nil
 	}
-	resolveInfo := newSlackResolveConversationInfoFuncWithTokenLookup(lookup, "qurl-slack/test", srv.URL, srv.Client())
+	resolveInfo := newSlackResolveConversationInfoFuncWithTokenLookup(lookup, "qurl-slack/test", srv.URL, srv.Client(), nil)
 	resolve := slackResolveChannelNameFromConversationInfo(resolveInfo)
 
 	name, err := resolve(context.Background(), "T1", "E1", "C_ok")

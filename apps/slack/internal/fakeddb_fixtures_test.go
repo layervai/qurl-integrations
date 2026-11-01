@@ -5,6 +5,7 @@ package internal
 // channel_policies schemas fenced in modules/qurl-slack-ddb/main.tf.
 
 import (
+	"slices"
 	"time"
 
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -27,39 +28,36 @@ const (
 )
 
 // seedWorkspaceAdmin returns a workspace_mappings row that marks
-// `slackUserID` as admin for `teamID`. Used by the admin-check
+// `slackUserID` and the owner as admins for `teamID`. Used by the admin-check
 // surfaces that pre-pivot exercised `/internal/v1/admin/check`.
 func seedWorkspaceAdmin(teamID, ownerID, slackUserID string, configuredAt time.Time) map[string]ddbtypes.AttributeValue {
-	at := configuredAt.UTC().Format(time.RFC3339)
-	return map[string]ddbtypes.AttributeValue{
-		fAttrSlackTeamID:        stringMember(teamID),
-		fAttrOwnerID:            stringMember(ownerID),
-		fAttrSeedAdminSlackUser: stringMember(slackUserID),
-		fAttrAdminSlackUserIDs:  &ddbtypes.AttributeValueMemberSS{Value: []string{slackUserID}},
-		fAttrCreatedAt:          stringMember(at),
-		fAttrUpdatedAt:          stringMember(at),
-	}
+	return seedWorkspaceAdmins(teamID, ownerID, []string{slackUserID}, configuredAt)
 }
 
 // seedWorkspaceAdmins is seedWorkspaceAdmin with more than one user on the
 // admin set. CheckAdmin grants admin to the owner (off owner_id) AND to any
 // user on the admin SS, so a caller that isn't the owner must be listed here
 // — hence the alias-gate helper lists both of its test callers ("U_admin"
-// and "U_alias_admin").
+// and "U_alias_admin"). The owner stays on the member set as BindWorkspace
+// seeds it; tests of missing-owner legacy rows must build those rows explicitly.
 func seedWorkspaceAdmins(teamID, ownerID string, adminUserIDs []string, configuredAt time.Time) map[string]ddbtypes.AttributeValue {
+	admins := slices.Clone(adminUserIDs)
+	if !slices.Contains(admins, ownerID) {
+		admins = append(admins, ownerID)
+	}
 	at := configuredAt.UTC().Format(time.RFC3339)
 	return map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:        stringMember(teamID),
 		fAttrOwnerID:            stringMember(ownerID),
 		fAttrSeedAdminSlackUser: stringMember(adminUserIDs[0]),
-		fAttrAdminSlackUserIDs:  &ddbtypes.AttributeValueMemberSS{Value: adminUserIDs},
+		fAttrAdminSlackUserIDs:  &ddbtypes.AttributeValueMemberSS{Value: admins},
 		fAttrCreatedAt:          stringMember(at),
 		fAttrUpdatedAt:          stringMember(at),
 	}
 }
 
 // seedWorkspaceNonAdmin returns a workspace_mappings row that
-// exists for `teamID` but does NOT name `slackUserID` as admin.
+// names only U_someone_else and the owner as admins for teamID.
 // Used by the admin-check-no surfaces.
 //
 // `U_someone_else` violates the post-PR userMentionPattern (`[UW][A-Z0-9]{8,}`)
@@ -69,14 +67,7 @@ func seedWorkspaceAdmins(teamID, ownerID string, adminUserIDs []string, configur
 // non-admin shape is visually distinct from the canonical
 // `UADMIN001` / `UOWNER001` fixtures.
 func seedWorkspaceNonAdmin(teamID, ownerID string) map[string]ddbtypes.AttributeValue {
-	return map[string]ddbtypes.AttributeValue{
-		fAttrSlackTeamID:        stringMember(teamID),
-		fAttrOwnerID:            stringMember(ownerID),
-		fAttrSeedAdminSlackUser: stringMember("U_someone_else"),
-		fAttrAdminSlackUserIDs:  &ddbtypes.AttributeValueMemberSS{Value: []string{"U_someone_else"}},
-		fAttrCreatedAt:          stringMember("2026-04-20T12:00:00Z"),
-		fAttrUpdatedAt:          stringMember("2026-04-20T12:00:00Z"),
-	}
+	return seedWorkspaceAdmin(teamID, ownerID, "U_someone_else", time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC))
 }
 
 // seedChannelPolicyDualShape returns a channel_policies row that writes
@@ -105,7 +96,7 @@ func seedChannelPolicyDualShape(teamID, channelID, alias, resourceID string) map
 
 // seedChannelPolicySet returns a channel_policies row carrying an
 // allowed_resource_ids SS attribute. Used for the multi-resource
-// AllowedResourceIDsForChannel gate, now reached only via the tunnel-slug allow-set fallback in `/qurl get`.
+// ChannelScopedResourceIDs gate, now reached only via the tunnel-slug allow-set fallback in `/qurl get`.
 //
 // `alias_bindings` and `allowed_resource_ids` are orthogonal surfaces
 // (see slackdata/policies.go preamble), so this helper attaches both
