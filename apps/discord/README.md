@@ -122,6 +122,19 @@ that use `Failed to revoke QURL`, `missing resource identity`, or the partial-mi
 token identity`, and `resource_ref`. The load-test warning now says
 `carried no usable resource identifier`.
 
+Upload, mint, create, and revoke logs use `resource_ref` instead of raw
+`resource_id`; create logs also use `crid_ref` instead of raw `crid`.
+To find a known resource in logs, compute its reference from the repository root:
+
+```sh
+node -e 'console.log(require("./apps/discord/src/utils/resource-id").resourceIdLogRef(process.argv[1]))' RESOURCE_ID
+```
+
+The reference is `sha256:` plus the first 12 lowercase hex digits of the
+SHA-256 hash of the exact UTF-8 identifier. It is a log lookup hint; confirm
+the resource in the owner-scoped store before taking action. Update saved
+queries that used the old raw ID fields.
+
 Each mint request allows 65 seconds for the connector’s 55-second deadline
 and response transport. Only the connector’s `request_admission_rejected` 429
 with `success: false` and an empty `links` array is retried, up to five times,
@@ -303,3 +316,7 @@ Setup and install cookies use `__Host-` names with `Secure`, `HttpOnly`,
 `SameSite=Lax`, and `Path=/`. Use HTTPS (or browser-supported localhost) for
 local setup tests. Deploying this change invalidates older setup cookies;
 admins with an in-flight setup must start again.
+
+### Guild scope in the revoke menu
+
+In multi-tenant mode, `/qurl revoke` lists only sends recorded for the invoking guild. Legacy rows without `guild_id` stay hidden; the bot does not infer their guild from the sender. Both send-recording methods write the provided guild on each recipient row. Before live adoption, verify that retained rows have the scope needed for the menu or complete their approved retirement path. The sender-index search remains bounded to ten pages of 100 rows; heavy history in other guilds can exhaust that window. This change does not claim complete cross-guild history coverage or backfill legacy records.
