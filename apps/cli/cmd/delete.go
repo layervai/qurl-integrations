@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -17,6 +18,7 @@ import (
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func deleteCmd(opts *globalOpts) *cobra.Command {
@@ -65,7 +67,10 @@ scripts and pipelines must pass --yes.`,
 			result, err := client.Delete(cmd.Context(), assessment.Input)
 			if err != nil {
 				cleanupAfterDeleteFailure(cmd.Context(), opts, client, assessment.Input, err)
-				return err
+				result, err = confirmPendingDelete(cmd.Context(), opts, client, assessment.Input, err)
+				if err != nil {
+					return err
+				}
 			}
 			if result.AlreadyGone {
 				// Idempotent delete: already-gone is the requested outcome.
@@ -90,6 +95,49 @@ scripts and pipelines must pass --yes.`,
 	return cmd
 }
 
+// TODO(upstream-contract): qurl-service#1998 reserves this code for a saved revoke.
+func pendingRevocationError(err error) *qurlapi.Error {
+	var pending *qurlapi.Error
+	if errors.As(err, &pending) && pending.StatusCode == http.StatusServiceUnavailable && pending.Code == "revocation_pending" {
+		return pending
+	}
+	return nil
+}
+
+func confirmPendingDelete(ctx context.Context, opts *globalOpts, client qurlapi.Client, id string, firstError error) (*qurlapi.DeleteResult, error) {
+	pending := pendingRevocationError(firstError)
+	// Local wait ceiling; the service currently requests 30 seconds.
+	if pending == nil || pending.RetryAfter == 0 || pending.RetryAfter > 35 {
+		return nil, firstError
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(firstError, err)
+	}
+	if !opts.quiet && opts.resolvedFormat != output.FormatJSON {
+		opts.printer().Notef("Revocation is saved. Waiting %d seconds before checking that access is closed.", pending.RetryAfter)
+	}
+	delay := time.Duration(pending.RetryAfter) * time.Second
+	if opts.sleep != nil {
+		opts.sleep(delay)
+	} else {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, errors.Join(firstError, ctx.Err())
+		case <-timer.C:
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(firstError, err)
+	}
+	result, err := client.Delete(ctx, id)
+	if err != nil {
+		return nil, errors.Join(firstError, err)
+	}
+	return result, nil
+}
+
 // cleanupAfterDeleteFailure withdraws a confirmed revoked route without
 // replacing the original error: protection still needs the caller to retry.
 func cleanupAfterDeleteFailure(ctx context.Context, opts *globalOpts, client qurlapi.Client, id string, deleteErr error) {
@@ -97,12 +145,13 @@ func cleanupAfterDeleteFailure(ctx context.Context, opts *globalOpts, client qur
 	if ctx.Err() != nil || !errors.As(deleteErr, &apiErr) || apiErr.StatusCode < http.StatusInternalServerError {
 		return
 	}
-	// A server failure can follow a committed revoke. Client failures need
-	// no extra request; a server failure alone is not proof of the commit.
-	resource, readErr := client.Resource(ctx, id)
-	// TODO(upstream-contract): only qurl-service's revoked status confirms the commit.
-	if readErr != nil || resource == nil || resource.Status != "revoked" {
-		return
+	// Stop local serving before waiting for proof. A generic server failure still
+	// needs a management read; only the dedicated code proves the write committed.
+	if pendingRevocationError(deleteErr) == nil {
+		resource, readErr := client.Resource(ctx, id)
+		if readErr != nil || resource == nil || resource.Status != "revoked" {
+			return
+		}
 	}
 	if cleanupErr := cleanupDeletedLocalShare(ctx, opts, id); cleanupErr != nil {
 		opts.printer().Warnf("Revocation is committed, but local sharing cleanup did not finish: %v", cleanupErr)

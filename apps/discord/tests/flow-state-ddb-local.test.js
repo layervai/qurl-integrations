@@ -10,14 +10,15 @@ localTest('real SDK flow transitions retain success/conflict/absence with one up
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(endpoint).hostname)) {
     throw new Error('The flow contract test requires a loopback DynamoDB endpoint');
   }
-  const { randomUUID } = require('node:crypto');
+  const { randomUUID, randomBytes } = require('node:crypto');
   const { DynamoDBClient, CreateTableCommand, DeleteTableCommand } = require('@aws-sdk/client-dynamodb');
-  const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
+  const { DynamoDBDocumentClient, PutCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
   const prefix = `flow-contract-${randomUUID()}-`;
   const table = `${prefix}flow-state`;
   const values = {
     DDB_TABLE_PREFIX: prefix, AWS_REGION: 'us-east-2',
     AWS_ACCESS_KEY_ID: 'local', AWS_SECRET_ACCESS_KEY: 'local', AWS_SESSION_TOKEN: undefined,
+    KEY_ENCRYPTION_KEY: randomBytes(32).toString('base64'),
   };
   const before = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
   for (const [key, value] of Object.entries(values)) {
@@ -29,7 +30,7 @@ localTest('real SDK flow transitions retain success/conflict/absence with one up
   const send = jest.spyOn(DynamoDBDocumentClient.prototype, 'send');
   let created = false;
   try {
-    const { transitionFlow } = require('../src/flow-state');
+    const { transitionFlow, createFlow, supersedeOrCreate, loadFlow, deleteFlow } = require('../src/flow-state');
     await raw.send(new CreateTableCommand({ TableName: table, BillingMode: 'PAY_PER_REQUEST',
       AttributeDefinitions: [{ AttributeName: 'flow_id', AttributeType: 'S' }],
       KeySchema: [{ AttributeName: 'flow_id', KeyType: 'HASH' }] }));
@@ -55,6 +56,28 @@ localTest('real SDK flow transitions retain success/conflict/absence with one up
     }
     expect(logger.audit.mock.calls.map(([, event]) => event.stage_from)).toEqual(['old', 'new', null, 'expired-stage']);
     expect(JSON.stringify(logger.audit.mock.calls)).not.toContain('synthetic-ciphertext');
+
+    // #273/#274: exercise the real conditional delete across the exact TTL boundary.
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.now());
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      for (const [suffix, expiry, recovered] of [['live', now + 1, false], ['equal', now, false], ['expired', now - 1, true]]) {
+        const flowId = `0:1#fixture-guild#fixture-channel#${suffix}`;
+        expect(await createFlow({ flow_id: flowId, stage: 'sibling', payload: { fixture: 'original' }, expires_at: now + 60 })).toEqual({ created: true, version: 1 });
+        await doc.send(new UpdateCommand({ TableName: table, Key: { flow_id: flowId },
+          UpdateExpression: 'SET expires_at = :expiry', ExpressionAttributeValues: { ':expiry': expiry } }));
+        expect((await supersedeOrCreate({ flow_id: flowId, stage: 'target', payload: { fixture: 'replacement' }, ttl_seconds: 60 })).created).toBe(recovered);
+        const survivor = await loadFlow(flowId, { include_expired: true });
+        expect(survivor.stage).toBe(recovered ? 'target' : 'sibling');
+        expect(survivor.payload.fixture).toBe(recovered ? 'replacement' : 'original');
+        if (recovered) {
+          // The new row reuses version 1: expiry must still protect it from stale cleanup.
+          expect(await deleteFlow(flowId, { stage: 'target', reason: 'admin_cleanup', expectedVersion: 1, expiredOnly: true })).toEqual({ deleted: false });
+          expect(await transitionFlow(flowId, 1, { stage_to: 'target', terminal: false })).toEqual({ result: 'success', version: 2 });
+          expect(await deleteFlow(flowId, { stage: 'target', reason: 'admin_cleanup', expectedVersion: 1 })).toEqual({ deleted: false });
+        }
+      }
+    } finally { clock.mockRestore(); }
   } finally {
     send.mockRestore();
     try {

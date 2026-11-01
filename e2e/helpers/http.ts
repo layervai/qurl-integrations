@@ -99,6 +99,7 @@ function isRetryableStatus(status: number, method: string): boolean {
  * @param maxAttempts total attempts including the first (default 3)
  * @param baseDelayMs linear backoff base — waits `baseDelayMs * attempt` between
  *   tries, i.e. 1s then 2s at the default (well under jest's 120s timeout)
+ * @param shouldRetry optional response filter before body cancellation; cannot enable an otherwise unsafe replay.
  * @param maxRetryAfterMs opt-in limit for a 503's Retry-After, per attempt.
  *   Default 0 keeps existing callers on local backoff. Directives above the
  *   limit are declined; valid shorter directives cannot shorten local backoff.
@@ -107,8 +108,8 @@ function isRetryableStatus(status: number, method: string): boolean {
 export async function fetchWithTransientRetry(
   input: string | URL,
   init?: RequestInit,
-  { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0, cleanupRetryBudget }:
-    { maxAttempts?: number; baseDelayMs?: number; maxRetryAfterMs?: number; cleanupRetryBudget?: CleanupRetryBudget } = {},
+  { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0, cleanupRetryBudget, shouldRetry }:
+    { maxAttempts?: number; baseDelayMs?: number; maxRetryAfterMs?: number; cleanupRetryBudget?: CleanupRetryBudget; shouldRetry?: (response: Response) => Promise<boolean> } = {},
 ): Promise<Response> {
   // Clamp once here so the loop never has to defend against a negative ceiling.
   const retryAfterCeilingMs = Math.max(0, maxRetryAfterMs);
@@ -120,6 +121,7 @@ export async function fetchWithTransientRetry(
     attempt < maxAttempts && !res.ok && isRetryableStatus(res.status, method);
     attempt++
   ) {
+    if (shouldRetry && !await shouldRetry(res)) return res;
     if (res.status === 429 && cleanupRetryBudget) {
       if (retriedCleanupRateLimit) return res;
       const previous = res;
@@ -167,6 +169,17 @@ export async function fetchWithTransientRetry(
   return res;
 }
 
+/** Read calls get at most three attempts and one rate-limit wait of at most 10s.
+ * Reuse cleanup's Retry-After parser so a long directive never causes an early retry. */
+export function fetchGetWithTransientRetry(
+  input: string | URL,
+  init?: Pick<RequestInit, 'headers' | 'redirect'>,
+): Promise<Response> {
+  return fetchWithTransientRetry(input, { ...init, method: 'GET' }, {
+    cleanupRetryBudget: { remainingMs: 10_000 },
+  });
+}
+
 /** One sweep shares this wait budget across all owned resources or messages. */
 export interface CleanupRetryBudget { remainingMs: number }
 
@@ -199,12 +212,12 @@ async function retryCleanupRateLimit(
     : Number.isFinite(date) ? Math.max(0, date - Date.now()) : 1000;
   const delayMs = Math.max(250, Math.ceil(hintedMs));
   if (!Number.isFinite(delayMs) || delayMs > budget.remainingMs) {
-    console.warn(`[cleanup] 429 retry declined: ${delayMs}ms exceeds the remaining ${budget.remainingMs}ms sweep budget`);
+    console.warn(`[rate-limit] 429 retry declined: ${delayMs}ms exceeds the remaining ${budget.remainingMs}ms retry budget`);
     return response;
   }
   budget.remainingMs -= delayMs;
   await response.body?.cancel().catch(() => {});
-  console.warn(`[cleanup] 429: one retry after ${delayMs}ms`);
+  console.warn(`[rate-limit] 429: one retry after ${delayMs}ms`);
   await new Promise<void>((resolve, reject) => {
     const signal = init.signal;
     const finish = () => { signal?.removeEventListener('abort', abort); resolve(); };

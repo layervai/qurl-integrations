@@ -1663,6 +1663,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 // struct to spend, and none to reclaim by reordering: every field is
 // pointer-aligned and pointer-sized, so neither carries any padding.
 type githubWorkflow struct {
+	Env         map[string]any        `yaml:"env"`
 	On          any                   `yaml:"on"`
 	Permissions any                   `yaml:"permissions"`
 	Jobs        map[string]*githubJob `yaml:"jobs"`

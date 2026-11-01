@@ -195,15 +195,9 @@ client.once('ready', async () => {
   logger.info(`Watching guild: ${guild?.name}`);
 });
 
-// guildCreate also fires on every shard ready burst (Discord re-sends
-// for every guild the bot is already in). Tag replays via !isReady() so
-// the install dashboard widget can filter to genuine installs.
-//
-// KNOWN LIMITATION (#195): discord.js v14's `Client.isReady()` does
-// NOT flip back to false on a session resume, so a forced re-IDENTIFY
-// (CLOSE code 4xxx) replays every cached guild with `replay: false`,
-// producing a fake install spike. Phase 2 fix uses a settle window
-// driven by shardReady/shardResume; see #195.
+// TODO(upstream-contract): discord.js READY seeds its guild cache before
+// GUILD_CREATE; tests/guild-install-gateway.test.js pins that replay behavior (#195).
+// Keep the readiness tag as a defensive startup signal.
 client.on('guildCreate', (guild) => {
   try {
     const replay = !client.isReady();
