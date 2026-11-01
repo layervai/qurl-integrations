@@ -365,6 +365,35 @@ describe('logger', () => {
       expect(parsed.audit.send_id).toBe('s1');
     });
 
+    it('does not run serialization hooks on an invalid audit event', () => {
+      logger = require('../src/logger');
+      const event = {
+        toJSON: jest.fn(() => 'event-secret'),
+        toString: jest.fn(() => { throw new Error('event-conversion'); }),
+      };
+
+      expect(() => logger.audit(event, { count: 3 })).not.toThrow();
+
+      expect(event.toJSON).not.toHaveBeenCalled();
+      expect(event.toString).not.toHaveBeenCalled();
+      const payload = JSON.parse(consoleSpy.log.mock.calls[0][0]).audit;
+      expect(payload.event).toBe('invalid_audit_event');
+      expect(payload.count).toBe(3);
+      expect(consoleSpy.log.mock.calls[0][0]).not.toContain('event-secret');
+    });
+
+    it('keeps the caller event out of sensitive-key diagnostics', () => {
+      logger = require('../src/logger');
+      logger.audit('untrusted-event-value', { auth_token: 'private-value' });
+
+      const warnings = consoleSpy.error.mock.calls.map(call => call[0]).join('\n');
+      expect(warnings).toContain('auth_token');
+      expect(warnings).not.toMatch(/untrusted-event-value|private-value/);
+      const payload = JSON.parse(consoleSpy.log.mock.calls[0][0]).audit;
+      expect(payload.event).toBe('untrusted-event-value');
+      expect(payload.auth_token).toBe('[REDACTED]');
+    });
+
     it.each(['qurlLink', 'qurl_link', 'qurlLinkUrl', 'qurl_link_url', 'qurlLinks', 'qurl_links'])(
       'redacts a live qURL access link stored under audit key %s',
       (key) => {

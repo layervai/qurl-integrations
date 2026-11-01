@@ -187,13 +187,17 @@ const LOG_EVENTS = Object.freeze({
 // in (top-level OR nested):
 //   1. The value is redacted to '[REDACTED]' in the emitted payload.
 //   2. A CloudWatch-visible `console.error` line names the offending
-//      key so the call site is grep-able from the dashboard.
+//      keys without copying the caller event or values. Event metadata
+//      remains in the structured audit record; cross-stream order is not guaranteed.
 // Sibling keys are unaffected, so legitimate dimensions still flow.
 // Detection uses an EXACT-MATCH set (AUDIT_SECRET_KEYS in logger.js),
 // not the top-level logger's substring-based REDACT_SUBSTRINGS — that
 // way `tokens_minted` / `token_count` / similar legitimate dimensions
 // don't trigger false-positive redactions. The substring approach
 // would have made the redaction unsafe; exact-match makes it safe.
+// Event names must be primitive strings. The logger reserves invalid_audit_event
+// and audit_serialization_failed for faults; query $.audit.event for these
+// records. Neither fault record copies the original event or exception text.
 const AUDIT_EVENTS = {
   // UPLOAD_SUCCESS fires after upload + mintLinksInBatches + sufficiency
   // check all succeed — i.e. when the send is fully prepared and ready
