@@ -509,7 +509,7 @@ developer-portal app:
 2. General Information → set the application name to **qURL (sandbox)**, upload
    `assets/discord-app-icon.png`, add the description from
    `discord-metadata.json`, and set the privacy/terms URLs listed there.
-3. Bot → set the unique username to `qurl` (`bot.unique_username` in
+3. Bot → set the bot username to `qURL` (`bot.username` in
    `discord-metadata.json`); the application/profile branding remains
    **qURL**. Upload `assets/discord-avatar.png`, and enable **Server Members
    Intent** under Privileged Gateway Intents.
@@ -525,8 +525,10 @@ install params, bot username, avatar, and banner). The script refuses to run if
 the token belongs to any Discord application other than LayerV sandbox app
 `1511450217789128885`.
 
-`bot.username` is the cased **qURL** brand source only; Discord's bot-user API
-receives `bot.unique_username` (`qurl`) as the lowercase unique username.
+The bot-user API receives `bot.username` exactly. An exact name match is complete
+regardless of the discriminator; case differences are applied as name changes.
+Discord keeps bots on their existing username system; this script does not wait
+for human-account username migration. See the [Discord developer guidance](https://support-dev.discord.com/hc/en-us/articles/13667755828631-Updating-Apps-to-Support-Unique-Usernames).
 
 ```bash
 npm run apply-discord-metadata
@@ -558,24 +560,24 @@ image updates are separate Discord `/users/@me` PATCHes, so respect
 `retry_after` and rerun instead of looping if either edit is rate-limited.
 
 After the live metadata apply, restart the bot with the same token/app pair
-so automatic command registration updates Discord's slash-command picker. Keep `DISCORD_CLIENT_ID` aligned with the metadata application
+so automatic command registration updates Discord's slash-command picker.
+Keep `DISCORD_CLIENT_ID` aligned with the metadata application
 ID; the script verifies the token's app, while command registration and invite
 links read the client ID from environment/SSM/infra wiring.
 
 Exit codes:
-- `0` — API fields applied, including the lowercase unique username `qurl`;
+- `0` — API fields applied, including the configured bot username `qURL`;
   application/profile branding remains **qURL**.
-- `1` — partial API apply. The script prints `retry_after` when Discord
-  rate-limits username/avatar/banner updates, flags ignored avatar/banner
-  writes, and keeps `1` if a portal action is also needed. The script does not
-  sleep/retry automatically; wait for `retry_after` and rerun. For legacy
-  case-only username drift, rerun after Discord reports `discriminator: "0"` to
-  confirm the lowercase unique username converges; app and image fields may
-  have applied while this exit remains non-zero.
+- `1` — invalid arguments, local configuration/assets, or a partial API apply.
+  Argument and local-validation failures occur before writes. After writes
+  start, warnings identify skipped fields; other fields can already be applied.
+  The script prints `retry_after` for rate-limited edits and does not retry them
+  automatically. Wait for that delay before rerunning.
 - `2` — API writes completed, but the application name still differs from
   `discord-metadata.json`; update the name in Developer Portal.
 - `3` — fatal application metadata PATCH failure. The application fields did
-  not finish applying; inspect the Discord response, wait for `retry_after` if
+  not finish applying; earlier bot fields may already be applied. Inspect the
+  Discord response, wait for `retry_after` if
   present, and rerun after fixing the API error.
 - `4` — pre-flight token/app verification failed before writes. Fix the token,
   app ID, or public key mismatch before rerunning.

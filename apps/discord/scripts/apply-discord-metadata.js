@@ -60,13 +60,6 @@ function validateHttpsUrl(value, field) {
 
 function validateMetadata(doc = loadMetadata()) {
   if (!doc.bot?.username) throw new Error('discord-metadata.json must set bot.username.');
-  if (!doc.bot?.unique_username) throw new Error('discord-metadata.json must set bot.unique_username.');
-  if (doc.bot.unique_username !== doc.bot.unique_username.toLowerCase()) {
-    throw new Error('discord-metadata.json must set bot.unique_username to Discord\'s lowercase unique username.');
-  }
-  if (doc.bot.unique_username !== doc.bot.username.toLowerCase()) {
-    throw new Error('discord-metadata.json must set bot.unique_username to the lowercase form of bot.username.');
-  }
   if (!doc.application?.name) throw new Error('discord-metadata.json must set application.name.');
   if (!doc.application?.description) throw new Error('discord-metadata.json must set application.description.');
   for (const [field, value] of [
@@ -299,12 +292,7 @@ async function main({
 
   let hadPartialFailure = false;
   let hadPortalActionRequired = false;
-  // bot.username is the cased brand source only. Discord's bot-user API has no
-  // display-name field, so the live PATCH applies bot.unique_username below.
-  const brandUsername = doc.bot.username;
-  // The API applies Discord's lowercase unique username; app/profile branding
-  // carries the cased qURL brand via application metadata and portal fields.
-  const apiUsername = doc.bot.unique_username;
+  const apiUsername = doc.bot.username;
 
   // Build payloads before dry-run; --skip-images also skips local image reads.
   const botUsernamePatch = { username: apiUsername };
@@ -364,22 +352,20 @@ async function main({
     throw new PreflightVerificationError(`Discord bot-user pre-flight verification failed: ${err.message}`, err);
   }
 
-  if (currentUser.username === apiUsername && (currentUser.discriminator === '0' || currentUser.discriminator === undefined)) {
-    logger.log(`Bot username already ${apiUsername}; Discord unique usernames are lowercase while app/profile branding remains ${brandUsername}.`);
-  } else if (currentUser.username.toLowerCase() === apiUsername) {
-    // Case-insensitive matches with mixed casing or a legacy discriminator are
-    // not fully migrated to Discord's lowercase unique-username state. Do not
-    // spend another username PATCH on a case-only value; #860 verifies the live
-    // account once Discord reports the exact lowercase migrated username.
-    hadPartialFailure = true;
-    const discriminator = currentUser.discriminator ?? 'unknown';
-    logger.warn(`Bot username is ${currentUser.username} with discriminator ${discriminator}; desired migrated unique username ${apiUsername}. Skipping username update until Discord unique-username migration completes; verify and resolve the live username outcome in #860.`);
+  // TODO(upstream-contract): bots retain their username system; an exact name is sufficient.
+  if (currentUser.username === apiUsername) {
+    logger.log(`Bot username already ${apiUsername}.`);
   } else {
     try {
       // Keep username separate from bot images so a name conflict/rate limit
       // does not block avatar/banner updates for the same verified app.
       const updatedUser = await request('PATCH', '/users/@me', botUsernamePatch, requestOptions);
-      logger.log(`Updated bot username: ${updatedUser.username}`);
+      if (updatedUser.username !== apiUsername) {
+        hadPartialFailure = true;
+        logger.warn('Bot username update did not match the configured name; verify it in Developer Portal.');
+      } else {
+        logger.log(`Updated bot username: ${updatedUser.username}`);
+      }
     } catch (err) {
       hadPartialFailure = true;
       logger.warn(`Bot username update skipped: ${errorDetails(err)}`);

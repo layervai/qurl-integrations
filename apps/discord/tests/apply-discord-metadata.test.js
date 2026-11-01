@@ -102,18 +102,7 @@ describe('apply-discord-metadata helpers', () => {
 
   test('validates required metadata identity fields', () => {
     expect(() => validateMetadata(metadata)).not.toThrow();
-    expect(() => validateMetadata({
-      ...metadata,
-      bot: { ...metadata.bot, unique_username: '' },
-    })).toThrow(/bot\.unique_username/);
-    expect(() => validateMetadata({
-      ...metadata,
-      bot: { ...metadata.bot, unique_username: 'qURL' },
-    })).toThrow(/lowercase unique username/);
-    expect(() => validateMetadata({
-      ...metadata,
-      bot: { ...metadata.bot, unique_username: 'different' },
-    })).toThrow(/lowercase form of bot\.username/);
+    expect(() => validateMetadata({ ...metadata, bot: { ...metadata.bot, username: '' } })).toThrow(/bot\.username/);
     expect(() => validateMetadata({
       ...metadata,
       application: { ...metadata.application, id: '' },
@@ -312,12 +301,12 @@ describe('apply-discord-metadata helpers', () => {
   });
 
   test('passes an abort signal to Discord requests', async () => {
-    const fetchImpl = jest.fn().mockResolvedValue(jsonResponse({ username: metadata.bot.unique_username }));
+    const fetchImpl = jest.fn().mockResolvedValue(jsonResponse({ username: metadata.bot.username }));
 
     await expect(request('GET', '/users/@me', undefined, {
       token: 'test-token',
       fetchImpl,
-    })).resolves.toEqual({ username: metadata.bot.unique_username });
+    })).resolves.toEqual({ username: metadata.bot.username });
 
     expect(fetchImpl.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
   });
@@ -360,7 +349,7 @@ describe('apply-discord-metadata helpers', () => {
   test('main returns the portal-action exit code when only the app name drifts', async () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse('Qurl Bot')),
-      jsonResponse({ username: metadata.bot.unique_username, discriminator: '0' }),
+      jsonResponse({ username: metadata.bot.username, discriminator: '0' }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse('Qurl Bot')),
     );
@@ -374,14 +363,14 @@ describe('apply-discord-metadata helpers', () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
-      jsonResponse({ username: metadata.bot.unique_username, discriminator: '0' }),
+      jsonResponse({ username: metadata.bot.username, discriminator: '0' }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse()),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(logger.log).toHaveBeenCalledWith(`Bot username already ${metadata.bot.unique_username}; Discord unique usernames are lowercase while app/profile branding remains ${metadata.bot.username}.`);
+    expect(logger.log).toHaveBeenCalledWith(`Bot username already ${metadata.bot.username}.`);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
@@ -390,93 +379,69 @@ describe('apply-discord-metadata helpers', () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
       jsonResponse({ username: 'Qurl Bot' }),
-      jsonResponse({ username: metadata.bot.unique_username }),
+      jsonResponse({ username: metadata.bot.username }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse()),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(5);
-    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({ username: metadata.bot.unique_username });
+    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({ username: metadata.bot.username });
     expect(JSON.parse(fetchImpl.mock.calls[3][1].body)).toEqual({ avatar: expect.stringMatching(/^data:image\//), banner: expect.stringMatching(/^data:image\//) });
     expect(JSON.parse(fetchImpl.mock.calls[4][1].body)).toMatchObject({ icon: expect.stringMatching(/^data:image\//), cover_image: expect.stringMatching(/^data:image\//) });
-    expect(logger.log).toHaveBeenCalledWith(`Updated bot username: ${metadata.bot.unique_username}`);
+    expect(logger.log).toHaveBeenCalledWith(`Updated bot username: ${metadata.bot.username}`);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  test('main treats a converged lowercase unique username as applied', async () => {
+  test('main treats the exact configured bot username as applied', async () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
-      jsonResponse({ username: metadata.bot.unique_username, discriminator: '0' }),
+      jsonResponse({ username: metadata.bot.username, discriminator: '0' }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse()),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(logger.log).toHaveBeenCalledWith(expect.stringMatching(/unique usernames are lowercase/));
+    expect(logger.log).toHaveBeenCalledWith(expect.stringMatching(/Bot username already/));
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  test('main treats a lowercase unique username without discriminator as applied', async () => {
+  test('main accepts an exact bot name without a discriminator', async () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
-      jsonResponse({ username: metadata.bot.unique_username }),
+      jsonResponse({ username: metadata.bot.username }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse()),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(logger.log).toHaveBeenCalledWith(expect.stringMatching(/unique usernames are lowercase/));
+    expect(logger.log).toHaveBeenCalledWith(expect.stringMatching(/Bot username already/));
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  test('main treats a legacy exact-case username match as a partial apply failure', async () => {
+  test.each(['qurl', 'QURL', 'Old Bot'])('patches a different bot name %s to the exact configured name', async username => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
-      jsonResponse(appResponse()),
-      jsonResponse({ username: metadata.bot.username, discriminator: '1234' }),
-      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
-      jsonResponse(appResponse()),
+      jsonResponse(appResponse()), jsonResponse({ username, discriminator: '1234' }),
+      jsonResponse({ username: metadata.bot.username }),
+      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }), jsonResponse(appResponse()),
     );
-
-    await expect(main({ token: 'test-token', fetchImpl, logger }))
-      .rejects.toThrow(/completed with skipped fields/);
-    expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/unique-username migration completes/));
+    await main({ token: 'test-token', fetchImpl, logger });
+    expect(fetchImpl).toHaveBeenCalledTimes(5);
+    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({ username: metadata.bot.username });
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  test('main treats mixed-case username responses as not fully migrated', async () => {
-    const logger = quietLogger();
+  test('a successful PATCH that does not return the configured name stays a partial failure', async () => {
     const fetchImpl = fetchSequence(
-      jsonResponse(appResponse()),
-      jsonResponse({ username: 'QURL', discriminator: '0' }),
-      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
-      jsonResponse(appResponse()),
+      jsonResponse(appResponse()), jsonResponse({ username: 'Old Bot' }), jsonResponse({ username: 'Still Old' }),
+      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }), jsonResponse(appResponse()),
     );
-
-    await expect(main({ token: 'test-token', fetchImpl, logger }))
-      .rejects.toThrow(/completed with skipped fields/);
-    expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/desired migrated unique username qurl/));
-  });
-
-  test('main treats a legacy case-only username mismatch as a partial apply failure', async () => {
-    const logger = quietLogger();
-    const fetchImpl = fetchSequence(
-      jsonResponse(appResponse()),
-      jsonResponse({ username: metadata.bot.unique_username, discriminator: '1234' }),
-      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
-      jsonResponse(appResponse()),
-    );
-
-    await expect(main({ token: 'test-token', fetchImpl, logger }))
-      .rejects.toThrow(/completed with skipped fields/);
-    expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/unique-username migration completes/));
+    await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() })).rejects.toThrow(/completed with skipped fields/);
   });
 
   test('main fails clearly when the current bot user omits username', async () => {
@@ -638,7 +603,7 @@ describe('metadata apply image upload policy', () => {
   test('skip-images retains application 429 failure and retry-after reporting', async () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
-      jsonResponse({ username: metadata.bot.unique_username, discriminator: '0' }),
+      jsonResponse({ username: metadata.bot.username, discriminator: '0' }),
       jsonResponse({ message: 'rate limited', retry_after: 12.5 }, { status: 429 }),
     );
     await expect(main({ skipImages: true, token: 'test-token', fetchImpl, logger: quietLogger() }))
@@ -650,7 +615,7 @@ describe('metadata apply image upload policy', () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
-      jsonResponse({ username: metadata.bot.unique_username, discriminator: '0' }),
+      jsonResponse({ username: metadata.bot.username, discriminator: '0' }),
       jsonResponse(appResponse()),
     );
     await main({ skipImages: true, token: 'test-token', fetchImpl, logger });
@@ -703,13 +668,25 @@ describe('metadata apply operator safety', () => {
   test('skip-images still updates a changed username without image fields', async () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()), jsonResponse({ username: 'Old Bot' }),
-      jsonResponse({ username: metadata.bot.unique_username }), jsonResponse(appResponse()),
+      jsonResponse({ username: metadata.bot.username }), jsonResponse(appResponse()),
     );
     await main({ skipImages: true, token: 'test-token', fetchImpl, logger: quietLogger() });
     expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({ username: metadata.bot.unique_username });
+    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({ username: metadata.bot.username });
     const appBody = JSON.parse(fetchImpl.mock.calls[3][1].body);
     expect(appBody).not.toHaveProperty('icon');
     expect(appBody).not.toHaveProperty('cover_image');
+  });
+});
+
+
+describe('bot username convergence', () => {
+  test.each(['1234', '0', undefined])('an exact configured bot name converges regardless of discriminator %s', async discriminator => {
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()), jsonResponse({ username: metadata.bot.username, discriminator }), jsonResponse(appResponse()),
+    );
+    await main({ skipImages: true, token: 'test-token', fetchImpl, logger: quietLogger() });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl.mock.calls.filter(([, options]) => options.method === 'PATCH')).toHaveLength(1);
   });
 });
