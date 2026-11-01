@@ -15,7 +15,7 @@ test.each(['cell0', ''])('receipt with optional cell_id=%s contains only public 
     const verifier = join(dir, 'verifier');
     writeFileSync(verifier, '', { mode: 0o700 });
     process.env.QURL_OWNERSHIP_VERIFIER = verifier;
-    process.env.QURL_PUBLIC_CONFIG_URL = 'https://qurl.link.layerv.xyz/';
+    process.env.QURL_PUBLIC_CONFIG_URL = 'https://qurl.link.example.layerv.xyz/';
     process.env.QURL_OWNERSHIP_RECEIPTS = path;
     process.env.MINT_API_URL = 'https://api.example/v1/qurls';
     process.env.QURL_API_KEY = 'private-api-key';

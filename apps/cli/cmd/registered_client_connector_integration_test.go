@@ -31,8 +31,8 @@ import (
 
 const (
 	connectorIntegrationAgentID  = "agent-cli-integration"
-	connectorIntegrationHubHost  = "a.test.layerv.xyz"
-	connectorIntegrationCellHost = "b.test.layerv.xyz"
+	connectorIntegrationHubHost  = "a.example.layerv.xyz"
+	connectorIntegrationCellHost = "b.example.layerv.xyz"
 
 	// qurl-conformance v0.16.0 moved the credential-recovery vectors to a
 	// private platform module, so this test keeps the values it needs from

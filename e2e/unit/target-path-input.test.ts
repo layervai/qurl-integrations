@@ -1,7 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTargetPathInput } from '../helpers/targetPathInput';
+const apiOrigin = 'https://api.example.layerv.xyz';
 const parent = 'ownedParentResource0123456789';
 const snapshot = (path: string) => JSON.parse(readFileSync(path, 'utf8').trimEnd().split('\n').pop()!);
 const bearer = 'private-bearer-canary';
@@ -15,7 +16,7 @@ for (const mode of ['success', 'unknown-post', 'wrong-path', 'wrong-parent', 'de
   let posts = 0; let deletes = 0;
   const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input, init) => {
    const url = new URL(String(input));
-   expect(url.origin).toBe('https://api.layerv.xyz');
+   expect(url.origin).toBe('https://api.example.layerv.xyz');
    if (init?.method === 'POST') {
     const saved = snapshot(path);
     expect(saved.pending).not.toBeNull();
@@ -50,8 +51,8 @@ for (const mode of ['success', 'unknown-post', 'wrong-path', 'wrong-parent', 'de
      ...(entry.path === undefined ? {} : { target_path: mode === 'wrong-path' ? '/wrong' : entry.path }) }] : [] } });
   });
   try {
-   if (mode === 'success') await runTargetPathInput("q_seed", bearer, path);
-   else await expect(runTargetPathInput("q_seed", bearer, path)).rejects.toThrow('retain lock and private journal');
+   if (mode === 'success') await runTargetPathInput("q_seed", bearer, path, apiOrigin);
+   else await expect(runTargetPathInput("q_seed", bearer, path, apiOrigin)).rejects.toThrow('retain lock and private journal');
    const saved = snapshot(path);
    expect(readFileSync(path, 'utf8')).not.toMatch(/private-bearer-canary|secret-capability-canary|private transport payload/);
    if (mode === 'success') {
@@ -66,6 +67,19 @@ for (const mode of ['success', 'unknown-post', 'wrong-path', 'wrong-parent', 'de
     if (mode === 'unknown-post') { expect(posts).toBe(1); expect(saved.pending).not.toBeNull(); }
     if (mode === 'wrong-type') expect(posts).toBe(0);
    }
+  } finally { fetchMock.mockRestore(); rmSync(dir, { recursive: true, force: true }); }
+ });
+}
+
+for (const apiOrigin of ['', 'http://api.example.com', 'https://user:secret@api.example.com', 'https://api.example.com/path', 'https://api.example.com?x=1', 'https://api.example.com/#x']) {
+ test(`rejects an unsafe API origin before creating the journal: ${new URL(apiOrigin || 'http://example.com').protocol}`, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'target-path-origin-'));
+  const path = join(dir, 'journal.json');
+  const fetchMock = jest.spyOn(global, 'fetch');
+  try {
+   await expect(runTargetPathInput('q_seed', bearer, path, apiOrigin)).rejects.toThrow('Explicit HTTPS API origin required');
+   expect(fetchMock).not.toHaveBeenCalled();
+   expect(existsSync(path)).toBe(false);
   } finally { fetchMock.mockRestore(); rmSync(dir, { recursive: true, force: true }); }
  });
 }

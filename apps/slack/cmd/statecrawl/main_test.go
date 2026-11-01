@@ -145,7 +145,7 @@ func TestParseFlags_SandboxPurgeNoAllowAccepted(t *testing.T) {
 // missing label as prod) would break every unlabeled sandbox purge while
 // leaving every rejection test green.
 func TestParseFlags_UnlabeledSandboxPurgeAccepted(t *testing.T) {
-	f, err := parse(t, wiringArgs(sandboxPoliciesTable, sandboxMappingsTable, "https://api.layerv.xyz", "-dry-run=false"))
+	f, err := parse(t, wiringArgs(sandboxPoliciesTable, sandboxMappingsTable, "https://api.example.layerv.xyz", "-dry-run=false"))
 	if err != nil {
 		t.Fatalf("parseFlags rejected an unlabeled all-sandbox purge: %v", err)
 	}
@@ -178,8 +178,8 @@ func TestLooksProd(t *testing.T) {
 		// api.layerv.ai host. Pin that breadth: narrowing it to the canonical
 		// host would turn any other prod subdomain into a silent bypass of the
 		// rail, and nothing else here would catch that.
-		{"endpoint non-canonical layerv.ai host", flags{qurlEndpoint: "https://staging.layerv.ai/v1"}, true},
-		{"endpoint sandbox origin", flags{qurlEndpoint: "https://api.layerv.xyz/v1"}, false},
+		{"endpoint non-canonical layerv.ai host", flags{qurlEndpoint: "https://staging.example.layerv.ai/v1"}, true},
+		{"endpoint sandbox origin", flags{qurlEndpoint: "https://api.example.layerv.xyz/v1"}, false},
 		{"all sandbox", flags{envLabel: "sandbox", channelPoliciesTable: "qurl-sandbox-cp"}, false},
 
 		// workspace_state is NOT scanned: its infra-rendered name carries no
@@ -203,7 +203,7 @@ func TestLooksProd(t *testing.T) {
 			channelPoliciesTable:   sandboxPoliciesTable,
 			workspaceMappingsTable: sandboxMappingsTable,
 			workspaceStateTable:    stateTableName,
-			qurlEndpoint:           "https://api.layerv.xyz",
+			qurlEndpoint:           "https://api.example.layerv.xyz",
 		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

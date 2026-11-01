@@ -386,14 +386,10 @@ function takeGatewayHandoffHmac() {
 const sendCooldownMs = intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true });
 const detectCooldownMs = intEnv('QURL_DETECT_COOLDOWN_MS', sendCooldownMs, { minPositive: true });
 
-// Env-extendable additions to connector.js's non-prod detect-tunnel
-// allowlist (DETECT_TUNNEL_NON_PROD_QURL_ENDPOINT_HOSTS /
-// DETECT_TUNNEL_NON_PROD_HOST_SUFFIXES). Those built-ins are hardcoded and
-// public; real sandbox/staging qURL-tunnel hostnames are infra-owned and
-// must not be committed to this public repo. These two comma-separated env
-// vars let the private infra repo inject them at deploy time — connector.js
-// merges them into the built-in sets: split on comma, trim, lowercase,
-// drop empties.
+// Deployment-owned non-production detect targets. The API-host and tunnel-suffix
+// lists are independent: an unknown API origin never gains these suffixes.
+// Defaults retain local API fixtures and the production tunnel suffix only.
+// Split comma-separated values, trim, lowercase, and drop empty entries.
 const detectExtraNonProdEndpointHosts = (process.env.DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS || '')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const detectExtraNonProdHostSuffixes = (process.env.DETECT_EXTRA_NON_PROD_HOST_SUFFIXES || '')

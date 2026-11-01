@@ -37,7 +37,7 @@ const POST_TIMEOUT_MS = 8_000;
 
 // `MINT_API_URL` host disambiguates env without a new env var: the production
 // API is on `layerv.ai`; any other non-empty host is treated as non-production.
-// Reconsider if a `staging.layerv.ai`-style host ever lands.
+// Reconsider if a `staging.example.layerv.ai`-style host ever lands.
 function envLabel() {
   const url = process.env.MINT_API_URL ?? '';
   if (!url) return '';

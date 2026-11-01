@@ -1,11 +1,16 @@
 import { closeSync, fsyncSync, openSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getLinkStatus, getQurlResource, revokeChild } from './qurl-api';
-const API = 'https://api.layerv.xyz';
-const MANAGEMENT = `${API}/v1/qurls`;
 const cases = [undefined, '/objects/owned-input-probe', '/?x=%2e/%2f', '/objects/%61', '/objects/../owned-input-probe', '/objects//owned-input-probe'];
 /** Caller provides the existing owned parent and coordinates the live Sandbox lock. */
-export async function runTargetPathInput(seedChild: string, bearer: string, journalPath: string): Promise<void> {
+export async function runTargetPathInput(seedChild: string, bearer: string, journalPath: string, apiOrigin: string): Promise<void> {
+  let origin: URL;
+  try { origin = new URL(apiOrigin); } catch { throw new Error('Explicit HTTPS API origin required'); }
+  if (origin.protocol !== 'https:' || !origin.hostname || origin.username || origin.password || origin.href !== `${origin.origin}/`) {
+    throw new Error('Explicit HTTPS API origin required');
+  }
+  const API = origin.origin;
+  const MANAGEMENT = `${API}/v1/qurls`;
   if (!/^q_[A-Za-z0-9]+$/.test(seedChild) || !bearer || !journalPath.startsWith('/')) throw new Error('Explicit normal owned child, bearer, absolute journal required');
   const fd = openSync(journalPath, 'ax', 0o600);
   const journal: { seed_child: string; parent: string; status: string; pending: { route: number; index: number; request_id: string } | null;

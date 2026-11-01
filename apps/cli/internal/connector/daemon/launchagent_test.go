@@ -20,7 +20,7 @@ import (
 const testHubKey = "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 func testHubResolver() (qurl.HubBootstrap, error) {
-	return qurl.HubBootstrap{Host: "hub.sandbox.layerv.xyz", Port: 443, ServerPublicKeyB64: testHubKey}, nil
+	return qurl.HubBootstrap{Host: "sandbox-hub.example.layerv.ai", Port: 443, ServerPublicKeyB64: testHubKey}, nil
 }
 
 type recordingJobManager struct {
@@ -55,7 +55,7 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(name string) (string, error) {
@@ -81,9 +81,9 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 		}
 		wantArguments := make([]string, 0, 20)
 		wantArguments = append(wantArguments,
-			"--endpoint", "https://api.sandbox.layerv.xyz", "daemon", "run", "--state-dir", filepath.Join(dir, "state"),
+			"--endpoint", "https://api.sandbox.example.layerv.xyz", "daemon", "run", "--state-dir", filepath.Join(dir, "state"),
 			"--runtime-dir", filepath.Dir(controller.IPC.SocketPath), "--job-version", "5/2.4.0", "--share-group-mode", "single",
-			"--hub-host", "hub.sandbox.layerv.xyz", "--hub-port", "443",
+			"--hub-host", "sandbox-hub.example.layerv.ai", "--hub-port", "443",
 			"--hub-server-public-key-b64", testHubKey,
 			"--supervision", "native",
 		)
@@ -119,7 +119,7 @@ func TestJobControllerPersistsCurrentArtifactInsteadOfOldQURLOnPath(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			manager := &recordingJobManager{}
 			controller := newTestJobController(t, filepath.Join(dir, "state", test.name), filepath.Join(dir, "logs", test.name),
-				"2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+				"2.5.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, testHubResolver)
 			controller.Manager = manager
 			controller.InvocationPath = test.invocation
 			controller.LookPath = func(name string) (string, error) {
@@ -154,7 +154,7 @@ func TestJobControllerResolvesExactBareInvocationName(t *testing.T) {
 	dir := t.TempDir()
 	currentBinary := filepath.Join(dir, "candidate", "qurl-candidate")
 	manager := &recordingJobManager{}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl-candidate"
 	controller.LookPath = func(name string) (string, error) {
@@ -177,7 +177,7 @@ func TestJobControllerResolvesExactBareInvocationName(t *testing.T) {
 func TestJobControllerRejectsNonCanonicalInvocationPath(t *testing.T) {
 	dir := t.TempDir()
 	manager := &recordingJobManager{}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = " qurl"
 	controller.LookPath = func(string) (string, error) {
@@ -199,7 +199,7 @@ func TestJobControllerRejectsNonCanonicalInvocationPath(t *testing.T) {
 func TestJobControllerCompatibleForegroundOwnerReloadsWithoutNativeManager(t *testing.T) {
 	dir := t.TempDir()
 	manager := &recordingJobManager{}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, func() (qurl.HubBootstrap, error) {
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, func() (qurl.HubBootstrap, error) {
 		t.Fatal("Hub resolution ran for a compatible live owner")
 		return qurl.HubBootstrap{}, nil
 	})
@@ -228,7 +228,7 @@ func TestJobControllerInstallsWhenCompatibleOwnerExitsBeforeReload(t *testing.T)
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
@@ -252,7 +252,7 @@ func TestJobControllerVersionChangeReloadsDefinitionInsteadOfLiveIPC(t *testing.
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
@@ -279,7 +279,7 @@ func TestJobControllerRejectsIncompatibleForegroundOwnerWithoutStartingSecondDae
 	dir := t.TempDir()
 	foreground := connectorservice.ServiceStatus{Installed: false, Running: false}
 	manager := &recordingJobManager{status: &foreground}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, func() (qurl.HubBootstrap, error) {
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, func() (qurl.HubBootstrap, error) {
 		t.Fatal("Hub resolution ran for an incompatible foreground owner")
 		return qurl.HubBootstrap{}, nil
 	})
@@ -308,7 +308,7 @@ func TestJobControllerTreatsLoadedJobAsOwnershipBeforeIPCInitialization(t *testi
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
@@ -332,12 +332,12 @@ func TestJobControllerRejectsSecretBearingOrMalformedDeploymentState(t *testing.
 		want     string
 	}{
 		{name: "empty endpoint", endpoint: "", resolve: testHubResolver, want: "endpoint is empty or non-canonical"},
-		{name: "endpoint userinfo", endpoint: "https://user:secret@api.sandbox.layerv.xyz", resolve: testHubResolver, want: "must not contain userinfo"},
-		{name: "endpoint query", endpoint: "https://api.sandbox.layerv.xyz?token=secret", resolve: testHubResolver, want: "must not contain userinfo, query, or fragment"},
-		{name: "resolver error", endpoint: "https://api.sandbox.layerv.xyz", resolve: func() (qurl.HubBootstrap, error) {
+		{name: "endpoint userinfo", endpoint: "https://user:secret@api.sandbox.example.layerv.xyz", resolve: testHubResolver, want: "must not contain userinfo"},
+		{name: "endpoint query", endpoint: "https://api.sandbox.example.layerv.xyz?token=secret", resolve: testHubResolver, want: "must not contain userinfo, query, or fragment"},
+		{name: "resolver error", endpoint: "https://api.sandbox.example.layerv.xyz", resolve: func() (qurl.HubBootstrap, error) {
 			return qurl.HubBootstrap{}, errors.New("Hub lookup failed")
 		}, want: "Hub lookup failed"},
-		{name: "untrusted Hub", endpoint: "https://api.sandbox.layerv.xyz", resolve: func() (qurl.HubBootstrap, error) {
+		{name: "untrusted Hub", endpoint: "https://api.sandbox.example.layerv.xyz", resolve: func() (qurl.HubBootstrap, error) {
 			return qurl.HubBootstrap{Host: "127.0.0.1", Port: 443, ServerPublicKeyB64: testHubKey}, nil
 		}, want: "canonical lowercase DNS name"},
 	}
@@ -395,7 +395,7 @@ func TestJobControllerModeChangeReplacesResidentDaemonLikeAVersionChange(t *test
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModePerShare, testHubResolver)
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.example.layerv.xyz", GroupModePerShare, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
@@ -420,7 +420,7 @@ func TestJobControllerModeChangeReplacesResidentDaemonLikeAVersionChange(t *test
 	}
 
 	// Switching back is the same definition change in the other direction.
-	back := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	back := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, testHubResolver)
 	back.Manager = manager
 	back.InvocationPath = "qurl"
 	back.LookPath = func(string) (string, error) { return binaryPath, nil }
@@ -442,7 +442,7 @@ func TestJobControllerModeChangeReplacesResidentDaemonLikeAVersionChange(t *test
 func TestJobControllerSameModeResidentDaemonReloadsLive(t *testing.T) {
 	dir := t.TempDir()
 	manager := &recordingJobManager{}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModePerShare, func() (qurl.HubBootstrap, error) {
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.example.layerv.xyz", GroupModePerShare, func() (qurl.HubBootstrap, error) {
 		t.Fatal("Hub resolution ran for a compatible live owner")
 		return qurl.HubBootstrap{}, nil
 	})
@@ -467,7 +467,7 @@ func TestJobControllerSameModeResidentDaemonReloadsLive(t *testing.T) {
 func TestJobControllerRefusesToInstallAnUnknownMode(t *testing.T) {
 	dir := t.TempDir()
 	manager := &recordingJobManager{}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupMode("both"), testHubResolver)
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.example.layerv.xyz", GroupMode("both"), testHubResolver)
 	controller.Manager = manager
 	controller.LookPath = func(string) (string, error) { return filepath.Join(dir, "bin", "qurl"), nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{}, false, nil }
@@ -667,7 +667,7 @@ func TestJobControllerIncompatibleStatusRequiresNativeOwnership(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			manager := &recordingJobManager{status: &connectorservice.ServiceStatus{Installed: tc.managed, Running: tc.managed}}
-			controller, err := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, tc.supervision, testHubResolver, nil)
+			controller, err := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, tc.supervision, testHubResolver, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -825,7 +825,7 @@ func TestJobArgumentsAreTiedToTheJobProtocolVersion(t *testing.T) {
 	if len(daemonJobLogArguments("out", "err")) != 0 {
 		pinned = append(pinned, "--job-stdout-log", "--job-stderr-log")
 	}
-	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := newTestJobController(t, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.example.layerv.xyz", GroupModeSingle, testHubResolver)
 	controller.InvocationPath = filepath.Join(dir, "bin", "qurl")
 	hub, err := testHubResolver()
 	if err != nil {

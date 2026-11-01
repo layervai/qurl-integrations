@@ -484,17 +484,17 @@ func TestDaemonHubOverrideIsExactAndAllOrNone(t *testing.T) {
 		port int
 		key  string
 	}{
-		{host: "hub.sandbox.layerv.xyz"},
+		{host: "sandbox-hub.example.layerv.ai"},
 		{port: 443},
 		{key: key},
-		{host: "hub.sandbox.layerv.xyz", port: 443},
+		{host: "sandbox-hub.example.layerv.ai", port: 443},
 	} {
 		if _, _, err := exactDaemonHubOverride(test.host, test.port, test.key); err == nil || !strings.Contains(err.Error(), "must be set together") {
 			t.Fatalf("partial daemon Hub override %#v error = %v", test, err)
 		}
 	}
-	got, present, err := exactDaemonHubOverride("hub.sandbox.layerv.xyz", 443, key)
-	if err != nil || !present || got.Host != "hub.sandbox.layerv.xyz" || got.Port != 443 || got.ServerPublicKeyB64 != key {
+	got, present, err := exactDaemonHubOverride("sandbox-hub.example.layerv.ai", 443, key)
+	if err != nil || !present || got.Host != "sandbox-hub.example.layerv.ai" || got.Port != 443 || got.ServerPublicKeyB64 != key {
 		t.Fatalf("exact daemon Hub override = (%#v, %t, %v)", got, present, err)
 	}
 	if _, _, err := exactDaemonHubOverride("127.0.0.1", 443, key); err == nil {

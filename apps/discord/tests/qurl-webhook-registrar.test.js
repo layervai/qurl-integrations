@@ -1070,8 +1070,8 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
 });
 
 describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host sweep)', () => {
-  const NEW_URL = 'https://discord.connector.layerv.xyz/webhooks/qurl';
-  const OLD_URL = 'https://discord.layerv.xyz/webhooks/qurl';
+  const NEW_URL = 'https://discord.connector.example.com/webhooks/qurl';
+  const OLD_URL = 'https://discord.sandbox.example.com/webhooks/qurl';
   const BOT_DESC = 'Discord bot view counter (region=us-east-2, env=sandbox)';
   const BOT_OPTS = { ...BASE_OPTS, bridgeUrl: NEW_URL, description: BOT_DESC };
 
@@ -1112,7 +1112,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       'GET /v1/webhooks': () => ({ body: { data: [
         {
           webhook_id: 'wh_connector',
-          url: 'https://s3-connector.layerv.xyz/webhooks/qurl', // different host, same path
+          url: 'https://s3-connector.sandbox.example.com/webhooks/qurl', // different host, same path
           description: 'qurl-s3-connector resource.closed subscription',
           events: ['qurl.accessed'],
           failure_count: 0,
@@ -1163,7 +1163,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       'GET /v1/webhooks': () => ({ body: { data: [
         {
           webhook_id: 'wh_other_region',
-          url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl', // different host, same path, same description prefix
+          url: 'https://discord.eu-central-1.example.com/webhooks/qurl', // different host, same path, same description prefix
           description: 'Discord bot view counter (region=eu-central-1, env=sandbox)',
           events: ['qurl.accessed', 'qurl.expired'],
           failure_count: 0,
@@ -1371,7 +1371,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       'GET /v1/webhooks': () => ({ body: { data: [
         {
           webhook_id: 'wh_same_host_diff_port',
-          url: 'https://discord.connector.layerv.xyz:8443/webhooks/qurl',
+          url: 'https://discord.connector.example.com:8443/webhooks/qurl',
           description: BOT_DESC,
           events: ['qurl.accessed'],
           failure_count: 9999,
@@ -1497,7 +1497,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       'GET /v1/webhooks': () => ({ body: { data: [
         {
           webhook_id: 'wh_transient',
-          url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+          url: 'https://discord.eu-central-1.example.com/webhooks/qurl',
           description: BOT_DESC,
           events: ['qurl.accessed', 'qurl.expired'],
           failure_count: 1, // below MIN_FAILURES (30)
@@ -1559,7 +1559,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         'GET /v1/webhooks': () => ({ body: { data: [
           {
             webhook_id: 'wh_healthy',
-            url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+            url: 'https://discord.eu-central-1.example.com/webhooks/qurl',
             description: BOT_DESC,
             events: ['qurl.accessed'],
             failure_count: 0,
@@ -1567,7 +1567,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           },
           {
             webhook_id: 'wh_transient',
-            url: 'https://discord.eu-west-1.layerv.xyz/webhooks/qurl',
+            url: 'https://discord.eu-west-1.example.com/webhooks/qurl',
             description: BOT_DESC,
             events: ['qurl.accessed'],
             failure_count: 1,
@@ -1601,7 +1601,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         'GET /v1/webhooks': () => ({ body: { data: [
           {
             webhook_id: 'wh_healthy',
-            url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+            url: 'https://discord.eu-central-1.example.com/webhooks/qurl',
             description: BOT_DESC,
             events: ['qurl.accessed'],
             failure_count: 0,
@@ -1633,7 +1633,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           listCallCount += 1;
           const subs = [{
             webhook_id: 'wh_healthy_a',
-            url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+            url: 'https://discord.eu-central-1.example.com/webhooks/qurl',
             description: BOT_DESC,
             events: ['qurl.accessed'],
             failure_count: 0,
@@ -1642,7 +1642,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           if (listCallCount >= 3) {
             subs.push({
               webhook_id: 'wh_healthy_b',
-              url: 'https://discord.eu-west-1.layerv.xyz/webhooks/qurl',
+              url: 'https://discord.eu-west-1.example.com/webhooks/qurl',
               description: BOT_DESC,
               events: ['qurl.accessed'],
               failure_count: 0,

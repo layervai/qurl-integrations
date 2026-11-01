@@ -392,7 +392,7 @@ function urlPathname(u) {
 // URL-migration orphan predicate.
 //
 // Symptom (sandbox, 2026-06): the bot's `base_url` was renamed from
-// `discord.layerv.xyz` → `discord.connector.layerv.xyz`. The registrar's
+// `discord.sandbox.example.com` → `discord.connector.example.com`. The registrar's
 // canonical-URL matcher correctly found ZERO subs at the new URL, so it
 // CREATED a fresh subscription. The OLD subscription stayed alive in
 // qurl-service — its secret unchanged, qurl-service kept trying to

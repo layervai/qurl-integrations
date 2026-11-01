@@ -13,7 +13,7 @@ test.each(['cell', ''])('captures exact detector child with cell_id=%s without c
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'detect-receipt-'));
   process.env.QURL_OWNERSHIP_RECEIPTS = path.join(dir, 'owned.jsonl');
   process.env.QURL_OWNERSHIP_VERIFIER = '/private/verifier';
-  process.env.QURL_PUBLIC_CONFIG_URL = 'https://qurl.link.layerv.xyz/';
+  process.env.QURL_PUBLIC_CONFIG_URL = 'https://qurl.link.example.layerv.xyz/';
   process.env.QURL_API_KEY = 'private-api-key';
   const { CRID_RESOURCE_ID: crid } = require('./helpers/qurl-fixtures');
   const minted = { crid, resource_id: 'r_owned', qurl_id: 'q_detector',
@@ -104,8 +104,8 @@ test('real SDK exposes the interception and exact-child revoke methods', () => {
 });
 
 
-test.each(['http://api.layerv.xyz', 'https://untrusted.example', 'https://user:pass@api.layerv.xyz',
-  'https://api.layerv.xyz/staging', 'https://api.layerv.xyz/?tenant=other', 'https://api.layerv.xyz/#other'])('preflight rejects %s before fetching owner identity', async endpoint => {
+test.each(['http://api.example.layerv.xyz', 'https://untrusted.example', 'https://user:pass@api.example.layerv.xyz',
+  'https://api.example.layerv.xyz/staging', 'https://api.example.layerv.xyz/?tenant=other', 'https://api.example.layerv.xyz/#other'])('preflight rejects %s before fetching owner identity', async endpoint => {
   process.env.DETECT_SMOKE_GUILD_ID = '1491271325791293611';
   delete process.env.DETECT_SMOKE_QURL_ID;
   for (const key of ['QURL_OWNERSHIP_VERIFIER', 'QURL_OWNERSHIP_RECEIPTS', 'QURL_PUBLIC_CONFIG_URL', 'QURL_ENDPOINT', 'QURL_API_KEY']) process.env[key] = 'configured';
