@@ -18,8 +18,18 @@ expiry, so a file you share today won't stay reachable forever.
 
 ## Installing
 
-The extension is distributed by your qURL operator. Install the build they
-give you:
+[**Install from the Chrome Web Store**](https://chromewebstore.google.com/detail/qurl-agent/icmdbkclledmbhbcjcjmckcokkgikjem),
+then pin the **qURL Agent** icon in your toolbar.
+
+The store currently lists version **1.0.3** (checked November 1, 2026). This
+source tree is version **1.1.0**. The usage and settings below describe the
+source build; the store build can have different controls and behavior.
+Check the listing for its current version and instructions.
+
+### Developer or operator-provided build
+
+To test this source version, or install an unpacked build from your qURL
+operator:
 
 1. Download or build the extension folder your operator provides (the
    unpacked `release/` directory).
@@ -47,7 +57,15 @@ Building the extension yourself is covered in the
 A few things worth knowing:
 
 - **Keep the popup open while uploading.** Clicking elsewhere or switching
-  windows closes the popup and cancels any upload still in progress.
+  windows closes the popup and cancels any upload still in progress. This is
+  a deliberate constraint for the current popup uploader. A background-worker
+  relay alone does not guarantee completion: [Chrome can stop a worker when
+  a fetch response takes more than 30 seconds](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle).
+- **Late insertion confirmation.** If the current draft insertion succeeds
+  after a timeout, an open popup corrects its status and asks you to check the
+  draft before inserting again. A completion from an older upload cannot
+  change the current upload's status. Closing the popup loses this live status;
+  check the draft before uploading the same file again.
 - **Gmail must be the active tab** in the focused window when you open the
   popup. A Gmail tab in a different window won't be picked up.
 - **Files are capped at 100 MB each.** Larger files are reported individually

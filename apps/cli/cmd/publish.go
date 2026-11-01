@@ -24,17 +24,20 @@ import (
 
 func publishCmd(opts *globalOpts) *cobra.Command {
 	var (
-		consumerMode      string
-		contractID        string
-		description       string
-		tags              []string
-		alias             string
-		connectorID       string
-		public            bool
-		private           bool
-		allowRequests     bool
-		allowedDeviceKeys []string
-		foreground        bool
+		consumerMode         string
+		stripeAccount        string
+		stripePrice          string
+		paymentAccessSeconds int64
+		contractID           string
+		description          string
+		tags                 []string
+		alias                string
+		connectorID          string
+		public               bool
+		private              bool
+		allowRequests        bool
+		allowedDeviceKeys    []string
+		foreground           bool
 	)
 
 	cmd := &cobra.Command{
@@ -118,6 +121,9 @@ owns the share and turns it off when it exits.`,
 			if err := setPublishConsumerPolicy(&access, consumerMode, contractID); err != nil {
 				return err
 			}
+			if err := setStripePayment(access.ConsumerAccess, stripeAccount, stripePrice, paymentAccessSeconds); err != nil {
+				return err
+			}
 
 			target, err := classifyPublishTarget(args[0])
 			if err != nil {
@@ -157,6 +163,9 @@ owns the share and turns it off when it exits.`,
 		},
 	}
 
+	cmd.Flags().StringVar(&stripeAccount, stripeAccountFlag, "", "connected publisher Stripe account")
+	cmd.Flags().StringVar(&stripePrice, stripePriceFlag, "", "Stripe price for paid contract access; LayerV collects 3%")
+	cmd.Flags().Int64Var(&paymentAccessSeconds, paymentAccessSecondsFlag, 0, "one-time access duration; zero lasts for the resource lifetime; subscriptions require zero")
 	cmd.Flags().StringVar(&consumerMode, "access", "", "private access mode: keys, invite_only, email_capture, review or contract")
 	cmd.Flags().StringVar(&contractID, "contract", "", "publisher contract identifier for contract access")
 	cmd.Flags().BoolVar(&public, "public", false, "let anyone who has the CRID open the resource (default: private, only you and the devices you allow)")
@@ -189,7 +198,7 @@ owns the share and turns it off when it exits.`,
 // resource.
 func publishAccessFlags(cmd *cobra.Command) []string {
 	var named []string
-	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", "access", "contract"} {
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", "access", consumerContract, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
 		flag := cmd.Flags().Lookup(name)
 		if flag == nil || !flag.Changed {
 			continue

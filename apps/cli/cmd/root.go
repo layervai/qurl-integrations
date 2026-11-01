@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -220,6 +221,15 @@ func Main(version string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	root, opts := newRoot(version, output.Detect(), lookForSavedSkill)
+	if command, _, err := root.Find(os.Args[1:]); err == nil {
+		for current := command; current != nil; current = current.Parent() {
+			if current.Name() == daemonCommandName {
+				// Include daemon subcommands while keeping normal command diagnostics unchanged.
+				slog.SetDefault(slog.New(slog.NewTextHandler(opts.streams.Err, nil)))
+				break
+			}
+		}
+	}
 	return run(ctx, root, opts)
 }
 
@@ -306,7 +316,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 			// Task Scheduler starts `daemon run` directly. Redirect before
 			// settings resolution so a malformed profile or environment value is
 			// present in the durable log on the first background start.
-			if cmd.Name() == "run" && cmd.Parent() != nil && cmd.Parent().Name() == "daemon" {
+			if cmd.Name() == "run" && cmd.Parent() != nil && cmd.Parent().Name() == daemonCommandName {
 				stdoutPath, err := cmd.Flags().GetString("job-stdout-log")
 				if err != nil {
 					return err
@@ -348,6 +358,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		shareCmd(opts),
 		grantsCmd(opts),
 		consumerAccessCmd(opts),
+		paymentsCmd(opts),
 		requestsCmd(opts),
 		approveCmd(opts),
 		denyCmd(opts),

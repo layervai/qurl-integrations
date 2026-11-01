@@ -22,11 +22,10 @@
  * already covered by smoke.test.ts).
  *
  * Also home to the knock-driven SINGLE-USE enforcement test ("a consumed
- * one-time link does not serve a second knock") — this file is the only
- * place a real consuming knock is driven (viewViaQurlLink); the URL-mint
- * suites can only exercise bare fetches, which don't run the SPA knock,
- * so their status checks pin counter coherence rather than enforcement
- * (URL-target knock coverage tracked in #951).
+ * one-time link does not serve a second knock"), driven by viewViaQurlLink. The
+ * URL-target equivalent lives in url-target-one-time.test.ts. Bare-fetch suites
+ * don't run the SPA knock, so their status checks pin counter coherence
+ * rather than enforcement.
  *
  * Also pins two render-at-mint security guarantees (#1027, EPIC #1019), in the
  * "distinct-per-viewer watermark + `_` route-label SNI" test below:
