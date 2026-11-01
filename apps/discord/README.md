@@ -321,3 +321,7 @@ Setup and install cookies use `__Host-` names with `Secure`, `HttpOnly`,
 `SameSite=Lax`, and `Path=/`. Use HTTPS (or browser-supported localhost) for
 local setup tests. Deploying this change invalidates older setup cookies;
 admins with an in-flight setup must start again.
+
+### Guild scope in the revoke menu
+
+In multi-tenant mode, `/qurl revoke` lists only sends recorded for the invoking guild. Legacy rows without `guild_id` stay hidden; the bot does not infer their guild from the sender. Both send-recording methods write the provided guild on each recipient row. Before live adoption, verify that retained rows have the scope needed for the menu or complete their approved retirement path. The sender-index search remains bounded to ten pages of 100 rows; heavy history in other guilds can exhaust that window. This change does not claim complete cross-guild history coverage or backfill legacy records.

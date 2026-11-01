@@ -2805,7 +2805,7 @@ async function executeSendPipeline(interaction, {
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
           }).catch(logIgnoredDiscordErr);
-          // Allow revoke retries; the stopped management card cannot accept Add.
+          // Release the in-process gate; retry from /qurl revoke after this card closes.
           // Durable revoking_at also protects other collectors/processes.
           revokeInFlight = false;
         } finally {

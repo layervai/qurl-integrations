@@ -778,6 +778,7 @@ async function getRecentSends(senderDiscordId, limit = 10, guildId) {
     // ScanIndexForward to true, revisit this — first-seen would
     // become oldest-wins which isn't what we want.
     for (const row of sendsRes.Items || []) {
+      // Missing guild scope also stays hidden; never infer ownership for legacy rows.
       // Filter before counting unique sends so other guilds cannot fill the menu.
       if (guildId !== undefined && row.guild_id !== guildId) continue;
       if (!metaBySendId.has(row.send_id)) {
