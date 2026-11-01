@@ -496,3 +496,103 @@ budget inside its 15-second backstop. Both paths stop new link admissions but
 skip the accepted-link drain to preserve session shutdown deadlines. Accepted
 work can be interrupted on those paths; this change does not establish complete
 shutdown safety for every gateway topology.
+
+## Sandbox application metadata
+
+Use the LayerV-owned sandbox Discord application, not the previous personal
+developer-portal app:
+
+- Application ID: `1511450217789128885`
+- Public Key: `f951fb4d407da2ac37ebb862f074e311d530b6e95940984695a320a1ac9f00ea`
+
+1. https://discord.com/developers/applications → `qURL (sandbox)`
+2. General Information → set the application name to **qURL (sandbox)**, upload
+   `assets/discord-app-icon.png`, add the description from
+   `discord-metadata.json`, and set the privacy/terms URLs listed there.
+3. Bot → set the bot username to `qURL` (`bot.username` in
+   `discord-metadata.json`); the application/profile branding remains
+   **qURL**. Upload `assets/discord-avatar.png`, and enable **Server Members
+   Intent** under Privileged Gateway Intents.
+4. Installation → default install settings should request `bot` and
+   `applications.commands` with permissions `2147503104` (View Channels, Send
+   Messages, Embed Links, Use Slash Commands).
+5. Copy the bot token.
+
+This script targets the sandbox app only. A production apply needs a separate
+reviewed metadata change.
+
+The repeatable metadata source of truth is `discord-metadata.json`. With a
+target bot token in `DISCORD_TOKEN`, operators can apply the bot/app fields
+that Discord exposes through API (`description`, `icon`, `cover_image`, tags,
+install params, bot username, avatar, and banner). The script refuses to run if
+the token belongs to any Discord application other than LayerV sandbox app
+`1511450217789128885`.
+
+The bot-user API receives `bot.username` exactly. An exact name match is complete
+regardless of the discriminator; case differences are applied as name changes.
+Discord keeps bots on their existing username system; this script does not wait
+for human-account username migration. See the [Discord developer guidance](https://support-dev.discord.com/hc/en-us/articles/13667755828631-Updating-Apps-to-Support-Unique-Usernames).
+
+```bash
+npm run apply-discord-metadata
+```
+
+Preview the API payload without making changes:
+
+```bash
+npm run apply-discord-metadata -- --dry-run
+```
+
+Unless `--skip-images` is set, dry-run verifies that every asset referenced by `discord-metadata.json`
+exists, can be read, stays under the local byte cap for its Discord surface,
+and matches the local dimension rules.
+
+For a repeat apply with unchanged images, use
+`npm run apply-discord-metadata -- --skip-images` (also works with `--dry-run`).
+This preserves all four stored images and does not read or upload local image
+files. Omit the flag for the first branding apply or after changing an asset.
+Discord CDN hashes are not source-file hashes, so the script does not guess
+whether local images match. Application text/install metadata is still applied
+on every run to restore the configured state; its log says "Applied" rather
+than claiming those fields changed.
+
+Run the live apply as an operator step after seeding the LayerV-owned token; do
+not wire it as an unconditional CI job until image/app PATCH idempotency lands
+in https://github.com/layervai/qurl-integrations/issues/588. Username and
+image updates are separate Discord `/users/@me` PATCHes, so respect
+`retry_after` and rerun instead of looping if either edit is rate-limited.
+
+After the live metadata apply, restart the bot with the same token/app pair
+so automatic command registration updates Discord's slash-command picker.
+Keep `DISCORD_CLIENT_ID` aligned with the metadata application
+ID; the script verifies the token's app, while command registration and invite
+links read the client ID from environment/SSM/infra wiring.
+
+Exit codes:
+- `0` — API fields applied, including the configured bot username `qURL`;
+  application/profile branding remains **qURL**.
+- `1` — invalid arguments, local configuration/assets, or a partial API apply.
+  Argument and local-validation failures occur before writes. After writes
+  start, warnings identify skipped fields; other fields can already be applied.
+  The script prints `retry_after` for rate-limited edits and does not retry them
+  automatically. Wait for that delay before rerunning.
+- `2` — API writes completed, but the application name still differs from
+  `discord-metadata.json`; update the name in Developer Portal.
+- `3` — fatal application metadata PATCH failure. The application fields did
+  not finish applying; earlier bot fields may already be applied. Inspect the
+  Discord response, wait for `retry_after` if
+  present, and rerun after fixing the API error.
+- `4` — pre-flight verification failed before writes. This includes identity
+  mismatches, network errors, timeouts and temporary API refusals. Check the
+  error first: fix a token/app mismatch, or wait for `retry_after` when the
+  failure is temporary. No fields were written by that run.
+
+Application name and legal URLs are Developer Portal-only. Discord's
+Edit Current Application API does not list legal URLs as writable fields, so
+verify the privacy and terms links directly in Developer Portal after editing
+them.
+
+The live apply uses Discord v10's documented current-user fields
+(`username`, `avatar`, `banner`) and current-application fields (`description`,
+`icon`, `cover_image`, `tags`, `install_params`); an application PATCH failure
+is fatal, while bot image failures are reported as partial applies.
