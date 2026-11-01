@@ -379,18 +379,10 @@ function effectiveGuildMemberCount(guild) {
   return guild?.memberCount ?? guild?.approximateMemberCount;
 }
 
-// Helper for the two pre-warm sites. Returns a Promise so the caller
-// can await before reading `guild.members.cache`. Swallows errors —
-// degraded expansion (parser sees a partial cache) is the correct
-// fallback for transient API blips; surfacing the failure to the user
-// would confuse them about a problem they can't act on. Hot-cache
-// short-circuit fires ONLY when `guild.memberCount` is present and
-// matched — see the inline comment at the gate for why
-// `approximateMemberCount` is deliberately not consulted here. The
-// populated cache is intentionally retained — discord.js `Collection`
-// has no LRU and eviction relies on `GUILD_MEMBER_REMOVE` gateway
-// events. Acceptable for our scale; revisit if a future regression in
-// gateway event delivery causes drift.
+// Prewarm before recipient expansion. A completed HTTP-only walk is reusable for
+// 60 seconds while its cache object and size remain unchanged. Failed/partial
+// walks never establish freshness; exact gateway member counts keep their gate.
+// shortcut: HTTP-only membership can lag by 60 seconds; use gateway churn events if tighter freshness is required.
 //
 // In-flight de-duplication via the `prewarmInFlight` map below: two
 // concurrent `/qurl send @everyone` invocations in the same guild from
@@ -399,15 +391,13 @@ function effectiveGuildMemberCount(guild) {
 // linearly. The map is keyed by `guild.id` so cross-guild calls still
 // proceed in parallel.
 const prewarmInFlight = new Map();
+const completedPrewarms = new WeakMap();
+const PREWARM_FRESH_MS = 60_000;
 // `logCtx` is spread first in every log payload below so explicit
 // fields after it (`guild_id`, `cache_size`, etc.) override any
 // matching key in the caller's `logCtx`. Don't put `guild_id` in
 // `logCtx` at call sites expecting it to win — it won't.
-async function prewarmGuildMembersCache(guild, logCtx) {
-  // Uniform Promise return shape regardless of which branch the caller
-  // hits — early-exit paths used to resolve `undefined`, which works
-  // for `await prewarmGuildMembersCache(...)` callers but would surprise
-  // a future caller that does `.then(...)`.
+async function prewarmGuildMembersCache(guild, logCtx, onProgress) {
   if (!guild || !guild.members || typeof guild.members.list !== 'function') return;
   const cacheSize = guild.members.cache?.size ?? 0;
   // Only short-circuit on EXACT `memberCount` (gateway tier). The
@@ -416,8 +406,7 @@ async function prewarmGuildMembersCache(guild, logCtx) {
   // calls from `resolveRecipientUsers`, an approximate-based gate could
   // fire prematurely and underresolve @everyone, re-introducing this
   // PR's original bug in a quieter form. http-only tier (no
-  // `memberCount`) accepts the perf cost of always paginating; the
-  // in-flight dedup below prevents concurrent invocations from stacking.
+  // `memberCount`) can only reuse a recently completed walk below.
   if (guild.memberCount != null && cacheSize >= guild.memberCount) {
     // Observability hook for the hot-cache short-circuit firing. Without
     // this, dashboards can't correlate "how often is the cache warm" with
@@ -427,9 +416,29 @@ async function prewarmGuildMembersCache(guild, logCtx) {
     });
     return;
   }
+  const listener = onProgress ? { notify: onProgress, pending: null } : null;
   const existing = prewarmInFlight.get(guild.id);
-  if (existing) return existing;
-  const inFlight = (async () => {
+  if (existing) {
+    if (listener) existing.progress.add(listener);
+    try { return await existing.promise; }
+    finally {
+      existing.progress.delete(listener);
+      await listener?.pending;
+    }
+  }
+  const completed = completedPrewarms.get(guild);
+  const age = completed ? Date.now() - completed.at : -1;
+  if (guild.memberCount == null && completed?.cache === guild.members.cache
+      && completed.size === cacheSize && age >= 0 && age < PREWARM_FRESH_MS) {
+    logger.debug('members pre-warm short-circuited (recent full walk)', {
+      ...logCtx, guild_id: guild.id, cache_size: cacheSize, age_ms: age,
+    });
+    return;
+  }
+  completedPrewarms.delete(guild);
+  const progress = new Set(listener ? [listener] : []);
+  // Defer the first SDK call until the in-flight entry exists, even on a synchronous throw.
+  const inFlight = Promise.resolve().then(async () => {
     try {
       // REST `GET /guilds/{id}/members` rather than `guild.members.fetch()`
       // (no args): the latter sends REQUEST_GUILD_MEMBERS over the gateway
@@ -459,6 +468,15 @@ async function prewarmGuildMembersCache(guild, logCtx) {
         // this PR fixes, and the cache-merge regression test can't
         // catch a class of failure where the mock differs from prod.
         const batch = await guild.members.list({ limit: DISCORD_MEMBERS_PAGE_SIZE, after, cache: true });
+        if (batch.size === DISCORD_MEMBERS_PAGE_SIZE && (page + 1) % 10 === 0 && progress.size > 0) {
+          const pages = page + 1;
+          for (const waiter of progress) {
+            if (waiter.pending) continue; // At most one edit per waiter; never queue stale progress.
+            waiter.pending = Promise.resolve().then(() => waiter.notify(pages)).catch(() => {
+              logger.warn('members pre-warm progress update failed', { caller: logCtx?.caller, pages });
+            }).finally(() => { waiter.pending = null; });
+          }
+        }
         if (batch.size < DISCORD_MEMBERS_PAGE_SIZE) break;
         // Collection is insertion-ordered against the API response, which
         // Discord sorts ascending by user_id — lastKey() is the right
@@ -497,6 +515,11 @@ async function prewarmGuildMembersCache(guild, logCtx) {
           ...logCtx, guild_id: guild.id, pages: PREWARM_MAX_PAGES, cache_size: guild.members.cache?.size,
         });
       } else if (!bailed) {
+        if (guild.members.cache && typeof guild.members.cache.size === 'number') {
+          completedPrewarms.set(guild, {
+            at: Date.now(), cache: guild.members.cache, size: guild.members.cache.size,
+          });
+        }
         // Successful-completion observability. Captures cache footprint
         // for large-guild memory tracking — paginating a 500k-member
         // guild persists 500k GuildMember objects in-process until the
@@ -515,9 +538,13 @@ async function prewarmGuildMembersCache(guild, logCtx) {
     } finally {
       prewarmInFlight.delete(guild.id);
     }
-  })();
-  prewarmInFlight.set(guild.id, inFlight);
-  return inFlight;
+  });
+  prewarmInFlight.set(guild.id, { promise: inFlight, progress });
+  try { return await inFlight; }
+  finally {
+    progress.delete(listener);
+    await listener?.pending;
+  }
 }
 
 function sanitizeMessage(msg) {
@@ -5496,7 +5523,9 @@ async function handleQurlSlashSend(interaction, params) {
     const hasMassMention = MASS_MENTION_HINT_RE.test(recipientsRaw || '');
     const hasRoleMention = ROLE_MENTION_HINT_RE.test(recipientsRaw || '');
     if (hasMassMention && (canMentionEveryone || hasRoleMention)) {
-      await prewarmGuildMembersCache(interaction.guild, { caller: 'handleQurlSlashSend' });
+      await prewarmGuildMembersCache(interaction.guild, { caller: 'handleQurlSlashSend' }, pages => interaction.editReply({
+        content: `Loading server members… ${pages * DISCORD_MEMBERS_PAGE_SIZE} checked.`,
+      }));
     }
     const parsed = parseRecipientMentions(recipientsRaw, interaction, {
       allowMassMention: canMentionEveryone,
