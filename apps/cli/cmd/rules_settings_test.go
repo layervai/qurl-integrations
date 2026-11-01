@@ -266,7 +266,7 @@ func TestPublishRuleOnceMintsAndRepublishMintsAgain(t *testing.T) {
 		t.Fatalf("mints = %d, want one per publish", len(mints))
 	}
 	for i, got := range mints {
-		if got["expires_in"] != "1h" || got["one_time_use"] != true {
+		if got["expires_in"] != "1h" || got["one_time_use"] != true || got["session_duration"] != "1h" {
 			t.Errorf("mint %d sent %v", i, got)
 		}
 	}

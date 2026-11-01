@@ -14,7 +14,7 @@
   ],
   "defaults": [
     {"id": "public", "label": "Anyone with the link", "summary": "Anyone who gets the link can open it.", "mode": "public"},
-    {"id": "once", "label": "Only the first person", "summary": "Works for whoever opens it first. Then it’s used up.", "mode": "public", "link_limits": {"one_time_use": true, "expires_in": "1h"}},
+    {"id": "once", "label": "Only the first person", "summary": "Works for whoever opens it first. Then it’s used up.", "mode": "public", "link_limits": {"one_time_use": true, "expires_in": "1h", "session_duration": "1h"}},
     {"id": "invite_only", "label": "People you invite", "summary": "Only the email addresses you add can open it.", "mode": "invite_only"},
     {"id": "review", "label": "People you approve", "summary": "They confirm their email and ask. You approve each person.", "mode": "review"}
   ],

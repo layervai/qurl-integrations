@@ -213,9 +213,10 @@ const OnlyFirstPersonID = "once"
 const OnlyFirstPersonLabel = "Only the first person"
 
 // OnlyFirstPerson is Anyone with the link on a single-use link that expires
-// like any temporary link. It is a preset, never saved as a rule.
+// like any temporary link. It is a preset, never saved as a rule; it matches
+// the catalog's defaults entry, which TestFrozenCatalogContract enforces.
 func OnlyFirstPerson() Definition {
-	return Definition{ID: OnlyFirstPersonID, Name: OnlyFirstPersonLabel, Mode: ModePublic, LinkLimits: &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}
+	return Definition{ID: OnlyFirstPersonID, Name: OnlyFirstPersonLabel, Mode: ModePublic, LinkLimits: &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true), SessionDuration: new("1h")}}
 }
 
 // IsOnlyFirstPerson reports whether selector names the preset by its ID or exact name.
