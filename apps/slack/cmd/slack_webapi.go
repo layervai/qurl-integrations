@@ -349,14 +349,14 @@ func newSlackWebAPIPoster(lookup slackBotTokenLookup, userAgent, url, op string,
 	return &slackWebAPIPoster{lookup: lookup, invalidate: invalidate, userAgent: userAgent, url: url, op: op, respErr: respErr, httpClient: httpClient}
 }
 
-// Keep request correlation at the root and lookup metadata in its own group.
-// Outside a request, preserve the existing flat process-log fields.
-func slackWebAPILogger(ctx context.Context) *slog.Logger {
-	logger := observability.Logger(ctx)
-	if logger != slog.Default() {
-		return logger.WithGroup("slack_api")
+// Keep diagnostics at the root; only lookup IDs can collide with request correlation.
+func slackOwnerLogAttrs(ctx context.Context, teamID, enterpriseID string) []slog.Attr {
+	team := slog.String("team_id", slackOwnerLogID(teamID))
+	enterprise := slog.String("enterprise_id", slackOwnerLogID(enterpriseID))
+	if _, scoped := observability.LoggerFromContext(ctx); scoped {
+		return []slog.Attr{slog.Group("slack_api", team, enterprise)}
 	}
-	return logger
+	return []slog.Attr{team, enterprise}
 }
 
 // postOnce resolves one owner's bot token (workspace team or, on the Grid fallback,
@@ -416,13 +416,11 @@ func (p *slackWebAPIPoster) gridPost(ctx context.Context, teamID, enterpriseID s
 	// Keep exact Slack owner IDs for diagnostics when they match Slack's owner ID
 	// alphabet; malformed IDs are replaced so this shared warning does not log
 	// arbitrary caller-controlled strings.
-	slackWebAPILogger(ctx).LogAttrs(
+	observability.Logger(ctx).LogAttrs(
 		ctx,
 		slog.LevelWarn,
 		"workspace Slack bot token missing; retrying with Enterprise Grid install token",
-		slog.String("op", p.op),
-		slog.String("team_id", slackOwnerLogID(teamID)),
-		slog.String("enterprise_id", slackOwnerLogID(enterpriseID)),
+		append(slackOwnerLogAttrs(ctx, teamID, enterpriseID), slog.String("op", p.op))...,
 	)
 	return p.postOnce(ctx, enterpriseID, body)
 }
@@ -592,16 +590,12 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 			fallbackLogSeen[fallbackLogKey] = struct{}{}
 		}
 		fallbackLogMu.Unlock()
-		logAttrs := []slog.Attr{
-			slog.String("team_id", slackOwnerLogID(teamID)),
-			slog.String("enterprise_id", slackOwnerLogID(enterpriseID)),
-			slog.String("error_code", errorCode),
-			slog.Any("error", err),
-		}
+		logAttrs := append(slackOwnerLogAttrs(ctx, teamID, enterpriseID),
+			slog.String("error_code", errorCode), slog.Any("error", err))
 		if fallbackLogAlreadySeen {
-			slackWebAPILogger(ctx).LogAttrs(ctx, slog.LevelDebug, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
+			observability.Logger(ctx).LogAttrs(ctx, slog.LevelDebug, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
 		} else {
-			slackWebAPILogger(ctx).LogAttrs(ctx, slog.LevelInfo, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
+			observability.Logger(ctx).LogAttrs(ctx, slog.LevelInfo, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
 		}
 		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {

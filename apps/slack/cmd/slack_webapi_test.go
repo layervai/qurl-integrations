@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1155,6 +1156,13 @@ func TestSlackWebAPIPosterGridFallbackWarningSanitizesOwnerIDs(t *testing.T) {
 		!strings.Contains(got, fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(enterpriseID))) {
 		t.Fatalf("fallback warning did not log sanitized owner markers: %s", got)
 	}
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["slack_api"] != nil || record["team_id"] != fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(teamID)) || record["op"] != "chat.postMessage" {
+		t.Fatalf("process log shape changed: %v", record)
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -1248,7 +1256,7 @@ func TestSlackPostMessageGridFallbackKeepsRequestCorrelation(t *testing.T) {
 	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
 		t.Fatalf("one structured warning required: %v", err)
 	}
-	for key, want := range map[string]string{"surface": "agent", "event_id": "event-test", "team_id": "T12345678", "enterprise_id": "E12345678", "level": "WARN"} {
+	for key, want := range map[string]string{"surface": "agent", "event_id": "event-test", "team_id": "T12345678", "enterprise_id": "E12345678", "level": "WARN", "op": "chat.postMessage"} {
 		if record[key] != want {
 			t.Errorf("%s = %v, want %s", key, record[key], want)
 		}
@@ -1267,7 +1275,10 @@ func TestSlackPostMessageGridFallbackKeepsRequestCorrelation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		key := token.(string)
+		key, ok := token.(string)
+		if !ok {
+			t.Fatalf("object key has type %T", token)
+		}
 		if keys[key] {
 			t.Fatalf("duplicate top-level log key %q", key)
 		}
@@ -1279,5 +1290,59 @@ func TestSlackPostMessageGridFallbackKeepsRequestCorrelation(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), testSlackValidationToken) {
 		t.Fatal("fallback log exposed a token")
+	}
+}
+
+func TestSlackMarkdownFallbackKeepsDiagnosticFieldsAtRoot(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		t.Run(strconv.FormatBool(scoped), func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := slog.New(observability.NewRedactingJSONHandler(&logs, nil))
+			previous := slog.Default()
+			slog.SetDefault(logger)
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			ctx := context.Background()
+			if scoped {
+				ctx = observability.WithLogger(ctx, logger.With("event_id", "event-test", "team_id", "T12345678"))
+			}
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if requests.Add(1) == 1 {
+					_, _ = w.Write([]byte(`{"ok":false,"error":"invalid_blocks"}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			t.Cleanup(server.Close)
+			post := newSlackPostMarkdownMessageFuncWithTokenLookup(func(context.Context, string) (string, error) {
+				return testSlackValidationToken, nil
+			}, testSlackValidationUA, server.URL, slackWebAPITestClient(server), nil)
+			if err := post(ctx, "T12345678", "E12345678", "C12345678", "100.1", "reply"); err != nil {
+				t.Fatal(err)
+			}
+			if requests.Load() != 2 {
+				t.Fatalf("requests = %d", requests.Load())
+			}
+			var record map[string]any
+			if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+				t.Fatal(err)
+			}
+			if record["error_code"] != "invalid_blocks" || record["error"] == nil {
+				t.Fatalf("diagnostics moved from root: %v", record)
+			}
+			_, grouped := record["slack_api"]
+			if grouped != scoped {
+				t.Fatalf("grouped IDs = %v, request logger = %v", grouped, scoped)
+			}
+			if record["team_id"] != "T12345678" {
+				t.Fatal("root team identity was lost")
+			}
+			if scoped && record["event_id"] != "event-test" {
+				t.Fatal("request event identity was lost")
+			}
+			if strings.Contains(logs.String(), testSlackValidationToken) {
+				t.Fatal("token in fallback log")
+			}
+		})
 	}
 }

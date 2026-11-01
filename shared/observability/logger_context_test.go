@@ -32,3 +32,16 @@ func TestRequestLoggerPreservesContextAndFallback(t *testing.T) {
 		t.Fatal("nil request logger must fall back")
 	}
 }
+
+func TestLoggerFromContextReportsPresenceInsteadOfLoggerIdentity(t *testing.T) {
+	for _, ctx := range []context.Context{context.Background(), WithLogger(context.Background(), nil)} {
+		if _, ok := LoggerFromContext(ctx); ok {
+			t.Fatal("missing logger reported present")
+		}
+	}
+	expected := slog.Default()
+	logger, ok := LoggerFromContext(WithLogger(context.Background(), expected))
+	if !ok || logger != expected {
+		t.Fatal("explicit process logger lost its context presence")
+	}
+}
