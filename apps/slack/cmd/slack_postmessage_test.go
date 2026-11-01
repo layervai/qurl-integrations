@@ -980,24 +980,29 @@ func TestSlackPostReplyTruncationIsNotCompleteDelivery(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
+			invalidations := 0
+			invalidate := func(string) { invalidations++ }
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				calls++
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, tc.body)
 			}))
 			defer srv.Close()
-			post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv), nil)
-			err := post(context.Background(), "T1", "", "C1", "parent.1", "complete fallback")
+			post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv), invalidate)
+			err := post(context.Background(), "T1", "E_grid", "C1", "parent.1", "complete fallback")
 			if (err != nil) != tc.wantError || calls != 1 {
 				t.Fatalf("completeness receipt err=%v calls=%d", err, calls)
 			}
-			strictBlocks := newSlackPostAgentMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv), nil)
-			if err := strictBlocks(context.Background(), "T1", "", "C1", "parent.1", nil, "complete fallback"); (err != nil) != tc.wantError || calls != 2 {
+			strictBlocks := newSlackPostAgentMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv), invalidate)
+			if err := strictBlocks(context.Background(), "T1", "E_grid", "C1", "parent.1", nil, "complete fallback"); (err != nil) != tc.wantError || calls != 2 {
 				t.Fatalf("agent block receipt err=%v calls=%d", err, calls)
 			}
-			ordinaryBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv), nil)
-			if err := ordinaryBlocks(context.Background(), "T1", "", "C1", "parent.1", nil, "ordinary message"); err != nil || calls != 3 {
+			ordinaryBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv), invalidate)
+			if err := ordinaryBlocks(context.Background(), "T1", "E_grid", "C1", "parent.1", nil, "ordinary message"); err != nil || calls != 3 {
 				t.Fatalf("ordinary block semantics changed err=%v calls=%d", err, calls)
+			}
+			if invalidations != 0 {
+				t.Fatal("posted incomplete reply invalidated a valid token")
 			}
 		})
 	}
