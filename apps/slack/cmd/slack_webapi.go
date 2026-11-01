@@ -405,10 +405,7 @@ func (p *slackWebAPIPoster) postOnce(ctx context.Context, ownerID string, body [
 // Returns the successful (or last) attempt's response body.
 func (p *slackWebAPIPoster) gridPost(ctx context.Context, teamID, enterpriseID string, body []byte) ([]byte, error) {
 	raw, err := p.postOnce(ctx, teamID, body)
-	if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-		return raw, err
-	}
-	if enterpriseID == "" || enterpriseID == teamID {
+	if !auth.SlackGridFallbackAllowed(teamID, enterpriseID, err) {
 		return raw, err
 	}
 	// Parity with openViewWithGridFallback's warn: a breadcrumb so an operator
@@ -966,10 +963,7 @@ func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLook
 	}
 	return func(ctx context.Context, teamID, enterpriseID, channelID string) (internal.ConversationInfo, error) {
 		info, err := get(ctx, teamID, channelID)
-		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-			return info, err
-		}
-		if enterpriseID == "" || enterpriseID == teamID {
+		if !auth.SlackGridFallbackAllowed(teamID, enterpriseID, err) {
 			return info, err
 		}
 		return get(ctx, enterpriseID, channelID)
@@ -1001,10 +995,7 @@ func newSlackAgentThreadHistoryFuncWithTokenLookup(lookup slackBotTokenLookup, u
 	}
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, oldestTS string) ([]internal.AgentThreadMessage, error) {
 		messages, err := read(ctx, teamID, channelID, threadTS, oldestTS)
-		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-			return messages, err
-		}
-		if enterpriseID == "" || enterpriseID == teamID {
+		if !auth.SlackGridFallbackAllowed(teamID, enterpriseID, err) {
 			return messages, err
 		}
 		return read(ctx, enterpriseID, channelID, threadTS, oldestTS)
@@ -1322,10 +1313,7 @@ func newSlackChannelMembershipFuncWithTokenLookup(lookup slackBotTokenLookup, us
 	}
 	return func(ctx context.Context, teamID, enterpriseID, channelID, userID string) (bool, error) {
 		member, err := isMember(ctx, teamID, channelID, userID)
-		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-			return member, err
-		}
-		if enterpriseID == "" || enterpriseID == teamID {
+		if !auth.SlackGridFallbackAllowed(teamID, enterpriseID, err) {
 			return member, err
 		}
 		return isMember(ctx, enterpriseID, channelID, userID)

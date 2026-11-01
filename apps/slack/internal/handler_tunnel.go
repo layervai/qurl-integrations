@@ -580,10 +580,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 // unchanged. Shared by the guided tunnel installer and `/qurl feedback`.
 func (h *Handler) openViewWithGridFallback(ctx context.Context, log *slog.Logger, teamID, enterpriseID, triggerID string, view []byte) error {
 	err := h.cfg.OpenView(ctx, teamID, triggerID, view)
-	if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-		return err
-	}
-	if enterpriseID == "" || enterpriseID == teamID {
+	if !auth.SlackGridFallbackAllowed(teamID, enterpriseID, err) {
 		return err
 	}
 	log.Warn("workspace Slack bot token missing; retrying modal with Enterprise Grid install token",
