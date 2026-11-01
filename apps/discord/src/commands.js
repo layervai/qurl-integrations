@@ -41,6 +41,7 @@ const {
   TRUST,
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
+  GUILD_WEBHOOK_PENDING_NOTICE,
 } = require('./constants');
 const {
   expiryToISO,
@@ -61,7 +62,7 @@ const { qurlApiErrorStatus } = require('./utils/qurl-errors');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
-const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
+const { linkGuildWebhookSubscriptionForSetup } = require('./guild-webhook-link');
 const {
   flowIdForInteraction,
   registerFlow,
@@ -4209,7 +4210,7 @@ async function handleSetupModal(interaction, { flow_id }) {
   await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE);
   logger.info('Guild API key configured', logFields);
 
-  fireAndForgetLinkGuildWebhookSubscription({
+  const webhookLinked = await linkGuildWebhookSubscriptionForSetup({
     guildId: interaction.guildId,
     apiKey: submittedKey,
     via: SETUP_VIA.PASTE,
@@ -4224,7 +4225,7 @@ async function handleSetupModal(interaction, { flow_id }) {
   // with /qurl-admin status; the saved-but-no-confirmation case is rare
   // and recoverable, the misleading-error case is not.
   return interaction.editReply({
-    content: SETUP_SUCCESS_MSG,
+    content: webhookLinked ? SETUP_SUCCESS_MSG : `${SETUP_SUCCESS_MSG}\n${GUILD_WEBHOOK_PENDING_NOTICE}`,
   }).catch(logIgnoredDiscordErr);
 }
 

@@ -30,7 +30,7 @@ jest.mock('../src/store', () => ({
 }));
 
 jest.mock('../src/guild-webhook-link', () => ({
-  fireAndForgetLinkGuildWebhookSubscription: jest.fn(),
+  linkGuildWebhookSubscriptionForSetup: jest.fn().mockResolvedValue(true),
 }));
 
 // commands.js still requires verifyStateBinding for the GitHub OAuth route;
@@ -56,7 +56,7 @@ const db = require('../src/store');
 const discord = require('../src/discord');
 const logger = require('../src/logger');
 const guildWebhookLink = require('../src/guild-webhook-link');
-const { AUDIT_EVENTS } = require('../src/constants');
+const { AUDIT_EVENTS, GUILD_WEBHOOK_PENDING_NOTICE } = require('../src/constants');
 const { signQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 const {
   QURL_OAUTH_SESSION_COOKIE,
@@ -430,7 +430,8 @@ describe('qurl-oauth routes', () => {
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
-    it('200s on happy path: mints key, persists, DMs admin, renders success with binding readout', async () => {
+    it.each([true, false])('persists setup and reports confirmed or pending view counting (linked=%s)', async (webhookLinked) => {
+      guildWebhookLink.linkGuildWebhookSubscriptionForSetup.mockResolvedValueOnce(webhookLinked);
       const state = signQurlOAuthState('guild-1', 'admin-2');
       const idTokenPayload = Buffer.from(JSON.stringify({ email: 'alice@layerv.test', sub: 'auth0|abc' })).toString('base64')
         .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -455,6 +456,14 @@ describe('qurl-oauth routes', () => {
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
+      const dm = discord.sendDM.mock.calls[0][1];
+      if (webhookLinked) {
+        expect(res.text).not.toContain(GUILD_WEBHOOK_PENDING_NOTICE);
+        expect(dm).not.toContain(GUILD_WEBHOOK_PENDING_NOTICE);
+      } else {
+        expect(res.text).toContain(GUILD_WEBHOOK_PENDING_NOTICE);
+        expect(dm).toContain(GUILD_WEBHOOK_PENDING_NOTICE);
+      }
       expect(res.text).toContain('/qurl send is ready');
       expect(res.text).not.toContain('/qurl map');
       expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', 'oauth');
@@ -566,7 +575,7 @@ describe('qurl-oauth routes', () => {
       expect(discord.sendDM).toHaveBeenCalledWith(
         'admin-2', expect.stringContaining('qURL is connected'),
       );
-      expect(guildWebhookLink.fireAndForgetLinkGuildWebhookSubscription)
+      expect(guildWebhookLink.linkGuildWebhookSubscriptionForSetup)
         .toHaveBeenCalledWith({
           guildId: 'guild-1',
           apiKey: 'lv_live_abc',

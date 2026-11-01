@@ -51,6 +51,7 @@ const { initHttpOnly } = require('./http-only-init');
 const eventConsumer = require('./event-consumer');
 const eventPublisher = require('./event-publisher');
 const webhookSubscriptions = require('./webhook-subscriptions');
+const { drainGuildWebhookSubscriptions, stopAcceptingGuildWebhookSubscriptions } = require('./guild-webhook-link');
 const { LOG_KINDS } = require('./constants');
 
 // Process role — selects which subset of the bot runs in this
@@ -659,6 +660,9 @@ async function gracefulShutdownTeardown({
   // actually running per process (combined + flag-on is rejected
   // at boot), so the sequencing matters only as documentation.
   await eventPublisher.stop();
+  // Finish accepted links before storage closes or gateway session state is sealed.
+  // Fatal shutdown must preserve its existing session-flush deadline.
+  if (awaitGatewayLeader) await drainGuildWebhookSubscriptions();
   // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
   // heartbeat tick during client.destroy() would race with the
   // WebSocketShard teardown and surface as a confusing "Sampler
@@ -692,7 +696,7 @@ async function gracefulShutdownTeardown({
   // built the hot-standby surface.
   //
   // Normal shutdown awaits both stop calls; a wedged final renew is bounded
-  // by runGracefulShutdown's 10 s force-exit. IDENTIFY-fatal shutdown still
+  // by runGracefulShutdown's 25 s normal force-exit. IDENTIFY-fatal shutdown still
   // invokes both idempotent stop methods to set their guards, but does not
   // await work parked behind manager.connect(). Earlier HTTP/publisher drains
   // can still consume the exit deadline before the session flush. A resumable
@@ -748,9 +752,13 @@ async function gracefulShutdown(code = 0, {
 } = {}) {
   return runGracefulShutdown({
     code,
+    // Keep 10s for prior teardown, 10s for links, and 5s for final storage close.
+    // TODO(upstream-contract): managed Fargate tasks allow 30s before SIGKILL.
+    ceilingMs: awaitGatewayLeader ? 25_000 : 10_000,
     claimShutdown: () => {
       if (isShuttingDown) return false;
       isShuttingDown = true;
+      stopAcceptingGuildWebhookSubscriptions();
       return true;
     },
     teardown: () => gracefulShutdownTeardown({
@@ -788,6 +796,7 @@ function gatewayFatalShutdown() {
 async function pushHandoffShutdown(code = 0) {
   if (isShuttingDown) return;
   isShuttingDown = true;
+  stopAcceptingGuildWebhookSubscriptions();
   await runPushHandoffShutdown({
     code, gatewayLeader, connectionWatchdog, eventPublisher, logger,
   });

@@ -458,6 +458,8 @@ module.exports = {
   // subscription. Without this flag, a missing shared secret makes guild
   // webhook linking fail closed instead of silently taking the rotation path.
   QURL_WEBHOOK_PURE_BYOK: process.env.QURL_WEBHOOK_PURE_BYOK === 'true',
+  // Bound setup response latency without canceling background subscription work.
+  QURL_WEBHOOK_SETUP_WAIT_MS: intEnv('QURL_WEBHOOK_SETUP_WAIT_MS', 3000, { strictInteger: true, min: 1, max: 5000 }),
 
   // qURL OAuth (Auth0) — for /qurl-admin setup admin consent flow.
   // When unset, /qurl-admin setup falls back to the legacy modal-paste path so the

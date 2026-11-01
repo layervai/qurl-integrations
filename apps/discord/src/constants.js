@@ -736,7 +736,10 @@ const LOG_KINDS = Object.freeze({
   UNHANDLED_REJECTION: 'unhandledRejection',
 });
 
+const GUILD_WEBHOOK_PENDING_NOTICE = 'View counting is not fully set up yet. Views may update more slowly. Run /qurl-admin setup again if this continues.';
+
 module.exports = {
+  GUILD_WEBHOOK_PENDING_NOTICE,
   COLORS,
   RESOURCE_TYPES,
   DM_STATUS,

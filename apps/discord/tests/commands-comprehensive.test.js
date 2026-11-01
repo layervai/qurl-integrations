@@ -115,7 +115,7 @@ jest.mock('../src/flow-state', () => ({
 
 jest.mock('../src/guild-webhook-link', () => ({
   linkGuildWebhookSubscription: jest.fn().mockResolvedValue({ ok: true, action: 'created' }),
-  fireAndForgetLinkGuildWebhookSubscription: jest.fn(),
+  linkGuildWebhookSubscriptionForSetup: jest.fn().mockResolvedValue(true),
 }));
 
 const crypto = require('crypto');
@@ -1662,6 +1662,18 @@ describe('handleSetupModal (dispatcher path)', () => {
         content: expect.stringContaining('503'),
       }),
     );
+  });
+
+  it('keeps the saved key and shows partial success when view counting is not confirmed', async () => {
+    const links = require('../src/guild-webhook-link');
+    const { GUILD_WEBHOOK_PENDING_NOTICE } = require('../src/constants');
+    links.linkGuildWebhookSubscriptionForSetup.mockResolvedValueOnce(false);
+    const interaction = makeModalInteraction();
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(mockDb.setGuildApiKey).toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: `${_test.SETUP_SUCCESS_MSG}\n${GUILD_WEBHOOK_PENDING_NOTICE}`,
+    }));
   });
 
   it('swallows Discord errors on the post-persist success reply', async () => {

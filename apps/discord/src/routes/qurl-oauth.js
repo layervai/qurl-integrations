@@ -7,7 +7,7 @@ const express = require('express');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
-const { AUDIT_EVENTS, SETUP_VIA } = require('../constants');
+const { AUDIT_EVENTS, SETUP_VIA, GUILD_WEBHOOK_PENDING_NOTICE } = require('../constants');
 const { sendDM } = require('../discord');
 const {
   verifyQurlOAuthState,
@@ -27,7 +27,7 @@ const {
   renderNotConfiguredPage,
   QURL_SETUP_AUTH_POLICY_REJECTED,
 } = require('../utils/oauth-not-configured');
-const { fireAndForgetLinkGuildWebhookSubscription } = require('../guild-webhook-link');
+const { linkGuildWebhookSubscriptionForSetup } = require('../guild-webhook-link');
 
 // Network-call timeouts. Centralized so a future tuning of "qurl-service
 // is slow under load" doesn't require a hunt-and-replace across both
@@ -84,7 +84,7 @@ function renderNotConfigured(res) {
 // (attacker's guild + victim's qURL email) so the victim can spot the
 // mismatch before /qurl send or /qurl map usage starts. PR #177 follow-up C.5 —
 // upgraded from the prior grey-prose subtext for visual prominence.
-function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
+function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail, webhookLinked }) {
   const details = [];
   if (guildId) details.push({ label: 'Discord guild', value: guildId });
   if (qurlAccountEmail) details.push({ label: 'qURL account', value: qurlAccountEmail });
@@ -98,7 +98,7 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
     // CTA folded into message so the "confirm before closing" cue
     // always rides next to the binding readout, including when the
     // qURL-account-email line is missing (JWKS verify failure).
-    message: `Confirm the binding below matches your server, then close this tab and return to Discord. ${readyCommandsPlain}`,
+    message: `Confirm the binding below matches your server, then close this tab and return to Discord. ${readyCommandsPlain}${webhookLinked ? '' : ' ' + GUILD_WEBHOOK_PENDING_NOTICE}`,
     details,
     type: 'success',
   }));
@@ -503,8 +503,8 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
 
   // 3a. Link webhook view counting: reuse the default owner or provision
-  //     a BYOK subscription. Fire-and-forget via the centralized helper.
-  fireAndForgetLinkGuildWebhookSubscription({
+  //     a BYOK subscription. Bound the page wait; timed-out work stays tracked.
+  const webhookLinked = await linkGuildWebhookSubscriptionForSetup({
     guildId, apiKey, via: SETUP_VIA.OAUTH, configuredBy: discordUserId,
   });
 
@@ -517,11 +517,12 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    matters for spotting binding mismatches in the rare confused-
   //    deputy edge case (see PR #177 review item 3).
   const dmLines = [`✅ **qURL is connected to your Discord server.** Your team can now use ${readyCommandsMarkdown}. All usage will be billed to your qURL account.`];
+  if (!webhookLinked) dmLines.push(GUILD_WEBHOOK_PENDING_NOTICE);
   if (keyPrefix) dmLines.push(`Key prefix: \`${keyPrefix}\``);
   sendDM(discordUserId, dmLines.join('\n'))
     .catch((err) => logger.warn('Failed to DM admin after qURL setup', { error: err?.message, discordUserId }));
 
-  return renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail });
+  return renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail, webhookLinked });
 });
 
 module.exports = router;
