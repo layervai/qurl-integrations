@@ -623,10 +623,17 @@ func TestAgentStreamer_DiscardedStreamTextFallsBackToAPostedReply(t *testing.T) 
 	// Slack and cannot be retracted — the case the fallback exists for.
 	const abandoned = "Let me look that up for you across this channel's res"
 	s.onDelta(abandoned)
+	s.onDelta(" short")
+	if s.pending.Len() == 0 {
+		t.Fatal("fixture must buffer unsent narration")
+	}
 
 	const reply = "I couldn't finish checking $docs in this channel."
 	if s.finalizeReply(&agent.Result{Reply: reply, Cutoff: agent.CutoffBudget, DiscardedStreamText: true}) {
 		t.Fatal("a turn that discarded streamed text must not claim the stream delivered the reply")
+	}
+	if s.pending.Len() != 0 {
+		t.Fatal("broken stream retained unsent narration")
 	}
 	if port.stops != 1 {
 		t.Fatalf("the partial stream must still be stopped, got stop=%d", port.stops)

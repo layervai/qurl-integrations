@@ -202,6 +202,7 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 		// together into one message — "Let me check the res" immediately followed by
 		// the real answer. Take the broken-stream fallback instead: stop what the user
 		// already saw, and let the caller post the complete answer as its own message.
+		s.pending.Reset()
 		s.broken = true // Abandoned narration also needs cleanup after a complete reply.
 		s.stop(ctx, nil)
 		return false

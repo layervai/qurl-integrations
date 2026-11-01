@@ -79,7 +79,7 @@ func (h *Handler) postAgentGeneratedReply(log *slog.Logger, env *slackEventEnvel
 	defer cancel()
 	if err := postBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, agentGeneratedReplyBlocks(text), strings.TrimSpace(text)); err != nil {
 		if errors.Is(err, ErrSlackMessageIncomplete) {
-			log.Warn("agent: reply posted without a complete receipt; keeping partial stream")
+			log.Warn("agent: reply posted without a complete receipt; not retrying")
 			return false
 		}
 		log.Warn("agent: post generated reply with feedback failed; falling back to text", "error", err)
