@@ -3258,7 +3258,7 @@ describe('handleAddRecipients — happy path (location)', () => {
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
     mockMintLinks.mockResolvedValueOnce([
       { qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
-      { qurl_id: 'q_2', qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
+      { qurl_id: 'q_2', qurl_link: 'https://other.example/2', resource_id: 'res-loc-new' },
     ]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
@@ -3271,6 +3271,8 @@ describe('handleAddRecipients — happy path (location)', () => {
       makeInteraction(), 'apikey',
     );
 
+    expect(mockSendDM.mock.calls[0][1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens q.test' });
+    expect(mockSendDM.mock.calls[1][1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens other.example' });
     expect(result.delivered).toBe(2);
     expect(result.failed).toBe(0);
     expect(result.msg).toMatch(/Added 2 recipients/);
@@ -4025,5 +4027,35 @@ describe('send-confirm audit correlation', () => {
     expect(new Set(dispatches.map(([, meta]) => meta.send_nonce))).toEqual(new Set([
       nonce === '0123456789abcdef' ? nonce : undefined,
     ]));
+  });
+});
+
+describe('destination footer — per-recipient failure isolation', () => {
+  it.each(['initial', 'add'])('persists a malformed link as failed while delivering its sibling (%s)', async (path) => {
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-new' });
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      resource_type: 'maps', actual_url: 'https://maps.example.com/x', expires_in: '30m',
+    });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_id: 'q_bad', qurl_link: 'not a URL', resource_id: 'res-new' },
+      { qurl_id: 'q_good', qurl_link: 'https://other.example/link', resource_id: 'res-new' },
+    ]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    const recipients = [
+      { id: 'u1', username: 'Alice', bot: false },
+      { id: 'u2', username: 'Bob', bot: false },
+    ];
+    if (path === 'initial') {
+      await executeSendPipeline(makeInteraction(), { ...makePipelineParams(), recipients });
+    } else {
+      const result = await handleAddRecipients('send-1', makeUsersCollection(recipients), makeInteraction(), 'apikey');
+      expect(result).toMatchObject({ delivered: 1, failed: 1 });
+    }
+    expect(mockSendDM).toHaveBeenCalledTimes(1);
+    expect(mockSendDM.mock.calls[0][0]).toBe('u2');
+    expect(mockSendDM.mock.calls[0][1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens other.example' });
+    expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith(expect.any(String), 'u1', 'failed');
+    expect(mockDb.markSendDMDelivered).toHaveBeenCalledWith(expect.any(String), 'u2', 'dm-c', 'dm-m');
   });
 });

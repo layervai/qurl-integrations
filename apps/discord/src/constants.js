@@ -21,8 +21,8 @@ const RESOURCE_TYPES = {
 
 // Trust signals surfaced on the per-recipient DM embed (sender provenance
 // + "is this real?" verify path). The destination domain in the footer
-// mirrors the host of the minted qURL — keep in lockstep with whatever
-// host qurl-service returns from POST /v1/qurls. The landing URL is the
+// defaults below apply only to embeds without a minted link. Linked embeds
+// derive their destination host from the link. The landing URL is the
 // public brand page first-time recipients can hit to verify qURL is a
 // real service before clicking Step Through.
 //
@@ -32,7 +32,6 @@ const RESOURCE_TYPES = {
 // real?", not "is this tenant real?"; routing through the canonical
 // brand page is the correct trust signal regardless of which host
 // served the link.
-//
 const TRUST = {
   LANDING_URL: 'https://layerv.ai/qurl/',
   DESTINATION_DOMAIN: 'qurl.link',
