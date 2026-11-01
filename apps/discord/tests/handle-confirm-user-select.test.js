@@ -55,6 +55,9 @@ describe('handleConfirmUserSelect', () => {
     const SKEW = 5;
     expect(callArgs.set_expires_at).toBeGreaterThanOrEqual(beforeSecs + SEND_FLOW_TTL_SECONDS - SKEW);
     expect(callArgs.set_expires_at).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS + SKEW);
+    expect(logger.audit).toHaveBeenCalledWith('send_confirm_picked', {
+      flow_id: 'fid', user_id: SENDER_ID, recipient_count: 1,
+    });
     expect(int.editReply).toHaveBeenCalled();
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Sending file/);
@@ -64,6 +67,7 @@ describe('handleConfirmUserSelect', () => {
     const int = makeSelectInteraction({ users: [] });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
+    expect(logger.audit).not.toHaveBeenCalledWith('send_confirm_picked', expect.anything());
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     expect(int.editReply).not.toHaveBeenCalled();
   });
@@ -229,6 +233,7 @@ describe('handleConfirmUserSelect', () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
     const int = makeSelectInteraction();
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(logger.audit).not.toHaveBeenCalledWith('send_confirm_picked', expect.anything());
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/),
     }));
@@ -247,6 +252,7 @@ describe('handleConfirmUserSelect', () => {
     mockTransitionFlow.mockRejectedValueOnce(new Error('ddb gone'));
     const int = makeSelectInteraction();
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(logger.audit).not.toHaveBeenCalledWith('send_confirm_picked', expect.anything());
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not save your pick/i),
       flags: 64,

@@ -4037,3 +4037,23 @@ test('slot-claim capacity rejection emits the count-only audit signal', async ()
     _test.setActiveFileSends(originalActive);
   }
 });
+
+describe('send-confirm audit correlation', () => {
+  test.each(['0123456789abcdef', 'legacy-or-secret'])('bounds the card reference for %s', async nonce => {
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' },
+      { qurl_id: 'q_aaaaaaaaaa2', qurl_link: 'https://q.test/2', resource_id: 'res-new' },
+    ]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+    await executeSendPipeline(makeInteraction(), makePipelineParams({
+      sendNonce: nonce, recipients: [{ id: 'u1', username: 'u1' }, { id: 'u2', username: 'u2' }],
+    }));
+    const dispatches = logger.audit.mock.calls.filter(([event]) => event === 'dispatch_sent');
+    expect(dispatches).toHaveLength(2);
+    expect(new Set(dispatches.map(([, meta]) => meta.send_nonce))).toEqual(new Set([
+      nonce === '0123456789abcdef' ? nonce : undefined,
+    ]));
+  });
+});

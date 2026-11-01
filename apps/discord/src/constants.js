@@ -215,6 +215,9 @@ const AUDIT_EVENTS = {
   // Payload counts are forensic only; the paired alarm counts both gates together.
   // TODO(upstream-contract): paired UploadRejectedCapacityCount filter in infra.
   UPLOAD_REJECTED_CAPACITY: 'upload_rejected_capacity',
+  SEND_CONFIRM_OPENED: 'send_confirm_opened',
+  SEND_CONFIRM_CANCELLED: 'send_confirm_cancelled',
+  SEND_CONFIRM_PICKED: 'send_confirm_picked',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',
   // DISPATCH_SENT_NO_REFS fires when sendDM resolved ok:true but the

@@ -77,3 +77,29 @@ describe('handleConfirmCancelClick', () => {
     );
   });
 });
+
+describe('send-confirm cancel audit', () => {
+  test('records dwell from original creation after the atomic delete wins', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const int = makeInteraction();
+    await handleConfirmCancelClick(int, { flow_id: 'fid', row: {
+      version: 3, created_at: now - 60, expires_at: now + 180,
+    } });
+    expect(logger.audit).toHaveBeenCalledWith('send_confirm_cancelled', {
+      flow_id: 'fid', user_id: SENDER_ID, dwell_seconds: expect.any(Number),
+    });
+    const dwell = logger.audit.mock.calls.find(([event]) => event === 'send_confirm_cancelled')[1].dwell_seconds;
+    expect(dwell).toBeGreaterThanOrEqual(60);
+    expect(dwell).toBeLessThan(65);
+  });
+  test.each(['lost', 'throw'])('%s delete does not count cancellation', async failure => {
+    if (failure === 'lost') mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
+    else mockDeleteFlow.mockRejectedValueOnce(new Error('unavailable'));
+    await handleConfirmCancelClick(makeInteraction(), { flow_id: 'fid', row: { version: 3 } });
+    expect(logger.audit).not.toHaveBeenCalledWith('send_confirm_cancelled', expect.anything());
+  });
+  test.each([undefined, -1, Number.MAX_SAFE_INTEGER, Date.now()])('omits invalid creation time %s', async created_at => {
+    await handleConfirmCancelClick(makeInteraction(), { flow_id: 'fid', row: { version: 3, created_at } });
+    expect(logger.audit).toHaveBeenCalledWith('send_confirm_cancelled', { flow_id: 'fid', user_id: SENDER_ID });
+  });
+});
