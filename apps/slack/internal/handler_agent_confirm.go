@@ -15,6 +15,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 // Confirm-card button action_ids. Distinct from every slash-command button so a
@@ -347,7 +348,7 @@ func (h *Handler) postAgentConfirmScoped(log *slog.Logger, env *slackEventEnvelo
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
+	ctx, cancel := context.WithTimeout(observability.WithLogger(h.baseCtx, log), agentDeliveryBudget)
 	defer cancel()
 	if err := h.cfg.AgentStore.PutPendingAction(ctx, env.TeamID, id, blob); err != nil {
 		log.Error("agent confirm: store pending action failed", "error", err)
@@ -435,6 +436,7 @@ func (h *Handler) handleAgentConfirmClick(w http.ResponseWriter, payload *intera
 	log := slog.With(
 		"surface", "agent_confirm",
 		"team_id", payload.Team.ID,
+		"enterprise_id", payload.Enterprise.ID,
 		"channel_id", payload.Channel.ID,
 		"user_id", payload.User.ID,
 		"approve", approve,
@@ -937,6 +939,7 @@ func deliverConfirmSeam(log *slog.Logger, seam string, wired bool, post func() e
 // deliverConfirmDM posts the private payload into a 1:1 DM conversation: the Enter
 // Portal blocks via PostMessageBlocks when present, else the text via PostMessage.
 func (h *Handler) deliverConfirmDM(ctx context.Context, log *slog.Logger, payload *interactionPayload, threadTS, text string, blocks []any) bool {
+	ctx = observability.WithLogger(ctx, log)
 	team, ent, channel := payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID
 	if blocks != nil {
 		return deliverConfirmSeam(log, "PostMessageBlocks", h.cfg.PostMessageBlocks != nil, func() error {
@@ -952,6 +955,7 @@ func (h *Handler) deliverConfirmDM(ctx context.Context, log *slog.Logger, payloa
 // ephemeral: the Enter Portal blocks via PostEphemeralBlocks when present, else
 // the text via PostEphemeral.
 func (h *Handler) deliverConfirmEphemeral(ctx context.Context, log *slog.Logger, payload *interactionPayload, threadTS, text string, blocks []any) bool {
+	ctx = observability.WithLogger(ctx, log)
 	team, ent, channel, user := payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, payload.User.ID
 	if blocks != nil {
 		return deliverConfirmSeam(log, "PostEphemeralBlocks", h.cfg.PostEphemeralBlocks != nil, func() error {

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 // agentStreamFlushBytes coalesces text deltas: the streamer buffers until it has at least
@@ -32,7 +33,7 @@ func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, e
 		return nil
 	}
 	return &agentReplyStreamer{
-		ctx:             ctx,
+		ctx:             observability.WithLogger(ctx, log),
 		baseCtx:         h.baseCtx,
 		log:             log,
 		port:            h.cfg.AgentStream,
@@ -180,7 +181,7 @@ func (s *agentReplyStreamer) stop(ctx context.Context, blocks []any) {
 // stream unfinished. Mirrors postAgentReply, which delivers off h.baseCtx with
 // the same agentDeliveryBudget.
 func (s *agentReplyStreamer) deliveryCtx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(s.baseCtx, agentDeliveryBudget)
+	return context.WithTimeout(observability.WithLogger(s.baseCtx, s.log), agentDeliveryBudget)
 }
 
 // finalizeReply finalizes a SUCCESSFUL turn and reports whether the stream delivered the
