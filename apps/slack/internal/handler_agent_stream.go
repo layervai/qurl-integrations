@@ -259,6 +259,20 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 	return result.Proposal == nil
 }
 
+// discardBrokenPartial runs only after the complete non-proposal fallback was posted.
+func (s *agentReplyStreamer) discardBrokenPartial(deliveredReply bool) {
+	if s == nil || !deliveredReply || !s.broken || s.streamTS == "" {
+		return
+	}
+	ctx, cancel := s.deliveryCtx()
+	defer cancel()
+	if err := s.port.DeleteStream(ctx, s.teamID, s.enterprise, s.channelID, s.streamTS); err != nil {
+		s.log.Warn("agent: could not remove abandoned partial stream", "error", err)
+		return
+	}
+	s.streamTS = ""
+}
+
 // finalizeError finalizes a FAILED turn and reports whether it was handled (so the caller
 // skips posting an error reply). A HEALTHY live stream's already-delivered partial stands —
 // deltas are never rolled back (agent.WithStreamSink) — so we flush the buffered tail, stop,

@@ -672,12 +672,13 @@ type AgentStreamStart struct {
 // token (enterpriseID for Grid token resolution). StartStream opens a stream on a
 // thread and returns the stream message's ts — the handle AppendStream/StopStream
 // address. AppendStream appends a markdown chunk; StopStream finalizes the message.
-// A nil port keeps the agent on the non-streaming post path; all three require the
-// assistant:write scope.
+// A nil port keeps the agent on the non-streaming post path. DeleteStream uses
+// the existing chat:write permission only after a full fallback reply is confirmed.
 type AgentStreamPort interface {
 	StartStream(ctx context.Context, start *AgentStreamStart) (streamTS string, err error)
 	AppendStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS, markdownText string) error
 	StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string, blocks []any) error
+	DeleteStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string) error
 }
 
 // ResolveChannelNameFunc resolves a channel id to its human name via

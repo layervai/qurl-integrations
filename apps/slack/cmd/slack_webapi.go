@@ -798,21 +798,23 @@ func newSlackAppHomePublishFuncWithTokenLookup(lookup slackBotTokenLookup, userA
 }
 
 const (
-	slackChatStartStreamURL  = "https://slack.com/api/chat.startStream"
-	slackChatAppendStreamURL = "https://slack.com/api/chat.appendStream"
-	slackChatStopStreamURL   = "https://slack.com/api/chat.stopStream"
+	slackChatStartStreamURL   = "https://slack.com/api/chat.startStream"
+	slackChatAppendStreamURL  = "https://slack.com/api/chat.appendStream"
+	slackChatStopStreamURL    = "https://slack.com/api/chat.stopStream"
+	slackChatDeleteMessageURL = "https://slack.com/api/chat.delete"
 )
 
 // slackAgentStreamPort implements [internal.AgentStreamPort] over Slack's native AI-app
-// streaming. startStream reads the response for the stream ts; appendStream/stopStream
-// are fire-and-forget. All three share the per-team token lookup + Grid fallback poster.
+// streaming. Start returns the stream handle; append, stop and delete check Slack receipts.
+// All four share the per-team token lookup, invalidation and Grid fallback poster.
 type slackAgentStreamPort struct {
 	start *slackWebAPIPoster
 	appnd *slackWebAPIPoster
 	stop  *slackWebAPIPoster
+	del   *slackWebAPIPoster
 }
 
-func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, startURL, appendURL, stopURL string, httpClient *http.Client, invalidate func(string)) internal.AgentStreamPort {
+func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, startURL, appendURL, stopURL, deleteURL string, httpClient *http.Client, invalidate func(string)) internal.AgentStreamPort {
 	if httpClient == nil {
 		// One shared client across start/append×N/stop so a streamed turn's verb sequence
 		// reuses keep-alive connections (parity with the assistant/reactions ports).
@@ -827,6 +829,7 @@ func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgen
 		start: mk(startURL, "chat.startStream"),
 		appnd: mk(appendURL, "chat.appendStream"),
 		stop:  mk(stopURL, "chat.stopStream"),
+		del:   mk(deleteURL, "chat.delete"),
 	}
 }
 
@@ -886,6 +889,17 @@ func (p *slackAgentStreamPort) StopStream(ctx context.Context, teamID, enterpris
 		return fmt.Errorf("chat.stopStream request marshal: %w", err)
 	}
 	return p.stop.post(ctx, teamID, enterpriseID, body)
+}
+
+func (p *slackAgentStreamPort) DeleteStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string) error {
+	body, err := json.Marshal(struct {
+		Channel string `json:"channel"`
+		TS      string `json:"ts"`
+	}{Channel: channelID, TS: streamTS})
+	if err != nil {
+		return fmt.Errorf("chat.delete request marshal: %w", err)
+	}
+	return p.del.post(ctx, teamID, enterpriseID, body)
 }
 
 // slackResolveChannelNameFromConversationInfo projects the conversations.info seam
@@ -1424,14 +1438,26 @@ func slackWebAPIResponseError(op string, benign map[string]struct{}, statusCode 
 		return err
 	}
 	var out struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
+		OK               bool   `json:"ok"`
+		Error            string `json:"error"`
+		Warning          string `json:"warning"`
+		ResponseMetadata struct {
+			Warnings []string `json:"warnings"`
+		} `json:"response_metadata"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		if snippet := slackAPIBodySnippet(raw); snippet != "" {
 			return fmt.Errorf("%s response JSON: %w: %s", op, err, snippet)
 		}
 		return fmt.Errorf("%s response JSON: %w", op, err)
+	}
+	if out.OK && op == "chat.postMessage" {
+		warnings := append(strings.Split(out.Warning, ","), out.ResponseMetadata.Warnings...)
+		for _, warning := range warnings {
+			if strings.TrimSpace(warning) == "message_truncated" {
+				return &slackWebAPIError{op: op, code: "message_truncated"}
+			}
+		}
 	}
 	return slackWebAPIResponseFieldsError(op, benign, header, out.OK, out.Error)
 }

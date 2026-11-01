@@ -65,17 +65,17 @@ func (h *Handler) agentFeedbackEnabled() bool {
 // postAgentGeneratedReply preserves the existing text/Markdown delivery seam
 // when feedback is not wired. When it is wired, it posts the answer and native
 // feedback buttons atomically so no generated response can lose its affordance.
-func (h *Handler) postAgentGeneratedReply(log *slog.Logger, env *slackEventEnvelope, threadTS, text string, fallback PostMessageFunc) {
+func (h *Handler) postAgentGeneratedReply(log *slog.Logger, env *slackEventEnvelope, threadTS, text string, fallback PostMessageFunc) bool {
 	if !h.agentFeedbackEnabled() || h.cfg.PostMessageBlocks == nil {
-		h.deliverAgentText(log, env, threadTS, text, fallback)
-		return
+		return h.deliverAgentText(log, env, threadTS, text, fallback)
 	}
 	ctx, cancel := context.WithTimeout(observability.WithLogger(h.baseCtx, log), agentDeliveryBudget)
 	defer cancel()
 	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, agentGeneratedReplyBlocks(text), strings.TrimSpace(text)); err != nil {
 		log.Warn("agent: post generated reply with feedback failed; falling back to text", "error", err)
-		h.deliverAgentText(log, env, threadTS, text, fallback)
+		return h.deliverAgentText(log, env, threadTS, text, fallback)
 	}
+	return true
 }
 
 // postAgentProposalPreview keeps each renderer on its own escaping regime:

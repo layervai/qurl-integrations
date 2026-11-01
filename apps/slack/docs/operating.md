@@ -1200,3 +1200,7 @@ filter event = "async_pool_rejected"
 ```
 
 This event counts shared-pool rejections, including the slash-command busy acknowledgment. It does not count every command failure or rejection from a separate follow-up gate. Group by `command` when you need the slash-command breakdown; rejections without that field appear in an empty group. Check request latency and dependency health before raising concurrency limits.
+
+### Broken agent stream cleanup (#709)
+
+If native streaming breaks, the bot posts the complete non-proposal reply before deleting its abandoned partial bubble. Both the text path and the feedback-block path must confirm complete delivery. Slack's `message_truncated` warning is a failed completeness receipt, even when `ok` is true. A failed fallback keeps the partial; a failed delete leaves the confirmed full reply and logs a cleanup warning. Healthy streams, proposal narration, blank replies, and failed-start attempts are not cleanup targets. Cleanup uses the bot's existing `chat:write` permission and a bounded delivery context. This source change does not enable streaming or authorize a live Slack test.

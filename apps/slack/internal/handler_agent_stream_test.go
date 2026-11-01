@@ -32,13 +32,19 @@ const (
 )
 
 type recordingStreamPort struct {
-	startErr   error
-	appendErr  error
-	startCalls int
-	starts     []AgentStreamStart
-	appends    []string
-	stops      int
-	stopBlocks []any
+	appendErrAfter int
+	deleteCtxErr   error
+	startErr       error
+	appendErr      error
+	startCalls     int
+	starts         []AgentStreamStart
+	appends        []string
+	stops          int
+	stopBlocks     []any
+	deletes        int
+	deleteErr      error
+	deletedTS      []string
+	onDelete       func()
 }
 
 func (r *recordingStreamPort) StartStream(_ context.Context, start *AgentStreamStart) (string, error) {
@@ -53,7 +59,7 @@ func (r *recordingStreamPort) StartStream(_ context.Context, start *AgentStreamS
 }
 
 func (r *recordingStreamPort) AppendStream(_ context.Context, _, _, _, _, markdownText string) error {
-	if r.appendErr != nil {
+	if r.appendErr != nil && len(r.appends) >= r.appendErrAfter {
 		return r.appendErr
 	}
 	r.appends = append(r.appends, markdownText)
@@ -64,6 +70,16 @@ func (r *recordingStreamPort) StopStream(_ context.Context, _, _, _, _ string, b
 	r.stops++
 	r.stopBlocks = blocks
 	return nil
+}
+
+func (r *recordingStreamPort) DeleteStream(ctx context.Context, _, _, _, streamTS string) error {
+	r.deletes++
+	r.deleteCtxErr = ctx.Err()
+	r.deletedTS = append(r.deletedTS, streamTS)
+	if r.onDelete != nil {
+		r.onDelete()
+	}
+	return r.deleteErr
 }
 
 func (r *recordingStreamPort) appended() string { return strings.Join(r.appends, "") }
@@ -619,5 +635,106 @@ func TestAgentStreamer_DiscardedStreamTextFallsBackToAPostedReply(t *testing.T) 
 	}
 	if got := port.appended(); got != abandoned {
 		t.Fatalf("only the already-delivered fragment should have reached Slack, got %q", got)
+	}
+}
+
+func TestProcessAgentEvent_BrokenStreamCleanupWaitsForCompleteFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name                           string
+		feedback, blocksFail, textFail bool
+		wantDeletes                    int
+	}{
+		{name: "text delivered", wantDeletes: 1},
+		{name: "text failed", textFail: true},
+		{name: "feedback delivered", feedback: true, wantDeletes: 1},
+		{name: "feedback fallback delivered", feedback: true, blocksFail: true, wantDeletes: 1},
+		{name: "both posts failed", feedback: true, blocksFail: true, textFail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reply := strings.Repeat("This is the complete answer. ", 24)
+			port := &recordingStreamPort{appendErr: errors.New("append failed"), appendErrAfter: 1}
+			llm := &handlerStreamingLLM{responses: []agent.Response{{Text: reply, StopReason: testAgentStreamEndTurn}}}
+			h, _, _ := newStreamingAgentHandler(llm, port, nil)
+			posted := false
+			postText := func(_ context.Context, _, _, _, _, text string) error {
+				if port.deletes != 0 {
+					t.Fatal("partial was deleted before full fallback delivery")
+				}
+				if text != agentLLMReplyWithDisclaimer(hardenAgentMarkdown(reply)) {
+					t.Fatalf("fallback was incomplete: %q", text)
+				}
+				if tc.textFail {
+					return errors.New("fallback post failed")
+				}
+				posted = true
+				return nil
+			}
+			h.cfg.PostMessage = postText
+			h.cfg.PostMarkdownMessage = postText
+			if tc.feedback {
+				h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+				h.cfg.PostFeedback = func(context.Context, []byte) error { return nil }
+				h.cfg.PostMessageBlocks = func(_ context.Context, _, _, _, _ string, _ []any, fallback string) error {
+					if port.deletes != 0 {
+						t.Fatal("partial was deleted before block delivery")
+					}
+					if fallback != strings.TrimSpace(agentLLMReplyWithDisclaimer(hardenAgentMarkdown(reply))) {
+						t.Fatal("block fallback was incomplete")
+					}
+					if tc.blocksFail {
+						return errors.New("block post failed")
+					}
+					posted = true
+					return nil
+				}
+			}
+			port.onDelete = func() {
+				if !posted || port.stops == 0 {
+					t.Fatal("cleanup preceded stop or confirmed fallback")
+				}
+			}
+			e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> what can I reach?")
+			e.Event.UserTeam = "T_user"
+			h.processAgentEvent(context.Background(), slog.Default(), e)
+			if len(port.appends) != 1 || port.stops != 1 {
+				t.Fatalf("did not create a real partial before failure: %+v", port)
+			}
+			if port.deletes != tc.wantDeletes {
+				t.Fatalf("delete calls=%d want=%d", port.deletes, tc.wantDeletes)
+			}
+			if port.deletes > 0 && (len(port.deletedTS) != 1 || port.deletedTS[0] != "stream.1" || port.deleteCtxErr != nil) {
+				t.Fatalf("cleanup targeted wrong stream or used an expired context: %+v", port)
+			}
+		})
+	}
+}
+
+func TestAgentStreamerCleanupPreservesHealthyAndFailedDeletion(t *testing.T) {
+	port := &recordingStreamPort{deleteErr: errors.New("delete failed")}
+	s := newTestStreamer(port)
+	s.streamTS = "own.partial"
+	s.discardBrokenPartial(true)
+	if port.deletes != 0 {
+		t.Fatal("healthy stream was deleted")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.ctx = ctx
+	s.broken = true
+	s.discardBrokenPartial(false)
+	if port.deletes != 0 {
+		t.Fatal("unconfirmed fallback deleted the partial")
+	}
+	var absent *agentReplyStreamer
+	absent.discardBrokenPartial(true)
+	s.discardBrokenPartial(true)
+	if port.deletes != 1 || s.streamTS != "own.partial" || port.deleteCtxErr != nil {
+		t.Fatal("failed cleanup lost the handle or used canceled turn context")
+	}
+	port.deleteErr = nil
+	s.discardBrokenPartial(true)
+	s.discardBrokenPartial(true)
+	if port.deletes != 2 || s.streamTS != "" {
+		t.Fatal("successful cleanup was not idempotent")
 	}
 }
