@@ -16,7 +16,7 @@ jest.mock('../src/qurl', () => ({
   revokeResource: jest.fn().mockResolvedValue({}),
 }));
 
-const TOKENS = 10; // MINT_BATCH_SIZE, asserted against the export below.
+const BATCH_SIZE = 10; // MINT_BATCH_SIZE, asserted against the export below.
 
 let tmpFile;
 
@@ -76,9 +76,9 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
-describe('runRound accounting — pool depth', () => {
+describe('runRound accounting — request batch size', () => {
   it('agrees with the constant the batch plan is built from', () => {
-    expect(loadWithCount(10).MINT_BATCH_SIZE).toBe(TOKENS);
+    expect(loadWithCount(10).MINT_BATCH_SIZE).toBe(BATCH_SIZE);
   });
 });
 

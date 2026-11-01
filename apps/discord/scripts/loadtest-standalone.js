@@ -176,7 +176,7 @@ const {
 
 // The same request batch size as the send pipeline — imported, not
 // copied, so a change to the cap reaches this script instead of silently
-// leaving it issuing a different number of uploads than a real send.
+// leaving it issuing a different number of mint requests than a real send.
 const { MINT_BATCH_SIZE } = require('../src/constants');
 
 const args = process.argv.slice(2);
@@ -2114,7 +2114,7 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
 
 /**
  * Batch plan for minting `count` links in bounded requests
- * deep — the load-test mirror of mintLinksInBatches in ../src/commands.js.
+ * — the load-test mirror of mintLinksInBatches in ../src/commands.js.
  *
  * Extracted as a pure function because scripts/ sits outside this app's jest
  * `collectCoverageFrom`, so loop logic left inline here is unenforced. The plan
@@ -2143,6 +2143,7 @@ async function runRound(roundNum) {
   const results = {
     fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0,
     uploadMs: 0, mintMs: 0, locMs: 0,
+    // Kept for historical report inputs; new rounds never re-upload between batches.
     reuploads: 0, reuploadFail: 0, reuploadMs: 0,
     // True when the round stopped before doing everything it planned —
     // anywhere. Present and false rather than absent, so a round object's

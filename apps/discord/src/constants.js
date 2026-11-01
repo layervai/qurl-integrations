@@ -92,6 +92,7 @@ const MAX_FILE_SIZE = 25 * 1024 * 1024;
 // Bound each connector mint request; this is not a per-resource quota.
 const MINT_BATCH_SIZE = 10;
 // TODO(upstream-contract): shared SDK/connector child-revoke request cap.
+// Connector revoke chunks must never exceed this SDK cap.
 const REVOKE_BATCH_MAX_IDS = 10;
 // Over-minted children beyond the requested count that mint-failure
 // compensation still revokes (commands.js 2xx path and connector.js non-2xx

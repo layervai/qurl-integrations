@@ -2954,6 +2954,7 @@ async function executeSendPipeline(interaction, {
 }
 
 // Keep cleanup failures isolated to one transport-sized batch, even under one parent.
+// Each job owns its route probe; a failed job cannot skip later children.
 function cleanupBatchesByResource(idsByResource) {
   const batches = [];
   for (const [resourceId, ids] of idsByResource) {

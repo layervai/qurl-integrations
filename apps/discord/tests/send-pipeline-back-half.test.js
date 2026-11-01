@@ -3731,6 +3731,23 @@ describe('mintLinksInBatches', () => {
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_idonly'], 'apikey');
   });
 
+  it('attempts later mint-failure cleanup batches after one revoke job fails', async () => {
+    const failure = Object.assign(new Error('mint failed'), { apiCode: 'quota_exceeded' });
+    const ids = Array.from({ length: 30 }, (_, i) => `q_cleanup${i}`);
+    for (let i = 0; i < ids.length; i += 10) {
+      mockMintLinks.mockResolvedValueOnce(ids.slice(i, i + 10).map(qurl_id => ({
+        qurl_id, qurl_link: `https://q.test/${qurl_id}`, expires_at: new Date(Date.now() + 86400000).toISOString(),
+      })));
+    }
+    mockMintLinks.mockRejectedValueOnce(failure);
+    mockRevokeMintedLinks.mockRejectedValueOnce(new Error('first cleanup job failed'));
+    await expect(mintLinksInBatches({ initialResourceId: 'res-1', recipientCount: 31, apiKey: 'apikey', expiresAt: new Date().toISOString() })).rejects.toBe(failure);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
+    expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toEqual(ids);
+    expect(mockRevokeMintedLinks.mock.calls.every(([resourceId, ids]) => resourceId === 'res-1' && ids.length <= 10)).toBe(true);
+    expect(logger.error).toHaveBeenCalledWith('Failed to revoke links after a mint failure', expect.objectContaining({ failed_count: 1, total: 3 }));
+  });
+
   it('stops waiting on compensation at its budget and still surfaces the mint error', async () => {
     jest.useFakeTimers();
     try {
