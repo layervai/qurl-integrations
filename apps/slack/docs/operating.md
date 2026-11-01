@@ -1147,11 +1147,13 @@ Slack's roughly three-second trigger window. Sustained p99 latency near either
 budget should be treated as an operator action item before customers see setup
 window-expired prompts.
 
-## Async pool pressure
+## Client User-Agent
 
 The qURL API and Slack WebAPI adapters use `qurl-bot-slack/<build>` as their
 User-Agent. Update attribution or log filters that match the old `qurl-slack/`
 prefix when adopting this build.
+
+## Async pool pressure
 
 A rejected worker in the shared async pool emits `event=async_pool_rejected`. This includes slash commands, interactions, and conversation turns; each caller chooses its reply. Use this CloudWatch Logs Insights query to find sustained pressure without matching on message text:
 
