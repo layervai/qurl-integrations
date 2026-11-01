@@ -668,3 +668,26 @@ outstanding edit per interaction. A slow edit cannot stall the walk or other
 senders; each sender waits for its own outstanding edit before its final reply.
 A failed progress edit does not abort a successfully completed walk or prevent
 that completed walk from being marked fresh.
+
+
+### Sender counter reconciliation
+
+The sender monitor reads a full source snapshot first. With a confirmed display
+floor and a recent complete snapshot, healthy ticks read the sharded aggregate
+instead of all recipient IDs. Missing or partial aggregate reads, counts below
+the known floor, legacy/no-floor rows, recipient additions and clock rollback
+force a source read. Incomplete source reads fail; they never establish freshness.
+
+The aggregate remains an optimization. The source fact and shard increment are
+not atomic. During dense polling, source reads repeat every 30 seconds to repair
+a crash between those writes. At steady intervals above 30 seconds, each tick
+still reads source. This keeps the normal five-second poll cadence and existing
+webhook fast path, but a new source-only crash gap can take 30 seconds plus the
+next tick/read time to repair instead of the old next-tick recovery. Known floors
+never move backward, and a failed final edit does not stop the monitor or advance
+the stored floor.
+
+The local `scripts/smoke-view-counter.js` proof measures 200 source BatchGet calls
+for 20,000 IDs versus one 64-key aggregate call. It also creates a real source-only
+crash gap. These are local request counts, not production latency or capacity
+measurements. Main rollout and real cross-replica Sandbox proof remain held.

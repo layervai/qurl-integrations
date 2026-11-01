@@ -111,6 +111,7 @@ const mockDb = {
   saveSendConfig: jest.fn(),
   saveSendConfirmState: jest.fn().mockResolvedValue(undefined),
   getQurlViews: jest.fn(async () => new Map()),
+  getSendViewedCount: jest.fn(),
   recordQurlView: jest.fn(),
   tryAdvanceRenderedCount: jest.fn().mockResolvedValue(true),
   getSendRenderedCount: jest.fn().mockResolvedValue(0),
@@ -262,6 +263,7 @@ beforeEach(() => {
   mockDb.markSendRevoked.mockReset();
   mockDb.markSendRevoked.mockResolvedValue(true);
   revokingSendLocks.clear();
+  mockDb.getSendViewedCount.mockReset().mockRejectedValue(new Error('aggregate unavailable'));
   mockDb.getQurlViews.mockReset();
   mockDb.getQurlViews.mockResolvedValue(new Map());
   mockDb.tryAdvanceRenderedCount.mockReset();
@@ -402,7 +404,7 @@ describe('monitorLinkStatus — shared monotonic floor with the webhook fast-pat
       content: expect.stringContaining('👀 2 viewed / 1 pending'),
     }));
     expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('send-1', 2);
-    expect(monitor.getFullMsg()).toBe('Sent to 3 users\n👀 1 viewed / 2 pending');
+    expect(monitor.getFullMsg()).toBe('Sent to 3 users\n👀 2 viewed / 1 pending');
     monitor.stop();
   });
 
@@ -4755,5 +4757,112 @@ describe('executeSendPipeline — direct contract coverage (#278)', () => {
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(logger.error).toHaveBeenCalledWith('saveSendConfig failed; Add Recipients will be unavailable for this send', expect.objectContaining({ error: 'config write failed' }));
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Sent to 1 user') }));
+  });
+});
+
+describe('monitorLinkStatus — aggregate reads with source reconciliation', () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { for (const monitor of Array.from(activeMonitors)) monitor.stop(); jest.useRealTimers(); });
+
+  const firstView = () => new Map([[TWO_LINK_SET[0].qurlId, { accessCount: 1 }]]);
+  const bothViews = () => new Map(TWO_LINK_SET.map(link => [link.qurlId, { accessCount: 1 }]));
+  function start(links = TWO_LINK_SET, interaction = makeInteraction()) {
+    return { interaction, monitor: monitorLinkStatus('aggregate-send', interaction, links,
+      links.map((link, i) => ({ id: link.recipientId, username: `User${i}` })),
+      '1h', 'Sent', { components: [] }, links.length) };
+  }
+
+  it('max-fanout healthy ticks read the aggregate instead of all 20,000 source IDs', async () => {
+    const links = Array.from({ length: 20000 }, (_, i) => ({ ...TWO_LINK_SET[0], qurlId: `q_${i}`, recipientId: `r${i}` }));
+    mockDb.getQurlViews.mockResolvedValue(new Map([[links[0].qurlId, { accessCount: 1 }]]));
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(2);
+    const { monitor } = start(links);
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
+    expect(mockDb.getQurlViews.mock.calls[0][0]).toHaveLength(20000);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
+    expect(mockDb.getSendViewedCount).toHaveBeenCalledWith('aggregate-send', 20000);
+    expect(monitor.getFullMsg()).toContain('2 viewed / 19998 pending');
+  });
+
+  it('a source-only view left by a crash is recovered by the periodic source read', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(1);
+    const { monitor } = start();
+    await jest.advanceTimersByTimeAsync(3000);
+    mockDb.getQurlViews.mockResolvedValue(bothViews()); // Source committed; shard ADD never ran.
+    await jest.advanceTimersByTimeAsync(25000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
+    expect(monitor.getFullMsg()).toContain('1 viewed / 1 pending');
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(monitor.getFullMsg()).toContain('2 viewed / 0 pending');
+    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('aggregate-send', 2);
+  });
+
+  it.each(['missing', 'partial', 'below floor', 'above expected', 'invalid'])(
+    'immediately reads source for an %s aggregate', async scenario => {
+      mockDb.getQurlViews.mockResolvedValue(firstView());
+      mockDb.getSendRenderedCount.mockResolvedValue(1);
+      const { monitor } = start();
+      await jest.advanceTimersByTimeAsync(3000);
+      mockDb.getQurlViews.mockResolvedValue(bothViews());
+      if (scenario === 'missing' || scenario === 'partial') mockDb.getSendViewedCount.mockRejectedValue(new Error(scenario));
+      else mockDb.getSendViewedCount.mockResolvedValue(scenario === 'below floor' ? 0 : scenario === 'above expected' ? 3 : NaN);
+      await jest.advanceTimersByTimeAsync(5000);
+      expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+      expect(monitor.getFullMsg()).toContain('2 viewed / 0 pending');
+    },
+  );
+
+  it('legacy rows without a confirmed floor keep the source backstop', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(null);
+    mockDb.getSendViewedCount.mockResolvedValue(1);
+    start();
+    await jest.advanceTimersByTimeAsync(8000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(mockDb.getSendViewedCount).not.toHaveBeenCalled();
+  });
+
+  it('a failed final aggregate edit stays live and retries without advancing the floor', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(2);
+    const { monitor, interaction } = start();
+    await jest.advanceTimersByTimeAsync(3000);
+    interaction.editReply.mockRejectedValueOnce(new Error('temporary edit failure'));
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalledWith('aggregate-send', 2);
+    expect(monitor.getFullMsg()).toContain('1 viewed / 1 pending');
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('aggregate-send', 2);
+    expect(monitor.getFullMsg()).toContain('2 viewed / 0 pending');
+  });
+
+  it('adding recipients invalidates the previous source snapshot', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(1);
+    const { monitor } = start();
+    await jest.advanceTimersByTimeAsync(3000);
+    monitor.addRecipients(1, [{ ...TWO_LINK_SET[0], qurlId: 'q_new', recipientId: 'r3' }]);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(mockDb.getQurlViews.mock.calls.at(-1)[0]).toHaveLength(3);
+  });
+
+  it('a clock rollback forces source reconciliation', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(1);
+    start();
+    await jest.advanceTimersByTimeAsync(3000);
+    jest.setSystemTime(Date.now() - 60000);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
   });
 });

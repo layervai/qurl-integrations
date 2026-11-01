@@ -34,6 +34,7 @@ function makeStore() {
       return out;
     },
     getSendRenderedCount: jest.fn(async () => 0),
+    getSendViewedCount: jest.fn(async () => { throw new Error('aggregate unavailable'); }),
     findSendsByQurlId: jest.fn(async () => []),
     healthCheck: jest.fn(),
     getStats: jest.fn(() => ({})),

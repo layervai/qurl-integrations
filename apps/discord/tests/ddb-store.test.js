@@ -1852,8 +1852,8 @@ describe('qurl sends', () => {
 
     ddbMock.reset();
     ddbMock.on(GetCommand).resolves({});
-    await expect(store.getSendRenderedCount('missing')).resolves.toBe(0);
-    await expect(store.getSendRenderedCount('')).resolves.toBe(0);
+    await expect(store.getSendRenderedCount('missing')).resolves.toBeNull();
+    await expect(store.getSendRenderedCount('')).resolves.toBeNull();
   });
 
   test('touchRenderedAt: failure-path debounce stamp — SETs last_rendered_at ONLY, no count, no condition', async () => {
@@ -2336,7 +2336,7 @@ describe('qurl views', () => {
     expect(views.size).toBe(2);
   });
 
-  test.each([false, true])('getQurlViews: bounded backoff preserves completed rows (exhausted=%s)', async (exhausted) => {
+  test.each([false, true])('getQurlViews: bounded backoff rejects incomplete snapshots (exhausted=%s)', async (exhausted) => {
     jest.useFakeTimers();
     const timeout = jest.spyOn(global, 'setTimeout');
     try {
@@ -2354,7 +2354,7 @@ describe('qurl views', () => {
           } : {}),
         };
       });
-      const pending = store.getQurlViews(['q_a', 'q_b']);
+      const pending = store.getQurlViews(['q_a', 'q_b']).catch(error => error);
       await jest.runAllTimersAsync();
       const views = await pending;
       expect(attempt).toBe(4);
@@ -2364,10 +2364,10 @@ describe('qurl views', () => {
         [{ qurl_id: 'q_b' }], [{ qurl_id: 'q_b' }], [{ qurl_id: 'q_b' }],
       ]);
       expect(ddbMock.commandCalls(BatchGetCommand)[3].args[0].input.RequestItems['test-prefix-qurl-views'].ConsistentRead).toBe(true);
-      expect(views.get('q_a')).toEqual({ accessCount: 1, consumed: false });
+      if (!exhausted) expect(views.get('q_a')).toEqual({ accessCount: 1, consumed: false });
       expect(logger.warn.mock.calls).toEqual(exhausted
         ? [['qurl view read retries exhausted', { unprocessed_keys: 1 }]] : []);
-      if (exhausted) expect(views.has('q_b')).toBe(false);
+      if (exhausted) expect(views).toEqual(new Error('qurl view read incomplete after retries'));
       else expect(views.get('q_b')).toEqual({ accessCount: 2, consumed: true });
     } finally {
       timeout.mockRestore();
@@ -2576,4 +2576,26 @@ describe('authoritative link expiry persistence', () => {
 test('single send expiry validation runs before its write', async () => {
   await expect(store.recordQURLSend({ expiresAt: null })).rejects.toThrow(/expiry/i);
   expect(ddbMock.calls()).toHaveLength(0);
+});
+
+
+describe('sender count availability', () => {
+  test('a missing aggregate is unknown, while a present zero is valid', async () => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: {} });
+    await expect(store.getSendViewedCount('missing', 20000)).rejects.toThrow('unavailable');
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { 'test-prefix-qurl-views': [{ viewed_count: 0 }] } });
+    await expect(store.getSendViewedCount('s1', 20000)).resolves.toBe(0);
+  });
+
+  test.each([-1, 0.5, '3'])('a malformed shard is unknown (%s)', async count => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { 'test-prefix-qurl-views': [{ viewed_count: count }] } });
+    await expect(store.getSendViewedCount('s1', 20000)).rejects.toThrow('invalid');
+  });
+
+  test('persistent unprocessed shard keys cannot return a partial sum', async () => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { 'test-prefix-qurl-views': [{ viewed_count: 1 }] },
+      UnprocessedKeys: { 'test-prefix-qurl-views': { Keys: [{ qurl_id: '__send_view_count__s1#63' }] } } });
+    await expect(store.getSendViewedCount('s1', 20000)).rejects.toThrow('incomplete');
+    expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(2);
+  });
 });
