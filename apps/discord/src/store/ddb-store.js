@@ -1977,6 +1977,8 @@ async function finishCredentialCleanup(job, outcome, reason) {
       ':now': nowIso(), ':reason': reason, ':token': job.lease_token, ':pending': 'pending',
       ...(!complete && !manual ? { ':due': Date.now() + Math.min(3_600_000, 30_000 * (2 ** job.attempts)) } : {}) },
   }));
+  if (complete) bestEffortLog(() => logger.audit(AUDIT_EVENTS.CREDENTIAL_CLEANUP_RESULT,
+    { stage: 'job', job_id: job.job_id, outcome: 'complete', reason }));
   return complete ? 'complete' : manual ? 'manual' : 'pending';
 }
 

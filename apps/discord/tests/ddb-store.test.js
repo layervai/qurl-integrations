@@ -2945,3 +2945,24 @@ describe('unstored minted credential retention', () => {
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 });
+
+describe('cleanup completion audit', () => {
+  const job = { pk: 'JOB#1', sk: 'META', job_id: '1', attempts: 1, lease_token: 'lease', qurl_api_key: 'private-key' };
+  test('only a confirmed durable completion emits the receipt', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.finishCredentialCleanup(job, 'complete', 'cleanup_confirmed');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.CREDENTIAL_CLEANUP_RESULT,
+      { stage: 'job', job_id: '1', outcome: 'complete', reason: 'cleanup_confirmed' });
+    expect(JSON.stringify(logger.audit.mock.calls)).not.toContain('private-key');
+  });
+  test('a failed completion has no successful audit receipt', async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error('write failed'));
+    await expect(store.finishCredentialCleanup(job, 'complete', 'cleanup_confirmed')).rejects.toThrow('write failed');
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+  test('logging cannot undo a completed cleanup', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    logger.audit.mockImplementationOnce(() => { throw new Error('logger failed'); });
+    await expect(store.finishCredentialCleanup(job, 'complete', 'cleanup_confirmed')).resolves.toBe('complete');
+  });
+});

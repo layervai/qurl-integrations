@@ -157,6 +157,7 @@ jobs:
             -e DDB_TEST_ENDPOINT=http://127.0.0.1:8000 \
             -e AWS_ACCESS_KEY_ID=local -e AWS_SECRET_ACCESS_KEY=local \
             -v "$PWD/scripts/smoke-guild-lifecycle.js:/app/scripts/smoke-guild-lifecycle.js:ro" \
+            -v "$PWD/scripts/backfill-credential-references.js:/app/scripts/backfill-credential-references.js:ro" \
             -v "$PWD/scripts/provision-ddb-local.js:/app/scripts/provision-ddb-local.js:ro" \
             -v "$PWD/scripts/ddb-local-schema.json:/app/scripts/ddb-local-schema.json:ro" \
             discord-bot-test node scripts/smoke-guild-lifecycle.js

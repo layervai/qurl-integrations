@@ -20,6 +20,13 @@ delete process.env.AWS_PROFILE;
 delete process.env.AWS_DEFAULT_PROFILE;
 delete process.env.AWS_SESSION_TOKEN;
 const store = require('../src/store/ddb-store');
+const auditResults = [];
+const logger = require('../src/logger');
+const originalAudit = logger.audit;
+logger.audit = (event, metadata) => {
+  if (event === 'credential_cleanup_result') auditResults.push(metadata);
+  originalAudit(event, metadata);
+};
 const client = new DynamoDBClient({ region: process.env.AWS_REGION, endpoint: process.env.DDB_TEST_ENDPOINT });
 const ddb = DynamoDBDocumentClient.from(client);
 const selected = tables.filter(table => ['guild-configs', 'credential-lifecycle'].includes(table.name));
@@ -261,6 +268,18 @@ async function main() {
       }
 
     } finally { await new Promise(resolve => server.close(resolve)); }
+    assert(auditResults.some(result => result.stage === 'webhook' && result.outcome === 'deleted'));
+    assert(auditResults.some(result => result.stage === 'job' && result.outcome === 'complete'));
+    assert(!JSON.stringify(auditResults).includes('worker-key'));
+    assert(!JSON.stringify(auditResults).includes('uncertain-key'));
+    const dryRun = require('node:child_process').execFileSync(process.execPath,
+      ['scripts/backfill-credential-references.js'], { env: process.env, encoding: 'utf8' });
+    const receipt = dryRun.split('\n').filter(line => line.startsWith('{"audit":'))
+      .map(line => JSON.parse(line).audit).find(record => record.stage === 'dry-run');
+    assert(receipt && receipt.references >= 2 && receipt.manual_jobs >= 1);
+    assert.equal(receipt.owner_id, undefined);
+    assert.equal(receipt.guild_id, undefined);
+
   } finally {
     try {
       for (const TableName of created.reverse()) await client.send(new DeleteTableCommand({ TableName }));
