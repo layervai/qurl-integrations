@@ -44,6 +44,11 @@ async function processJob(original) {
   // Never revoke a key that a concurrent setup kept for this guild.
   const current = await db.getGuildCleanupSnapshot(job.guild_id);
   const keyInUse = current?.qurl_api_key && decrypt(current.qurl_api_key) === apiKey;
+  // A failed confirmation can outlive an in-flight write. Only operator recovery
+  // can resolve an unused uncertain key; a strong read is not a failure receipt.
+  if (job.reason === 'uncertain_setup' && !keyInUse) {
+    return db.finishCredentialCleanup(job, 'manual', 'setup_outcome_unknown');
+  }
   if (job.webhook_id) {
     // A retained owner binding was verified when this exact key was saved.
     // Avoid GET /me when that proof exists: frozen accounts can still self-revoke.

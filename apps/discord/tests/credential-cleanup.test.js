@@ -102,3 +102,15 @@ test('retained verified owner binding avoids a frozen-account identity dependenc
   expect(remote.deleteSubscription).toHaveBeenCalledTimes(1);
   expect(remote.callQurlService).toHaveBeenCalledTimes(1);
 });
+
+test('unused uncertain setup stays manual even after a strong read', async () => {
+  await worker.processJob({ ...base, reason: 'uncertain_setup' });
+  expect(db.finishCredentialCleanup).toHaveBeenCalledWith(expect.anything(), 'manual', 'setup_outcome_unknown');
+  expect(remote.callQurlService).not.toHaveBeenCalled();
+});
+test('a confirmed active uncertain key is preserved', async () => {
+  db.getGuildCleanupSnapshot.mockResolvedValue({ qurl_api_key: 'encrypted:old-key' });
+  await worker.processJob({ ...base, reason: 'uncertain_setup' });
+  expect(db.finishCredentialCleanup).toHaveBeenCalledWith(expect.anything(), 'complete', 'active_key_preserved');
+  expect(remote.callQurlService).not.toHaveBeenCalled();
+});

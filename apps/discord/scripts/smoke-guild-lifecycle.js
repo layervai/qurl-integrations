@@ -210,7 +210,7 @@ async function main() {
     const requests = [];
     const server = require('node:http').createServer((req, res) => {
       requests.push(`${req.method} ${req.url}`);
-      assert.equal(req.headers.authorization, 'Bearer worker-key');
+      assert(['Bearer worker-key', 'Bearer failed-key', 'Bearer uncertain-key'].includes(req.headers.authorization));
       if (req.method === 'GET' && req.url === '/v1/me') {
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ data: { owner_id: 'worker-owner', api_key: { key_id: 'worker-key-id', kind: 'dedicated' } } }));
@@ -239,6 +239,27 @@ async function main() {
       assert.equal((await store.getGuildCleanupSnapshot('worker')).qurl_api_key, undefined);
       assert.equal((await store.getGuildCleanupSnapshot('worker')).observed_installation_joined_at, joinB);
       assert.equal((await lifecycleRows()).find(row => row.job_id === workerJobId).qurl_api_key, undefined);
+      for (const uncertain of [false, true]) {
+        requests.length = 0;
+        const apiKey = uncertain ? 'uncertain-key' : 'failed-key';
+        const id = await store.enqueueUnstoredGuildCredential({ guildId: 'never-saved', apiKey,
+          keyId: 'failed-id', ownerId: 'worker-owner', uncertain });
+        const compensation = (await lifecycleRows()).find(row => row.job_id === id);
+        assert.notEqual(compensation.qurl_api_key, apiKey);
+        assert.equal(require('../src/utils/crypto').decrypt(compensation.qurl_api_key), apiKey);
+        assert.equal(compensation.reason, uncertain ? 'uncertain_setup' : 'failed_setup');
+        assert(!('expires_at' in compensation));
+        await ddb.send(new UpdateCommand({ TableName: `${process.env.DDB_TABLE_PREFIX}credential-lifecycle`,
+          Key: { pk: compensation.pk, sk: compensation.sk }, UpdateExpression: 'SET due_at = :due', ExpressionAttributeValues: { ':due': 0 } }));
+        const claimedCompensation = await store.claimCredentialCleanup(compensation.due_bucket, 1);
+        assert.equal(claimedCompensation.job_id, id);
+        assert.equal(await require('../src/credential-cleanup').processJob(claimedCompensation), uncertain ? 'manual' : 'complete');
+        assert.deepEqual(requests, uncertain ? [] : ['DELETE /v1/me/api-key']);
+        const final = (await lifecycleRows()).find(row => row.job_id === id);
+        if (uncertain) assert.equal(final.qurl_api_key, compensation.qurl_api_key);
+        else assert.equal(final.qurl_api_key, undefined);
+      }
+
     } finally { await new Promise(resolve => server.close(resolve)); }
   } finally {
     try {

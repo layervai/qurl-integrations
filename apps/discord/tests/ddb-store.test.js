@@ -2930,3 +2930,18 @@ describe('credential reference migration authority', () => {
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 });
+
+describe('unstored minted credential retention', () => {
+  test('keeps only encrypted credential material and durable recovery identity', async () => {
+    ddbMock.on(PutCommand).resolves({});
+    await store.enqueueUnstoredGuildCredential({ guildId: 'g', apiKey: 'new-key', keyId: 'key-id', ownerId: 'owner', uncertain: true });
+    const job = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+    expect(job).toMatchObject({ reason: 'uncertain_setup', qurl_api_key: mockCiphertext('new-key'), qurl_key_id: 'key-id', qurl_key_kind: 'dedicated' });
+    expect(job.expires_at).toBeUndefined();
+  });
+  test('refuses to persist plaintext if encryption is unavailable', async () => {
+    mockEncryptStrict.mockImplementationOnce(() => { throw new Error('KEK unavailable'); });
+    await expect(store.enqueueUnstoredGuildCredential({ guildId: 'g', apiKey: 'new-key', keyId: 'key-id', ownerId: 'owner' })).rejects.toThrow('KEK');
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+});
