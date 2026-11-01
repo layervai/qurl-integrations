@@ -1870,7 +1870,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	}
 	// Deliver: an interactive confirm card for an executable proposal once the
 	// confirm flow is enabled, else the text reply/preview (merged #650 behavior).
-	h.deliverAgentResultScoped(log, env, replyTS, operatingChannel, &result)
+	streamer.discardBrokenPartial(h.deliverAgentResultScoped(log, env, replyTS, operatingChannel, &result))
 }
 
 func (h *Handler) prepareAgentEventAdmission(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string, pre *loadedHistory, preadmitted bool) (string, *loadedHistory, bool) {
@@ -1953,22 +1953,30 @@ func (h *Handler) postAgentReply(log *slog.Logger, env *slackEventEnvelope, thre
 // mrkdwn PostMessage seam: degraded rendering, and not a full defense for Slack's
 // own <url|label> mrkdwn masking syntax, but still a delivered pre-enablement
 // answer rather than a dropped one. The production seam wires PostMarkdownMessage.
-func (h *Handler) postAgentMarkdownReply(log *slog.Logger, env *slackEventEnvelope, threadTS, markdown string) {
+func (h *Handler) postAgentMarkdownReply(log *slog.Logger, env *slackEventEnvelope, threadTS, markdown string) bool {
 	post := h.cfg.PostMarkdownMessage
 	if post == nil {
-		post = h.cfg.PostMessage
+		// Without a strict receipt, preserve the partial even if the legacy post succeeds.
+		h.postAgentGeneratedReply(log, env, threadTS, markdown, h.cfg.PostMessage)
+		return false
 	}
-	h.postAgentGeneratedReply(log, env, threadTS, markdown, post)
+	return h.postAgentGeneratedReply(log, env, threadTS, markdown, post)
 }
 
 // deliverAgentText posts text to the thread via the given seam. It derives its own
 // context off h.baseCtx (see agentDeliveryBudget) rather than the turn ctx, so a
 // turn that spent its deadline still delivers its reply. Failures are logged, not
-// surfaced.
-func (h *Handler) deliverAgentText(log *slog.Logger, env *slackEventEnvelope, threadTS, text string, post PostMessageFunc) {
+// surfaced to end users; the return value confirms complete fallback delivery.
+func (h *Handler) deliverAgentText(log *slog.Logger, env *slackEventEnvelope, threadTS, text string, post PostMessageFunc) bool {
 	ctx, cancel := context.WithTimeout(observability.WithLogger(h.baseCtx, log), agentDeliveryBudget)
 	defer cancel()
 	if err := post(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, text); err != nil {
-		log.Error("agent: post reply failed", "error", err)
+		if errors.Is(err, ErrSlackMessageIncomplete) {
+			log.Warn("agent: reply posted without a complete receipt; not retrying")
+		} else {
+			log.Error("agent: post reply failed", "error", err)
+		}
+		return false
 	}
+	return true
 }

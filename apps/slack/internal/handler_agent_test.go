@@ -2996,14 +2996,15 @@ func TestAgentReplyDeliveryCarriesRequestLogger(t *testing.T) {
 			}
 			post := func(ctx context.Context, _, _, _, _, _ string) error { return record(ctx) }
 			h := &Handler{baseCtx: parent, cfg: Config{
-				AgentStore:          &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"},
-				PostMessage:         post,
-				PostMessageBlocks:   func(ctx context.Context, _, _, _, _ string, _ []any, _ string) error { return record(ctx) },
-				PostEphemeral:       func(ctx context.Context, _, _, _, _, _, _ string) error { return record(ctx) },
-				PostEphemeralBlocks: func(ctx context.Context, _, _, _, _, _ string, _ []any, _ string) error { return record(ctx) },
-				OpenView:            func(context.Context, string, string, []byte) error { return nil },
-				PostFeedback:        func(context.Context, []byte) error { return nil },
-				AgentStream:         &recordingStreamPort{},
+				AgentStore:             &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"},
+				PostMessage:            post,
+				PostAgentMessageBlocks: func(ctx context.Context, _, _, _, _ string, _ []any, _ string) error { return record(ctx) },
+				PostMessageBlocks:      func(ctx context.Context, _, _, _, _ string, _ []any, _ string) error { return record(ctx) },
+				PostEphemeral:          func(ctx context.Context, _, _, _, _, _, _ string) error { return record(ctx) },
+				PostEphemeralBlocks:    func(ctx context.Context, _, _, _, _, _ string, _ []any, _ string) error { return record(ctx) },
+				OpenView:               func(context.Context, string, string, []byte) error { return nil },
+				PostFeedback:           func(context.Context, []byte) error { return nil },
+				AgentStream:            &recordingStreamPort{},
 			}}
 			env := &slackEventEnvelope{TeamID: "T12345678"}
 			env.Event.ChannelType = slackChannelTypeIM

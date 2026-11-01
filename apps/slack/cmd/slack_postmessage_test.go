@@ -478,7 +478,7 @@ func TestSlackAgentStreamStopPostsFeedbackBlocks(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	port := newSlackAgentStreamPortWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.URL, srv.URL, slackWebAPITestClient(srv), nil)
+	port := newSlackAgentStreamPortWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.URL, srv.URL, srv.URL+"/chat.delete", slackWebAPITestClient(srv), nil)
 	blocks := []any{map[string]any{"type": "context_actions"}}
 	if err := port.StopStream(context.Background(), "T1", "", "C1", "1700.01", blocks); err != nil {
 		t.Fatalf("stop stream: %v", err)
@@ -930,5 +930,90 @@ func TestSlackPostEphemeralFuncSurfacesSlackError(t *testing.T) {
 	err := post(context.Background(), "T1", "", mdTestChannel, "", "U_clicker", "x")
 	if err == nil || !strings.Contains(err.Error(), "user_not_in_channel") {
 		t.Fatalf("error = %v, want user_not_in_channel surfaced", err)
+	}
+}
+
+func TestSlackAgentStreamDeleteUsesBotOwnedMessageAndChecksReceipt(t *testing.T) {
+	for _, ok := range []bool{true, false} {
+		t.Run(fmt.Sprintf("ok=%t", ok), func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != http.MethodPost || r.URL.Path != "/chat.delete" || r.Header.Get("Authorization") != "Bearer xoxb-test" {
+					t.Errorf("wrong delete request: method=%s path=%s", r.Method, r.URL.Path)
+				}
+				var body map[string]string
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					http.Error(w, "invalid fixture body", http.StatusBadRequest)
+					return
+				}
+				if len(body) != 2 || body["channel"] != "C_own" || body["ts"] != "stream.1" {
+					t.Errorf("wrong cleanup target: %+v", body)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if ok {
+					_, _ = io.WriteString(w, `{"ok":true,"channel":"C_own","ts":"stream.1"}`)
+				} else {
+					_, _ = io.WriteString(w, `{"ok":false,"error":"cant_delete_message"}`)
+				}
+			}))
+			defer srv.Close()
+			port := newSlackAgentStreamPortWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.URL, srv.URL, srv.URL+"/chat.delete", slackWebAPITestClient(srv), nil)
+			err := port.DeleteStream(context.Background(), "T1", "", "C_own", "stream.1")
+			if (err == nil) != ok || calls != 1 {
+				t.Fatalf("receipt=%v calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestSlackPostReplyTruncationIsNotCompleteDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		wantError  bool
+	}{
+		{"truncated metadata", `{"ok":true,"response_metadata":{"warnings":["message_truncated"]}}`, true},
+		{"truncated legacy warning", `{"ok":true,"warning":"missing_charset, message_truncated"}`, true},
+		{"unreadable receipt metadata", `{"ok":true,"response_metadata":{"warnings":7}}`, true},
+		{"unrelated warning", `{"ok":true,"response_metadata":{"warnings":["missing_charset"]}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			invalidations := 0
+			invalidate := func(string) { invalidations++ }
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv), invalidate)
+			err := post(context.Background(), "T1", "E_grid", "C1", "parent.1", "complete fallback")
+			if (err != nil) != tc.wantError || calls != 1 {
+				t.Fatalf("completeness receipt err=%v calls=%d", err, calls)
+			}
+			strictBlocks := newSlackPostAgentMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv), invalidate)
+			if err := strictBlocks(context.Background(), "T1", "E_grid", "C1", "parent.1", nil, "complete fallback"); (err != nil) != tc.wantError || calls != 2 {
+				t.Fatalf("agent block receipt err=%v calls=%d", err, calls)
+			}
+			ordinaryBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, slackWebAPITestClient(srv), invalidate)
+			if err := ordinaryBlocks(context.Background(), "T1", "E_grid", "C1", "parent.1", nil, "ordinary message"); err != nil || calls != 3 {
+				t.Fatalf("ordinary block semantics changed err=%v calls=%d", err, calls)
+			}
+			if invalidations != 0 {
+				t.Fatal("posted incomplete reply invalidated a valid token")
+			}
+		})
+	}
+}
+
+func TestSlackTruncationReceiptIsAgentOnly(t *testing.T) {
+	raw := []byte(`{"ok":true,"response_metadata":{"warnings":["message_truncated"]}}`)
+	if err := slackChatPostMessageResponseError(http.StatusOK, nil, raw); err != nil {
+		t.Fatalf("ordinary posted message changed semantics: %v", err)
+	}
+	if err := slackAgentPostMessageResponseError(http.StatusOK, nil, raw); !errors.Is(err, internal.ErrSlackMessageIncomplete) {
+		t.Fatalf("agent receipt: %v", err)
 	}
 }

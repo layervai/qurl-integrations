@@ -202,10 +202,11 @@ func (h *Handler) deliverAgentResult(log *slog.Logger, env *slackEventEnvelope, 
 // deliverAgentResultScoped carries the already membership-gated operating channel
 // through proposal delivery. It differs from the card's Slack conversation only for
 // an assistant-pane turn opened from a channel.
-func (h *Handler) deliverAgentResultScoped(log *slog.Logger, env *slackEventEnvelope, threadTS, operatingChannel string, result *agent.Result) {
+// It reports complete non-proposal reply delivery so broken-stream cleanup cannot erase the only answer.
+func (h *Handler) deliverAgentResultScoped(log *slog.Logger, env *slackEventEnvelope, threadTS, operatingChannel string, result *agent.Result) bool {
 	if result.Proposal != nil && h.agentConfirmEnabled() && h.confirmDeliverable(result.Proposal) {
 		h.postAgentConfirmScoped(log, env, threadTS, operatingChannel, result.Proposal)
-		return
+		return false
 	}
 	// The agent's own answer posts as standard Markdown rendered by Slack, with
 	// masked links neutralized before either the channel or pane surface sees them.
@@ -214,14 +215,14 @@ func (h *Handler) deliverAgentResultScoped(log *slog.Logger, env *slackEventEnve
 	// postAgentProposalPreview). The blank-reply error fallback stays fixed text.
 	if result.Proposal == nil && strings.TrimSpace(result.Reply) != "" {
 		reply := hardenAgentMarkdown(result.Reply)
-		h.postAgentMarkdownReply(log, env, threadTS, agentLLMReplyWithDisclaimer(reply))
-		return
+		return h.postAgentMarkdownReply(log, env, threadTS, agentLLMReplyWithDisclaimer(reply))
 	}
 	if result.Proposal != nil && strings.TrimSpace(result.Proposal.Summary) != "" {
 		h.postAgentProposalPreview(log, env, threadTS, result.Proposal.Summary)
-		return
+		return false
 	}
 	h.postAgentReply(log, env, threadTS, agentReplyText(result))
+	return false
 }
 
 // confirmDeliverable reports whether a confirm card should render for this proposal

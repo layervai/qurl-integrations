@@ -202,6 +202,8 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 		// together into one message — "Let me check the res" immediately followed by
 		// the real answer. Take the broken-stream fallback instead: stop what the user
 		// already saw, and let the caller post the complete answer as its own message.
+		s.pending.Reset()
+		s.broken = true // Abandoned narration also needs cleanup after a complete reply.
 		s.stop(ctx, nil)
 		return false
 	}
@@ -257,6 +259,20 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 		return false
 	}
 	return result.Proposal == nil
+}
+
+// discardBrokenPartial runs only after the complete non-proposal fallback was posted.
+func (s *agentReplyStreamer) discardBrokenPartial(deliveredReply bool) {
+	if s == nil || !deliveredReply || !s.broken || s.streamTS == "" {
+		return
+	}
+	ctx, cancel := s.deliveryCtx()
+	defer cancel()
+	if err := s.port.DeleteStream(ctx, s.teamID, s.enterprise, s.channelID, s.streamTS); err != nil {
+		s.log.Warn("agent: could not remove abandoned partial stream", "error", err)
+		return
+	}
+	s.streamTS = ""
 }
 
 // finalizeError finalizes a FAILED turn and reports whether it was handled (so the caller
