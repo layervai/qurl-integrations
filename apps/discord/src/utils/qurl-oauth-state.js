@@ -22,8 +22,8 @@
 // session — there's no consumed-nonce store. The practical impact is
 // bounded because Auth0's `code` parameter is single-use and short-lived
 // (so the second presentation needs a fresh Auth0 grant), and a re-mint
-// on the bot side is an idempotent upsert in guild_configs. The signed
-// state is NOT a one-shot token; it's an integrity envelope. PR copy and
+// on the bot side uses a separate retry key per Auth0 grant before the
+// guild_configs upsert. The signed state is NOT a one-shot token; it's an integrity envelope. PR copy and
 // route comments avoid the "single-use" framing for that reason.
 const crypto = require('crypto');
 const { createStateSigner } = require('./oauth-state');

@@ -36,7 +36,8 @@ function getJwks() {
 }
 
 /**
- * Verifies an Auth0 id_token's signature, issuer, audience, and expiry.
+ * Verifies an Auth0 id_token's signature, issuer, audience, expiry, and nonce.
+ * expectedNonce is required and comes from the verified setup state.
  *
  * Returns { ok: true, payload } on success, or { ok: false, reason }
  * on any verification failure. Reasons are coarse-grained on the wire

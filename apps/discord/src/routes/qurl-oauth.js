@@ -4,6 +4,7 @@
 // experience and CSRF posture live in the PR #177 description; Stage-2
 // confused-deputy mitigation is documented in discord-install.js.
 const express = require('express');
+const crypto = require('crypto');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
@@ -357,7 +358,8 @@ router.get('/callback', rateLimit, async (req, res) => {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
-        'Idempotency-Key': verified.payload.nonce,
+        // A fresh grant must not replay a key revoked after a failed save.
+        'Idempotency-Key': crypto.createHmac('sha256', verified.payload.nonce).update(code).digest('hex'),
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
