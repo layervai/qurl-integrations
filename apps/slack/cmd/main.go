@@ -209,7 +209,7 @@ func run() error {
 		return fmt.Errorf("DDBProvider init: %w", err)
 	}
 	var authProvider auth.Provider = ddbProvider
-	userAgent := "qurl-slack/" + version
+	userAgent := "qurl-bot-slack/" + version
 
 	maxConcurrentAsync := readMaxConcurrentAsync()
 	maxConcurrentFollowupAsync := readMaxConcurrentFollowupAsync()
