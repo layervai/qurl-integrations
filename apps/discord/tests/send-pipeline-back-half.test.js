@@ -2506,6 +2506,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     return {
       collect: collectHandlers.collect,
+      end: collectHandlers.end,
       finishRevoke,
       interaction,
       makeClick,
@@ -2534,6 +2535,62 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       expect(selection.deferUpdate).toHaveBeenCalled();
       expect(recipients).toEqual([{ id: 'u1', username: 'Alice' }]);
       expect(logger.error).not.toHaveBeenCalledWith('Add recipients failed', expect.anything());
+    } finally {
+      clearCooldown('sender-1');
+    }
+  });
+
+  it('keeps the successful revoke result when the collector window ends (#200)', async () => {
+    const { collect, end, finishRevoke, interaction, makeClick, revokeStarted } = await setupRevocableSend();
+    const pending = collect(makeClick('revoke'));
+    await revokeStarted.promise;
+    finishRevoke.resolve();
+    await pending;
+    const result = interaction.editReply.mock.calls.at(-1)[0].content;
+    expect(result).toContain('Revoked 1/1 user.');
+    expect(result).toContain('Revoked for: Alice');
+
+    interaction.editReply.mockClear();
+    await end([], 'time');
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: result, components: [] });
+  });
+
+  it('includes newly added recipients in the collector revoke result (#200)', async () => {
+    const { collect, finishRevoke, interaction, makeClick, revokeStarted } = await setupRevocableSend();
+    try {
+      const selection = {
+        users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
+        deferUpdate: jest.fn().mockResolvedValue(undefined),
+        editReply: jest.fn().mockResolvedValue(undefined),
+      };
+      const addClick = makeClick('add');
+      addClick.reply.mockResolvedValueOnce({ awaitMessageComponent: jest.fn().mockResolvedValue(selection) });
+      mockDb.getSendConfig.mockResolvedValueOnce({
+        connector_resource_id: 'res-initial', expires_in: '30m',
+        attachment_url: 'https://cdn.discordapp.com/x.png',
+        attachment_name: 'x.png', attachment_content_type: 'image/png',
+      });
+      mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
+      mockMintLinks.mockResolvedValueOnce([
+        { qurl_link: 'https://q.test/added', resource_id: 'res-added', qurl_id: 'q_added' },
+      ]);
+      await collect(addClick);
+      expect(selection.editReply).toHaveBeenCalledWith({ content: 'Added 1 recipient', components: [] });
+
+      mockDb.getSendItems.mockReset();
+      // Counts come from DDB; names must include the collector's added recipient.
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { recipient_discord_id: 'u1', resource_id: 'res-initial', qurl_id: 'q_original' },
+        { recipient_discord_id: 'u2', resource_id: 'res-added', qurl_id: 'q_added' },
+      ]);
+      const pending = collect(makeClick('revoke'));
+      await revokeStarted.promise;
+      finishRevoke.resolve();
+      await pending;
+      expect(interaction.editReply).toHaveBeenLastCalledWith(expect.objectContaining({
+        content: expect.stringContaining('Revoked 2/2 users.'),
+      }));
+      expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain('Revoked for: Alice, Bob');
     } finally {
       clearCooldown('sender-1');
     }
