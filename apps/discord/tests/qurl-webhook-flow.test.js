@@ -80,7 +80,7 @@ function buildQurlAccessedPayload({ id, qurlId, resourceId, accessCount, consume
 }
 
 async function deliverWebhook(payload) {
-  const raw = JSON.stringify(payload);
+  const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
   const sig = qurlServiceSign(raw, process.env.QURL_WEBHOOK_SECRET);
   return request(app)
     .post('/webhooks/qurl')

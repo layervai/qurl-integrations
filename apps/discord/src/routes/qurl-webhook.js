@@ -37,6 +37,8 @@ const { parseExpiryMs } = require('../utils/time');
 const router = express.Router();
 
 const SIGNATURE_HEADER = 'qurl-signature';
+// TODO(upstream-contract): producers refresh signed sent_at_ms on every attempt; deploy them first.
+const FRESHNESS_WINDOW_MS = 5 * 60 * 1000;
 // Lowercase only by design: Node's crypto.digest('hex') and Go's
 // hex.EncodeToString both emit lowercase. A future cross-language
 // emitter defaulting to uppercase hex would silently 401 every
@@ -1068,13 +1070,14 @@ router.post('/qurl', async (req, res) => {
     return res.status(200).json({ status: 'invalid-payload' });
   }
 
-  // TODO(freshness): the signature pins payload integrity but not
-  // freshness. A captured event with a never-seen `id` and a
-  // sufficiently-advanced access_count would still be accepted long
-  // after capture. qurl-service includes a signed `timestamp` field;
-  // adding a `now() - body.timestamp > N` rejection would close the
-  // replay window. Out of scope for this PR (qurl-service is the only
-  // valid emitter today).
+  const sentAtMs = body.sent_at_ms;
+  const validSentAt = Number.isSafeInteger(sentAtMs) && sentAtMs > 0;
+  if (!validSentAt || Math.abs(Date.now() - sentAtMs) > FRESHNESS_WINDOW_MS) {
+    const reason = validSentAt ? 'outside_freshness_window' : 'missing_or_invalid_sent_at_ms';
+    logger.warn('qURL webhook delivery timestamp rejected', { reason });
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_REPLAY_REJECTED, { reason });
+    return res.status(validSentAt ? 401 : 400).json({ error: 'Invalid webhook delivery timestamp' });
+  }
 
   if (eventType === QURL_WEBHOOK_EVENTS.EXPIRED) {
     return handleQurlExpired(req, res, { data, eventId });

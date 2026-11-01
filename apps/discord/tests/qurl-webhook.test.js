@@ -120,7 +120,7 @@ beforeEach(() => {
 
 describe('POST /webhooks/qurl — sender view-counter fast-path gate (feat #60, PR-B)', () => {
   const signedRequest = (payload) => {
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     return request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -166,7 +166,7 @@ describe('POST /webhooks/qurl — subscription-registry primed-vs-unprimed seman
   it('returns 503 when registry is unprimed (cold start / DDB scan in-flight)', async () => {
     mockPrimed = false;
     mockOwnerSecrets.clear();
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -179,7 +179,7 @@ describe('POST /webhooks/qurl — subscription-registry primed-vs-unprimed seman
     mockPrimed = true;
     mockWithinLag = false;
     mockOwnerSecrets.clear();
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -192,7 +192,7 @@ describe('POST /webhooks/qurl — subscription-registry primed-vs-unprimed seman
     mockPrimed = true;
     mockWithinLag = true;
     mockOwnerSecrets.clear();
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -204,7 +204,7 @@ describe('POST /webhooks/qurl — subscription-registry primed-vs-unprimed seman
 
 describe('POST /webhooks/qurl — signature verification', () => {
   it('accepts a request with a valid bare-hex HMAC over the raw body', async () => {
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -221,7 +221,7 @@ describe('POST /webhooks/qurl — signature verification', () => {
   });
 
   it('rejects a request with a wrong signature (401)', async () => {
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -232,7 +232,7 @@ describe('POST /webhooks/qurl — signature verification', () => {
   });
 
   it('rejects a request with a missing signature header (401)', async () => {
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -241,7 +241,7 @@ describe('POST /webhooks/qurl — signature verification', () => {
   });
 
   it('rejects a malformed signature (wrong length / non-hex)', async () => {
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -251,7 +251,7 @@ describe('POST /webhooks/qurl — signature verification', () => {
   });
 
   it('rejects a sha256-prefixed signature (GitHub-style would be wrong wire shape)', async () => {
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -264,7 +264,7 @@ describe('POST /webhooks/qurl — signature verification', () => {
 describe('POST /webhooks/qurl — payload handling', () => {
   it('ignores non-qurl.accessed events with 200 (so qurl-service does not retry)', async () => {
     const payload = { ...VALID_PAYLOAD, type: 'qurl.created' };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -278,7 +278,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
   it('returns 200 invalid-payload when body.id missing (no replay-protection key)', async () => {
     const payload = { ...VALID_PAYLOAD };
     delete payload.id;
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -291,7 +291,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
 
   it('returns 200 invalid-payload when qurl_id missing (no retry — payload is malformed, not transient)', async () => {
     const payload = { id: 'evt-1', type: 'qurl.accessed', owner_id: 'usr_test', data: { access_count: 1 } };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -307,7 +307,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       id: 'evt-1', type: 'qurl.accessed', owner_id: 'usr_test',
       data: { qurl_id: 'q_aaaaaaaaaa1', access_count: -3, consumed: false },
     };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -322,7 +322,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       id: 'evt-zero', type: 'qurl.accessed', owner_id: 'usr_test',
       data: { qurl_id: 'q_aaaaaaaaaa1', access_count: 0, consumed: false },
     };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -336,7 +336,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
 
   it('surfaces store dedup result on replay', async () => {
     mockRecordQurlView.mockResolvedValueOnce({ result: 'dedup', firstView: false });
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -348,7 +348,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
 
   it('returns 500 (retriable) when the store throws — qurl-service redelivery is the recovery path', async () => {
     mockRecordQurlView.mockRejectedValueOnce(new Error('DDB throttled'));
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -358,7 +358,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
   });
 
   it('passes body.id through verbatim as the eventId replay key', async () => {
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -371,7 +371,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
 
   it('rejects body.id that is not a string (e.g., an object slipped through)', async () => {
     const payload = { ...VALID_PAYLOAD, id: { weird: true } };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -384,7 +384,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
 
   it('rejects access_count=null (Number(null)===0 must not slip through)', async () => {
     const payload = { ...VALID_PAYLOAD, data: { ...VALID_PAYLOAD.data, access_count: null } };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -397,7 +397,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
 
   it('rejects fractional access_count (wire contract is Go int64; floats are a shape regression)', async () => {
     const payload = { ...VALID_PAYLOAD, data: { ...VALID_PAYLOAD.data, access_count: 1.5 } };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -410,7 +410,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
 
   it('treats consumed as boolean-only — the string "false" does NOT coerce to true', async () => {
     const payload = { ...VALID_PAYLOAD, data: { ...VALID_PAYLOAD.data, consumed: 'false' } };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -438,7 +438,7 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
     mockOwnerSecrets.clear();
     mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
     const unknownPayload = { ...VALID_PAYLOAD, owner_id: 'usr_unregistered' };
-    const unknownRaw = JSON.stringify(unknownPayload);
+    const unknownRaw = JSON.stringify({ sent_at_ms: Date.now(), ...unknownPayload });
     for (let i = 0; i < 150; i++) {
       // eslint-disable-next-line no-await-in-loop
       await request(isolatedApp)
@@ -453,12 +453,12 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
       .set('QURL-Signature', signBody(unknownRaw))
       .send(unknownRaw);
     expect(limited.status).toBe(429);
-    const siblingRaw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: 'usr_other_unknown' });
+    const siblingRaw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD, owner_id: 'usr_other_unknown' });
     const sibling = await request(isolatedApp)
       .post('/webhooks/qurl').set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(siblingRaw)).send(siblingRaw);
     expect(sibling.status).toBe(401);
-    const validRaw = JSON.stringify(VALID_PAYLOAD);
+    const validRaw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const valid = await request(isolatedApp)
       .post('/webhooks/qurl').set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(validRaw)).send(validRaw);
@@ -468,7 +468,7 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
   it('bounds missing-owner attempts without blocking a registered owner', async () => {
     // eslint-disable-next-line global-require
     const isolatedApp = require('../src/server').app;
-    const missingRaw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: undefined });
+    const missingRaw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD, owner_id: undefined });
     for (let i = 0; i <= 150; i++) {
       // eslint-disable-next-line no-await-in-loop
       const attempt = await request(isolatedApp)
@@ -476,7 +476,7 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
         .set('QURL-Signature', signBody(missingRaw)).send(missingRaw);
       expect(attempt.status).toBe(i < 150 ? 401 : 429);
     }
-    const validRaw = JSON.stringify(VALID_PAYLOAD);
+    const validRaw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const valid = await request(isolatedApp)
       .post('/webhooks/qurl').set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(validRaw)).send(validRaw);
@@ -486,13 +486,13 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
   it('caps rotating unknown owners without blocking a registered owner', async () => {
     const isolatedApp = require('../src/server').app;
     for (let i = 0; i <= 1500; i++) {
-      const raw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: `usr_rotating_${i}` });
+      const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD, owner_id: `usr_rotating_${i}` });
       // eslint-disable-next-line no-await-in-loop
       const response = await request(isolatedApp).post('/webhooks/qurl')
         .set('Content-Type', 'application/json').set('QURL-Signature', signBody(raw)).send(raw);
       expect(response.status).toBe(i < 1500 ? 401 : 429);
     }
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const registered = await request(isolatedApp).post('/webhooks/qurl')
       .set('Content-Type', 'application/json').set('QURL-Signature', signBody(raw)).send(raw);
     expect(registered.status).toBe(200);
@@ -500,7 +500,7 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
 
   it.each([123, {}, [], true])('rejects a non-string owner cleanly: %j', async owner_id => {
     const isolatedApp = require('../src/server').app;
-    const raw = JSON.stringify({ ...VALID_PAYLOAD, owner_id });
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD, owner_id });
     const response = await request(isolatedApp).post('/webhooks/qurl')
       .set('Content-Type', 'application/json').set('QURL-Signature', signBody(raw)).send(raw);
     expect(response.status).toBe(401);
@@ -522,7 +522,7 @@ describe('POST /webhooks/qurl — bad-sig limiter scope (only HMAC failures coun
     mockOwnerSecrets.clear();
     mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
     const unknownPayload = { ...VALID_PAYLOAD, owner_id: 'usr_unregistered' };
-    const unknownRaw = JSON.stringify(unknownPayload);
+    const unknownRaw = JSON.stringify({ sent_at_ms: Date.now(), ...unknownPayload });
 
     for (let i = 0; i < 30; i++) {
       // eslint-disable-next-line no-await-in-loop
@@ -534,7 +534,7 @@ describe('POST /webhooks/qurl — bad-sig limiter scope (only HMAC failures coun
       expect(r.status).toBe(401);
     }
 
-    const validRaw = JSON.stringify(VALID_PAYLOAD);
+    const validRaw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const valid = await request(isolatedApp)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -549,7 +549,7 @@ describe('POST /webhooks/qurl — multi-secret HMAC selection (BYOK view counter
     mockOwnerSecrets.set('usr_test', 'secret-A');
     mockOwnerSecrets.set('usr_sibling', 'secret-B');
     const payload = { ...VALID_PAYLOAD, owner_id: 'usr_test' };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -562,7 +562,7 @@ describe('POST /webhooks/qurl — multi-secret HMAC selection (BYOK view counter
   it('accepts a request signed with the owner_id-resolved secret', async () => {
     mockOwnerSecrets.set('usr_byok_guild', 'guild-specific-secret');
     const payload = { ...VALID_PAYLOAD, owner_id: 'usr_byok_guild' };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -575,7 +575,7 @@ describe('POST /webhooks/qurl — multi-secret HMAC selection (BYOK view counter
 
 describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => {
   it('extracts owner_id from req.rawBody even if req.body is clobbered before the router', async () => {
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     const res = await request(buildReqBodyClobberingApp())
       .post('/webhooks/qurl')
       .set('X-Forwarded-For', '198.51.100.42')
@@ -593,7 +593,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
   it('returns 401 when rawBody JSON parsing rejects a signed out-of-contract wire shape', async () => {
     const raw = Buffer.concat([
       Buffer.from([0xef, 0xbb, 0xbf]),
-      Buffer.from(JSON.stringify(VALID_PAYLOAD)),
+      Buffer.from(JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD })),
     ]);
     const res = await request(buildRawOnlyApp())
       .post('/webhooks/qurl')
@@ -612,7 +612,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
   it('returns 401 when body.owner_id is missing entirely', async () => {
     const payload = { ...VALID_PAYLOAD };
     delete payload.owner_id;
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -624,7 +624,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
 
   it('returns 401 when body.owner_id is non-string (e.g. object slipped through)', async () => {
     const payload = { ...VALID_PAYLOAD, owner_id: { weird: true } };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -635,7 +635,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
 
   it('returns 401 when body.owner_id is empty string', async () => {
     const payload = { ...VALID_PAYLOAD, owner_id: '' };
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -673,7 +673,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
   it('fires CACHE_MISS_UNKNOWN_OWNER audit on missing body.owner_id', async () => {
     const payload = { ...VALID_PAYLOAD };
     delete payload.owner_id;
-    const raw = JSON.stringify(payload);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
     await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
@@ -694,7 +694,7 @@ describe('POST /webhooks/qurl — bad-signature rate limit', () => {
     isolatedApp = require('../src/server').app;
   });
   it('returns 429 once an IP crosses BAD_SIG_MAX failed-signature attempts', async () => {
-    const raw = JSON.stringify(VALID_PAYLOAD);
+    const raw = JSON.stringify({ sent_at_ms: Date.now(), ...VALID_PAYLOAD });
     for (let i = 0; i < 30; i++) {
       // eslint-disable-next-line no-await-in-loop
       await request(isolatedApp)
@@ -709,5 +709,54 @@ describe('POST /webhooks/qurl — bad-signature rate limit', () => {
       .set('QURL-Signature', signBody(raw))
       .send(raw);
     expect(res.status).toBe(429);
+  });
+});
+
+
+describe('signed delivery freshness', () => {
+  const now = 1800000000000;
+  const eventTypes = ['qurl.accessed', 'qurl.expired'];
+  let clock;
+  beforeEach(() => { clock = jest.spyOn(Date, 'now').mockReturnValue(now); });
+  afterEach(() => { clock.mockRestore(); });
+
+  const postExactPayload = payload => {
+    const raw = JSON.stringify(payload);
+    return request(app).post('/webhooks/qurl').set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw)).send(raw);
+  };
+
+  it.each(eventTypes.flatMap(type => [0, -300000, 300000].map(offset => [type, offset])))('accepts a fresh attempt for a historical event (%s, %i)', async (type, offset) => {
+    const res = await postExactPayload({ ...VALID_PAYLOAD, type, sent_at_ms: now + offset });
+    expect(res.status).toBe(200);
+    if (type === 'qurl.accessed') expect(mockRecordQurlView).toHaveBeenCalled();
+    else expect(mockFindSendsByQurlId).toHaveBeenCalled();
+    expect(mockAudit).not.toHaveBeenCalledWith('qurl_webhook_replay_rejected', expect.anything());
+  });
+
+  it.each(eventTypes.flatMap(type => [-300001, 300001].map(offset => [type, offset])))('rejects an old or future signed attempt before any store access (%s, %i)', async (type, offset) => {
+    const res = await postExactPayload({ ...VALID_PAYLOAD, type, sent_at_ms: now + offset });
+    expect(res.status).toBe(401);
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
+    expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
+    expect(mockAudit).toHaveBeenCalledWith('qurl_webhook_replay_rejected', { reason: 'outside_freshness_window' });
+  });
+
+  it.each(eventTypes.flatMap(type => [undefined, null, '', String(now), false, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1].map(sentAt => [type, sentAt])))('rejects a missing or malformed signed attempt time (%s, %p)', async (type, sentAt) => {
+    const res = await postExactPayload({ ...VALID_PAYLOAD, type, sent_at_ms: sentAt });
+    expect(res.status).toBe(400);
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
+    expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
+    expect(mockAudit).toHaveBeenCalledWith('qurl_webhook_replay_rejected', { reason: 'missing_or_invalid_sent_at_ms' });
+  });
+
+  it('cannot freshen a captured stale payload without its signing secret', async () => {
+    const raw = JSON.stringify({ ...VALID_PAYLOAD, sent_at_ms: now - 300001 });
+    const changed = JSON.stringify({ ...VALID_PAYLOAD, sent_at_ms: now });
+    const res = await request(app).post('/webhooks/qurl').set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw)).send(changed);
+    expect(res.status).toBe(401);
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
+    expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
   });
 });

@@ -94,7 +94,7 @@ function signBody(rawJson, secret = 'test-qurl-secret') {
 }
 
 function signedRequest(payload) {
-  const raw = JSON.stringify(payload);
+  const raw = JSON.stringify({ sent_at_ms: Date.now(), ...payload });
   return request(app)
     .post('/webhooks/qurl')
     .set('Content-Type', 'application/json')

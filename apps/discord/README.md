@@ -496,3 +496,17 @@ budget inside its 15-second backstop. Both paths stop new link admissions but
 skip the accepted-link drain to preserve session shutdown deadlines. Accepted
 work can be interrupted on those paths; this change does not establish complete
 shutdown safety for every gateway topology.
+
+### qURL webhook delivery freshness
+
+The receiver requires a signed `sent_at_ms`: positive integer Unix milliseconds
+for this delivery attempt. It accepts a five-minute past/future clock window,
+then keeps the existing event-ID/count deduplication. The HMAC covers the full
+raw body. `timestamp` remains the historical event time; retries can carry old
+events with a fresh `sent_at_ms`.
+
+Producer-first rollout is required for #493. Keep this receiver change draft
+until every delivery worker supplies the field and approved delivery receipts
+confirm it. The current receiver accepts the added field. Roll back this receiver
+before rolling back to a producer that omits it. No new secret or database
+attribute is required. Native tests do not prove a deployed producer fleet.
