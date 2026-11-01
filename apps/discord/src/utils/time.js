@@ -136,7 +136,8 @@ function formatSelfDestructLabel(seconds) {
   return `${seconds}s`;
 }
 
-// The viewer may blank before the server's one-second access minimum.
+// TODO(upstream-contract): the server's one-second minimum also applies below 1s.
+// Under a minute, explain that an already-open viewer may continue loading.
 function formatSelfDestructTimingNote(seconds) {
   if (!isPositiveFinite(seconds) || seconds >= 60) return '';
   return seconds < 1
@@ -145,11 +146,11 @@ function formatSelfDestructTimingNote(seconds) {
 }
 
 // formatSelfDestructSegment — renders the self-destruct status as a
-// stand-alone segment for the post-send confirm header
+// header segment with an optional second line for short-timer precision
 // (`Sent to N | Expires: 24h | Self-destruct: ...`). A null/undefined/
 // non-finite/non-positive value renders as "off" — the "no timer
 // selected" sentinel — so the segment is always present and aligned
-// with the rest of the header.
+// with the rest of the header. Append it last so its note stays on its own line.
 function formatSelfDestructSegment(seconds) {
   if (isPositiveFinite(seconds)) {
     const label = `Self-destruct: ${formatSelfDestructLabel(seconds)}`;
