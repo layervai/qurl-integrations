@@ -20,8 +20,8 @@ const RESOURCE_TYPES = {
 };
 
 // Trust signals surfaced on the per-recipient DM embed (sender provenance
-// + "is this real?" verify path). The destination domain in the footer
-// defaults below apply only to embeds without a minted link. Linked embeds
+// + "is this real?" verify path). DESTINATION_DOMAIN is the footer fallback
+// for embeds without a minted link. Linked embeds
 // derive their destination host from the link. The landing URL is the
 // public brand page first-time recipients can hit to verify qURL is a
 // real service before clicking Step Through.

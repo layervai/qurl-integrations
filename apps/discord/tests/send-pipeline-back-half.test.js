@@ -4031,17 +4031,20 @@ describe('send-confirm audit correlation', () => {
 });
 
 describe('destination footer — per-recipient failure isolation', () => {
-  it.each(['initial', 'add'])('persists a malformed link as failed while delivering its sibling (%s)', async (path) => {
+  it.each(['initial', 'add'].flatMap(path => ['malformed', 'hostless', 'send-throws'].map(failure => [path, failure])))('persists a failed recipient while delivering its sibling (%s, %s)', async (path, failure) => {
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-new' });
     mockDb.getSendConfig.mockResolvedValueOnce({
       resource_type: 'maps', actual_url: 'https://maps.example.com/x', expires_in: '30m',
     });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_bad', qurl_link: 'not a URL', resource_id: 'res-new' },
+      { qurl_id: 'q_bad', qurl_link: failure === 'malformed' ? 'not a URL' : failure === 'hostless' ? 'mailto:x@example.com' : 'https://bad.example/#secret', resource_id: 'res-new' },
       { qurl_id: 'q_good', qurl_link: 'https://other.example/link', resource_id: 'res-new' },
     ]);
-    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockSendDM.mockImplementation(async recipientId => {
+      if (failure === 'send-throws' && recipientId === 'u1') throw new Error('secret delivery failure');
+      return { ok: true, channelId: 'dm-c', messageId: 'dm-m' };
+    });
     const recipients = [
       { id: 'u1', username: 'Alice', bot: false },
       { id: 'u2', username: 'Bob', bot: false },
@@ -4052,9 +4055,12 @@ describe('destination footer — per-recipient failure isolation', () => {
       const result = await handleAddRecipients('send-1', makeUsersCollection(recipients), makeInteraction(), 'apikey');
       expect(result).toMatchObject({ delivered: 1, failed: 1 });
     }
-    expect(mockSendDM).toHaveBeenCalledTimes(1);
-    expect(mockSendDM.mock.calls[0][0]).toBe('u2');
-    expect(mockSendDM.mock.calls[0][1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens other.example' });
+    expect(mockSendDM).toHaveBeenCalledTimes(failure === 'send-throws' ? 2 : 1);
+    expect(mockSendDM.mock.calls.at(-1)[0]).toBe('u2');
+    expect(mockSendDM.mock.calls.at(-1)[1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens other.example' });
+    expect(logger.warn).toHaveBeenCalledWith('Recipient delivery failed before completion', {
+      sendId: expect.any(String), errorName: failure === 'send-throws' ? 'Error' : 'TypeError',
+    });
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith(expect.any(String), 'u1', 'failed');
     expect(mockDb.markSendDMDelivered).toHaveBeenCalledWith(expect.any(String), 'u2', 'dm-c', 'dm-m');
   });

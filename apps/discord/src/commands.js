@@ -1058,6 +1058,8 @@ function buildDeliveryEmbed({
   senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage,
   renderActionsAsMarkdown = false,
 }) {
+  const destinationDomain = qurlLink == null ? TRUST.DESTINATION_DOMAIN : new URL(qurlLink).hostname;
+  if (!destinationDomain) throw new TypeError('Delivery link must have a hostname');
   // Discord's `<t:N:R>` markdown wants a positive integer Unix-seconds
   // value; anything else renders a misleading recipient surface (e.g.
   // `<t:0:R>` → "56 years ago", `<t:undefined:R>` → literal text,
@@ -1170,7 +1172,7 @@ function buildDeliveryEmbed({
     .setColor(COLORS.QURL_BRAND)
     .setAuthor(authorOpts)
     .setDescription(descLines.join('\n'))
-    .setFooter({ text: `opens ${qurlLink == null ? TRUST.DESTINATION_DOMAIN : new URL(qurlLink).hostname}` });
+    .setFooter({ text: `opens ${destinationDomain}` });
 }
 
 // Convenience wrapper used by executeSendPipeline. Short links preserve
