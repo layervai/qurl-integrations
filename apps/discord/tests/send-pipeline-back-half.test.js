@@ -885,6 +885,43 @@ describe('revokeAllLinks', () => {
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1', { signal: expect.any(AbortSignal) });
   });
 
+  it('revokes 101 children under one parent through the real connector chunker', async () => {
+    const config = require('../src/config');
+    const previousUrl = config.CONNECTOR_URL;
+    const previousFetch = globalThis.fetch;
+    config.CONNECTOR_URL = 'https://connector.fixture.invalid';
+    const ids = Array.from({ length: 101 }, (_, i) => `q_bulk${i}`);
+    mockDb.getSendItems.mockResolvedValueOnce(ids.map((qurl_id, i) => ({
+      resource_id: 'res-1', recipient_discord_id: `bulk-user${i}`, qurl_id,
+    })));
+    const realRevoke = jest.requireActual('../src/connector').revokeMintedLinks;
+    mockRevokeMintedLinks.mockImplementationOnce(realRevoke);
+    const batches = [];
+    globalThis.fetch = jest.fn(async (url, options) => {
+      expect(url).toBe('https://connector.fixture.invalid/api/revoke_links');
+      expect(options.method).toBe('POST');
+      expect(options.signal.aborted).toBe(false);
+      const body = JSON.parse(options.body);
+      expect(body.resource_id).toBe('res-1');
+      batches.push(body.qurl_ids);
+      return { ok: true, status: 200, json: async () => ({
+        success: true, results: body.qurl_ids.map(qurl_id => ({ qurl_id, status: 'revoked' })),
+      }) };
+    });
+    try {
+      const result = await revokeAllLinks('send-bulk', 'sender-1', 'apikey');
+      expect(result).toMatchObject({ success: 101, total: 101, failureUserIds: [], finalizationFailed: false });
+      expect(batches).toHaveLength(11);
+      expect(batches.every(ids => ids.length > 0 && ids.length <= 10)).toBe(true);
+      expect(batches.flat()).toEqual(ids);
+      expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-bulk', 'sender-1', { signal: expect.any(AbortSignal) });
+      expect(require('../src/qurl').revokeResource).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = previousFetch;
+      config.CONNECTOR_URL = previousUrl;
+    }
+  });
+
   it('leaves the send retryable when the connector cannot confirm a child revoke', async () => {
     mockRevokeMintedLinks.mockRejectedValueOnce(new Error('Connector revoke_links failed (429)'));
     mockDb.getSendItems.mockResolvedValueOnce([
