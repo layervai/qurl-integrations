@@ -193,7 +193,7 @@ func TestAPIKeyCreateRejectsMismatchedReceipts(t *testing.T) {
 }
 
 func TestAPIKeyListRejectsIncompletePages(t *testing.T) {
-	for _, body := range []string{`{}`, `{"data":null}`, `{"data":[{"key_id":"bad","kind":"api_key","status":"active"}]}`, `{"data":[],"meta":{"has_more":true}}`, `{"data":{}}`} {
+	for _, body := range []string{`{}`, `{"data":null}`, `{"data":[]}`, `{"data":[],"meta":{}}`, `{"data":[{"key_id":"bad","kind":"api_key","status":"active"}]}`, `{"data":[],"meta":{"has_more":true}}`, `{"data":{}}`} {
 		t.Run(body, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
 			defer server.Close()
@@ -297,5 +297,20 @@ func TestAccountAdminAuthRejectsScopeInjectionBeforeNetwork(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatal("invalid scopes reached account settings endpoint")
+	}
+}
+
+func TestAPIKeyListAcceptsAnExplicitEmptyFinalPage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[],"meta":{"has_more":false}}`))
+	}))
+	defer server.Close()
+	client, err := NewAPIKeyManagement(&Config{BaseURL: server.URL, APIKey: "fixture-account-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := client.ListAPIKeys(context.Background(), APIKeyListOptions{Limit: 20, Status: "active"})
+	if err != nil || page == nil || page.HasMore || len(page.Keys) != 0 {
+		t.Fatalf("valid empty final page rejected: %v", err)
 	}
 }

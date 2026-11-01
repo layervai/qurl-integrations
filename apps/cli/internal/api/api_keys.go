@@ -125,12 +125,12 @@ func (c *client) ListAPIKeys(ctx context.Context, opts APIKeyListOptions) (*APIK
 	}
 	var envelope struct {
 		Data []APIKeyMetadata `json:"data"`
-		Meta struct {
+		Meta *struct {
 			NextCursor string `json:"next_cursor"`
-			HasMore    bool   `json:"has_more"`
+			HasMore    *bool  `json:"has_more"`
 		} `json:"meta"`
 	}
-	if json.Unmarshal(reply.body, &envelope) != nil || envelope.Data == nil || len(envelope.Data) > opts.Limit || (envelope.Meta.HasMore && envelope.Meta.NextCursor == "") {
+	if json.Unmarshal(reply.body, &envelope) != nil || envelope.Data == nil || len(envelope.Data) > opts.Limit || envelope.Meta == nil || envelope.Meta.HasMore == nil || (*envelope.Meta.HasMore && envelope.Meta.NextCursor == "") {
 		return nil, invalidAPIKeyReply()
 	}
 	for i := range envelope.Data {
@@ -138,7 +138,7 @@ func (c *client) ListAPIKeys(ctx context.Context, opts APIKeyListOptions) (*APIK
 			return nil, invalidAPIKeyReply()
 		}
 	}
-	return &APIKeyPage{Keys: envelope.Data, NextCursor: envelope.Meta.NextCursor, HasMore: envelope.Meta.HasMore}, nil
+	return &APIKeyPage{Keys: envelope.Data, NextCursor: envelope.Meta.NextCursor, HasMore: *envelope.Meta.HasMore}, nil
 }
 
 // CreateAccountAPIKey binds retries to the same caller-owned creation identity.
