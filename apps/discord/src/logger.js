@@ -242,7 +242,7 @@ const logger = {
         // offending keys are listed so a caller fixing the first
         // doesn't have to re-run to discover the second.
         const namedKeys = [...secretKeys].map(k => `"${sanitizeMessage(k)}"`).join(', ');
-        console.error(`[${formatTimestamp()}] ERROR: logger.audit received sensitive key(s) [${namedKeys}] in event=${sanitizeMessage(event)}; value(s) redacted in emitted payload — caller must remove from meta`);
+        console.error(`[${formatTimestamp()}] ERROR: logger.audit received sensitive key(s) [${namedKeys}]; value(s) redacted in emitted payload — caller must remove from meta`);
       }
       // Spread cleaned meta first, then pin event + agent last so a
       // caller passing `agent` or `event` in meta cannot overwrite the
