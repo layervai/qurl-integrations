@@ -124,17 +124,16 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		ecsFargateRegionPlaceholderNote,
 		"Create the shared CloudWatch Logs group `/ecs/qurl-connector` in the task region and let the task execution role write to it. Each task has a separate `qurl/qurl/<task-id>` stream; filter by task ID to find one install. For separate access or retention, replace `awslogs-group` with an install-specific group and update the execution role permissions.",
 		"Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.",
-		"Configure qurl-agent-state for POSIX UID/GID `" + ecsConnectorUser + "`; qURL creates its owner-only nested state directory. Mount qurl-config and qurl-bootstrap read-only with share.yaml and enrollment-token respectively.",
 		"The generated sidecar drops every Linux capability.",
 		"Its ECS restart policy retries the non-essential qURL container indefinitely after the 60-second minimum run window without restarting the target application container.",
 	}, " ")
 	return intro + "\n\n" +
-		"1. Store the enrollment token from the separate DM as the read-only `enrollment-token` file on the qurl-bootstrap EFS access point. This message intentionally does not contain the token.\n\n" +
-		"2. Put share.yaml at `/etc/qurl/share.yaml` on the read-only qurl-config EFS access point:\n\n" +
+		"1. Store the enrollment token from the separate DM as the read-only `enrollment-token` file at the qurl-bootstrap access-point root. This message intentionally does not contain the token.\n\n" +
+		"2. Put share.yaml at the qurl-config access-point root (the container reads `/etc/qurl/share.yaml`):\n\n" +
 		configBlock + "\n\n" +
 		"3. Add this non-essential qURL sidecar container to the same task definition as the target container:\n\n" +
 		containerBlock + "\n\n" +
-		"4. " + volumeInstructions + "\n\nDo not share qurl-agent-state across concurrently running sidecars. Stop the old task before a replacement mounts the same state (for an ECS service, use deployment maximumPercent 100 and minimumHealthyPercent 0). After the task logs show qURL connected, deploy a warm-start revision without `--enrollment-token-file` or the qurl-bootstrap mount; verify it reconnects from qurl-agent-state, then delete the enrollment-token file.", nil
+		"4. " + volumeInstructions + "\n\nAfter the task logs show qURL connected, deploy a warm-start revision without `--enrollment-token-file` or the qurl-bootstrap mount; verify it reconnects from qurl-agent-state, then delete the enrollment-token file.", nil
 }
 
 func renderECSEFSVolumeInstructions(slug string) (string, error) {
@@ -163,9 +162,9 @@ func renderECSEFSVolumeInstructions(slug string) (string, error) {
 	}
 	return "Merge this task-level volumes object into the task definition. Replace the file-system ID and all three access-point IDs:\n\n" + block + "\n\n" +
 		"Create separate EFS access points rooted at `/qurl/" + slug + "/agent-state`, `/qurl/" + slug + "/config`, and `/qurl/" + slug + "/bootstrap`, respectively. Set each access point's POSIX user and root CreationInfo owner to UID/GID `" + ecsConnectorUser + "`, with root permissions `0700`. These paths belong on the access points; task volume rootDirectory stays `/`. " +
-		"Write `share.yaml` at the config access-point root and `enrollment-token` at the bootstrap access-point root; the container sees `/etc/qurl/share.yaml` and `/run/secrets/qurl/enrollment-token`. qURL creates `state/` under the agent-state root. " +
+		"Use a separate provisioning principal with ClientMount and ClientWrite on the config/bootstrap access points to write these files through those access points. Write `share.yaml` at the config access-point root and `enrollment-token` at the bootstrap access-point root; the container sees `/etc/qurl/share.yaml` and `/run/secrets/qurl/enrollment-token`. qURL creates `state/` under the agent-state root. " +
 		"Use a different slug and access points for every concurrently running sidecar. Keep one active task per agent-state access point. Stop the old task before its replacement mounts the same state; for an ECS service use desiredCount 1, deployment maximumPercent 100 and minimumHealthyPercent 0. " +
-		"Grant the task role elasticfilesystem:ClientMount on the file-system ARN, scoped to these three access points with the elasticfilesystem:AccessPointArn condition. Grant elasticfilesystem:ClientWrite on that ARN only with the agent-state access-point condition; apply the same limits in the file-system policy. Allow NFS TCP 2049 from the task security group to EFS mount targets.", nil
+		"Grant the task role elasticfilesystem:ClientMount on the file-system ARN, scoped to these three access points with the elasticfilesystem:AccessPointArn condition. Grant elasticfilesystem:ClientWrite on that ARN only with the agent-state access-point condition; do not grant the task role write access to config/bootstrap through the file-system policy. Allow NFS TCP 2049 from the task security group to EFS mount targets.", nil
 }
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (string, error) {

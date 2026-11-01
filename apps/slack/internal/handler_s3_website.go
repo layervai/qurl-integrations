@@ -1071,13 +1071,12 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		"The START dependency orders container launch only, so the qURL Connector may log local connection errors until the origin is listening.",
 		"The task role needs s3:GetObject on the objects and s3:ListBucket on the bucket.",
 		s3WebsitePreflightNotice,
-		"Configure qurl-agent-state for POSIX UID/GID `65532:65532`, and mount qurl-config and qurl-bootstrap read-only. Do not share qurl-agent-state across concurrently running sidecars.",
 		"Both generated containers drop every Linux capability.",
 		"The log group is shared across installs. Each task has separate `origin/" + s3WebsiteOriginContainerName + "/<task-id>` and `qurl/qurl/<task-id>` streams; filter by task ID to find one install. For separate access or retention, replace both `awslogs-group` values with an install-specific group and update the execution role permissions.",
 	}, " ")
 	return intro + "\n\n" +
-		"1. Store the enrollment token from the separate DM as the read-only qurl-bootstrap/enrollment-token file. This message intentionally does not contain it.\n\n" +
-		"2. Put share.yaml at `/etc/qurl/share.yaml` on the qurl-config EFS access point:\n\n" +
+		"1. Store the enrollment token from the separate DM as enrollment-token at the qurl-bootstrap access-point root. This message intentionally does not contain it.\n\n" +
+		"2. Put share.yaml at the qurl-config access-point root (the container reads `/etc/qurl/share.yaml`):\n\n" +
 		configBlock + "\n\n" +
 		"3. Add these two containers to the same task definition and replace each `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
 		containerBlock + "\n\n" +

@@ -19,7 +19,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"Fargate's awsvpc network mode",
 		ecsFargateRegionPlaceholderNote,
 		"127.0.0.1:9090",
-		"POSIX UID/GID `65532:65532`",
+		"UID/GID `65532:65532`",
 		`"readonlyRootFilesystem": true`,
 		`"restartPolicy": {`,
 		`"restartAttemptPeriod": 60`,
@@ -28,7 +28,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"Store the enrollment token from the separate DM",
 		"message intentionally does not contain the token",
 		testTunnelImageRef,
-		"Put share.yaml at `/etc/qurl/share.yaml`",
+		"Put share.yaml at the qurl-config access-point root",
 		testTunnelLocalPort9090Line,
 		"crid: '" + testTunnelCRID + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
@@ -180,7 +180,7 @@ func TestRenderedECSVolumeArtifactsMatchBothInstallers(t *testing.T) {
 			if mounts != 3 {
 				t.Fatalf("want three corresponding mounts, got %d", mounts)
 			}
-			for _, want := range []string{"/qurl/" + slug + "/agent-state", "/qurl/" + slug + "/config", "/qurl/" + slug + "/bootstrap", "rootDirectory stays `/`", "POSIX user and root CreationInfo owner", "0700", "different slug and access points", "one active task", "maximumPercent 100 and minimumHealthyPercent 0", "file-system ARN", "elasticfilesystem:AccessPointArn", "/etc/qurl/share.yaml", "/run/secrets/qurl/enrollment-token"} {
+			for _, want := range []string{"/qurl/" + slug + "/agent-state", "/qurl/" + slug + "/config", "/qurl/" + slug + "/bootstrap", "rootDirectory stays `/`", "POSIX user and root CreationInfo owner", "0700", "different slug and access points", "one active task", "maximumPercent 100 and minimumHealthyPercent 0", "file-system ARN", "elasticfilesystem:AccessPointArn", "/etc/qurl/share.yaml", "/run/secrets/qurl/enrollment-token", "separate provisioning principal", "do not grant the task role write access to config/bootstrap"} {
 				if !strings.Contains(instructions, want) {
 					t.Fatalf("missing EFS setup rule %q", want)
 				}
@@ -194,6 +194,23 @@ func TestECSEFSVolumeInstructionsRejectUnsafeSlug(t *testing.T) {
 	for _, slug := range []string{"", "other/../../shared", "bad`slug", "bad\nslug"} {
 		if _, err := renderECSEFSVolumeInstructions(slug); err == nil {
 			t.Fatalf("accepted unsafe slug %q", slug)
+		}
+	}
+}
+
+func TestS3ECSSlugValidationMatchesSharedVolumePaths(t *testing.T) {
+	t.Parallel()
+	for _, slug := range []string{"abc", "a-b", strings.Repeat("a", 64)} {
+		values := map[string]map[string]interactionStateValue{s3WebsiteInstallBlockSlug: {s3WebsiteInstallActionSlug: {Value: slug}}}
+		fieldErrors := map[string]string{}
+		got, _ := parseConnectorSlugAndShortcut(values, s3WebsiteInstallBlockSlug, s3WebsiteInstallActionSlug, s3WebsiteInstallBlockShortcut, s3WebsiteInstallActionShortcut, fieldErrors)
+		if len(fieldErrors) != 0 {
+			t.Fatalf("S3 slug %q rejected: %v", slug, fieldErrors)
+		}
+		args := testS3WebsiteArgs(tunnelEnvECSFargate)
+		args.Slug = got
+		if _, err := renderECSS3WebsiteInstructions(args, testTunnelImageRef, testTunnelImageRef); err != nil {
+			t.Fatalf("S3 slug %q cannot render: %v", slug, err)
 		}
 	}
 }

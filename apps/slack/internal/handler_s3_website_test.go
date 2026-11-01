@@ -1566,7 +1566,7 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderECSS3WebsiteInstructions: %v", err)
 	}
-	if !strings.Contains(instructions, "Do not share qurl-agent-state across concurrently running sidecars") {
+	if !strings.Contains(instructions, "Use a different slug and access points for every concurrently running sidecar") {
 		t.Fatalf("ECS instructions missing qurl-agent-state sharing warning:\n%s", instructions)
 	}
 	for _, want := range []string{"read-only qurl-bootstrap EFS access point", "warm-start revision", "delete the enrollment-token file"} {

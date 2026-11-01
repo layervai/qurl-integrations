@@ -144,7 +144,11 @@ for concurrent sidecars. Put `share.yaml` at the config access-point root, which
 mounts at `/etc/qurl/share.yaml`. The earlier `/work/qurl-proxy.yaml` layout is
 retired. The temporary enrollment file goes at the bootstrap access-point root;
 keep the state volume after enrollment. The task-volume `rootDirectory` stays
-`/`: the access point supplies the per-slug root. See the [ECS EFS task volume
+`/`: the access point supplies the per-slug root.
+
+Seed config/bootstrap files through their access points from a separate
+provisioning principal with mount/write access. Keep the runtime task role
+read-only on those access points, including in the file-system policy. See the [ECS EFS task volume
 contract](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specify-efs-config.html)
 and [EFS access-point directory rules](https://docs.aws.amazon.com/efs/latest/ug/enforce-root-directory-access-point.html).
 
