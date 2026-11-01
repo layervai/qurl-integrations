@@ -104,6 +104,17 @@ for (const [name, path] of platforms) {
 				0,
 				"invalid or unauthorized requests must not contact qURL",
 			);
+			for (const key of Object.keys(env)) {
+				assert.equal(
+					(await invoke({ values: { ...env, [key]: undefined } }))
+						.status,
+					503,
+				);
+			}
+			assert.equal(
+				(await invoke({ authorization: env.MINT_TOKEN })).status,
+				401,
+			);
 			const response = await invoke({
 				body: JSON.stringify({
 					target: "https://evil.example",
@@ -126,6 +137,12 @@ for (const [name, path] of platforms) {
 				new Headers(calls[0].init.headers).get("Authorization"),
 				`Bearer ${env.QURL_API_KEY}`,
 			);
+			assert.equal(
+				(await invoke({ authorization: `bearer ${env.MINT_TOKEN}` }))
+					.status,
+				201,
+			);
+			assert.equal(calls.length, 2);
 			calls = [];
 			upstream = () =>
 				Response.json(
@@ -141,7 +158,11 @@ for (const [name, path] of platforms) {
 			upstream = () => {
 				throw new Error("secret transport detail");
 			};
-			assert.equal((await invoke()).status, 502);
+			const transportFailure = await invoke();
+			assert.equal(transportFailure.status, 502);
+			assert.deepEqual(await transportFailure.json(), {
+				error: "Could not mint a link",
+			});
 			upstream = () =>
 				Response.json(
 					{ data: { ...data, crid: "wrong-resource" } },

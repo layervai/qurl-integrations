@@ -17,8 +17,11 @@ export default async function handler(request) {
 		return json({ error: "Mint endpoint is not configured" }, 503);
 	}
 	// Compare every character so a matching prefix does not return early.
-	const expected = `Bearer ${token}`;
-	const supplied = request.headers.get("Authorization") ?? "";
+	const expected = token;
+	const supplied =
+		/^Bearer (.+)$/i.exec(
+			request.headers.get("Authorization") ?? "",
+		)?.[1] ?? "";
 	let mismatch = expected.length ^ supplied.length;
 	for (let i = 0; i < expected.length; i++) {
 		mismatch |= expected.charCodeAt(i) ^ (supplied.charCodeAt(i) || 0);

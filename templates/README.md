@@ -1,6 +1,6 @@
-# qURL™ edge templates
+# qURL edge templates
 
-Each directory is self-contained: copy it to start a mint endpoint, or copy
+Each qURL™ template directory is self-contained: copy it to start a mint endpoint, or copy
 its handler and exact SDK dependency into an existing project.
 
 - [Cloudflare Worker](cloudflare-worker/README.md)
@@ -10,7 +10,7 @@ its handler and exact SDK dependency into an existing project.
 These examples use `createPortalForUrl()` from `@layervai/qurl` 3.1.1.
 They mint on demand for a fixed configured target and require a separate
 server-side bearer credential. Read the platform README before deploying.
-The CLI scaffold integration requested in #122 is still tracked separately;
+The CLI scaffold integration requested in [#122](https://github.com/layervai/qurl-integrations/issues/122) is still tracked separately;
 no `layerv protect` command is provided by these examples.
 
 To run the local contract tests from the repository root:

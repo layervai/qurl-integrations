@@ -1,8 +1,8 @@
-# qURL™ mint endpoint
+# qURL mint endpoint
 
-This endpoint lets a trusted server or agent mint a qURL for one configured
+This endpoint lets a trusted server or agent mint a qURL™ for one configured
 HTTPS target. It uses the published TypeScript SDK's `createPortalForUrl()`
-helper. The older proposed `hideUrl()` name in issue #123 became this helper.
+helper.
 
 It accepts `POST` only and returns `{ "link": "…", "expires_at": "…" }`.
 The link is valid for 60 seconds; the API controls the account limits and
@@ -40,7 +40,7 @@ curl --fail-with-body --request POST \
 
 A successful request creates a real link using the configured account.
 Use a test account and test target when you first check the deployment.
-Unauthenticated requests return 401; missing configuration returns 503;
+Once configured, unauthenticated requests return 401; missing configuration returns 503;
 upstream failures return 502 without exposing API error details.
 
 ## Vercel Edge Function
