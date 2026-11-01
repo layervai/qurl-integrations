@@ -12,6 +12,8 @@ import (
 // Format selects the stdout projection.
 type Format string
 
+const accountStatusField = "status"
+
 // The two output formats.
 const (
 	FormatText Format = "text"

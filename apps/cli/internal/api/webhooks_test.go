@@ -31,7 +31,7 @@ func TestWebhookWritesNeverRetryOrSendReplayKey(t *testing.T) {
 			}))
 			defer server.Close()
 			// The real transport's 503 retry path is active; write methods must bypass it.
-			client, err := NewWebhookManagement(&Config{BaseURL: server.URL, APIKey: "fixture-account-token"})
+			client, err := NewAccountManagement(&Config{BaseURL: server.URL, APIKey: "fixture-account-token"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -61,7 +61,7 @@ func TestWebhookMetadataRejectsMalformedReplies(t *testing.T) {
 	} {
 		t.Run(body, func(t *testing.T) {
 			reply := &restReply{status: http.StatusOK, body: []byte(body)}
-			page, err := decodeWebhookPage[Webhook](reply, 1)
+			page, err := decodeAccountPage[Webhook](reply, 1)
 			if err == nil {
 				for _, item := range page.Data {
 					if !validWebhook(&item) {
@@ -74,17 +74,17 @@ func TestWebhookMetadataRejectsMalformedReplies(t *testing.T) {
 			}
 		})
 	}
-	page, err := decodeWebhookPage[Webhook](&restReply{status: http.StatusOK, body: []byte(`{"data":[],"meta":{"has_more":false}}`)}, 1)
+	page, err := decodeAccountPage[Webhook](&restReply{status: http.StatusOK, body: []byte(`{"data":[],"meta":{"has_more":false}}`)}, 1)
 	if err != nil || len(page.Data) != 0 || page.HasMore {
 		t.Fatal("rejected explicit empty final page")
 	}
 }
 
 func TestWebhookInputAndAuthorityBoundaries(t *testing.T) {
-	if _, err := NewWebhookManagement(nil); err == nil {
+	if _, err := NewAccountManagement(nil); err == nil {
 		t.Fatal("nil configuration accepted")
 	}
-	if _, err := NewWebhookManagement(&Config{OwnerID: "device:fixture"}); err == nil {
+	if _, err := NewAccountManagement(&Config{OwnerID: "device:fixture"}); err == nil {
 		t.Fatal("device owner accepted")
 	}
 	endpoint, description, status := "https://receiver.example/hook", strings.Repeat("x", 501), "revoked"

@@ -563,12 +563,47 @@ Lists and deliveries return one page. Use JSON `next_cursor` with `--cursor` for
 the next page. The event catalog is not a delivery guarantee. The API reference
 currently marks `qurl.expired` and `resource.closed` as not yet delivered.
 
+## Account custom domains
+
+Domain commands use the same fresh browser account sign-in as webhooks. They
+manage domains owned by that account. Registration requires an enterprise plan;
+the API checks that entitlement. These commands print DNS instructions and never
+change your DNS provider.
+
+```sh
+qurl domains list --limit 20 --output json
+qurl domains add secure.example.com --output json
+qurl domains get secure.example.com --output json
+qurl domains verify secure.example.com --output json
+qurl domains regenerate-token secure.example.com --output json
+qurl domains delete secure.example.com
+```
+
+Configure the returned TXT, ACME CNAME and traffic-routing records at your DNS
+provider. Verification checks DNS once; it does not wait for propagation. Exit
+zero means the API returned the checks. Inspect `status` and each `verified`
+value before using the domain. Quiet verification prints the reported status.
+Other quiet domain commands print the normalized domain name. Missing optional
+readiness remains unknown rather than false.
+
+The verification token can expire. For a pending or failed domain, use
+`regenerate-token`, replace the TXT record with the new value, and verify again.
+The previous token is invalidated immediately. Writes make one HTTP attempt
+without a replay key. If a write or its output is uncertain, use `domains get`
+to inspect current state and read the latest token before another write.
+
+Domain lists return one page. Use JSON `next_cursor` with `--cursor` for the next
+page. DNS values and check errors are quoted in human output and preserved in
+JSON. Browser tokens are never saved or substituted for this machine's device
+credential.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `qurl api-keys list/create/update/revoke` | Manage account credentials after a fresh browser sign-in |
 | `qurl webhooks` | Manage account webhook subscriptions, signing secrets, and delivery metadata |
+| `qurl domains` | Manage enterprise custom domains and inspect DNS verification |
 | `qurl publish <target-url>` | Publish a remote URL or serve a local app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |

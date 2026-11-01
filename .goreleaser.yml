@@ -154,6 +154,13 @@ homebrew_casks:
       - manpages/qurl-webhooks-rotate-secret.1
       - manpages/qurl-webhooks-events.1
       - manpages/qurl-webhooks-deliveries.1
+      - manpages/qurl-domains.1
+      - manpages/qurl-domains-list.1
+      - manpages/qurl-domains-get.1
+      - manpages/qurl-domains-add.1
+      - manpages/qurl-domains-delete.1
+      - manpages/qurl-domains-verify.1
+      - manpages/qurl-domains-regenerate-token.1
       - manpages/qurl-login.1
       - manpages/qurl-publish.1
       - manpages/qurl-preview.1

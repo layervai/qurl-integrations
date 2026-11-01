@@ -12,10 +12,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
-const (
-	webhookListOperation   = "list"
-	webhookCreateOperation = "create"
-)
+const webhookCreateOperation = "create"
 
 func webhooksCmd(opts *globalOpts) *cobra.Command {
 	command := &cobra.Command{Use: "webhooks", Short: "Manage account webhooks with a fresh browser sign-in", Args: noArgs,
@@ -27,11 +24,11 @@ func webhooksCmd(opts *globalOpts) *cobra.Command {
 func webhookListCmd(opts *globalOpts) *cobra.Command {
 	var limit int
 	var cursor string
-	list := &cobra.Command{Use: webhookListOperation, Short: "List one page of webhook metadata", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if err := qurlapi.ValidateWebhookPage(limit); err != nil {
+	list := &cobra.Command{Use: accountListOperation, Short: "List one page of webhook metadata", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if err := qurlapi.ValidateAccountPage(limit); err != nil {
 			return exitcode.UsageError(err)
 		}
-		client, owner, err := opts.accountWebhookClient(cmd.Context(), false)
+		client, owner, err := opts.accountManagementClient(cmd.Context(), false)
 		if err != nil {
 			return err
 		}
@@ -56,7 +53,7 @@ func webhookGetCmd(opts *globalOpts) *cobra.Command {
 		if err := qurlapi.ValidateWebhookID(args[0]); err != nil {
 			return exitcode.UsageError(err)
 		}
-		client, owner, err := opts.accountWebhookClient(cmd.Context(), false)
+		client, owner, err := opts.accountManagementClient(cmd.Context(), false)
 		if err != nil {
 			return err
 		}
@@ -77,7 +74,7 @@ func webhookDeleteCmd(opts *globalOpts) *cobra.Command {
 		if err := qurlapi.ValidateWebhookID(args[0]); err != nil {
 			return exitcode.UsageError(err)
 		}
-		client, _, err := opts.accountWebhookClient(cmd.Context(), true)
+		client, _, err := opts.accountManagementClient(cmd.Context(), true)
 		if err != nil {
 			return err
 		}
@@ -94,7 +91,7 @@ func webhookRotateCmd(opts *globalOpts) *cobra.Command {
 		if err := qurlapi.ValidateWebhookID(args[0]); err != nil {
 			return exitcode.UsageError(err)
 		}
-		client, owner, err := opts.accountWebhookClient(cmd.Context(), true)
+		client, owner, err := opts.accountManagementClient(cmd.Context(), true)
 		if err != nil {
 			return err
 		}
@@ -115,7 +112,7 @@ func webhookRotateCmd(opts *globalOpts) *cobra.Command {
 
 func webhookEventsCmd(opts *globalOpts) *cobra.Command {
 	events := &cobra.Command{Use: "events", Short: "Read the server event catalog", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		client, _, err := opts.accountWebhookClient(cmd.Context(), false)
+		client, _, err := opts.accountManagementClient(cmd.Context(), false)
 		if err != nil {
 			return err
 		}
@@ -135,10 +132,10 @@ func webhookDeliveriesCmd(opts *globalOpts) *cobra.Command {
 		if err := qurlapi.ValidateWebhookID(args[0]); err != nil {
 			return exitcode.UsageError(err)
 		}
-		if err := qurlapi.ValidateWebhookPage(deliveryLimit); err != nil {
+		if err := qurlapi.ValidateAccountPage(deliveryLimit); err != nil {
 			return exitcode.UsageError(err)
 		}
-		client, _, err := opts.accountWebhookClient(cmd.Context(), false)
+		client, _, err := opts.accountManagementClient(cmd.Context(), false)
 		if err != nil {
 			return err
 		}
@@ -196,7 +193,7 @@ func webhookWriteCmd(opts *globalOpts, create bool) *cobra.Command {
 }
 
 func (o *globalOpts) runWebhookWrite(ctx context.Context, id string, input qurlapi.WebhookInput, create bool) error {
-	client, owner, err := o.accountWebhookClient(ctx, true)
+	client, owner, err := o.accountManagementClient(ctx, true)
 	if err != nil {
 		return err
 	}
@@ -221,30 +218,6 @@ func (o *globalOpts) runWebhookWrite(ctx context.Context, id string, input qurla
 		return fmt.Errorf("%w: webhook owner differs from signed-in account", qurl.ErrInvalidAPIResponse)
 	}
 	return o.printer().Webhook(item, "")
-}
-
-func (o *globalOpts) accountWebhookClient(ctx context.Context, write bool) (qurlapi.WebhookManagement, string, error) {
-	o.warnInsecureEndpoint()
-	scopes := []string{accountAdminReadScope}
-	if write {
-		scopes = append(scopes, accountAdminWriteScope)
-	}
-	token, err := o.signInAdmin(ctx, o.accountConfig("", ""), o.openBrowser, scopes)
-	if err != nil {
-		return nil, "", err
-	}
-	client, err := qurlapi.NewWebhookManagement(o.accountConfig(token, ""))
-	if err != nil {
-		return nil, "", err
-	}
-	identity, err := client.Me(ctx)
-	if err != nil {
-		return nil, "", err
-	}
-	if identity.AuthType != "jwt" || identity.Key != nil {
-		return nil, "", fmt.Errorf("%w: webhooks require browser account authentication", qurl.ErrInvalidAPIResponse)
-	}
-	return client, identity.OwnerID, nil
 }
 
 type webhookSecretResultError struct {
