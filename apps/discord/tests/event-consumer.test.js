@@ -521,7 +521,7 @@ describe('event-consumer: pollOnce', () => {
 
     expect(client.actions.InteractionCreate.handle).toHaveBeenCalledTimes(3);
     expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('DeleteMessage failed'),
+      expect.stringContaining('processing or deletion failed'),
       expect.objectContaining({ messageId: 'm-2' }),
     );
   });
@@ -711,12 +711,12 @@ describe('event-consumer: pollLoop error backoff', () => {
     }
   });
 
-  test('onFatal callback routes permanent-error path away from process.exit', async () => {
+  test.each(['QueueDoesNotExist', 'CredentialsProviderError', 'CredentialsError'])('onFatal handles %s without a retry or direct exit', async (code) => {
     const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
     const onFatal = jest.fn();
     sqsMock.on(ReceiveMessageCommand).callsFake(() => {
       const err = new Error('q gone');
-      err.name = 'QueueDoesNotExist';
+      err.name = code;
       throw err;
     });
     eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
@@ -731,6 +731,56 @@ describe('event-consumer: pollLoop error backoff', () => {
       await eventConsumer.stop();
     } finally {
       exitSpy.mockRestore();
+    }
+  });
+
+  test.each(['CredentialsProviderError', 'CredentialsError'])('a later %s retries and recovers after a successful poll', async (code) => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const onFatal = jest.fn();
+    let receives = 0;
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      receives++;
+      if (receives === 2) throw Object.assign(new Error('refresh unavailable'), { name: code });
+      if (receives === 3) eventConsumer._test.getStopController().abort();
+      return { Messages: [] };
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    try {
+      eventConsumer.start(makeStubClient(), { onFatal });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(receives).toBe(2);
+      expect(onFatal).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(receives).toBe(3);
+      expect(onFatal).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith('Event consumer: poll iteration failed', { error: 'refresh unavailable' });
+    } finally {
+      await eventConsumer.stop();
+      jest.useRealTimers();
+    }
+  });
+
+  test.each(['CredentialsProviderError', 'CredentialsError'])('a hard cause under %s remains fatal after a successful poll', async (code) => {
+    const onFatal = jest.fn();
+    let receives = 0;
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      receives++;
+      if (receives === 2) throw Object.assign(new Error('provider wrapper', { cause: { name: 'AccessDeniedException' } }), { name: code });
+      if (receives === 3) eventConsumer._test.getStopController().abort();
+      return { Messages: [] };
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    try {
+      eventConsumer.start(makeStubClient(), { onFatal });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(receives).toBe(2);
+      expect(onFatal).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        'Event consumer: permanent AWS failure, exiting',
+        expect.objectContaining({ code: 'AccessDeniedException' }),
+      );
+    } finally {
+      await eventConsumer.stop();
     }
   });
 
@@ -877,6 +927,11 @@ describe('event-consumer: start/stop lifecycle', () => {
     const badCreds = Object.assign(new Error('creds'), { name: 'UnrecognizedClientException' });
     expect(permanentAwsErrorCode(badCreds)).toBe('UnrecognizedClientException');
 
+    for (const code of ['CredentialsProviderError', 'CredentialsError']) {
+      expect(permanentAwsErrorCode(Object.assign(new Error('no credentials'), { name: code }))).toBe(code);
+      expect(permanentAwsErrorCode(new Error('wrapper', { cause: { name: code } }))).toBe(code);
+    }
+
     const wrapped = Object.assign(new Error('wrap'), {
       cause: { name: 'QueueDoesNotExist' },
     });
@@ -892,6 +947,18 @@ describe('event-consumer: start/stop lifecycle', () => {
     const cyclic = new Error('cyclic');
     cyclic.cause = cyclic;
     expect(permanentAwsErrorCode(cyclic)).toBeNull();
+  });
+
+  test.each(['CredentialsProviderError', 'CredentialsError'])('a hard cause wins over %s across error aliases', (code) => {
+    const { permanentAwsErrorCode } = eventConsumer._test;
+    for (const field of ['name', 'code', 'Code']) {
+      const cause = { [field]: 'AccessDeniedException' };
+      expect(permanentAwsErrorCode({ name: code, cause })).toBe('AccessDeniedException');
+    }
+    expect(permanentAwsErrorCode({ name: code, code: 'InvalidQueueUrl' })).toBe('InvalidQueueUrl');
+    const cyclic = { name: code };
+    cyclic.cause = cyclic;
+    expect(permanentAwsErrorCode(cyclic)).toBe(code);
   });
 
   test('pollOnce passes the stopController.signal in the SDK send options', async () => {
@@ -941,6 +1008,7 @@ describe('event-consumer: start/stop lifecycle', () => {
     const client = makeStubClient();
 
     eventConsumer.start(client);
+    expect(eventConsumer.getMetrics().running).toBe(true);
     eventConsumer.start(client);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('start() called while already running'),
@@ -948,6 +1016,7 @@ describe('event-consumer: start/stop lifecycle', () => {
 
     await eventConsumer.stop();
     await eventConsumer.stop();
+    expect(eventConsumer.getMetrics().running).toBe(false);
   });
 
   test('stop() drains in-flight handlers before resolving (settled within deadline)', async () => {
@@ -1128,6 +1197,7 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
 
     withWorkerDispatch(() => eventConsumer.trackDispatch(handlerPromise));
 
+    expect(eventConsumer.getMetrics().qurl_bot_event_inflight).toBe(1);
     expect(eventConsumer._test.getInFlightCount()).toBe(1);
     resolveHandler('done');
     await handlerPromise;
@@ -1166,6 +1236,7 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
 
     await flushMicrotasks();
 
+    expect(eventConsumer.getMetrics().qurl_bot_event_dispatch_handler_rejections_total).toBe(1);
     expect(logger.error).toHaveBeenCalledWith(
       'Event consumer: dispatch handler rejected',
       expect.objectContaining({
@@ -1244,8 +1315,95 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
       await pollOnceFast(client);
       await pollOnceFast(client);
 
+      expect(eventConsumer.getMetrics()).toEqual({
+        running: false,
+        qurl_bot_event_inflight: cap,
+        qurl_bot_event_inflight_limit: cap,
+        qurl_bot_event_polls_total: 3,
+        qurl_bot_event_atcap_polls_total: 3,
+        qurl_bot_event_dispatch_handler_rejections_total: 0,
+      });
       expect(logger.warn.mock.calls.length - warnBaseline).toBe(1);
       expect(logger.debug.mock.calls.length - debugBaseline).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test.each([['resolve', true], ['reject', true], ['resolve', false]])('a handler %s wakes a capped poll without waiting for its backoff (shutdown signal: %s)', async (outcome, withStop) => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      let finish;
+      const handler = new Promise((resolve, reject) => { finish = outcome === 'resolve' ? resolve : reject; });
+      withWorkerDispatch(() => {
+        eventConsumer.trackDispatch(handler);
+        for (let i = 1; i < eventConsumer._test.MAX_INFLIGHT_HANDLERS; i++) {
+          eventConsumer.trackDispatch(new Promise(() => {}));
+        }
+      });
+      sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+      const client = makeStubClient();
+      for (let i = 0; i < 4; i++) await pollOnceFast(client);
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(1600);
+      if (withStop) eventConsumer._test._setStopControllerForTest();
+      let woke = false;
+      const paused = withMockedSqs(() => eventConsumer._test.pollOnce(client)).then(() => { woke = true; });
+      await jest.advanceTimersByTimeAsync(10);
+      expect(woke).toBe(false);
+      finish(outcome === 'reject' ? new Error('handler failed') : undefined);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(woke).toBe(true);
+      await paused;
+      expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(0);
+      await pollOnceFast(client);
+      expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(1);
+      expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('one completion above the soft cap does not wake a still-full worker', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      let finish;
+      withWorkerDispatch(() => {
+        eventConsumer.trackDispatch(new Promise(resolve => { finish = resolve; }));
+        for (let i = 0; i < eventConsumer._test.MAX_INFLIGHT_HANDLERS; i++) {
+          eventConsumer.trackDispatch(new Promise(() => {}));
+        }
+      });
+      let woke = false;
+      const paused = withMockedSqs(() => eventConsumer._test.pollOnce(makeStubClient())).then(() => { woke = true; });
+      await jest.advanceTimersByTimeAsync(10);
+      finish();
+      await jest.advanceTimersByTimeAsync(1);
+      expect(woke).toBe(false);
+      await jest.advanceTimersByTimeAsync(100);
+      await paused;
+      expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(0);
+    } finally { jest.useRealTimers(); }
+  });
+
+  test('shutdown still wakes an at-cap sleep while every handler remains pending', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      withWorkerDispatch(() => {
+        for (let i = 0; i < eventConsumer._test.MAX_INFLIGHT_HANDLERS; i++) {
+          eventConsumer.trackDispatch(new Promise(() => {}));
+        }
+      });
+      eventConsumer._test._setStopControllerForTest();
+      let woke = false;
+      const paused = withMockedSqs(() => eventConsumer._test.pollOnce(makeStubClient())).then(() => { woke = true; });
+      await jest.advanceTimersByTimeAsync(10);
+      expect(woke).toBe(false);
+      eventConsumer._test.getStopController().abort();
+      await jest.advanceTimersByTimeAsync(1);
+      expect(woke).toBe(true);
+      await paused;
+      expect(eventConsumer._test.getInFlightCount()).toBe(eventConsumer._test.MAX_INFLIGHT_HANDLERS);
+      expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(0);
     } finally {
       jest.useRealTimers();
     }
@@ -1326,6 +1484,7 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
 
     await withMockedSqs(() => eventConsumer._test.pollOnce(client));
     expect(eventConsumer._test.isAtCapPauseLogged()).toBe(true);
+    expect(eventConsumer.getMetrics().qurl_bot_event_atcap_polls_total).toBe(1);
     expect(eventConsumer._test.getCurrentBackoffMs()).toBe(200);
 
     resolvers.forEach((r) => r('done'));
@@ -1333,6 +1492,9 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
 
     await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(eventConsumer.getMetrics().qurl_bot_event_inflight).toBe(0);
+    expect(eventConsumer.getMetrics().qurl_bot_event_polls_total).toBe(2);
+    expect(eventConsumer.getMetrics().qurl_bot_event_atcap_polls_total).toBe(1);
     expect(logger.info).toHaveBeenCalledWith(
       eventConsumer._test.AT_CAP_RELEASED_INFO_MSG,
       expect.objectContaining({ cap }),

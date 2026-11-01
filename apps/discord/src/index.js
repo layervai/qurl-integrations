@@ -50,7 +50,10 @@ const {
 const { initHttpOnly } = require('./http-only-init');
 const eventConsumer = require('./event-consumer');
 const eventPublisher = require('./event-publisher');
+const { createDispatchProbe, getRuntimeProbeStore } = require('./dispatch-probe');
+let dispatchProbe = null;
 const webhookSubscriptions = require('./webhook-subscriptions');
+const { drainGuildWebhookSubscriptions, stopAcceptingGuildWebhookSubscriptions } = require('./guild-webhook-link');
 const { LOG_KINDS } = require('./constants');
 
 // Process role — selects which subset of the bot runs in this
@@ -124,7 +127,7 @@ logger.info('Process role configured', { role: PROCESS_ROLE, isGateway, isHttp }
 // bot treats itself as a public multi-server app and commands register
 // globally. When GUILD_ID is set to a valid Discord snowflake, commands
 // register to that guild only so they propagate instantly. Per-guild qURL
-// API keys come from /qurl setup (stored encrypted in guild_configs) in
+// API keys come from /qurl-admin setup (stored encrypted in guild_configs) in
 // either mode.
 const { isMultiTenant } = config;
 
@@ -155,7 +158,7 @@ if (isMultiTenant) {
 if (process.env.NODE_ENV === 'production') {
   // QURL_API_KEY is deliberately NOT required: it is only the global
   // fallback for /qurl send + /qurl map, and every deployment shape
-  // relies on per-guild /qurl setup. List is in boot-requirements.js
+  // relies on per-guild /qurl-admin setup. List is in boot-requirements.js
   // for testability.
   const prodMissing = missingProdKeys(process.env);
   if (prodMissing.length > 0) {
@@ -166,7 +169,7 @@ if (process.env.NODE_ENV === 'production') {
 
   // BASE_URL https check — fail fast at boot when the qURL guided setup flow
   // is configured (isQurlOAuthConfigured) but BASE_URL isn't a usable https
-  // origin, so /qurl setup can't dead-end at the OAuth redirect later (#619).
+  // origin, so /qurl-admin setup can't dead-end at the OAuth redirect later (#619).
   // The qURL OAuth router (server.js) mounts unconditionally, so this applies
   // to plain single-guild and multi-tenant deploys alike.
   //
@@ -517,12 +520,10 @@ if (shouldRegisterInteractionListener({
 if (isGateway && !config.ENABLE_GATEWAY_RESUME) {
   // Register commands when ready
   client.once('ready', async () => {
-    // registerCommands takes REST + appId + a guilds map so the
-    // shim path can call the same function without a Client.
+    // Registration uses REST + appId in both gateway implementations.
     await registerCommands({
       rest: client.rest,
       appId: client.application.id,
-      guilds: new Map([...client.guilds.cache.values()].map((g) => [g.id, g.name])),
     });
   });
 
@@ -538,6 +539,7 @@ if (isGateway && !config.ENABLE_GATEWAY_RESUME) {
   // function directly (not wrapped) so v8 keeps a single shape and
   // avoids per-frame closure allocation.
   client.on('raw', noteGatewayActivity);
+  client.on('raw', packet => dispatchProbe?.capture(packet));
 
   // Publish-to-SQS hook for the worker tier (zero-downtime Pillar 1).
   // Fires on every gateway dispatch; `publish` filters internally to
@@ -592,14 +594,10 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
         logger.warn('registerCommands (shim path) skipped: appId not populated by READY');
       } else {
         commandsRegistered = true;
-        // Gateway-tier shim doesn't maintain a guild cache (that's
-        // the worker tier's job); empty map skips purge. The
-        // handleCommand dispatch-time filter remains the correctness
-        // guarantee for stale registrations.
+        // Previous-scope cleanup uses explicit config, not a guild cache.
         registerCommands({
           rest: gatewayShim.getRest(),
           appId,
-          guilds: new Map(),
         }).catch((err) => {
           logger.error('registerCommands (shim path) failed', { error: err.message });
         });
@@ -607,6 +605,7 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
     }
     noteGatewayActivity();
     eventPublisher.publish(data);
+    dispatchProbe?.capture(data);
   });
 }
 
@@ -645,9 +644,10 @@ async function gracefulShutdownTeardown({
   awaitConnectionWatchdog = true,
   awaitGatewayLeader = true,
 } = {}) {
+  dispatchProbe?.stop();
   // Wait for in-flight HTTP requests to drain — server.close() is async,
   // and process.exit() called immediately after would truncate an OAuth
-  // callback mid-flight, leaving the admin's /qurl setup without a
+  // callback mid-flight, leaving the admin's /qurl-admin setup without a
   // persisted API key.
   await tryClose('HTTP server', httpServer, logger);
   stopServerIntervals();
@@ -665,6 +665,9 @@ async function gracefulShutdownTeardown({
   // actually running per process (combined + flag-on is rejected
   // at boot), so the sequencing matters only as documentation.
   await eventPublisher.stop();
+  // Finish accepted links before storage closes or gateway session state is sealed.
+  // Fatal shutdown must preserve its existing session-flush deadline.
+  if (awaitGatewayLeader) await drainGuildWebhookSubscriptions();
   // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
   // heartbeat tick during client.destroy() would race with the
   // WebSocketShard teardown and surface as a confusing "Sampler
@@ -698,7 +701,7 @@ async function gracefulShutdownTeardown({
   // built the hot-standby surface.
   //
   // Normal shutdown awaits both stop calls; a wedged final renew is bounded
-  // by runGracefulShutdown's 10 s force-exit. IDENTIFY-fatal shutdown still
+  // by runGracefulShutdown's 25 s normal force-exit. IDENTIFY-fatal shutdown still
   // invokes both idempotent stop methods to set their guards, but does not
   // await work parked behind manager.connect(). Earlier HTTP/publisher drains
   // can still consume the exit deadline before the session flush. A resumable
@@ -754,9 +757,13 @@ async function gracefulShutdown(code = 0, {
 } = {}) {
   return runGracefulShutdown({
     code,
+    // Keep 10s for prior teardown, 10s for links, and 5s for final storage close.
+    // TODO(upstream-contract): managed Fargate tasks allow 30s before SIGKILL.
+    ceilingMs: awaitGatewayLeader ? 25_000 : 10_000,
     claimShutdown: () => {
       if (isShuttingDown) return false;
       isShuttingDown = true;
+      stopAcceptingGuildWebhookSubscriptions();
       return true;
     },
     teardown: () => gracefulShutdownTeardown({
@@ -794,6 +801,8 @@ function gatewayFatalShutdown() {
 async function pushHandoffShutdown(code = 0) {
   if (isShuttingDown) return;
   isShuttingDown = true;
+  dispatchProbe?.stop();
+  stopAcceptingGuildWebhookSubscriptions();
   await runPushHandoffShutdown({
     code, gatewayLeader, connectionWatchdog, eventPublisher, logger,
   });
@@ -1073,7 +1082,7 @@ async function start() {
     // from env at boot.
     //
     // PER-GUILD subscriptions (BYOK view counter) are in-process:
-    // every guild that links its own API key (via /qurl setup or the
+    // every guild that links its own API key (via /qurl-admin setup or the
     // OAuth callback) gets its own subscription. The registry below
     // owns the in-memory map<owner_id, secret> the multi-secret
     // receiver consults on every inbound webhook, primes from
@@ -1154,12 +1163,7 @@ async function start() {
     eventPublisher.start();
   }
 
-  // TODO(upstream-contract): the infrastructure repository still emits and
-  // provisions the retired view-update queue. No app producer remains; remove
-  // its variables, queue, and IAM there, then delete this compatibility log.
-  if (process.env.ENABLE_VIEW_UPDATE_PUSH === 'true' && isHttp && !isShuttingDown) {
-    logger.info('ENABLE_VIEW_UPDATE_PUSH is retired; using the webhook fast path and polling fallback');
-  }
+  // TODO(upstream-contract): #875 retains view-update resources until all deployed old producers are gone.
 
   // Resume uses the shim's persisted Discord session. The legacy path keeps
   // discord.js as the WebSocket owner. HTTP-only replicas open no gateway.
@@ -1211,6 +1215,26 @@ async function start() {
       gatewayHeartbeatTimer = startGatewayHeartbeat(client);
       activeGuildCountTimer = startActiveGuildCount(client);
     }
+  }
+  if (isGateway && config.ENABLE_DISPATCH_PROBE && !isShuttingDown) {
+    const transport = gatewayShim ? {
+      isReady: () => gatewayShim.isReady() && gatewayShim.isConnected(),
+      getTarget: () => gatewayShim.getDispatchProbeTarget(),
+      request: (target, packet) => gatewayShim.requestDispatchProbe(target, packet),
+    } : {
+      isReady: () => client.isReady(),
+      getTarget: async () => {
+        const guild = client.guilds.cache.find(g => g.available);
+        return guild && client.user ? { guildId: guild.id, userId: client.user.id, shardId: guild.shardId } : null;
+      },
+      // TODO(upstream-contract): pinned SDK field returns the send Promise; public shard.send drops it.
+      request: (target, packet) => client.ws._ws.send(target.shardId, packet),
+    };
+    dispatchProbe = createDispatchProbe({
+      store: getRuntimeProbeStore(), transport, client, logger,
+      publish: config.ENABLE_EVENT_SHIPPER ? eventPublisher.publishDispatchProbe : null,
+    });
+    dispatchProbe.start();
   }
 }
 

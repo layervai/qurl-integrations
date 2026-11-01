@@ -22,6 +22,7 @@
 // need for a problem the bot can solve itself.
 
 const express = require('express');
+const { createHash } = require('node:crypto');
 const db = require('../store');
 const config = require('../config');
 const logger = require('../logger');
@@ -53,21 +54,13 @@ function sanitizeForLog(s) {
 }
 
 const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
-// Looser limiter for OWNER_UNKNOWN — operational drift is the
-// expected failure mode (not an attacker brute-forcing HMAC), but
-// without ANY ceiling an attacker could flood the receiver with
-// signed-shaped requests carrying bogus owner_id and never trip a
-// rate limit. Threshold is 5× the HMAC limiter to avoid throttling
-// during a real registry-rebuild incident.
-//
-// CROSS-TENANT FAIRNESS TRADE-OFF: keyed on IP alone. qurl-service
-// egresses from a small NAT/proxy pool so a single guild whose
-// webhook_owner_id has drifted vs. qurl-service's signing identity
-// can burn 150/min on the shared source IP and 429 other guilds'
-// legitimate events. Acceptable at low BYOK count today (≤10 in
-// prod); at scale this should key on (ip, owner_id) or skip per-IP
-// limiting for OWNER_UNKNOWN entirely.
+// Registry rebuilds need a looser budget than bad signatures: 150/min per
+// (IP, owner). Hashing bounds key size but grants no trust. A 1500/min IP
+// ceiling (ten owner budgets) also catches rotating bogus owners. Both limits
+// run only after an unknown-owner result, so registered NAT siblings bypass them.
+// shortcut: each local 10k-key map can evict history; revisit for strict fleet-wide budgets.
 const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000 });
+const unknownOwnerIpLimiter = createBadSigLimiter({ max: 1500, windowMs: 60_000 });
 
 // Reason codes returned from verifyAndResolve. Caller maps them to
 // HTTP status + audit event + rate-limiter interaction in one place
@@ -154,29 +147,11 @@ function verifyAndResolve(req) {
   return { result: VERIFY_RESULTS.OK, ownerId, body };
 }
 
-// Reconstruct the absolute expiry instant from the recipient row's
-// `created_at` (ISO-8601) + `expires_in` (the symbolic label, one of
-// EXPIRY_LABELS keys like '24h'). Returns UNIX seconds, or null if
-// either field is missing/unparseable.
-//
-// Why reconstruct rather than read from the wire payload: the
-// qurl.expired event's `data` is exactly `{qurl_id, resource_id}` —
-// transit-safe by design, so target-side fields like an absolute
-// `expires_at` aren't carried on the wire. The row already carries
-// everything needed to render the marker.
-//
-// Drift direction is consistently FORWARD (reconstructed > true): the
-// bot computes the true `expiresAt` pre-mint and `created_at` is
-// stamped post-mint, so `created_at + expires_in` always lands later
-// than the upstream-enforced expiry by the mint round-trip duration.
-// Magnitude: sub-second on small sends, single-digit seconds on
-// large multi-batch mints (each batch is its own network round-trip).
-// At the firing edge this can briefly render "expired in 3 seconds"
-// before Discord re-evaluates the `<t:N:R>` marker forward across
-// the boundary. Bounded and cosmetic — both the magnitude and the
-// brief future-render window are well inside the rounding window of
-// a relative-time render at the 30m–7d horizon.
+// Use the mint expiry for new rows; reconstruct only legacy rows without it.
 function rowExpiresAtSeconds(row) {
+  if (row?.expires_at !== undefined) {
+    return Number.isSafeInteger(row.expires_at) && row.expires_at > 0 ? row.expires_at : null;
+  }
   if (typeof row?.created_at !== 'string' || typeof row?.expires_in !== 'string') return null;
   const createdMs = Date.parse(row.created_at);
   if (!Number.isFinite(createdMs)) return null;
@@ -520,9 +495,8 @@ async function handleQurlExpired(req, res, { data, eventId }) {
 // Consumed-flip for the qurl.accessed path: when a recipient opens a
 // ONE-TIME qURL and consumes it (`data.consumed === true`), the link is
 // dead for them even though its 30m TTL hasn't elapsed. Flip their DM
-// from the present-tense "🕐 Closes <t:...:R>" embed to the past-tense
-// "🔒 You opened this one-time qURL … no longer active" copy so they
-// don't see "Closes in ~25m" on a link they can no longer reach.
+// from the original closing-time countdown to explicit consumed copy so
+// the future expiry marker does not imply the used link is still reachable.
 //
 // FIRE-AND-FORGET by design (mirrors the view-counter publish above, NOT
 // handleQurlExpired's response coupling): the view is already recorded
@@ -769,13 +743,13 @@ function editSenderCounterInBackground({
         return { status: 'no-state' };
       }
 
-      // 3. TERMINAL CHECK FIRST. A revoked / window-closed / otherwise
-      //    frozen confirmation must NOT be resurrected by a late view
+      // 3. FAST-PATH-OFF CHECK FIRST. A revoked / window-closed / otherwise
+      //    disarmed token display must NOT be edited by a late view
       //    edit — checked before anything else so we never even read the
       //    send items for a dead display.
-      if (state.terminal) {
-        logger.debug('qURL webhook sender-counter: skip — terminal', { qurl_id: qurlId, send_id: sendId });
-        return { status: 'terminal' };
+      if (state.fastPathOff) {
+        logger.debug('qURL webhook sender-counter: skip — fast path off', { qurl_id: qurlId, send_id: sendId });
+        return { status: 'fast_path_off' };
       }
 
       // 4. ABSENT-GUARD. No token / app id / base means this send predates
@@ -921,9 +895,9 @@ function editSenderCounterInBackground({
         cacheSenderCounterRenderState(sendId, latestState);
         state = latestState;
         renderStateCached = false;
-        if (state.terminal) {
-          logger.debug('qURL webhook sender-counter: skip — terminal', { qurl_id: qurlId, send_id: sendId });
-          return { status: 'terminal' };
+        if (state.fastPathOff) {
+          logger.debug('qURL webhook sender-counter: skip — fast path off', { qurl_id: qurlId, send_id: sendId });
+          return { status: 'fast_path_off' };
         }
         if (!state.interactionToken || !state.interactionAppId || typeof state.baseMsg !== 'string') {
           logger.debug('qURL webhook sender-counter: skip — render state absent/partial (legacy or pre-TTL)', { qurl_id: qurlId, send_id: sendId });
@@ -1001,13 +975,9 @@ function editSenderCounterInBackground({
 
 router.post('/qurl', async (req, res) => {
   const ip = req.ip || 'unknown';
-  // OR-coupling note: an IP that already burned the HMAC limiter
-  // (30/min) will get 429'd here even if its current request would
-  // have been OWNER_UNKNOWN (separately budgeted at 150/min). That's
-  // acceptable — the IP is already flagged as suspicious — so the
-  // looser unknown-owner threshold protects legitimate operational
-  // drift from OTHER IPs, not from the same already-bad-actor IP.
-  if (badSigLimiter.shouldThrottle(ip) || unknownOwnerLimiter.shouldThrottle(ip)) {
+  // Keep bad-signature suppression ahead of parsing/HMAC work. A source
+  // that burns this security budget remains blocked across owner IDs.
+  if (badSigLimiter.shouldThrottle(ip)) {
     logger.warn('qURL webhook rate limit exceeded', { ip });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, {});
     return res.status(429).json({ error: 'Too many invalid webhook attempts' });
@@ -1058,7 +1028,16 @@ router.post('/qurl', async (req, res) => {
       || result === VERIFY_RESULTS.OWNER_ID_MISSING;
     let totalInWindow = null;
     if (isHmacFailure) totalInWindow = badSigLimiter.recordBadSig(ip);
-    else if (isUnknownOwner) totalInWindow = unknownOwnerLimiter.recordBadSig(ip);
+    else if (isUnknownOwner) {
+      const ownerKey = `${ip}:${createHash('sha256').update(ownerId || '').digest('hex')}`;
+      if (unknownOwnerIpLimiter.shouldThrottle(ip) || unknownOwnerLimiter.shouldThrottle(ownerKey)) {
+        logger.warn('qURL webhook rate limit exceeded', { ip });
+        logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, {});
+        return res.status(429).json({ error: 'Too many invalid webhook attempts' });
+      }
+      unknownOwnerIpLimiter.recordBadSig(ip);
+      totalInWindow = unknownOwnerLimiter.recordBadSig(ownerKey);
+    }
     // Audit-event split mirrors the threat-model split: OWNER_* are
     // operational/payload-shape signal (route both to the same
     // unknown-owner dashboard line); SIG_* are HMAC-failure signal.
@@ -1121,11 +1100,7 @@ router.post('/qurl', async (req, res) => {
   // int case in one check. Also blocks Number(null)===0 from slipping
   // through, which would otherwise cost a DDB write per such event.
   // Strict positive integer — qurl.accessed events always carry
-  // access_count >= 1 by contract. Reject 0 here (vs accepting 0 +
-  // writing to DDB + publisher dropping at SQS layer) to avoid the
-  // asymmetric log pair where the webhook returns "recorded" and the
-  // view-update-publisher then warns "invalid accessCount" on the
-  // same event. One source of truth at the wire boundary.
+  // access_count >= 1 by contract. Reject zero before recording a view.
   if (!Number.isSafeInteger(data.access_count) || data.access_count <= 0) {
     logger.warn('qURL webhook access_count not a positive integer', { qurl_id: data.qurl_id, access_count: data.access_count });
     return res.status(200).json({ status: 'invalid-payload' });
@@ -1154,7 +1129,6 @@ router.post('/qurl', async (req, res) => {
     // already-decided 200 — the polling backstop in monitorLinkStatus
     // re-renders anything this edit misses.
     //
-    // Keep the old SQS view-update path off; #875 removes that dead wiring.
     if (dbResult === 'recorded') {
       editSenderCounterInBackground({ qurlId: data.qurl_id, firstView });
     }
@@ -1188,6 +1162,7 @@ router.post('/qurl', async (req, res) => {
 router.stopIntervals = function stopIntervals() {
   badSigLimiter.stopSweep();
   unknownOwnerLimiter.stopSweep();
+  unknownOwnerIpLimiter.stopSweep();
   clearInterval(senderCounterCacheSweepTimer);
   for (const { timer } of senderCounterFlushTimers.values()) clearTimeout(timer);
   senderCounterFlushTimers.clear();

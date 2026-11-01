@@ -7,6 +7,7 @@ jest.mock('jose', () => ({
   jwtVerify: jest.fn(),
 }));
 
+const EXPECTED_NONCE = 'a'.repeat(32);
 const jose = require('jose');
 const { verifyAuth0IdToken } = require('../src/utils/auth0-jwks');
 
@@ -24,10 +25,10 @@ describe('verifyAuth0IdToken', () => {
 
   it('returns ok with the payload when jose.jwtVerify resolves', async () => {
     jose.jwtVerify.mockResolvedValueOnce({
-      payload: { email: 'alice@layerv.test', sub: 'auth0|abc' },
+      payload: { email: 'alice@layerv.test', sub: 'auth0|abc', nonce: EXPECTED_NONCE },
       protectedHeader: { alg: 'RS256' },
     });
-    const res = await verifyAuth0IdToken('valid.jwt.sig');
+    const res = await verifyAuth0IdToken('valid.jwt.sig', EXPECTED_NONCE);
     expect(res.ok).toBe(true);
     expect(res.payload.email).toBe('alice@layerv.test');
     const verifyArgs = jose.jwtVerify.mock.calls[0][2];
@@ -35,18 +36,23 @@ describe('verifyAuth0IdToken', () => {
     expect(verifyArgs.audience).toBe('test-client-id');
   });
 
+  it.each([undefined, null, 42, '', 'b'.repeat(32)])('rejects a verified token with a missing or mismatched nonce %s', async nonce => {
+    jose.jwtVerify.mockResolvedValueOnce({ payload: { nonce, email: 'wrong@example.test' } });
+    expect(await verifyAuth0IdToken('valid.jwt.sig', EXPECTED_NONCE)).toEqual({ ok: false, reason: 'nonce_mismatch' });
+  });
+
   it('returns coarse-grained reason on signature/issuer/audience/expiry failures', async () => {
     const err = new Error('signature verification failed');
     err.code = 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED';
     jose.jwtVerify.mockRejectedValueOnce(err);
-    const res = await verifyAuth0IdToken('tampered.jwt.sig');
+    const res = await verifyAuth0IdToken('tampered.jwt.sig', EXPECTED_NONCE);
     expect(res.ok).toBe(false);
     expect(res.reason).toBe('ERR_JWS_SIGNATURE_VERIFICATION_FAILED');
   });
 
   it('returns verify_failed when jose throws without a code', async () => {
     jose.jwtVerify.mockRejectedValueOnce(new Error('mystery'));
-    const res = await verifyAuth0IdToken('some.jwt.sig');
+    const res = await verifyAuth0IdToken('some.jwt.sig', EXPECTED_NONCE);
     expect(res).toEqual({ ok: false, reason: 'verify_failed' });
   });
 });

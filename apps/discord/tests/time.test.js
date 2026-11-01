@@ -12,6 +12,7 @@ const {
   expiryToMs,
   formatSelfDestructLabel,
   formatSelfDestructSegment,
+  formatSelfDestructTimingNote,
   formatSessionDurationSeconds,
   isPositiveFinite,
   selfDestructSelectValueToSeconds,
@@ -132,11 +133,23 @@ describe('utils/time', () => {
 
   });
 
+  describe('formatSelfDestructTimingNote', () => {
+    test.each([0.5, 0.999])('sub-second minimum at %s', seconds => {
+      expect(formatSelfDestructTimingNote(seconds)).toBe('Access uses a one-second minimum; open content may briefly continue loading.');
+    });
+    test.each([1, 5, 59.999])('short timer at %s', seconds => {
+      expect(formatSelfDestructTimingNote(seconds)).toBe('Access stops at the timer; open content may briefly continue loading.');
+    });
+    test.each([60, 300, 0, -1, NaN, Infinity, null, undefined, '5'])('no note at %s', seconds => {
+      expect(formatSelfDestructTimingNote(seconds)).toBe('');
+    });
+  });
+
   describe('formatSelfDestructSegment', () => {
     it('renders each preset as "Self-destruct: <label>"', () => {
       for (const preset of SELF_DESTRUCT_PRESETS) {
         expect(formatSelfDestructSegment(preset.seconds))
-          .toBe(`Self-destruct: ${preset.label}`);
+          .toBe([`Self-destruct: ${preset.label}`, formatSelfDestructTimingNote(preset.seconds)].filter(Boolean).join('\n'));
       }
     });
 

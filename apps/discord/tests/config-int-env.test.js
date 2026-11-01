@@ -224,3 +224,14 @@ describe('config — OAuth rate-limit knobs (must be positive integers)', () => 
     });
   });
 });
+
+describe('webhook setup wait budget', () => {
+  test.each([
+    [undefined, 3000], ['1', 1], ['5000', 5000],
+    ['0', 3000], ['5001', 3000], ['3ms', 3000], ['1.5', 3000],
+  ])('uses a bounded integer for %p', (raw, expected) => {
+    captureFreshConfig({ QURL_WEBHOOK_SETUP_WAIT_MS: raw }, cfg => {
+      expect(cfg.QURL_WEBHOOK_SETUP_WAIT_MS).toBe(expected);
+    });
+  });
+});

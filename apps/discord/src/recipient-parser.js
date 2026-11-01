@@ -82,24 +82,13 @@
 //                                               // appeared but the caller
 //                                               // denied via the
 //                                               // `allowMassMention` opt
-//     massMentionExpanded:  <boolean>,          // true iff @everyone was
-//                                               // allowed AND the walk
-//                                               // iterated at least one
-//                                               // non-bot member from
-//                                               // `members.cache` (the
-//                                               // member may already be
-//                                               // in `ids` via a prior
-//                                               // named mention — dedup
-//                                               // happens inside
-//                                               // `consider()`; the flag
-//                                               // records that the
-//                                               // expansion ran, not
-//                                               // that it added new
-//                                               // entries). False when
-//                                               // cache was cold,
-//                                               // all-bot, or cap-
-//                                               // saturated before the
-//                                               // walk reached it.
+//     massMentionExpanded:  <boolean>,          // allowed, had room before
+//                                               // the full cache walk,
+//                                               // and saw a human (even
+//                                               // if already selected).
+//                                               // False for a denied,
+//                                               // cold, all-bot, or
+//                                               // already-full selection.
 //                                               // Mutually exclusive
 //                                               // with massMentionDenied.
 //   }
@@ -324,11 +313,8 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
 
-  // `seen` is the canonical post-filter unique-candidate set (every
-  // ID we considered, regardless of cap). `ids` is the cap-bounded
-  // subset returned to the caller. `cappedCount` is computed post-hoc
-  // as `seen.size - ids.size` — accurate even when role expansion is
-  // the source of the overflow.
+  // seen dedupes explicit expansions and accepted cache IDs; ids is bounded.
+  // Cache-only overflow is counted separately because cache keys are unique.
   const seen = new Set();
   const ids = new Set();
   const invalidTokens = [];
@@ -486,7 +472,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // that order.
     //
     // Intentionally NO `ids.size >= cap` early-break here (unlike the
-    // channel-expansion and @everyone loops): role expansion walks
+    // channel-expansion loop): role expansion walks
     // every member so `consider()` can grow `seen` past the cap,
     // giving downstream `cappedCount` an accurate "you typed 55, we
     // kept 25" signal. Early-breaking would zero out cappedCount
@@ -576,15 +562,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
       continue;
     }
-    // Early-break on cap, mirroring the @everyone loop's
-    // `if (ids.size >= cap) break;` (see the ordering comment block
-    // there for the full rationale on cache-insertion-order semantics
-    // — voice expansion inherits the same caveat: under-cap overflow
-    // wins remaining slots by Discord Collection insertion order, not
-    // alphabetical / role-ordered / recently-active). Without the
-    // break, a stage channel with thousands of members + a small
-    // env-overridden cap would walk the entire member set after the
-    // cap was hit — bounded but wasted work.
+    // Voice expansion keeps cache insertion order and stops at the cap.
     //
     // `capHit` separates "no usable members" (empty / bots-only) from
     // "cap was already filled by earlier expansions, voice silently
@@ -623,59 +601,24 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // first, and @everyone fills the remainder. Reversing this order
   // silently drops explicit mentions when the cache is partial.
   let massMentionExpanded = false;
+  let everyoneOverflow = 0;
+  const seenBeforeEveryone = seen.size;
   if (everyonePresent && allowMassMention) {
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
-      // PARTIAL-CACHE BLIND SPOT: same caveat as role expansion
-      // above — in large guilds without a recent GUILD_MEMBERS
-      // chunk, the cache reflects only the currently-loaded subset,
-      // not the guild's true member count. Acceptable v1; in
-      // realistic guilds (where bots are <1% of members) the cap
-      // (QURL_SEND_MAX_RECIPIENTS) bounds the iteration via the
-      // `break` below. The pathological all-bots case still walks
-      // the entire cache — bounded only by cache size, not the cap.
-      //
-      // ORDERING is cache-insertion-order (discord.js Collection
-      // is a Map): when the cap short-circuits the loop, members
-      // win the remaining slots BY CACHE INSERTION ORDER — not
-      // alphabetical, role-ordered, or recently-active. Users may
-      // see a different subset across invocations as the cache
-      // churns. v2 picker (#324 — MentionableSelectMenu) shifts the
-      // selection burden onto the user and removes this ambiguity.
-      //
-      // ITERATION ASSUMES NO CONCURRENT MUTATION: discord.js itself
-      // doesn't guarantee iteration safety for Collections under
-      // gateway-driven mutation (member join/leave events). This
-      // parser runs synchronously inside the slash-command handler
-      // — no awaits between the start of this loop and its `break`
-      // — so the cache snapshot is effectively frozen for the loop
-      // body. A future refactor that introduced an `await` here
-      // would break that assumption.
+      // TODO(upstream-contract): discord.js keeps members.cache keyed by member ID.
+      // Exact counts require O(cache) work; only the loaded snapshot is counted.
+      // Explicit mentions keep priority, then cache order fills the remaining slots.
+      // Cache order can change between runs (#324). Do not await in this walk.
+      // Count overflow without retaining cache-only IDs.
+      const hadCapacityForEveryone = ids.size < cap;
       for (const [memberId, member] of everyoneMembers) {
-        // Short-circuit once we've filled the cap. We accept the
-        // tradeoff of inaccurate cappedCount (no past-cap members
-        // get added to `seen`) over scanning a 10k-member cache.
-        // The cap message still surfaces from any explicit mentions
-        // that overflowed.
-        if (ids.size >= cap) break;
         if (isBotMember(member)) continue;
-        consider(memberId);
-        // Set inside the walk (rather than deriving from
-        // `everyonePresent && allowMassMention` at the bottom) so the
-        // flag means "expansion iterated at least one non-bot member,"
-        // not "expansion was permitted." Robust against future short-
-        // circuits — cap exhausted by named mentions before this loop
-        // runs, empty cache, all-bot cache — that would otherwise
-        // leave the flag overstating.
-        //
-        // NOTE: `consider()` is a silent no-op when `seen.has(id)`, so
-        // a mixed-mentions input like `<@alice> @everyone` where alice
-        // is also in the @everyone set still sets the flag — the walk
-        // iterated alice and dedup'd internally. Documented call-site
-        // behavior (`commands.js`'s MIXED MENTIONS comment) intentionally
-        // treats this as EVERYONE-mode, so the dedup-then-set ordering
-        // matches the intended downstream semantic.
-        massMentionExpanded = true;
+        // Preserve mode selection when explicit mentions already filled the cap.
+        if (hadCapacityForEveryone) massMentionExpanded = true;
+        if (seen.has(memberId)) continue;
+        if (ids.size < cap) consider(memberId);
+        else everyoneOverflow++;
       }
     }
   }
@@ -741,33 +684,24 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     invalidTokens.push(escaped);
   }
 
-  // Cap was enforced inline during the two passes (`ids` never
-  // exceeds `cap`; over-cap candidates live in `seen` but not `ids`).
+  // Explicit overflow stays in seen; cache-only overflow is counted without
+  // retaining IDs. The output never exceeds cap.
   // The back-half re-enforces the cap too; surfacing `cappedCount`
   // here lets the caller say "I kept N of M — drop these or split"
   // before they hit Send rather than waiting for the back-half error.
   const finalIds = [...ids];
-  const cappedCount = seen.size - ids.size;
+  const cappedCount = seen.size - ids.size + everyoneOverflow;
   if (cappedCount > 0) {
-    const logFn = seen.size > cap * MASSIVE_OVERSHOOT_MULTIPLIER
+    const logFn = seenBeforeEveryone > cap * MASSIVE_OVERSHOOT_MULTIPLIER
       ? logger.warn
       : logger.debug;
     logFn('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
-      uniqueCount: seen.size, cap, cappedCount,
+      uniqueCount: seen.size + everyoneOverflow, cap, cappedCount,
     });
   }
 
-  // `massMentionExpanded` was set inside the @everyone walk above
-  // (true iff the walk iterated at least one non-bot member —
-  // `consider()` dedups internally, so a mixed-mentions input still
-  // sets the flag). Surfacing it lets callers route the slash-text
-  // "@everyone" path into RECIPIENT_MODE_EVERYONE without duplicating
-  // the regex-match-and-permission-check (or reaching past the parser
-  // to detect the `<@&{guildId}>` wire form). False when the user typed
-  // @everyone but lacked permission (the denied path lands on
-  // `massMentionDenied` instead) or when the cache was cold /
-  // cap-saturated by the time the walk reached it (caller's
-  // `valid.length` check still catches that downstream).
+  // Preserve mode selection: @everyone had room and the cache had a human.
+  // Denied, cold, or already-full explicit selections leave this false.
   return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, roleMentionsDenied };
 }
 

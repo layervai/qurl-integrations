@@ -1035,40 +1035,32 @@ describe('qurl sends', () => {
     expect(input.ExpressionAttributeValues[':s']).toBe('sent');
   });
 
-  test.each(['guild-a', 'guild-b'])('getRecentSends scopes the sender history to %s before fanout', async (guildId) => {
-    ddbMock.on(QueryCommand).callsFake((input) => {
-      if (input.IndexName) return Promise.resolve({ Items: [
-        { send_id: 'a', guild_id: 'guild-a', created_at: '2026-10-31T01:00:00Z' },
-        { send_id: 'b', guild_id: 'guild-b', created_at: '2026-10-31T00:00:00Z' },
-        { send_id: 'legacy', created_at: '2026-10-30T00:00:00Z' },
-      ] });
-      return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
+  describe.each([
+    ['updateSendDMStatus', ['s1', 'rcpt', 'sent'], { ':s': 'sent' }],
+    ['markSendDMDelivered', ['s1', 'rcpt', 'channel', 'message'], { ':s': 'sent', ':c': 'channel', ':m': 'message' }],
+  ])('%s only updates an existing recipient', (method, args, expectedValues) => {
+    test('preserves the composite key and all delivery fields in one conditional write', async () => {
+      ddbMock.on(UpdateCommand).resolves({});
+      await store[method](...args);
+      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
+      const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+      expect(input.Key).toEqual({ send_id: 's1', recipient_discord_id: 'rcpt' });
+      expect(input.ConditionExpression).toBe('attribute_exists(send_id)');
+      expect(input.ExpressionAttributeValues).toEqual(expectedValues);
     });
-    ddbMock.on(GetCommand).resolves({});
-    const expectedId = guildId === 'guild-a' ? 'a' : 'b';
-    const result = await store.getRecentSends('sender', 5, guildId);
-    expect(result.map(row => row.send_id)).toEqual([expectedId]);
-    expect(ddbMock.commandCalls(GetCommand).map(call => call.args[0].input.Key.send_id)).toEqual([expectedId]);
-  });
 
-  test('getRecentSends continues past a page with only other-guild sends', async () => {
-    ddbMock.on(QueryCommand).callsFake((input) => {
-      if (!input.IndexName) return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
-      if (!input.ExclusiveStartKey) return Promise.resolve({
-        Items: [{ send_id: 'other', guild_id: 'guild-a' }],
-        LastEvaluatedKey: { send_id: 'other', recipient_discord_id: 'r1' },
-      });
-      return Promise.resolve({ Items: [{ send_id: 'mine', guild_id: 'guild-b' }] });
+    test('a missing recipient is a quiet no-op without a fallback upsert', async () => {
+      ddbMock.on(UpdateCommand).rejects(Object.assign(new Error('missing row'), { name: 'ConditionalCheckFailedException' }));
+      await expect(store[method](...args)).resolves.toBeUndefined();
+      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
+      expect(logger.debug).toHaveBeenCalledWith(`${method}: recipient row no longer exists`);
     });
-    ddbMock.on(GetCommand).resolves({});
-    const result = await store.getRecentSends('sender', 1, 'guild-b');
-    expect(result.map(row => row.send_id)).toEqual(['mine']);
-    expect(ddbMock.commandCalls(QueryCommand).filter(call => call.args[0].input.IndexName)).toHaveLength(2);
-  });
 
-  test.each([null, '', 1])('getRecentSends rejects an invalid explicit guild scope: %s', async (guildId) => {
-    await expect(store.getRecentSends('sender', 5, guildId)).rejects.toThrow('guildId must be a non-empty string');
-    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+    test('real storage failures still reach the dispatch persistence handler', async () => {
+      const failure = Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' });
+      ddbMock.on(UpdateCommand).rejects(failure);
+      await expect(store[method](...args)).rejects.toBe(failure);
+    });
   });
 
   test('getRecentSends: uses base-table Query per send for accurate recipient_count', async () => {
@@ -1563,7 +1555,10 @@ describe('qurl sends', () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'sender', attachment_url: encryptedUrl, personal_message: 'hi' },
     });
-    const result = await store.getSendConfig('s1', 'sender');
+    const controller = new AbortController();
+    const result = await store.getSendConfig('s1', 'sender', { signal: controller.signal });
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
+    expect(ddbMock.commandCalls(GetCommand)[0].args[1]).toEqual({ abortSignal: controller.signal });
     expect(result.attachment_url).toBe('https://cdn.example/attachment');
   });
 
@@ -1576,6 +1571,7 @@ describe('qurl sends', () => {
       },
     });
     const result = await store.getSendConfig('s1', 'sender');
+    expect(ddbMock.commandCalls(GetCommand)[0].args[1]).toBeUndefined();
     expect(result).not.toHaveProperty('interaction_token');
     expect(JSON.stringify(result)).not.toContain('tok-LIVE-bearer-cred');
     expect(result.expires_in).toBe('24h');
@@ -1643,7 +1639,7 @@ describe('qurl sends', () => {
       expectedCount: 5, lastRenderedCount: 2,
       viewedCount: null,
       lastRenderedAt: 0,
-      baseMsg: undefined, qurlIds: [], terminal: false,
+      baseMsg: undefined, qurlIds: [], fastPathOff: false,
     });
   });
 
@@ -1660,21 +1656,35 @@ describe('qurl sends', () => {
   test.each([
     ['revoked_at', true, { revoked_at: 'when' }],
     ['revoking_at', false, { revoking_at: 'when' }],
-  ])('getSendRenderState: %s yields terminal=%s', async (_field, terminal, revocationState) => {
+  ])('getSendRenderState: %s yields fastPathOff=%s', async (_field, fastPathOff, revocationState) => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', ...revocationState, confirm_qurl_ids: ['q_a', 'q_b'] },
     });
     const viaRevoke = await store.getSendRenderState('s1');
-    expect(viaRevoke.terminal).toBe(terminal);
+    expect(viaRevoke.fastPathOff).toBe(fastPathOff);
     expect(viaRevoke.qurlIds).toEqual(['q_a', 'q_b']);
     expect(viaRevoke.expectedCount).toBe(0);
     expect(viaRevoke.lastRenderedCount).toBe(0);
 
     ddbMock.reset();
     ddbMock.on(GetCommand).resolves({ Item: { send_id: 's2', confirm_terminal: true } });
-    const viaTerminalFlag = await store.getSendRenderState('s2');
-    expect(viaTerminalFlag.terminal).toBe(true);
-    expect(viaTerminalFlag.qurlIds).toEqual([]); // absent → [] not undefined
+    const viaLegacyFlag = await store.getSendRenderState('s2');
+    expect(viaLegacyFlag.fastPathOff).toBe(true);
+    expect(viaLegacyFlag.qurlIds).toEqual([]); // absent → [] not undefined
+  });
+
+  test.each([
+    [{ confirm_fast_path_off: true }, true],
+    [{ confirm_terminal: true }, true],
+    [{ confirm_fast_path_off: true, confirm_terminal: false }, true],
+    [{ confirm_fast_path_off: false, confirm_terminal: true }, true],
+    [{ confirm_fast_path_off: true, confirm_terminal: true }, true],
+    [{ confirm_fast_path_off: false, confirm_terminal: false }, false],
+    [{ confirm_fast_path_off: 'true', confirm_terminal: 'true' }, false],
+    [{}, false],
+  ])('getSendRenderState: new and legacy fast-path flags %j → %s', async (flags, expected) => {
+    ddbMock.on(GetCommand).resolves({ Item: { send_id: 's1', ...flags } });
+    expect((await store.getSendRenderState('s1')).fastPathOff).toBe(expected);
   });
 
   test('getSendRenderState: returns null on missing row / empty sendId', async () => {
@@ -1739,9 +1749,12 @@ describe('qurl sends', () => {
 
   test('incrementSendViewedCount: increments a sharded qurl_views counter row, not the send config hot row', async () => {
     const before = Math.floor(Date.now() / 1000);
-    ddbMock.on(UpdateCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
     await expect(store.incrementSendViewedCount('s1', 'q_a', 1)).resolves.toBeUndefined();
-    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    const transaction = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+    expect(transaction.ClientRequestToken).toMatch(/^[0-9a-f-]{36}$/);
+    expect(transaction.TransactItems).toHaveLength(1);
+    const input = transaction.TransactItems[0].Update;
     expect(input.TableName).toBe('test-prefix-qurl-views');
     expect(input.Key.qurl_id).toBe('__send_view_count__s1#00');
     expect(input.UpdateExpression).toBe('SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one');
@@ -1752,6 +1765,25 @@ describe('qurl sends', () => {
     expect(input.ExpressionAttributeValues[':shard']).toBe(0);
     expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + 30 * 24 * 60 * 60);
     expect(input.ReturnValues).toBeUndefined();
+  });
+
+  test('incrementSendViewedCount: conflict retries preserve the exact command and token', async () => {
+    const conflict = Object.assign(new Error('conflict'), { name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'TransactionConflict' }] });
+    ddbMock.on(TransactWriteCommand).rejectsOnce(conflict).resolves({});
+    await store.incrementSendViewedCount('s1', 'q_a', 1);
+    const calls = ddbMock.commandCalls(TransactWriteCommand);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].args[0]).toBe(calls[1].args[0]);
+    expect(calls[0].args[1].abortSignal).toBe(calls[1].args[1].abortSignal);
+    ddbMock.reset();
+    ddbMock.on(TransactWriteCommand).rejects(conflict);
+    await expect(store.incrementSendViewedCount('s1', 'q_a', 1)).rejects.toThrow('conflict');
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(7);
+    ddbMock.reset();
+    ddbMock.on(TransactWriteCommand).rejects(Object.assign(new Error('invalid'), { name: 'ValidationException' }));
+    await expect(store.incrementSendViewedCount('s1', 'q_a', 1)).rejects.toThrow('invalid');
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
   test('getSendViewedCount: small sends read one strong shard key', async () => {
@@ -1776,9 +1808,9 @@ describe('qurl sends', () => {
   });
 
   test('getSendViewedCount: expanded expectedCount still reads earlier one-shard writes', async () => {
-    ddbMock.on(UpdateCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
     await store.incrementSendViewedCount('s1', 'q_a', 1);
-    const writtenKey = ddbMock.commandCalls(UpdateCommand)[0].args[0].input.Key;
+    const writtenKey = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems[0].Update.Key;
     expect(writtenKey).toEqual({ qurl_id: '__send_view_count__s1#00' });
 
     ddbMock.reset();
@@ -1842,8 +1874,8 @@ describe('qurl sends', () => {
 
     ddbMock.reset();
     ddbMock.on(GetCommand).resolves({});
-    await expect(store.getSendRenderedCount('missing')).resolves.toBe(0);
-    await expect(store.getSendRenderedCount('')).resolves.toBe(0);
+    await expect(store.getSendRenderedCount('missing')).resolves.toBeNull();
+    await expect(store.getSendRenderedCount('')).resolves.toBeNull();
   });
 
   test('touchRenderedAt: failure-path debounce stamp — SETs last_rendered_at ONLY, no count, no condition', async () => {
@@ -1889,11 +1921,11 @@ describe('qurl sends', () => {
     await expect(store.tryClaimRenderAttempt('', Date.now())).resolves.toBe(false);
   });
 
-  test('markConfirmTerminal: idempotent SET confirm_terminal = true, no condition', async () => {
+  test('markConfirmFastPathOff: idempotent new flag plus legacy compatibility write, no condition', async () => {
     ddbMock.on(UpdateCommand).resolves({});
-    await store.markConfirmTerminal('s1');
+    await store.markConfirmFastPathOff('s1');
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    expect(input.UpdateExpression).toMatch(/SET confirm_terminal = :t/);
+    expect(input.UpdateExpression).toBe('SET confirm_fast_path_off = :t, confirm_terminal = :t');
     expect(input.ExpressionAttributeValues[':t']).toBe(true);
     expect(input.ConditionExpression).toBeUndefined(); // sticky kill-switch, no guard
   });
@@ -1920,6 +1952,19 @@ describe('qurl sends', () => {
     const expectedCountPlaceholder = Object.entries(input.ExpressionAttributeValues)
       .find(([, val]) => val === 3)?.[0];
     expect(input.ConditionExpression).toBe(`attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`);
+  });
+
+  test('saveSendConfirmState: confirmed zero initializes the floor and large-send shard without resetting either', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.saveSendConfirmState('s1', { expectedCount: 20000, viewedCount: 0 });
+    const [config, shard] = ddbMock.commandCalls(UpdateCommand).map(call => call.args[0].input);
+    expect(config.UpdateExpression).toContain('last_rendered_count = if_not_exists(last_rendered_count, :initial_floor)');
+    expect(config.ExpressionAttributeValues[':initial_floor']).toBe(0);
+    expect(shard.Key).toEqual({ qurl_id: '__send_view_count__s1#00' });
+    expect(shard.UpdateExpression).toContain('viewed_count = if_not_exists(viewed_count, :zero)');
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).resolvesOnce({}).rejectsOnce(new Error('throttled'));
+    await expect(store.saveSendConfirmState('s1', { expectedCount: 20000, viewedCount: 0 })).resolves.toBe(true);
   });
 
   test('saveSendConfirmState: partial /qurl-add re-persist updates ONLY the passed keys — NEVER nulls the live token', async () => {
@@ -1982,7 +2027,7 @@ describe('qurl sends', () => {
 
   test('getSendConfig: ownership check — returns undefined for wrong sender', async () => {
     ddbMock.on(GetCommand).resolves({
-      Item: { send_id: 's1', sender_discord_id: 'owner', personal_message: 'secret' },
+      Item: { send_id: 's1', sender_discord_id: 'owner', personal_message: 'secret', revoked_at: '2026-10-31T00:00:00Z' },
     });
     const result = await store.getSendConfig('s1', 'attacker');
     expect(result).toBeUndefined();
@@ -2150,6 +2195,43 @@ describe('qurl sends', () => {
     }
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
   });
+
+  test.each(['guild-a', 'guild-b'])('getRecentSends scopes the sender history to %s before fanout', async (guildId) => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName) return Promise.resolve({ Items: [
+        { send_id: 'a', guild_id: 'guild-a', created_at: '2026-10-31T01:00:00Z' },
+        { send_id: 'b', guild_id: 'guild-b', created_at: '2026-10-31T00:00:00Z' },
+        { send_id: 'legacy', created_at: '2026-10-30T00:00:00Z' },
+      ] });
+      return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
+    });
+    ddbMock.on(GetCommand).resolves({});
+    const expectedId = guildId === 'guild-a' ? 'a' : 'b';
+    const result = await store.getRecentSends('sender', 5, guildId);
+    expect(result.map(row => row.send_id)).toEqual([expectedId]);
+    expect(ddbMock.commandCalls(GetCommand).map(call => call.args[0].input.Key.send_id)).toEqual([expectedId]);
+  });
+
+  test('getRecentSends continues past a page with only other-guild sends', async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (!input.IndexName) return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
+      if (!input.ExclusiveStartKey) return Promise.resolve({
+        Items: [{ send_id: 'other', guild_id: 'guild-a' }],
+        LastEvaluatedKey: { send_id: 'other', recipient_discord_id: 'r1' },
+      });
+      return Promise.resolve({ Items: [{ send_id: 'mine', guild_id: 'guild-b' }] });
+    });
+    ddbMock.on(GetCommand).resolves({});
+    const result = await store.getRecentSends('sender', 1, 'guild-b');
+    expect(result.map(row => row.send_id)).toEqual(['mine']);
+    expect(ddbMock.commandCalls(QueryCommand).filter(call => call.args[0].input.IndexName)).toHaveLength(2);
+  });
+
+  test.each([null, '', 1])('getRecentSends rejects an invalid explicit guild scope: %s', async (guildId) => {
+    await expect(store.getRecentSends('sender', 5, guildId)).rejects.toThrow('guildId must be a non-empty string');
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+
 });
 
 describe('qurl views', () => {
@@ -2270,7 +2352,7 @@ describe('qurl views', () => {
     expect(keys).toHaveLength(2);
   });
 
-  test('getQurlViews: retries once on UnprocessedKeys', async () => {
+  test('getQurlViews: stops retrying when unfinished keys succeed', async () => {
     let attempt = 0;
     ddbMock.on(BatchGetCommand).callsFake(() => {
       attempt++;
@@ -2288,6 +2370,46 @@ describe('qurl views', () => {
     expect(attempt).toBe(2);
     expect(views.size).toBe(2);
   });
+
+  test.each([false, true])('getQurlViews: bounded backoff rejects incomplete snapshots (exhausted=%s)', async (exhausted) => {
+    jest.useFakeTimers();
+    const timeout = jest.spyOn(global, 'setTimeout');
+    try {
+      let attempt = 0;
+      const requested = [];
+      ddbMock.on(BatchGetCommand).callsFake((input) => {
+        requested.push(input.RequestItems['test-prefix-qurl-views'].Keys);
+        attempt++;
+        return {
+          Responses: { 'test-prefix-qurl-views': attempt === 1
+            ? [{ qurl_id: 'q_a', access_count: 1 }]
+            : (!exhausted && attempt === 4 ? [{ qurl_id: 'q_b', access_count: 2, consumed: true }] : []) },
+          ...((exhausted || attempt < 4) ? {
+            UnprocessedKeys: { 'test-prefix-qurl-views': { Keys: [{ qurl_id: 'q_b' }], ConsistentRead: true } },
+          } : {}),
+        };
+      });
+      const pending = store.getQurlViews(['q_a', 'q_b'], { consistentRead: true }).catch(error => error);
+      await jest.runAllTimersAsync();
+      const views = await pending;
+      expect(attempt).toBe(4);
+      expect(timeout.mock.calls.map(([, ms]) => ms)).toEqual([50, 100, 200]);
+      expect(requested).toEqual([
+        [{ qurl_id: 'q_a' }, { qurl_id: 'q_b' }],
+        [{ qurl_id: 'q_b' }], [{ qurl_id: 'q_b' }], [{ qurl_id: 'q_b' }],
+      ]);
+      expect(ddbMock.commandCalls(BatchGetCommand)[3].args[0].input.RequestItems['test-prefix-qurl-views'].ConsistentRead).toBe(true);
+      if (!exhausted) expect(views.get('q_a')).toEqual({ accessCount: 1, consumed: false });
+      expect(logger.warn.mock.calls).toEqual(exhausted
+        ? [['qurl view read retries exhausted', { unprocessed_keys: 1 }]] : []);
+      if (exhausted) expect(views).toEqual(new Error('qurl view read incomplete after retries'));
+      else expect(views.get('q_b')).toEqual({ accessCount: 2, consumed: true });
+    } finally {
+      timeout.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
 });
 
 describe('stats', () => {
@@ -2427,5 +2549,88 @@ describe('ddb-store boot-time AWS_REGION validation', () => {
     const result = spawnDdbStoreBootWithRegion('us-west-2');
     expect(result.status).toBe(0);
     expect(result.stderr).not.toMatch(/AWS_REGION/);
+  });
+});
+
+describe('revoke work deadline', () => {
+  it('passes the same deadline through intent reads and writes', async () => {
+    const signal = new AbortController().signal;
+    ddbMock.on(GetCommand).resolves({ Item: { sender_discord_id: 'sender-1' } });
+    ddbMock.on(UpdateCommand).resolves({});
+    expect(await store.markSendRevoking('send-1', 'sender-1', { signal })).toBe(true);
+    for (const call of ddbMock.calls()) expect(call.args[1]).toEqual({ abortSignal: signal });
+  });
+
+  it('stops before the next send metadata page when the deadline expires', async () => {
+    const budget = new AbortController();
+    ddbMock.on(QueryCommand).callsFake(() => {
+      budget.abort();
+      return { Items: [], LastEvaluatedKey: { send_id: 'send-1', recipient_discord_id: 'next' } };
+    });
+    await expect(store.getSendItems('send-1', 'sender-1', { consistentRead: true, signal: budget.signal })).rejects.toThrow();
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(QueryCommand)[0].args[1]).toEqual({ abortSignal: budget.signal });
+  });
+
+  it('does not start finalization after the deadline', async () => {
+    const budget = new AbortController();
+    budget.abort();
+    await expect(store.markSendRevoked('send-1', 'sender-1', { signal: budget.signal })).rejects.toThrow();
+    expect(ddbMock.calls()).toHaveLength(0);
+  });
+});
+
+
+describe('authoritative link expiry persistence', () => {
+  beforeEach(() => {
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(BatchWriteCommand).resolves({});
+  });
+  test('single and batch writes retain epoch seconds without replacing requested duration', async () => {
+    const row = { sendId: 'expiry-send', senderDiscordId: 'sender', recipientDiscordId: 'recipient', resourceId: 'resource', resourceType: 'file', qurlLink: 'https://q.test/1', expiresIn: '24h', expiresAt: 1800000900 };
+    await store.recordQURLSend(row);
+    expect(ddbMock.commandCalls(PutCommand).at(-1).args[0].input.Item).toEqual({
+      send_id: row.sendId, sender_discord_id: row.senderDiscordId, recipient_discord_id: row.recipientDiscordId,
+      resource_id: row.resourceId, resource_type: row.resourceType, qurl_link: row.qurlLink,
+      expires_at: row.expiresAt, expires_in: row.expiresIn, dm_status: 'pending', created_at: expect.any(String),
+      channel_id: undefined, target_type: undefined,
+    });
+    await store.recordQURLSendBatch([row]);
+    const request = ddbMock.commandCalls(BatchWriteCommand).at(-1).args[0].input;
+    const item = Object.values(request.RequestItems)[0][0].PutRequest.Item;
+    expect(item).toMatchObject({ expires_at: 1800000900, expires_in: '24h' });
+  });
+  test.each([null, '1800000900', NaN, Infinity, 1.5, 0, -1])('invalid expiry %s in a later chunk fails before any write', async expiresAt => {
+    const sends = Array.from({ length: 26 }, (_, i) => ({ sendId: 'expiry-send', senderDiscordId: 'sender', recipientDiscordId: `recipient${i}`, resourceId: 'resource', resourceType: 'file', qurlLink: 'https://q.test/1', expiresIn: '24h', expiresAt: i === 25 ? expiresAt : 1800000900 }));
+    await expect(store.recordQURLSendBatch(sends)).rejects.toThrow(/expiry/i);
+    expect(ddbMock.calls()).toHaveLength(0);
+  });
+});
+
+
+test('single send expiry validation runs before its write', async () => {
+  await expect(store.recordQURLSend({ expiresAt: null })).rejects.toThrow(/expiry/i);
+  expect(ddbMock.calls()).toHaveLength(0);
+});
+
+
+describe('sender count availability', () => {
+  test('a missing aggregate is unknown, while a present zero is valid', async () => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: {} });
+    await expect(store.getSendViewedCount('missing', 20000)).rejects.toThrow('unavailable');
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { 'test-prefix-qurl-views': [{ viewed_count: 0 }] } });
+    await expect(store.getSendViewedCount('s1', 20000)).resolves.toBe(0);
+  });
+
+  test.each([-1, 0.5, '3'])('a malformed shard is unknown (%s)', async count => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { 'test-prefix-qurl-views': [{ viewed_count: count }] } });
+    await expect(store.getSendViewedCount('s1', 20000)).rejects.toThrow('invalid');
+  });
+
+  test('persistent unprocessed shard keys cannot return a partial sum', async () => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { 'test-prefix-qurl-views': [{ viewed_count: 1 }] },
+      UnprocessedKeys: { 'test-prefix-qurl-views': { Keys: [{ qurl_id: '__send_view_count__s1#63' }] } } });
+    await expect(store.getSendViewedCount('s1', 20000)).rejects.toThrow('incomplete');
+    expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(2);
   });
 });

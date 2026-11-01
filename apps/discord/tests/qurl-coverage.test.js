@@ -256,7 +256,7 @@ describe('qURL client — getResourceStatus', () => {
 
   it.each([
     ['GET status', resourceId => qurl.getResourceStatus(resourceId)],
-    ['DELETE revoke', resourceId => qurl.deleteLink(resourceId)],
+    ['DELETE revoke', resourceId => qurl.revokeResource(resourceId)],
   ])('rejects an access token passed as a resource ID without logging or echoing it (%s)', async (_label, invoke) => {
     const logger = require('../src/logger');
     const accessToken = ['at', 'sensitive-access-marker'].join('_');
@@ -308,7 +308,7 @@ describe('qURL client — getResourceStatus', () => {
 
   it.each([
     ['GET status', resourceId => qurl.getResourceStatus(resourceId)],
-    ['DELETE revoke', resourceId => qurl.deleteLink(resourceId)],
+    ['DELETE revoke', resourceId => qurl.revokeResource(resourceId)],
   ])('rejects a public-key resource ID before network work, as SDK 2.x requires a CRID (%s)', async (_label, invoke) => {
     globalThis.fetch = jest.fn();
 
@@ -327,7 +327,7 @@ describe('qURL client — getResourceStatus', () => {
     const deleteSpy = jest.spyOn(QURLClient.prototype, 'deleteResource').mockRejectedValueOnce(clientError);
 
     try {
-      const thrown = await qurl.deleteLink(unknownCredential).catch(error => error);
+      const thrown = await qurl.revokeResource(unknownCredential).catch(error => error);
 
       expect(thrown.message).toBe(
         'qURL API DELETE /resources/:resourceId failed (client_validation)',
@@ -347,7 +347,7 @@ describe('qURL client — getResourceStatus', () => {
       .mockRejectedValueOnce(new TypeError(`delete rejected ${unknownCredential}`));
 
     try {
-      const thrown = await qurl.deleteLink(unknownCredential).catch(error => error);
+      const thrown = await qurl.revokeResource(unknownCredential).catch(error => error);
 
       expect(thrown.message).toBe(
         'qURL API DELETE /resources/:resourceId failed (unknown_error)',
@@ -473,6 +473,26 @@ describe('qURL client — revokeOrdinaryLinks', () => {
     }
   });
 
+  it('returns a long parent-read Retry-After without an uncancellable SDK sleep', async () => {
+    const response = apiError(429);
+    response.headers.get = name => name.toLowerCase() === 'retry-after' ? '3600' : null;
+    globalThis.fetch = jest.fn().mockResolvedValueOnce(response);
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID, ['q_aaaaaaaaaa1'], 'guild-key'))
+      .rejects.toMatchObject({ status: 429, failedCount: 1 });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops SDK deletes at the parent deadline and retains the first confirmation', async () => {
+    const budget = new AbortController();
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(apiOk(200, { resource_id: PUBLIC_KEY_RESOURCE_ID, crid: CRID_RESOURCE_ID }))
+      .mockImplementationOnce(async () => { budget.abort(); return apiOk(204); });
+    await expect(qurl.revokeOrdinaryLinks(PUBLIC_KEY_RESOURCE_ID,
+      ['q_aaaaaaaaaa1', 'q_aaaaaaaaaa2', 'q_aaaaaaaaaa3'], 'guild-key', { signal: budget.signal }))
+      .rejects.toMatchObject({ failedCount: 2, confirmedQurlIds: ['q_aaaaaaaaaa1'] });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('stops mid-batch once the budget expires', async () => {
     const budget = new AbortController();
     const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockImplementation(ms => (
@@ -493,7 +513,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
       const { ERROR_CODE_NETWORK, ERROR_CODE_TIMEOUT } = require('@layervai/qurl');
       expect([ERROR_CODE_NETWORK, ERROR_CODE_TIMEOUT]).toContain(err.code);
       expect(err.message).not.toContain('unknown_error');
-      expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     } finally {
       timeoutSpy.mockRestore();
     }
@@ -528,6 +548,7 @@ describe('qURL client — revokeOrdinaryLinks', () => {
       .rejects.toMatchObject({
         message: 'qURL API DELETE /resources/:resourceId/qurls/:qurlId failed (404)',
         failedCount: 1,
+        confirmedQurlIds: ['q_aaaaaaaaaa2'],
       });
     expect(globalThis.fetch.mock.calls.map(([url, init]) => [init?.method || 'GET', String(url)]).slice(2)).toEqual([
       ['DELETE', `https://api.test.local/v1/resources/${CRID_RESOURCE_ID}/qurls/q_aaaaaaaaaa1`],
@@ -754,7 +775,7 @@ describe('qURL client — retry + audit behavior', () => {
 
   it('does not replay DELETE on 503 because the mutation outcome is unknown', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
-    await expect(qurl.deleteLink(CRID_RESOURCE_ID)).rejects.toThrow(/503/);
+    await expect(qurl.revokeResource(CRID_RESOURCE_ID)).rejects.toThrow(/503/);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -764,7 +785,7 @@ describe('qURL client — retry + audit behavior', () => {
     const { resourceIdLogRef } = require('../src/utils/resource-id');
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(401));
 
-    const thrown = await qurl.deleteLink(CRID_RESOURCE_ID).then(
+    const thrown = await qurl.revokeResource(CRID_RESOURCE_ID).then(
       () => { throw new Error('expected rejection'); },
       error => error,
     );

@@ -27,109 +27,13 @@ jest.mock('../src/logger', () => ({
 }));
 
 const embedInstances = [];
-const makeEmbed = () => {
-  const embed = {
-    setColor: jest.fn().mockReturnThis(),
-    setTitle: jest.fn().mockReturnThis(),
-    setDescription: jest.fn().mockReturnThis(),
-    setAuthor: jest.fn().mockReturnThis(),
-    addFields: jest.fn().mockReturnThis(),
-    setFooter: jest.fn().mockReturnThis(),
-    setTimestamp: jest.fn().mockReturnThis(),
-    setThumbnail: jest.fn().mockReturnThis(),
-    setURL: jest.fn().mockReturnThis(),
-    _fields: [],
-  };
-  embed.addFields.mockImplementation(function (...args) {
-    embed._fields.push(...args);
-    return embed;
-  });
-  embedInstances.push(embed);
-  return embed;
-};
-
-jest.mock('discord.js', () => {
-  const { makeOptionBuilder, makeComponentChainable } = require('./helpers/discord-mock');
-  return {
-  SlashCommandBuilder: jest.fn().mockImplementation(() => {
-    const subBuilder = () => ({
-      setName: jest.fn().mockReturnThis(),
-      setDescription: jest.fn().mockReturnThis(),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
-      addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
-      addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
-      addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
-    });
-    const builder = {
-      setName: jest.fn(function (n) { builder.name = n; return builder; }),
-      setDescription: jest.fn().mockReturnThis(),
-      addSubcommand: jest.fn(function (fn) { if (typeof fn === 'function') fn(subBuilder()); return builder; }),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return builder; }),
-      addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return builder; }),
-      addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return builder; }),
-      addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return builder; }),
-      setDefaultMemberPermissions: jest.fn().mockReturnThis(),
-      toJSON: jest.fn().mockReturnValue({}),
-    };
-    return builder;
-  }),
-  EmbedBuilder: jest.fn().mockImplementation(makeEmbed),
-  PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
-  ActionRowBuilder: jest.fn().mockImplementation(() => {
-    const row = { components: [], addComponents: jest.fn(function (...args) {
-      row.components.push(...args.flat());
-      return row;
-    }) };
-    return row;
-  }),
-  ButtonBuilder: jest.fn().mockImplementation(() => ({
-    setCustomId: jest.fn().mockReturnThis(),
-    setLabel: jest.fn().mockReturnThis(),
-    setEmoji: jest.fn().mockReturnThis(),
-    setStyle: jest.fn().mockReturnThis(),
-    setURL: jest.fn().mockReturnThis(),
-  })),
-  ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
-  ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
-  ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
-  StringSelectMenuBuilder: jest.fn().mockImplementation(() => ({
-    setCustomId: jest.fn().mockReturnThis(),
-    setPlaceholder: jest.fn().mockReturnThis(),
-    addOptions: jest.fn().mockReturnThis(),
-  })),
-  UserSelectMenuBuilder: jest.fn().mockImplementation(() => ({
-    setCustomId: jest.fn().mockReturnThis(),
-    setPlaceholder: jest.fn().mockReturnThis(),
-    setMinValues: jest.fn().mockReturnThis(),
-    setMaxValues: jest.fn().mockReturnThis(),
-    setDefaultValues: jest.fn().mockReturnThis(),
-    addDefaultUsers: jest.fn().mockReturnThis(),
-  })),
-  MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
-  ModalBuilder: jest.fn().mockImplementation(() => ({
-    setCustomId: jest.fn().mockReturnThis(),
-    setTitle: jest.fn().mockReturnThis(),
-    addComponents: jest.fn().mockReturnThis(),
-  })),
-  TextInputBuilder: jest.fn().mockImplementation(() => ({
-    setCustomId: jest.fn().mockReturnThis(),
-    setLabel: jest.fn().mockReturnThis(),
-    setPlaceholder: jest.fn().mockReturnThis(),
-    setStyle: jest.fn().mockReturnThis(),
-    setMaxLength: jest.fn().mockReturnThis(),
-    setMinLength: jest.fn().mockReturnThis(),
-    setRequired: jest.fn().mockReturnThis(),
-  })),
-  TextInputStyle: { Short: 1, Paragraph: 2 },
-  };
-});
+jest.mock('discord.js', () => require('./helpers/discord-mock').buildDiscordMock(embedInstances));
 
 const mockDb = {
   getLinkByDiscord: jest.fn(),
   getLinkedDiscordIds: jest.fn(() => new Set()),
   createPendingLink: jest.fn(),
   getLinkByGithub: jest.fn(),
-  deleteLink: jest.fn().mockReturnValue({ changes: 1 }),
   getContributions: jest.fn(() => []),
   getBadges: jest.fn(() => []),
   getStreak: jest.fn(() => null),
@@ -211,7 +115,7 @@ jest.mock('../src/flow-state', () => ({
 
 jest.mock('../src/guild-webhook-link', () => ({
   linkGuildWebhookSubscription: jest.fn().mockResolvedValue({ ok: true, action: 'created' }),
-  fireAndForgetLinkGuildWebhookSubscription: jest.fn(),
+  linkGuildWebhookSubscriptionForSetup: jest.fn().mockResolvedValue(true),
 }));
 
 const crypto = require('crypto');
@@ -231,44 +135,9 @@ const {
   sendCooldowns, handleAddRecipients,
 } = _test;
 
+const { makeInteraction: makeBaseInteraction } = require('./helpers/discord-mock');
 function makeInteraction(overrides = {}) {
-  const base = {
-    user: { id: 'user-1', username: 'TestUser' },
-    options: {
-      getSubcommand: jest.fn(() => 'send'),
-      getString: jest.fn(() => null),
-      getUser: jest.fn(() => null),
-      getAttachment: jest.fn(() => null),
-      getInteger: jest.fn(() => null),
-      getFocused: jest.fn(() => ({ name: 'location', value: '' })),
-    },
-    reply: jest.fn().mockResolvedValue({
-      awaitMessageComponent: jest.fn().mockRejectedValue(new Error('timeout')),
-      createMessageComponentCollector: jest.fn(() => ({
-        on: jest.fn(),
-      })),
-    }),
-    editReply: jest.fn().mockResolvedValue(undefined),
-    deferReply: jest.fn().mockResolvedValue(undefined),
-    followUp: jest.fn().mockResolvedValue(undefined),
-    channel: {
-      awaitMessageComponent: jest.fn().mockRejectedValue(new Error('timeout')),
-      members: new Map(),
-    },
-    channelId: 'ch-1',
-    guildId: 'guild-1',
-    guild: {
-      members: { fetch: jest.fn().mockResolvedValue(undefined) },
-      voiceStates: { cache: new Map() },
-    },
-    replied: false,
-    deferred: false,
-    isChatInputCommand: jest.fn(() => true),
-    isAutocomplete: jest.fn(() => false),
-    commandName: 'qurl',
-    respond: jest.fn().mockResolvedValue(undefined),
-  };
-  return { ...base, ...overrides };
+  return makeBaseInteraction({ guildId: 'guild-1', ...overrides });
 }
 
 afterAll(() => {
@@ -350,7 +219,7 @@ describe('handleCommand', () => {
     await handleCommand(interaction);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('no longer available'),
-      ephemeral: true,
+      flags: 64,
     }));
   });
 
@@ -361,7 +230,7 @@ describe('handleCommand', () => {
     await handleCommand(interaction);
 
     expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('error'), ephemeral: true }),
+      expect.objectContaining({ content: expect.stringContaining('error'), flags: 64 }),
     );
   });
 
@@ -640,8 +509,8 @@ describe('/qurl help subcommand', () => {
 
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining('qURL Bot'),
-        ephemeral: true,
+        content: expect.stringContaining('qURL — Help'),
+        flags: 64,
       }),
     );
   });
@@ -670,7 +539,7 @@ describe('/qurl help subcommand', () => {
   it('does not advertise Add to Discord when only qURL OAuth is configured', async () => {
     const content = await renderHelp({ qurlOAuth: true, discordInstall: false });
 
-    expect(content).toContain('`/qurl setup` — connect qURL via OAuth');
+    expect(content).toContain('`/qurl-admin setup` — connect qURL via OAuth');
     expect(content).not.toContain('Adding the bot to a new server');
     expect(content).not.toContain('Add to Discord');
   });
@@ -678,7 +547,7 @@ describe('/qurl help subcommand', () => {
   it('keeps legacy setup copy and no install CTA before qURL OAuth is configured', async () => {
     const content = await renderHelp({ qurlOAuth: false, discordInstall: false });
 
-    expect(content).toContain('`/qurl setup` — configure your API key');
+    expect(content).toContain('`/qurl-admin setup` — configure your API key');
     expect(content).not.toContain('connect qURL via OAuth');
     expect(content).not.toContain('Add to Discord');
   });
@@ -911,7 +780,7 @@ describe('/qurl revoke subcommand', () => {
     await cmd.execute(interaction);
 
     const siblingCall = interaction.editReply.mock.calls.find(
-      (c) => /qurl setup/.test(c[0]?.content || ''),
+      (c) => /qurl-admin setup/.test(c[0]?.content || ''),
     );
     expect(siblingCall).toBeDefined();
   });
@@ -945,7 +814,7 @@ describe('/qurl revoke subcommand', () => {
     await cmd.execute(interaction);
 
     const siblingCall = interaction.editReply.mock.calls.find(
-      (c) => /qurl setup.*button/.test(c[0]?.content || ''),
+      (c) => /qurl-admin setup.*button/.test(c[0]?.content || ''),
     );
     expect(siblingCall).toBeDefined();
   });
@@ -1127,7 +996,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
     await expect(handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' })).resolves.toBeUndefined();
 
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_u_1'], expect.anything());
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_u_1'], expect.anything(), { signal: expect.any(AbortSignal) });
     expect(require('../src/logger').warn).toHaveBeenCalledWith(
       'Revoke select acknowledgement failed; revoking without a result message',
       { sendId: 'send-1', error: 'Unknown interaction' },
@@ -1244,11 +1113,11 @@ describe('handleRevokeSelect (dispatcher path)', () => {
       content: expect.stringContaining('Revoked 2/2 users.'),
     }));
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(4);
-    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-retry', 'user-1');
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-retry', 'user-1', { signal: expect.any(AbortSignal) });
   });
 });
 
-describe('/qurl setup subcommand (legacy modal-paste path)', () => {
+describe('/qurl-admin setup subcommand (legacy modal-paste path)', () => {
   const originalKEK = process.env.KEY_ENCRYPTION_KEY;
   const originalAuthDomain = process.env.AUTH0_DOMAIN;
   beforeAll(() => {
@@ -1331,13 +1200,13 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
       expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
       expect(interaction.reply).toHaveBeenCalledWith({
         content: expect.stringContaining('qURL setup is temporarily unavailable'),
-        ephemeral: true,
+        flags: 64,
       });
       expect(interaction.reply.mock.calls[0][0].content)
         .not.toContain('AUTH0_EMAIL_CONNECTION');
       const logger = require('../src/logger');
       expect(logger.warn).toHaveBeenCalledWith(
-        'Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot',
+        'Refusing /qurl-admin setup: AUTH0_EMAIL_CONNECTION was rejected at boot',
       );
       expect(logger.error).not.toHaveBeenCalled();
     } finally {
@@ -1359,7 +1228,7 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
       // setup-only policy block.
       expect(interaction.reply).toHaveBeenCalledWith({
         content: expect.stringContaining('Attachment is missing or malformed'),
-        ephemeral: true,
+        flags: 64,
       });
       expect(interaction.reply.mock.calls[0][0].content)
         .not.toContain('temporarily unavailable');
@@ -1427,7 +1296,7 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
     await cmd.execute(interaction);
 
     const blockedCall = interaction.editReply.mock.calls.find(
-      (c) => /already have a `\/qurl setup` modal open/.test(c[0]?.content || ''),
+      (c) => /already have a `\/qurl-admin setup` modal open/.test(c[0]?.content || ''),
     );
     expect(blockedCall).toBeDefined();
   });
@@ -1537,7 +1406,7 @@ describe('handleSetupButton (dispatcher path)', () => {
       expect(interaction.showModal).not.toHaveBeenCalled();
       expect(interaction.reply).toHaveBeenCalledWith({
         content: expect.stringContaining('qURL setup is temporarily unavailable'),
-        ephemeral: true,
+        flags: 64,
       });
     } finally {
       config.isAuth0EmailConnectionRejected = originalRejected;
@@ -1645,7 +1514,7 @@ describe('handleSetupButton (dispatcher path)', () => {
     );
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining('please run `/qurl setup` again'),
+        content: expect.stringContaining('please run `/qurl-admin setup` again'),
       }),
     );
   });
@@ -1729,7 +1598,7 @@ describe('handleSetupModal (dispatcher path)', () => {
       expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
       expect(interaction.reply).toHaveBeenCalledWith({
         content: expect.stringContaining('qURL setup is temporarily unavailable'),
-        ephemeral: true,
+        flags: 64,
       });
       expect(interaction.reply.mock.calls[0][0].content)
         .not.toContain('AUTH0_EMAIL_CONNECTION');
@@ -1783,7 +1652,7 @@ describe('handleSetupModal (dispatcher path)', () => {
     expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
     const replyArg = interaction.reply.mock.calls.at(-1)[0];
     expect(replyArg.content).toContain('Invalid API key format');
-    expect(replyArg.content).toContain('Run `/qurl setup` again');
+    expect(replyArg.content).toContain('Run `/qurl-admin setup` again');
   });
 
   it('surfaces 401 from qURL API as invalid-key message', async () => {
@@ -1830,6 +1699,18 @@ describe('handleSetupModal (dispatcher path)', () => {
         content: expect.stringContaining('503'),
       }),
     );
+  });
+
+  it('keeps the saved key and shows partial success when view counting is not confirmed', async () => {
+    const links = require('../src/guild-webhook-link');
+    const { GUILD_WEBHOOK_PENDING_NOTICE } = require('../src/constants');
+    links.linkGuildWebhookSubscriptionForSetup.mockResolvedValueOnce(false);
+    const interaction = makeModalInteraction();
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(mockDb.setGuildApiKey).toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: `${_test.SETUP_SUCCESS_MSG}\n${GUILD_WEBHOOK_PENDING_NOTICE}`,
+    }));
   });
 
   it('swallows Discord errors on the post-persist success reply', async () => {
@@ -1894,7 +1775,7 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     expect(replyArg).toBeDefined();
     expect(replyArg.content).not.toContain('/qurl map');
     expect(replyArg.content).toContain('/qurl send');
-    expect(replyArg.content).toContain('qURL Bot — Help');
+    expect(replyArg.content).toContain('qURL — Help');
     expect(replyArg.content).toContain('Share files securely');
     expect(replyArg.content).not.toContain('Share resources securely');
   });
@@ -1909,7 +1790,7 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     await handleCommand(interaction);
     expect(interaction.reply).toHaveBeenCalledWith({
       content: _test.QURL_MAP_DISABLED_REPLY,
-      ephemeral: true,
+      flags: 64,
     });
     expect(interaction.deferReply).not.toHaveBeenCalled();
   });
@@ -1924,7 +1805,7 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     await handleCommand(interaction);
     expect(interaction.reply).toHaveBeenCalledWith({
       content: _test.QURL_DETECT_DISABLED_REPLY,
-      ephemeral: true,
+      flags: 64,
     });
     expect(interaction.deferReply).not.toHaveBeenCalled();
   });
@@ -1956,7 +1837,7 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     await handleCommand(interaction);
     expect(interaction.reply).toHaveBeenCalledWith({
       content: expect.stringMatching(/`\/qurl file` has been renamed to `\/qurl send`/),
-      ephemeral: true,
+      flags: 64,
     });
     expect(interaction.deferReply).not.toHaveBeenCalled();
   });

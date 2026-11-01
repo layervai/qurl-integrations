@@ -21,7 +21,7 @@ describe('buildAuth0AuthorizeUrl', () => {
       buildAuth0AuthorizeUrl,
       qurlOAuthCallbackUrl,
     }) => {
-      const url = buildAuth0AuthorizeUrl({ state: 'signed-state', codeChallenge: PKCE_CHALLENGE });
+      const url = buildAuth0AuthorizeUrl({ nonce: 'a'.repeat(32), state: 'signed-state', codeChallenge: PKCE_CHALLENGE });
 
       expect(url.origin).toBe('https://layerv-test.auth0.com');
       expect(url.pathname).toBe('/authorize');
@@ -32,11 +32,18 @@ describe('buildAuth0AuthorizeUrl', () => {
       expect(url.searchParams.get('scope')).toBe('qurl:write qurl:read openid email');
       expect(url.searchParams.get('audience')).toBe('https://api.layerv.test');
       expect(url.searchParams.get('state')).toBe('signed-state');
+      expect(url.searchParams.get('nonce')).toBe('a'.repeat(32));
       expect(url.searchParams.get('code_challenge')).toBe(PKCE_CHALLENGE);
       expect(url.searchParams.get('code_challenge_method')).toBe('S256');
       expect(url.searchParams.get('prompt')).toBe('login consent');
       expect(url.search).toContain('prompt=login+consent');
       expect(url.searchParams.get('connection')).toBeNull();
+    });
+  });
+
+  it.each([undefined, null, 42, '', 'short', 'z'.repeat(32)])('rejects an unusable OIDC nonce %s', nonce => {
+    withBuilder({}, ({ buildAuth0AuthorizeUrl }) => {
+      expect(() => buildAuth0AuthorizeUrl({ state: 'signed-state', codeChallenge: PKCE_CHALLENGE, nonce })).toThrow(TypeError);
     });
   });
 
@@ -49,7 +56,7 @@ describe('buildAuth0AuthorizeUrl', () => {
 
   it('pins a configured passwordless connection after config trimming', () => {
     withBuilder({ AUTH0_EMAIL_CONNECTION: ' email ' }, ({ buildAuth0AuthorizeUrl }) => {
-      const url = buildAuth0AuthorizeUrl({ state: 'signed-state', codeChallenge: PKCE_CHALLENGE });
+      const url = buildAuth0AuthorizeUrl({ nonce: 'a'.repeat(32), state: 'signed-state', codeChallenge: PKCE_CHALLENGE });
 
       expect(url.searchParams.get('connection')).toBe('email');
     });
@@ -58,7 +65,7 @@ describe('buildAuth0AuthorizeUrl', () => {
   it('refuses to build an unpinned authorize URL when the configured pin was rejected', () => {
     withBuilder({ AUTH0_EMAIL_CONNECTION: 'email' }, ({ buildAuth0AuthorizeUrl }, config) => {
       config.isAuth0EmailConnectionRejected = true;
-      expect(() => buildAuth0AuthorizeUrl({
+      expect(() => buildAuth0AuthorizeUrl({ nonce: 'a'.repeat(32),
         state: 'signed-state',
         codeChallenge: PKCE_CHALLENGE,
       })).toThrow('Auth0 email connection policy was rejected');

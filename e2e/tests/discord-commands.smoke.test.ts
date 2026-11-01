@@ -9,10 +9,20 @@ const SUBCOMMAND_OPTION_TYPE = 1;
 // https://discord.com/developers/docs/interactions/application-commands#application-command-object-application-command-types
 const CHAT_INPUT_COMMAND_TYPE = 1;
 
+interface ApplicationCommandOption {
+  type: number;
+  name: string;
+  options?: ApplicationCommandOption[];
+  required?: boolean;
+  max_length?: number;
+  choices?: Array<{ name: string; value: string | number }>;
+}
+
 interface ApplicationCommand {
   name: string;
   type?: number;
-  options?: Array<{ type: number; name: string }>;
+  default_member_permissions?: string | null;
+  options?: ApplicationCommandOption[];
 }
 
 // Tag every fetched registration with the scope it came from. Guild-
@@ -31,10 +41,11 @@ type ScopedCommand = ApplicationCommand & { _scope: 'global' | 'guild' };
 // becomes observed rather than theoretical.
 describe('Discord command registration (smoke)', () => {
   const env = loadEnv();
-  // Shared across both assertions so we only hit the Discord API twice per
+  // Shared across the assertions so we only hit the Discord API twice per
   // run instead of four times (halves rate-limit exposure). Initialized
   // to `[]` so the type doesn't lie during the pre-beforeAll window.
   let registrations: ScopedCommand[] = [];
+  let adminRegistrations: ScopedCommand[] = [];
 
   beforeAll(async () => {
     // Bot-identity sanity check. If BOT_TOKEN and BOT_CLIENT_ID drift —
@@ -89,14 +100,12 @@ describe('Discord command registration (smoke)', () => {
           throw err;
         }),
     ]);
-    registrations = [
-      ...globalCommands
-        .filter((c) => c.name === 'qurl')
-        .map((c) => ({ ...c, _scope: 'global' as const })),
-      ...guildCommands
-        .filter((c) => c.name === 'qurl')
-        .map((c) => ({ ...c, _scope: 'guild' as const })),
+    const scopedCommands = [
+      ...globalCommands.map(c => ({ ...c, _scope: 'global' as const })),
+      ...guildCommands.map(c => ({ ...c, _scope: 'guild' as const })),
     ];
+    registrations = scopedCommands.filter(c => c.name === 'qurl');
+    adminRegistrations = scopedCommands.filter(c => c.name === 'qurl-admin');
 
     // Fail the whole suite loudly if Discord returned no /qurl registrations
     // at all. Without this guard the ghost-subcommand test below would
@@ -107,6 +116,16 @@ describe('Discord command registration (smoke)', () => {
         `Either the bot never called commands.set() on boot, or the Discord API returned an empty response. ` +
         `Check bot logs for a "Slash commands registered." line on the latest deploy.`,
       );
+    }
+  });
+
+  it('admin actions register in the same scopes with Manage Server permission', () => {
+    expect(adminRegistrations.map(command => command._scope).sort())
+      .toEqual(registrations.map(command => command._scope).sort());
+    for (const command of adminRegistrations) {
+      expect(command.type ?? CHAT_INPUT_COMMAND_TYPE).toBe(CHAT_INPUT_COMMAND_TYPE);
+      expect(command.default_member_permissions).toBe('32');
+      expect((command.options ?? []).map(option => option.name).sort()).toEqual(['setup', 'status']);
     }
   });
 
@@ -125,7 +144,7 @@ describe('Discord command registration (smoke)', () => {
       // scope regressed in the Jest failure header.
       //
       // `'map'` is conditional on the deploy-time MAP_COMMAND_ENABLED
-      // toggle (see apps/discord/src/config.js + the commands.js IIFE).
+      // toggle (see apps/discord/src/config.js + buildQurlCommandData).
       // The smoke runner has to read the same flag the bot reads.
       // Strict shape check: require the env var to be exactly "true"
       // or "false" — if a workflow regression drops the "Resolve
@@ -159,12 +178,21 @@ describe('Discord command registration (smoke)', () => {
       console.log(`smoke: MAP_COMMAND_ENABLED="${rawMapFlag}" (mapEnabled=${mapEnabled}); DETECT_COMMAND_ENABLED="${rawDetectFlag}" (detectEnabled=${detectEnabled})`);
       // Base set (always present) + conditionally `detect` / `map`, then sorted to
       // match the actual subcommand list (also sorted, above).
-      const expectedSubcommands = ['help', 'revoke', 'send', 'setup', 'status'];
+      const expectedSubcommands = ['help', 'revoke', 'send'];
       if (detectEnabled) expectedSubcommands.push('detect');
       if (mapEnabled) expectedSubcommands.push('map');
       expectedSubcommands.sort();
       expect({ scope: qurl._scope, subcommands })
         .toEqual({ scope: qurl._scope, subcommands: expectedSubcommands });
+      if (mapEnabled) {
+        const sharedNames = ['recipients', 'expires-in', 'self-destruct', 'personal-message'];
+        const sharedOptions = (name: string) => (qurl.options?.find(option => option.name === name)?.options ?? [])
+          .filter(option => sharedNames.includes(option.name));
+        const sendOptions = sharedOptions('send');
+        expect(sendOptions.map(option => option.name)).toEqual(sharedNames);
+        expect({ scope: qurl._scope, options: sharedOptions('map') })
+          .toEqual({ scope: qurl._scope, options: sendOptions });
+      }
     }
   });
 

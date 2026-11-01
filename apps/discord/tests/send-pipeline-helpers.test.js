@@ -49,6 +49,7 @@ jest.mock('discord.js', () => ({
     setTimestamp: jest.fn().mockReturnThis(),
     setThumbnail: jest.fn().mockReturnThis(),
   })),
+  MessageFlags: jest.requireActual('discord.js').MessageFlags,
   PermissionFlagsBits: { ManageRoles: 1n },
   ActionRowBuilder: jest.fn().mockImplementation(() => {
     const row = { components: [], addComponents: jest.fn(function (...args) {
@@ -493,7 +494,7 @@ describe('qURL client', () => {
   describe('createOneTimeLink', () => {
     it('sends correct POST body with one_time_use: true', async () => {
       globalThis.fetch = jest.fn().mockImplementation(async () => Response.json({
-        data: { resource_id: 'res-1', crid: CRID_RESOURCE_ID, qurl_link: 'https://q.test/abc' },
+        data: { resource_id: 'res-1', crid: CRID_RESOURCE_ID, qurl_link: 'https://q.test/abc', expires_at: new Date(Date.now() + 86400000).toISOString() },
       }, { status: 201 }));
 
       const result = await qurl.createOneTimeLink('https://example.com', '24h', 'test label');
@@ -530,7 +531,7 @@ describe('qURL client', () => {
 
     it('includes authorization header', async () => {
       globalThis.fetch = jest.fn().mockImplementation(async () => Response.json({
-        data: { resource_id: 'r1', qurl_link: 'l1' },
+        data: { resource_id: 'r1', qurl_link: 'l1', expires_at: new Date(Date.now() + 86400000).toISOString() },
       }, { status: 201 }));
 
       await qurl.createOneTimeLink('https://example.com', '1h', 'label');
@@ -543,11 +544,11 @@ describe('qURL client', () => {
     });
   });
 
-  describe('deleteLink', () => {
+  describe('revokeResource', () => {
     it('revokes a CRID through DELETE /v1/resources/{id}', async () => {
       globalThis.fetch = jest.fn().mockImplementation(async () => new Response(null, { status: 204 }));
 
-      await qurl.deleteLink(CRID_RESOURCE_ID);
+      await qurl.revokeResource(CRID_RESOURCE_ID);
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
@@ -573,7 +574,7 @@ describe('qURL client', () => {
         }),
       });
 
-      await expect(qurl.deleteLink(CRID_RESOURCE_ID)).rejects.toThrow(/401/);
+      await expect(qurl.revokeResource(CRID_RESOURCE_ID)).rejects.toThrow(/401/);
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       expect(logger.audit).toHaveBeenCalledWith(
         AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
@@ -593,7 +594,7 @@ describe('qURL client', () => {
     it('rejects a legacy private ID before network work', async () => {
       globalThis.fetch = jest.fn();
 
-      await expect(qurl.deleteLink('r_legacy42')).rejects.toThrow(/qURL API DELETE.*failed \(client_validation\)/);
+      await expect(qurl.revokeResource('r_legacy42')).rejects.toThrow(/qURL API DELETE.*failed \(client_validation\)/);
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
@@ -603,7 +604,7 @@ describe('qURL client', () => {
     ])('rejects %s before network work', async (_kind, resourceId) => {
       globalThis.fetch = jest.fn();
 
-      await expect(qurl.deleteLink(resourceId)).rejects.toThrow(/Invalid resource ID format/);
+      await expect(qurl.revokeResource(resourceId)).rejects.toThrow(/Invalid resource ID format/);
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
@@ -622,7 +623,7 @@ describe('qURL client', () => {
         }),
       });
 
-      const thrown = await qurl.deleteLink(CRID_RESOURCE_ID).then(
+      const thrown = await qurl.revokeResource(CRID_RESOURCE_ID).then(
         () => null,
         (error) => error,
       );
@@ -701,14 +702,15 @@ describe('Connector client', () => {
       expect(result.resource_id).toBe('conn-res-1');
     });
 
-    it('throws when Discord CDN download fails', async () => {
+    it.each(['uploadToConnector', 'downloadAndUpload'])('%s records the CDN status without attempting an upload', async (method) => {
       globalThis.fetch = jest.fn().mockResolvedValueOnce({
         ok: false,
         status: 403,
       });
 
-      await expect(connector.uploadToConnector('https://cdn.discordapp.com/file.png', 'f.png', 'image/png'))
-        .rejects.toThrow(/Failed to download from Discord CDN: 403/);
+      await expect(connector[method]('https://cdn.discordapp.com/file.png', 'f.png', 'image/png'))
+        .rejects.toMatchObject({ cdnStatus: 403, message: 'Failed to download from Discord CDN: 403' });
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     });
 
     it('throws when connector upload fails', async () => {
@@ -759,8 +761,8 @@ describe('Connector client', () => {
 
     it('sends POST with correct body and returns links', async () => {
       const mockLinks = [
-        { qurl_id: 'q_1', qurl_link: 'https://q.test/1' },
-        { qurl_id: 'q_2', qurl_link: 'https://q.test/2' },
+        { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString() },
+        { qurl_id: 'q_2', qurl_link: 'https://q.test/2', expires_at: new Date(Date.now() + 86400000).toISOString() },
       ];
 
       globalThis.fetch = jest.fn().mockResolvedValue({
@@ -998,6 +1000,7 @@ describe('handleAddRecipients', () => {
         setThumbnail: jest.fn().mockReturnThis(),
         setURL: jest.fn().mockReturnThis(),
       })),
+      MessageFlags: jest.requireActual('discord.js').MessageFlags,
       PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
       ActionRowBuilder: jest.fn().mockImplementation(() => {
         const row = { components: [], addComponents: jest.fn(function (...args) {
@@ -1080,7 +1083,7 @@ describe('handleAddRecipients', () => {
     mockCreateOneTimeLink = jest.fn();
     jest.mock('../src/qurl', () => ({
       createOneTimeLink: mockCreateOneTimeLink,
-      deleteLink: jest.fn(),
+      revokeResource: jest.fn(),
     }));
 
     mockMintLinks = jest.fn();
@@ -1214,8 +1217,8 @@ describe('handleAddRecipients', () => {
     });
 
     mockMintLinks.mockResolvedValue([
-      { qurl_id: 'q_mint_1', qurl_link: 'https://q.test/mint-1' },
-      { qurl_id: 'q_mint_2', qurl_link: 'https://q.test/mint-2' },
+      { qurl_id: 'q_mint_1', qurl_link: 'https://q.test/mint-1', expires_at: new Date(Date.now() + 86400000).toISOString() },
+      { qurl_id: 'q_mint_2', qurl_link: 'https://q.test/mint-2', expires_at: new Date(Date.now() + 86400000).toISOString() },
     ]);
 
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
@@ -1256,7 +1259,7 @@ describe('handleAddRecipients', () => {
       self_destruct_seconds: 30,
     });
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-res-44', fileBuffer: new ArrayBuffer(8) });
-    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_mint_3', qurl_link: 'https://q.test/mint-3' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_mint_3', qurl_link: 'https://q.test/mint-3', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
     const users = makeUsersCollection([
@@ -1293,7 +1296,7 @@ describe('handleAddRecipients', () => {
       resource_id: 'res-loc-1',
       hash: 'loc-hash',
     });
-    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_otl_1', qurl_link: 'https://q.test/otl-1' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_otl_1', qurl_link: 'https://q.test/otl-1', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
     const users = makeUsersCollection([
@@ -1326,7 +1329,7 @@ describe('handleAddRecipients', () => {
       self_destruct_seconds: 300,
     });
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'res-loc-2', hash: 'loc-hash' });
-    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_otl_2', qurl_link: 'https://q.test/otl-2' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_otl_2', qurl_link: 'https://q.test/otl-2', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
     const users = makeUsersCollection([
@@ -1363,7 +1366,7 @@ describe('handleAddRecipients', () => {
       hash: 'h-maps',
       success: true,
     });
-    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_maps_1', qurl_link: 'https://q.test/maps-1' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_maps_1', qurl_link: 'https://q.test/maps-1', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
     const users = makeUsersCollection([
@@ -1395,8 +1398,8 @@ describe('handleAddRecipients', () => {
 
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-partial', hash: 'hp', success: true });
     mockMintLinks.mockResolvedValue([
-      { qurl_id: 'q_link1', qurl_link: 'https://q.test/link1' },
-      { qurl_id: 'q_link2', qurl_link: 'https://q.test/link2' },
+      { qurl_id: 'q_link1', qurl_link: 'https://q.test/link1', expires_at: new Date(Date.now() + 86400000).toISOString() },
+      { qurl_id: 'q_link2', qurl_link: 'https://q.test/link2', expires_at: new Date(Date.now() + 86400000).toISOString() },
     ]);
 
     mockSendDM
@@ -1448,8 +1451,8 @@ describe('handleAddRecipients', () => {
 
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-mixed', hash: 'hm', success: true });
     mockMintLinks.mockResolvedValue([
-      { qurl_id: 'q_link1', qurl_link: 'https://q.test/link1' },
-      { qurl_id: 'q_link2', qurl_link: 'https://q.test/link2' },
+      { qurl_id: 'q_link1', qurl_link: 'https://q.test/link1', expires_at: new Date(Date.now() + 86400000).toISOString() },
+      { qurl_id: 'q_link2', qurl_link: 'https://q.test/link2', expires_at: new Date(Date.now() + 86400000).toISOString() },
     ]);
 
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
@@ -1590,8 +1593,8 @@ describe('handleAddRecipients', () => {
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res-A', fileBuffer });
     mockReUploadBuffer.mockResolvedValue({ resource_id: 'new-res-B' });
 
-    const batch1Links = Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_r_${i}`, qurl_link: `https://q.test/r-${i}` }));
-    const batch2Links = Array.from({ length: 2 }, (_, i) => ({ qurl_id: `q_r2_${i}`, qurl_link: `https://q.test/r2-${i}` }));
+    const batch1Links = Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_r_${i}`, qurl_link: `https://q.test/r-${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() }));
+    const batch2Links = Array.from({ length: 2 }, (_, i) => ({ qurl_id: `q_r2_${i}`, qurl_link: `https://q.test/r2-${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() }));
     mockMintLinks
       .mockResolvedValueOnce(batch1Links)
       .mockResolvedValueOnce(batch2Links);
@@ -1602,10 +1605,10 @@ describe('handleAddRecipients', () => {
     const result = await handleAddRecipients('send-batch', users, mockOriginalInteraction, 'test-api-key');
 
     expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
-    expect(mockReUploadBuffer).toHaveBeenCalledTimes(1);
+    expect(mockReUploadBuffer).not.toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', { expiresAt: expect.any(String), n: 10, apiKey: 'test-api-key', selfDestructSeconds: null });
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-B', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(result.msg).toMatch(/Added 12 recipients/);
   });
 
@@ -1628,7 +1631,7 @@ describe('handleAddRecipients', () => {
     }
 
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res-C', fileBuffer: new ArrayBuffer(8) });
-    const links = Array.from({ length: 8 }, (_, i) => ({ qurl_id: `q_l_${i}`, qurl_link: `https://q.test/l-${i}` }));
+    const links = Array.from({ length: 8 }, (_, i) => ({ qurl_id: `q_l_${i}`, qurl_link: `https://q.test/l-${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() }));
     mockMintLinks.mockResolvedValueOnce(links);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 

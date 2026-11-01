@@ -5,7 +5,7 @@ const {
 } = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
-const { AUDIT_EVENTS } = require('./constants');
+const { AUDIT_EVENTS, REVOKE_BATCH_MAX_IDS } = require('./constants');
 const {
   qurlPath,
   resourceIdLogRef,
@@ -59,15 +59,13 @@ const QURL_ID_LOG_PATH = '/qurls/:resourceId';
 const CHILD_QURL_LOG_PATH = '/qurls/:qurlId';
 const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
 const RESOURCE_QURL_LOG_PATH = '/resources/:resourceId/qurls/:qurlId';
-// Ordinary-child revoke client: each call (parent GET or one DELETE) gets two
-// 10s attempts, and the batch gets 25s per expected call (one GET plus one
-// DELETE per child). The signal is the real bound: extra parent GETs after a
-// 404 share the same budget, so a full ten-child batch never exceeds 275s,
-// well inside Discord's 15-minute window.
-// Shared with connector.js's revoke_links chunk size, which must never exceed it.
-const REVOKE_BATCH_MAX_IDS = 10;
+// Ordinary-child revoke calls get one 10s attempt and share a batch deadline.
+// TODO(upstream-contract): SDK GET retries can sleep for a long Retry-After
+// without caller cancellation. Disable retries for this bounded user action;
+// failed reads/deletes stay unconfirmed for the next explicit revoke attempt.
 const ORDINARY_REVOKE_ATTEMPT_TIMEOUT_MS = 10_000;
-const ORDINARY_REVOKE_MAX_RETRIES = 1;
+const ORDINARY_REVOKE_MAX_RETRIES = 0;
+// Each child can need a 10s lookup and a 10s delete, plus scheduling headroom.
 const ORDINARY_REVOKE_BUDGET_PER_CALL_MS = 25_000;
 const UNKNOWN_STATUS0_CODE = 'unknown_error';
 
@@ -99,10 +97,13 @@ function makeClient(apiKey, { signal, timeout = REQUEST_TIMEOUT_MS, maxRetries =
     maxRetries,
     userAgent: USER_AGENT,
     ...(signal ? {
-      fetch: (url, init) => globalThis.fetch(url, {
-        ...init,
-        signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
-      }),
+      fetch: async (url, init) => {
+        signal.throwIfAborted();
+        return globalThis.fetch(url, {
+          ...init,
+          signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
+        });
+      },
     } : {}),
   });
 }
@@ -349,7 +350,7 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
 // Whole-resource revoke. Retained for scripts/loadtest-standalone.js only: bot
 // revoke and cleanup must revoke children (connector.revokeMintedLinks),
 // because a shared parent delete never reaches watermarked children.
-async function deleteLink(resourceId, apiKey) {
+async function revokeResource(resourceId, apiKey) {
   resourcePath(resourceId);
   const client = makeClient(apiKey);
   // Revoke at the resource level: every link minted on the resource stops
@@ -384,8 +385,10 @@ async function deleteLink(resourceId, apiKey) {
 //
 // Throws the first failure with `failedCount`: children not confirmed revoked,
 // including any skipped after an auth failure or a budget abort, so it is an
-// upper bound on still-live children rather than a measurement.
-async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
+// upper bound on still-live children rather than a measurement. confirmedQurlIds
+// contains only successful child DELETEs under the verified parent.
+async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey, { signal } = {}) {
+  signal?.throwIfAborted();
   validateResourceId(resourceId);
   if (!Array.isArray(rawQurlIds) || rawQurlIds.length > REVOKE_BATCH_MAX_IDS) {
     throw new Error('Invalid qURL revoke token list');
@@ -396,7 +399,7 @@ async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
   // An empty list would "succeed" for every recipient a caller maps onto it.
   if (qurlIds.length === 0) throw new Error('No qURL revoke token ids to revoke');
   const client = makeClient(apiKey, {
-    signal: AbortSignal.timeout(ORDINARY_REVOKE_BUDGET_PER_CALL_MS * (qurlIds.length + 1)),
+    signal: AbortSignal.any([AbortSignal.timeout(ORDINARY_REVOKE_BUDGET_PER_CALL_MS * (qurlIds.length + 1)), ...(signal ? [signal] : [])]),
     timeout: ORDINARY_REVOKE_ATTEMPT_TIMEOUT_MS,
     maxRetries: ORDINARY_REVOKE_MAX_RETRIES,
   });
@@ -423,21 +426,23 @@ async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
     });
   }
   validateResourceId(parent.crid);
-  // Sequential: callers already fan out across resources, and each SDK call
-  // retries 429s, so a parallel burst here would amplify rate limiting. Attempt
+  // Sequential: callers already fan out across resources, so a parallel burst
+  // here would amplify rate limiting. Attempt
   // every child before failing so one stale child cannot shield live siblings.
   let firstFailure;
   let failedCount = 0;
+  const confirmedQurlIds = [];
   for (const [i, qurlId] of qurlIds.entries()) {
     try {
       await callQurl('DELETE', RESOURCE_QURL_LOG_PATH, () => client.revokeResourceQurl(parent.crid, qurlId));
+      confirmedQurlIds.push(qurlId);
     } catch (err) {
       failedCount++;
       firstFailure ??= err;
       // Every sibling would fail the same auth check; stop so one bad key does
       // not page DEPENDENCY_AUTH_FAILURE once per child, and count the children
       // never attempted as failed (still live).
-      if (err?.status === 401 || err?.status === 403) {
+      if (signal?.aborted || err?.status === 401 || err?.status === 403) {
         failedCount += qurlIds.length - 1 - i;
         break;
       }
@@ -445,6 +450,7 @@ async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
   }
   if (firstFailure) {
     firstFailure.failedCount = failedCount;
+    firstFailure.confirmedQurlIds = confirmedQurlIds;
     throw firstFailure;
   }
 }
@@ -466,7 +472,7 @@ async function getResourceStatus(resourceId, apiKey) {
 
 module.exports = {
   createOneTimeLink,
-  deleteLink,
+  revokeResource,
   revokeOrdinaryLinks,
   REVOKE_BATCH_MAX_IDS,
   getIdentity,

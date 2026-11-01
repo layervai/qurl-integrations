@@ -24,7 +24,7 @@ Three pieces:
    Terraform `aws_lambda_invocation`. Creates / rotates / reuses the
    bot's default `qurl.accessed` subscription against qurl-service, writes
    the secret to SSM. The bot never registers that default subscription on
-   boot; `/qurl setup` still provisions guild BYOK subscriptions and records
+   boot; `/qurl-admin setup` still provisions guild BYOK subscriptions and records
    an owner-only mapping when a guild key resolves to the default owner.
 
 ## Why a Lambda (not on-boot self-registration)
@@ -69,7 +69,7 @@ Terraform-side ordering (config lives in the infrastructure repository):
 
 Every process that can call the guild webhook linker must receive
 `QURL_WEBHOOK_SECRET` in a default-subscription deployment, including gateway
-tasks that serve `/qurl setup`. The one-shot backfill enforces this at startup;
+tasks that serve `/qurl-admin setup`. The one-shot backfill enforces this at startup;
 `QURL_WEBHOOK_PURE_BYOK=true` is the explicit opt-out for deployments with no
 default subscription. The flag has no effect while `QURL_WEBHOOK_SECRET` is
 set. It is not a rollback switch for a deployment with a managed default
@@ -158,7 +158,7 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   `DEFAULT_WEBHOOK_OWNER_KEY_INVALID` means the saved guild key ciphertext
   cannot be decrypted; `DEFAULT_WEBHOOK_OWNER_KEY_CHANGED` means a concurrent
   re-key or other row update won, or the guild row was removed mid-link
-  (re-run `/qurl setup`). HTTP failures commonly use
+  (re-run `/qurl-admin setup`). HTTP failures commonly use
   `error_code=Error`; network and timeout failures use their runtime error name.
   The `DEFAULT_WEBHOOK_OWNER_CONTRACT`, `_CONFLICT`, and `_PAGE_CAP` codes also
   fail receiver priming: while they persist, the registry scan cannot prime
@@ -168,7 +168,7 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   attributes) is picked up by `scripts/provision-guild-subscriptions.js`, but a
   failed re-key leaves the previous key's `webhook_id` / `webhook_owner_id` /
   `webhook_secret` on the row, so the backfill skips it and the receiver keeps
-  the old owner and secret. After fixing the cause, re-run `/qurl setup` for
+  the old owner and secret. After fixing the cause, re-run `/qurl-admin setup` for
   each re-keyed guild that logged the failure.
 - **Guild links fail with `error_code=DEFAULT_WEBHOOK_SECRET_CONFLICT`** (at
   `stage=default-owner-persist`, or `stage=default-owner-cache` when the
@@ -187,7 +187,7 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
 - **Guild links fail with `error_code=DEFAULT_WEBHOOK_OWNER_MISSING`.** The row
   has a secret without its owner and is not eligible for receiver caching.
   Inspect the row for partial/manual writes, remove the stale webhook fields,
-  and re-run `/qurl setup`; do not copy the default environment secret into it.
+  and re-run `/qurl-admin setup`; do not copy the default environment secret into it.
 - **`qurl-views` table missing.** Bot's monitor `BatchGet` throws
   `ResourceNotFoundException`; the setInterval's try/catch logs
   `Link monitor poll failed` and the counter sticks at

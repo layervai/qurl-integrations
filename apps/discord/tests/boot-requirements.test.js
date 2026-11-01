@@ -29,7 +29,7 @@ describe('bootRequired', () => {
 });
 
 describe('prodRequired', () => {
-  it('omits QURL_API_KEY — every deployment configures per-guild via /qurl setup', () => {
+  it('omits QURL_API_KEY — every deployment configures per-guild via /qurl-admin setup', () => {
     expect(prodRequired().sort()).toEqual([
       'KEY_ENCRYPTION_KEY', 'METRICS_TOKEN',
     ]);
@@ -646,7 +646,7 @@ describe('invalidStateSecretValues', () => {
     expect(invalidStateSecretValues({ isQurlOAuthConfigured: false })).toEqual([]);
   });
 
-  it('flags a configured qURL OAuth flow with NO available signer key (would deferred-500 the first /qurl setup)', () => {
+  it('flags a configured qURL OAuth flow with NO available signer key (would deferred-500 the first /qurl-admin setup)', () => {
     const problems = invalidStateSecretValues({ isQurlOAuthConfigured: true });
     expect(problems).toHaveLength(1);
     expect(problems[0]).toMatch(/qURL OAuth is configured .* but no state-signing secret/);

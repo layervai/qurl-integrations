@@ -11,7 +11,7 @@ const logger = require('../logger');
 
 /**
  * Render a 503 not-configured page. The `surface` arg picks the
- * remediation copy that fits the entry point — Stage-1 (/qurl setup)
+ * remediation copy that fits the entry point — Stage-1 (/qurl-admin setup)
  * and Stage-2 entry/callback routes land here at different points, so the
  * admin's safe next step differs.
  *
@@ -34,14 +34,14 @@ function renderNotConfiguredPage(res, surface, reason) {
   if (surface === 'discord-install-entry') {
     message = 'Nothing was installed. Try Add to Discord again after your layerv.ai operator finishes provisioning, or contact them out of band.';
   } else if (surface === 'discord-install') {
-    message = 'The bot may already be in your server. If it is, run /qurl setup after your layerv.ai operator finishes provisioning. Otherwise, try Add to Discord again then, or contact them out of band.';
+    message = 'The bot may already be in your server. If it is, run /qurl-admin setup after your layerv.ai operator finishes provisioning. Otherwise, try Add to Discord again then, or contact them out of band.';
   } else if (reason === QURL_SETUP_AUTH_POLICY_REJECTED) {
     // Retrying cannot help until an operator edits the deployment value.
     message = 'The bot operator must correct an invalid authentication setting in the deployment before qURL setup can finish. '
       + 'Contact your layerv.ai admin.';
   } else {
     message = 'The Auth0 application for the qURL Discord bot has not been registered yet. '
-      + 'Run /qurl setup again later, or contact your layerv.ai admin.';
+      + 'Run /qurl-admin setup again later, or contact your layerv.ai admin.';
   }
 
   return res.status(503).send(res.renderPage({

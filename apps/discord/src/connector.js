@@ -22,16 +22,16 @@ const MAX_CDN_REDIRECTS = 3;
 // processes at most 10 unique ids under one 55s handler deadline. Leave 10s for
 // response transport so the caller, not an accidental race, owns the bound.
 // The endpoint rejects larger requests atomically, so chunk rather than couple
-// to commands.js's independently tunable TOKENS_PER_RESOURCE. The same chunk
+// to commands.js's independently tunable MINT_BATCH_SIZE. The same chunk
 // feeds the SDK fallback, so its size is CONNECTOR_REVOKE_MAX_IDS below. A 404
 // is remembered only within one call, so each resource re-probes the route on
 // purpose: a process-wide negative cache would hide the route once enabled.
 const REVOKE_LINKS_TIMEOUT_MS = 65_000;
-// Chunk size: #1551's 10-id request cap, bounded by construction by the SDK
-// fallback's per-call cap because every chunk may be handed to it whole. (A
-// missing import yields NaN, which the coverage check in revokeMintedLinks
-// turns into a throw, never a false success.)
+// Each chunk may be handed to the SDK whole, so both caps must hold.
 const CONNECTOR_REVOKE_MAX_IDS = Math.min(10, REVOKE_BATCH_MAX_IDS);
+if (!Number.isSafeInteger(CONNECTOR_REVOKE_MAX_IDS) || CONNECTOR_REVOKE_MAX_IDS < 1) {
+  throw new Error('Invalid connector revoke chunk size');
+}
 const REVOKE_RETRY_AFTER_MAX_SECONDS = 2;
 // Waiting budget for inline partial-mint cleanup before the mint error is
 // rethrown: one connector revoke chunk plus slack. Larger partial sets (up to
@@ -81,8 +81,8 @@ async function cdnFetchFollowSafe(sourceUrl) {
 // Log the raw connector body at debug level and throw a body-free Error.
 // Mirrors qurl.js — connector responses may echo request headers/tokens, and
 // upstream callers log err.message into application logs.
-// qURL API error codes the connector can pass back via the `error` string.
-// Surface them as Error.apiCode so the caller can branch on a typed value
+// qURL API codes come from connector code or legacy error prose.
+// Surface known codes as Error.apiCode so the caller can branch on a typed value
 // instead of substring-matching the human-readable message (which the
 // connector / upstream API can rephrase without notice).
 const QUOTA_EXCEEDED_PATTERNS = [
@@ -99,10 +99,11 @@ function parseConnectorBody(bodyText) {
 
   try {
     parsed = JSON.parse(bodyText);
-    // Connector wraps upstream API errors as `{success:false, error:"..."}`.
-    // The wrapped string is what we pattern-match for known codes.
+    // TODO(upstream-contract): connector code values take precedence over legacy prose.
     const errStr = typeof parsed.error === 'string' ? parsed.error : '';
-    if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
+    if (parsed.code === 'quota_exceeded') {
+      apiCode = 'quota_exceeded';
+    } else if (!parsed.code && QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
       apiCode = 'quota_exceeded';
       apiDetail = errStr;
     }
@@ -120,9 +121,8 @@ function partialQurlIdsFromLinks(links, n) {
   if (!Array.isArray(links)) {
     return { partialQurlIds: [], unrevokedQurlIds: [], unidentifiedCount: 0, overMintedCount: 0, cappedCount: 0 };
   }
-  // This runs while reporting a failed mint: never let a bad `n` replace that
-  // error. Skip cleanup instead and let the capped count below surface it.
-  const cap = Number.isInteger(n) && n > 0 ? n + MAX_OVERFLOW_REVOKE_IDS : 0;
+  // mintLinks validates n before any network call.
+  const cap = n + MAX_OVERFLOW_REVOKE_IDS;
   const normalized = links.map(link => qurlIdForCleanup(link?.qurl_id));
   const identified = [...new Set(normalized.filter(id => id !== null))];
   return {
@@ -130,7 +130,7 @@ function partialQurlIdsFromLinks(links, n) {
     // Bounded, non-secret slice of ids left for hand reconciliation.
     unrevokedQurlIds: identified.slice(cap, cap + MAX_OVERFLOW_REVOKE_IDS),
     unidentifiedCount: normalized.filter(id => id === null).length,
-    overMintedCount: cap ? Math.max(0, identified.length - n) : 0,
+    overMintedCount: Math.max(0, identified.length - n),
     cappedCount: Math.max(0, identified.length - cap),
   };
 }
@@ -377,7 +377,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
 
   const downloadResponse = await cdnFetchFollowSafe(sourceUrl);
   if (!downloadResponse.ok) {
-    throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
+    throw Object.assign(new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`), { cdnStatus: downloadResponse.status });
   }
 
   const contentLengthHeader = downloadResponse.headers.get('content-length');
@@ -423,9 +423,8 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
 
 /**
  * Re-register an already-downloaded file buffer with the connector.
- * Creates a new qURL resource (with a fresh token pool) without
- * re-downloading from Discord CDN. Used when the per-resource token
- * quota (10) is exhausted and more recipients need links.
+ * Used by the standalone load test without a Discord CDN download.
+ * Identical content can resolve to an existing resource.
  */
 async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds) {
   filename = sanitizeFilename(filename);
@@ -470,7 +469,7 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
 
   const downloadResponse = await cdnFetchFollowSafe(sourceUrl);
   if (!downloadResponse.ok) {
-    throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
+    throw Object.assign(new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`), { cdnStatus: downloadResponse.status });
   }
 
   const contentLengthHeader = downloadResponse.headers.get('content-length');
@@ -531,7 +530,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   // cross-wired token into a caller's logs.
   validateResourceId(resourceId);
   // Bound `n` defensively — callers in this codebase already cap at 10
-  // (TOKENS_PER_RESOURCE) or 50 (recipient max), but mintLinks is exported
+  // (MINT_BATCH_SIZE) or 50 (recipient max), but mintLinks is exported
   // so validate at the API boundary. Negative or non-integer values would
   // make the qURL backend behave unpredictably; 100 is a comfortable ceiling.
   if (!Number.isInteger(n) || n < 1 || n > 100) {
@@ -660,8 +659,9 @@ async function discardBody(response) {
 // (Retry-After: 1) is retried once, so /qurl revoke's own 5-resource fan-out
 // does not fail itself; a second 429 is returned for the caller to fail closed.
 // Both attempts share one REVOKE_LINKS_TIMEOUT_MS budget.
-async function postRevokeLinks(resourceId, batchIds, apiKey) {
-  const signal = AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS);
+async function postRevokeLinks(resourceId, batchIds, apiKey, parentSignal) {
+  const signal = AbortSignal.any([AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS), ...(parentSignal ? [parentSignal] : [])]);
+  signal.throwIfAborted();
   const post = () => fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
@@ -713,9 +713,11 @@ async function postRevokeLinks(resourceId, batchIds, apiKey) {
  * outcome per requested id throw. Callers keep the send and its parent resource
  * as retry anchors for the user's next revoke.
  *
- * @throws when any requested link may still be live.
+ * @throws when any requested link may still be live; confirmedQurlIds retains
+ * only this resource's children whose revocation was confirmed.
  */
-async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
+async function revokeMintedLinks(resourceId, qurlIds, apiKey, { signal } = {}) {
+  signal?.throwIfAborted();
   validateResourceId(resourceId);
   if (!Array.isArray(qurlIds)) throw new Error('Invalid connector revoke token list');
   const normalizedIds = qurlIds.map(qurlIdForCleanup);
@@ -730,13 +732,27 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   // Ids revoked through the SDK (route absent or not_connector_managed), so
   // count reconciles with the outcomes tally.
   let fallbackCount = 0;
+  const confirmedQurlIds = new Set();
+  const revokeOrdinary = async batchIds => {
+    try {
+      signal?.throwIfAborted();
+      await revokeOrdinaryLinks(resourceId, batchIds, apiKey, ...(signal ? [{ signal }] : []));
+      for (const id of batchIds) confirmedQurlIds.add(id);
+    } catch (err) {
+      const confirmed = new Set(Array.isArray(err?.confirmedQurlIds) ? err.confirmedQurlIds : []);
+      for (const id of batchIds) {
+        if (confirmed.has(id)) confirmedQurlIds.add(id);
+      }
+      throw err;
+    }
+  };
   // Connector outages must not block ordinary revokes that never needed it:
   // on a transport failure or 5xx, try the SDK fallback, which is fail-closed
   // on its own (it can only confirm children it DELETEs under the verified
   // parent), and rethrow the connector error if that fallback fails too.
   const fallbackOrThrow = async (batchIds, connectorError) => {
     try {
-      await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+      await revokeOrdinary(batchIds);
     } catch (fallbackError) {
       // Keep the connector error (and its api_code) as the verdict, but carry
       // the fallback's diagnosis so failed_child_count survives.
@@ -747,24 +763,23 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     }
     fallbackCount += batchIds.length;
   };
-  let confirmedCount = 0;
   // Ids the connector itself confirmed on a 200 (not via any SDK fallback),
   // counted before any handoff so a failed handoff still shows its progress.
   let connectorDirectCount = 0;
   try {
     for (let offset = 0; offset < ids.length; offset += CONNECTOR_REVOKE_MAX_IDS) {
+      signal?.throwIfAborted();
       const batchIds = ids.slice(offset, offset + CONNECTOR_REVOKE_MAX_IDS);
       // An empty chunk (a broken cap) would confirm vacuously; never let it.
       if (batchIds.length === 0) throw new Error('Connector revoke chunk is empty');
       if (routeAbsent) {
-        await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+        await revokeOrdinary(batchIds);
         fallbackCount += batchIds.length;
-        confirmedCount += batchIds.length;
         continue;
       }
       let response;
       try {
-        response = await postRevokeLinks(resourceId, batchIds, apiKey);
+        response = await postRevokeLinks(resourceId, batchIds, apiKey, signal);
       } catch (transportError) {
         logger.warn('Connector revoke_links unreachable', {
           resource_ref: resourceIdLogRef(resourceId),
@@ -772,16 +787,14 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
           count: batchIds.length,
         });
         await fallbackOrThrow(batchIds, transportError);
-        confirmedCount += batchIds.length;
         continue;
       }
 
       if (response.status === 404) {
         routeAbsent = true;
         await discardBody(response);
-        await revokeOrdinaryLinks(resourceId, batchIds, apiKey);
+        await revokeOrdinary(batchIds);
         fallbackCount += batchIds.length;
-        confirmedCount += batchIds.length;
         continue;
       }
       if (!response.ok) {
@@ -814,7 +827,6 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
         connectorError ??= new Error(`Connector revoke_links failed (${response.status})`);
         if (response.status < 500) throw connectorError;
         await fallbackOrThrow(batchIds, connectorError);
-        confirmedCount += batchIds.length;
         continue;
       }
 
@@ -833,30 +845,37 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
       const requested = new Set(batchIds);
       const statuses = new Map();
       const results = Array.isArray(parsed.results) ? parsed.results : [];
-      if (results.length !== batchIds.length) {
+      const resultIds = results.map(result => result?.qurl_id);
+      if (resultIds.some(id => !requested.has(id)) || new Set(resultIds).size !== results.length) {
         throw new Error('Connector revoke_links did not confirm every requested link');
       }
       for (const result of results) {
-        if (requested.has(result?.qurl_id) && REVOKE_TERMINAL_STATUSES.has(result.status)
-            && !statuses.has(result.qurl_id)) {
+        if (REVOKE_TERMINAL_STATUSES.has(result.status)) {
           statuses.set(result.qurl_id, result.status);
+        }
+      }
+      for (const [id, status] of statuses) {
+        if (status !== 'not_connector_managed') {
+          confirmedQurlIds.add(id);
+          connectorDirectCount++;
         }
       }
       if (statuses.size !== batchIds.length) {
         throw new Error('Connector revoke_links did not confirm every requested link');
       }
       const ordinaryIds = batchIds.filter(id => statuses.get(id) === 'not_connector_managed');
-      connectorDirectCount += batchIds.length - ordinaryIds.length;
       if (ordinaryIds.length > 0) {
-        await revokeOrdinaryLinks(resourceId, ordinaryIds, apiKey);
+        await revokeOrdinary(ordinaryIds);
         fallbackCount += ordinaryIds.length;
       }
       // Tally only once the chunk is confirmed, so outcomes stay exact on failure.
       for (const status of statuses.values()) outcomes[status] = (outcomes[status] || 0) + 1;
-      confirmedCount += batchIds.length;
     }
     // Belt and braces for the chunk loop: never report success short of every id.
-    if (confirmedCount !== ids.length) throw new Error('Connector revoke did not cover every requested link');
+    if (confirmedQurlIds.size !== ids.length) throw new Error('Connector revoke did not cover every requested link');
+  } catch (err) {
+    err.confirmedQurlIds = [...confirmedQurlIds];
+    throw err;
   } finally {
     // route_absent tells rollout verification whether #1551 is live here; the
     // tally is logged on failure too so partial progress stays visible.
@@ -867,12 +886,12 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
       outcomes,
       fallback_count: fallbackCount,
     };
-    if (confirmedCount === ids.length) {
+    if (confirmedQurlIds.size === ids.length) {
       logger.info('Revoked minted links', summary);
     } else {
       logger.warn('Minted link revoke incomplete', {
         ...summary,
-        confirmed_count: confirmedCount,
+        confirmed_count: confirmedQurlIds.size,
         connector_direct_count: connectorDirectCount,
       });
     }

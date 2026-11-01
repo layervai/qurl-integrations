@@ -151,7 +151,8 @@ const nowIso = () => new Date().toISOString();
 // Aggregate counters for the token-gated /metrics endpoint. Both are
 // full-table Scans, which is why /health uses healthCheck() instead —
 // see the note there. /metrics is rate-limited and bearer-gated, so the
-// scan cost is bounded to deliberate operator scrapes.
+// legacy totals are for deliberate operator scrapes. The consumer-only view
+// skips these scans for routine worker-pressure collection.
 async function getStats() {
   const [configuredGuilds, totalSends] = await Promise.all([
     countAll(TABLES.guild_configs),
@@ -188,11 +189,12 @@ async function countAll(TableName) {
 // for you. Don't hand it a Limit unless you also want the per-page
 // cap (we use it on the GSI hot path in getRecentSends; the per-
 // send recipient queries below intentionally don't set one).
-async function queryAll(input) {
+async function queryAll(input, { signal } = {}) {
   const items = [];
   let ExclusiveStartKey;
   do {
-    const res = await ddb.send(new QueryCommand({ ...input, ExclusiveStartKey }));
+    signal?.throwIfAborted();
+    const res = await ddb.send(new QueryCommand({ ...input, ExclusiveStartKey }), ...(signal ? [{ abortSignal: signal }] : []));
     items.push(...(res.Items || []));
     ExclusiveStartKey = res.LastEvaluatedKey;
   } while (ExclusiveStartKey);
@@ -222,52 +224,24 @@ async function scanAll(TableName, { consistentRead = false } = {}) {
 
 // ── Badges ──
 
-async function recordQURLSend({
-  sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType,
-  qurlLink, qurlId, expiresIn, channelId, targetType, guildId,
-}) {
-  // qurl_id is the GSI hash key on qurl_id-index, used by the
-  // qurl.expired webhook handler to locate the recipient row for DM
-  // editing. Sparse GSI: omit the attribute when empty so the row stays
-  // out of the index (qurl-service returns "" for resources that don't
-  // surface a qurl_id, and indexing those would clutter the GSI without
-  // a lookup path that could use them).
-  const Item = {
-    send_id: sendId,
-    recipient_discord_id: recipientDiscordId,
-    sender_discord_id: senderDiscordId,
-    resource_id: resourceId,
-    resource_type: resourceType,
-    qurl_link: qurlLink,
-    expires_in: expiresIn,
-    channel_id: channelId,
-    target_type: targetType,
-    dm_status: 'pending',
-    created_at: nowIso(),
-  };
-  if (typeof qurlId === 'string' && qurlId.length > 0) {
-    Item.qurl_id = qurlId;
+function validateSendExpiry(expiry) {
+  if (expiry !== undefined && (!Number.isSafeInteger(expiry) || expiry <= 0)) {
+    throw new TypeError('Link expiry must be positive integer epoch seconds');
   }
-  // guild_id is a NON-KEY, non-indexed attribute — DynamoDB is schemaless
-  // for non-key attrs, so the qurl-bot-ddb table needs no Terraform change
-  // to carry it. It scopes watermark attribution to the minting guild
-  // (#1101); the /qurl detect read filters sends on it (a write-time
-  // invariant + a defense-in-depth filter at read time). Sparse like
-  // qurl_id: a legacy/non-guild send omits it rather than writing an empty
-  // string. It rides the `qurl_id-index` GSI for free (projection = ALL).
-  if (typeof guildId === 'string' && guildId.length > 0) {
-    Item.guild_id = guildId;
-  }
+}
+
+async function recordQURLSend(send) {
+  validateSendExpiry(send.expiresAt);
   await ddb.send(new PutCommand({
     TableName: TABLES.qurl_sends,
-    Item,
+    Item: qurlSendBatchItem(send, nowIso()),
   }));
 }
 
 function qurlSendBatchItem(s, createdAt) {
   // qurl_id is sparsely written so an empty/missing value (e.g.
   // a future emit path that doesn't surface it) doesn't pollute
-  // the qurl_id-index GSI. See recordQURLSend for the same gate.
+  // the qurl_id-index GSI.
   const Item = {
     send_id: s.sendId,
     recipient_discord_id: s.recipientDiscordId,
@@ -288,15 +262,20 @@ function qurlSendBatchItem(s, createdAt) {
   // the minting guild (#1101). Sparse like qurl_id — a legacy /
   // non-guild send omits it. No Terraform change needed (schemaless
   // non-key attr); rides the qurl_id-index GSI for the /qurl detect
-  // read (projection = ALL). See recordQURLSend for the full why.
+  // read (projection = ALL).
   if (typeof s.guildId === 'string' && s.guildId.length > 0) {
     Item.guild_id = s.guildId;
+  }
+  if (s.expiresAt !== undefined) {
+    // TODO(upstream-contract): qurl_sends retains history; this field must not be a TTL.
+    Item.expires_at = s.expiresAt;
   }
   return Item;
 }
 
 async function recordQURLSendBatch(sends, options = {}) {
   if (!sends || sends.length === 0) return;
+  for (const send of sends) validateSendExpiry(send.expiresAt);
   const MAX_RETRIES = 5;
   // Single `now` shared across every batch chunk / guarded transaction of this
   // batch. INTENTIONAL parity with SQLite's transactional insert —
@@ -407,7 +386,7 @@ async function recordQURLSendBatch(sends, options = {}) {
   }
 }
 
-// ── QURL views (webhook-fed view counter for /qurl send + /qurl map) ──
+// ── qURL views (webhook-fed view counter for /qurl send + /qurl map) ──
 
 // 30d TTL on `expires_at` (peer attribute name across every TTL table
 // in qurl-bot-ddb), refreshed on every write. Safely past the longest
@@ -493,14 +472,16 @@ async function recordQurlView({
 // 20000), so a full send is up to ⌈N/100⌉ = 200 sequential BatchGets.
 // The sender-counter fast-path now renders from fanout-scaled sharded
 // counters in this same table, so this BatchGet-all path is not on the
-// normal sub-second render path. It remains the monitor poll reader and a
-// legacy fallback for live rows created before the aggregate existed.
-async function getQurlViews(qurlIds) {
+// normal sub-second render path. Periodic monitor reconciliation and legacy
+// or incomplete-aggregate fallbacks still read these source facts.
+async function getQurlViews(qurlIds, { consistentRead = false } = {}) {
   if (!Array.isArray(qurlIds) || qurlIds.length === 0) return new Map();
   // Drop empties defensively — an empty qurl_id is a collision attractor.
   const keys = [...new Set(qurlIds.filter(Boolean))].map(id => ({ qurl_id: id }));
   if (keys.length === 0) return new Map();
   const CHUNK = 100;
+  const MAX_RETRIES = 3;
+  let unprocessedKeys = 0;
   const out = new Map();
   const collect = (res) => {
     for (const item of (res.Responses && res.Responses[TABLES.qurl_views]) || []) {
@@ -511,39 +492,60 @@ async function getQurlViews(qurlIds) {
     }
   };
   for (let i = 0; i < keys.length; i += CHUNK) {
-    const slice = keys.slice(i, i + CHUNK);
-    const res = await ddb.send(new BatchGetCommand({
-      RequestItems: { [TABLES.qurl_views]: { Keys: slice } },
-    }));
-    collect(res);
-    // Single retry on UnprocessedKeys — persistent throttle is an oncall
-    // signal, not a per-call retry loop.
-    const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
-    if (unprocessed && unprocessed.Keys && unprocessed.Keys.length > 0) {
-      collect(await ddb.send(new BatchGetCommand({ RequestItems: { [TABLES.qurl_views]: unprocessed } })));
+    let request = { Keys: keys.slice(i, i + CHUNK), ConsistentRead: consistentRead };
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const res = await ddb.send(new BatchGetCommand({
+        RequestItems: { [TABLES.qurl_views]: request },
+      }));
+      collect(res);
+      const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
+      if (!unprocessed?.Keys?.length) break;
+      if (attempt === MAX_RETRIES) {
+        unprocessedKeys += unprocessed.Keys.length;
+        break;
+      }
+      // Retry only unfinished keys; bounded 50/100/200ms waits per chunk.
+      await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+      request = { ...unprocessed, ConsistentRead: consistentRead };
     }
+  }
+  if (unprocessedKeys > 0) {
+    logger.warn('qurl view read retries exhausted', { unprocessed_keys: unprocessedKeys });
+    throw new Error('qurl view read incomplete after retries');
   }
   return out;
 }
 
 async function updateSendDMStatus(sendId, recipientDiscordId, status) {
-  await ddb.send(new UpdateCommand({
-    TableName: TABLES.qurl_sends,
-    Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
-    UpdateExpression: 'SET dm_status = :s',
-    ExpressionAttributeValues: { ':s': status },
-  }));
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_sends,
+      Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+      ConditionExpression: 'attribute_exists(send_id)',
+      UpdateExpression: 'SET dm_status = :s',
+      ExpressionAttributeValues: { ':s': status },
+    }));
+  } catch (err) {
+    if (err?.name !== 'ConditionalCheckFailedException') throw err;
+    logger.debug('updateSendDMStatus: recipient row no longer exists');
+  }
 }
 
 // Coalesces dm_status + DM channel/message refs into one Update so the
 // hot dispatch path stays at one DDB write per successful recipient.
 async function markSendDMDelivered(sendId, recipientDiscordId, channelId, messageId) {
-  await ddb.send(new UpdateCommand({
-    TableName: TABLES.qurl_sends,
-    Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
-    UpdateExpression: 'SET dm_status = :s, dm_channel_id = :c, dm_message_id = :m',
-    ExpressionAttributeValues: { ':s': DM_STATUS.SENT, ':c': channelId, ':m': messageId },
-  }));
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_sends,
+      Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+      ConditionExpression: 'attribute_exists(send_id)',
+      UpdateExpression: 'SET dm_status = :s, dm_channel_id = :c, dm_message_id = :m',
+      ExpressionAttributeValues: { ':s': DM_STATUS.SENT, ':c': channelId, ':m': messageId },
+    }));
+  } catch (err) {
+    if (err?.name !== 'ConditionalCheckFailedException') throw err;
+    logger.debug('markSendDMDelivered: recipient row no longer exists');
+  }
 }
 
 // qurl_id-index GSI lookup for the qurl.expired webhook handler.
@@ -867,7 +869,8 @@ function hasSenderIdentity(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-async function flipRevokedAt(sendId, senderDiscordId) {
+async function flipRevokedAt(sendId, senderDiscordId, { signal } = {}) {
+  signal?.throwIfAborted();
   // Sets revoked_at on an existing config row, owner-scoped, with
   // idempotent CCFE swallow. Used by both the normal markSendRevoked
   // path AND the legacy-CCFE recovery path (when a non-revoke writer
@@ -882,7 +885,7 @@ async function flipRevokedAt(sendId, senderDiscordId) {
         ':s': senderDiscordId,
       },
       ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
@@ -893,12 +896,13 @@ async function flipRevokedAt(sendId, senderDiscordId) {
       TableName: TABLES.qurl_send_configs,
       Key: { send_id: sendId },
       ConsistentRead: true,
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     return res.Item?.sender_discord_id === senderDiscordId && Boolean(res.Item.revoked_at);
   }
 }
 
-async function flipRevokingAt(sendId, senderDiscordId) {
+async function flipRevokingAt(sendId, senderDiscordId, { signal } = {}) {
+  signal?.throwIfAborted();
   try {
     await ddb.send(new UpdateCommand({
       TableName: TABLES.qurl_send_configs,
@@ -909,7 +913,7 @@ async function flipRevokingAt(sendId, senderDiscordId) {
         ':s': senderDiscordId,
       },
       ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
@@ -920,7 +924,7 @@ async function flipRevokingAt(sendId, senderDiscordId) {
       TableName: TABLES.qurl_send_configs,
       Key: { send_id: sendId },
       ConsistentRead: true,
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     if (!res.Item) return false;
     return res.Item.sender_discord_id === senderDiscordId
       && Boolean(res.Item.revoking_at)
@@ -928,13 +932,14 @@ async function flipRevokingAt(sendId, senderDiscordId) {
   }
 }
 
-async function markSendRevoking(sendId, senderDiscordId) {
+async function markSendRevoking(sendId, senderDiscordId, { signal } = {}) {
+  signal?.throwIfAborted();
   if (!hasSenderIdentity(senderDiscordId)) return false;
   const cfgRes = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
     ConsistentRead: true,
-  }));
+  }), ...(signal ? [{ abortSignal: signal }] : []));
   if (cfgRes.Item) {
     if (!hasSenderIdentity(cfgRes.Item.sender_discord_id)) {
       logger.warn('markSendRevoking rejected config without sender identity', { sendId });
@@ -943,7 +948,7 @@ async function markSendRevoking(sendId, senderDiscordId) {
     if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false;
     if (cfgRes.Item.revoked_at) return false;
     if (cfgRes.Item.revoking_at) return true;
-    return flipRevokingAt(sendId, senderDiscordId);
+    return flipRevokingAt(sendId, senderDiscordId, { signal });
   }
 
   const legacyItems = await queryAll({
@@ -952,7 +957,7 @@ async function markSendRevoking(sendId, senderDiscordId) {
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
-  });
+  }, { signal });
   if (legacyItems.length === 0) return false;
   const legacy = legacyItems[0];
   try {
@@ -970,15 +975,16 @@ async function markSendRevoking(sendId, senderDiscordId) {
         created_at: legacy.created_at || nowIso(),
       },
       ConditionExpression: 'attribute_not_exists(send_id)',
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
-    return flipRevokingAt(sendId, senderDiscordId);
+    return flipRevokingAt(sendId, senderDiscordId, { signal });
   }
 }
 
-async function markSendRevoked(sendId, senderDiscordId) {
+async function markSendRevoked(sendId, senderDiscordId, { signal } = {}) {
+  signal?.throwIfAborted();
   // Two-branch logic:
   // (a) Normal path: config row exists — flip revoked_at.
   // (b) Legacy path: config row doesn't exist — insert minimal row. Current
@@ -990,7 +996,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
     ConsistentRead: true,
-  }));
+  }), ...(signal ? [{ abortSignal: signal }] : []));
   if (cfgRes.Item) {
     if (!hasSenderIdentity(cfgRes.Item.sender_discord_id)) {
       logger.warn('markSendRevoked rejected config without sender identity', { sendId });
@@ -998,7 +1004,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
     }
     if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false; // ownership check
     if (cfgRes.Item.revoked_at) return true; // idempotent, durable state confirmed
-    return flipRevokedAt(sendId, senderDiscordId);
+    return flipRevokedAt(sendId, senderDiscordId, { signal });
   }
 
   // Legacy — look up qurl_sends row, insert minimal config with revoked_at.
@@ -1018,7 +1024,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
-  });
+  }, { signal });
   if (legacyItems.length === 0) return false;
   const legacy = legacyItems[0];
   try {
@@ -1033,7 +1039,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
         created_at: nowIso(),
       },
       ConditionExpression: 'attribute_not_exists(send_id)',
-    }));
+    }), ...(signal ? [{ abortSignal: signal }] : []));
     return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
@@ -1052,7 +1058,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
     //   - A racing markSendRevoked AND a non-revoke writer
     //     interleave: flipRevokedAt's CCFE re-read confirms the
     //     "already revoked" case idempotently.
-    return flipRevokedAt(sendId, senderDiscordId);
+    return flipRevokedAt(sendId, senderDiscordId, { signal });
   }
 }
 
@@ -1087,11 +1093,13 @@ async function saveSendConfig({
   }));
 }
 
-async function getSendConfig(sendId, senderDiscordId) {
+async function getSendConfig(sendId, senderDiscordId, { signal } = {}) {
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
-  }));
+    // Sender-control reads must observe the current revoke fence.
+    ConsistentRead: true,
+  }), ...(signal ? [{ abortSignal: signal }] : []));
   const row = res.Item;
   if (!row) return row;
   if (row.sender_discord_id !== senderDiscordId) return undefined; // ownership check
@@ -1134,10 +1142,10 @@ async function getSendConfig(sendId, senderDiscordId) {
 // field remains the commit-after-edit floor: the sharded total can run
 // ahead when a view records but the Discord edit is coalesced or fails.
 //
-// `terminal` is derived (not stored as one flag): the display is dead
-// once the sender revoked (revoked_at) OR a window-close/expired path
-// set confirm_terminal — either way a late fast-path edit must NOT
-// resurrect a live-looking counter. `qurlIds` is an optional inline cache
+// `fastPathOff` disarms token edits after revoke, window close or add-degrade.
+// It does not describe display liveness: polling may still own a bare display.
+// shortcut: retain the legacy read until old rows migrate (#875); this table has no TTL.
+// `qurlIds` is an optional inline cache
 // of minted qurl_ids for small sends; large sends deliberately store []
 // so the row stays well below DDB's item limit and the rare fallback reads
 // recipient rows via getSendItems instead.
@@ -1187,13 +1195,13 @@ async function getSendRenderState(sendId) {
     qurlIds: Array.isArray(row.confirm_qurl_ids) ? row.confirm_qurl_ids : [],
     // revoking_at is intent, not completion: a failed DELETE may leave links
     // live, so view updates must continue until revoked_at is confirmed.
-    terminal: Boolean(row.revoked_at) || row.confirm_terminal === true,
+    fastPathOff: Boolean(row.revoked_at) || row.confirm_fast_path_off === true || row.confirm_terminal === true,
   };
 }
 
 const SEND_VIEW_COUNTER_MAX_SHARDS = 64;
-// Roughly half DynamoDB's ~1k WCU/s single-partition ceiling, leaving
-// burst headroom before the next power-of-two shard step kicks in.
+// Keep the existing shard layout across rolling workers. Transactional
+// increments use two write phases; this target is not a throughput guarantee.
 const SEND_VIEW_COUNTER_TARGET_WRITES_PER_SHARD = 500;
 const SEND_VIEW_COUNTER_PREFIX = '__send_view_count__';
 // Keep the optional inline qurl_id cache comfortably below DynamoDB's
@@ -1250,43 +1258,71 @@ async function incrementSendViewedCount(sendId, qurlId, expectedCount) {
   if (!qurlId) throw new Error('incrementSendViewedCount: qurlId is required');
   const shardCount = sendViewedCountShardCount(expectedCount);
   const shard = sendViewedCountShard(qurlId, shardCount);
-  await ddb.send(new UpdateCommand({
-    TableName: TABLES.qurl_views,
-    Key: { qurl_id: sendViewedCountKey(sendId, shard) },
-    UpdateExpression: 'SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one',
-    ExpressionAttributeValues: {
-      ':sid': sendId,
-      ':shard': shard,
-      ':exp': Math.floor(Date.now() / 1000) + QURL_VIEW_TTL_SECONDS,
-      ':one': 1,
-    },
-  }));
+  const command = new TransactWriteCommand({
+    // One token per logical increment makes SDK retries safe after a lost response.
+    ClientRequestToken: crypto.randomUUID(),
+    TransactItems: [{
+      Update: {
+        TableName: TABLES.qurl_views,
+        Key: { qurl_id: sendViewedCountKey(sendId, shard) },
+        UpdateExpression: 'SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one',
+        ExpressionAttributeValues: {
+          ':sid': sendId,
+          ':shard': shard,
+          ':exp': Math.floor(Date.now() / 1000) + QURL_VIEW_TTL_SECONDS,
+          ':one': 1,
+        },
+      },
+    }],
+  });
+  const signal = AbortSignal.timeout(3000);
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted();
+    try {
+      await ddb.send(command, { abortSignal: signal });
+      return;
+    } catch (err) {
+      const conflict = err.name === 'TransactionConflictException'
+        || (err.name === 'TransactionCanceledException'
+          && err.CancellationReasons?.some(reason => reason.Code === 'TransactionConflict'));
+      if (!conflict || signal.aborted || attempt >= 6) throw err;
+      // Preserve the command/token through contention retries and ambiguous SDK responses.
+      await new Promise(resolve => setTimeout(resolve, Math.min(250, 25 * 2 ** attempt) * (0.5 + Math.random())));
+    }
+  }
 }
 
 async function getSendViewedCount(sendId, expectedCount) {
-  if (!sendId) return 0;
+  if (!sendId) throw new Error('getSendViewedCount: sendId is required');
   const keys = sendViewedCountKeys(sendId, sendViewedCountShardCount(expectedCount));
   const res = await ddb.send(new BatchGetCommand({
     RequestItems: { [TABLES.qurl_views]: { Keys: keys, ConsistentRead: true } },
   }));
   let total = 0;
+  let found = false;
   const collect = (batch) => {
     for (const item of (batch.Responses && batch.Responses[TABLES.qurl_views]) || []) {
-      if (typeof item.viewed_count === 'number' && item.viewed_count > 0) {
-        total += item.viewed_count;
+      if (!Number.isSafeInteger(item.viewed_count) || item.viewed_count < 0) {
+        throw new Error('send viewed count shard is invalid');
       }
+      found = true;
+      total += item.viewed_count;
     }
   };
   collect(res);
   const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
   if (unprocessed && unprocessed.Keys && unprocessed.Keys.length > 0) {
-    // Single retry by design: if sustained DDB throttling still leaves a
-    // partial sum, the next non-coalesced render and the poll backstop
-    // re-read from source-of-truth qurl_views rows and correct the count.
-    collect(await ddb.send(new BatchGetCommand({
+    // A partial retry is unavailable, never a complete count. Callers fall
+    // back to source facts when this bounded read fails.
+    const retry = await ddb.send(new BatchGetCommand({
       RequestItems: { [TABLES.qurl_views]: { ...unprocessed, ConsistentRead: true } },
-    })));
+    }));
+    collect(retry);
+    if (retry.UnprocessedKeys?.[TABLES.qurl_views]?.Keys?.length > 0) {
+      throw new Error('send viewed count read incomplete after retry');
+    }
   }
+  if (!found || !Number.isSafeInteger(total)) throw new Error('send viewed count aggregate unavailable');
   return total;
 }
 
@@ -1294,7 +1330,7 @@ async function getSendViewedCount(sendId, expectedCount) {
 // uses this to avoid rendering below a fast-path edit that already advanced
 // last_rendered_count on another replica.
 async function getSendRenderedCount(sendId) {
-  if (!sendId) return 0;
+  if (!sendId) return null;
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
@@ -1302,7 +1338,7 @@ async function getSendRenderedCount(sendId) {
     ConsistentRead: true,
   }));
   const n = res.Item?.last_rendered_count;
-  return typeof n === 'number' && n > 0 ? n : 0;
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 // Monotonic AFTER-edit commit for the view counter (PR-B calls this
@@ -1381,13 +1417,13 @@ async function tryClaimRenderAttempt(sendId, staleBeforeMs) {
 // Sticky fast-path kill-switch. Revoke/window-close use it for frozen
 // displays; mid-life /qurl add degrade uses it for an alive-but-bare poll
 // display. New code that needs display liveness must add its own signal,
-// not infer it from confirm_terminal. Follow-up #875 renames this to the
-// mechanism it actually gates: confirm_fast_path_off.
-async function markConfirmTerminal(sendId) {
+// not infer it from confirm_fast_path_off.
+// shortcut: dual-write the legacy flag until every deployed replica reads the new flag (#875).
+async function markConfirmFastPathOff(sendId) {
   await ddb.send(new UpdateCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
-    UpdateExpression: 'SET confirm_terminal = :t',
+    UpdateExpression: 'SET confirm_fast_path_off = :t, confirm_terminal = :t',
     ExpressionAttributeValues: { ':t': true },
   }));
 }
@@ -1443,6 +1479,11 @@ async function saveSendConfirmState(sendId, {
     values[placeholder] = val;
     if (attr === 'expected_count') expectedCountPlaceholder = placeholder;
   }
+  // The caller has confirmed the initial zero-count Discord edit. Preserve any newer floor.
+  if (viewedCount === 0) {
+    sets.push('last_rendered_count = if_not_exists(last_rendered_count, :initial_floor)');
+    values[':initial_floor'] = 0;
+  }
   if (sets.length === 0) return;
   const update = {
     TableName: TABLES.qurl_send_configs,
@@ -1459,6 +1500,19 @@ async function saveSendConfirmState(sendId, {
   }
   try {
     await ddb.send(new UpdateCommand(update));
+    if (viewedCount === 0 && Number.isSafeInteger(expectedCount) && expectedCount > 100) {
+      try {
+        await ddb.send(new UpdateCommand({
+          TableName: TABLES.qurl_views,
+          Key: { qurl_id: sendViewedCountKey(sendId, 0) },
+          UpdateExpression: 'SET viewed_count = if_not_exists(viewed_count, :zero), send_id = :sid, counter_shard = :zero, expires_at = :exp',
+          ExpressionAttributeValues: { ':zero': 0, ':sid': sendId,
+            ':exp': Math.floor(Date.now() / 1000) + QURL_VIEW_TTL_SECONDS },
+        }));
+      } catch (err) {
+        logger.warn('Send aggregate initialization failed; poll uses source facts', { sendId, error: err.message });
+      }
+    }
     return true;
   } catch (err) {
     if (err.name === 'ConditionalCheckFailedException' && expectedCountPlaceholder) {
@@ -1490,7 +1544,7 @@ async function getSendResourceIds(sendId, senderDiscordId) {
 // recipient's DM to "closed the door". Legacy rows predating the
 // ref-capture wire-up have those fields unset — the revoke loop's
 // missing-refs guard skips the edit naturally.
-async function getSendItems(sendId, senderDiscordId, { consistentRead = false } = {}) {
+async function getSendItems(sendId, senderDiscordId, { consistentRead = false, signal } = {}) {
   const items = await queryAll({
     TableName: TABLES.qurl_sends,
     // Revoke opts into a strongly consistent base-table query after writing
@@ -1502,7 +1556,7 @@ async function getSendItems(sendId, senderDiscordId, { consistentRead = false } 
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
-  });
+  }, { signal });
   return items.map(item => ({
     resource_id: item.resource_id,
     recipient_discord_id: item.recipient_discord_id,
@@ -1828,7 +1882,7 @@ async function setGuildDefaultWebhookOwner(
     if (!onlyKeyReencrypted) throw defaultOwnerKeyChangedError();
     // Retry once for unchanged plaintext with new encryption randomness. Keep
     // every webhook CAS predicate; a second concurrent mutation still fails,
-    // under the documented KEY_CHANGED code (recovery: re-run /qurl setup).
+    // under the documented KEY_CHANGED code (recovery: re-run /qurl-admin setup).
     await ddb.send(new UpdateCommand({
       ...update,
       ExpressionAttributeValues: { ...values, ':storedApiKey': latestRow.qurl_api_key },
@@ -1861,7 +1915,7 @@ async function clearGuildWebhookSubscription(guildId) {
 // propagation that fixes rotate-drift. RCU cost is acceptable on a
 // low-cardinality table.
 // TODO(#486): replace scanAll with a Query on the webhook_owner_id
-// GSI when guild_configs > ~10k rows. Every `/qurl setup` and OAuth
+// GSI when guild_configs > ~10k rows. Every `/qurl-admin setup` and OAuth
 // callback hits this via propagateGuildWebhookSubscription, so the
 // link-path cost is O(table_size) per call — same fix as the
 // 30s priming scan, single migration covers both.
@@ -1948,7 +2002,7 @@ async function propagateGuildWebhookSubscription(
 // Per-row decrypt-fail alarm-once tracker. A permanently-corrupt row
 // would otherwise emit 2880 audits/day (30s tick × 2 replicas).
 // Cleared per guildId on its next successful decrypt — so a row that
-// recovers (operator re-encrypts via /qurl setup or backfill) resets
+// recovers (operator re-encrypts via /qurl-admin setup or backfill) resets
 // and re-alarms if it breaks again.
 const _decryptAlarmedGuilds = new Set();
 
@@ -1976,7 +2030,7 @@ async function scanGuildSubscriptions() {
       // stay unprimed and every inbound webhook would 401. Log + emit
       // an audit so a CloudWatch metric-filter alarm can fire on
       // sustained decrypt failures (KMS key drift); backfill or
-      // /qurl setup re-encrypts the row.
+      // /qurl-admin setup re-encrypts the row.
       //
       // Alarm-once per guild_id per "outage": the audit fires on the
       // FIRST decrypt failure for this row and stays silent until a
@@ -2039,7 +2093,7 @@ async function scanGuildSubscriptions() {
 // `getStats()` against DDB is a paginated full-table Scan. Using
 // it at health-check cadence would
 // scale RCU cost with table size and amplify cost-per-instance in
-// any fleet. /metrics keeps the full aggregation — that's the right
+// any fleet. Default /metrics keeps the full aggregation — that's the right
 // home for it.
 async function healthCheck() {
   // Probe `guild_configs` rather than a higher-traffic table. It has
@@ -2065,7 +2119,7 @@ async function close() {
 module.exports = {
   // Stats
   getStats,
-  // QURL sends
+  // qURL sends
   recordQURLSend, recordQURLSendBatch, updateSendDMStatus, markSendDMDelivered,
   getRecentSends, markSendRevoking, markSendRevoked, isSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
@@ -2074,8 +2128,8 @@ module.exports = {
   // View-counter render state (cross-replica fast-path, PR-B)
   saveSendConfirmState,
   getSendRenderState, incrementSendViewedCount, getSendViewedCount,
-  getSendRenderedCount, tryAdvanceRenderedCount, touchRenderedAt, tryClaimRenderAttempt, markConfirmTerminal,
-  // QURL views (webhook-fed)
+  getSendRenderedCount, tryAdvanceRenderedCount, touchRenderedAt, tryClaimRenderAttempt, markConfirmFastPathOff,
+  // qURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs
   getGuildApiKey, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,

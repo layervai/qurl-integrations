@@ -107,7 +107,6 @@ describe('editDM via REST', () => {
   it.each([
     ['10003', 10003, 404, 'Unknown Channel'],
     ['50001', 50001, 403, 'Missing Access'],
-    ['50007', 50007, 403, 'Cannot send messages to this user'],
   ])('marks %s as expected and surfaces code+reason on the return', async (_name, code, status, descriptionFragment) => {
     restMock.patch.mockRejectedValueOnce(
       Object.assign(new Error('expected'), { status, code }),
@@ -148,14 +147,14 @@ describe('editDM via REST', () => {
     logger.info.mockClear();
     logger.warn.mockClear();
     restMock.patch.mockRejectedValueOnce(
-      Object.assign(new Error('Cannot send messages to this user'), { status: 403, code: 50007 }),
+      Object.assign(new Error('Missing Access'), { status: 403, code: 50001 }),
     );
     await editDM('c', 'm', { embeds: [], components: [] });
     expect(logger.info).toHaveBeenCalledWith(
       'Failed to edit DM',
       expect.objectContaining({
-        code: 50007,
-        expectedReason: expect.stringContaining('Cannot send messages to this user'),
+        code: 50001,
+        expectedReason: expect.stringContaining('Missing Access'),
       }),
     );
     logger.info.mockClear();
@@ -293,4 +292,27 @@ describe('editInteractionReply via webhook token (cross-replica view-counter pri
     expect(fields.errorMessage).toBeUndefined();
     expect(JSON.stringify(fields)).not.toContain(TOKEN);
   });
+});
+
+it('does not edit a DM after the revoke work deadline', async () => {
+  const budget = new AbortController();
+  budget.abort();
+  expect(await editDM('c', 'm', { components: [] }, { signal: budget.signal })).toEqual({ ok: false, expected: true });
+  expect(logger.warn).not.toHaveBeenCalled();
+  expect(restMock.patch).not.toHaveBeenCalled();
+});
+
+it('passes the revoke deadline into Discord REST queue and request handling', async () => {
+  const signal = new AbortController().signal;
+  restMock.patch.mockResolvedValueOnce({});
+  expect(await editDM('c', 'm', { components: [] }, { signal })).toEqual({ ok: true });
+  expect(restMock.patch.mock.calls[0][1].signal).toBe(signal);
+});
+
+it('treats unobserved DM-edit code 50007 as a warning without changing the failed edit result', async () => {
+  restMock.patch.mockRejectedValueOnce(Object.assign(new Error('Cannot send messages to this user'), { status: 403, code: 50007 }));
+  const result = await editDM('c', 'm', { content: 'closed' });
+  expect(result).toEqual({ ok: false, expected: false, code: 50007, reason: undefined });
+  expect(logger.warn).toHaveBeenCalledWith('Failed to edit DM', expect.objectContaining({ code: 50007, status: 403 }));
+  expect(logger.info).not.toHaveBeenCalled();
 });

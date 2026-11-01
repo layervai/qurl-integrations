@@ -4,7 +4,7 @@
 // keyed by the qurl-service auth0 owner_id that authorizes the
 // subscription. Populated from `guild_configs` at boot and refreshed
 // every 30s; the registering replica updates its own map synchronously
-// inside the link/unlink flow so the user who just ran /qurl setup
+// inside the link/unlink flow so the user who just ran /qurl-admin setup
 // doesn't race their own first view.
 //
 // Sibling replicas catch up on the next tick. qurl-service's retry
@@ -83,7 +83,7 @@ let linkOwnerDiscoveryInFlight = null;
 
 // Owners whose entries must survive scanOnce's clear-and-repopulate
 // swap. .clear()'d at the top of each scan; re-applied after the
-// swap so a concurrent /qurl setup whose DDB write landed AFTER the
+// swap so a concurrent /qurl-admin setup whose DDB write landed AFTER the
 // scan crossed its partition isn't silently dropped.
 const upsertsDuringScan = new Set();
 
@@ -564,7 +564,7 @@ async function scanOnce() {
     }
 
     // Snapshot ONLY the in-flight upsert owners — scales with the
-    // few concurrent /qurl setup calls during this scan, not the
+    // few concurrent /qurl-admin setup calls during this scan, not the
     // whole tenant count. A future 10k-tenant cache would otherwise
     // pay an O(tenants) clone every scan tick.
     let liveSnapshot = null;

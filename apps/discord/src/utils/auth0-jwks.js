@@ -15,6 +15,7 @@
 const jose = require('jose');
 const config = require('../config');
 const logger = require('../logger');
+const { timingSafeStringEqual } = require('./cookies');
 
 let _jwksFn = null;
 
@@ -26,7 +27,7 @@ function getJwks() {
   // jose.createRemoteJWKSet returns a function that fetches + caches the
   // JWKS, with built-in key-id-miss refresh. Defaults: 5-min cache TTL,
   // 30-sec cooldown between refresh attempts on miss. Acceptable for our
-  // workload (id_tokens are minted once per /qurl setup completion).
+  // workload (id_tokens are minted once per /qurl-admin setup completion).
   _jwksFn = jose.createRemoteJWKSet(
     new URL(`https://${config.AUTH0_DOMAIN}/.well-known/jwks.json`),
     { cooldownDuration: 30000, cacheMaxAge: 5 * 60 * 1000 },
@@ -35,7 +36,8 @@ function getJwks() {
 }
 
 /**
- * Verifies an Auth0 id_token's signature, issuer, audience, and expiry.
+ * Verifies an Auth0 id_token's signature, issuer, audience, expiry, and nonce.
+ * expectedNonce is required and comes from the verified setup state.
  *
  * Returns { ok: true, payload } on success, or { ok: false, reason }
  * on any verification failure. Reasons are coarse-grained on the wire
@@ -46,7 +48,7 @@ function getJwks() {
  * are audienced to the OAuth client, NOT to the API audience the
  * access_token uses).
  */
-async function verifyAuth0IdToken(idToken) {
+async function verifyAuth0IdToken(idToken, expectedNonce) {
   if (typeof idToken !== 'string' || !idToken) {
     return { ok: false, reason: 'no_token' };
   }
@@ -62,6 +64,9 @@ async function verifyAuth0IdToken(idToken) {
       // a clear answer site.
       clockTolerance: 0,
     });
+    if (!timingSafeStringEqual(payload.nonce, expectedNonce)) {
+      return { ok: false, reason: 'nonce_mismatch' };
+    }
     return { ok: true, payload };
   } catch (err) {
     // Severity split: signature/claim/JWKS failures are the only signal

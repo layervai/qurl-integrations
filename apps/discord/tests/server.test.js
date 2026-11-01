@@ -72,7 +72,31 @@ describe('Server', () => {
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('ok');
       expect(res.body.stats).toBeDefined();
+      expect(res.body.eventConsumer).toEqual({
+        running: false,
+        qurl_bot_event_inflight: 0,
+        qurl_bot_event_inflight_limit: expect.any(Number),
+        qurl_bot_event_polls_total: 0,
+        qurl_bot_event_atcap_polls_total: 0,
+        qurl_bot_event_dispatch_handler_rejections_total: 0,
+      });
       expect(res.body.uptime).toBeDefined();
+    });
+
+    it('consumer-only view reads no aggregate store stats', async () => {
+      process.env.METRICS_TOKEN = 'secret-token';
+      const res = await request(app).get('/metrics?view=consumer').set('Authorization', 'Bearer secret-token');
+      expect(res.status).toBe(200);
+      expect(res.body.eventConsumer.qurl_bot_event_inflight).toBe(0);
+      expect(res.body.stats).toBeUndefined();
+      expect(db.getStats).not.toHaveBeenCalled();
+    });
+
+    it.each(['Consumer', 'unknown', 'consumer&view=other'])('rejects unsupported metrics view %s without scans', async view => {
+      process.env.METRICS_TOKEN = 'secret-token';
+      const res = await request(app).get(`/metrics?view=${view}`).set('Authorization', 'Bearer secret-token');
+      expect(res.status).toBe(400);
+      expect(db.getStats).not.toHaveBeenCalled();
     });
 
     it('returns 429 after exceeding the per-IP rate limit', async () => {
