@@ -1026,7 +1026,7 @@ function abortableSleep(ms, wakeSignal) {
     const signal = wakeSignal && stopController
       ? AbortSignal.any([stopController.signal, wakeSignal])
       : wakeSignal || stopController?.signal;
-    // Already-aborted fast path: a stop() that landed before this
+    // Already-aborted fast path: a stop or drain wake before this
     // sleep started returns immediately.
     if (signal?.aborted) {
       resolve();

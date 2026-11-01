@@ -1330,7 +1330,7 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     }
   });
 
-  test.each(['resolve', 'reject'])('a handler %s wakes a capped poll without waiting for its backoff', async (outcome) => {
+  test.each([['resolve', true], ['reject', true], ['resolve', false]])('a handler %s wakes a capped poll without waiting for its backoff (shutdown signal: %s)', async (outcome, withStop) => {
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     try {
       let finish;
@@ -1345,7 +1345,7 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
       const client = makeStubClient();
       for (let i = 0; i < 4; i++) await pollOnceFast(client);
       expect(eventConsumer._test.getCurrentBackoffMs()).toBe(1600);
-      eventConsumer._test._setStopControllerForTest();
+      if (withStop) eventConsumer._test._setStopControllerForTest();
       let woke = false;
       const paused = withMockedSqs(() => eventConsumer._test.pollOnce(client)).then(() => { woke = true; });
       await jest.advanceTimersByTimeAsync(10);
@@ -1361,6 +1361,28 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('one completion above the soft cap does not wake a still-full worker', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      let finish;
+      withWorkerDispatch(() => {
+        eventConsumer.trackDispatch(new Promise(resolve => { finish = resolve; }));
+        for (let i = 0; i < eventConsumer._test.MAX_INFLIGHT_HANDLERS; i++) {
+          eventConsumer.trackDispatch(new Promise(() => {}));
+        }
+      });
+      let woke = false;
+      const paused = withMockedSqs(() => eventConsumer._test.pollOnce(makeStubClient())).then(() => { woke = true; });
+      await jest.advanceTimersByTimeAsync(10);
+      finish();
+      await jest.advanceTimersByTimeAsync(1);
+      expect(woke).toBe(false);
+      await jest.advanceTimersByTimeAsync(100);
+      await paused;
+      expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(0);
+    } finally { jest.useRealTimers(); }
   });
 
   test('shutdown still wakes an at-cap sleep while every handler remains pending', async () => {
