@@ -7,7 +7,8 @@ its handler and exact SDK dependency into an existing project.
 - [Netlify Edge Function](netlify-edge/README.md)
 - [Vercel Edge Function](vercel-edge/README.md)
 
-These examples use `createPortalForUrl()` from `@layervai/qurl` 3.1.1.
+These examples use `createPortalForUrl()` from the SDK version pinned in each
+`package.json`.
 They mint on demand for a fixed configured target and require a separate
 server-side bearer credential. Read the platform README before deploying.
 The CLI scaffold integration requested in [#122](https://github.com/layervai/qurl-integrations/issues/122) is still tracked separately;
