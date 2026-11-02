@@ -697,6 +697,7 @@ describe('/qurl status through the real identity transport', () => {
     globalThis.fetch = jest.fn(fetchResult);
     const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
     await handleCommand(interaction);
+    await expect(mockGetIdentity.mock.results[0].value).rejects.toThrow(`qURL API GET /me failed (${code})`);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith('qURL status identity check failed', expect.objectContaining({
       guild_id: 'guild-1', failure_stage: 'qurl_service', status, code,

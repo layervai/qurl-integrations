@@ -232,9 +232,10 @@ async function getIdentity(apiKey, guildId) {
     try {
       body = await response.json();
     } catch (cause) {
-      const error = new Error('qURL identity response could not be read');
-      error.code = cause?.name === 'TimeoutError' || cause?.name === 'AbortError'
+      const code = cause?.name === 'TimeoutError' || cause?.name === 'AbortError'
         ? ERROR_CODE_TIMEOUT : 'identity_invalid_json';
+      const error = qurlApiError('GET', '/me', code);
+      error.code = code;
       throw error;
     }
     // TODO(upstream-contract): mirrors qurl-service's GET /v1/me envelope.
