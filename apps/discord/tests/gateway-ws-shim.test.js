@@ -510,8 +510,11 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
     const pending = shim.getActiveGuildCount();
     if (mode === 'stop') await shim.stop({ flushFinal: false });
     else manager.emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
-    resolvePage([{ id: 'stale' }]);
+    resolvePage(mode === 'disconnect'
+      ? Array.from({ length: 200 }, (_, i) => ({ id: `stale-${i}` }))
+      : [{ id: 'stale' }]);
     await expect(pending).resolves.toBe(null);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(1);
     if (mode === 'disconnect') {
       manager.emit(WebSocketShardEvents.Resumed, 0);
       manager.emit(WebSocketShardEvents.Dispatch, { data: { t: 'RESUMED', d: {} }, shardId: 0 });
@@ -520,6 +523,33 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
       expect(restInstances[0].get).toHaveBeenCalledTimes(2);
       await shim.stop({ flushFinal: false });
     }
+  });
+
+  it('does not charge disconnect-aborted seeds to the REST failure cooldown', async () => {
+    const { shim, managerInstances, restInstances, logger } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    const resume = () => {
+      manager.emit(WebSocketShardEvents.Resumed, 0);
+      manager.emit(WebSocketShardEvents.Dispatch, { data: { t: 'RESUMED', d: {} }, shardId: 0 });
+    };
+    resume();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let resolvePage;
+      const page = new Promise(resolve => { resolvePage = resolve; });
+      restInstances[0].get.mockReturnValueOnce(page);
+      const pending = shim.getActiveGuildCount();
+      manager.emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
+      resolvePage([{ id: 'stale' }]);
+      // eslint-disable-next-line no-await-in-loop
+      await expect(pending).resolves.toBe(null);
+      resume();
+    }
+    restInstances[0].get.mockResolvedValueOnce([{ id: 'fresh' }]);
+    await expect(shim.getActiveGuildCount()).resolves.toBe(1);
+    expect(restInstances[0].get).toHaveBeenCalledTimes(4);
+    expect(logger.warn.mock.calls.some(([message]) => message.includes('guild seed cooldown engaged'))).toBe(false);
+    await shim.stop({ flushFinal: false });
   });
 
   it('retries the pure-RESUME REST seed after a transient request failure', async () => {
