@@ -9,7 +9,8 @@ binding before its first policy write, it initializes the legacy identity before
 rotating the generation. That bounded retry checks both initialized IDs, so it
 cannot follow a concurrent reinstall or ownership change.
 
-Admin membership writes also carry the first gate's snapshot. The membership
+Admin membership writes and agent-toggle writes also carry the first mutation
+gate's snapshot. Agent status and usage replies stay read-only. The mutation
 condition and current caller/owner/generation/installation checks run in one
 workspace-row update. Revocation or reinstall during a command cannot authorize
 an old admin to change the new roster. Missing authorization has no direct-write

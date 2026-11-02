@@ -16,13 +16,13 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/testddb"
 )
 
-type membershipBoundaryDDB struct {
+type workspaceMutationBoundaryDDB struct {
 	*dynamodb.Client
 	beforeUpdate func()
 }
 
-func (d *membershipBoundaryDDB) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, options ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
-	if strings.Contains(aws.ToString(in.UpdateExpression), ":uids") && d.beforeUpdate != nil {
+func (d *workspaceMutationBoundaryDDB) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, options ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	if (strings.Contains(aws.ToString(in.UpdateExpression), ":uids") || strings.Contains(aws.ToString(in.UpdateExpression), "agent_enabled")) && d.beforeUpdate != nil {
 		interleave := d.beforeUpdate
 		d.beforeUpdate = nil
 		interleave()
@@ -35,7 +35,7 @@ func TestPolicySignedMembershipDynamoDBLocal(t *testing.T) {
 		for _, mode := range []string{"unchanged", "caller removed", "reinstalled"} {
 			t.Run(operation+"/"+mode, func(t *testing.T) {
 				client, workspaceTable, policyTable := testddb.New(t)
-				boundary := &membershipBoundaryDDB{Client: client}
+				boundary := &workspaceMutationBoundaryDDB{Client: client}
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				store, err := slackdata.NewStore(ctx, slackdata.WithDynamoDBClient(boundary), slackdata.WithTableNames(workspaceTable, policyTable))

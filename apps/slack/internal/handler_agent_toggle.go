@@ -18,9 +18,8 @@ import (
 // toggle gates the agent on TOP of the org-level surface — while the deployment's
 // conversation mode is dark, setting it just pre-stages the opt-in.
 func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
-	// Admin-gate BEFORE parsing the arg, so every unauthorized caller takes the same
-	// audited admin-only path: a non-admin probing `agent <anything>` must not get a
-	// different (and unaudited) reply than `agent on`.
+	// Gate before any grammar or state reply. Only mutations capture write
+	// authority; status reads must not trigger legacy metadata initialization.
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
 	if teamID == "" {
 		respondSlack(w, ":warning: missing team_id in slash command payload")
@@ -30,14 +29,11 @@ func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
 	if !h.requireAdminStoreSync(w) {
 		return
 	}
-	if !h.requireAdminSync(w, teamID, userID, AdminActionAgentToggle) {
-		return
-	}
 
 	_, rest := slashVerb(strings.TrimSpace(values.Get(fieldText)), adminVerbAgent)
 	arg := strings.ToLower(strings.TrimSpace(rest))
 
-	var enable, show bool
+	var enable, show, usage bool
 	switch arg {
 	case "", "status", "show":
 		show = true
@@ -46,6 +42,21 @@ func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
 	case "off", "disable", "disabled", "false":
 		enable = false
 	default:
+		usage = true
+	}
+	var authorization slackdata.PolicyAuthorization
+	if show || usage {
+		if !h.requireAdminSync(w, teamID, userID, AdminActionAgentToggle) {
+			return
+		}
+	} else {
+		var allowed bool
+		authorization, allowed = h.requirePolicyAdminSync(w, teamID, userID, AdminActionAgentToggle)
+		if !allowed {
+			return
+		}
+	}
+	if usage {
 		respondSlack(w, "Usage: `agent on` or `agent off` (or bare `agent` to show the current state).")
 		return
 	}
@@ -59,7 +70,7 @@ func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, h.agentToggleStatus(ctx, teamID))
 		return
 	}
-	if err := h.cfg.AdminStore.SetAgentEnabled(ctx, teamID, enable); err != nil {
+	if err := h.cfg.AdminStore.SetAgentEnabled(authorization.Context(ctx), teamID, enable); err != nil {
 		respondSlack(w, agentToggleSetError(err))
 		return
 	}

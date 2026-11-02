@@ -332,8 +332,8 @@ func TestPolicyRetiredRowRecoveryStopsOnUnknownFailure(t *testing.T) {
 	}
 }
 
-func TestMembershipWritesRequireCapturedAuthority(t *testing.T) {
-	for _, operation := range []string{"add", "remove"} {
+func TestWorkspaceWritesRequireCapturedAuthority(t *testing.T) {
+	for _, operation := range []string{"add", "remove", "toggle"} {
 		t.Run(operation, func(t *testing.T) {
 			store := newStore(&stubDDB{getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 				return &dynamodb.GetItemOutput{Item: policyTestWorkspace()}, nil
@@ -342,10 +342,13 @@ func TestMembershipWritesRequireCapturedAuthority(t *testing.T) {
 				return nil, errors.New("unexpected unauthorized membership write")
 			}})
 			var err error
-			if operation == "add" {
+			switch operation {
+			case "add":
 				err = store.AddAdmin(context.Background(), "T1", testOtherSlackID)
-			} else {
+			case "remove":
 				err = store.RemoveAdmin(context.Background(), "T1", testOtherSlackID)
+			case "toggle":
+				err = store.SetAgentEnabled(context.Background(), "T1", true)
 			}
 			assertPolicyStatus(t, err, http.StatusConflict)
 		})

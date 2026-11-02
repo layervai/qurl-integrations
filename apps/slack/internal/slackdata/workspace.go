@@ -241,7 +241,7 @@ func (s *Store) SetAgentEnabled(ctx context.Context, teamID string, enabled bool
 		return &Error{StatusCode: http.StatusBadRequest, Title: "SetAgentEnabled: team_id is required"}
 	}
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	err := s.updateAuthorizedWorkspace(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
