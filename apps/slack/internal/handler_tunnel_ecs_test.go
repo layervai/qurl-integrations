@@ -110,8 +110,9 @@ func TestECSFargateVolumesMatchSidecarMounts(t *testing.T) {
 	args := testTunnelInstallArgs()
 	instructions := mustRenderECSFargateTunnelInstructions(t, args, testTunnelImageRef)
 	storeAt := strings.Index(instructions, "Store the enrollment token")
-	if strings.Index(instructions, "Create three EFS access points") > storeAt ||
-		strings.Index(instructions, "Attach a file system policy") > storeAt {
+	accessPointsAt := strings.Index(instructions, "Create three EFS access points")
+	policyAt := strings.Index(instructions, "Attach a file system policy")
+	if storeAt < 0 || accessPointsAt < 0 || policyAt < 0 || accessPointsAt > storeAt || policyAt > storeAt {
 		t.Fatal("file creation precedes EFS access-point/policy provisioning")
 	}
 	// Parse the artifact actually delivered to Slack, not a separately built fixture.
