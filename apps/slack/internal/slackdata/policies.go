@@ -483,25 +483,15 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 // `/qurl uninstall` cascade that forgets a workspace once the Slack install is
 // gone and there is nothing left for those per-channel grants to authorize.
 //
-// Two phases against the partition key (slack_team_id):
+// Strong table queries page over channel keys and installation IDs. This
+// unconditional operator variant deletes every observed row. Lifecycle callers
+// use PurgeTeamChannelPoliciesBefore instead: its transactions fence concurrent
+// reinstalls and its final binding read detects a changed cleanup scope.
 //
-//   - Query pages over the team's rows (LastEvaluatedKey loop, same shape as
-//     [Store.ChannelsForResource]), projecting only the SK so a wide row doesn't
-//     drag every attribute over the wire — the DeleteItem only needs the key.
-//   - Each row is removed with an unconditional DeleteItem keyed by its
-//     (slack_team_id, slack_channel_id). Unconditional ⇒ idempotent: a row that a
-//     concurrent unset-alias already cleared makes its delete a DynamoDB no-op.
-//
-// Best-effort by construction: it attempts to delete every row it observes
-// during the Query pass, even after an individual DeleteItem fails, then returns
-// the joined delete errors at the end. Strong table queries see committed rows
-// on each page; they do not form a snapshot or stop in-flight writers. Missed
-// rows have no TTL. Durable cleanup and reinstall-safe writer fencing remain
-// required (#931); a successful sweep alone does not establish that every row
-// is gone. Lifecycle callers must treat returned errors as cleanup failures.
-// The unconditional variant uses sequential DeleteItem. Cutoff cleanup also
-// checks binding state atomically when the workspace is gone. Neither path
-// changes request-time reads.
+// Neither query is a partition snapshot. Completion depends on guarded writers
+// and durable delivery retries; mixed-version writers require the retirement
+// procedure in policy-installation-rollout.md. Row failures are joined and
+// returned so lifecycle callers cannot acknowledge incomplete cleanup.
 func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) error {
 	return s.purgeTeamChannelPolicies(ctx, teamID, time.Time{})
 }

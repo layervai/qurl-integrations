@@ -116,7 +116,17 @@ func TestPolicySignedLifecycleDynamoDBLocal(t *testing.T) {
 				stopWorker()
 				return nil
 			}
-			h.runLifecyclePurgeWorker(workerCtx)
+			// Replay only the serialized delivery through a fresh handler and store.
+			restartedStore, err := slackdata.NewStore(ctx, slackdata.WithDynamoDBClient(client), slackdata.WithTableNames(workspaceTable, policyTable))
+			if err != nil {
+				t.Fatal(err)
+			}
+			restarted := newTestHandler(t, upstream)
+			restarted.cfg.AdminStore = restartedStore
+			restarted.cfg.AgentStore = h.cfg.AgentStore
+			restarted.cfg.AuthProvider = provider
+			restarted.cfg.LifecyclePurgeQueue = queue
+			restarted.runLifecyclePurgeWorker(workerCtx)
 			if scenario == "unknown legacy retains delivery" {
 				if deleted != 0 {
 					t.Fatal("incomplete legacy cleanup acknowledged its delivery")
