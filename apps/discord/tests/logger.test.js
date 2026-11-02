@@ -45,6 +45,28 @@ describe('logger', () => {
     });
   });
 
+  describe.each(['info', 'audit'])('%s secret containers', (method) => {
+    test.each(['array', 'wrapper', 'deep'])('redacts strings in %s containers for every matched key', (shape) => {
+      process.env.LOG_LEVEL = 'debug';
+      logger = require('../src/logger');
+      const { REDACT_EXACT_KEYS, AUDIT_SECRET_KEYS } = logger.__testExports;
+      const keys = new Set([...REDACT_EXACT_KEYS, ...AUDIT_SECRET_KEYS,
+        ...(method === 'info' ? ['myToken', 'customSecret', 'decoratedPassword', 'authorizationValue', 'someApiKey', 'foo_api_key', 'qurlLinkUrl'] : [])]);
+      for (const key of keys) {
+        consoleSpy.log.mockClear();
+        let value = shape === 'array' ? ['private-container-value', 'another-private-value']
+          : { algorithm: 'example', value: 'private-container-value', count: 7 };
+        if (shape === 'deep') for (let i = 0; i < 8; i++) value = { child: value };
+        logger[method]('container-fixture', { [key]: value, adjacent_count: 9 });
+        const line = consoleSpy.log.mock.calls[0][0];
+        expect(line).not.toContain('private-container-value');
+        expect(line).not.toContain('another-private-value');
+        expect(line).toContain('[REDACTED]');
+        expect(line).toContain('"adjacent_count":9');
+      }
+    });
+  });
+
   it('info level logs info, warn, error but not debug', () => {
     process.env.LOG_LEVEL = 'info';
     logger = require('../src/logger');
@@ -660,7 +682,8 @@ describe('logger', () => {
 
       const line = consoleSpy.log.mock.calls[0][0];
       expect(line).toContain('"token":"[REDACTED]"');
-      expect(line).toContain('"nested_hash":"also-secret"');
+      expect(line).toContain('"nested_hash":"[REDACTED]"');
+      expect(line).not.toContain('also-secret');
       expect(line).not.toContain('real-secret');
     });
 
@@ -723,9 +746,10 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      logger.audit('upload_success', { send_id: 's1', hash: { myToken: 'audit-survives' } });
+      logger.audit('upload_success', { send_id: 's1', myToken: 'audit-survives', hash: { myToken: 'nested-secret' } });
       const auditParsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
-      expect(auditParsed.audit.hash.myToken).toBe('audit-survives');
+      expect(auditParsed.audit.myToken).toBe('audit-survives');
+      expect(auditParsed.audit.hash.myToken).toBe('[REDACTED]');
 
       consoleSpy.log.mockClear();
 

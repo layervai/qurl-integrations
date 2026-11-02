@@ -119,12 +119,18 @@ function isAuditSecretKey(key) {
 // matched-key non-null object/array values (depth-5 cap inherited from the
 // function body); qURL access-link containers are suppressed as a unit because
 // bare strings inside them have no inner key to match.
-function redactAuditSecrets(value, depth = 0, secretKeys = []) {
+function redactAuditSecrets(value, depth = 0, secretKeys = [], insideSecret = false) {
+  if (insideSecret && typeof value === 'string' && value.length > 0) {
+    return { value: '[REDACTED]', secretKeys };
+  }
+  if (insideSecret && depth > 5 && value != null && typeof value === 'object') {
+    return { value: '[REDACTED]', secretKeys };
+  }
   if (depth > 5 || value == null || typeof value !== 'object') {
     return { value, secretKeys };
   }
   if (Array.isArray(value)) {
-    const arr = value.map((v) => redactAuditSecrets(v, depth + 1, secretKeys).value);
+    const arr = value.map((v) => redactAuditSecrets(v, depth + 1, secretKeys, insideSecret).value);
     return { value: arr, secretKeys };
   }
   const out = {};
@@ -148,20 +154,22 @@ function redactAuditSecrets(value, depth = 0, secretKeys = []) {
         // container instead of risking a leak. Empty containers are safe.
         out[k] = '[REDACTED]';
       } else if (v != null && typeof v === 'object') {
-        out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
+        out[k] = redactAuditSecrets(v, depth + 1, secretKeys, true).value;
       } else {
         out[k] = v;
       }
     } else {
-      out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
+      out[k] = redactAuditSecrets(v, depth + 1, secretKeys, insideSecret).value;
     }
   }
   return { value: out, secretKeys };
 }
 
-function redact(value, depth = 0) {
+function redact(value, depth = 0, insideSecret = false) {
+  if (insideSecret && typeof value === 'string' && value.length > 0) return '[REDACTED]';
+  if (insideSecret && depth > 5 && value != null && typeof value === 'object') return '[REDACTED]';
   if (depth > 5 || value == null) return value;
-  if (Array.isArray(value)) return value.map(v => redact(v, depth + 1));
+  if (Array.isArray(value)) return value.map(v => redact(v, depth + 1, insideSecret));
   if (typeof value !== 'object') return value;
   const out = {};
   for (const [k, v] of Object.entries(value)) {
@@ -178,12 +186,12 @@ function redact(value, depth = 0) {
       } else if (isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
         out[k] = '[REDACTED]';
       } else if (v != null && typeof v === 'object') {
-        out[k] = redact(v, depth + 1);
+        out[k] = redact(v, depth + 1, true);
       } else {
         out[k] = v;
       }
     } else {
-      out[k] = redact(v, depth + 1);
+      out[k] = redact(v, depth + 1, insideSecret);
     }
   }
   return out;
