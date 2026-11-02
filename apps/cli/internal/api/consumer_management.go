@@ -96,3 +96,15 @@ type ConsumerManagementResult struct {
 	Grants      []qurl.ConsumerGrant
 	NextCursor  string
 }
+
+// ConnectPublisherStripe starts owner onboarding through the configured SDK.
+func (m consumerManagement) ConnectPublisherStripe(ctx context.Context) (string, error) {
+	link, err := m.sdk.ConnectPublisherStripe(ctx)
+	return link, mapError(err)
+}
+
+// PublisherStripeAccount reads the current owner account through the SDK.
+func (m consumerManagement) PublisherStripeAccount(ctx context.Context) (string, error) {
+	account, err := m.sdk.PublisherStripeAccount(ctx)
+	return account, mapError(err)
+}
