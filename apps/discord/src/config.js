@@ -318,10 +318,14 @@ const discordClientId = process.env.DISCORD_CLIENT_ID;
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
 const normalizedDiscordClientId = discordClientId?.trim();
 const normalizedDiscordClientSecret = discordClientSecret?.trim();
+// shortcut: old callbacks cannot read hashes; remove this rollout switch after fleet adoption.
+const installHashedState = (process.env.DISCORD_INSTALL_HASHED_STATE || 'false').trim().toLowerCase();
+
 let discordInstallNotConfiguredReason = null;
-// Core config first so a deploy missing AUTH0_* is told that before an
-// optional-pin rejection it would only discover after the next redeploy.
-if (!isQurlOAuthConfigured) {
+// Validate the rollout setting, then core config before optional pins.
+if (!['true', 'false'].includes(installHashedState)) {
+  discordInstallNotConfiguredReason = 'DISCORD_INSTALL_HASHED_STATE must be true or false';
+} else if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'AUTH0_* unset';
 } else if (isAuth0EmailConnectionRejected) {
   discordInstallNotConfiguredReason = 'AUTH0_EMAIL_CONNECTION rejected';
@@ -425,6 +429,7 @@ module.exports = {
   DISCORD_CLIENT_SECRET: isInfraSeedSentinel(normalizedDiscordClientSecret)
     ? null
     : normalizedDiscordClientSecret,
+  DISCORD_INSTALL_HASHED_STATE: installHashedState === 'true',
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   isQurlOAuthConfigured,

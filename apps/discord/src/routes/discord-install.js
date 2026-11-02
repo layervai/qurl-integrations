@@ -17,9 +17,10 @@
 // admin-visible step between Discord consent and Auth0 consent.
 //
 // CSRF posture (LOAD-BEARING — do not remove without replacing):
-//   /install mints a random state value and stores the same value in a
-//   host-only, HttpOnly, SameSite=Lax cookie. /callback requires the
-//   echoed state and cookie to match before exchanging Discord's code.
+//   /install keeps a random secret in a host-only, HttpOnly, SameSite=Lax
+//   cookie. After callback-fleet adoption, URLs carry only its SHA-256 hash.
+//   /callback verifies this browser binding before exchanging Discord's code.
+//   Existing legacy states remain valid until their original cookie expiry.
 //   A callback URL forwarded from another browser therefore fails closed
 //   before it can bind that browser's qURL account to the attacker's guild.
 //   The cookie is intentionally single-slot: a second /install request in
@@ -91,21 +92,29 @@ function renderError(res, statusCode, headline, detail) {
   }));
 }
 
-// State is `<expiry epoch seconds>.<32 random bytes, base64url>`. The expiry
+// The cookie is `<expiry epoch seconds>.<32 random bytes, base64url>`. The expiry
 // needs no signature: it is only honoured when the browser also presents the
-// identical __Host- cookie, which an attacker cannot plant, so the server
+// matching __Host- cookie, which an attacker cannot plant, so the server
 // enforces the same TTL as the cookie's Max-Age instead of trusting the browser.
 const INSTALL_STATE_RE = /^(\d{1,12})\.[A-Za-z0-9_-]{43}$/;
 
-function mintInstallState() {
+function mintInstallCookie() {
   const expirySec = Math.floor(Date.now() / 1000) + DISCORD_INSTALL_COOKIE_TTL_SECONDS;
   return `${expirySec}.${crypto.randomBytes(32).toString('base64url')}`;
 }
 
+function installStateForCookie(cookieState) {
+  return crypto.createHash('sha256').update(cookieState).digest('hex');
+}
+
 function inspectInstallState(req, state) {
   const cookieState = readCookie(req, DISCORD_INSTALL_SESSION_COOKIE);
-  const matches = Boolean(cookieState && state && timingSafeStringEqual(cookieState, state));
-  const expirySec = matches ? Number(INSTALL_STATE_RE.exec(state)?.[1]) : NaN;
+  const cookieMatch = INSTALL_STATE_RE.exec(cookieState || '');
+  const matches = Boolean(cookieMatch && state && (
+    timingSafeStringEqual(installStateForCookie(cookieState), state)
+    || timingSafeStringEqual(cookieState, state)
+  ));
+  const expirySec = matches ? Number(cookieMatch[1]) : NaN;
   return {
     hasCookie: Boolean(cookieState),
     matches,
@@ -130,8 +139,11 @@ router.get('/install', installRateLimit, (req, res) => {
     return renderNotConfiguredPage(res, 'discord-install-entry', 'KEY_ENCRYPTION_KEY unset');
   }
 
-  const state = mintInstallState();
-  setDiscordInstallSessionCookie(res, state);
+  const cookieState = mintInstallCookie();
+  setDiscordInstallSessionCookie(res, cookieState);
+  const state = config.DISCORD_INSTALL_HASHED_STATE
+    ? installStateForCookie(cookieState)
+    : cookieState;
   const authorizeUrl = new URL('https://discord.com/oauth2/authorize');
   authorizeUrl.searchParams.set('client_id', config.DISCORD_CLIENT_ID);
   authorizeUrl.searchParams.set('permissions', DISCORD_BOT_PERMISSIONS);

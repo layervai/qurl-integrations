@@ -43,6 +43,7 @@ jest.mock('../src/commands', () => ({
   registerCommands: jest.fn(),
 }));
 
+const crypto = require('crypto');
 const request = require('supertest');
 const { app } = require('../src/server');
 const config = require('../src/config');
@@ -104,6 +105,7 @@ function extractStyleNonce(res) {
 }
 
 beforeEach(() => {
+  config.DISCORD_INSTALL_HASHED_STATE = false;
   jest.clearAllMocks();
   rateLimitStore.clear();
   globalThis.fetch = originalFetch;
@@ -112,6 +114,7 @@ beforeEach(() => {
 afterEach(() => {
   // Ensure a failed assertion cannot leave a logger spy installed for the
   // remaining cases in this file.
+  config.DISCORD_INSTALL_HASHED_STATE = false;
   jest.restoreAllMocks();
 });
 
@@ -1189,4 +1192,55 @@ describe('discord-install — not configured', () => {
       }
     },
   );
+});
+
+describe('hashed Discord install browser binding', () => {
+  const hash = value => crypto.createHash('sha256').update(value).digest('hex');
+
+  it('keeps the browser secret out of the URL and completes the callback', async () => {
+    config.DISCORD_INSTALL_HASHED_STATE = true;
+    const install = await request(app).get('/oauth/discord/install');
+    const secret = cookieValue(install.headers['set-cookie'], DISCORD_INSTALL_SESSION_COOKIE);
+    const state = new URL(install.headers.location).searchParams.get('state');
+    expect(secret).toMatch(/^\d{1,12}\.[A-Za-z0-9_-]{43}$/);
+    expect(state).toBe(hash(secret));
+    expect(install.headers.location).not.toContain(secret);
+    mockSuccessfulDiscordIdentity();
+    const res = await request(app).get(`/oauth/discord/callback?code=ok-code&state=${state}`)
+      .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${secret}`);
+    expect(res.status).toBe(302);
+    expect(new URL(res.headers.location).hostname).toBe('layerv-test.auth0.com');
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not accept the URL hash itself as the browser cookie', async () => {
+    config.DISCORD_INSTALL_HASHED_STATE = true;
+    const install = await request(app).get('/oauth/discord/install');
+    const state = new URL(install.headers.location).searchParams.get('state');
+    globalThis.fetch = jest.fn();
+    const res = await request(app).get(`/oauth/discord/callback?code=ok-code&state=${state}`)
+      .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${state}`);
+    expect(res.status).toBe(400);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    `${Math.floor(Date.now() / 1000) - 1}.${'a'.repeat(43)}`,
+    'invalid-cookie',
+  ])('rejects the hash of an expired or malformed cookie', async secret => {
+    config.DISCORD_INSTALL_HASHED_STATE = true;
+    globalThis.fetch = jest.fn();
+    const res = await request(app).get(`/oauth/discord/callback?code=ok-code&state=${hash(secret)}`)
+      .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${secret}`);
+    expect(res.status).toBe(400);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('completes an existing legacy install after hashed minting is enabled', async () => {
+    config.DISCORD_INSTALL_HASHED_STATE = true;
+    mockSuccessfulDiscordIdentity();
+    const res = await discordCallback('/oauth/discord/callback?code=ok-code');
+    expect(res.status).toBe(302);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
 });
