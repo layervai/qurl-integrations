@@ -670,6 +670,8 @@ func TestRevokeResource_ReadAuthRejected(t *testing.T) {
 
 const testRevokeUnknownType = "future_type"
 
+// Typed rows use a valid detail envelope; otherwise readStatus selects the
+// malformed/error response, with zero simulating a lost connection.
 // Inspection is advisory for an authorized revoke; DELETE decides success.
 func TestRevokeResource_InspectionFallback(t *testing.T) {
 	for _, tc := range []struct {
@@ -680,6 +682,9 @@ func TestRevokeResource_InspectionFallback(t *testing.T) {
 		{"transit type", "transit", 200, 200, 204},
 		{"malformed read", "", 200, 200, 204},
 		{"read unavailable", "", 500, 200, 204},
+		{"tunnel inspection and sharing unavailable", "", 500, 500, 204},
+		{"read unavailable then delete not found", "", 500, 200, 404},
+		{"read unavailable then delete gone", "", 500, 200, 410},
 		{"read rate limited", "", 429, 200, 204},
 		{"read transport failure", "", 0, 200, 204},
 		{"best effort sharing failure", testRevokeUnknownType, 200, 500, 204},
@@ -699,7 +704,12 @@ func TestRevokeResource_InspectionFallback(t *testing.T) {
 			} else {
 				ts.addCustomer(http.MethodGet, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, _ *http.Request) {
 					if tc.readStatus == 0 {
-						conn, _, err := w.(http.Hijacker).Hijack()
+						hj, ok := w.(http.Hijacker)
+						if !ok {
+							t.Error("test server does not support connection hijacking")
+							return
+						}
+						conn, _, err := hj.Hijack()
 						if err != nil {
 							t.Error(err)
 							return
@@ -738,6 +748,9 @@ func TestRevokeResource_InspectionFallback(t *testing.T) {
 				}
 				deletes.Add(1)
 				w.WriteHeader(tc.deleteStatus)
+				if tc.deleteStatus == 500 {
+					_, _ = w.Write([]byte(`{"error":{"title":"Upstream","detail":"private-upstream-detail"}}`))
+				}
 			})
 			h := newAdminTestHandler(t, ts)
 			result := h.revokeResourceResult(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testTunnelResourceID, testRevokeAlias)
@@ -748,14 +761,18 @@ func TestRevokeResource_InspectionFallback(t *testing.T) {
 			if result.audit.success != wantSuccess {
 				t.Errorf("audit success=%v, want %v", result.audit.success, wantSuccess)
 			}
-			if wantSuccess && (!strings.Contains(result.cardText, "Revoked") || !strings.Contains(result.cardText, "Lifecycle checks were incomplete")) {
+			if wantSuccess && (!strings.Contains(result.cardText, "Revoked") || !strings.Contains(result.cardText, "Lifecycle checks were incomplete") || !strings.Contains(result.audit.display, "Lifecycle checks were incomplete")) {
 				t.Errorf("missing degraded success: %q", result.cardText)
 			}
-			if strings.Contains(result.cardText, "private-upstream-detail") {
+			if strings.Contains(result.cardText, "private-upstream-detail") || strings.Contains(result.cardText, "data.resource") {
 				t.Errorf("reply leaked upstream detail: %q", result.cardText)
 			}
-			if revokeAliasBound(t, h) == wantSuccess {
-				t.Errorf("alias bound=%v after success=%v", revokeAliasBound(t, h), wantSuccess)
+			gone := tc.deleteStatus == http.StatusNotFound || tc.deleteStatus == http.StatusGone
+			if gone && (!strings.Contains(result.cardText, "not found") || strings.Contains(result.cardText, "Lifecycle checks")) {
+				t.Errorf("gone resource reply = %q, want not-found without lifecycle note", result.cardText)
+			}
+			if bound := revokeAliasBound(t, h); bound != (!wantSuccess && !gone) {
+				t.Errorf("alias bound=%v after success=%v, gone=%v", bound, wantSuccess, gone)
 			}
 		})
 	}

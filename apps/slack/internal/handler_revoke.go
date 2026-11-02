@@ -22,7 +22,8 @@ const revokeUsageMessage = "Usage: `/qurl-admin revoke $<id>` — revoke a prote
 // *userError — but a future refactor mustn't leak an internal error to Slack.
 const commonRevokeFailedMessage = "Failed to revoke the resource. Please try again."
 
-const revokeLifecycleUncertainNote = ":warning: Lifecycle checks were incomplete. Check any Connector and origin workloads you run."
+// revokeLifecycleUncertainNote qualifies a confirmed revoke with incomplete inspection.
+const revokeLifecycleUncertainNote = ":warning: Lifecycle checks were incomplete."
 
 // revokeTeardownNote is appended only to successful revoke replies. It LEADS
 // with what revoke did do — qurl-service flips the resource to revoked (new
@@ -189,7 +190,11 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 		return newActionCoreResult(false, authErrorMessage(err), "Workspace API key was not available.")
 	}
 	resource, err := c.GetResource(ctx, resourceID)
-	degraded := err != nil
+	resourceType := ""
+	if resource != nil {
+		resourceType = resource.Type
+	}
+	degradedReason := ""
 	if err != nil {
 		var apiErr *client.APIError
 		if errors.As(err, &apiErr) {
@@ -203,24 +208,33 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 				return newActionCoreResult(false, "This workspace's API key was rejected by the qURL service — re-run `/qurl setup <email>` to reconnect.", "Workspace API key was rejected.")
 			}
 		}
+		degradedReason = "read_failed"
 		log.Error("read resource before revoke failed; proceeding to delete", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
-	} else if resource.Type != client.ResourceTypeURL && resource.Type != client.ResourceTypeTunnel {
-		degraded = true
-		log.Error("revoke: unknown resource type; proceeding to delete", "type", resource.Type, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+	} else {
+		switch resourceType {
+		case client.ResourceTypeURL, client.ResourceTypeTunnel:
+			// Known types use the normal lifecycle path below.
+		default:
+			degradedReason = "unknown_type"
+			log.Error("revoke: unknown resource type; proceeding to delete", "type", resourceType, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+		}
 	}
-	// Unknown metadata must not disable revocation. Try stopping sharing first;
-	// known tunnels retain their stricter stop-before-delete lifecycle contract.
-	if degraded || resource.Type == client.ResourceTypeTunnel {
+	// Prefer revoking viewer access to leaving it granted when inspection fails,
+	// even if a real tunnel's sharing stop also fails. Connector plumbing can remain;
+	// revokeTeardownNote explains manual teardown. Recognized tunnels still stop
+	// first to quiesce their serving state before DELETE.
+	if degradedReason != "" || resourceType == client.ResourceTypeTunnel {
 		if _, err := c.SetSharing(ctx, resourceID, "off"); err != nil {
 			var apiErr *client.APIError
 			if !errors.As(err, &apiErr) || (apiErr.StatusCode != http.StatusNotFound && apiErr.StatusCode != http.StatusGone) {
-				log.Error("stop tunnel sharing before revoke failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
-				if !degraded {
+				if degradedReason == "" {
+					log.Error("stop tunnel sharing before revoke failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
 					return newActionCoreResult(false, ":warning: "+sanitizeAPIError(err, fmt.Sprintf("Failed to stop sharing `$%s` before revoke", escapeMrkdwnCode(displayToken))), "Sharing could not be stopped before revoke.")
 				}
+				log.Warn("optional sharing stop failed; proceeding to revoke", "error", err, "degraded_reason", degradedReason, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
 			}
-			// Sharing is advisory when inspection failed. DELETE still checks
-			// authorization and decides whether revocation succeeded.
+			// A 404/410 may be a concurrent delete. With degraded metadata, other
+			// stop failures are advisory too; DELETE still authorizes the revoke.
 		}
 	}
 	if err := c.DeleteResource(ctx, resourceID); err != nil {
@@ -266,8 +280,8 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 	// so pointing the admin at teardown would be a guess.
 	cardText := fmt.Sprintf("Revoked `$%s` and all its qURLs.\n\n%s", escapeMrkdwnCode(displayToken), revokeTeardownNote)
 	auditDisplay := "Resource and all of its qURLs were revoked."
-	if degraded {
-		log.Warn("revoke succeeded with incomplete lifecycle checks", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+	if degradedReason != "" {
+		log.Warn("revoke succeeded with incomplete lifecycle checks", "degraded_reason", degradedReason, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
 		cardText += "\n\n" + revokeLifecycleUncertainNote
 		auditDisplay += " Lifecycle checks were incomplete."
 	}
