@@ -168,7 +168,7 @@ jobs:
       # lockstep with the infra repo's QURL_IMAGE pin.
       QURL_IMAGE: ghcr.io/layervai/qurl@sha256:5de963d335cca0a6e9a030978d7f3de6587ae1e26f369a38afbf168c04ee220a
       QURL_RELEASE_IMAGE_REQUIRED: "true"
-      # The control-char, upstream-response and request-preflight assertions
+      # The control-char, upstream-response, request-preflight and exotic-key assertions
       # postdate this immutable origin. Waive only that exact digest so the producer
       # fixes can merge and publish; behavior_test.sh rejects a malformed or
       # mismatched waiver. The pin-rotation PR must remove this line.
