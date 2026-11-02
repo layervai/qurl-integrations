@@ -76,7 +76,8 @@ class SDKVectorTest(unittest.TestCase):
                     response = connection.getresponse()
                     # Valid signature reaches key lookup (unknown fixture); forged one never does.
                     self.assertEqual(response.status, 403 if forged else 404)
-                    response.read()
+                    body = response.read()
+                    self.assertIn(b"SignatureDoesNotMatch" if forged else b"NoSuchKey", body)
                 finally:
                     connection.close()
         finally:

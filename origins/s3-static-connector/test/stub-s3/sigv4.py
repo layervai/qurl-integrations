@@ -40,6 +40,7 @@ def verify_sigv4(method, target, headers, access_key="test", secret_key="test"):
         if not values:
             return False
         canonical_headers.append(name + ":" + ",".join(" ".join(v.split()) for v in values) + "\n")
+    # The proxy encoder and SDK vectors emit uppercase escapes; this is not a general URI normalizer.
     uri = quote(target, safe="/%~")
     canonical = "\n".join([method, uri, "", "".join(canonical_headers), auth[3], payload])
     scope = auth[2] + "/us-east-1/s3/aws4_request"

@@ -1,7 +1,8 @@
 # SigV4 / canonicalization regression fixtures for s3-static-connector.
 # behavior_test.sh uses real nginx + Envoy and a signature-verifying S3 stub.
 # The verifier has AWS's published S3 GET vector and independently captured
-# AWS CLI S3 GetObject signatures for spaces, plus, slash, literal %2F and //.
+# AWS CLI S3 GetObject signatures for spaces, plus, slash, literal %2F, //,
+# punctuation and UTF-8. These vectors validate signing, not viewer support.
 # Forged signatures, changed paths/methods/headers and query leakage fail.
 # Synthetic credentials only: this establishes canonical signing, not IAM/TLS.
 # [crypto] = S3 fixture verifies the HMAC before selecting the key.
@@ -18,10 +19,11 @@
 /deep/path                  -> /deep/path/index.html                      [crypto]
 GET /range.bin Range: 0-3    -> 206 partial                                 [crypto]
 HEAD /metrics.json          -> 200 no body                                 [crypto]
-/a+b.txt                    -> /a+b.txt                                   [crypto]
-/a%2Bb.txt                  -> /a+b.txt (encoded plus)                    [crypto]
+/a+b.txt                    -> /a%2Bb.txt (encoded before signing)        [crypto]
+/a%2Bb.txt                  -> /a%2Bb.txt (encoded plus)                  [crypto]
 /a%2Fb.txt                  -> /a/b.txt (encoded slash is a separator)    [crypto]
 /dir//file.txt              -> /dir/file.txt (nginx merges slashes)       [crypto]
+/bundle@2x[slug]~(1)!,=;.js  -> same key, percent-encoded wire path       [crypto]
 /a%20b.txt                  -> 404; spaces unsupported                    [rejected]
 /a%252Fb.txt                -> 404; literal percent/escape unsupported    [rejected]
 /a%25252Fb.txt              -> 404; nested percent escape unsupported    [rejected]

@@ -24,6 +24,8 @@ from urllib.parse import urlsplit, unquote
 
 # key (no leading slash) -> (content_type, cache_control_or_None, body bytes)
 FIXTURES = {
+    "bundle@2x[slug]~(1)!,=;.js": ("text/plain", None, b"punctuation"),
+    "caf\u00e9.txt": ("text/plain", None, b"unicode"),
     "a b.txt": ("text/plain", None, b"space"),
     "a+b.txt": ("text/plain", None, b"plus"),
     "a/b.txt": ("text/plain", None, b"slash"),

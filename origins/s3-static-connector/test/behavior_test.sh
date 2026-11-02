@@ -518,11 +518,11 @@ fi
 # Cryptographic verification of every request is never waived.
 if [ "$waive_security_contract" != "true" ]; then
   # Exotic-key requests cross both real proxies; the stub verifies their HMAC.
-  for key_case in '/a+b.txt|/a+b.txt|plus' '/a%2Bb.txt|/a+b.txt|plus' '/a%2Fb.txt|/a/b.txt|slash' '/dir//file.txt|/dir/file.txt|normalized-slashes'; do
+  for key_case in '/a+b.txt|/a%2Bb.txt|plus' '/a%2Bb.txt|/a%2Bb.txt|plus' '/a%2Fb.txt|/a/b.txt|slash' '/dir//file.txt|/dir/file.txt|normalized-slashes' '/bundle@2x[slug]~(1)!,=;.js|/bundle%402x%5Bslug%5D~%281%29%21%2C%3D%3B.js|punctuation'; do
     IFS='|' read -r viewer_path signed_path expected_body <<< "$key_case"
     docker exec "$ORIGIN" qurl-origin-cachectl purge >/dev/null
     mark="$(stub_log_mark)"
-    fetch --path-as-is "$base$viewer_path"
+    fetch --globoff --path-as-is "$base$viewer_path"
     expect_eq "SigV4 exotic $viewer_path status" "$(status_code)" 200
     expect_eq "SigV4 exotic $viewer_path signed path" "$(hval X-Stub-Path)" "$signed_path"
     expect_eq "SigV4 exotic $viewer_path key" "$(cat "$B")" "$expected_body"
