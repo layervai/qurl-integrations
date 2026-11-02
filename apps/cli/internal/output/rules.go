@@ -153,6 +153,16 @@ func accessRuleLabel(mode string) string {
 	return "Unavailable"
 }
 
+// AccessModeChoices lists the --mode values in the order they are offered,
+// such as "public, invite_only or contract".
+func AccessModeChoices() string {
+	modes := make([]string, len(accessModes))
+	for i, m := range accessModes {
+		modes[i] = m.mode
+	}
+	return strings.Join(modes[:len(modes)-1], ", ") + " or " + modes[len(modes)-1]
+}
+
 // AccessModeHelp lists every mode with its one-line summary, for creating a rule.
 func AccessModeHelp() string {
 	lines := make([]string, len(accessModes))

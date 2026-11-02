@@ -171,14 +171,14 @@ func samePointer[T comparable](a, b *T) bool {
 
 // sameSettings compares field presence too, since an explicit default round-trips.
 func sameSettings(a, b *Definition) bool {
-	return SameLinkLimits(a.LinkLimits, b.LinkLimits) && samePointer(a.ApprovalExpiresIn, b.ApprovalExpiresIn)
+	return sameLinkLimits(a.LinkLimits, b.LinkLimits) && samePointer(a.ApprovalExpiresIn, b.ApprovalExpiresIn)
 }
 
 // SameEffectiveLinkLimits compares what the limits do: an explicit
 // one_time_use false is the same as omitting it. session_duration has no
 // such default, since omitting it leaves the client's own.
 func SameEffectiveLinkLimits(a, b *LinkLimits) bool {
-	return SameLinkLimits(withoutDefaults(a), withoutDefaults(b))
+	return sameLinkLimits(withoutDefaults(a), withoutDefaults(b))
 }
 
 func withoutDefaults(l *LinkLimits) *LinkLimits {
@@ -190,8 +190,8 @@ func withoutDefaults(l *LinkLimits) *LinkLimits {
 	return &copied
 }
 
-// SameLinkLimits compares limits field by field, presence included.
-func SameLinkLimits(a, b *LinkLimits) bool {
+// sameLinkLimits compares limits field by field, presence included.
+func sameLinkLimits(a, b *LinkLimits) bool {
 	return a == b || a != nil && b != nil && a.ExpiresIn == b.ExpiresIn && samePointer(a.OneTimeUse, b.OneTimeUse) && samePointer(a.SessionDuration, b.SessionDuration)
 }
 

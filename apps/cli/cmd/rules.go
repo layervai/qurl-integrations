@@ -348,7 +348,7 @@ func (o *globalOpts) reconcileRulesAfterLink(ctx context.Context) {
 }
 
 // modeChoices lists --mode values in the order every client offers them.
-const modeChoices = "public, invite_only, review, email_capture, email_domain, keys or contract"
+var modeChoices = output.AccessModeChoices()
 
 // approvalsLast maps --approvals-last choices to approval_expires_in; never is empty.
 var approvalsLast = map[string]string{"1d": "1d", "7d": "7d", "30d": "30d", "90d": "90d", "never": ""}

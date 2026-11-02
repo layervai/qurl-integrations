@@ -113,7 +113,7 @@ func TestFrozenCatalogContract(t *testing.T) {
 	}
 	once := OnlyFirstPerson()
 	if len(catalog.Defaults) != 4 || catalog.Defaults[1].ID != once.ID || catalog.Defaults[1].Label != once.Name ||
-		catalog.Defaults[1].Mode != once.Mode || !SameLinkLimits(catalog.Defaults[1].LinkLimits, once.LinkLimits) {
+		catalog.Defaults[1].Mode != once.Mode || !sameLinkLimits(catalog.Defaults[1].LinkLimits, once.LinkLimits) {
 		t.Fatal("Only the first person drifted from the catalog's defaults")
 	}
 	for _, d := range catalog.Defaults {
@@ -301,7 +301,7 @@ func TestSameEffectiveLinkLimitsIgnoresExplicitDefaults(t *testing.T) {
 			t.Errorf("SameEffectiveLinkLimits(%+v, %+v) = %v", omitted, tc.other, got)
 		}
 	}
-	if SameLinkLimits(omitted, &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(false)}) {
+	if sameLinkLimits(omitted, &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(false)}) {
 		t.Error("library comparison must keep an explicit false")
 	}
 }
