@@ -1078,6 +1078,8 @@ async function saveSendConfig({
       // delivered exist), so it deliberately carries none of those fields.
       created_at: nowIso(),
     },
+    // A late initial send must never replace the durable Add Recipients barrier.
+    ConditionExpression: 'attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at)',
   }));
 }
 

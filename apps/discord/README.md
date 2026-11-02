@@ -327,3 +327,15 @@ This follows [RFC 6749 section 10.12](https://www.rfc-editor.org/rfc/rfc6749#sec
 
 The source change alone does not complete this rollout. Keep the related item
 in #1456 open until fleet adoption and the real browser install pass.
+
+
+### Preserve revocation state during sends
+
+A send that finishes after a revoke must not replace the stored revocation
+barrier. The initial send-config write now refuses rows with pending, confirmed,
+or acknowledged revocation state. Deploy this guarded writer to all send workers
+and drain in-flight old sends before adopting revoke acknowledgement.
+
+Check actual conditional writes with DynamoDB Local and synthetic credentials:
+`DDB_TEST_ENDPOINT=http://127.0.0.1:8000 node scripts/smoke-send-config-barrier.js`.
+The check creates and deletes its own disposable table.

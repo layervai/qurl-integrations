@@ -2393,3 +2393,11 @@ describe('ddb-store boot-time AWS_REGION validation', () => {
     expect(result.stderr).not.toMatch(/AWS_REGION/);
   });
 });
+
+
+test('late send config writes preserve all revocation barriers', async () => {
+  ddbMock.on(PutCommand).resolves({});
+  await store.saveSendConfig({ sendId: 'send-1', senderDiscordId: 'sender', resourceType: 'file' });
+  expect(ddbMock.commandCalls(PutCommand)[0].args[0].input.ConditionExpression)
+    .toBe('attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at)');
+});
