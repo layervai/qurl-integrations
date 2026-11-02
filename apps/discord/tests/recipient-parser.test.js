@@ -625,22 +625,14 @@ describe('parseRecipientMentions — channel mentions (voice / stage-voice)', ()
     expect(res.ids.slice(0, 3)).toEqual(voiceMembers);
   });
 
-  test('voice candidates remain available after direct mentions reach the send cap', () => {
-    const users = { '111': {}, '222': {}, '333': {}, 'aaa': {}, 'bbb': {} };
+  test('voice candidates follow direct mentions without parser capping', () => {
     const int = makeInteraction({
-      users,
+      users: { '111': {}, '222': {}, '333': {}, 'aaa': {}, 'bbb': {} },
       channels: { '500': { type: GUILD_VOICE, members: ['aaa', 'bbb'] } },
     });
-    const config = require('../src/config');
-    const origCap = config.QURL_SEND_MAX_RECIPIENTS;
-    config.QURL_SEND_MAX_RECIPIENTS = 3;
-    try {
-      const res = parseRecipientMentions('<@111> <@222> <@333> <#500>', int);
-      expect(res.ids.sort()).toEqual(['111', '222', '333', 'aaa', 'bbb']);
-      expect(res.invalidTokens).toEqual([]);
-    } finally {
-      config.QURL_SEND_MAX_RECIPIENTS = origCap;
-    }
+    const result = parseRecipientMentions('<@111> <@222> <@333> <#500>', int);
+    expect(result.ids).toEqual(['111', '222', '333', 'aaa', 'bbb']);
+    expect(result.invalidTokens).toEqual([]);
   });
 });
 

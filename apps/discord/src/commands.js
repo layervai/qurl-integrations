@@ -363,6 +363,7 @@ const PERSONAL_MESSAGE_INPUT_MAX = 280;
 // from it rather than maintaining the parallel copy.
 const MASS_MENTION_HINT_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])|<@&\d+>/u;
 const ROLE_MENTION_HINT_RE = /<@&\d+>/u;
+const CHANNEL_MENTION_HINT_RE = /<#\d+>/u;
 
 // discord.js `Guild._patch` only sets `memberCount` from the gateway
 // GUILD_CREATE payload. The REST `GET /guilds/:id?with_counts=true`
@@ -4505,6 +4506,7 @@ async function resolveRecipientUsers(interaction, ids) {
   if (!interaction.guild) {
     return { users: [], unresolvedIds: [...ids], transientFailureIds: [] };
   }
+  // Failed lookups leave holes, removed after ordered results are assembled.
   const users = new Array(ids.length);
   const missQueue = [];
   for (let index = 0; index < ids.length; index++) {
@@ -5586,7 +5588,8 @@ async function handleQurlSlashSend(interaction, params) {
     const cappedCount = eligible.length - valid.length;
     const selfIncluded = valid.some(user => user.id === interaction.user.id);
     if (cappedCount > 0) {
-      const log = eligible.length > config.QURL_SEND_MAX_RECIPIENTS * RECIPIENT_CAP_LOG_WARN_MULTIPLIER
+      const groupMention = hasMassMention || CHANNEL_MENTION_HINT_RE.test(recipientsRaw || '');
+      const log = !groupMention && eligible.length > config.QURL_SEND_MAX_RECIPIENTS * RECIPIENT_CAP_LOG_WARN_MULTIPLIER
         ? logger.warn : logger.debug;
       log('qurl send/map: capping resolved recipient list', {
         uniqueCount: eligible.length, cap: config.QURL_SEND_MAX_RECIPIENTS, cappedCount,

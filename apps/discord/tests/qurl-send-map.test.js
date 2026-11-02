@@ -130,6 +130,7 @@ jest.mock('../src/flow-state', () => ({
   supersedeOrCreate: (...a) => mockSupersedeOrCreate(...a),
 }));
 
+const { VOICE_CHANNEL_TYPE, MAX_INPUT_LENGTH } = require('../src/recipient-parser');
 const commands = require('../src/commands');
 const { _test } = commands;
 const logger = require('../src/logger');
@@ -1387,6 +1388,19 @@ describe('resolveRecipientUsers', () => {
     );
   });
 
+  test('failed early lookups leave later cached and fetched humans in parsed order', async () => {
+    const ids = Array.from({ length: 5 }, (_, i) => `10000000000000000${i}`);
+    const int = makeInteraction({
+      guildMembers: { [ids[1]]: {}, [ids[4]]: {} },
+      guildFetchByID: { [ids[0]]: 'ratelimit', [ids[2]]: 'unknown', [ids[3]]: makeUser(ids[3]) },
+    });
+    const result = await resolveRecipientUsers(int, ids);
+    expect(result.users.map(user => user.id)).toEqual([ids[1], ids[3], ids[4]]);
+    expect(result.transientFailureIds).toEqual([ids[0]]);
+    expect(result.unresolvedIds).toEqual([ids[2]]);
+    expect(int.guild.members.fetch).toHaveBeenCalledTimes(3);
+  });
+
   test('no guild → everything unresolved', async () => {
     const int = makeInteraction({ guildId: null });
     const r = await resolveRecipientUsers(int, ['100000000000000001', '100000000000000002']);
@@ -2111,6 +2125,45 @@ describe('handleQurlSend — slash entry', () => {
     expect(log).toHaveBeenCalledWith('qurl send/map: capping resolved recipient list', {
       uniqueCount: count, cap: 25, cappedCount: count - 25,
     });
+  });
+
+  test('raw input length bounds uncached direct lookups without an earlier recipient cap', async () => {
+    const ids = Array.from({ length: 1000 }, (_, i) => `1000000000000${String(i).padStart(6, '0')}`);
+    const completeMentions = Math.floor(MAX_INPUT_LENGTH / (ids[0].length + 4));
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: ids.map(id => `<@${id}>`).join(' ') },
+      guildFetchByID: Object.fromEntries(ids.map(id => [id, makeUser(id)])),
+    });
+    await handleQurlSend(int);
+    expect(int.guild.members.fetch.mock.calls.map(([id]) => id)).toEqual(ids.slice(0, completeMentions));
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    expect(payload.recipientIds).toEqual(ids.slice(0, 25));
+    expect(payload.warningsBlock).toContain(`${completeMentions - 25} recipient(s) past the cap`);
+  });
+
+  test.each(['everyone', 'role', 'voice'])('large %s expansion keeps exact capped recipients without cap warning logs', async (kind) => {
+    const count = 1000;
+    const ids = Array.from({ length: count }, (_, i) => `1000000000000${String(i).padStart(6, '0')}`);
+    const token = kind === 'everyone' ? '@everyone' : kind === 'role' ? '<@&7000>' : '<#500>';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: token },
+      guildMembers: Object.fromEntries(ids.map(id => [id, {}])),
+    });
+    int.guild.memberCount = count;
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.roles.cache.set('7000', { id: '7000', mentionable: true, members: int.guild.members.cache });
+    int.guild.channels.cache.set('500', { type: VOICE_CHANNEL_TYPE, members: int.guild.members.cache, permissionsFor: () => ({ has: () => true }) });
+    await handleQurlSend(int);
+    expect(mockSupersedeOrCreate).toHaveBeenCalledTimes(1);
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    expect(payload.recipientIds).toEqual(ids.slice(0, 25));
+    expect(payload.warningsBlock).toContain('975 recipient(s) past the cap');
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('975 recipient(s) past the cap');
+    expect(payload.recipientMode).toBe(kind === 'everyone' ? RECIPIENT_MODE_EVERYONE : RECIPIENT_MODE_PICKER);
+    expect(int.guild.members.fetch).not.toHaveBeenCalled();
+    expect(int.guild.members.list).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalledWith('qurl send/map: capping resolved recipient list', expect.anything());
+    expect(logger.debug).toHaveBeenCalledWith('qurl send/map: capping resolved recipient list', { uniqueCount: count, cap: 25, cappedCount: count - 25 });
   });
 
   test('inner catch on supersedeOrCreate throw clears cooldown + surfaces specific error', async () => {

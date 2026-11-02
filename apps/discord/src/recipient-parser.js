@@ -76,7 +76,7 @@
 //   {
 //     ids:                  [<user_id>, ...],   // all deduped candidates
 //     invalidTokens:        [<raw_token>, ...], // pre-escaped (see above)
-//     cappedCount:          0,                  // compatibility field; caller caps after resolution
+//     cappedCount:          0,                  // deprecated; caller caps after resolution
 //     massMentionDenied:    <boolean>,          // true when @everyone
 //                                               // appeared but the caller
 //                                               // denied via the
@@ -559,7 +559,8 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   if (everyonePresent && allowMassMention) {
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
-      // Snapshot order is preserved; the caller caps only after user resolution.
+      // Synchronous walk: gateway events cannot mutate this snapshot mid-loop.
+      // The caller caps only after user resolution.
       // A partial cache still expands only the members it contains.
       for (const [memberId, member] of everyoneMembers) {
         if (isBotMember(member)) continue;
