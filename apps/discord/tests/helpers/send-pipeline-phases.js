@@ -18,7 +18,7 @@ function setupSendPhases() {
   };
   const logger = Object.fromEntries(['info', 'warn', 'error', 'debug', 'audit'].map(k => [k, jest.fn()]));
   const sendDM = jest.fn().mockResolvedValue({ ok: true, channelId: 'dm-1', messageId: 'message-1' });
-  jest.doMock('../../src/config', () => ({ QURL_SEND_MAX_RECIPIENTS: 50 }));
+  jest.doMock('../../src/config', () => ({ ...jest.requireActual('../../src/config'), QURL_SEND_MAX_RECIPIENTS: 50 }));
   jest.doMock('../../src/store', () => db);
   jest.doMock('../../src/connector', () => connector);
   jest.doMock('../../src/logger', () => logger);

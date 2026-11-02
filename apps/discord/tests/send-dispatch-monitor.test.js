@@ -27,3 +27,12 @@ test('dispatch stops the monitor when the confirmation reply fails', async () =>
   expect(phase.activeMonitors.size).toBe(0);
   expect(phase.sendDM).toHaveBeenCalledTimes(1);
 });
+
+test('driver preserves a dispatch rejection after successful mint and persistence', async () => {
+  const error = new Error('confirmation unavailable');
+  phase.interaction.editReply.mockResolvedValueOnce(undefined).mockRejectedValueOnce(error);
+  await expect(phase.executeSendPipeline(phase.interaction, phase.params)).rejects.toBe(error);
+  expect(phase.db.recordQURLSendBatch).toHaveBeenCalledTimes(1);
+  expect(phase.sendDM).toHaveBeenCalledTimes(1);
+  expect(phase.activeMonitors.size).toBe(0);
+});

@@ -1953,14 +1953,15 @@ async function executeSendPipeline(interaction, {
     expiresIn, selfDestructSeconds, personalMessage, sendNonce, recipientMode,
   };
   const prepared = await prepareSendResources(interaction, params);
-  if (!prepared.qurlLinks) return prepared.reply;
+  if ('reply' in prepared) return prepared.reply;
   const send = { ...params, ...prepared };
   const persisted = await persistSendBatch(interaction, send);
-  if (!('expiresAt' in persisted)) return persisted.reply;
+  if ('reply' in persisted) return persisted.reply;
   return dispatchAndMonitor(interaction, { ...send, ...persisted });
 }
 
-// Preserve pending error replies so mint cleanup does not wait for Discord.
+// Both pre-dispatch phases return success fields or { reply }; the driver observes pending replies.
+// Keep error replies pending so mint cleanup does not wait for Discord.
 async function prepareSendResources(interaction, {
   apiKey, resourceType, attachment, locationUrl, locationName, recipients,
   expiresIn, selfDestructSeconds, personalMessage, sendNonce,
