@@ -295,7 +295,7 @@ func ddbToError(op string, err error) error {
 		return nil
 	}
 	var mapped *Error
-	if errors.As(err, &mapped) && mapped.Code == ErrCodePolicyWorkspaceChanged {
+	if errors.As(err, &mapped) && (mapped.Code == ErrCodePolicyWorkspaceChanged || mapped.Code == ErrCodePolicyReconciliationRequired) {
 		return err
 	}
 	var ccfe *ddbtypes.ConditionalCheckFailedException

@@ -2,6 +2,7 @@ package slackdata
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -70,6 +71,12 @@ func TestPolicyReinstallWriteDynamoDBLocal(t *testing.T) {
 				assertPolicyStatus(t, err, 409)
 			} else if err != nil {
 				t.Fatal(err)
+			}
+			if scenario == "untagged before retirement" {
+				var typed *Error
+				if !errors.As(err, &typed) || typed.Code != ErrCodePolicyReconciliationRequired {
+					t.Fatalf("ambiguous policy must require operator reconciliation: %v", err)
+				}
 			}
 			row, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(store.ChannelPoliciesName), Key: key, ConsistentRead: aws.Bool(true)})
 			if err != nil {

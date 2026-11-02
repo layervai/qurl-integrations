@@ -19,7 +19,7 @@ import (
 )
 
 func TestPolicySignedHandlerDynamoDBLocal(t *testing.T) {
-	for _, scenario := range []string{"unchanged", "admin removed during lookup", "workspace deleted during lookup", "reinstalled during lookup", "owner transferred away and back"} {
+	for _, scenario := range []string{"unchanged", "admin removed during lookup", "workspace deleted during lookup", "reinstalled during lookup", "owner transferred away and back", "untagged needs repair"} {
 		t.Run(scenario, func(t *testing.T) {
 			ddb, workspaceTable, policyTable := testddb.New(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -39,6 +39,9 @@ func TestPolicySignedHandlerDynamoDBLocal(t *testing.T) {
 			mutationResult := make(chan error, 1)
 			mutate := func() error {
 				switch scenario {
+				case "untagged needs repair":
+					_, err := ddb.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(policyTable), Item: map[string]ddbtypes.AttributeValue{"slack_team_id": &ddbtypes.AttributeValueMemberS{Value: team}, "slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: channel}, "allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_unknown"}}}})
+					return err
 				case "admin removed during lookup":
 					return store.RemoveAdmin(testPolicyContext(ctx, t, store, team, testAdminOwnerID), team, testAdminUserID)
 				case "workspace deleted during lookup":
@@ -103,7 +106,20 @@ func TestPolicySignedHandlerDynamoDBLocal(t *testing.T) {
 				}
 				return
 			}
-			if !strings.Contains(reply, "Failed to update alias") {
+			if scenario == "untagged needs repair" {
+				if !strings.Contains(reply, "operator reconciliation") || strings.Contains(reply, "Run the command again") {
+					t.Fatalf("ambiguous row gave the wrong next step: %q", reply)
+				}
+				allowed, err := store.AllowedResourceIDsForChannel(ctx, team, channel)
+				if err != nil || len(allowed) != 1 {
+					t.Fatalf("ambiguous row changed: %v %v", allowed, err)
+				}
+				if _, exists := allowed["r_unknown"]; !exists {
+					t.Fatal("unknown policy lost")
+				}
+				return
+			}
+			if !strings.Contains(reply, "Workspace permissions changed") {
 				t.Fatalf("stale authorization reached a successful reply: %q", reply)
 			}
 			if scenario == "reinstalled during lookup" {

@@ -119,6 +119,9 @@ func SlackRateLimitRetryAfter(err error) string {
 // /qurl setup yet" path — surface a useful next-action instead of the
 // generic auth-failure string.
 func authErrorMessage(err error) string {
+	if reply := policyMutationReply(err); reply != "" {
+		return reply
+	}
 	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
 		return workspaceNotSetupMessage
 	}

@@ -16,6 +16,9 @@ import (
 // ErrCodePolicyWorkspaceChanged means the operation must obtain fresh authorization.
 const ErrCodePolicyWorkspaceChanged = "workspace_policy_authorization_changed"
 
+// ErrCodePolicyReconciliationRequired requires operator repair, not a command retry.
+const ErrCodePolicyReconciliationRequired = "policy_reconciliation_required"
+
 const errCodePolicyPurgeWorkspaceChanged = "policy_purge_workspace_changed"
 
 const policyConditionFailed = "ConditionalCheckFailed"
@@ -269,6 +272,9 @@ func commitPolicyUpdate(ctx context.Context, client policyTransactionClient, req
 		return policyTransactionError(err, authorization)
 	}
 	retired, present, identityErr := policyIdentity(canceled.CancellationReasons[1].Item, attrPolicyInstallation)
+	if identityErr == nil && len(canceled.CancellationReasons[1].Item) != 0 && !present && !authorization.legacyPolicies && !authorization.store.legacyPolicyWritersRetired {
+		return &Error{StatusCode: http.StatusConflict, Code: ErrCodePolicyReconciliationRequired, Title: "This channel's settings need operator reconciliation"}
+	}
 	if identityErr != nil || len(canceled.CancellationReasons[1].Item) == 0 || (present && retired == authorization.installation) || (!present && (authorization.legacyPolicies || !authorization.store.legacyPolicyWritersRetired)) {
 		return policyTransactionError(err, authorization)
 	}

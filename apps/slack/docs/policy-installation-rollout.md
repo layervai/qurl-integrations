@@ -38,7 +38,9 @@ write stamps the row without removing its grants or aliases. This initialization
 does not move the binding's lifecycle cutoff timestamp.
 
 A new binding never adopts an untagged row. While writer retirement is unconfirmed,
-a write to that row fails closed. A lifecycle job retains the row and returns
+a write to that row fails closed with `policy_reconciliation_required`. This
+requires operator reconciliation; repeating the command cannot repair it. A
+lifecycle job retains the row and returns
 `policy_purge_legacy_ownership_unknown`, so the durable queue can retry. Do not
 acknowledge that job or discard it as a permanent failure.
 

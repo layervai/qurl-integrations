@@ -406,6 +406,10 @@ func (h *Handler) resolveAndBindTunnelSlugAliasResult(ctx context.Context, log *
 	// (not its bound target) to keep the info-disclosure surface
 	// narrow — claude-bot review #5 on the prior single-alias version.
 	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID)
+	if reply := policyMutationReply(err); reply != "" {
+		log.Warn("alias policy scope changed", "error", err, "team_id", teamID, "channel_id", channelID)
+		return newActionCoreResult(false, reply, reply)
+	}
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
 		return newActionCoreResult(false, fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias), "Alias is already bound in this channel.")
 	}
@@ -508,6 +512,10 @@ func (h *Handler) unbindAliasResult(ctx context.Context, teamID, channelID, alia
 
 func (h *Handler) unbindAliasCoreResult(ctx context.Context, teamID, channelID, alias string) actionCoreResult {
 	err := h.aliasStore.UnbindChannelAlias(ctx, teamID, channelID, alias)
+	if reply := policyMutationReply(err); reply != "" {
+		slog.Warn("alias policy scope changed", "error", err, "team_id", teamID, "channel_id", channelID)
+		return newActionCoreResult(false, reply, reply)
+	}
 	switch {
 	case errors.Is(err, slackdata.ErrAliasNotFound):
 		return newActionCoreResult(false, fmt.Sprintf("Alias `$%s` is not bound in this channel. Nothing to clear.", escapeMrkdwnCode(alias)), "Alias was not bound in this channel.")

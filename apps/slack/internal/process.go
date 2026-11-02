@@ -155,6 +155,9 @@ func (h *Handler) runOnPool(sem chan struct{}, log *slog.Logger, timeout time.Du
 // Slack because either can drift into service names, DB errors, or other
 // operator-grade text.
 func sanitizeAPIError(err error, prefix string) string {
+	if reply := policyMutationReply(err); reply != "" {
+		return reply
+	}
 	var apiErr *client.APIError
 	if !errors.As(err, &apiErr) {
 		return prefix + "."

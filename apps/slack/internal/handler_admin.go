@@ -276,6 +276,11 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 	if err := h.cfg.AdminStore.AddAdmin(authorization.Context(ctx), teamID, target); err != nil {
+		if reply := policyMutationReply(err); reply != "" {
+			slog.Warn("workspace policy scope changed", "error", err, "team_id", teamID)
+			respondSlack(w, reply)
+			return
+		}
 		var se *slackdata.Error
 		if errors.As(err, &se) {
 			// Discriminate on (StatusCode, Code) — mirrors RemoveAdmin
@@ -341,6 +346,11 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 	if err := h.cfg.AdminStore.RemoveAdmin(authorization.Context(ctx), teamID, target); err != nil {
+		if reply := policyMutationReply(err); reply != "" {
+			slog.Warn("workspace policy scope changed", "error", err, "team_id", teamID)
+			respondSlack(w, reply)
+			return
+		}
 		var se *slackdata.Error
 		if errors.As(err, &se) {
 			switch {
@@ -499,6 +509,11 @@ func (h *Handler) handleAdminTransferOwnership(w http.ResponseWriter, teamID, en
 	ctx, cancel := context.WithTimeout(transferCtx, adminSyncVerbBudget)
 	defer cancel()
 	if err := h.cfg.AdminStore.TransferOwnership(authorization.Context(ctx), teamID, callerUserID, target); err != nil {
+		if reply := policyMutationReply(err); reply != "" {
+			slog.Warn("workspace policy scope changed", "error", err, "team_id", teamID)
+			respondSlack(w, reply)
+			return
+		}
 		var se *slackdata.Error
 		if errors.As(err, &se) {
 			switch {

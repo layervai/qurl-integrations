@@ -119,6 +119,9 @@ func (h *Handler) agentToggleOrgDarkSuffix() string {
 // agentToggleSetError maps a SetAgentEnabled failure to user-facing copy without
 // leaking internals — the only expected error is the unbound-workspace 404.
 func agentToggleSetError(err error) string {
+	if reply := policyMutationReply(err); reply != "" {
+		return reply
+	}
 	var se *slackdata.Error
 	if errors.As(err, &se) && se.StatusCode == http.StatusNotFound {
 		return "This workspace isn't set up yet — run `/qurl setup` first, then try again."
