@@ -137,20 +137,104 @@ on the bucket:
 }
 ```
 
-Scope `s3:GetObject` to `S3_PREFIX` (`/site/*` above); drop the prefix segment
-for a whole-bucket deployment. `s3:ListBucket` is what makes S3 answer a missing
-key with `404 NoSuchKey` instead of `403 AccessDenied`, which is the distinction
-the preflight and the `upstream_status` alarms both depend on — so grant it on
-the bare bucket ARN, matching the `connector-protected-site` construct the
-website infrastructure already ships. An `s3:prefix` condition is **not** an
-equivalent narrowing here: that key is supplied per List request and is absent
-from the authorization check `GetObject` performs, so conditioning the grant
-sends missing keys back to `403`. Confine enumeration with a bucket policy
-instead. A prefix-scoped variant is tracked in GitHub issue #894, along with the
-CloudWatch queries for these statuses. This broad `s3:ListBucket` grant is an
-intentional #894 tradeoff: it preserves the 403-vs-404 operator signal at the
-cost of enumeration permission for this identity. Do not silently replace it
-with an `s3:prefix` condition until #894 changes that signal and policy shape.
+Scope `s3:GetObject` to `S3_PREFIX` (`site/*` above); drop the prefix segment
+for a whole-bucket deployment. The unconditional `s3:ListBucket` grant above
+lets this identity list the whole bucket. It also lets S3 distinguish a missing
+key (`404`) from a rejected request (`403`) in the origin logs. Viewers receive
+`404` for both.
+
+#### Prefix-limited listing
+
+For `S3_PREFIX=site`, replace the `MissingKeysResolveAs404` statement above with:
+
+```json
+{
+  "Sid": "ListOnlyServedPrefix",
+  "Effect": "Allow",
+  "Action": "s3:ListBucket",
+  "Resource": "arn:aws:s3:::EXAMPLE-BUCKET",
+  "Condition": {
+    "StringLike": {
+      "s3:prefix": ["site/*"]
+    }
+  }
+}
+```
+
+Keep the `ReadServedObjects` statement. Use the same bucket and normalized
+prefix in both statements and the origin configuration; `S3_PREFIX` has no
+leading or trailing slash. This grants no write, delete, or bucket-wide list
+access. Other attached policies can still grant broader access; replace the
+broad list grant rather than adding this beside it.
+
+The prefix condition applies to list requests, not to `GetObject`. With this
+policy, a missing object can therefore produce upstream `403`, just like a
+rejected read. The viewer still gets `404`, and the startup preflight may report
+`preflight_request_rejected` when the index object is absent. Treat a `403`
+alarm as a request-rejection signal, not proof of bad credentials. Check for a
+missing key as well as IAM, region, endpoint, and signing settings. See the
+[AWS GetObject error contract](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)
+and [prefix condition examples](https://docs.aws.amazon.com/AmazonS3/latest/userguide/amazon-s3-policy-keys.html).
+
+For example, an operator with this role can check the exact index key with:
+
+```sh
+aws s3api list-objects-v2 --bucket EXAMPLE-BUCKET --prefix site/index.html \
+  --query "Contents[?Key == 'site/index.html'].Key" --output json
+```
+
+An empty result means this exact key is absent; a failed list request needs an
+IAM/credential check. Replace both key literals together. Use a dedicated
+bucket if the deployment needs both an unconditional list grant for clear
+missing-key diagnostics and isolation from other sites' object names.
+SSE-KMS objects also need permission to decrypt with their specific KMS key;
+the S3 statements above do not grant that permission.
+
+### Operator queries and troubleshooting
+
+Ship the origin container's stdout to a CloudWatch log group. nginx emits JSON
+with `layer: "nginx"`, numeric viewer `status`, and string `upstream_status`.
+Envoy's separate `layer: "origin"` lines report rejected requests and must not
+be added to nginx counts, or the same request can be counted twice. Select the
+origin log group and a short time range in Logs Insights.
+
+This query counts upstream `403`, `429`, and `5xx` responses by five-minute bin
+and viewer status. It also matches nginx's comma/colon-separated upstream
+statuses when a request has more than one upstream attempt:
+
+```text
+fields @timestamp, layer, status, upstream_status
+| filter layer = "nginx"
+| filter upstream_status like /(^|[ ,:])(403|429|5[0-9]{2})($|[ ,:])/
+| stats count(*) as requests by bin(5m), upstream_status, status
+```
+
+To find masked failures in viewer responses, including signer/connection
+failures that have no S3 response, use:
+
+```text
+fields @timestamp, layer, status, upstream_status, cache
+| filter layer = "nginx" and status >= 500
+| stats count(*) as requests by bin(5m), status, upstream_status, cache
+```
+
+These are request counts, not unique-object counts. A stale cached object can
+still return `200` while an upstream error occurs; the first query covers that
+case. A cache hit can have empty `upstream_status`, so absence of a matching
+line does not prove S3 was reached. Neither query prints object keys. Keep keys
+out of metric dimensions and shared incident reports. Query syntax follows the
+[CloudWatch Logs Insights reference](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_QuerySyntax.html).
+
+| Symptom | Viewer response on an uncached request | Operator check |
+| --- | --- | --- |
+| S3 rejects the request (`403`) | `404 Not Found` | Confirm the object exists under the configured prefix; then check the role/provider chain, bucket policy, KMS key, region, endpoint and signing settings. Prefix-limited listing also makes missing keys look like `403`. |
+| S3 throttles (`429`) | `502 Bad Gateway` | Check the `429` trend and S3 request load; keep the nginx cache enabled and investigate repeated misses before raising request volume. |
+| Object is missing (`404` with an unconditional list grant) | `404 Not Found` | Check the exact case-sensitive key, prefix and index document; sync the missing object. |
+| S3 returns `5xx`, or the signer/S3 path is unreachable | `502 Bad Gateway` | Compare upstream statuses with viewer `5xx`; check origin/signer health, AWS service health and network egress. An empty upstream status is not an S3 status. |
+
+The viewer never receives the S3 error body or `x-amz-*` headers. Existing
+production origin alarms must still be configured; these read-only queries do
+not create alarms, notification routes, or IAM grants.
 
 ### Startup preflight
 
