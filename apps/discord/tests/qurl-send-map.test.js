@@ -553,6 +553,16 @@ describe('resolveMentionableSelection', () => {
     expect(r.massMentionDenied).toBe(false);
   });
 
+  test.each([100, 101])('role scan flags only an incomplete scan (%s members)', (count) => {
+    const members = Array.from({ length: count }, (_, i) => ({
+      user: makeUser(`700000000000000${String(i).padStart(3, '0')}`, { bot: true }),
+    }));
+    const int = makeMentionableInteraction({ pickedRoles: [makeRole({ id: 'large-role', members })] });
+    const result = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(result.iterationBoundHit).toBe(count > 100);
+    expect(result.droppedFromRoles).toBe(Math.min(count, 100));
+  });
+
   test('pathological all-bot role iteration bounded at exactly 4× cap (=100, pins the multiplier)', () => {
     const config = require('../src/config');
     const ITER_BOUND = 4 * config.QURL_SEND_MAX_RECIPIENTS;
@@ -735,7 +745,7 @@ describe('resolveMentionableSelection', () => {
   test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold, roleMentionsDenied }', () => {
     const int = makeMentionableInteraction({});
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
-    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'massMentionDenied', 'namedRoleMembersUnavailable', 'roleMentionsDenied', 'users']);
+    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'iterationBoundHit', 'massMentionDenied', 'namedRoleMembersUnavailable', 'roleMentionsDenied', 'users']);
   });
 
   describe('role-mention permission gate (#326)', () => {
@@ -4123,6 +4133,27 @@ describe('handleConfirmUserSelect', () => {
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/@everyone/);
     expect(updated.content).toMatch(/Mention Everyone/);
+  });
+
+  test.each([false, true])('bounded role scan gives a visible limit warning (valid user=%s)', async (withUser) => {
+    const user = makeUser('100000000000000001');
+    const bots = Array.from({ length: 101 }, (_, i) => {
+      const bot = makeUser(`700000000000000${String(i).padStart(3, '0')}`, { bot: true });
+      return [bot.id, { user: bot }];
+    });
+    const int = makeSelectInteraction({
+      users: withUser ? [user] : [],
+      roles: [['large-role', { id: 'large-role', mentionable: true, members: new Map([...bots, [user.id, { user }]]) }]],
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const reply = int.editReply.mock.calls.at(-1)[0];
+    expect(reply.content).toContain('Picked role(s) are too large to fully evaluate — try fewer or smaller roles');
+    expect(reply.content).not.toContain('have no non-bot members');
+    if (withUser) {
+      expect(mockTransitionFlow.mock.calls[0][2].payload.warningsBlock).toContain('too large to fully evaluate');
+    } else {
+      expect(mockTransitionFlow).not.toHaveBeenCalled();
+    }
   });
 
   test.each([false, true])('unavailable named role gives a visible retry warning (valid user=%s)', async (withUser) => {
