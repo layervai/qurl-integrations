@@ -25,6 +25,10 @@ const policyConditionFailed = "ConditionalCheckFailed"
 
 const (
 	exprPolicyInstallation  = "#installation"
+	exprPolicyGeneration    = "#generation"
+	exprPolicyOwner         = "#owner"
+	exprPolicyAdmins        = "#admins"
+	exprPolicyLegacy        = "#legacy"
 	valuePolicyInstallation = ":installation"
 )
 
@@ -101,7 +105,7 @@ func (s *Store) AuthorizePolicyWrite(ctx context.Context, teamID, userID string)
 			Key:                       map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID)},
 			UpdateExpression:          aws.String("SET #generation = :generation, #installation = :installation, #legacy = :legacy"),
 			ConditionExpression:       aws.String(policyCallerCondition + " AND attribute_not_exists(#generation) AND attribute_not_exists(#installation)"),
-			ExpressionAttributeNames:  map[string]string{"#owner": attrOwnerID, "#admins": attrAdminSlackUserIDs, "#generation": attrPolicyGeneration, exprPolicyInstallation: attrPolicyInstallation, "#legacy": attrPolicyLegacy},
+			ExpressionAttributeNames:  map[string]string{exprPolicyOwner: attrOwnerID, exprPolicyAdmins: attrAdminSlackUserIDs, exprPolicyGeneration: attrPolicyGeneration, exprPolicyInstallation: attrPolicyInstallation, exprPolicyLegacy: attrPolicyLegacy},
 			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":owner": stringAttr(owner), ":caller": stringAttr(userID), ":generation": stringAttr(rand.Text()), valuePolicyInstallation: stringAttr(rand.Text()), ":legacy": &ddbtypes.AttributeValueMemberBOOL{Value: true}},
 			ReturnValues:              ddbtypes.ReturnValueAllNew,
 		})
@@ -167,7 +171,7 @@ func (s *Store) updatePolicy(ctx context.Context, in *dynamodb.UpdateItemInput) 
 				TableName:                 aws.String(s.WorkspaceMappingsName),
 				Key:                       map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(authorization.teamID)},
 				ConditionExpression:       aws.String(policyCallerCondition + " AND #generation = :generation AND #installation = :installation"),
-				ExpressionAttributeNames:  map[string]string{"#owner": attrOwnerID, "#admins": attrAdminSlackUserIDs, "#generation": attrPolicyGeneration, exprPolicyInstallation: attrPolicyInstallation},
+				ExpressionAttributeNames:  map[string]string{exprPolicyOwner: attrOwnerID, exprPolicyAdmins: attrAdminSlackUserIDs, exprPolicyGeneration: attrPolicyGeneration, exprPolicyInstallation: attrPolicyInstallation},
 				ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":owner": stringAttr(authorization.ownerID), ":caller": stringAttr(authorization.userID), ":generation": stringAttr(authorization.generation), valuePolicyInstallation: stringAttr(authorization.installation)},
 			}},
 			{Update: update},

@@ -7,6 +7,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/testddb"
@@ -100,7 +101,17 @@ func TestPolicyStatecrawlDynamoDBLocal(t *testing.T) {
 			if rep.stats.Purged.Load() != wantPurged || rep.stats.PurgeErrors.Load() != 1-wantPurged {
 				t.Fatalf("apply counters: purged=%d errors=%d", rep.stats.Purged.Load(), rep.stats.PurgeErrors.Load())
 			}
-			allowed, err := store.AllowedResourceIDsForChannel(ctx, team, channel)
+			row, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(policies), Key: map[string]ddbtypes.AttributeValue{"slack_team_id": &ddbtypes.AttributeValueMemberS{Value: team}, "slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: channel}}, ConsistentRead: aws.Bool(true)})
+			allowed := make(map[string]struct{})
+			if err == nil {
+				if aliases, ok := row.Item["alias_bindings"].(*ddbtypes.AttributeValueMemberM); ok {
+					for _, raw := range aliases.Value {
+						if id, ok := raw.(*ddbtypes.AttributeValueMemberS); ok {
+							allowed[id.Value] = struct{}{}
+						}
+					}
+				}
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

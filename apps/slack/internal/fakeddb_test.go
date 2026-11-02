@@ -283,6 +283,10 @@ func compositeKey(schema []string, item map[string]ddbtypes.AttributeValue) (str
 func (f *fakeDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.getItemLocked(in)
+}
+
+func (f *fakeDDB) getItemLocked(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 	name := aws.ToString(in.TableName)
 	if f.getHook != nil {
 		f.getHook(name, stringKey(in.Key))
@@ -1252,4 +1256,19 @@ func evalSetValue(expression string, item, values map[string]ddbtypes.AttributeV
 		return value, nil
 	}
 	return nil, fmt.Errorf("fakeDDB SET: unknown value %q", expression)
+}
+
+func (f *fakeDDB) TransactGetItems(_ context.Context, in *dynamodb.TransactGetItemsInput, _ ...func(*dynamodb.Options)) (*dynamodb.TransactGetItemsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := &dynamodb.TransactGetItemsOutput{}
+	for _, operation := range in.TransactItems {
+		get := operation.Get
+		item, err := f.getItemLocked(&dynamodb.GetItemInput{TableName: get.TableName, Key: get.Key, ProjectionExpression: get.ProjectionExpression, ExpressionAttributeNames: get.ExpressionAttributeNames})
+		if err != nil {
+			return nil, err
+		}
+		out.Responses = append(out.Responses, ddbtypes.ItemResponse{Item: item.Item})
+	}
+	return out, nil
 }

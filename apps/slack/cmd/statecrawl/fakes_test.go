@@ -225,3 +225,17 @@ func (f *fakeDDB) TransactWriteItems(ctx context.Context, in *dynamodb.TransactW
 	_, err := f.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: update.TableName, Key: update.Key, UpdateExpression: update.UpdateExpression, ConditionExpression: update.ConditionExpression, ExpressionAttributeNames: update.ExpressionAttributeNames, ExpressionAttributeValues: update.ExpressionAttributeValues, ReturnValuesOnConditionCheckFailure: update.ReturnValuesOnConditionCheckFailure})
 	return &dynamodb.TransactWriteItemsOutput{}, err
 }
+
+func (f *fakeDDB) TransactGetItems(ctx context.Context, in *dynamodb.TransactGetItemsInput, _ ...func(*dynamodb.Options)) (*dynamodb.TransactGetItemsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := &dynamodb.TransactGetItemsOutput{}
+	for _, op := range in.TransactItems {
+		item, err := f.GetItem(ctx, &dynamodb.GetItemInput{TableName: op.Get.TableName, Key: op.Get.Key})
+		if err != nil {
+			return nil, err
+		}
+		out.Responses = append(out.Responses, ddbtypes.ItemResponse{Item: item.Item})
+	}
+	return out, nil
+}

@@ -455,10 +455,7 @@ func TestHandleLifecycleEvent_RetainsUnmarkedRowsForReconciliation(t *testing.T)
 	if !slices.Contains(admins, testAdminUserID) {
 		t.Fatalf("admins after delayed purge = %v, want %q retained", admins, testAdminUserID)
 	}
-	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, "C_fresh")
-	if err != nil {
-		t.Fatalf("AllowedResourceIDsForChannel after delayed purge: %v", err)
-	}
+	allowed := physicalPolicyResources(context.Background(), t, h.cfg.AdminStore.Client, h.cfg.AdminStore.ChannelPoliciesName, testAdminTeamID, "C_fresh")
 	if _, ok := allowed["r_fresh"]; !ok {
 		t.Fatalf("fresh policy after delayed purge = %v, want r_fresh retained", allowed)
 	}

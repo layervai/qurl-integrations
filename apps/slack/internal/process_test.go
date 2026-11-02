@@ -283,6 +283,7 @@ func seedGetAliasBinding(t *testing.T, h *Handler, teamID string) {
 	t.Helper()
 	names := defaultTestTableNames()
 	ddb := newFakeDDB(t, names, nil)
+	ddb.seedItem(t, names.workspace, seedWorkspaceNonAdmin(teamID, testAdminOwnerID))
 	ddb.seedItem(t, names.channelPolicy, seedChannelPolicyAliasBindings(
 		teamID, getTokenCommandTestChannelID, map[string]string{getTestAlias: getTestResourceID},
 	))

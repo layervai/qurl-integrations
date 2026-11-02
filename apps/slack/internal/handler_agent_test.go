@@ -1174,6 +1174,7 @@ func TestHandleEvent_AgentEchoedResourceDescriptionEscapesSlackControls(t *testi
 	)
 	names := defaultTestTableNames()
 	adminStore := newStoreFromFake(t, newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{
+		names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)},
 		names.channelPolicy: {
 			seedChannelPolicySet("T1", "C1", "deploy", []string{resourceID}),
 		},

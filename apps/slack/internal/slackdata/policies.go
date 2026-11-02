@@ -61,8 +61,8 @@ const (
 //
 // Either surface allows the row to mint. As of #589 this set is also
 // the `/qurl list` disclosure scope again (not just the mint gate) —
-// see the TODO below and apps/slack/docs/list-disclosure.md. Single-row
-// GetItem; no pagination needed.
+// see the TODO below and apps/slack/docs/list-disclosure.md. One atomic
+// workspace-and-policy read; no pagination needed.
 //
 // Known asymmetry vs [ResolvePolicy]: this function does NOT read the
 // legacy scalar `resource_id` attribute. ResolvePolicy falls back to
@@ -89,7 +89,7 @@ func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channe
 			Title:      "AllowedResourceIDsForChannel: team_id and channel_id are required",
 		}
 	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	out, err := s.readChannelPolicy(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
@@ -121,7 +121,7 @@ func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID
 			Title:      "ResolvePolicy: team_id, channel_id, resource_id are required",
 		}
 	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	out, err := s.readChannelPolicy(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
@@ -168,7 +168,7 @@ func (s *Store) LookupChannelAlias(ctx context.Context, teamID, channelID, alias
 			Title:      "LookupChannelAlias: team_id, channel_id, alias_name are required",
 		}
 	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	out, err := s.readChannelPolicy(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
@@ -195,7 +195,7 @@ func (s *Store) LookupChannelAlias(ctx context.Context, teamID, channelID, alias
 }
 
 // GetChannelPolicy returns every alias binding for a single
-// (teamID, channelID) row via a single GetItem against the PK+SK.
+// (teamID, channelID) row and checks its installation in one atomic read.
 // Replaces the previous "page team-wide then filter" shape that
 // could miss the calling channel when its row sorted past page-
 // boundary (the team-wide ListPolicies + post-filter pattern hid
@@ -213,7 +213,7 @@ func (s *Store) GetChannelPolicy(ctx context.Context, teamID, channelID string) 
 			Title:      "GetChannelPolicy: team_id and channel_id are required",
 		}
 	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	out, err := s.readChannelPolicy(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),

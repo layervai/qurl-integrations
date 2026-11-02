@@ -122,3 +122,22 @@ installation and can be cleared atomically before a new policy write. The
 operator must review and recreate any intended configuration under the new
 owner; reclaim does not silently carry it forward. Preserve this distinction
 when planning legacy migrations.
+
+## Read isolation
+
+Policy authorization and alias listing read the workspace binding and channel
+policy in one `TransactGetItems` snapshot. A retired installation, an absent
+binding, or an untagged row under a new non-legacy binding supplies no grants
+or aliases. This hides ambiguous data without deleting it; the durable cleanup
+job and operator reconciliation still remain necessary. Active legacy bindings
+can read their existing untagged configuration. Malformed identity and unknown
+transaction errors fail closed. A mutating context must also match the binding
+in this snapshot; it cannot follow a reinstall into new configuration.
+
+This replaces each policy GetItem with one bounded two-item request. It adds no
+per-user cache, global coordinator, or separate workspace-read round trip.
+Ordinary reads do not project the admin roster. Transactional reads still
+increase read capacity use and can conflict with writes. Verify real task and
+operator GetItem permissions on both tables, the native paired-read result,
+and deployed read capacity, conflict rate and customer latency before rollout.
+Local emulator success does not establish AWS IAM or production capacity.

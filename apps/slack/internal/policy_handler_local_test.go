@@ -110,8 +110,8 @@ func TestPolicySignedHandlerDynamoDBLocal(t *testing.T) {
 				if !strings.Contains(reply, "operator reconciliation") || strings.Contains(reply, "Run the command again") {
 					t.Fatalf("ambiguous row gave the wrong next step: %q", reply)
 				}
-				allowed, err := store.AllowedResourceIDsForChannel(ctx, team, channel)
-				if err != nil || len(allowed) != 1 {
+				allowed := physicalPolicyResources(ctx, t, ddb, policyTable, team, channel)
+				if len(allowed) != 1 {
 					t.Fatalf("ambiguous row changed: %v %v", allowed, err)
 				}
 				if _, exists := allowed["r_unknown"]; !exists {

@@ -127,6 +127,7 @@ func newBackendUnderTest(t *testing.T, withClient bool) (*agentBackend, *slackda
 	}
 	fake := newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{
 		names.channelPolicy: {row},
+		names.workspace:     {seedWorkspaceNonAdmin("T1", testAdminOwnerID)},
 	})
 	store := &slackdata.Store{
 		Client:                fake,
@@ -232,7 +233,7 @@ func TestAgentBackend_ListResources_ShowsChannelAliasForUnaliasedResource(t *tes
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_url2"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },
@@ -276,7 +277,7 @@ func TestAgentBackend_ListResources_PicksSmallestAliasOnMultipleBindings(t *test
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_url2"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },
@@ -329,7 +330,7 @@ func TestAgentBackend_InspectToken(t *testing.T) {
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },
@@ -390,7 +391,7 @@ func TestAgentBackend_InspectToken_EscapesUntrustedPageContent(t *testing.T) {
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },
@@ -453,7 +454,7 @@ func TestAgentBackend_InspectToken_StripsHTMLNoiseAndTruncatesSummaryFields(t *t
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },
@@ -519,7 +520,7 @@ func TestAgentBackend_InspectToken_RejectsAuthPage(t *testing.T) {
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },
@@ -572,7 +573,7 @@ func TestAgentBackend_InspectToken_JSONReturnsGenericFallback(t *testing.T) {
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },
@@ -702,7 +703,7 @@ func TestAgentBackend_InspectToken_PDFReturnsProtectedResource(t *testing.T) {
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_runbook"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },
@@ -782,7 +783,7 @@ func TestAgentBackend_InspectToken_DownloadMimeReturnsProtectedResource(t *testi
 				"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_download"}},
 			}
 			store := &slackdata.Store{
-				Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+				Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 				WorkspaceMappingsName: names.workspace,
 				ChannelPoliciesName:   names.channelPolicy,
 				Now:                   func() time.Time { return fixedNow },
@@ -840,7 +841,7 @@ func TestAgentBackend_InspectToken_AllowsQURLLinkRedirectToQURLSite(t *testing.T
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },
@@ -899,7 +900,7 @@ func TestAgentBackend_InspectToken_RejectsCrossHostRedirect(t *testing.T) {
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },
@@ -959,7 +960,7 @@ func TestAgentBackend_InspectToken_AllowsProtectedAuthDocumentation(t *testing.T
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_login_guide"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },
@@ -1020,7 +1021,7 @@ func TestAgentBackend_InspectToken_RejectsUnexpectedInitialLinkHost(t *testing.T
 		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
 	}
 	store := &slackdata.Store{
-		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}, names.workspace: {seedWorkspaceNonAdmin("T1", testAdminOwnerID)}}),
 		WorkspaceMappingsName: names.workspace,
 		ChannelPoliciesName:   names.channelPolicy,
 		Now:                   func() time.Time { return fixedNow },

@@ -112,10 +112,7 @@ func TestPolicyRevokeHandlerDynamoDBLocal(t *testing.T) {
 			if db.calls != wantCalls {
 				t.Fatalf("attempts=%d want=%d", db.calls, wantCalls)
 			}
-			allowed, err := store.AllowedResourceIDsForChannel(ctx, team, channel)
-			if err != nil {
-				t.Fatal(err)
-			}
+			allowed := physicalPolicyResources(ctx, t, client, policies, team, channel)
 			_, dead := allowed["r_dead"]
 			if dead != (mode != "one rebind") {
 				t.Fatalf("dead grant retained=%v", dead)

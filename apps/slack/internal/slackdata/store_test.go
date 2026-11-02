@@ -44,12 +44,13 @@ const (
 // boundary tests below — the cross-handler integration tests have a
 // fuller fakeDDB in the internal/ package.
 type stubDDB struct {
-	getItemFn    func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
-	putItemFn    func(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error)
-	updateItemFn func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
-	deleteItemFn func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error)
-	queryFn      func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error)
-	scanFn       func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error)
+	transactGetItemsFn func(*dynamodb.TransactGetItemsInput) (*dynamodb.TransactGetItemsOutput, error)
+	getItemFn          func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
+	putItemFn          func(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error)
+	updateItemFn       func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
+	deleteItemFn       func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error)
+	queryFn            func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error)
+	scanFn             func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error)
 }
 
 func (s *stubDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -876,7 +877,7 @@ func TestLookupChannelAlias_HappyPath(t *testing.T) {
 	if aws.ToString(captured.TableName) != "cp" {
 		t.Errorf("TableName = %q, want cp", aws.ToString(captured.TableName))
 	}
-	if aws.ToString(captured.ProjectionExpression) != "#ab.#a" {
+	if aws.ToString(captured.ProjectionExpression) != "#ab.#a, #read_policy_installation" {
 		t.Errorf("ProjectionExpression = %q, want #ab.#a (single map key, not the full row)", aws.ToString(captured.ProjectionExpression))
 	}
 	if captured.ExpressionAttributeNames["#ab"] != attrAliasBindings {
@@ -1763,4 +1764,18 @@ func TestLegacyWriterRetirementConfiguration(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Existing read fixtures model an active pre-upgrade workspace. Identity tests
+// override transactGetItemsFn or use the native fixture for real snapshots.
+func (s *stubDDB) TransactGetItems(ctx context.Context, in *dynamodb.TransactGetItemsInput, _ ...func(*dynamodb.Options)) (*dynamodb.TransactGetItemsOutput, error) {
+	if s.transactGetItemsFn != nil {
+		return s.transactGetItemsFn(in)
+	}
+	policy := in.TransactItems[1].Get
+	out, err := s.GetItem(ctx, &dynamodb.GetItemInput{TableName: policy.TableName, Key: policy.Key, ProjectionExpression: policy.ProjectionExpression, ExpressionAttributeNames: policy.ExpressionAttributeNames})
+	if err != nil {
+		return nil, err
+	}
+	return &dynamodb.TransactGetItemsOutput{Responses: []ddbtypes.ItemResponse{{Item: map[string]ddbtypes.AttributeValue{attrOwnerID: stringAttr(testOwnerSlackID)}}, {Item: out.Item}}}, nil
 }

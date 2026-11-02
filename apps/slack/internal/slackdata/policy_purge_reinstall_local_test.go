@@ -107,7 +107,11 @@ func TestPolicyPurgeDynamoDBLocalRetiredDeleteBoundary(t *testing.T) {
 			} else {
 				assertPolicyStatus(t, err, 503)
 			}
-			remaining, err := store.AllowedResourceIDsForChannel(ctx, team, channel)
+			physical, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(store.ChannelPoliciesName), Key: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(team), attrSlackChannelID: stringAttr(channel)}, ConsistentRead: aws.Bool(true)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			remaining := allowedResourceIDsFromItem(physical.Item)
 			if err != nil || len(remaining) != 1 {
 				t.Fatalf("cleanup lost policy: %v %v", remaining, err)
 			}

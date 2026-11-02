@@ -54,7 +54,11 @@ func TestPolicyReclaimDynamoDBLocal(t *testing.T) {
 					t.Fatalf("unknown ownership must require repair: %v", err)
 				}
 			}
-			allowed, err := store.AllowedResourceIDsForChannel(ctx, team, channel)
+			physical, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(store.ChannelPoliciesName), Key: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(team), attrSlackChannelID: stringAttr(channel)}, ConsistentRead: aws.Bool(true)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			allowed := allowedResourceIDsFromItem(physical.Item)
 			if err != nil {
 				t.Fatal(err)
 			}

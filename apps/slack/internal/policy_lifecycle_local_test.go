@@ -131,15 +131,15 @@ func TestPolicySignedLifecycleDynamoDBLocal(t *testing.T) {
 				if deleted != 0 {
 					t.Fatal("incomplete legacy cleanup acknowledged its delivery")
 				}
-				unknown, err := store.AllowedResourceIDsForChannel(ctx, team, "CAAAA")
-				if err != nil || len(unknown) != 1 {
+				unknown := physicalPolicyResources(ctx, t, client, policyTable, team, "CAAAA")
+				if len(unknown) != 1 {
 					t.Fatalf("ambiguous policy was lost: %v", err)
 				}
 			} else if deleted != 1 {
 				t.Fatal("completed cleanup did not acknowledge delivery")
 			}
-			oldRows, err := store.AllowedResourceIDsForChannel(ctx, team, "COLD")
-			if err != nil || len(oldRows) != 0 {
+			oldRows := physicalPolicyResources(ctx, t, client, policyTable, team, "COLD")
+			if len(oldRows) != 0 {
 				t.Fatalf("completed worker retained old policies: %v %v", oldRows, err)
 			}
 			if scenario != "late write before worker" {

@@ -1160,6 +1160,7 @@ func TestAdminHelpReflectsFlatVerbs(t *testing.T) {
 // /qurl get even though the legacy data is still on the table.
 func TestResolvePolicy_LegacySingleRowShape(t *testing.T) {
 	ts := newAdminTestServers(t)
+	ts.seedPolicyWorkspace(t, testAdminTeamID)
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:    stringMember(testAdminTeamID),
 		fAttrSlackChannelID: stringMember("C_legacy"),
