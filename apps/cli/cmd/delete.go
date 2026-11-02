@@ -163,7 +163,7 @@ func cleanupAfterDeleteFailure(ctx context.Context, opts *globalOpts, client qur
 // cleanupDeletedLocalShare converges local desired state after the service has
 // committed deletion. It signals an existing daemon through IPC but never
 // installs or starts one.
-func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) error {
+func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) (err error) {
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
 		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
@@ -172,10 +172,9 @@ func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) 
 		return err
 	}
 	if crid.Validate(id) == nil {
-		// A deleted share's link limits are never used again.
-		if err := forgetLinkLimits(ctx, stateDir, id); err != nil {
-			return err
-		}
+		// A deleted share's link limits are never used again; forgetting them
+		// never blocks the cleanup below, and a leftover entry is harmless.
+		defer func() { err = errors.Join(err, forgetLinkLimits(ctx, stateDir, id)) }()
 	}
 	registry, local, err := findDeletedLocalShare(ctx, opts, stateDir, id)
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -161,8 +162,9 @@ func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (ac
 	if accessrules.IsOnlyFirstPerson(selector) {
 		return accessrules.OnlyFirstPerson(), nil
 	}
-	// Built-in IDs need no saved state, so a damaged rules file cannot block them.
-	if rule, err := accessrules.Find(selector, accessrules.BuiltIns()); err == nil && rule.ID == selector {
+	// Built-ins need no saved state, so a damaged rules file cannot block them;
+	// saved rules cannot take their names (NameTaken).
+	if rule, err := accessrules.Find(selector, accessrules.BuiltIns()); err == nil {
 		return rule, nil
 	}
 	store, err := o.ruleStore()
@@ -329,6 +331,9 @@ func validateRuleSelectionFlags(cmd *cobra.Command) error {
 
 // reconcileRulesAfterLink never fails the login; it warns when rules stay pending.
 func (o *globalOpts) reconcileRulesAfterLink(ctx context.Context) {
+	// Bounded so a slow service cannot hold up a login that already succeeded.
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	snapshot, err := o.syncRules(ctx)
 	notice, deferred := ruleSyncNotice(&snapshot, err)
 	if !deferred {
@@ -539,6 +544,11 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 	}
 	if existing {
 		kept, err := o.savedLinkLimits(ctx, id)
+		if err != nil && rule == nil {
+			// A plain republish never asked for rules; it still succeeds.
+			o.printer().Warnf("Published %s, but its saved link limits could not be read, so no link was made: %v", id, err)
+			return nil
+		}
 		if err != nil {
 			return err
 		}

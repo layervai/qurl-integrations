@@ -367,6 +367,11 @@ func Find(selector string, lists ...[]Definition) (Definition, error) {
 // person already uses d's name, ignoring case and surrounding space.
 func NameTaken(items []Definition, d *Definition) bool {
 	name := strings.TrimSpace(d.Name)
+	// --rule reads these selectors as presets before saved names, so a rule named
+	// "once" or "builtin.…" could never be chosen and would silently pick a preset.
+	if strings.EqualFold(name, OnlyFirstPersonID) || strings.HasPrefix(strings.ToLower(name), "builtin.") {
+		return true
+	}
 	return slices.ContainsFunc(append(append(BuiltIns(), OnlyFirstPerson()), items...), func(other Definition) bool {
 		return other.ID != d.ID && strings.EqualFold(strings.TrimSpace(other.Name), name)
 	})

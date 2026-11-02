@@ -24,7 +24,7 @@ func TestRulesCreateTakesSettingsForItsModeOnly(t *testing.T) {
 			accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true), SessionDuration: new("30m")}}},
 		{[]string{"Stays open", "--mode", "public", "--expires-in", "1h", "--once", "--stays-open-for", "30m"},
 			accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true), SessionDuration: new("30m")}}},
-		{[]string{"Once", "--mode", "public", "--expires-in", "1h", "--once"},
+		{[]string{"First look", "--mode", "public", "--expires-in", "1h", "--once"},
 			accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}},
 		{[]string{"Reviewers", "--mode", "review", "--approvals-last", "7d"}, accessrules.Definition{Mode: "review", ApprovalExpiresIn: new("7d")}},
 		{[]string{"Laptops", "--mode", "keys", "--approvals-last", "never"}, accessrules.Definition{Mode: "keys"}},
@@ -178,6 +178,21 @@ func TestShareFailsClosedOnDamagedLinkLimits(t *testing.T) {
 	}
 }
 
+func TestDamagedLinkLimitsNeverFailPlainRepublishOrDelete(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "share_rules.json"), []byte("damaged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scriptPublish(t, srv, true, true, nil, nil)
+	for _, args := range [][]string{{"publish", "https://api.example.com"}, {"delete", srv.Key.CRID, "--yes"}} {
+		result := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL}, args...), shareStateDir: dir})
+		if result.code != 0 || !strings.Contains(result.stderr.String(), "share_rules.json") {
+			t.Fatalf("%v: %d %s", args, result.code, result.stderr.String())
+		}
+	}
+}
+
 func TestShareWithoutSavedLimitsLeavesStateUntouched(t *testing.T) {
 	srv := apitest.NewServer(t)
 	dir := filepath.Join(t.TempDir(), "never-created")
@@ -317,8 +332,10 @@ func TestQuietPublishWithOncePrintsItsLink(t *testing.T) {
 }
 
 func TestRuleNamedOnlyTheFirstPersonIsTaken(t *testing.T) {
-	result := runCLI(t, &runOpts{args: []string{"rules", "create", "only the first person", "--mode", "public"}, env: map[string]string{}, shareStateDir: connectorStateTestDir(t)})
-	if result.code == 0 || !strings.Contains(result.stderr.String(), "already exists") {
-		t.Fatalf("create %d %s", result.code, result.stderr.String())
+	for _, name := range []string{"only the first person", "once", "ONCE", "builtin.public", "Builtin.x"} {
+		result := runCLI(t, &runOpts{args: []string{"rules", "create", name, "--mode", "invite_only"}, env: map[string]string{}, shareStateDir: connectorStateTestDir(t)})
+		if result.code == 0 || !strings.Contains(result.stderr.String(), "already exists") {
+			t.Fatalf("create %q %d %s", name, result.code, result.stderr.String())
+		}
 	}
 }
