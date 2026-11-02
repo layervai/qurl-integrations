@@ -1,4 +1,4 @@
-// Package testddb provides loopback-only DynamoDB fixtures for native tests.
+// Package testddb provides loopback-only DynamoDB fixtures. Import it only from tests.
 package testddb
 
 import (

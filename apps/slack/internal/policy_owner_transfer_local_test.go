@@ -76,7 +76,7 @@ func TestPolicySignedOwnerTransferDynamoDBLocal(t *testing.T) {
 			if owner == nil || owner.Value != want {
 				t.Fatalf("stale owner command transferred a changed installation: %q", reply)
 			}
-			if mode != "unchanged" && strings.Contains(reply, "Transferred qURL") {
+			if mode != "unchanged" && !strings.Contains(reply, "Workspace permissions changed") {
 				t.Fatal("stale transfer reported success")
 			}
 		})

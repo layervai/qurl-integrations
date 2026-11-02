@@ -326,7 +326,7 @@ func (h *Handler) resolveAndResetTunnelDisplayName(ctx context.Context, log *slo
 func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamID, channelID, id string) (c *client.Client, resource *client.Resource, userMsg string) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("display-name: failed to get API key", "error", err, "team_id", teamID, "id", id)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "display-name: failed to get API key", "error", err, "team_id", teamID, "id", id)
 		return nil, nil, authErrorMessage(err)
 	}
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Slug: id})

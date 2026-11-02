@@ -689,7 +689,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("tunnel install: failed to get API key", "error", err)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "tunnel install: failed to get API key", "error", err)
 		return nil, authErrorMessage(err), err
 	}
 	connectorAPIURL := strings.TrimSpace(h.cfg.ConnectorAPIURL)
@@ -734,7 +734,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	// mints a fresh short-lived key.
 	aliasStatus, err := h.ensureTunnelAlias(ctx, teamID, channelID, args.Alias, resource.ResourceID)
 	if err != nil {
-		log.Error("tunnel install: channel shortcut bind failed", "error", err, "shortcut", args.Alias, "resource_id", resource.ResourceID)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "tunnel install: channel shortcut bind failed", "error", err, "shortcut", args.Alias, "resource_id", resource.ResourceID)
 		return nil, aliasStatus, err
 	}
 
@@ -1275,6 +1275,9 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 		return fmt.Sprintf("qURL alias `$%s` is already used in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias), slackdata.ErrAliasAlreadyBound
 	}
 	if err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID); err != nil {
+		if reply := policyMutationReply(err); reply != "" {
+			return reply, err
+		}
 		if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
 			// A concurrent retry may have created the same binding after our
 			// optimistic read. Confirm that benign race before surfacing a

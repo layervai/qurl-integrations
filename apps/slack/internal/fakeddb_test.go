@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
@@ -1151,6 +1152,7 @@ func (f *fakeDDB) TransactWriteItems(_ context.Context, in *dynamodb.TransactWri
 		item  map[string]ddbtypes.AttributeValue
 	}
 	var writes []pendingWrite
+	seen := make(map[[2]string]bool)
 	for index, operation := range in.TransactItems {
 		var tableName, condition string
 		var key, values map[string]ddbtypes.AttributeValue
@@ -1176,6 +1178,11 @@ func (f *fakeDDB) TransactWriteItems(_ context.Context, in *dynamodb.TransactWri
 		if err != nil {
 			return nil, err
 		}
+		identity := [2]string{tableName, encoded}
+		if seen[identity] {
+			return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "Transaction cannot target the same item twice"}
+		}
+		seen[identity] = true
 		if condition != "" {
 			item, present := table[encoded]
 			matched, err := evalCondition(condition, item, present, values, names)

@@ -185,7 +185,7 @@ func (h *Handler) revokeResource(ctx context.Context, log *slog.Logger, teamID, 
 func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, teamID, userID, resourceID, displayToken string) actionCoreResult {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("revoke: failed to get API key", "error", err, "team_id", teamID, "user_id", userID)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "revoke: failed to get API key", "error", err, "team_id", teamID, "user_id", userID)
 		return newActionCoreResult(false, authErrorMessage(err), "Workspace API key was not available.")
 	}
 	resource, err := c.GetResource(ctx, resourceID)

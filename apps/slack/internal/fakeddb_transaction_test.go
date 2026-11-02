@@ -11,7 +11,7 @@ import (
 )
 
 func TestFakePolicyTransactionIsAtomic(t *testing.T) {
-	for _, scenario := range []string{"commit", "condition failure", "invalid later update"} {
+	for _, scenario := range []string{"commit", "condition failure", "invalid later update", "duplicate item"} {
 		t.Run(scenario, func(t *testing.T) {
 			names := defaultTestTableNames()
 			str := func(s string) ddbtypes.AttributeValue { return &ddbtypes.AttributeValueMemberS{Value: s} }
@@ -31,6 +31,9 @@ func TestFakePolicyTransactionIsAtomic(t *testing.T) {
 			}
 			if scenario == "invalid later update" {
 				second.UpdateExpression = aws.String("SET marker = :missing")
+			}
+			if scenario == "duplicate item" {
+				second.Key = key("C1")
 			}
 			_, err := fake.TransactWriteItems(context.Background(), &dynamodb.TransactWriteItemsInput{TransactItems: []ddbtypes.TransactWriteItem{{Update: first}, {Update: second}}})
 			if scenario == "commit" && err != nil {
