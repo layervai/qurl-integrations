@@ -7,7 +7,6 @@ const {
   ButtonStyle,
   ComponentType,
   StringSelectMenuBuilder,
-  UserSelectMenuBuilder,
   MentionableSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
@@ -850,7 +849,7 @@ function isValidExpiry(v) {
   return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v);
 }
 
-// Per-pick cap on UserSelectMenuBuilder.setMaxValues, set to Discord's
+// Per-pick cap on recipient menus' setMaxValues, set to Discord's
 // max_values hard limit. Used by both the initial confirm-card picker
 // and the post-send "Add Recipients" flow — keep them in lockstep.
 const USER_SELECT_PER_PICK_CAP = 25;
@@ -2373,9 +2372,12 @@ async function executeSendPipeline(interaction, {
     return { recipientId: link.recipientId, username: recipient?.username, sent: result.ok === true };
   }, 5);
 
+  // Collector-local delivery history; a restored collector must seed this from persisted items.
+  const addRecipientExclusions = new Set([interaction.user.id]);
   for (const r of dmResults) {
     if (r.status === 'fulfilled' && r.value.sent) {
       delivered++;
+      addRecipientExclusions.add(r.value.recipientId);
     } else {
       failed++;
       if (r.status === 'fulfilled') {
@@ -2870,16 +2872,16 @@ async function executeSendPipeline(interaction, {
           }
           setCooldown(interaction.user.id);
 
-          // Show user select menu — collect the response on the REPLY message.
+          // Collect users and roles on the private picker reply.
           const maxSelect = Math.min(
             USER_SELECT_PER_PICK_CAP,
             remaining,
             DISCORD_SELECT_MAX_VALUES_HARD_CAP,
           );
           const userSelectRow = new ActionRowBuilder().addComponents(
-            new UserSelectMenuBuilder()
+            new MentionableSelectMenuBuilder()
               .setCustomId(`qurl_addusers_${sendId}`)
-              .setPlaceholder('Select users to send to')
+              .setPlaceholder('Select users or roles to send to')
               .setMinValues(1)
               .setMaxValues(maxSelect)
           );
@@ -2892,17 +2894,49 @@ async function executeSendPipeline(interaction, {
 
           try {
             const selectInteraction = await selectReply.awaitMessageComponent({
-              componentType: ComponentType.UserSelect,
+              componentType: ComponentType.MentionableSelect,
               time: 60000,
             });
 
             await selectInteraction.deferUpdate();
+            if (selectInteraction.roles?.size > 0) {
+              await prewarmGuildMembersCache(selectInteraction.guild, { caller: 'addRecipients' });
+            }
+            const selection = resolveMentionableSelection({
+              interaction: selectInteraction,
+              excludedUserIds: addRecipientExclusions,
+              canMentionEveryone: !!selectInteraction.guild
+                && selectInteraction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true,
+            });
+            const { valid, droppedBots } = partitionRecipients(selection.users, interaction.user.id, { excludeSender: true });
+            // One role can exceed the remaining send capacity even when only one picker value is selected.
+            const additional = valid.slice(0, remaining);
+            const warnings = renderRecipientWarnings({
+              droppedBots,
+              droppedFromRoles: selection.droppedFromRoles,
+              droppedFromEveryoneRoleOnly: selection.droppedFromEveryoneRoleOnly,
+              iterationBoundHit: selection.iterationBoundHit,
+              namedRoleMembersUnavailableCount: selection.namedRoleMembersUnavailable.size,
+              alreadyDeliveredCount: selection.alreadyDeliveredCount,
+              massMentionDenied: selection.massMentionDenied,
+              everyoneCacheCold: selection.everyoneCacheCold,
+              roleMentionsDeniedNames: resolveRoleNames(selectInteraction.guild, selection.roleMentionsDenied),
+              cappedCount: valid.length - additional.length,
+            });
+            if (additional.length === 0) {
+              await selectInteraction.editReply({
+                content: ['No new recipients selected. Existing recipients and yourself are excluded.', warnings].filter(Boolean).join('\n'),
+                components: [],
+              });
+              return;
+            }
             const addResult = await handleAddRecipients(
-              sendId, selectInteraction.users, interaction, apiKey,
+              sendId, additional, interaction, apiKey,
             );
+            for (const id of addResult.deliveredRecipientIds || []) addRecipientExclusions.add(id);
 
             // Extend recipients[] for the post-revoke names line.
-            // Dedupe by id — re-Add of an already-included user.
+            // Dedupe names by id — a failed delivery can be retried.
             if (addResult.newRecipients?.length) {
               const existingIds = new Set(recipients.map(r => r.id));
               for (const r of addResult.newRecipients) {
@@ -2952,7 +2986,10 @@ async function executeSendPipeline(interaction, {
               }
             }
 
-            await selectInteraction.editReply({ content: addResult.msg, components: [] });
+            await selectInteraction.editReply({
+              content: [addResult.msg, addResult.dispatchAttempted ? warnings : ''].filter(Boolean).join('\n'),
+              components: [],
+            });
           } catch (err) {
             const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
             // Generic user-facing message; real details only land in logs.
@@ -3163,8 +3200,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     };
   }
 
-  // Filter out bots and the sender. Convert the Discord Collection to a
-  // plain array so later callers (map/forEach over newRecipients[i]) work.
+  // Arrays and Discord Collections both support filter/values. Normalize
+  // to an array while excluding bots and the sender before dispatch.
   const newRecipients = [...usersCollection
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];
@@ -3580,12 +3617,15 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // One persist write per recipient regardless of links.length —
     // both store methods key on (send_id, recipient_discord_id).
     await persistDispatchResult(sendId, recipient.id, result);
-    return { sent: result.ok === true, username: recipient.username };
+    return { sent: result.ok === true, username: recipient.username, recipientId: recipient.id };
   }, 5);
 
+  const deliveredRecipientIds = [];
   for (const r of dmResults) {
-    if (r.status === 'fulfilled' && r.value.sent) delivered++;
-    else failed++;
+    if (r.status === 'fulfilled' && r.value.sent) {
+      delivered++;
+      deliveredRecipientIds.push(r.value.recipientId);
+    } else failed++;
   }
 
   // newLinks pairs each qurlId with the recipient's username so the
@@ -3604,7 +3644,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   let msg = `Added ${delivered} recipient${delivered !== 1 ? 's' : ''}`;
   if (failed > 0) msg += ` (${failed} could not be reached)`;
   logger.info('/qurl add recipients', { sendId, delivered, failed });
-  return { msg, newLinks, delivered, failed, newRecipients: resolvedRecipients };
+  return { msg, newLinks, delivered, failed, newRecipients: resolvedRecipients, deliveredRecipientIds, dispatchAttempted: true };
 }
 
 // --- /qurl revoke handler ---
@@ -4632,12 +4672,23 @@ function partitionRecipients(users, senderId, { excludeSender = false } = {}) {
 // in prod and plain Maps in tests. Both implement `.values()`,
 // `.entries()`, and `Symbol.iterator` — the duck-type guards below
 // gate on the methods we actually call.
-function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id = null }) {
+// Add Recipients excludes the sender and successful prior deliveries before
+// either picked users or role members consume expansion capacity.
+function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id = null, excludedUserIds }) {
   const guild = interaction.guild;
   const userMap = new Map();
+  const pickedBots = new Map();
+  const alreadyDeliveredIds = new Set();
   if (interaction.users && typeof interaction.users.values === 'function') {
     for (const u of interaction.users.values()) {
-      if (u && u.id) userMap.set(u.id, u);
+      if (!u?.id) continue;
+      if (excludedUserIds?.has(u.id)) {
+        if (u.id !== interaction.user?.id) alreadyDeliveredIds.add(u.id);
+        continue;
+      }
+      // Bots remain in the result for warnings, but cannot consume human capacity.
+      if (u.bot) pickedBots.set(u.id, u);
+      else userMap.set(u.id, u);
     }
   }
   let massMentionDenied = false;
@@ -4783,7 +4834,11 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
         // will report it via droppedBots. Skipping here means it
         // doesn't ALSO tick the role-side bot signal — avoids
         // surfacing two warnings for the same underlying bot.
-        if (userMap.has(memberId)) continue;
+        if (excludedUserIds?.has(memberId)) {
+          if (memberId !== interaction.user?.id) alreadyDeliveredIds.add(memberId);
+          continue;
+        }
+        if (userMap.has(memberId) || pickedBots.has(memberId)) continue;
         if (droppedFromRolesSet.has(memberId)) continue;
         if (isBotMember(member)) {
           droppedFromRolesSet.add(memberId);
@@ -4797,7 +4852,8 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
     }
   }
   return {
-    users: [...userMap.values()],
+    users: [...userMap.values(), ...pickedBots.values()],
+    alreadyDeliveredCount: alreadyDeliveredIds.size,
     massMentionDenied,
     droppedFromRoles: droppedFromRolesSet.size,
     droppedFromEveryoneRoleOnly: droppedFromRolesSet.size > 0
@@ -4839,6 +4895,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  * @param {{
  *   invalidTokens?: string[],
  *   cappedCount?: number,
+ *   alreadyDeliveredCount?: number,
  *   unresolvedIds?: string[],
  *   transientFailureIds?: string[],
  *   droppedBots?: number,
@@ -4854,6 +4911,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
 function renderRecipientWarnings({
   invalidTokens = [],
   cappedCount = 0,
+  alreadyDeliveredCount = 0,
   unresolvedIds = [],
   transientFailureIds = [],
   droppedBots = 0,
@@ -4874,7 +4932,10 @@ function renderRecipientWarnings({
   const sanitizeForBullet = (s) =>
     sliceWithEllipsis(s.replace(/`/g, ''), WARNING_NAME_CODEPOINT_CAP, '…');
   if (cappedCount > 0) {
-    lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — ${cappedCount} recipient(s) past the cap were dropped.`);
+    lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — at least ${cappedCount} recipient(s) past the cap were dropped.`);
+  }
+  if (alreadyDeliveredCount > 0) {
+    lines.push(`• ${alreadyDeliveredCount} recipient(s) already received this send — skipped.`);
   }
   if (invalidTokens.length > 0) {
     // recipient-parser.js's docstring is explicit: invalidTokens are
