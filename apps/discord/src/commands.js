@@ -2899,40 +2899,43 @@ async function executeSendPipeline(interaction, {
             });
 
             await selectInteraction.deferUpdate();
-            if (selectInteraction.roles?.size > 0) {
-              await prewarmGuildMembersCache(selectInteraction.guild, { caller: 'addRecipients' });
-            }
-            const selection = resolveMentionableSelection({
-              interaction: selectInteraction,
-              excludedUserIds: addRecipientExclusions,
-              canMentionEveryone: !!selectInteraction.guild
-                && selectInteraction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true,
-            });
-            const { valid, droppedBots } = partitionRecipients(selection.users, interaction.user.id, { excludeSender: true });
-            // One role can exceed the remaining send capacity even when only one picker value is selected.
-            const additional = valid.slice(0, remaining);
-            const warnings = renderRecipientWarnings({
-              droppedBots,
-              droppedFromRoles: selection.droppedFromRoles,
-              droppedFromEveryoneRoleOnly: selection.droppedFromEveryoneRoleOnly,
-              iterationBoundHit: selection.iterationBoundHit,
-              namedRoleMembersUnavailableCount: selection.namedRoleMembersUnavailable.size,
-              alreadyDeliveredCount: selection.alreadyDeliveredCount,
-              massMentionDenied: selection.massMentionDenied,
-              everyoneCacheCold: selection.everyoneCacheCold,
-              roleMentionsDeniedNames: resolveRoleNames(selectInteraction.guild, selection.roleMentionsDenied),
-              cappedCount: valid.length - additional.length,
-            });
-            if (additional.length === 0) {
+            let warnings = '';
+            let emptySelection = false;
+            const addResult = await handleAddRecipients(sendId, async () => {
+              if (selectInteraction.roles?.size > 0) {
+                await prewarmGuildMembersCache(selectInteraction.guild, { caller: 'addRecipients' });
+              }
+              const selection = resolveMentionableSelection({
+                interaction: selectInteraction,
+                excludedUserIds: addRecipientExclusions,
+                canMentionEveryone: !!selectInteraction.guild
+                  && selectInteraction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true,
+              });
+              const { valid, droppedBots } = partitionRecipients(selection.users, interaction.user.id, { excludeSender: true });
+              // One role can exceed the remaining send capacity even when only one picker value is selected.
+              const additional = valid.slice(0, remaining);
+              warnings = renderRecipientWarnings({
+                droppedBots,
+                droppedFromRoles: selection.droppedFromRoles,
+                droppedFromEveryoneRoleOnly: selection.droppedFromEveryoneRoleOnly,
+                iterationBoundHit: selection.iterationBoundHit,
+                namedRoleMembersUnavailableCount: selection.namedRoleMembersUnavailable.size,
+                alreadyDeliveredCount: selection.alreadyDeliveredCount,
+                massMentionDenied: selection.massMentionDenied,
+                everyoneCacheCold: selection.everyoneCacheCold,
+                roleMentionsDeniedNames: resolveRoleNames(selectInteraction.guild, selection.roleMentionsDenied),
+                cappedCount: valid.length - additional.length,
+              });
+              emptySelection = additional.length === 0;
+              return additional;
+            }, interaction, apiKey);
+            if (emptySelection) {
               await selectInteraction.editReply({
-                content: ['No new recipients selected. Existing recipients and yourself are excluded.', warnings].filter(Boolean).join('\n'),
+                content: ['No new recipients could be added.', warnings].filter(Boolean).join('\n'),
                 components: [],
               });
               return;
             }
-            const addResult = await handleAddRecipients(
-              sendId, additional, interaction, apiKey,
-            );
             for (const id of addResult.deliveredRecipientIds || []) addRecipientExclusions.add(id);
 
             // Extend recipients[] for the post-revoke names line.
@@ -3152,7 +3155,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
 // derived from originalInteraction directly so no caller can pass a
 // mismatched value and accidentally let one user add recipients to another
 // user's send.
-async function handleAddRecipients(sendId, usersCollection, originalInteraction, apiKey) {
+async function handleAddRecipients(sendId, usersSource, originalInteraction, apiKey) {
   const senderDiscordId = originalInteraction.user.id;
   const sendConfig = await db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
@@ -3202,6 +3205,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
   // Arrays and Discord Collections both support filter/values. Normalize
   // to an array while excluding bots and the sender before dispatch.
+  // Resolve potentially slow picker work only after the stored-state gates pass.
+  const usersCollection = typeof usersSource === 'function' ? await usersSource() : usersSource;
   const newRecipients = [...usersCollection
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];

@@ -2495,6 +2495,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
   test.each([false, true])('Add Recipients expands a permitted role after cache prewarm (cold=%s)', async (cold) => {
     const { selectInteraction, selectReply, click, guild } = await collectRolePick({ cold });
+    expect(mockDb.getSendConfig).toHaveBeenCalledTimes(1);
     expect(logger.error.mock.calls).toEqual([]);
     expect(selectReply.awaitMessageComponent).toHaveBeenCalledWith({ componentType: 7, time: 60000 });
     const menu = click.reply.mock.calls[0][0].components[0].components[0];
@@ -2573,8 +2574,8 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     const nextSelect = { ...selectInteraction, editReply: jest.fn().mockResolvedValue(undefined) };
     const nextClick = makeClick('add');
     nextClick.reply.mockResolvedValueOnce({ awaitMessageComponent: jest.fn().mockResolvedValue(nextSelect) });
+    mockDb.getSendConfig.mockResolvedValueOnce(storedConfig);
     if (partial) {
-      mockDb.getSendConfig.mockResolvedValueOnce(storedConfig);
       mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-retry', fileBuffer: new ArrayBuffer(8) });
       mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/retry', qurl_id: 'q_retry', resource_id: 'res-retry' }]);
     }
@@ -2622,6 +2623,22 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     })) });
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
     expect(selectInteraction.editReply.mock.calls[0][0].content).toContain('too large to fully evaluate');
+  });
+
+  test('a revoked send stops before cold denied-role prewarm or empty-selection copy', async () => {
+    const { guild, selectInteraction } = await collectRolePick({ revoked: true, cold: true, mentionable: false });
+    expect(guild.members.list).not.toHaveBeenCalled();
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(selectInteraction.editReply).toHaveBeenCalledWith({
+      content: 'Cannot add recipients — this send has already been revoked.', components: [],
+    });
+  });
+
+  test('a permitted cold @everyone pick warms members before adding recipients', async () => {
+    const { guild, selectInteraction } = await collectRolePick({ everyone: true, permission: true, cold: true });
+    expect(guild.members.list).toHaveBeenCalledTimes(1);
+    expect(mockSendDM.mock.calls.map(([id]) => id)).toEqual(['u1', 'u2', 'u3']);
+    expect(selectInteraction.editReply.mock.calls[0][0].content).toContain('bots cannot receive');
   });
 
   async function setupRevocableSend({ initialPartialFailure = false } = {}) {
@@ -3157,13 +3174,18 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
     const err = new Error('revoked');
     err.code = 'SEND_CONFIG_REVOKED';
-    mockDb.recordQURLSendBatch.mockRejectedValueOnce(err);
-
+    const resolveUsers = jest.fn(async () => {
+      // A revoke lands while the deferred picker is resolving, after preflight.
+      mockDb.recordQURLSendBatch.mockRejectedValueOnce(err);
+      return makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]);
+    });
     const result = await handleAddRecipients(
-      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      'send-1', resolveUsers,
       makeInteraction(), 'apikey',
     );
 
+    expect(resolveUsers).toHaveBeenCalledTimes(1);
+    expect(mockDb.getSendConfig).toHaveBeenCalledTimes(1);
     expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
     expect(result.delivered).toBe(0);
     expect(result.newRecipients).toEqual([]);

@@ -742,7 +742,7 @@ describe('resolveMentionableSelection', () => {
     expect(r.droppedFromRoles).toBe(0);
   });
 
-  test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold, roleMentionsDenied }', () => {
+  test('returns the documented resolver result fields', () => {
     const int = makeMentionableInteraction({});
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
     expect(Object.keys(r).sort()).toEqual(['alreadyDeliveredCount', 'droppedFromEveryoneRoleOnly', 'droppedFromRoles', 'everyoneCacheCold', 'iterationBoundHit', 'massMentionDenied', 'namedRoleMembersUnavailable', 'roleMentionsDenied', 'users']);
