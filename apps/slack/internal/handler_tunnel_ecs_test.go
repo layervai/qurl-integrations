@@ -16,6 +16,8 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	for _, want := range []string{
 		ecsFargateChecklistText,
 		"desiredCount: 1",
+		"dedicated EFS file system",
+		"Do not replace a shared file system policy",
 		"default file system policy permits anonymous",
 		"Explicitly deny the task role mounts outside",
 		"separate provisioning role",
