@@ -1267,16 +1267,20 @@ func TestConfirm_RevokeThroughQURLClient(t *testing.T) {
 	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
 		names.channelPolicy: {seedChannelPolicySet("T1", "C1", testRevokeAlias, []string{testTunnelResourceID})},
 	})
+	// Only the HTTP backend is reused; workspace and alias state stay in hc.
 	ts := newAdminTestServers(t)
 	hc.h.cfg.NewClient = func(apiKey string) *client.Client {
 		return client.New(ts.customerServer.URL, apiKey, client.WithRetry(0))
 	}
+	requireWorkspaceKey := func(r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Error("qURL request did not use the workspace credential")
+		}
+	}
 	var reads, stops, deletes atomic.Int32
 	path := "/v1/resources/" + testTunnelResourceID
 	ts.addCustomer(http.MethodGet, path, func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer test-key" {
-			t.Error("detail read did not use the workspace credential")
-		}
+		requireWorkspaceKey(r)
 		reads.Add(1)
 		respondQURLEnvelope(t, w, map[string]any{"resource": map[string]any{
 			"resource_id": testTunnelResourceID, "type": client.ResourceTypeTunnel,
@@ -1284,10 +1288,11 @@ func TestConfirm_RevokeThroughQURLClient(t *testing.T) {
 		}, "qurls": []any{}})
 	})
 	ts.addCustomer(http.MethodPut, path+"/sharing", func(w http.ResponseWriter, r *http.Request) {
+		requireWorkspaceKey(r)
 		var body struct {
 			DesiredState string `json:"desired_state"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.DesiredState != "off" || reads.Load() != 1 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.DesiredState != "off" || reads.Load() != 1 || deletes.Load() != 0 {
 			t.Errorf("sharing stop before DELETE: state=%q, reads=%d, err=%v", body.DesiredState, reads.Load(), err)
 		}
 		stops.Add(1)
@@ -1296,7 +1301,8 @@ func TestConfirm_RevokeThroughQURLClient(t *testing.T) {
 			"desired_state": "off", "serving_epoch": 1, "connection_state": "stopped",
 		})
 	})
-	ts.addCustomer(http.MethodDelete, path, func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer(http.MethodDelete, path, func(w http.ResponseWriter, r *http.Request) {
+		requireWorkspaceKey(r)
 		if reads.Load() != 1 || stops.Load() != 1 {
 			t.Error("DELETE reached before the resource read and sharing stop")
 		}
@@ -1308,7 +1314,7 @@ func TestConfirm_RevokeThroughQURLClient(t *testing.T) {
 	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
 	hc.h.Wait()
 	replaced, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
-	if !replaced || !hc.claimed(id) || !strings.Contains(text, "Revoked") || !strings.Contains(text, testRevokeAlias) {
+	if !replaced || !hc.claimed(id) || !strings.HasPrefix(text, "Revoked `$"+testRevokeAlias+"` and all its qURLs.") {
 		t.Fatalf("approved revoke did not replace its claimed card with success: replace=%v, text=%q", replaced, text)
 	}
 	if reads.Load() != 1 || stops.Load() != 1 || deletes.Load() != 1 {
