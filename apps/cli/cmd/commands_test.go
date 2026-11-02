@@ -179,14 +179,14 @@ func TestSharingCopyStatesTheDeviceAccessRule(t *testing.T) {
 	)
 	for _, surface := range []struct {
 		name, text string
-		// setAtCreation is how the surface says that privacy cannot change.
+		// setAtCreation says a publish retry preserves privacy.
 		setAtCreation string
 		// notYetCount is how often the surface says that the shipped
 		// deployment does not offer the request. The README says it here and
 		// in its section about get.
 		notYetCount int
 	}{
-		{"qurl publish --help", publishHelp, "Privacy is set at creation and cannot be changed later.", 1},
+		{"qurl publish --help", publishHelp, "Privacy is set at creation; a publish retry cannot change it.", 1},
 		{"README", readme, "Privacy is set at creation; a retry cannot change it.", 2},
 	} {
 		for _, want := range []string{

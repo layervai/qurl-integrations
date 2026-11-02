@@ -532,7 +532,7 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
+		StateDir: stateDir, SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
@@ -591,7 +591,7 @@ func TestWaitForSharingSettlesStartingDiagnosticIntoRetryCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
+		StateDir: stateDir, SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
@@ -623,7 +623,7 @@ func TestWaitForSharingReportsMissingDaemonResourceDiagnostic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
+		StateDir: stateDir, SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
@@ -1275,7 +1275,7 @@ func TestShareInspectKeepsAuthoritativeStoppedStateOverStaleDaemonDiagnostic(t *
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
+		StateDir: stateDir, SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
@@ -3319,7 +3319,7 @@ func foregroundIPCTestDaemon(started, stopped chan struct{}) func(context.Contex
 		done := make(chan error, 1)
 		go func() {
 			done <- (&connectordaemon.IPCServer{
-				SocketPath: path, Manager: manager, JobVersion: jobVersion,
+				StateDir: stateDir, SocketPath: path, Manager: manager, JobVersion: jobVersion,
 			}).Run(runCtx)
 		}()
 		readyCtx, cancelReady := context.WithTimeout(ctx, 2*time.Second)
@@ -3438,11 +3438,11 @@ func startExternalJourneyDaemon(t *testing.T, daemon *journeyDaemon, stateDir, e
 	admissionsBefore := daemon.admitter.admissions()
 	ctx, cancel := context.WithCancel(context.Background())
 	daemon.manager, daemon.cancel, daemon.done = manager, cancel, make(chan error, 1)
-	version, err := connectordaemon.JobVersion(daemon.version, connectordaemon.GroupModeSingle)
+	version, err := connectordaemon.JobVersion(daemon.version, connectordaemon.GroupModeSingle, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &connectordaemon.IPCServer{SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: version}
+	server := &connectordaemon.IPCServer{StateDir: stateDir, SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: version}
 	go func() { daemon.done <- server.Run(ctx) }()
 	controller, err := connectordaemon.NewJobController(stateDir, t.TempDir(), daemon.version, endpoint, connectordaemon.GroupModeSingle, connectorstate.RuntimeSupervisionExternal, func() (qurl.HubBootstrap, error) {
 		t.Error("external lifecycle resolved native job deployment")

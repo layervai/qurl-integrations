@@ -55,10 +55,10 @@ type statusSample struct {
 
 func (s *statusSample) degraded() bool { return s.Err != "" || s.Serving < s.Total }
 
-func takeStatusSample(ctx context.Context, resourceIDs []string, socket string, start time.Time) statusSample {
+func takeStatusSample(ctx context.Context, resourceIDs []string, stateDir, socket string, start time.Time) statusSample {
 	now := time.Now()
 	sample := statusSample{At: now, Elapsed: now.Sub(start).Seconds(), Total: len(resourceIDs)}
-	status, running, err := connectordaemon.IPCClient{SocketPath: socket}.Status(ctx)
+	status, running, err := connectordaemon.IPCClient{SocketPath: socket, StateDir: stateDir}.Status(ctx)
 	if err != nil {
 		sample.Err = err.Error()
 		return sample
@@ -107,18 +107,18 @@ func (s *statusSample) count(diag *connectordaemon.ResourceDiagnostic) {
 
 // waitAllServing samples the daemon every interval until every proof
 // resource serves or the deadline passes, handing each sample to onSample.
-func waitAllServing(ctx context.Context, resourceIDs []string, socket string, start time.Time,
+func waitAllServing(ctx context.Context, resourceIDs []string, stateDir, socket string, start time.Time,
 	deadline, interval time.Duration, onSample func(statusSample),
 ) (statusSample, bool) {
 	if len(resourceIDs) == 0 {
-		sample := takeStatusSample(ctx, resourceIDs, socket, start)
+		sample := takeStatusSample(ctx, resourceIDs, stateDir, socket, start)
 		onSample(sample)
 		return sample, false
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 	for {
-		sample := takeStatusSample(waitCtx, resourceIDs, socket, start)
+		sample := takeStatusSample(waitCtx, resourceIDs, stateDir, socket, start)
 		onSample(sample)
 		if sample.Err == "" && sample.Total > 0 && sample.Serving == sample.Total {
 			return sample, true

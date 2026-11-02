@@ -141,6 +141,7 @@ homebrew_casks:
       - manpages/qurl-account-setup.1
       - manpages/qurl-account-recover.1
       - manpages/qurl-login.1
+      - manpages/qurl-payments.1
       - manpages/qurl-publish.1
       - manpages/qurl-preview.1
       - manpages/qurl-preview-get.1
