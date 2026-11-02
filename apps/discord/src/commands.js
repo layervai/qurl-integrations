@@ -1948,6 +1948,23 @@ async function executeSendPipeline(interaction, {
   // callers and the picker happy path.
   recipientMode,
 }) {
+  const params = {
+    apiKey, resourceType, attachment, locationUrl, locationName, recipients,
+    expiresIn, selfDestructSeconds, personalMessage, sendNonce, recipientMode,
+  };
+  const prepared = await prepareSendResources(interaction, params);
+  if (!prepared.qurlLinks) return prepared.reply;
+  const send = { ...params, ...prepared };
+  const persisted = await persistSendBatch(interaction, send);
+  if (!('expiresAt' in persisted)) return persisted.reply;
+  return dispatchAndMonitor(interaction, { ...send, ...persisted });
+}
+
+// Preserve pending error replies so mint cleanup does not wait for Discord.
+async function prepareSendResources(interaction, {
+  apiKey, resourceType, attachment, locationUrl, locationName, recipients,
+  expiresIn, selfDestructSeconds, personalMessage, sendNonce,
+}) {
   // Shared cancel-edit for every entry gate. Fire-and-forget — the
   // throw is the load-bearing signal (test pins + logger.error in
   // handleCommand's outer catch). The outer catch will still append
@@ -2089,10 +2106,10 @@ async function executeSendPipeline(interaction, {
         logger.warn('File send rejected at slot-claim: concurrency cap reached', {
           activeFileSends, sendId, sendNonce, userId: interaction.user.id,
         });
-        return interaction.editReply({
+        return { reply: interaction.editReply({
           content: 'The bot is processing too many file sends right now. Please try again in a moment.',
           components: [],
-        });
+        }) };
       }
       activeFileSends++;
       fileSendSlotClaimed = true;
@@ -2145,7 +2162,7 @@ async function executeSendPipeline(interaction, {
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
         clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
+        return { reply: interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` }) };
       }
 
       qurlLinks = recipients.map((r, i) => ({
@@ -2185,7 +2202,7 @@ async function executeSendPipeline(interaction, {
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected for location', { expected: recipients.length, got: allLinks.length });
         clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
+        return { reply: interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` }) };
       }
 
       qurlLinks = recipients.map((r, i) => ({
@@ -2227,11 +2244,11 @@ async function executeSendPipeline(interaction, {
     if (error.apiCode === 'quota_exceeded') {
       const isFile = resourceType === RESOURCE_TYPES.FILE;
       const verb = isFile ? 're-upload the file' : 'edit the location query and resend';
-      return interaction.editReply({
+      return { reply: interaction.editReply({
         content: `Couldn't create more links — this ${isFile ? 'file' : 'location'} has hit its share limit (${TOKENS_PER_RESOURCE} per upload). To send to more recipients, ${verb}.`,
-      });
+      }) };
     }
-    return interaction.editReply({ content: 'Failed to create links. Please try again.' });
+    return { reply: interaction.editReply({ content: 'Failed to create links. Please try again.' }) };
   } finally {
     // Release the file-concurrency slot as soon as the mint+batch phase is
     // done — we no longer hold the 25 MB buffer past this point.
@@ -2240,9 +2257,15 @@ async function executeSendPipeline(interaction, {
 
   if (qurlLinks.length === 0) {
     clearCooldown(interaction.user.id);
-    return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
+    return { reply: interaction.editReply({ content: 'Failed to create any links. Please try again.' }) };
   }
 
+  return { sendId, qurlLinks, connectorResourceId };
+}
+
+async function persistSendBatch(interaction, {
+  sendId, qurlLinks, resourceType, expiresIn,
+}) {
   // Compute the absolute expiry instant once for this dispatch (Unix
   // seconds — Discord's <t:N:R> format requires seconds, not millis).
   // Using send-time + duration rather than reading from the API mint
@@ -2321,11 +2344,19 @@ async function executeSendPipeline(interaction, {
       orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
     });
     clearCooldown(interaction.user.id);
-    return interaction.editReply({
+    return { reply: interaction.editReply({
       content: 'Failed to save link records. Links were not sent. Please try again.',
-    });
+    }) };
   }
 
+  return { expiresAt };
+}
+
+async function dispatchAndMonitor(interaction, {
+  apiKey, resourceType, attachment, locationUrl, locationName, recipients,
+  expiresIn, selfDestructSeconds, personalMessage, recipientMode,
+  sendId, qurlLinks, connectorResourceId, expiresAt,
+}) {
   // Send DMs. `expiresAt` is Unix seconds, computed above the DDB
   // write — see the #352 hoist comment near recordQURLSendBatch for
   // the clock-drift caveat that was previously documented here.
@@ -10075,6 +10106,9 @@ module.exports = {
       // its contract against a constructed param object — without
       // re-driving the full /qurl send + /qurl map confirm-card flow.
       executeSendPipeline,
+      prepareSendResources,
+      persistSendBatch,
+      dispatchAndMonitor,
       // Test-only file-concurrency hooks. The slot counter is module-
       // private (live state) and exposing a setter lets the cap branch
       // be tested without a parallel-send harness.
