@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"maps"
 	"net/http"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -144,11 +146,15 @@ func (s *Store) updatePolicy(ctx context.Context, in *dynamodb.UpdateItemInput) 
 	if in.ReturnValues != "" && in.ReturnValues != ddbtypes.ReturnValueNone {
 		return &Error{StatusCode: http.StatusInternalServerError, Title: "Policy transactions do not return item values"}
 	}
+	update, err := policyLineageUpdate(in, &authorization)
+	if err != nil {
+		return err
+	}
 	transactional, ok := s.Client.(policyTransactionClient)
 	if !ok {
 		return &Error{StatusCode: http.StatusInternalServerError, Title: "Atomic policy writes are unavailable"}
 	}
-	_, err := transactional.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+	_, err = transactional.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
 		ClientRequestToken: aws.String(rand.Text()),
 		TransactItems: []ddbtypes.TransactWriteItem{
 			{ConditionCheck: &ddbtypes.ConditionCheck{
@@ -158,25 +164,10 @@ func (s *Store) updatePolicy(ctx context.Context, in *dynamodb.UpdateItemInput) 
 				ExpressionAttributeNames:  map[string]string{"#owner": attrOwnerID, "#admins": attrAdminSlackUserIDs, "#generation": attrPolicyGeneration, exprPolicyInstallation: attrPolicyInstallation},
 				ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":owner": stringAttr(authorization.ownerID), ":caller": stringAttr(authorization.userID), ":generation": stringAttr(authorization.generation), valuePolicyInstallation: stringAttr(authorization.installation)},
 			}},
-			{Update: &ddbtypes.Update{
-				TableName: in.TableName, Key: in.Key, UpdateExpression: in.UpdateExpression,
-				ConditionExpression:      in.ConditionExpression,
-				ExpressionAttributeNames: in.ExpressionAttributeNames, ExpressionAttributeValues: in.ExpressionAttributeValues,
-				ReturnValuesOnConditionCheckFailure: in.ReturnValuesOnConditionCheckFailure,
-			}},
+			{Update: update},
 		},
 	})
-	var canceled *ddbtypes.TransactionCanceledException
-	if errors.As(err, &canceled) {
-		if len(canceled.CancellationReasons) > 0 && aws.ToString(canceled.CancellationReasons[0].Code) == policyConditionFailed {
-			return policyWorkspaceChanged()
-		}
-		if len(canceled.CancellationReasons) > 1 && aws.ToString(canceled.CancellationReasons[1].Code) == policyConditionFailed {
-			// Existing alias callers distinguish their condition from a workspace fence.
-			return &ddbtypes.ConditionalCheckFailedException{Message: aws.String("Channel policy condition changed")}
-		}
-	}
-	return err
+	return policyTransactionError(err, &authorization)
 }
 
 // deleteUnboundPolicy removes late old writes regardless of their wall-clock
@@ -198,4 +189,70 @@ func (s *Store) deleteUnboundPolicy(ctx context.Context, teamID, channelID strin
 		return &Error{StatusCode: http.StatusServiceUnavailable, Code: errCodePolicyPurgeWorkspaceChanged, Title: "Workspace changed during policy cleanup; retry"}
 	}
 	return ddbToError("PurgeTeamChannelPolicies.unbound", err)
+}
+
+// policyLineageUpdate stamps the row in the same commit as the mutation. Old
+// untagged rows belong only to an explicitly migrated legacy installation.
+func policyLineageUpdate(in *dynamodb.UpdateItemInput, authorization *PolicyAuthorization) (*ddbtypes.Update, error) {
+	expression := aws.ToString(in.UpdateExpression)
+	if !strings.HasPrefix(expression, "SET ") {
+		return nil, &Error{StatusCode: http.StatusInternalServerError, Title: "Policy updates require a SET clause"}
+	}
+	names := maps.Clone(in.ExpressionAttributeNames)
+	values := maps.Clone(in.ExpressionAttributeValues)
+	if names == nil {
+		names = make(map[string]string)
+	}
+	if values == nil {
+		values = make(map[string]ddbtypes.AttributeValue)
+	}
+	const lineageName, lineageValue, teamName = "#policy_lineage", ":policy_lineage", "#policy_team"
+	if _, present := names[lineageName]; present {
+		return nil, policyWorkspaceChanged()
+	}
+	if _, present := names[teamName]; present {
+		return nil, policyWorkspaceChanged()
+	}
+	if _, present := values[lineageValue]; present {
+		return nil, policyWorkspaceChanged()
+	}
+	names[lineageName], names[teamName] = attrPolicyInstallation, attrSlackTeamID
+	values[lineageValue] = stringAttr(authorization.installation)
+	condition := "attribute_not_exists(" + teamName + ") OR " + lineageName + " = " + lineageValue
+	if authorization.legacyPolicies {
+		condition += " OR attribute_not_exists(" + lineageName + ")"
+	}
+	condition = "(" + condition + ")"
+	if original := aws.ToString(in.ConditionExpression); original != "" {
+		condition += " AND (" + original + ")"
+	}
+	return &ddbtypes.Update{TableName: in.TableName, Key: in.Key,
+		UpdateExpression:    aws.String("SET " + lineageName + " = " + lineageValue + ", " + strings.TrimPrefix(expression, "SET ")),
+		ConditionExpression: aws.String(condition), ExpressionAttributeNames: names, ExpressionAttributeValues: values,
+		ReturnValuesOnConditionCheckFailure: ddbtypes.ReturnValuesOnConditionCheckFailureAllOld}, nil
+}
+
+func policyRowBelongsTo(item map[string]ddbtypes.AttributeValue, authorization *PolicyAuthorization) bool {
+	if len(item) == 0 {
+		return true
+	}
+	installation, present, err := policyIdentity(item, attrPolicyInstallation)
+	return err == nil && ((present && installation == authorization.installation) || (!present && authorization.legacyPolicies))
+}
+
+func policyTransactionError(err error, authorization *PolicyAuthorization) error {
+	var canceled *ddbtypes.TransactionCanceledException
+	if errors.As(err, &canceled) {
+		if len(canceled.CancellationReasons) > 0 && aws.ToString(canceled.CancellationReasons[0].Code) == policyConditionFailed {
+			return policyWorkspaceChanged()
+		}
+		if len(canceled.CancellationReasons) > 1 && aws.ToString(canceled.CancellationReasons[1].Code) == policyConditionFailed {
+			if !policyRowBelongsTo(canceled.CancellationReasons[1].Item, authorization) {
+				return policyWorkspaceChanged()
+			}
+			// Existing alias callers distinguish their condition from a workspace fence.
+			return &ddbtypes.ConditionalCheckFailedException{Message: aws.String("Channel policy condition changed")}
+		}
+	}
+	return err
 }

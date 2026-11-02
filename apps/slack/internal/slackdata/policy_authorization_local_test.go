@@ -99,7 +99,7 @@ func localPolicyStore(t *testing.T) (*Store, *dynamodb.Client) {
 func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 	store, client := localPolicyStore(t)
 	index := 0
-	for _, scenario := range []string{"current admin", "deleted binding", "reinstall at same clock time", "revoked admin", "owner transferred away and back", "legacy binding", "ownership keeps installation", "delete at commit boundary", "alias conflict"} {
+	for _, scenario := range []string{"current admin", "deleted binding", "reinstall at same clock time", "revoked admin", "owner transferred away and back", "legacy binding", "ownership keeps installation", "delete at commit boundary", "alias conflict", "retired policy row", "untagged modern policy row", "legacy existing policy", "invalid policy lineage"} {
 		t.Run(scenario, func(t *testing.T) {
 			index++
 			teamID := fmt.Sprintf("T%08d", index)
@@ -116,7 +116,7 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 			}
 			bind()
 			workspaceKey := map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID)}
-			if scenario == "legacy binding" {
+			if scenario == "legacy binding" || scenario == "legacy existing policy" {
 				if _, err := client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(store.WorkspaceMappingsName), Key: workspaceKey, UpdateExpression: aws.String("REMOVE policy_generation, policy_installation")}); err != nil {
 					t.Fatal(err)
 				}
@@ -132,6 +132,25 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 			wantConflict := false
 			wantResources := []string{"r_old"}
 			switch scenario {
+			case "retired policy row", "untagged modern policy row", "legacy existing policy", "invalid policy lineage":
+				item := map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID), attrSlackChannelID: stringAttr("C00000001"), attrAllowedResourceIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{"r_prior"}}}
+				if scenario == "retired policy row" {
+					item[attrPolicyInstallation] = stringAttr("retired")
+				}
+				if scenario == "invalid policy lineage" {
+					item[attrPolicyInstallation] = &ddbtypes.AttributeValueMemberBOOL{Value: true}
+				}
+				if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: mutation.TableName, Item: item}); err != nil {
+					t.Fatal(err)
+				}
+				mutation.UpdateExpression = aws.String("SET updated_at = :now ADD allowed_resource_ids :resources")
+				mutation.ExpressionAttributeValues[":now"] = stringAttr("2026-11-02T12:00:00Z")
+				wantResources = []string{"r_prior"}
+				wantConflict = true
+				if scenario == "legacy existing policy" {
+					wantConflict = false
+					wantResources = []string{"r_old", "r_prior"}
+				}
 			case "deleted binding":
 				if err := store.DeleteWorkspaceMapping(ctx, teamID); err != nil {
 					t.Fatal(err)
@@ -234,6 +253,9 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 			}
 			if wantResources == nil && len(row.Item) != 0 {
 				t.Fatal("refused write materialized an orphan policy row")
+			}
+			if !wantConflict && readString(row.Item, attrPolicyInstallation) != authorization.installation {
+				t.Fatal("successful policy write did not stamp its installation")
 			}
 			got := readStringSet(row.Item, attrAllowedResourceIDs)
 			slices.Sort(got)

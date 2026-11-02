@@ -165,8 +165,15 @@ func TestPolicyUpdateIsAtomicAndPreservesMutationCondition(t *testing.T) {
 		t.Fatal("transaction lost captured authority")
 	}
 	update := transaction.TransactItems[1].Update
-	if update == nil || aws.ToString(update.TableName) != "cp" || !reflect.DeepEqual(update.Key, mutation.Key) || !reflect.DeepEqual(update.ExpressionAttributeNames, mutation.ExpressionAttributeNames) || !reflect.DeepEqual(update.ExpressionAttributeValues, mutation.ExpressionAttributeValues) || aws.ToString(update.ConditionExpression) != aws.ToString(mutation.ConditionExpression) || aws.ToString(update.UpdateExpression) != aws.ToString(mutation.UpdateExpression) {
-		t.Fatal("transaction altered the channel policy mutation")
+	if update == nil || aws.ToString(update.TableName) != "cp" || !reflect.DeepEqual(update.Key, mutation.Key) ||
+		aws.ToString(update.UpdateExpression) != "SET #policy_lineage = :policy_lineage, #alias = :resource" ||
+		aws.ToString(update.ConditionExpression) != "(attribute_not_exists(#policy_team) OR #policy_lineage = :policy_lineage) AND (attribute_not_exists(#alias))" ||
+		update.ExpressionAttributeNames["#alias"] != "alias_bindings" || readString(update.ExpressionAttributeValues, ":resource") != "r_1" ||
+		readString(update.ExpressionAttributeValues, ":policy_lineage") != authorization.installation || update.ReturnValuesOnConditionCheckFailure != ddbtypes.ReturnValuesOnConditionCheckFailureAllOld {
+		t.Fatal("transaction lost mutation semantics or installation condition")
+	}
+	if len(mutation.ExpressionAttributeNames) != 1 || len(mutation.ExpressionAttributeValues) != 1 || aws.ToString(mutation.UpdateExpression) != "SET #alias = :resource" || aws.ToString(mutation.ConditionExpression) != "attribute_not_exists(#alias)" {
+		t.Fatal("transaction modified its caller's reusable input")
 	}
 }
 
@@ -278,7 +285,7 @@ func TestPolicyUpdatePreservesUnknownFailureWithoutFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = store.updatePolicy(authorization.Context(context.Background()), &dynamodb.UpdateItemInput{TableName: aws.String("cp"), Key: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr("T1")}})
+	err = store.updatePolicy(authorization.Context(context.Background()), &dynamodb.UpdateItemInput{TableName: aws.String("cp"), Key: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr("T1")}, UpdateExpression: aws.String("SET x = :v")})
 	if !errors.Is(err, failure) {
 		t.Fatalf("transaction failure was lost or misclassified: %v", err)
 	}
