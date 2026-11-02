@@ -2403,6 +2403,13 @@ async function executeSendPipeline(interaction, {
       selfDestructSeconds,
     });
   } catch (err) {
+    if (err?.name === 'ConditionalCheckFailedException') {
+      logger.info('Send finished after revocation started; preserving its closed state', { sendId, delivered, failed });
+      return interaction.editReply({
+        content: `Sent ${delivered} DM(s). Revocation started before this send finished. Add Recipients is unavailable. Use \`/qurl revoke\` to retry an unconfirmed deletion.`,
+        components: [],
+      });
+    }
     logger.error('saveSendConfig failed; Add Recipients will be unavailable for this send', {
       sendId, error: err.message,
     });

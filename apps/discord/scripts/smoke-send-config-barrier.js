@@ -4,7 +4,8 @@ const { randomBytes, randomUUID } = require('node:crypto');
 const { DynamoDBClient, CreateTableCommand, DeleteTableCommand } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
 
-const endpoint = new URL(process.env.DDB_TEST_ENDPOINT || '');
+assert(process.env.DDB_TEST_ENDPOINT, 'Set DDB_TEST_ENDPOINT to a loopback DynamoDB Local URL');
+const endpoint = new URL(process.env.DDB_TEST_ENDPOINT);
 assert(['localhost', '127.0.0.1', '[::1]'].includes(endpoint.hostname), 'Use a loopback DynamoDB Local endpoint');
 assert.equal(endpoint.protocol, 'http:', 'Use local HTTP');
 process.env.AWS_REGION = 'us-east-2';

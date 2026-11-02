@@ -3822,3 +3822,21 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(message.content).not.toMatch(/\u202E/u);
   });
 });
+
+
+test('late config barrier closes confirmation without treating delivered DMs as a failed send', async () => {
+  const interaction = makeInteraction();
+  mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
+  mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', qurl_id: 'q_aaaaaaaaaa1', resource_id: 'res-1' }]);
+  mockSendDM.mockResolvedValueOnce({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+  mockDb.recordQURLSendBatch.mockResolvedValueOnce(undefined);
+  mockDb.saveSendConfig.mockRejectedValueOnce(Object.assign(new Error('condition failed'), { name: 'ConditionalCheckFailedException' }));
+  await executeSendPipeline(interaction, makePipelineParams());
+  expect(mockSendDM).toHaveBeenCalledTimes(1);
+  expect(logger.error).not.toHaveBeenCalled();
+  expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('preserving its closed state'), expect.objectContaining({ delivered: 1, failed: 0 }));
+  expect(interaction.editReply).toHaveBeenLastCalledWith({
+    content: expect.stringContaining('Sent 1 DM(s). Revocation started'), components: [],
+  });
+  expect(activeMonitors.size).toBe(0);
+});
