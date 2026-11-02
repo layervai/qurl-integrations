@@ -477,3 +477,37 @@ func TestPublishLinkFailureKeepsTextAndQuietStdoutEmpty(t *testing.T) {
 		}
 	}
 }
+
+func TestShareSavedLimitsReportsOnlyServerClamp(t *testing.T) {
+	for _, receipt := range []struct {
+		name     string
+		seconds  *int
+		wantNote bool
+	}{
+		{name: "old server"},
+		{name: "full lifetime", seconds: new(3600)},
+		{name: "clamped lifetime", seconds: new(60), wantNote: true},
+	} {
+		t.Run(receipt.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			dir := connectorStateTestDir(t)
+			scriptPublish(t, srv, false, false, nil, nil)
+			srv.ScriptRepeat(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", 2, func(w http.ResponseWriter, _ *http.Request) {
+				data := map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "qurl_link": "https://qurl.link/at_limited", "expires_at": "2020-01-01T00:00:00Z"}
+				if receipt.seconds != nil {
+					data["expires_in_seconds"] = *receipt.seconds
+				}
+				apitest.WriteEnvelope(t, w, http.StatusCreated, data, nil)
+			})
+			published := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-"}, stdin: strings.NewReader(hourRule), shareStateDir: dir})
+			if published.code != 0 {
+				t.Fatalf("publish: %d %s", published.code, published.stderr.String())
+			}
+			result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID, "--ttl", "1h"}, shareStateDir: dir})
+			note := "Note: the service granted a 1m0s link lifetime instead of the requested 1h0m0s."
+			if result.code != 0 || result.stdout.String() != "https://qurl.link/at_limited\n" || strings.Contains(result.stderr.String(), note) != receipt.wantNote {
+				t.Fatalf("share: %d stdout=%q stderr=%q", result.code, result.stdout.String(), result.stderr.String())
+			}
+		})
+	}
+}
