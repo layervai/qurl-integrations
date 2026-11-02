@@ -143,7 +143,8 @@ responses and stored IDs are unchanged. Update saved queries that used the raw
 `resource_id` or `crid` log fields.
 
 To find logs for an ID you already obtained through an authorized resource lookup,
-run this offline prompt from the repo root. The ID is not part of shell history:
+run this offline prompt from the repo root. It accepts resource IDs and CRIDs.
+The ID is not part of shell history, but terminal input is echoed into scrollback:
 
 ```sh
 cd apps/discord
@@ -166,8 +167,18 @@ input.question("Resource ID: ", id => {
 ```
 
 Filter `@message` for the printed reference in Logs Insights. It is a correlation
-hint, not a unique ID or an access credential. Confirm the actual resource through
-the authorized API before any action; a reference cannot be reversed into an ID.
+hint, not a unique ID or an access credential. It is not a lookup key; a known
+candidate ID can be hashed and compared, so a reference does not conceal a
+guessable ID. Confirm the actual resource through the authorized API before action.
+
+For an orphaned-resource error, start with its logged `qurlId`. With the same
+owner's API key, `GET /v1/qurls/{id}` accepts that qURL ID and returns the parent
+resource. Compare the logged reference against the returned `resource_id` or
+`crid`, then use the existing connector child-revoke path for the logged qURL IDs.
+Keep a foreign/unknown child's 404 or a reference mismatch as a stop condition.
+Do not delete the parent resource: it may contain other recipients' links.
+Verify this lookup on the deployed API before adopting these log-field changes;
+the source contract alone is not a served-API check.
 
 ## Configuration
 

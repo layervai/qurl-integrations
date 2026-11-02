@@ -301,7 +301,8 @@ describe('POST /webhooks/qurl — payload handling', () => {
     expect(res.body).toEqual({ status: 'invalid-payload' });
     expect(mockRecordQurlView).not.toHaveBeenCalled();
     const logger = require('../src/logger');
-    const warning = logger.warn.mock.calls.find(([message]) => message.endsWith('missing qurl_id'));
+    const warning = logger.warn.mock.calls.find(([message]) => message === `qURL webhook ${type} missing qurl_id`);
+    expect(warning).toBeDefined();
     expect(warning[1].resource_ref).toBe(require('../src/utils/resource-id').resourceIdLogRef('private-resource-fixture'));
     expect(warning[1]).not.toHaveProperty('resource_id');
     expect(JSON.stringify(warning)).not.toContain('private-resource-fixture');
