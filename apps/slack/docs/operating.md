@@ -1003,6 +1003,15 @@ enabled on `workspace_mappings.expires_at`. Durable workspace binding rows must
 not write `expires_at`; DynamoDB TTL is table-wide and would reap any real row
 that accidentally carried a numeric value.
 
+If a peer has already advanced to the next window, tasks share that window's
+budget instead of resetting it backward. A counter more than one window ahead
+fails closed with `rate_limit_clock_skew`; its count, window, and expiry stay
+unchanged. The user gets an operator-check message rather than a large retry
+estimate. Check every writer's clock and the stored window before repair. Do
+not delete/reset the counter or disable the gate to shorten the wait: that can
+reuse a consumed budget. Correcting a clock does not repair an existing future
+counter automatically; any manual repair must preserve its consumed budget.
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -1146,6 +1155,12 @@ budgeted at 800 ms and the `views.open` call at 1500 ms, leaving headroom inside
 Slack's roughly three-second trigger window. Sustained p99 latency near either
 budget should be treated as an operator action item before customers see setup
 window-expired prompts.
+
+## Client User-Agent
+
+The qURL API and Slack WebAPI adapters use `qurl-bot-slack/<build>` as their
+User-Agent. Update attribution or log filters that match the old `qurl-slack/`
+prefix when adopting this build.
 
 ## Async pool pressure
 

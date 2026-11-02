@@ -233,6 +233,7 @@ check-teams-docker:
 check-e2e:
 	go test -race ./e2e/cmd/verify-ownership
 	go vet ./e2e/cmd/verify-ownership
+	go tool govulncheck ./e2e/cmd/...
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) config verify
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./e2e/cmd/verify-ownership/...
 	$(call node_version_warning,e2e)
