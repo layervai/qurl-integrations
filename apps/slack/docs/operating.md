@@ -1173,3 +1173,27 @@ filter event = "async_pool_rejected"
 ```
 
 This event counts shared-pool rejections, including the slash-command busy acknowledgment. It does not count every command failure or rejection from a separate follow-up gate. Group by `command` when you need the slash-command breakdown; rejections without that field appear in an empty group. Check request latency and dependency health before raising concurrency limits.
+
+## OAuth state-write latency
+
+The state-write telemetry for issue #935 emits JSON `msg="oauth state put"`
+with only numeric `duration_ms` and a fixed `result`: `success`, `timeout`,
+`canceled`, or `error`. It measures the `PutState` call, including SDK retries
+and transport time. It does not measure the full Slack acknowledgement. No
+state handle, nonce, PKCE verifier, email, team/user ID, or error text is logged.
+
+When the source and paired infra change are adopted, `OAuthStatePutDurationMs`
+is materialized in the environment-qualified Slack runtime namespace, without
+metric dimensions. A Maximum of at least 1000 ms in one 60-second window alerts
+the existing runtime alerts topic. This warns before the 2-second state-store
+write timeout consumes nearly all of the roughly 3-second acknowledgement
+budget after an owner check that can take 800 ms. A missing metric is unknown,
+not proof of a fast or healthy write. Check the deployed source and filter
+before relying on this signal.
+
+On an alert, compare `duration_ms` with `result` in the matching log records.
+Check DynamoDB throttling/capacity, SDK retries, network paths and request
+cancellation first. A fast `error` result identifies a state-write failure but
+does not by itself trigger this latency alarm. Do not extend the write timeout
+or log the state payload to diagnose it. Check ownership-gate and delivery
+latency separately before claiming the full acknowledgement is healthy.
