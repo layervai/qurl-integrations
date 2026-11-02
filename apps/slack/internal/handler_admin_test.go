@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -75,19 +76,7 @@ func TestHandleAdminAdd_AlreadyAdmin(t *testing.T) {
 	}
 }
 
-// TestHandleAdminAdd_WorkspaceNotBound fences the 404 surface at the
-// slackdata layer: a pre-claim workspace returns ErrCodeWorkspaceNotBound.
-//
-// Coverage gap (known, not fixed): the handler-layer mapping of that
-// store error to the user-visible "Workspace isn't bound — run
-// `/qurl setup <email>` first" copy isn't fenced end-to-end here, because
-// requireAdminSync short-circuits on the same missing row (CheckAdmin
-// returns isAdmin=false → "admin-only" reply). The handler arm IS
-// marked "unreachable in practice; kept for safety against gate
-// refactors" — if a future refactor flips the gate to allow non-admins
-// through, this test would still pin the store contract but the user
-// copy could drift. Acceptable trade for not introducing an AdminStore
-// interface just for this fence.
+// Deleting a binding after authorization must invalidate the captured scope.
 func TestHandleAdminAdd_WorkspaceNotBound(t *testing.T) {
 	ts := newAdminTestServers(t)
 	// Capture authority, then delete the binding to exercise disappearance
@@ -106,8 +95,8 @@ func TestHandleAdminAdd_WorkspaceNotBound(t *testing.T) {
 	if !errors.As(err, &se) {
 		t.Fatalf("expected *slackdata.Error, got %T", err)
 	}
-	if se.StatusCode != http.StatusNotFound || se.Code != slackdata.ErrCodeWorkspaceNotBound {
-		t.Errorf("status=%d code=%q, want 404 / %q", se.StatusCode, se.Code, slackdata.ErrCodeWorkspaceNotBound)
+	if se.StatusCode != http.StatusConflict || se.Code != slackdata.ErrCodePolicyWorkspaceChanged {
+		t.Errorf("status=%d code=%q, want 409 / %q", se.StatusCode, se.Code, slackdata.ErrCodePolicyWorkspaceChanged)
 	}
 }
 
@@ -128,7 +117,7 @@ func TestAddAdmin_DisambiguationCantConfirmMembership(t *testing.T) {
 
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
 	fixturePolicyCtx := testPolicyFixtureContext(t, store, testAdminTeamID)
-	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("injected CCFE")})
+	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, currentWorkspaceConflict(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID))
 	err := store.AddAdmin(fixturePolicyCtx, testAdminTeamID, testTargetUserID)
 	if err == nil {
 		t.Fatal("AddAdmin returned nil error; expected unverified surface")
@@ -158,7 +147,7 @@ func TestHandleAdminAdd_Unverified(t *testing.T) {
 	// disambiguation read sees the row WITHOUT the target on the
 	// SS — surfaces as ErrCodeAdminAddUnverified.
 	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
-	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("injected CCFE")})
+	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, currentWorkspaceConflict(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID))
 
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
@@ -390,7 +379,7 @@ func TestHandleAdminTransferOwnership_EnterpriseIDPassedToLookup(t *testing.T) {
 	}
 }
 
-func TestHandleAdminTransferOwnership_RacedOwnerChangeReturnsOwnerOnly(t *testing.T) {
+func TestHandleAdminTransferOwnership_MissingConflictSnapshotRequiresRetry(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
 	h := newAdminTestHandler(t, ts)
@@ -408,8 +397,8 @@ func TestHandleAdminTransferOwnership_RacedOwnerChangeReturnsOwnerOnly(t *testin
 	inv := newAdminSlashInvoker(t, h)
 
 	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
-	if !strings.Contains(reply, "owner-only") || !strings.Contains(reply, "/qurl-admin admins") {
-		t.Fatalf("reply missing raced-owner surface: %q", reply)
+	if !strings.Contains(reply, "Workspace permissions changed") {
+		t.Fatalf("reply missing retry surface for missing conflict snapshot: %q", reply)
 	}
 	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
 	if err != nil {
@@ -1515,4 +1504,14 @@ func TestPolicyAuthorizationGateRaceReplies(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Caller-condition failures include ALL_OLD so authority can be checked separately.
+func currentWorkspaceConflict(t *testing.T, store *slackdata.Store, team string) error {
+	t.Helper()
+	row, err := store.Client.GetItem(context.Background(), &dynamodb.GetItemInput{TableName: stringPtr(store.WorkspaceMappingsName), Key: map[string]ddbtypes.AttributeValue{"slack_team_id": &ddbtypes.AttributeValueMemberS{Value: team}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("injected caller condition"), Item: row.Item}
 }

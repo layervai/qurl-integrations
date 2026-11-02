@@ -147,3 +147,8 @@ with 10–20 ms jitter between calls and the caller's deadline. Unknown reasons,
 validation errors and throttling are not retried by this read loop. Persistent
 conflicts still fail closed. Measure workspace-wide conflict rates and latency;
 this bounded retry does not replace the rollout capacity gate.
+
+Channel enumeration uses Query only to discover resource matches. Each match is
+checked through the paired workspace/policy snapshot before returning its channel
+ID. Budget one transactional read per candidate channel, including bounded
+conflict retries; measure large-workspace Edit/revoke latency before rollout.

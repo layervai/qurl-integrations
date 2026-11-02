@@ -73,6 +73,10 @@ func TestPolicyReadLineageDynamoDBLocal(t *testing.T) {
 					_, ok := ids["r_previous"]
 					return ok, err
 				},
+				"enumeration": func() (bool, error) {
+					channels, err := store.ChannelsForResource(ctx, team, "r_previous")
+					return len(channels) != 0, err
+				},
 				"resolve": func() (bool, error) { return store.ResolvePolicy(ctx, team, channel, "r_previous") },
 				"alias": func() (bool, error) {
 					_, ok, err := store.LookupChannelAlias(ctx, team, channel, "old")

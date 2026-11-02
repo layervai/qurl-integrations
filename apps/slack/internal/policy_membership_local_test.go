@@ -32,7 +32,7 @@ func (d *workspaceMutationBoundaryDDB) UpdateItem(ctx context.Context, in *dynam
 
 func TestPolicySignedMembershipDynamoDBLocal(t *testing.T) {
 	for _, operation := range []string{"add", "remove"} {
-		for _, mode := range []string{"unchanged", "caller removed", "reinstalled"} {
+		for _, mode := range []string{"unchanged", "caller removed", "reinstalled", "binding deleted"} {
 			t.Run(operation+"/"+mode, func(t *testing.T) {
 				client, workspaceTable, policyTable := testddb.New(t)
 				boundary := &workspaceMutationBoundaryDDB{Client: client}
@@ -59,6 +59,10 @@ func TestPolicySignedMembershipDynamoDBLocal(t *testing.T) {
 					switch mode {
 					case "caller removed":
 						if err := store.RemoveAdmin(owner.Context(ctx), team, testAdminUserID); err != nil {
+							t.Error(err)
+						}
+					case "binding deleted":
+						if err := store.DeleteWorkspaceMapping(ctx, team); err != nil {
 							t.Error(err)
 						}
 					case "reinstalled":
@@ -93,6 +97,12 @@ func TestPolicySignedMembershipDynamoDBLocal(t *testing.T) {
 				row, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(workspaceTable), Key: map[string]ddbtypes.AttributeValue{"slack_team_id": &ddbtypes.AttributeValueMemberS{Value: team}}, ConsistentRead: aws.Bool(true)})
 				if err != nil {
 					t.Fatal(err)
+				}
+				if mode == "binding deleted" {
+					if len(row.Item) != 0 || !strings.Contains(reply, "Workspace permissions changed") {
+						t.Fatalf("deleted binding was recreated or misreported: row=%v reply=%q", row.Item, reply)
+					}
+					return
 				}
 				admins, _ := row.Item["admin_slack_user_ids"].(*ddbtypes.AttributeValueMemberSS)
 				found := false

@@ -65,19 +65,15 @@ func TestSetAgentEnabled_WritesExplicitBool(t *testing.T) {
 	}
 }
 
-func TestSetAgentEnabled_UnboundWorkspaceIs404(t *testing.T) {
-	// The conditional-check failure (no row) must surface as a 404 with setup
-	// guidance — not the generic 503 — so the admin learns to run /qurl setup.
+func TestSetAgentEnabled_DeletedBindingRequiresFreshAuthorization(t *testing.T) {
+	// A deleted binding invalidates captured authority; no caller-condition fallback.
 	st := newStore(&stubDDB{updateItemFn: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
 		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("no row")}
 	}})
 	err := st.SetAgentEnabled(unitPolicyContext(t, st), "T1", true)
 	var se *Error
-	if !errors.As(err, &se) || se.StatusCode != http.StatusNotFound {
-		t.Fatalf("CCFE = %v, want 404 *Error", err)
-	}
-	if !strings.Contains(strings.ToLower(se.Title), "setup") {
-		t.Errorf("404 Title = %q, want it to mention setup", se.Title)
+	if !errors.As(err, &se) || se.StatusCode != http.StatusConflict || se.Code != ErrCodePolicyWorkspaceChanged {
+		t.Fatalf("CCFE = %v, want authorization conflict", err)
 	}
 }
 

@@ -110,10 +110,8 @@ func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channe
 // (teamID, channelID). Missing row → false (no policy = no access).
 //
 // The old HTTP shape returned a `bool` and an error; same shape here.
-// Eventual-consistency read is intentional — `/qurl get` and `/qurl
-// aliases` tolerate ~few-second propagation lag after a fresh
-// setalias mutation; strong reads would double RCU cost without
-// changing failure modes that matter.
+// Read policy and binding in one transactional snapshot, so a retired
+// installation cannot authorize a request while cleanup is still pending.
 func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID string) (bool, error) {
 	if teamID == "" || channelID == "" || resourceID == "" {
 		return false, &Error{
@@ -344,7 +342,8 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	// allowed_resource_ids grant but no aliases — and that SS-only row still needs
 	// purging. Matches the other reads on this table (small row).
 	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
+		TableName:      aws.String(s.ChannelPoliciesName),
+		ConsistentRead: aws.Bool(true),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),
@@ -412,6 +411,17 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 		in.ExpressionAttributeValues[":removed_resource"] = stringAttr(resourceID)
 	}
 	if err := s.updatePolicy(ctx, in); err != nil {
+		var condition *ddbtypes.ConditionalCheckFailedException
+		if errors.As(err, &condition) {
+			// Retired-row cleanup may already have removed every reference.
+			current, readErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: in.TableName, Key: in.Key, ConsistentRead: aws.Bool(true)})
+			if readErr != nil {
+				return nil, ddbToError("PurgeResourceFromChannel.reconcile", readErr)
+			}
+			if len(current.Item) == 0 {
+				return aliasKeys, nil
+			}
+		}
 		return nil, ddbToError("PurgeResourceFromChannel", err)
 	}
 	return aliasKeys, nil
@@ -465,7 +475,15 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 		for _, item := range out.Items {
 			channelID := readString(item, attrSlackChannelID)
 			if channelID != "" && channelItemAllowsResource(item, resourceID) {
-				channels = append(channels, channelID)
+				// Query only discovers candidates. Recheck each match atomically with
+				// its binding before disclosing a channel or planning a revoke.
+				ids, readErr := s.AllowedResourceIDsForChannel(ctx, teamID, channelID)
+				if readErr != nil {
+					return nil, readErr
+				}
+				if _, allowed := ids[resourceID]; allowed {
+					channels = append(channels, channelID)
+				}
 			}
 		}
 		if len(out.LastEvaluatedKey) == 0 {

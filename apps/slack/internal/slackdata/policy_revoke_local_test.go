@@ -58,3 +58,29 @@ func TestPolicyRevokeDynamoDBLocalAliasReboundAtCommit(t *testing.T) {
 		t.Fatal("retry retained dead grant")
 	}
 }
+
+func TestPolicyRevokeDynamoDBLocalRetiredRowReportsSuccess(t *testing.T) {
+	store, client := localPolicyStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	const team, channel = "TRETIRED01", "CRETIRE01"
+	if err := store.BindWorkspace(ctx, &WorkspaceMapping{TeamID: team, OwnerID: testOwnerSlackID}, testOwnerSlackID); err != nil {
+		t.Fatal(err)
+	}
+	actor, err := store.AuthorizePolicyWrite(ctx, team, testOwnerSlackID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(team), attrSlackChannelID: stringAttr(channel)}
+	item := map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(team), attrSlackChannelID: stringAttr(channel), attrPolicyInstallation: stringAttr("retired"), attrAllowedResourceIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dead"}}}
+	if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(store.ChannelPoliciesName), Item: item}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PurgeResourceFromChannel(actor.Context(ctx), team, channel, "r_dead"); err != nil {
+		t.Fatalf("completed cleanup reported failure: %v", err)
+	}
+	row, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(store.ChannelPoliciesName), Key: key, ConsistentRead: aws.Bool(true)})
+	if err != nil || len(row.Item) != 0 {
+		t.Fatalf("retired row retained: %+v %v", row, err)
+	}
+}

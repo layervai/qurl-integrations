@@ -655,8 +655,8 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 }
 
 func TestTransferOwnership_DisambiguatesConditionalFailure(t *testing.T) {
-	conditionalFailed := func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("raced")}
+	conditionalFailed := func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("raced"), Item: map[string]ddbtypes.AttributeValue{attrOwnerID: in.ExpressionAttributeValues[":authorized_owner"], attrPolicyGeneration: in.ExpressionAttributeValues[":authorized_generation"], attrPolicyInstallation: in.ExpressionAttributeValues[":authorized_installation"], attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{readString(in.ExpressionAttributeValues, ":authorized_caller")}}}}
 	}
 
 	t.Run("current owner changed after gate", func(t *testing.T) {
@@ -1116,6 +1116,13 @@ func TestExposeRevokeChannel_RejectEmptyArgs(t *testing.T) {
 func TestChannelsForResource_UnionSortAndQueryShape(t *testing.T) {
 	var got *dynamodb.QueryInput
 	store := newStore(&stubDDB{
+		getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			channel := readString(in.Key, attrSlackChannelID)
+			if channel == "C_alias" {
+				return &dynamodb.GetItemOutput{Item: channelPolicyRow(channel, nil, map[string]string{"dash": testTargetResourceID})}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: channelPolicyRow(channel, []string{testTargetResourceID}, nil)}, nil
+		},
 		queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
 			got = in
 			return &dynamodb.QueryOutput{Items: []map[string]ddbtypes.AttributeValue{
@@ -1149,6 +1156,13 @@ func TestChannelsForResource_UnionSortAndQueryShape(t *testing.T) {
 func TestChannelsForResource_PagesAllResults(t *testing.T) {
 	page := 0
 	store := newStore(&stubDDB{
+		getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			channel := readString(in.Key, attrSlackChannelID)
+			if channel == "C_alias" {
+				return &dynamodb.GetItemOutput{Item: channelPolicyRow(channel, nil, map[string]string{"dash": testTargetResourceID})}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: channelPolicyRow(channel, []string{testTargetResourceID}, nil)}, nil
+		},
 		queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
 			page++
 			if page == 1 {

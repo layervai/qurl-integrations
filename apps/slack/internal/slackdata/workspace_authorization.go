@@ -36,7 +36,7 @@ func (s *Store) updateAuthorizedWorkspace(ctx context.Context, in *dynamodb.Upda
 	guarded.ReturnValuesOnConditionCheckFailure = ddbtypes.ReturnValuesOnConditionCheckFailureAllOld
 	_, err := s.Client.UpdateItem(ctx, &guarded)
 	var conflict *ddbtypes.ConditionalCheckFailedException
-	if errors.As(err, &conflict) && len(conflict.Item) != 0 && !matchesPolicyAuthorization(conflict.Item, &authorization) {
+	if errors.As(err, &conflict) && !matchesPolicyAuthorization(conflict.Item, &authorization) {
 		return policyWorkspaceChanged()
 	}
 	return err
