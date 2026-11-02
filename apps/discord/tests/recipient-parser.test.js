@@ -269,7 +269,7 @@ describe('parseRecipientMentions — role mentions', () => {
       roles: { '7000': { members: ['101'], mentionable: true } },
     });
     expect(parseRecipientMentions('<@101> <@&7000>', int))
-      .toMatchObject({ ids: ['101'], invalidTokens: [], cappedCount: 0 });
+      .toMatchObject({ ids: ['101'], invalidTokens: [], cappedCount: 0, roleMentionsDenied: [] });
   });
 
   test('role mention repeated in input expands once (no double-counting)', () => {
@@ -786,6 +786,7 @@ describe('role fixture permission defaults', () => {
     const result = parseRecipientMentions('<@&7000>', int);
     expect(result.ids).toEqual([]);
     expect(result.roleMentionsDenied).toEqual(['7000']);
+    expect(result.invalidTokens).toEqual([]);
   });
 });
 

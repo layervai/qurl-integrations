@@ -474,6 +474,7 @@ describe('resolveMentionableSelection', () => {
       pickedRoles: [makeRole({ mentionable: true, id: 'role-eng', members: [{ user: u1 }] })],
     });
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.roleMentionsDenied).toEqual([]);
     expect(r.users.map((u) => u.id)).toEqual([u1.id]);
   });
 
@@ -633,6 +634,7 @@ describe('resolveMentionableSelection', () => {
       pickedRoles: [role],
     });
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.roleMentionsDenied).toEqual([]);
     expect(r.users.length).toBe(1);
     expect(r.users[0]).toBe(u1Picked);
     expect(r.users[0]).not.toBe(u1FromRole);
@@ -650,6 +652,7 @@ describe('resolveMentionableSelection', () => {
       pickedRoles: [role],
     });
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.roleMentionsDenied).toEqual([]);
     expect(r.users.map((u) => u.id)).toEqual([bot1.id]);
     expect(r.droppedFromRoles).toBe(0);
   });
