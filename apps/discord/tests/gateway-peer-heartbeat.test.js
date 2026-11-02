@@ -345,17 +345,16 @@ describe('default constants', () => {
 });
 
 describe('peer heartbeat audit counters', () => {
-  const { AUDIT_EVENTS } = require('../src/constants');
 
   it('counts completed writes and transport failures while preserving the error', async () => {
     const { heartbeat, ddbMock, logger } = makeHeartbeat();
     ddbMock.on(PutCommand).resolves({});
     await heartbeat.writeHeartbeat();
-    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.GATEWAY_PEER_HEARTBEAT_WRITE, { shard_id: '0:1', instance_id: 'inst-A', result: 'written' });
+    expect(logger.audit).toHaveBeenLastCalledWith('gateway_peer_heartbeat_writes_total', { shard_id: '0:1', instance_id: 'inst-A', result: 'written' });
     const failure = new Error('DDB unavailable');
     ddbMock.on(PutCommand).rejects(failure);
     await expect(heartbeat.writeHeartbeat()).rejects.toBe(failure);
-    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.GATEWAY_PEER_HEARTBEAT_WRITE_ERROR, { shard_id: '0:1', instance_id: 'inst-A', result: 'error' });
+    expect(logger.audit).toHaveBeenLastCalledWith('gateway_peer_heartbeat_write_errors_total', { shard_id: '0:1', instance_id: 'inst-A', result: 'error' });
     expect(logger.audit).toHaveBeenCalledTimes(2);
   });
 });

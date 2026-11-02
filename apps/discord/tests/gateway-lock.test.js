@@ -448,7 +448,6 @@ describe('default TTL', () => {
 });
 
 describe('gateway lock audit counters', () => {
-  const { AUDIT_EVENTS } = require('../src/constants');
   const identity = { shard_id: '0:1', instance_id: 'inst-A' };
 
   it('counts successful acquisition and renewal, and only actual renewal CAS loss', async () => {
@@ -461,9 +460,9 @@ describe('gateway lock audit counters', () => {
     expect(await lock.renewLock()).toEqual({ renewed: false });
     expect(await lock.renewLock()).toEqual({ renewed: false });
     expect(logger.audit.mock.calls).toEqual([
-      [AUDIT_EVENTS.GATEWAY_LOCK_ACQUIRED, { ...identity, result: 'acquired' }],
-      [AUDIT_EVENTS.GATEWAY_LOCK_RENEWED, { ...identity, result: 'renewed' }],
-      [AUDIT_EVENTS.GATEWAY_LOCK_LOST_CAS, { ...identity, result: 'cas_failed' }],
+      ['gateway_lock_acquired_total', { ...identity, result: 'acquired' }],
+      ['gateway_lock_renewed_total', { ...identity, result: 'renewed' }],
+      ['gateway_lock_lost_cas_total', { ...identity, result: 'cas_failed' }],
     ]);
   });
 
@@ -490,6 +489,6 @@ describe('gateway lock audit counters', () => {
     logger.audit.mockClear();
     if (result === 'released') expect(await lock.releaseLock()).toEqual({ released: true });
     else expect(await lock.transferLock('inst-B', 'task-B/inst-B')).toMatchObject({ transferred: true });
-    expect(logger.audit.mock.calls).toEqual([[AUDIT_EVENTS.GATEWAY_LOCK_RELEASED, { ...identity, result }]]);
+    expect(logger.audit.mock.calls).toEqual([['gateway_lock_released_total', { ...identity, result }]]);
   });
 });

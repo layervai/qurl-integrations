@@ -281,7 +281,11 @@ const AUDIT_EVENTS = {
   // See commands.js handleCommand for the precedence table.
   INTERACTION_HANDLED: 'interaction_handled',
 
-  // TODO(upstream-contract): gateway coordination filters and alarm in the infra repo.
+  // TODO(upstream-contract): infra qurl-bot-discord/terraform/monitoring.tf filters
+  // these literal counter names; only renewal CAS loss pages. Keep identity/result
+  // in logs, not metric dimensions. Transfers count as releases, not fresh acquires:
+  // acquire minus release is not a held-lock gauge. At 2 s cadence, two replicas
+  // emit about 130k renewal/write audit lines per shard per day.
   GATEWAY_LOCK_ACQUIRED: 'gateway_lock_acquired_total',
   GATEWAY_LOCK_RENEWED: 'gateway_lock_renewed_total',
   GATEWAY_LOCK_LOST_CAS: 'gateway_lock_lost_cas_total',

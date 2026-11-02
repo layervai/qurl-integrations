@@ -104,7 +104,6 @@ const { AUDIT_EVENTS } = require('./constants');
 // Lease duration in seconds. 6 s sets the cold-fallback floor at
 // ~6 s + RESUME RTT ≈ 7 s. Paired with the 2 s renew cadence elsewhere
 // — three missed renewals = lock becomes acquirable by a peer.
-
 const DEFAULT_TTL_SECONDS = 6;
 
 function createGatewayLock({
