@@ -643,63 +643,121 @@ func TestRevokeResource_PurgesOnReadGone(t *testing.T) {
 // TestRevokeResource_ReadAuthRejected fences the read-side 401/403 arm: setup
 // guidance, no DELETE, and bindings kept (auth failure proves nothing is gone).
 func TestRevokeResource_ReadAuthRejected(t *testing.T) {
-	ts := newAdminTestServers(t)
-	seedRevokeAlias(t, ts)
-	ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(revokeUnauthorizedBody))
-	})
-	refuseRevokeDelete(t, ts, testRevokeResourceID, "after the read was auth-rejected")
-	h := newAdminTestHandler(t, ts)
-
-	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
-	if !strings.Contains(msg, "API key was rejected") {
-		t.Errorf("read 401 message = %q, want setup guidance", msg)
-	}
-	if !revokeAliasBound(t, h) {
-		t.Errorf("alias %q purged after an auth-rejected read", testRevokeAlias)
-	}
-}
-
-// TestRevokeResource_MalformedReadFailsClosed fences a 200 read with no
-// data.resource: the admin gets the generic inspect failure and no DELETE runs.
-func TestRevokeResource_MalformedReadFailsClosed(t *testing.T) {
-	ts := newAdminTestServers(t)
-	seedRevokeAlias(t, ts)
-	ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
-		respondQURLEnvelope(t, w, map[string]any{"qurls": []any{}})
-	})
-	refuseRevokeDelete(t, ts, testRevokeResourceID, "after a malformed resource read")
-	h := newAdminTestHandler(t, ts)
-
-	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
-	if !strings.Contains(msg, "Failed to inspect") {
-		t.Errorf("malformed read message = %q, want the inspect failure", msg)
-	}
-	if strings.Contains(msg, "data.resource") {
-		t.Errorf("malformed read message leaked the raw contract error: %q", msg)
-	}
-	// Unlike read-404, a malformed read proves nothing is gone, so bindings stay.
-	if !revokeAliasBound(t, h) {
-		t.Errorf("alias %q purged after a malformed read", testRevokeAlias)
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			seedRevokeAlias(t, ts)
+			ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(revokeUnauthorizedBody))
+			})
+			ts.addCustomer(http.MethodPut, "/v1/resources/"+testRevokeResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+				t.Error("sharing attempted after read auth rejection")
+				w.WriteHeader(http.StatusForbidden)
+			})
+			refuseRevokeDelete(t, ts, testRevokeResourceID, "after the read was auth-rejected")
+			h := newAdminTestHandler(t, ts)
+			result := h.revokeResourceResult(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+			if result.audit.success || !strings.Contains(result.cardText, "API key was rejected") {
+				t.Errorf("read auth rejection result = %+v, want failure and setup guidance", result)
+			}
+			if !revokeAliasBound(t, h) {
+				t.Error("alias purged after auth-rejected read")
+			}
+		})
 	}
 }
 
-// TestRevokeResource_UnknownTypeRefusesDelete pins the current default arm: an
-// unrecognized resource type refuses the revoke rather than guessing teardown.
-func TestRevokeResource_UnknownTypeRefusesDelete(t *testing.T) {
-	ts := newAdminTestServers(t)
-	seedRevokeAlias(t, ts)
-	addRevokeResourceRead(t, ts, testRevokeResourceID, "future_type")
-	refuseRevokeDelete(t, ts, testRevokeResourceID, "for an unrecognized resource type")
-	h := newAdminTestHandler(t, ts)
+const testRevokeUnknownType = "future_type"
 
-	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
-	if !strings.Contains(msg, "not recognized") {
-		t.Errorf("unknown type message = %q, want the unrecognized-type failure", msg)
-	}
-	if !revokeAliasBound(t, h) {
-		t.Errorf("alias %q purged after a refused revoke", testRevokeAlias)
+// Inspection is advisory for an authorized revoke; DELETE decides success.
+func TestRevokeResource_InspectionFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name, resourceType                      string
+		readStatus, sharingStatus, deleteStatus int
+	}{
+		{"future type", testRevokeUnknownType, 200, 200, 204},
+		{"transit type", "transit", 200, 200, 204},
+		{"malformed read", "", 200, 200, 204},
+		{"read unavailable", "", 500, 200, 204},
+		{"read rate limited", "", 429, 200, 204},
+		{"read transport failure", "", 0, 200, 204},
+		{"best effort sharing failure", testRevokeUnknownType, 200, 500, 204},
+		{"unknown type has no sharing endpoint", "transit", 200, 404, 204},
+		{"optional sharing unauthorized", testRevokeUnknownType, 200, 401, 204},
+		{"optional sharing forbidden", "transit", 200, 403, 204},
+		{"delete failed", testRevokeUnknownType, 200, 200, 500},
+		{"delete unauthorized", testRevokeUnknownType, 200, 200, 401},
+		{"delete forbidden", testRevokeUnknownType, 200, 200, 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testRevokeAlias: testTunnelResourceID})
+			if tc.resourceType != "" {
+				addRevokeResourceRead(t, ts, testTunnelResourceID, tc.resourceType)
+			} else {
+				ts.addCustomer(http.MethodGet, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, _ *http.Request) {
+					if tc.readStatus == 0 {
+						conn, _, err := w.(http.Hijacker).Hijack()
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						_ = conn.Close()
+						return
+					}
+					w.WriteHeader(tc.readStatus)
+					_, _ = w.Write([]byte(`{"error":{"title":"Upstream","detail":"private-upstream-detail"}}`))
+				})
+			}
+			var sharing, deletes atomic.Int32
+			ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, r *http.Request) {
+				var in struct {
+					DesiredState string `json:"desired_state"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.DesiredState != "off" {
+					t.Errorf("sharing request = %+v (%v), want off", in, err)
+				}
+				sharing.Add(1)
+				if tc.sharingStatus != 200 {
+					w.WriteHeader(tc.sharingStatus)
+					return
+				}
+				respondQURLEnvelope(t, w, map[string]any{
+					"resource_id": testTunnelResourceID, "crid": testTunnelCRID,
+					"desired_state": "off", "serving_epoch": 1, "connection_state": "stopped",
+				})
+			})
+			ts.addCustomer(http.MethodDelete, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer test-key" {
+					t.Error("DELETE omitted workspace authentication")
+				}
+				if sharing.Load() == 0 {
+					t.Error("DELETE preceded the best-effort sharing stop")
+				}
+				deletes.Add(1)
+				w.WriteHeader(tc.deleteStatus)
+			})
+			h := newAdminTestHandler(t, ts)
+			result := h.revokeResourceResult(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testTunnelResourceID, testRevokeAlias)
+			if sharing.Load() == 0 || deletes.Load() == 0 {
+				t.Errorf("sharing calls=%d, deletes=%d; want both", sharing.Load(), deletes.Load())
+			}
+			wantSuccess := tc.deleteStatus == http.StatusNoContent
+			if result.audit.success != wantSuccess {
+				t.Errorf("audit success=%v, want %v", result.audit.success, wantSuccess)
+			}
+			if wantSuccess && (!strings.Contains(result.cardText, "Revoked") || !strings.Contains(result.cardText, "Lifecycle checks were incomplete")) {
+				t.Errorf("missing degraded success: %q", result.cardText)
+			}
+			if strings.Contains(result.cardText, "private-upstream-detail") {
+				t.Errorf("reply leaked upstream detail: %q", result.cardText)
+			}
+			if revokeAliasBound(t, h) == wantSuccess {
+				t.Errorf("alias bound=%v after success=%v", revokeAliasBound(t, h), wantSuccess)
+			}
+		})
 	}
 }
 
