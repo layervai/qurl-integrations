@@ -23,7 +23,7 @@ const revokeUsageMessage = "Usage: `/qurl-admin revoke $<id>` — revoke a prote
 const commonRevokeFailedMessage = "Failed to revoke the resource. Please try again."
 
 // revokeLifecycleUncertainNote qualifies a confirmed revoke with incomplete inspection.
-const revokeLifecycleUncertainNote = ":warning: Lifecycle checks were incomplete."
+const revokeLifecycleUncertainNote = ":warning: Lifecycle checks were incomplete. Follow the workload teardown steps above."
 
 // revokeTeardownNote is appended only to successful revoke replies. It LEADS
 // with what revoke did do — qurl-service flips the resource to revoked (new
@@ -223,6 +223,7 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 	// even if a real tunnel's sharing stop also fails. Connector plumbing can remain;
 	// revokeTeardownNote explains manual teardown. Recognized tunnels still stop
 	// first to quiesce their serving state before DELETE.
+	// TODO(upstream-contract): qurl-service rejects non-tunnel sharing writes; DELETE authorizes independently.
 	if degradedReason != "" || resourceType == client.ResourceTypeTunnel {
 		if _, err := c.SetSharing(ctx, resourceID, "off"); err != nil {
 			var apiErr *client.APIError

@@ -670,7 +670,7 @@ func TestRevokeResource_ReadAuthRejected(t *testing.T) {
 
 const testRevokeUnknownType = "future_type"
 
-// Typed rows use a valid detail envelope; otherwise readStatus selects the
+// Typed rows use a valid detail envelope (readStatus is unused); otherwise it selects the
 // malformed/error response, with zero simulating a lost connection.
 // Inspection is advisory for an authorized revoke; DELETE decides success.
 func TestRevokeResource_InspectionFallback(t *testing.T) {
@@ -682,7 +682,7 @@ func TestRevokeResource_InspectionFallback(t *testing.T) {
 		{"transit type", "transit", 200, 200, 204},
 		{"malformed read", "", 200, 200, 204},
 		{"read unavailable", "", 500, 200, 204},
-		{"tunnel inspection and sharing unavailable", "", 500, 500, 204},
+		{"read and sharing unavailable", "", 500, 500, 204},
 		{"read unavailable then delete not found", "", 500, 200, 404},
 		{"read unavailable then delete gone", "", 500, 200, 410},
 		{"read rate limited", "", 429, 200, 204},
@@ -715,6 +715,10 @@ func TestRevokeResource_InspectionFallback(t *testing.T) {
 							return
 						}
 						_ = conn.Close()
+						return
+					}
+					if tc.readStatus == http.StatusOK {
+						respondQURLEnvelope(t, w, map[string]any{"qurls": []any{}})
 						return
 					}
 					w.WriteHeader(tc.readStatus)
@@ -762,7 +766,7 @@ func TestRevokeResource_InspectionFallback(t *testing.T) {
 				t.Errorf("audit success=%v, want %v", result.audit.success, wantSuccess)
 			}
 			if wantSuccess && (!strings.Contains(result.cardText, "Revoked") || !strings.Contains(result.cardText, "Lifecycle checks were incomplete") || !strings.Contains(result.audit.display, "Lifecycle checks were incomplete")) {
-				t.Errorf("missing degraded success: %q", result.cardText)
+				t.Errorf("missing degraded success: card=%q, audit=%q", result.cardText, result.audit.display)
 			}
 			if strings.Contains(result.cardText, "private-upstream-detail") || strings.Contains(result.cardText, "data.resource") {
 				t.Errorf("reply leaked upstream detail: %q", result.cardText)
