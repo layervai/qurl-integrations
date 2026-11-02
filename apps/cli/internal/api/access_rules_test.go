@@ -86,3 +86,23 @@ func TestAccessRulesIgnoresEnvelopeAdditionsButNotRuleFields(t *testing.T) {
 		}
 	}
 }
+
+func TestMintLimitedLinkPreservesServerLifetime(t *testing.T) {
+	for _, seconds := range []int{-1, 0, 60, 3600} {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", func(w http.ResponseWriter, _ *http.Request) {
+			data := map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "qurl_link": "https://qurl.link/at_test", "expires_at": "2020-01-01T00:00:00Z"}
+			if seconds >= 0 {
+				data["expires_in_seconds"] = seconds
+			}
+			apitest.WriteEnvelope(t, w, http.StatusCreated, data, nil)
+		})
+		link, err := newTestClient(t, srv, nil).MintLimitedLink(t.Context(), srv.Key.CRID, accessrules.LinkLimits{ExpiresIn: "1h"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if link.ExpiresInSeconds != max(0, seconds) {
+			t.Fatalf("lifetime = %d, want %d", link.ExpiresInSeconds, max(0, seconds))
+		}
+	}
+}
