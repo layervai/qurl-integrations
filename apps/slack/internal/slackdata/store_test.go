@@ -44,12 +44,13 @@ const (
 // boundary tests below — the cross-handler integration tests have a
 // fuller fakeDDB in the internal/ package.
 type stubDDB struct {
-	getItemFn    func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
-	putItemFn    func(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error)
-	updateItemFn func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
-	deleteItemFn func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error)
-	queryFn      func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error)
-	scanFn       func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error)
+	transactGetItemsFn func(*dynamodb.TransactGetItemsInput) (*dynamodb.TransactGetItemsOutput, error)
+	getItemFn          func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
+	putItemFn          func(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error)
+	updateItemFn       func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
+	deleteItemFn       func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error)
+	queryFn            func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error)
+	scanFn             func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error)
 }
 
 func (s *stubDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -617,7 +618,7 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 	})
 	now := time.Date(2026, 10, 31, 12, 34, 56, 123456789, time.FixedZone("test", -6*60*60))
 	store.Now = func() time.Time { return now }
-	if err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID); err != nil {
+	if err := store.TransferOwnership(unitPolicyContext(t, store), "T1", testOwnerSlackID, testOtherSlackID); err != nil {
 		t.Fatalf("TransferOwnership: %v", err)
 	}
 	if got == nil {
@@ -632,10 +633,10 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 	if stamp, ok := got.ExpressionAttributeValues[exprNow].(*ddbtypes.AttributeValueMemberS); !ok || stamp.Value != "2026-10-31T18:34:56Z" {
 		t.Fatalf("ownership transfer display stamp = %#v", got.ExpressionAttributeValues[exprNow])
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :owner_set" {
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET "+preserveBindingTimeUpdate+"owner_id = :new_owner, policy_generation = :policy_generation, updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :owner_set" {
 		t.Errorf("UpdateExpression = %q", exp)
 	}
-	if cond := aws.ToString(got.ConditionExpression); cond != "attribute_exists(slack_team_id) AND owner_id = :current_owner" {
+	if cond := aws.ToString(got.ConditionExpression); !strings.Contains(cond, "(attribute_exists(slack_team_id) AND owner_id = :current_owner AND attribute_exists(policy_installation))") || !strings.Contains(cond, "policy_generation = :authorized_generation") || !strings.Contains(cond, "policy_installation = :authorized_installation") {
 		t.Errorf("ConditionExpression = %q", cond)
 	}
 	if team, _ := got.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS); team == nil || team.Value != "T1" {
@@ -654,8 +655,8 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 }
 
 func TestTransferOwnership_DisambiguatesConditionalFailure(t *testing.T) {
-	conditionalFailed := func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("raced")}
+	conditionalFailed := func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("raced"), Item: map[string]ddbtypes.AttributeValue{attrOwnerID: in.ExpressionAttributeValues[":authorized_owner"], attrPolicyGeneration: in.ExpressionAttributeValues[":authorized_generation"], attrPolicyInstallation: in.ExpressionAttributeValues[":authorized_installation"], attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{readString(in.ExpressionAttributeValues, ":authorized_caller")}}}}
 	}
 
 	t.Run("current owner changed after gate", func(t *testing.T) {
@@ -670,7 +671,7 @@ func TestTransferOwnership_DisambiguatesConditionalFailure(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID)
+		err := store.TransferOwnership(unitPolicyContext(t, store), "T1", testOwnerSlackID, testOtherSlackID)
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -693,7 +694,7 @@ func TestTransferOwnership_DisambiguatesConditionalFailure(t *testing.T) {
 				return &dynamodb.GetItemOutput{}, nil
 			},
 		})
-		err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID)
+		err := store.TransferOwnership(unitPolicyContext(t, store), "T1", testOwnerSlackID, testOtherSlackID)
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -713,7 +714,7 @@ func TestTransferOwnership_DisambiguatesConditionalFailure(t *testing.T) {
 				return nil, errors.New("transport blip")
 			},
 		})
-		err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID)
+		err := store.TransferOwnership(unitPolicyContext(t, store), "T1", testOwnerSlackID, testOtherSlackID)
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -876,7 +877,7 @@ func TestLookupChannelAlias_HappyPath(t *testing.T) {
 	if aws.ToString(captured.TableName) != "cp" {
 		t.Errorf("TableName = %q, want cp", aws.ToString(captured.TableName))
 	}
-	if aws.ToString(captured.ProjectionExpression) != "#ab.#a" {
+	if aws.ToString(captured.ProjectionExpression) != "#ab.#a, #read_policy_installation" {
 		t.Errorf("ProjectionExpression = %q, want #ab.#a (single map key, not the full row)", aws.ToString(captured.ProjectionExpression))
 	}
 	if captured.ExpressionAttributeNames["#ab"] != attrAliasBindings {
@@ -927,13 +928,13 @@ func TestBindChannelAlias_WritesAliasMapEntry(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	})
-	if err := store.BindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard", "r_prod_dash01"); err != nil {
+	if err := store.BindChannelAlias(unitPolicyContext(t, store), "T1", "C1", "prod-dashboard", "r_prod_dash01"); err != nil {
 		t.Fatalf("BindChannelAlias: %v", err)
 	}
 	if len(calls) != 2 {
 		t.Fatalf("UpdateItem calls = %d, want 2", len(calls))
 	}
-	if got := aws.ToString(calls[0].UpdateExpression); got != "SET #ab = :empty, updated_at = :now, updated_at_unix_nano = :now_nano" {
+	if got := aws.ToString(calls[0].UpdateExpression); got != "SET #policy_lineage = :policy_lineage, #ab = :empty, updated_at = :now, updated_at_unix_nano = :now_nano" {
 		t.Errorf("seed UpdateExpression = %q", got)
 	}
 	if now, ok := calls[0].ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
@@ -942,10 +943,10 @@ func TestBindChannelAlias_WritesAliasMapEntry(t *testing.T) {
 	if nowNano, ok := calls[0].ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
 		t.Errorf("seed :now_nano = %#v, want unix nanos", calls[0].ExpressionAttributeValues[":now_nano"])
 	}
-	if got := aws.ToString(calls[1].UpdateExpression); got != "SET #ab.#a = :rid, updated_at = :now, updated_at_unix_nano = :now_nano" {
+	if got := aws.ToString(calls[1].UpdateExpression); got != "SET #policy_lineage = :policy_lineage, #ab.#a = :rid, updated_at = :now, updated_at_unix_nano = :now_nano" {
 		t.Errorf("write UpdateExpression = %q", got)
 	}
-	if got := aws.ToString(calls[1].ConditionExpression); got != "attribute_not_exists(#ab.#a)" {
+	if got := aws.ToString(calls[1].ConditionExpression); !strings.Contains(got, "AND (attribute_not_exists(#ab.#a))") {
 		t.Errorf("write ConditionExpression = %q", got)
 	}
 	if calls[1].ExpressionAttributeNames["#ab"] != attrAliasBindings || calls[1].ExpressionAttributeNames["#a"] != "prod-dashboard" {
@@ -974,7 +975,7 @@ func TestBindChannelAlias_DuplicateReturnsSentinel(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	})
-	err := store.BindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard", "r_prod_dash01")
+	err := store.BindChannelAlias(unitPolicyContext(t, store), "T1", "C1", "prod-dashboard", "r_prod_dash01")
 	if !errors.Is(err, ErrAliasAlreadyBound) {
 		t.Fatalf("err = %v, want ErrAliasAlreadyBound", err)
 	}
@@ -986,7 +987,7 @@ func TestUnbindChannelAlias_NotFoundReturnsSentinel(t *testing.T) {
 			return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("missing")}
 		},
 	})
-	err := store.UnbindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard")
+	err := store.UnbindChannelAlias(unitPolicyContext(t, store), "T1", "C1", "prod-dashboard")
 	if !errors.Is(err, ErrAliasNotFound) {
 		t.Fatalf("err = %v, want ErrAliasNotFound", err)
 	}
@@ -1028,13 +1029,13 @@ func TestExposeResourceToChannel_AddsToAllowedSet(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	})
-	if err := store.ExposeResourceToChannel(context.Background(), "T1", "C9", "r_target01"); err != nil {
+	if err := store.ExposeResourceToChannel(unitPolicyContext(t, store), "T1", "C9", "r_target01"); err != nil {
 		t.Fatalf("ExposeResourceToChannel: %v", err)
 	}
 	if got == nil {
 		t.Fatal("UpdateItem not called")
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "SET updated_at = :now, updated_at_unix_nano = :now_nano ADD allowed_resource_ids :rids" {
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET #policy_lineage = :policy_lineage, updated_at = :now, updated_at_unix_nano = :now_nano ADD allowed_resource_ids :rids" {
 		t.Errorf("UpdateExpression = %q, want SET updated_at = :now, updated_at_unix_nano = :now_nano ADD allowed_resource_ids :rids", exp)
 	}
 	if tbl := aws.ToString(got.TableName); tbl != "cp" {
@@ -1068,13 +1069,13 @@ func TestRevokeResourceFromChannel_DeletesFromAllowedSet(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	})
-	if err := store.RevokeResourceFromChannel(context.Background(), "T1", "C9", "r_target01"); err != nil {
+	if err := store.RevokeResourceFromChannel(unitPolicyContext(t, store), "T1", "C9", "r_target01"); err != nil {
 		t.Fatalf("RevokeResourceFromChannel: %v", err)
 	}
 	if got == nil {
 		t.Fatal("UpdateItem not called")
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "SET updated_at = :now, updated_at_unix_nano = :now_nano DELETE allowed_resource_ids :rids" {
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET #policy_lineage = :policy_lineage, updated_at = :now, updated_at_unix_nano = :now_nano DELETE allowed_resource_ids :rids" {
 		t.Errorf("UpdateExpression = %q, want SET updated_at = :now, updated_at_unix_nano = :now_nano DELETE allowed_resource_ids :rids", exp)
 	}
 	if now, ok := got.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
@@ -1097,13 +1098,13 @@ func TestExposeRevokeChannel_RejectEmptyArgs(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil // unreachable after Fatal; non-nil to satisfy nilnil
 		},
 	})
-	if err := store.ExposeResourceToChannel(context.Background(), "", "C1", "r1"); err == nil {
+	if err := store.ExposeResourceToChannel(unitPolicyContext(t, store), "", "C1", "r1"); err == nil {
 		t.Error("ExposeResourceToChannel(empty team): want error")
 	}
-	if err := store.ExposeResourceToChannel(context.Background(), "T1", "C1", ""); err == nil {
+	if err := store.ExposeResourceToChannel(unitPolicyContext(t, store), "T1", "C1", ""); err == nil {
 		t.Error("ExposeResourceToChannel(empty resource): want error")
 	}
-	if err := store.RevokeResourceFromChannel(context.Background(), "T1", "", "r1"); err == nil {
+	if err := store.RevokeResourceFromChannel(unitPolicyContext(t, store), "T1", "", "r1"); err == nil {
 		t.Error("RevokeResourceFromChannel(empty channel): want error")
 	}
 }
@@ -1115,6 +1116,13 @@ func TestExposeRevokeChannel_RejectEmptyArgs(t *testing.T) {
 func TestChannelsForResource_UnionSortAndQueryShape(t *testing.T) {
 	var got *dynamodb.QueryInput
 	store := newStore(&stubDDB{
+		getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			channel := readString(in.Key, attrSlackChannelID)
+			if channel == "C_alias" {
+				return &dynamodb.GetItemOutput{Item: channelPolicyRow(channel, nil, map[string]string{"dash": testTargetResourceID})}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: channelPolicyRow(channel, []string{testTargetResourceID}, nil)}, nil
+		},
 		queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
 			got = in
 			return &dynamodb.QueryOutput{Items: []map[string]ddbtypes.AttributeValue{
@@ -1148,6 +1156,13 @@ func TestChannelsForResource_UnionSortAndQueryShape(t *testing.T) {
 func TestChannelsForResource_PagesAllResults(t *testing.T) {
 	page := 0
 	store := newStore(&stubDDB{
+		getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			channel := readString(in.Key, attrSlackChannelID)
+			if channel == "C_alias" {
+				return &dynamodb.GetItemOutput{Item: channelPolicyRow(channel, nil, map[string]string{"dash": testTargetResourceID})}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: channelPolicyRow(channel, []string{testTargetResourceID}, nil)}, nil
+		},
 		queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
 			page++
 			if page == 1 {
@@ -1234,7 +1249,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 			},
 		})
 
-		unbound, err := store.PurgeResourceFromChannel(context.Background(), "T1", "C1", deadID)
+		unbound, err := store.PurgeResourceFromChannel(unitPolicyContext(t, store), "T1", "C1", deadID)
 		if err != nil {
 			t.Fatalf("PurgeResourceFromChannel: %v", err)
 		}
@@ -1245,7 +1260,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 			t.Fatal("no UpdateItem issued")
 		}
 		expr := aws.ToString(captured.UpdateExpression)
-		if !strings.Contains(expr, "SET #updated_at = :now") {
+		if !strings.Contains(expr, "#updated_at = :now") {
 			t.Errorf("UpdateExpression missing updated_at SET: %q", expr)
 		}
 		if !strings.Contains(expr, "#updated_at_nano = :now_nano") {
@@ -1274,7 +1289,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 		// REMOVE — it must be the STALE alias, never the survivor.
 		var removed []string
 		for ref, name := range captured.ExpressionAttributeNames {
-			if ref == exprAliasBindings || name == attrUpdatedAt || name == attrUpdatedAtNano {
+			if ref == exprAliasBindings || name == attrUpdatedAt || name == attrUpdatedAtNano || name == attrSlackTeamID || name == attrPolicyInstallation {
 				continue
 			}
 			removed = append(removed, name)
@@ -1300,7 +1315,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 				return &dynamodb.UpdateItemOutput{}, nil
 			},
 		})
-		unbound, err := store.PurgeResourceFromChannel(context.Background(), "T1", "C1", deadID)
+		unbound, err := store.PurgeResourceFromChannel(unitPolicyContext(t, store), "T1", "C1", deadID)
 		if err != nil {
 			t.Fatalf("PurgeResourceFromChannel: %v", err)
 		}
@@ -1332,7 +1347,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 				return &dynamodb.UpdateItemOutput{}, nil
 			},
 		})
-		unbound, err := store.PurgeResourceFromChannel(context.Background(), "T1", "C1", deadID)
+		unbound, err := store.PurgeResourceFromChannel(unitPolicyContext(t, store), "T1", "C1", deadID)
 		if err != nil {
 			t.Fatalf("PurgeResourceFromChannel: %v", err)
 		}
@@ -1347,7 +1362,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 	t.Run("missing args rejected", func(t *testing.T) {
 		store := newStore(&stubDDB{})
 		for _, args := range [][3]string{{"", "C1", deadID}, {"T1", "", deadID}, {"T1", "C1", ""}} {
-			if _, err := store.PurgeResourceFromChannel(context.Background(), args[0], args[1], args[2]); err == nil {
+			if _, err := store.PurgeResourceFromChannel(unitPolicyContext(t, store), args[0], args[1], args[2]); err == nil {
 				t.Errorf("PurgeResourceFromChannel(%q,%q,%q): want bad-request error", args[0], args[1], args[2])
 			}
 		}
@@ -1439,7 +1454,7 @@ func TestDeleteWorkspaceMapping(t *testing.T) {
 		if err := store.DeleteWorkspaceMappingBefore(context.Background(), "T1", cutoff); err != nil {
 			t.Fatalf("DeleteWorkspaceMappingBefore: %v", err)
 		}
-		if got := aws.ToString(captured.ConditionExpression); got != purgeCutoffCondition {
+		if got := aws.ToString(captured.ConditionExpression); got != bindingPurgeCutoffCondition {
 			t.Fatalf("ConditionExpression = %q", got)
 		}
 		if got := captured.ExpressionAttributeNames["#updated_at_nano"]; got != attrUpdatedAtNano {
@@ -1619,6 +1634,9 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 	t.Run("guarded delete skips rows updated after cutoff", func(t *testing.T) {
 		var deleteCalls int
 		store := newStore(&stubDDB{
+			getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr("T1")}}, nil
+			},
 			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
 				return &dynamodb.QueryOutput{
 					Items: []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_new", []string{"r1"}, nil)},
@@ -1678,4 +1696,100 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 			t.Fatalf("deleted channels = %v, want %v", deletedChannels, want)
 		}
 	})
+}
+
+// An installation ID must not depend on wall-clock precision or reuse a prior bind.
+func TestWorkspacePolicyGenerationChangesAtSameClockTime(t *testing.T) {
+	var generations []string
+	store := newStore(&stubDDB{
+		putItemFn: func(in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			generations = append(generations, readString(in.Item, attrPolicyGeneration))
+			return &dynamodb.PutItemOutput{}, nil
+		},
+		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			generation, ok := in.ExpressionAttributeValues[":policy_generation"].(*ddbtypes.AttributeValueMemberS)
+			if !ok {
+				t.Fatal("ownership transfer did not rotate the policy generation")
+			}
+			generations = append(generations, generation.Value)
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	})
+	fixed := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return fixed }
+	for range 2 { // Two fresh binds represent installations separated by a purge.
+		if err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T1", OwnerID: testOwnerSlackID}, testOwnerSlackID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.TransferOwnership(unitPolicyContext(t, store), "T1", testOwnerSlackID, testOtherSlackID); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool)
+	for _, generation := range generations {
+		if generation == "" || seen[generation] {
+			t.Fatalf("missing or reused policy generation: %q", generation)
+		}
+		seen[generation] = true
+	}
+	if len(seen) != 3 {
+		t.Fatalf("generation count = %d, want three binding/ownership changes", len(seen))
+	}
+}
+
+// Expression tests use an explicit store-scoped snapshot. Native tests cover
+// workspace condition evaluation and failed-transaction atomicity.
+func unitPolicyContext(t *testing.T, store *Store) context.Context {
+	t.Helper()
+	if stub, ok := store.Client.(*stubDDB); ok {
+		store.Client = &policyTestDDB{stubDDB: stub, transact: func(in *dynamodb.TransactWriteItemsInput) error {
+			if len(in.TransactItems) != 2 || in.TransactItems[0].ConditionCheck == nil || in.TransactItems[1].Update == nil {
+				t.Fatal("policy mutation bypassed its atomic workspace check")
+			}
+			update := in.TransactItems[1].Update
+			if !strings.Contains(aws.ToString(update.ConditionExpression), "#policy_lineage = :policy_lineage") {
+				t.Fatal("policy mutation lacks installation condition")
+			}
+			_, err := stub.UpdateItem(context.Background(), &dynamodb.UpdateItemInput{TableName: update.TableName, Key: update.Key, UpdateExpression: update.UpdateExpression, ConditionExpression: update.ConditionExpression, ExpressionAttributeNames: update.ExpressionAttributeNames, ExpressionAttributeValues: update.ExpressionAttributeValues})
+			var conflict *ddbtypes.ConditionalCheckFailedException
+			if errors.As(err, &conflict) {
+				return &ddbtypes.TransactionCanceledException{CancellationReasons: []ddbtypes.CancellationReason{{Code: aws.String("None")}, {Code: aws.String(policyConditionFailed)}}}
+			}
+			return err
+		}}
+	}
+	authorization := PolicyAuthorization{store: store, teamID: "T1", userID: testOwnerSlackID, ownerID: testOwnerSlackID, generation: "unit-generation", installation: "unit-installation"}
+	return authorization.Context(context.Background())
+}
+
+func TestLegacyWriterRetirementConfiguration(t *testing.T) {
+	for _, raw := range []string{"", "false", "true", "invalid"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv(EnvLegacyPolicyWritersRetired, raw)
+			store, err := NewStore(context.Background(), WithDynamoDBClient(&stubDDB{}), WithTableNames("ws", "cp"))
+			if raw == "invalid" {
+				if err == nil {
+					t.Fatal("invalid retirement state accepted")
+				}
+				return
+			}
+			if err != nil || store.legacyPolicyWritersRetired != (raw == "true") {
+				t.Fatalf("retirement configuration: %v %v", store, err)
+			}
+		})
+	}
+}
+
+// Existing read fixtures model an active pre-upgrade workspace. Identity tests
+// override transactGetItemsFn or use the native fixture for real snapshots.
+func (s *stubDDB) TransactGetItems(ctx context.Context, in *dynamodb.TransactGetItemsInput, _ ...func(*dynamodb.Options)) (*dynamodb.TransactGetItemsOutput, error) {
+	if s.transactGetItemsFn != nil {
+		return s.transactGetItemsFn(in)
+	}
+	policy := in.TransactItems[1].Get
+	out, err := s.GetItem(ctx, &dynamodb.GetItemInput{TableName: policy.TableName, Key: policy.Key, ProjectionExpression: policy.ProjectionExpression, ExpressionAttributeNames: policy.ExpressionAttributeNames})
+	if err != nil {
+		return nil, err
+	}
+	return &dynamodb.TransactGetItemsOutput{Responses: []ddbtypes.ItemResponse{{Item: map[string]ddbtypes.AttributeValue{attrOwnerID: stringAttr(testOwnerSlackID)}}, {Item: out.Item}}}, nil
 }

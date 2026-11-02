@@ -20,12 +20,17 @@ package internal
 //     `ts.addAdmin("GET","/internal/v1/admin/check", ...)` pattern.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 // adminTestServers owns the customer httptest server and the
@@ -194,6 +199,7 @@ func (ts *adminTestServers) seedWorkspace(t *testing.T, teamID, ownerID, slackUs
 // construct their row inline (see TestResolvePolicy_LegacySingleRowShape).
 func (ts *adminTestServers) seedPolicyDualShape(t *testing.T, teamID, channelID, alias, resourceID string) {
 	t.Helper()
+	ts.seedPolicyWorkspace(t, teamID)
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicyDualShape(teamID, channelID, alias, resourceID))
 }
 
@@ -208,6 +214,7 @@ func (ts *adminTestServers) seedPolicyDualShape(t *testing.T, teamID, channelID,
 // that exercise both surfaces against the same row.
 func (ts *adminTestServers) seedPolicySet(t *testing.T, teamID, channelID, alias string, resourceIDs []string) {
 	t.Helper()
+	ts.seedPolicyWorkspace(t, teamID)
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicySet(teamID, channelID, alias, resourceIDs))
 }
 
@@ -218,6 +225,7 @@ func (ts *adminTestServers) seedPolicySet(t *testing.T, teamID, channelID, alias
 // seedPolicySet when both are needed).
 func (ts *adminTestServers) seedPolicyAliasBindings(t *testing.T, teamID, channelID string, bindings map[string]string) {
 	t.Helper()
+	ts.seedPolicyWorkspace(t, teamID)
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicyAliasBindings(teamID, channelID, bindings))
 }
 
@@ -241,4 +249,16 @@ func (ts *adminTestServers) failOnAdminMutation(t *testing.T, msg string) {
 	ts.ddb.SetUpdateItemHook(func(in interface{}) {
 		t.Errorf("admin UpdateItem reached despite gate: %s", msg)
 	})
+}
+
+// Policy fixtures model active legacy installs without granting the test caller admin.
+func (ts *adminTestServers) seedPolicyWorkspace(t *testing.T, teamID string) {
+	t.Helper()
+	out, err := ts.ddb.GetItem(context.Background(), &dynamodb.GetItemInput{TableName: aws.String(ts.tableNames.workspace), Key: map[string]ddbtypes.AttributeValue{fAttrSlackTeamID: stringMember(teamID)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Item) == 0 {
+		ts.ddb.seedItem(t, ts.tableNames.workspace, seedWorkspaceNonAdmin(teamID, testAdminOwnerID))
+	}
 }

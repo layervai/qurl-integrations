@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -62,7 +63,7 @@ func TestHandleAdminAdd_AlreadyAdmin(t *testing.T) {
 	// conditional `NOT contains(...)` fails immediately. AddAdmin's
 	// ADD-on-SS is set-union, so the caller stays admin.
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testTargetUserID); err != nil {
 		t.Fatalf("seed target as admin: %v", err)
 	}
 
@@ -75,26 +76,18 @@ func TestHandleAdminAdd_AlreadyAdmin(t *testing.T) {
 	}
 }
 
-// TestHandleAdminAdd_WorkspaceNotBound fences the 404 surface at the
-// slackdata layer: a pre-claim workspace returns ErrCodeWorkspaceNotBound.
-//
-// Coverage gap (known, not fixed): the handler-layer mapping of that
-// store error to the user-visible "Workspace isn't bound — run
-// `/qurl setup <email>` first" copy isn't fenced end-to-end here, because
-// requireAdminSync short-circuits on the same missing row (CheckAdmin
-// returns isAdmin=false → "admin-only" reply). The handler arm IS
-// marked "unreachable in practice; kept for safety against gate
-// refactors" — if a future refactor flips the gate to allow non-admins
-// through, this test would still pin the store contract but the user
-// copy could drift. Acceptable trade for not introducing an AdminStore
-// interface just for this fence.
+// Deleting a binding after authorization must invalidate the captured scope.
 func TestHandleAdminAdd_WorkspaceNotBound(t *testing.T) {
 	ts := newAdminTestServers(t)
-	// No seedAdmin — the workspace_mappings row doesn't exist.
-	// Direct-store dispatch bypasses the admin gate (which would
-	// also fail) so we can assert the 404 mapping in isolation.
+	// Capture authority, then delete the binding to exercise disappearance
+	// between authorization and the write.
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	err := store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID)
+	ts.seedAdmin(t)
+	fixturePolicyCtx := testPolicyFixtureContext(t, store, testAdminTeamID)
+	if err := store.DeleteWorkspaceMapping(context.Background(), testAdminTeamID); err != nil {
+		t.Fatal(err)
+	}
+	err := store.AddAdmin(fixturePolicyCtx, testAdminTeamID, testTargetUserID)
 	if err == nil {
 		t.Fatal("AddAdmin against missing workspace returned nil")
 	}
@@ -102,8 +95,8 @@ func TestHandleAdminAdd_WorkspaceNotBound(t *testing.T) {
 	if !errors.As(err, &se) {
 		t.Fatalf("expected *slackdata.Error, got %T", err)
 	}
-	if se.StatusCode != http.StatusNotFound || se.Code != slackdata.ErrCodeWorkspaceNotBound {
-		t.Errorf("status=%d code=%q, want 404 / %q", se.StatusCode, se.Code, slackdata.ErrCodeWorkspaceNotBound)
+	if se.StatusCode != http.StatusConflict || se.Code != slackdata.ErrCodePolicyWorkspaceChanged {
+		t.Errorf("status=%d code=%q, want 409 / %q", se.StatusCode, se.Code, slackdata.ErrCodePolicyWorkspaceChanged)
 	}
 }
 
@@ -121,10 +114,11 @@ func TestHandleAdminAdd_WorkspaceNotBound(t *testing.T) {
 func TestAddAdmin_DisambiguationCantConfirmMembership(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t) // target NOT on admin_slack_user_ids
-	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("injected CCFE")})
 
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	err := store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID)
+	fixturePolicyCtx := testPolicyFixtureContext(t, store, testAdminTeamID)
+	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, currentWorkspaceConflict(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID))
+	err := store.AddAdmin(fixturePolicyCtx, testAdminTeamID, testTargetUserID)
 	if err == nil {
 		t.Fatal("AddAdmin returned nil error; expected unverified surface")
 	}
@@ -152,7 +146,8 @@ func TestHandleAdminAdd_Unverified(t *testing.T) {
 	// Inject a CCFE on the workspace UpdateItem so the
 	// disambiguation read sees the row WITHOUT the target on the
 	// SS — surfaces as ErrCodeAdminAddUnverified.
-	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("injected CCFE")})
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
+	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, currentWorkspaceConflict(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID))
 
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
@@ -186,6 +181,7 @@ func TestHandleAdminAdd_NonAdminCaller(t *testing.T) {
 func TestHandleAdminAdd_SelfAdd(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "self-add should bail before AddAdmin")
 
 	h := newAdminTestHandler(t, ts)
@@ -228,7 +224,7 @@ func TestHandleAdminRemove_HappyPath(t *testing.T) {
 	// Add a second admin so removing them leaves the caller as the
 	// only admin (avoids tangling with the owner-check fence).
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testOtherAdminID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testOtherAdminID); err != nil {
 		t.Fatalf("seed other admin: %v", err)
 	}
 
@@ -267,6 +263,7 @@ func TestHandleAdminRemove_NotAdmin(t *testing.T) {
 func TestHandleAdminRemove_SelfRemoveRefused(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "self-remove should bail before RemoveAdmin")
 
 	h := newAdminTestHandler(t, ts)
@@ -289,6 +286,7 @@ func TestHandleAdminRemove_SelfRemoveRefused(t *testing.T) {
 func TestHandleAdminRemove_OwnerRemoveRefused(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "owner-remove should bail before the UpdateItem (only GetItem fires)")
 
 	h := newAdminTestHandler(t, ts)
@@ -381,12 +379,15 @@ func TestHandleAdminTransferOwnership_EnterpriseIDPassedToLookup(t *testing.T) {
 	}
 }
 
-func TestHandleAdminTransferOwnership_RacedOwnerChangeReturnsOwnerOnly(t *testing.T) {
+func TestHandleAdminTransferOwnership_MissingConflictSnapshotRequiresRetry(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
-	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("owner changed after gate")})
-
 	h := newAdminTestHandler(t, ts)
+	// Isolate the injected transfer failure from one-time legacy initialization.
+	if _, err := h.cfg.AdminStore.AuthorizePolicyWrite(context.Background(), testAdminTeamID, testAdminOwnerID); err != nil {
+		t.Fatal(err)
+	}
+	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("owner changed after gate")})
 	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
 		if userID != testTargetUserID {
 			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
@@ -396,8 +397,8 @@ func TestHandleAdminTransferOwnership_RacedOwnerChangeReturnsOwnerOnly(t *testin
 	inv := newAdminSlashInvoker(t, h)
 
 	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
-	if !strings.Contains(reply, "owner-only") || !strings.Contains(reply, "/qurl-admin admins") {
-		t.Fatalf("reply missing raced-owner surface: %q", reply)
+	if !strings.Contains(reply, "Workspace permissions changed") {
+		t.Fatalf("reply missing retry surface for missing conflict snapshot: %q", reply)
 	}
 	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
 	if err != nil {
@@ -438,6 +439,7 @@ func TestHandleAdminTransferOwnership_OwnerOffAdminSetKeepsOldOwnerAdmin(t *test
 func TestHandleAdminTransferOwnership_SelfTransferNoops(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "self-transfer should bail before TransferOwnership")
 
 	h := newAdminTestHandler(t, ts)
@@ -463,6 +465,7 @@ func TestHandleAdminTransferOwnership_SelfTransferNoops(t *testing.T) {
 func TestHandleAdminTransferOwnership_LookupUnconfiguredRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "nil SlackUserLookup should fail before TransferOwnership")
 
 	h := newAdminTestHandler(t, ts)
@@ -569,6 +572,7 @@ func TestHandleAdminTransferOwnership_BadTargetRejected(t *testing.T) {
 func TestHandleAdminTransferOwnership_UnknownTargetRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "unknown target should fail before TransferOwnership")
 	var logBuf bytes.Buffer
 	prevLogger := slog.Default()
@@ -603,6 +607,7 @@ func TestHandleAdminTransferOwnership_UnknownTargetRejected(t *testing.T) {
 func TestHandleAdminTransferOwnership_LookupTransientErrorRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "transient target lookup error should fail before TransferOwnership")
 
 	h := newAdminTestHandler(t, ts)
@@ -630,6 +635,7 @@ func TestHandleAdminTransferOwnership_LookupTransientErrorRejected(t *testing.T)
 func TestHandleAdminTransferOwnership_MissingUsersReadScopeRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "missing users:read should fail before TransferOwnership")
 
 	h := newAdminTestHandler(t, ts)
@@ -657,6 +663,7 @@ func TestHandleAdminTransferOwnership_MissingUsersReadScopeRejected(t *testing.T
 func TestHandleAdminTransferOwnership_MissingSlackBotTokenRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "missing Slack bot token should fail before TransferOwnership")
 
 	h := newAdminTestHandler(t, ts)
@@ -708,7 +715,7 @@ func TestHandleAdminList_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testOtherAdminID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testOtherAdminID); err != nil {
 		t.Fatalf("seed other admin: %v", err)
 	}
 
@@ -749,10 +756,10 @@ func TestHandleAdminList_OwnerOnAdminSet(t *testing.T) {
 	// BindWorkspace shape), plus two additional admins.
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testAdminUserID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testAdminUserID); err != nil {
 		t.Fatalf("seed admin 1: %v", err)
 	}
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testOtherAdminID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testOtherAdminID); err != nil {
 		t.Fatalf("seed admin 2: %v", err)
 	}
 
@@ -896,6 +903,7 @@ func TestAddAdmin_Concurrent(t *testing.T) {
 	ts.seedAdmin(t)
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
 
+	fixturePolicyCtx := testPolicyFixtureContext(t, store, testAdminTeamID)
 	const racers = 8
 
 	results := make(chan error, racers)
@@ -903,7 +911,7 @@ func TestAddAdmin_Concurrent(t *testing.T) {
 	for range racers {
 		go func() {
 			<-start
-			results <- store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID)
+			results <- store.AddAdmin(fixturePolicyCtx, testAdminTeamID, testTargetUserID)
 		}()
 	}
 	close(start)
@@ -955,10 +963,11 @@ func TestRemoveAdmin_Concurrent(t *testing.T) {
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
 	// Seed the target onto the admin set so RemoveAdmin's
 	// `contains(admin_slack_user_ids, :uid)` finds them on first read.
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testTargetUserID); err != nil {
 		t.Fatalf("seed target as admin: %v", err)
 	}
 
+	fixturePolicyCtx := testPolicyFixtureContext(t, store, testAdminTeamID)
 	const racers = 8
 
 	results := make(chan error, racers)
@@ -966,7 +975,7 @@ func TestRemoveAdmin_Concurrent(t *testing.T) {
 	for range racers {
 		go func() {
 			<-start
-			results <- store.RemoveAdmin(context.Background(), testAdminTeamID, testTargetUserID)
+			results <- store.RemoveAdmin(fixturePolicyCtx, testAdminTeamID, testTargetUserID)
 		}()
 	}
 	close(start)
@@ -1140,6 +1149,7 @@ func TestAdminHelpReflectsFlatVerbs(t *testing.T) {
 // /qurl get even though the legacy data is still on the table.
 func TestResolvePolicy_LegacySingleRowShape(t *testing.T) {
 	ts := newAdminTestServers(t)
+	ts.seedPolicyWorkspace(t, testAdminTeamID)
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:    stringMember(testAdminTeamID),
 		fAttrSlackChannelID: stringMember("C_legacy"),
@@ -1473,4 +1483,35 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 			t.Errorf("added admin: reply missing owner mention <@%s>, got: %q", owner, got)
 		}
 	})
+}
+
+func TestPolicyAuthorizationGateRaceReplies(t *testing.T) {
+	for _, gate := range []string{"admin", "owner"} {
+		t.Run(gate, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+			h := newAdminTestHandler(t, ts)
+			ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("legacy initialization raced")})
+			w := httptest.NewRecorder()
+			var allowed bool
+			if gate == "owner" {
+				_, allowed = h.requireTransferOwnerSync(context.Background(), w, testAdminTeamID, testAdminOwnerID)
+			} else {
+				_, allowed = h.requirePolicyAdminSync(w, testAdminTeamID, testAdminOwnerID, AdminAdd)
+			}
+			if allowed || !strings.Contains(w.Body.String(), "Workspace permissions changed") || strings.Contains(w.Body.String(), "upstream error") {
+				t.Fatalf("wrong raced gate reply: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+// Caller-condition failures include ALL_OLD so authority can be checked separately.
+func currentWorkspaceConflict(t *testing.T, store *slackdata.Store, team string) error {
+	t.Helper()
+	row, err := store.Client.GetItem(context.Background(), &dynamodb.GetItemInput{TableName: stringPtr(store.WorkspaceMappingsName), Key: map[string]ddbtypes.AttributeValue{"slack_team_id": &ddbtypes.AttributeValueMemberS{Value: team}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("injected caller condition"), Item: row.Item}
 }

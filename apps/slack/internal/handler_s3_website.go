@@ -230,10 +230,11 @@ func (h *Handler) handleS3WebsiteInstallSubmission(w http.ResponseWriter, payloa
 
 	adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 	defer cancel()
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
+	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		log.Error("S3 website install modal admin check failed", "error", err)
-		respondS3WebsiteInstallModalError(w, "Could not verify admin status. Retry in a moment.")
+		log.Log(adminCtx, storeErrorLogLevel(adminCtx, err, slog.LevelError), "S3 website install modal admin check failed", "error", err)
+		reply := policyAuthorizationReply(err)
+		respondS3WebsiteInstallModalError(w, reply)
 		return
 	}
 	if !isAdmin {
@@ -262,6 +263,7 @@ func (h *Handler) handleS3WebsiteInstallSubmission(w http.ResponseWriter, payloa
 	setupStartedAt := time.Unix(meta.CreatedAtUnix, 0)
 	req.attemptID = tunnelBootstrapModalAttemptID(payload.View.ID, setupStartedAt)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		ctx = authorization.Context(ctx)
 		h.processS3WebsiteInstall(ctx, log, req)
 	}) {
 		respondS3WebsiteInstallModalError(w, modalBusyMsg)
@@ -499,7 +501,7 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("S3 website install: failed to get API key", "error", sanitizeLogValue(err.Error()))
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "S3 website install: failed to get API key", "error", sanitizeLogValue(err.Error()))
 		return nil, authErrorMessage(err), err
 	}
 
@@ -534,7 +536,7 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 
 	aliasStatus, err := h.ensureTunnelAlias(ctx, teamID, channelID, args.Alias, resolvedArgs.ResourceID)
 	if err != nil {
-		log.Error("S3 website install: channel shortcut bind failed", "error", sanitizeLogValue(err.Error()), "shortcut", sanitizeLogValue(args.Alias), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID))
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "S3 website install: channel shortcut bind failed", "error", sanitizeLogValue(err.Error()), "shortcut", sanitizeLogValue(args.Alias), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID))
 		return nil, aliasStatus, err
 	}
 	previousSharing, err := c.GetSharing(ctx, resource.ResourceID)

@@ -25,7 +25,7 @@ import (
 // all; this test is the only thing that fails CI on drift. (Alternative fix if
 // this ever gets brittle: ask slackdata to export the four names.)
 func TestSchemaConstants_MatchSlackdataWritePath(t *testing.T) {
-	fake := &fakeDDB{}
+	fake := &fakeDDB{workspace: policyWorkspaceFixture()}
 	store, err := slackdata.NewStore(context.Background(),
 		slackdata.WithDynamoDBClient(fake),
 		slackdata.WithTableNames("wm", "cp"),
@@ -34,6 +34,11 @@ func TestSchemaConstants_MatchSlackdataWritePath(t *testing.T) {
 		t.Fatalf("build store: %v", err)
 	}
 	ctx := context.Background()
+	authorization, err := store.AuthorizePolicyWrite(ctx, "T1", "UOWNER001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = authorization.Context(ctx)
 	// ExposeResourceToChannel writes the allowed_resource_ids SS; BindChannelAlias
 	// writes the alias_bindings map. Both key the row by team/channel. Between
 	// them they exercise all four attribute names statecrawl depends on.

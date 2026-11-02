@@ -1421,7 +1421,7 @@ func TestConfirm_RecordsStructuredAuditResults(t *testing.T) {
 			pa:   &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "docs", ChannelID: "C1"},
 			before: func(t *testing.T, hc *confirmHarness) {
 				t.Helper()
-				if err := hc.h.cfg.AdminStore.BindChannelAlias(context.Background(), "T1", "C1", "docs", "r_existing"); err != nil {
+				if err := hc.h.cfg.AdminStore.BindChannelAlias(testPolicyFixtureContext(t, hc.h.cfg.AdminStore, "T1"), "T1", "C1", "docs", "r_existing"); err != nil {
 					t.Fatalf("seed bound alias: %v", err)
 				}
 			},

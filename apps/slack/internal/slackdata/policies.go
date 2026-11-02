@@ -61,8 +61,8 @@ const (
 //
 // Either surface allows the row to mint. As of #589 this set is also
 // the `/qurl list` disclosure scope again (not just the mint gate) —
-// see the TODO below and apps/slack/docs/list-disclosure.md. Single-row
-// GetItem; no pagination needed.
+// see the TODO below and apps/slack/docs/list-disclosure.md. One atomic
+// workspace-and-policy read; no pagination needed.
 //
 // Known asymmetry vs [ResolvePolicy]: this function does NOT read the
 // legacy scalar `resource_id` attribute. ResolvePolicy falls back to
@@ -89,7 +89,7 @@ func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channe
 			Title:      "AllowedResourceIDsForChannel: team_id and channel_id are required",
 		}
 	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	out, err := s.readChannelPolicy(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
@@ -110,10 +110,8 @@ func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channe
 // (teamID, channelID). Missing row → false (no policy = no access).
 //
 // The old HTTP shape returned a `bool` and an error; same shape here.
-// Eventual-consistency read is intentional — `/qurl get` and `/qurl
-// aliases` tolerate ~few-second propagation lag after a fresh
-// setalias mutation; strong reads would double RCU cost without
-// changing failure modes that matter.
+// Read policy and binding in one transactional snapshot, so a retired
+// installation cannot authorize a request while cleanup is still pending.
 func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID string) (bool, error) {
 	if teamID == "" || channelID == "" || resourceID == "" {
 		return false, &Error{
@@ -121,7 +119,7 @@ func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID
 			Title:      "ResolvePolicy: team_id, channel_id, resource_id are required",
 		}
 	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	out, err := s.readChannelPolicy(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
@@ -168,7 +166,7 @@ func (s *Store) LookupChannelAlias(ctx context.Context, teamID, channelID, alias
 			Title:      "LookupChannelAlias: team_id, channel_id, alias_name are required",
 		}
 	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	out, err := s.readChannelPolicy(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
@@ -195,7 +193,7 @@ func (s *Store) LookupChannelAlias(ctx context.Context, teamID, channelID, alias
 }
 
 // GetChannelPolicy returns every alias binding for a single
-// (teamID, channelID) row via a single GetItem against the PK+SK.
+// (teamID, channelID) row and checks its installation in one atomic read.
 // Replaces the previous "page team-wide then filter" shape that
 // could miss the calling channel when its row sorted past page-
 // boundary (the team-wide ListPolicies + post-filter pattern hid
@@ -213,7 +211,7 @@ func (s *Store) GetChannelPolicy(ctx context.Context, teamID, channelID string) 
 			Title:      "GetChannelPolicy: team_id and channel_id are required",
 		}
 	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	out, err := s.readChannelPolicy(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
@@ -281,7 +279,7 @@ func (s *Store) updateChannelResourceSet(ctx context.Context, operation, updateV
 		}
 	}
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	err := s.updatePolicy(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
@@ -330,13 +328,8 @@ func (s *Store) updateChannelResourceSet(ctx context.Context, operation, updateV
 // leak (resource IDs are unique and never reused, so a dangling id can't later
 // point at a different resource).
 //
-// The map REMOVE is UNCONDITIONAL — DynamoDB can't express a per-key
-// `alias_bindings.#a = :rid` guard across N keys in one expression. Alias NAMES,
-// unlike resource IDs, are reusable, so in the sub-second window between this
-// read and the write an admin who unbound then rebound the same name to a LIVE
-// resource would have that fresh binding clobbered. The purge runs synchronously
-// right after the upstream delete, so the window is tiny; the race is accepted
-// rather than guarded.
+// Each removed alias must still point to the deleted resource at commit time.
+// A concurrent rebind cancels the update rather than removing a live binding.
 func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID, resourceID string) ([]string, error) {
 	if teamID == "" || channelID == "" || resourceID == "" {
 		return nil, &Error{
@@ -349,7 +342,8 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	// allowed_resource_ids grant but no aliases — and that SS-only row still needs
 	// purging. Matches the other reads on this table (small row).
 	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
+		TableName:      aws.String(s.ChannelPoliciesName),
+		ConsistentRead: aws.Bool(true),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),
@@ -358,7 +352,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	if err != nil {
 		return nil, ddbToError("PurgeResourceFromChannel", err)
 	}
-	// Row absent → nothing to purge. Returning here also keeps the unconditional
+	// Row absent → nothing to purge. Returning here also keeps the
 	// UpdateItem below from materializing an empty row for a channel that never
 	// referenced the resource.
 	if len(out.Item) == 0 {
@@ -380,6 +374,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	// keys are name-aliased.
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	expr := "SET #updated_at = " + exprNow + ", " + exprUpdatedAtNano + " = " + exprNowNano
+	conditions := []string{"attribute_exists(" + attrSlackTeamID + ")"}
 	names := map[string]string{
 		"#updated_at":     attrUpdatedAt,
 		exprUpdatedAtNano: attrUpdatedAtNano,
@@ -391,6 +386,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 			nameRef := fmt.Sprintf("#a%d", i)
 			names[nameRef] = alias
 			removes[i] = exprAliasBindings + "." + nameRef
+			conditions = append(conditions, removes[i]+" = :removed_resource")
 		}
 		expr += " REMOVE " + strings.Join(removes, ", ")
 	}
@@ -409,8 +405,23 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 			exprNowNano: updatedAtNano,
 		},
 		ExpressionAttributeNames: names,
+		ConditionExpression:      aws.String(strings.Join(conditions, " AND ")),
 	}
-	if _, err := s.Client.UpdateItem(ctx, in); err != nil {
+	if len(aliasKeys) > 0 {
+		in.ExpressionAttributeValues[":removed_resource"] = stringAttr(resourceID)
+	}
+	if err := s.updatePolicy(ctx, in); err != nil {
+		var condition *ddbtypes.ConditionalCheckFailedException
+		if errors.As(err, &condition) {
+			// Retired-row cleanup may already have removed every reference.
+			current, readErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: in.TableName, Key: in.Key, ConsistentRead: aws.Bool(true)})
+			if readErr != nil {
+				return nil, ddbToError("PurgeResourceFromChannel.reconcile", readErr)
+			}
+			if len(current.Item) == 0 {
+				return aliasKeys, nil
+			}
+		}
 		return nil, ddbToError("PurgeResourceFromChannel", err)
 	}
 	return aliasKeys, nil
@@ -464,7 +475,15 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 		for _, item := range out.Items {
 			channelID := readString(item, attrSlackChannelID)
 			if channelID != "" && channelItemAllowsResource(item, resourceID) {
-				channels = append(channels, channelID)
+				// Query only discovers candidates. Recheck each match atomically with
+				// its binding before disclosing a channel or planning a revoke.
+				ids, readErr := s.AllowedResourceIDsForChannel(ctx, teamID, channelID)
+				if readErr != nil {
+					return nil, readErr
+				}
+				if _, allowed := ids[resourceID]; allowed {
+					channels = append(channels, channelID)
+				}
 			}
 		}
 		if len(out.LastEvaluatedKey) == 0 {
@@ -482,34 +501,23 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 // `/qurl uninstall` cascade that forgets a workspace once the Slack install is
 // gone and there is nothing left for those per-channel grants to authorize.
 //
-// Two phases against the partition key (slack_team_id):
+// Strong table queries page over channel keys and installation IDs. This
+// unconditional operator variant deletes every observed row. Lifecycle callers
+// use PurgeTeamChannelPoliciesBefore instead: its transactions fence concurrent
+// reinstalls and its final binding read detects a changed cleanup scope.
 //
-//   - Query pages over the team's rows (LastEvaluatedKey loop, same shape as
-//     [Store.ChannelsForResource]), projecting only the SK so a wide row doesn't
-//     drag every attribute over the wire — the DeleteItem only needs the key.
-//   - Each row is removed with an unconditional DeleteItem keyed by its
-//     (slack_team_id, slack_channel_id). Unconditional ⇒ idempotent: a row that a
-//     concurrent unset-alias already cleared makes its delete a DynamoDB no-op.
-//
-// Best-effort by construction: it attempts to delete every row it observes
-// during the Query pass, even after an individual DeleteItem fails, then returns
-// the joined delete errors at the end. Strong table queries see committed rows
-// on each page; they do not form a snapshot or stop in-flight writers. Missed
-// rows have no TTL. Durable cleanup and reinstall-safe writer fencing remain
-// required (#931); a successful sweep alone does not establish that every row
-// is gone. Lifecycle callers must treat returned errors as cleanup failures.
-// Sequential DeleteItem
-// (not BatchWriteItem) keeps the [DynamoDBClient] surface unchanged; per-team
-// channel-policy rows are bounded by the channels a workspace used the bot in,
-// so the round-trips stay modest.
+// Neither query is a partition snapshot. Completion depends on guarded writers
+// and durable delivery retries; mixed-version writers require the retirement
+// procedure in policy-installation-rollout.md. Row failures are joined and
+// returned so lifecycle callers cannot acknowledge incomplete cleanup.
 func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) error {
 	return s.purgeTeamChannelPolicies(ctx, teamID, time.Time{})
 }
 
-// PurgeTeamChannelPoliciesBefore deletes channel_policies rows for teamID only
-// when they have not been updated since cutoff. Rows created or changed by a
-// fast reinstall/setup after the teardown signal are retained rather than being
-// clobbered by a delayed async purge.
+// PurgeTeamChannelPoliciesBefore removes observed orphan policies regardless of
+// timestamp when the binding is absent. Its atomic check protects a concurrent
+// reinstall. A bound workspace keeps its own installation rows and removes only
+// known retired rows; bindings without lineage retain the legacy cutoff guard.
 func (s *Store) PurgeTeamChannelPoliciesBefore(ctx context.Context, teamID string, cutoff time.Time) error {
 	return s.purgeTeamChannelPolicies(ctx, teamID, cutoff)
 }
@@ -517,6 +525,14 @@ func (s *Store) PurgeTeamChannelPoliciesBefore(ctx context.Context, teamID strin
 func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cutoff time.Time) error {
 	if teamID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeTeamChannelPolicies: team_id is required"}
+	}
+	var binding policyPurgeBinding
+	if !cutoff.IsZero() {
+		var err error
+		binding, err = s.policyPurgeBinding(ctx, teamID)
+		if err != nil {
+			return err
+		}
 	}
 	var startKey map[string]ddbtypes.AttributeValue
 	var deleteErrs []error
@@ -529,12 +545,12 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 				":tid": stringAttr(teamID),
 			},
-			// Only the SK is needed to issue the per-row DeleteItem; the rest of
-			// each row is irrelevant to a full delete. Mirrors the projected reads
-			// elsewhere on this table.
-			ProjectionExpression: aws.String("#cid"),
+			// Read only row identity and installation lineage; cleanup does not
+			// need to load the alias maps or resource sets.
+			ProjectionExpression: aws.String("#cid, #installation"),
 			ExpressionAttributeNames: map[string]string{
-				"#cid": attrSlackChannelID,
+				"#cid":                 attrSlackChannelID,
+				exprPolicyInstallation: attrPolicyInstallation,
 			},
 			ExclusiveStartKey: startKey,
 		})
@@ -553,28 +569,13 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 				})
 				continue
 			}
-			deleteInput := &dynamodb.DeleteItemInput{
-				TableName: aws.String(s.ChannelPoliciesName),
-				Key: map[string]ddbtypes.AttributeValue{
-					attrSlackTeamID:    stringAttr(teamID),
-					attrSlackChannelID: stringAttr(channelID),
-				},
+			err := s.deletePolicyForPurge(ctx, teamID, channelID, item, cutoff, binding)
+			var changed *Error
+			if errors.As(err, &changed) && changed.Code == errCodePolicyPurgeWorkspaceChanged {
+				return joinSweepErrors(deleteErrs, err)
 			}
-			if !cutoff.IsZero() {
-				deleteInput.ConditionExpression = aws.String(purgeCutoffCondition)
-				deleteInput.ExpressionAttributeNames = map[string]string{
-					exprUpdatedAtNano: attrUpdatedAtNano,
-				}
-				deleteInput.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
-					exprPurgeCutoffNano: unixNanoAttr(cutoff),
-				}
-			}
-			if _, err := s.Client.DeleteItem(ctx, deleteInput); err != nil {
-				var ccfe *ddbtypes.ConditionalCheckFailedException
-				if !cutoff.IsZero() && errors.As(err, &ccfe) {
-					continue
-				}
-				deleteErrs = append(deleteErrs, ddbToError("PurgeTeamChannelPolicies", err))
+			if err != nil {
+				deleteErrs = append(deleteErrs, err)
 			}
 		}
 		if len(out.LastEvaluatedKey) == 0 {
@@ -582,7 +583,40 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 		}
 		startKey = out.LastEvaluatedKey
 	}
+	if !cutoff.IsZero() {
+		current, err := s.policyPurgeBinding(ctx, teamID)
+		if err != nil {
+			return joinSweepErrors(deleteErrs, err)
+		}
+		if current != binding {
+			return joinSweepErrors(deleteErrs, policyPurgeChanged())
+		}
+	}
 	return errors.Join(deleteErrs...)
+}
+
+func (s *Store) deletePolicyForPurge(ctx context.Context, teamID, channelID string, item map[string]ddbtypes.AttributeValue, cutoff time.Time, binding policyPurgeBinding) error {
+	if !cutoff.IsZero() && !binding.bound {
+		return s.deleteUnboundPolicy(ctx, teamID, channelID)
+	}
+	if !cutoff.IsZero() && binding.installation != "" {
+		return s.deleteRetiredPolicy(ctx, teamID, channelID, item, binding)
+	}
+	in := &dynamodb.DeleteItemInput{
+		TableName: aws.String(s.ChannelPoliciesName),
+		Key:       map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID), attrSlackChannelID: stringAttr(channelID)},
+	}
+	if !cutoff.IsZero() {
+		in.ConditionExpression = aws.String(purgeCutoffCondition)
+		in.ExpressionAttributeNames = map[string]string{exprUpdatedAtNano: attrUpdatedAtNano}
+		in.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{exprPurgeCutoffNano: unixNanoAttr(cutoff)}
+	}
+	_, err := s.Client.DeleteItem(ctx, in)
+	var condition *ddbtypes.ConditionalCheckFailedException
+	if !cutoff.IsZero() && errors.As(err, &condition) {
+		return nil
+	}
+	return ddbToError("PurgeTeamChannelPolicies", err)
 }
 
 // allowedResourceIDsFromItem returns the set of resource IDs a channel_policies

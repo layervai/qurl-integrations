@@ -44,7 +44,7 @@ func TestWorkspaceAgentEnabled_DecisionMatrix(t *testing.T) {
 
 	t.Run("explicit on wins over a default-off deployment", func(t *testing.T) {
 		h, store := newWS(t, false)
-		if err := store.SetAgentEnabled(ctx, "T1", true); err != nil {
+		if err := store.SetAgentEnabled(testPolicyFixtureContext(t, store, "T1"), "T1", true); err != nil {
 			t.Fatalf("SetAgentEnabled: %v", err)
 		}
 		if !h.workspaceAgentEnabled(ctx, log, "T1") {
@@ -54,7 +54,7 @@ func TestWorkspaceAgentEnabled_DecisionMatrix(t *testing.T) {
 
 	t.Run("explicit off survives a default-on flip", func(t *testing.T) {
 		h, store := newWS(t, true)
-		if err := store.SetAgentEnabled(ctx, "T1", false); err != nil {
+		if err := store.SetAgentEnabled(testPolicyFixtureContext(t, store, "T1"), "T1", false); err != nil {
 			t.Fatalf("SetAgentEnabled: %v", err)
 		}
 		if h.workspaceAgentEnabled(ctx, log, "T1") {
@@ -89,11 +89,10 @@ func TestWorkspaceAgentEnabled_FailsClosedOnReadError(t *testing.T) {
 // --- the gate is wired at the event path, before dedupe ---
 
 func TestProcessAgentEvent_OptOutGatedBeforeDedupe(t *testing.T) {
-	ctx := context.Background()
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, "T1", "Uowner", "Uadmin", testWorkspaceConfiguredAt)
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	if err := store.SetAgentEnabled(ctx, "T1", false); err != nil {
+	if err := store.SetAgentEnabled(testPolicyFixtureContext(t, store, "T1"), "T1", false); err != nil {
 		t.Fatalf("opt out: %v", err)
 	}
 
@@ -122,7 +121,7 @@ func TestProcessAgentEvent_OptOutGatedBeforeDedupe(t *testing.T) {
 	// Re-enable and replay the SAME event_id. It must reply — proving the toggle
 	// gate runs BEFORE MarkEventSeen: a mention dropped while disabled was never
 	// dedupe-committed, so opting in later doesn't swallow the replay as a retry.
-	if err := store.SetAgentEnabled(ctx, "T1", true); err != nil {
+	if err := store.SetAgentEnabled(testPolicyFixtureContext(t, store, "T1"), "T1", true); err != nil {
 		t.Fatalf("opt in: %v", err)
 	}
 	h.handleEvent(httptest.NewRecorder(), []byte(appMentionBody("EvGate")))
@@ -138,7 +137,7 @@ func TestProcessAgentEvent_OptOutGatedBeforeDedupe(t *testing.T) {
 
 func TestConfirm_DisabledWorkspaceGatedBeforeClaim(t *testing.T) {
 	hc := newConfirmHarness(t, "Uadmin")
-	if err := hc.h.cfg.AdminStore.SetAgentEnabled(context.Background(), "T1", false); err != nil {
+	if err := hc.h.cfg.AdminStore.SetAgentEnabled(testPolicyFixtureContext(t, hc.h.cfg.AdminStore, "T1"), "T1", false); err != nil {
 		t.Fatalf("opt out: %v", err)
 	}
 	id := hc.seedPending(t, revokePending())
@@ -304,5 +303,19 @@ func TestAdminHelpIncludesConversationMode(t *testing.T) {
 	bare := newTestHandler(t, noopQURLServer(t)) // wires neither store
 	if h := bare.adminHelpMessage(commandAdmin); strings.Contains(h, "*Conversation mode*") {
 		t.Errorf("no-store admin help must omit the conversation-mode section:\n%s", h)
+	}
+}
+
+func TestAgentStatusAndUsageDoNotInitializeWriteMetadata(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.failOnAdminMutation(t, "status and usage must remain read-only")
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+	for _, command := range []string{"agent", "agent status", "agent invalid"} {
+		status, reply := inv.invokeAdmin(command, testAdminTeamID, testAdminUserID)
+		if status != http.StatusOK || reply == "" {
+			t.Fatalf("read-only agent reply: %d %q", status, reply)
+		}
 	}
 }

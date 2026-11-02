@@ -3511,7 +3511,7 @@ func TestTunnelInstallAgentAuditRecordsDMUnconfigured(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	h.cfg.AgentStore = agentStore
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
+	h.processTunnelInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
 
 	if resourceHits != 0 || apiKeyHits != 0 {
 		t.Fatalf("resource/api-key hits = %d/%d, want 0/0 before DM wiring", resourceHits, apiKeyHits)
@@ -3866,7 +3866,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	h.cfg.TunnelImage = testTunnelImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(processCtx, slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
+	h.processTunnelInstall(testPolicyContext(processCtx, t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
@@ -3959,7 +3959,7 @@ func TestTunnelInstallAgentAuditWriteFailureDoesNotBlockInstall(t *testing.T) {
 	h.cfg.TunnelImage = testTunnelImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
+	h.processTunnelInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
 
 	if len(responseBodies) == 0 {
 		t.Fatal("response_url posts = 0, want install instructions despite audit write failure")
@@ -4144,7 +4144,7 @@ func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 		panic("test panic after bootstrap key mint")
 	}
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
+	h.processTunnelInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
 
 	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
 	if err != nil {
@@ -4218,7 +4218,7 @@ func TestTunnelInstallBuildPanicRevokesBootstrapKeyAndAudits(t *testing.T) {
 		panic("test build panic after bootstrap key mint")
 	}
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
+	h.processTunnelInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
 
 	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
 	if err != nil {
@@ -4310,7 +4310,7 @@ func TestTunnelInstallAgentAuditRecordsOnlyAgentBuildFailure(t *testing.T) {
 			captureTunnelPostDMSuccess(h)
 			h.SetAliasStore(h.cfg.AdminStore)
 			tc.setup(t, ts, h)
-			h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, tc.agentAudit))
+			h.processTunnelInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, tc.agentAudit))
 
 			if len(responseBodies) != 1 {
 				t.Fatalf("response_url posts = %d, want build-failure message: %v", len(responseBodies), responseBodies)
@@ -4402,7 +4402,7 @@ func TestTunnelInstallRetriesTransientTextDeliveryBeforeRevoking(t *testing.T) {
 	h.cfg.TunnelImage = testTunnelImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), nil))
+	h.processTunnelInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), nil))
 
 	if revokeHits != 0 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 0 after text retry delivered the install", revokeHits)
@@ -4471,7 +4471,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 		return errors.New("dm unavailable")
 	}
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), testTunnelInstallAgentAudit()))
+	h.processTunnelInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), testTunnelInstallAgentAudit()))
 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
@@ -4552,7 +4552,7 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 		return fmt.Errorf("chat.postMessage: %w", ErrSlackMissingScope)
 	}
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), nil))
+	h.processTunnelInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), nil))
 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
@@ -4638,7 +4638,7 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 		LocalPort:   defaultTunnelLocalPort,
 		Environment: tunnelEnvDocker,
 	}
-	h.processTunnelInstall(context.Background(), slog.Default(), &tunnelInstallRequest{
+	h.processTunnelInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), &tunnelInstallRequest{
 		teamID:       testAdminTeamID,
 		enterpriseID: "",
 		channelID:    testTunnelChannelID,
@@ -4647,7 +4647,7 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 		args:         args,
 		attemptID:    tunnelBootstrapTimeAttemptID("test-attempt", firstAttempt),
 	})
-	h.processTunnelInstall(context.Background(), slog.Default(), &tunnelInstallRequest{
+	h.processTunnelInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), &tunnelInstallRequest{
 		teamID:       testAdminTeamID,
 		enterpriseID: "",
 		channelID:    testTunnelChannelID,
@@ -4736,7 +4736,7 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 	h.cfg.TunnelImage = testTunnelImageRef
 	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), testTunnelInstallAgentAudit()))
+	h.processTunnelInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), testTunnelInstallAgentAudit()))
 
 	if revokeHits != 0 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 0 (plain-text fallback delivered the install)", revokeHits)
@@ -4852,10 +4852,13 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 func TestEnsureTunnelAliasRecoversConcurrentSameResourceBind(t *testing.T) {
 	ts := newAdminTestServers(t)
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
+	if err := store.BindWorkspace(context.Background(), &slackdata.WorkspaceMapping{TeamID: testAdminTeamID, OwnerID: testAdminOwnerID}, testAdminUserID); err != nil {
+		t.Fatal(err)
+	}
 	h := NewHandler(Config{AdminStore: store})
 	h.aliasStore = raceBindAliasStore{store: store}
 
-	status, err := h.ensureTunnelAlias(context.Background(), testAdminTeamID, testTunnelChannelID, testTunnelSlug, testTunnelResourceID)
+	status, err := h.ensureTunnelAlias(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), testAdminTeamID, testTunnelChannelID, testTunnelSlug, testTunnelResourceID)
 	if err != nil {
 		t.Fatalf("ensureTunnelAlias: %v", err)
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -28,6 +29,7 @@ func discardLogger() *slog.Logger {
 // from preset pages, GetItem from a per-channel item map, and records every
 // mutation so a dry run can be proven side-effect-free.
 type fakeDDB struct {
+	workspace  map[string]ddbtypes.AttributeValue
 	scanPages  []*dynamodb.ScanOutput
 	scanErr    error
 	queryPages []*dynamodb.QueryOutput
@@ -79,6 +81,9 @@ func (f *fakeDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...fun
 		return nil, f.getErr
 	}
 	channelID := keyString(in.Key, attrSlackChannelID)
+	if channelID == "" {
+		return &dynamodb.GetItemOutput{Item: f.workspace}, nil
+	}
 	if item, ok := f.items[channelID]; ok {
 		return &dynamodb.GetItemOutput{Item: item}, nil
 	}
@@ -205,4 +210,32 @@ func writeEnvelope(t *testing.T, w http.ResponseWriter, data any, nextCursor str
 	}); err != nil {
 		t.Fatalf("encode envelope: %v", err)
 	}
+}
+
+func policyWorkspaceFixture() map[string]ddbtypes.AttributeValue {
+	return map[string]ddbtypes.AttributeValue{"slack_team_id": &ddbtypes.AttributeValueMemberS{Value: "T1"}, "owner_id": &ddbtypes.AttributeValueMemberS{Value: "UOWNER001"}, "policy_generation": &ddbtypes.AttributeValueMemberS{Value: "generation"}, "policy_installation": &ddbtypes.AttributeValueMemberS{Value: "installation"}, "policy_legacy": &ddbtypes.AttributeValueMemberBOOL{Value: true}}
+}
+
+// This capturing fake records expressions; native store tests evaluate conditions.
+func (f *fakeDDB) TransactWriteItems(ctx context.Context, in *dynamodb.TransactWriteItemsInput, _ ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+	if len(in.TransactItems) != 2 || in.TransactItems[0].ConditionCheck == nil || in.TransactItems[1].Update == nil {
+		return nil, errors.New("unexpected statecrawl transaction")
+	}
+	update := in.TransactItems[1].Update
+	_, err := f.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: update.TableName, Key: update.Key, UpdateExpression: update.UpdateExpression, ConditionExpression: update.ConditionExpression, ExpressionAttributeNames: update.ExpressionAttributeNames, ExpressionAttributeValues: update.ExpressionAttributeValues, ReturnValuesOnConditionCheckFailure: update.ReturnValuesOnConditionCheckFailure})
+	return &dynamodb.TransactWriteItemsOutput{}, err
+}
+
+func (f *fakeDDB) TransactGetItems(ctx context.Context, in *dynamodb.TransactGetItemsInput, _ ...func(*dynamodb.Options)) (*dynamodb.TransactGetItemsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := &dynamodb.TransactGetItemsOutput{}
+	for _, op := range in.TransactItems {
+		item, err := f.GetItem(ctx, &dynamodb.GetItemInput{TableName: op.Get.TableName, Key: op.Get.Key})
+		if err != nil {
+			return nil, err
+		}
+		out.Responses = append(out.Responses, ddbtypes.ItemResponse{Item: item.Item})
+	}
+	return out, nil
 }

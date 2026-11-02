@@ -150,12 +150,13 @@ func (h *Handler) handleExposeURL(w http.ResponseWriter, values url.Values) {
 	if !ok {
 		return
 	}
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionExposeURL) {
+	authorization, allowed := h.requireAliasAdminGate(w, teamID, values, AdminActionExposeURL)
+	if !allowed {
 		return
 	}
 
 	h.runAsync(w, "protect_url", values, func(ctx context.Context, log *slog.Logger) {
-		msg := h.exposeURLResourceInChannel(ctx, log, teamID, channelID, args)
+		msg := h.exposeURLResourceInChannel(authorization.Context(ctx), log, teamID, channelID, args)
 		_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
 	})
 }
@@ -307,6 +308,10 @@ func (h *Handler) exposeURLResourceInChannel(ctx context.Context, log *slog.Logg
 	}
 
 	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, args.ChannelAlias, resource.ResourceID)
+	if reply := policyMutationReply(err); reply != "" {
+		log.Warn("channel policy scope changed", "error", err, "team_id", teamID, "channel_id", channelID)
+		return reply
+	}
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
 		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", args.ChannelAlias, args.ChannelAlias)
 	}
@@ -325,7 +330,10 @@ func (h *Handler) exposeURLResourceInChannel(ctx context.Context, log *slog.Logg
 func (h *Handler) resolveURLResourceForExpose(ctx context.Context, log *slog.Logger, teamID string, args *resourceExposeArgs) (*client.Resource, error) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("resource protect: API key lookup failed", "error", err, "team_id", teamID)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "resource protect: API key lookup failed", "error", err, "team_id", teamID)
+		if reply := policyMutationReply(err); reply != "" {
+			return nil, &userError{msg: reply}
+		}
 		return nil, &userError{msg: "Failed to look up URL resource. Please try again."}
 	}
 	// Bare-minimum import path: reuse the same first-page scan as /qurl list/get

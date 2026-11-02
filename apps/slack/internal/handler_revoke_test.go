@@ -581,7 +581,7 @@ func TestRevokeResource_PurgesChannelBindings(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 
-	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	msg := h.revokeResource(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
 	if !strings.Contains(msg, "Revoked") {
 		t.Fatalf("revoke message = %q, want a success confirmation", msg)
 	}
@@ -631,7 +631,7 @@ func TestRevokeResource_PurgesOnReadGone(t *testing.T) {
 	refuseRevokeDelete(t, ts, testRevokeResourceID, "after the read reported the resource gone")
 	h := newAdminTestHandler(t, ts)
 
-	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	msg := h.revokeResource(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
 	if !strings.Contains(msg, "not found") {
 		t.Fatalf("revoke message = %q, want the already-revoked surface", msg)
 	}
@@ -759,7 +759,7 @@ func TestRevokeResource_PurgesOnAlreadyGone(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 
-	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	msg := h.revokeResource(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
 	if !strings.Contains(msg, "not found") {
 		t.Fatalf("revoke message = %q, want the already-revoked surface", msg)
 	}

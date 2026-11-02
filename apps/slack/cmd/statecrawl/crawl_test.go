@@ -54,6 +54,7 @@ func orphanScenario(t *testing.T, dryRun bool) (*flags, *fakeDDB, fakeProvider, 
 		[]string{testDeadID, testLiveID},
 	)
 	fake := &fakeDDB{
+		workspace: policyWorkspaceFixture(),
 		scanPages: []*dynamodb.ScanOutput{{Items: []map[string]ddbtypes.AttributeValue{row}}},
 		items:     map[string]map[string]ddbtypes.AttributeValue{testChannel: row},
 	}
@@ -221,5 +222,14 @@ func TestCrawl_AllHealthyNoFindings(t *testing.T) {
 	}
 	if snap.ChannelsScanned != 1 || snap.TeamsResolved != 1 {
 		t.Errorf("coverage counters = (channels %d, teams_resolved %d), want (1, 1)", snap.ChannelsScanned, snap.TeamsResolved)
+	}
+}
+
+func TestCrawlApplyRefusesMissingWorkspaceAuthority(t *testing.T) {
+	f, fake, provider, store := orphanScenario(t, false)
+	fake.workspace = nil
+	snapshot, err := crawl(context.Background(), f, discardLogger(), store, provider, fake)
+	if err == nil || snapshot.PurgeErrors != 1 || fake.mutationCount() != 0 {
+		t.Fatalf("missing workspace authority allowed repair: %v %+v mutations=%d", err, snapshot, fake.mutationCount())
 	}
 }

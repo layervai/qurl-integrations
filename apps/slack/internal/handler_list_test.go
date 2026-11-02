@@ -340,6 +340,7 @@ func TestChannelAliasesByResourceID(t *testing.T) {
 		names := defaultTestTableNames()
 		ddb := newFakeDDB(t, names, nil)
 		if seed != nil {
+			ddb.seedItem(t, names.workspace, seedWorkspaceNonAdmin("T1", testAdminOwnerID))
 			ddb.seedItem(t, names.channelPolicy, seed)
 		}
 		return &Handler{cfg: Config{AdminStore: newStoreFromFake(t, ddb, names, nil)}}
@@ -558,12 +559,12 @@ func TestHandleList_EmptyChannel(t *testing.T) {
 			notWant: []string{"/qurl-admin protect-connector", "Edit", "tunnel"},
 		},
 		{
-			name: "admin check error gets admin handoff",
+			name: "workspace scope error fails closed",
 			seed: func(t *testing.T, ts *adminTestServers) {
 				ts.seedAdmin(t)
 				ts.ddb.SetGetItemErr(ts.tableNames.workspace, errors.New("injected workspace read failure"))
 			},
-			want:    []string{"Ask a Slack admin"},
+			want:    []string{serviceUnreachableMessage},
 			notWant: []string{"/qurl-admin protect-connector", "Edit", "tunnel"},
 		},
 	} {
@@ -578,7 +579,7 @@ func TestHandleList_EmptyChannel(t *testing.T) {
 			inv := newAdminSlashInvoker(t, h)
 
 			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-			if !strings.Contains(async, "No protected resources are available in this channel") {
+			if tc.name != "workspace scope error fails closed" && !strings.Contains(async, "No protected resources are available in this channel") {
 				t.Errorf("async reply missing empty-state copy: %q", async)
 			}
 			for _, want := range tc.want {

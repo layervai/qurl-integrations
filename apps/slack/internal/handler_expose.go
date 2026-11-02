@@ -36,7 +36,7 @@ func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, "Guided setup is not configured on this Secure Access Agent deployment. Use `/qurl-admin protect-connector <id>` or `/qurl-admin protect-url $<alias>` instead.")
 		return
 	}
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionExpose) {
+	if !h.requireAdminStoreSync(w) || !h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), AdminActionExpose) {
 		return
 	}
 	respondSlackBlocks(w, "What do you want to protect in this channel?", exposeChooserBlocks(channelID))
@@ -213,7 +213,10 @@ var (
 func (h *Handler) urlResourceSelectOptions(ctx context.Context, log *slog.Logger, teamID string) (options []map[string]any, userMsg string) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("protect url: API key lookup failed", "error", err, "team_id", teamID)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "protect url: API key lookup failed", "error", err, "team_id", teamID)
+		if reply := policyMutationReply(err); reply != "" {
+			return nil, reply
+		}
 		return nil, "Failed to look up URL resources. Please try again."
 	}
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
@@ -328,10 +331,11 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *View
 	// the deliberate fail-closed check — same posture as the install/edit modals.
 	adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 	defer cancel()
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
+	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		slog.Error("protect url modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
-		respondExposeURLModalError(w, "Could not verify admin status. Retry in a moment.")
+		slog.Log(adminCtx, storeErrorLogLevel(adminCtx, err, slog.LevelError), "protect url modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		reply := policyAuthorizationReply(err)
+		respondExposeURLModalError(w, reply)
 		return
 	}
 	if !isAdmin {
@@ -348,6 +352,7 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *View
 		"view_id", payload.View.ID,
 	)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		ctx = authorization.Context(ctx)
 		msg := h.bindURLResourceToChannel(ctx, log, meta.TeamID, meta.ChannelID, channelAlias, resourceID)
 		_ = h.postResponse(log, meta.ResponseURL, msg)
 	}) {
@@ -430,10 +435,11 @@ func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload
 
 	adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 	defer cancel()
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
+	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		slog.Error("protect url create modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
-		respondExposeURLModalError(w, "Could not verify admin status. Retry in a moment.")
+		slog.Log(adminCtx, storeErrorLogLevel(adminCtx, err, slog.LevelError), "protect url create modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		reply := policyAuthorizationReply(err)
+		respondExposeURLModalError(w, reply)
 		return
 	}
 	if !isAdmin {
@@ -450,6 +456,7 @@ func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload
 		"view_id", payload.View.ID,
 	)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		ctx = authorization.Context(ctx)
 		msg := h.createOrFindAndExposeURLResourceFromModal(ctx, log, meta.TeamID, meta.ChannelID, args)
 		_ = h.postResponse(log, meta.ResponseURL, msg)
 	}) {
@@ -514,7 +521,10 @@ func (h *Handler) createOrFindAndExposeURLResource(ctx context.Context, log *slo
 func (h *Handler) createOrFindAndExposeURLResourceResult(ctx context.Context, log *slog.Logger, teamID, channelID string, args *exposeURLCreateArgs, copyText exposeURLProtectionCopy) actionCoreResult {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("protect url resource: API key lookup failed", "op", copyText.logOp, "error", err, "team_id", teamID)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "protect url resource: API key lookup failed", "op", copyText.logOp, "error", err, "team_id", teamID)
+		if reply := policyMutationReply(err); reply != "" {
+			return newActionCoreResult(false, reply, reply)
+		}
 		return newActionCoreResult(false, exposeURLProtectFailedMsg, "URL resource could not be protected.")
 	}
 	// Do not write the Slack channel alias into owner-level resource fields:
@@ -533,6 +543,10 @@ func (h *Handler) createOrFindAndExposeURLResourceResult(ctx context.Context, lo
 	}
 
 	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, args.ChannelAlias, resource.ResourceID)
+	if reply := policyMutationReply(err); reply != "" {
+		log.Warn("channel policy scope changed", "error", err, "team_id", teamID, "channel_id", channelID)
+		return newActionCoreResult(false, reply, reply)
+	}
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
 		return newActionCoreResult(false, fmt.Sprintf("URL resource is ready, but alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or %s.", args.ChannelAlias, args.ChannelAlias, copyText.aliasRetryAction), "URL protection did not complete because the alias is already bound in this channel; the URL resource is ready.")
 	}
@@ -564,6 +578,10 @@ func (h *Handler) bindURLResourceToChannel(ctx context.Context, log *slog.Logger
 	}
 
 	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, channelAlias, resource.ResourceID)
+	if reply := policyMutationReply(err); reply != "" {
+		log.Warn("channel policy scope changed", "error", err, "team_id", teamID, "channel_id", channelID)
+		return reply
+	}
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
 		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", channelAlias, channelAlias)
 	}

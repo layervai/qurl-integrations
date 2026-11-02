@@ -518,9 +518,11 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 	// to BOTH Approve and Reject. A non-admin click is denied ephemerally and
 	// claims NOTHING, so an admin can still act on the pending action.
 	if adminGatedFor(pa.Action) {
-		if !h.requireAdminForClick(log, responseURL, teamID, payload.User.ID, agentConfirmAdminOnlyReply) {
+		authorization, allowed := h.requireAdminForClick(log, responseURL, teamID, payload.User.ID, agentConfirmAdminOnlyReply)
+		if !allowed {
 			return
 		}
+		ctx = authorization.Context(ctx)
 	}
 
 	// Asker-only gate for get. A get mints a one-time access CREDENTIAL and is

@@ -2,6 +2,7 @@ package slackdata
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -22,7 +23,13 @@ const (
 	attrOwnerID           = "owner_id"
 	attrAdminSlackUserIDs = "admin_slack_user_ids"
 	attrCreatedAt         = "created_at"
-	attrUpdatedAt         = "updated_at"
+	// Rotates on binding and ownership changes to fence pending authorization.
+	attrPolicyGeneration = "policy_generation"
+	// Installation identity survives ownership transfer, which preserves policies.
+	attrPolicyInstallation = "policy_installation"
+	attrPolicyLegacy       = "policy_legacy"
+	attrPolicyBoundAt      = "policy_bound_at_unix_nano"
+	attrUpdatedAt          = "updated_at"
 	// Every guarded workspace_mappings/channel_policies write must refresh
 	// attrUpdatedAtNano, including TTL-backed rate-limit counters. Lifecycle
 	// purges use it as the reinstall-race guard; a writer that skips it can let a
@@ -92,6 +99,11 @@ const (
 )
 
 const purgeCutoffCondition = "attribute_not_exists(" + exprUpdatedAtNano + ") OR " + exprUpdatedAtNano + " <= " + exprPurgeCutoffNano
+
+const exprPolicyBoundAt = "#policy_bound_at"
+const exprBindingZero = ":binding_zero"
+const preserveBindingTimeUpdate = attrPolicyBoundAt + " = if_not_exists(" + attrPolicyBoundAt + ", if_not_exists(" + attrUpdatedAtNano + ", " + exprBindingZero + ")), "
+const bindingPurgeCutoffCondition = exprPolicyBoundAt + " <= " + exprPurgeCutoffNano + " OR (attribute_not_exists(" + exprPolicyBoundAt + ") AND (" + purgeCutoffCondition + "))"
 
 // bindDisambiguationBudget caps the post-CCFE GetItem that decides
 // between the caller-already-bound (idempotent-continue) and
@@ -203,25 +215,20 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 		return false, "", nil
 	}
 	ownerID = readString(out.Item, attrOwnerID)
-	// The workspace owner (recorded by `/qurl setup` at bind time) is always
-	// an admin. A fresh bind seeds admin_slack_user_ids with the owner, but
-	// that link is written once: legacy rows and rows where the owner was
-	// later dropped from the set can leave the owner absent from it, locking
-	// them out of every admin affordance — including the `/qurl list` Edit
-	// button. Grant admin off owner_id directly so the gate self-heals on
-	// read. owner_id is the write-once Slack user-id anchor; a shape-mismatched
-	// legacy owner_id (an Auth0 sub) can never equal a real Slack user id, so
-	// this cannot over-grant.
-	if ownerID != "" && ownerID == slackUserID {
-		return true, ownerID, nil
+	return workspaceCallerIsAdmin(out.Item, slackUserID), ownerID, nil
+}
+
+// The owner remains an admin even if a legacy row omits it from the admin set.
+func workspaceCallerIsAdmin(item map[string]ddbtypes.AttributeValue, userID string) bool {
+	if owner := readString(item, attrOwnerID); owner != "" && owner == userID {
+		return true
 	}
-	admins := readStringSet(out.Item, attrAdminSlackUserIDs)
-	for _, u := range admins {
-		if u == slackUserID {
-			return true, ownerID, nil
+	for _, admin := range readStringSet(item, attrAdminSlackUserIDs) {
+		if admin == userID {
+			return true
 		}
 	}
-	return false, ownerID, nil
+	return false
 }
 
 // SetAgentEnabled writes the per-workspace conversation-mode toggle on the
@@ -234,17 +241,18 @@ func (s *Store) SetAgentEnabled(ctx context.Context, teamID string, enabled bool
 		return &Error{StatusCode: http.StatusBadRequest, Title: "SetAgentEnabled: team_id is required"}
 	}
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	err := s.updateAuthorizedWorkspace(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression:    aws.String("SET " + attrAgentEnabled + " = :v, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano),
+		UpdateExpression:    aws.String("SET " + preserveBindingTimeUpdate + attrAgentEnabled + " = :v, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano),
 		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ")"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":v":        boolAttr(enabled),
-			exprNow:     updatedAt,
-			exprNowNano: updatedAtNano,
+			exprBindingZero: &ddbtypes.AttributeValueMemberN{Value: "0"},
+			":v":            boolAttr(enabled),
+			exprNow:         updatedAt,
+			exprNowNano:     updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -478,6 +486,9 @@ func workspaceMappingItem(teamID, ownerID, seedAdmin string, created, now time.T
 	updatedAt, updatedAtNano := updatedAtAttrs(now)
 	return map[string]ddbtypes.AttributeValue{
 		attrSlackTeamID:        stringAttr(teamID),
+		attrPolicyGeneration:   stringAttr(rand.Text()),
+		attrPolicyInstallation: stringAttr(rand.Text()),
+		attrPolicyBoundAt:      updatedAtNano,
 		attrOwnerID:            stringAttr(ownerID),
 		attrSeedAdminSlackUser: stringAttr(seedAdmin),
 		attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
@@ -562,12 +573,12 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 		}
 	}
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	err := s.updateAuthorizedWorkspace(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression: aws.String("SET updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :uids"),
+		UpdateExpression: aws.String("SET " + preserveBindingTimeUpdate + "updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :uids"),
 		// Two clauses combined: refuse on a missing row (handler maps
 		// to "workspace_not_bound") AND on an already-member user
 		// (handler maps to "admin_already_exists"). DDB doesn't let
@@ -575,10 +586,11 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 		// the post-CCFE GetItem below makes the call.
 		ConditionExpression: aws.String("attribute_exists(slack_team_id) AND NOT contains(admin_slack_user_ids, :uid)"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":uids":     &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
-			":uid":      stringAttr(targetUserID),
-			exprNow:     updatedAt,
-			exprNowNano: updatedAtNano,
+			exprBindingZero: &ddbtypes.AttributeValueMemberN{Value: "0"},
+			":uids":         &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
+			":uid":          stringAttr(targetUserID),
+			exprNow:         updatedAt,
+			exprNowNano:     updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -730,12 +742,12 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 		}
 	}
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	err := s.updateAuthorizedWorkspace(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression: aws.String("SET updated_at = :now, updated_at_unix_nano = :now_nano DELETE admin_slack_user_ids :uids"),
+		UpdateExpression: aws.String("SET " + preserveBindingTimeUpdate + "updated_at = :now, updated_at_unix_nano = :now_nano DELETE admin_slack_user_ids :uids"),
 		// `contains(...)` guarantees the user is in the set at
 		// mutation time — a CCFE here is the "nothing to remove"
 		// case (either the row vanished mid-flight, or the user
@@ -743,10 +755,11 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 		// a row delete-race in the same code path.
 		ConditionExpression: aws.String("contains(admin_slack_user_ids, :uid) AND attribute_exists(slack_team_id)"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":uids":     &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
-			":uid":      stringAttr(targetUserID),
-			exprNow:     updatedAt,
-			exprNowNano: updatedAtNano,
+			exprBindingZero: &ddbtypes.AttributeValueMemberN{Value: "0"},
+			":uids":         &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
+			":uid":          stringAttr(targetUserID),
+			exprNow:         updatedAt,
+			exprNowNano:     updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -783,26 +796,33 @@ func (s *Store) TransferOwnership(ctx context.Context, teamID, currentOwnerID, n
 			Title:      "TransferOwnership: new_owner_id must be a Slack user ID",
 		}
 	}
+	authorization, ok := ctx.Value(policyAuthorizationContextKey{}).(PolicyAuthorization)
+	if !ok || !authorization.IsOwner() || authorization.userID != currentOwnerID {
+		return policyWorkspaceChanged()
+	}
 	ownerSet := []string{currentOwnerID}
 	if newOwnerID != currentOwnerID {
 		ownerSet = append(ownerSet, newOwnerID)
 	}
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	in := &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
-		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ") AND " + attrOwnerID + " = :current_owner"),
+		UpdateExpression:    aws.String("SET " + preserveBindingTimeUpdate + attrOwnerID + " = :new_owner, " + attrPolicyGeneration + " = :policy_generation, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
+		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ") AND " + attrOwnerID + " = :current_owner AND attribute_exists(" + attrPolicyInstallation + ")"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":current_owner": stringAttr(currentOwnerID),
-			":new_owner":     stringAttr(newOwnerID),
-			":owner_set":     &ddbtypes.AttributeValueMemberSS{Value: ownerSet},
-			exprNow:          updatedAt,
-			exprNowNano:      updatedAtNano,
+			exprBindingZero:      &ddbtypes.AttributeValueMemberN{Value: "0"},
+			":policy_generation": stringAttr(rand.Text()),
+			":current_owner":     stringAttr(currentOwnerID),
+			":new_owner":         stringAttr(newOwnerID),
+			":owner_set":         &ddbtypes.AttributeValueMemberSS{Value: ownerSet},
+			exprNow:              updatedAt,
+			exprNowNano:          updatedAtNano,
 		},
-	})
+	}
+	err := s.updateAuthorizedWorkspace(ctx, in)
 	if err == nil {
 		return nil
 	}
@@ -827,6 +847,7 @@ func (s *Store) TransferOwnership(ctx context.Context, teamID, currentOwnerID, n
 			Title:      "TransferOwnership: workspace is not bound",
 		}
 	}
+
 	return &Error{
 		StatusCode: http.StatusConflict,
 		Code:       ErrCodeOwnerTransferNotOwner,
@@ -852,7 +873,8 @@ func (s *Store) ListAdmins(ctx context.Context, teamID string) (ownerID string, 
 		}
 	}
 	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.WorkspaceMappingsName),
+		TableName:      aws.String(s.WorkspaceMappingsName),
+		ConsistentRead: aws.Bool(true),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
@@ -906,8 +928,9 @@ func (s *Store) deleteWorkspaceMapping(ctx context.Context, teamID string, cutof
 		},
 	}
 	if !cutoff.IsZero() {
-		input.ConditionExpression = aws.String(purgeCutoffCondition)
+		input.ConditionExpression = aws.String(bindingPurgeCutoffCondition)
 		input.ExpressionAttributeNames = map[string]string{
+			exprPolicyBoundAt: attrPolicyBoundAt,
 			exprUpdatedAtNano: attrUpdatedAtNano,
 		}
 		input.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{

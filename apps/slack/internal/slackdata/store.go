@@ -66,6 +66,9 @@ const (
 	// EnvChannelPoliciesTable holds the DDB table name for the per-
 	// channel allowed-resource-id policy table.
 	EnvChannelPoliciesTable = "QURL_CHANNEL_POLICIES_TABLE"
+	// EnvLegacyPolicyWritersRetired permits untagged-row retirement only after all
+	// old writers and their in-flight work have stopped. Unset defaults to false.
+	EnvLegacyPolicyWritersRetired = "QURL_SLACK_LEGACY_POLICY_WRITERS_RETIRED"
 )
 
 // DynamoDBClient is the slice of *dynamodb.Client the Store uses.
@@ -92,12 +95,13 @@ type DynamoDBClient interface {
 // The zero value is NOT usable — construct via [NewStore] or set
 // every field explicitly in tests.
 type Store struct {
-	Client                DynamoDBClient
-	WorkspaceMappingsName string
-	ChannelPoliciesName   string
-	RateLimitEnabled      bool
-	RateLimitLimit        int
-	RateLimitWindow       time.Duration
+	legacyPolicyWritersRetired bool
+	Client                     DynamoDBClient
+	WorkspaceMappingsName      string
+	ChannelPoliciesName        string
+	RateLimitEnabled           bool
+	RateLimitLimit             int
+	RateLimitWindow            time.Duration
 
 	// Now is injected so tests can pin the clock for created_at /
 	// updated_at assertions without poking a package-global.
@@ -163,6 +167,14 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 		return nil, fmt.Errorf("slackdata.NewStore: %s is required", EnvChannelPoliciesTable)
 	}
 
+	retired := false
+	if raw := os.Getenv(EnvLegacyPolicyWritersRetired); raw != "" {
+		var err error
+		retired, err = strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("slackdata.NewStore: %s must be a boolean", EnvLegacyPolicyWritersRetired)
+		}
+	}
 	if o.ddbClient == nil {
 		cfg, err := awsconfig.LoadDefaultConfig(ctx, o.awsConfigFns...)
 		if err != nil {
@@ -172,13 +184,14 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 	}
 
 	return &Store{
-		Client:                o.ddbClient,
-		WorkspaceMappingsName: o.workspaceMappingsName,
-		ChannelPoliciesName:   o.channelPoliciesName,
-		RateLimitEnabled:      o.rateLimitEnabled,
-		RateLimitLimit:        defaultRateLimitLimit,
-		RateLimitWindow:       defaultRateLimitWindow,
-		Now:                   time.Now,
+		legacyPolicyWritersRetired: retired,
+		Client:                     o.ddbClient,
+		WorkspaceMappingsName:      o.workspaceMappingsName,
+		ChannelPoliciesName:        o.channelPoliciesName,
+		RateLimitEnabled:           o.rateLimitEnabled,
+		RateLimitLimit:             defaultRateLimitLimit,
+		RateLimitWindow:            defaultRateLimitWindow,
+		Now:                        time.Now,
 	}, nil
 }
 
@@ -280,6 +293,10 @@ type WorkspaceMapping struct {
 func ddbToError(op string, err error) error {
 	if err == nil {
 		return nil
+	}
+	var mapped *Error
+	if errors.As(err, &mapped) && (mapped.Code == ErrCodePolicyWorkspaceChanged || mapped.Code == ErrCodePolicyReconciliationRequired) {
+		return err
 	}
 	var ccfe *ddbtypes.ConditionalCheckFailedException
 	if errors.As(err, &ccfe) {

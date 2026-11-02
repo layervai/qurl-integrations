@@ -23,7 +23,7 @@ func TestSetAgentEnabled_RequiresTeamID(t *testing.T) {
 		called = true
 		return &dynamodb.UpdateItemOutput{}, nil
 	}})
-	err := st.SetAgentEnabled(context.Background(), "", true)
+	err := st.SetAgentEnabled(unitPolicyContext(t, st), "", true)
 	var se *Error
 	if !errors.As(err, &se) || se.StatusCode != http.StatusBadRequest {
 		t.Fatalf("empty teamID = %v, want 400 *Error", err)
@@ -41,7 +41,7 @@ func TestSetAgentEnabled_WritesExplicitBool(t *testing.T) {
 				gotInput = in
 				return &dynamodb.UpdateItemOutput{}, nil
 			}})
-			if err := st.SetAgentEnabled(context.Background(), "T1", enable); err != nil {
+			if err := st.SetAgentEnabled(unitPolicyContext(t, st), "T1", enable); err != nil {
 				t.Fatalf("SetAgentEnabled(%v) err: %v", enable, err)
 			}
 			if gotInput == nil {
@@ -65,19 +65,15 @@ func TestSetAgentEnabled_WritesExplicitBool(t *testing.T) {
 	}
 }
 
-func TestSetAgentEnabled_UnboundWorkspaceIs404(t *testing.T) {
-	// The conditional-check failure (no row) must surface as a 404 with setup
-	// guidance — not the generic 503 — so the admin learns to run /qurl setup.
+func TestSetAgentEnabled_DeletedBindingRequiresFreshAuthorization(t *testing.T) {
+	// A deleted binding invalidates captured authority; no caller-condition fallback.
 	st := newStore(&stubDDB{updateItemFn: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
 		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("no row")}
 	}})
-	err := st.SetAgentEnabled(context.Background(), "T1", true)
+	err := st.SetAgentEnabled(unitPolicyContext(t, st), "T1", true)
 	var se *Error
-	if !errors.As(err, &se) || se.StatusCode != http.StatusNotFound {
-		t.Fatalf("CCFE = %v, want 404 *Error", err)
-	}
-	if !strings.Contains(strings.ToLower(se.Title), "setup") {
-		t.Errorf("404 Title = %q, want it to mention setup", se.Title)
+	if !errors.As(err, &se) || se.StatusCode != http.StatusConflict || se.Code != ErrCodePolicyWorkspaceChanged {
+		t.Fatalf("CCFE = %v, want authorization conflict", err)
 	}
 }
 
@@ -85,7 +81,7 @@ func TestSetAgentEnabled_TransportErrorMapsTo503(t *testing.T) {
 	st := newStore(&stubDDB{updateItemFn: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
 		return nil, errors.New("ddb unreachable")
 	}})
-	err := st.SetAgentEnabled(context.Background(), "T1", true)
+	err := st.SetAgentEnabled(unitPolicyContext(t, st), "T1", true)
 	var se *Error
 	if !errors.As(err, &se) || se.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("transport error = %v, want 503 *Error", err)

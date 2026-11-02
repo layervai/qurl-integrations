@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -229,10 +230,11 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *Vie
 	// modal submission.
 	adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 	defer cancel()
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
+	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		slog.Error("tunnel edit modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
-		respondTunnelEditModalError(w, "Could not verify admin status. Retry in a moment.")
+		slog.Log(adminCtx, storeErrorLogLevel(adminCtx, err, slog.LevelError), "tunnel edit modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		reply := policyAuthorizationReply(err)
+		respondTunnelEditModalError(w, reply)
 		return
 	}
 	if !isAdmin {
@@ -250,6 +252,7 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *Vie
 		"view_id", payload.View.ID,
 	)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		ctx = authorization.Context(ctx)
 		h.processTunnelEdit(ctx, log, &meta, displayName, nameChanged, aliases, desiredChannels)
 	}) {
 		respondTunnelEditModalError(w, modalBusyMsg)
@@ -401,7 +404,7 @@ func parseEditChannelSelection(values map[string]map[string]interactionStateValu
 func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, displayName string, nameChanged bool, desiredAliases, desiredChannels []string) {
 	c, err := h.authenticatedClient(ctx, meta.TeamID)
 	if err != nil {
-		log.Error("tunnel edit: API key lookup failed", "error", err)
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "tunnel edit: API key lookup failed", "error", err)
 		_ = h.postResponse(log, meta.ResponseURL, ":warning: "+authErrorMessage(err))
 		return
 	}
@@ -420,17 +423,21 @@ func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta 
 	}
 
 	aliasResult := h.reconcileChannelAliases(ctx, log, meta, desiredAliases)
-	channelResult := h.reconcileChannelExposure(ctx, log, meta, desiredChannels)
+	var channelResult channelExposureResult
+	if aliasResult.policyError == "" {
+		channelResult = h.reconcileChannelExposure(ctx, log, meta, desiredChannels)
+	}
 	_ = h.postResponse(log, meta.ResponseURL, formatResourceEditSummary(meta.Token, meta.ResourceType, changes, &aliasResult, &channelResult))
 }
 
 // aliasReconcileResult buckets the outcome of reconciling a tunnel's channel
 // aliases for the edit summary.
 type aliasReconcileResult struct {
-	added     []string
-	removed   []string
-	conflicts []string // alias already bound to a DIFFERENT tunnel in this channel
-	hadError  bool     // a non-conflict bind/unbind or the policy read failed
+	policyError string
+	added       []string
+	removed     []string
+	conflicts   []string // alias already bound to a DIFFERENT tunnel in this channel
+	hadError    bool     // a non-conflict bind/unbind or the policy read failed
 }
 
 // reconcileChannelAliases applies the admin's alias edit. Additions are desired
@@ -480,7 +487,12 @@ func (h *Handler) reconcileChannelAliases(ctx context.Context, log *slog.Logger,
 		case errors.Is(err, slackdata.ErrAliasAlreadyBound):
 			res.conflicts = append(res.conflicts, a)
 		case err != nil:
-			log.Error("tunnel edit: bind alias failed", "error", err, "alias", a, "resource_id", meta.ResourceID)
+			log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "tunnel edit: bind alias failed", "error", err, "alias", a, "resource_id", meta.ResourceID)
+			if reply := policyMutationReply(err); reply != "" {
+				res.hadError = true
+				res.policyError = reply
+				return res
+			}
 			res.hadError = true
 		default:
 			res.added = append(res.added, a)
@@ -503,7 +515,12 @@ func (h *Handler) reconcileChannelAliases(ctx context.Context, log *slog.Logger,
 		case err == nil, errors.Is(err, slackdata.ErrAliasNotFound):
 			res.removed = append(res.removed, a)
 		default:
-			log.Error("tunnel edit: unbind alias failed", "error", err, "alias", a, "resource_id", meta.ResourceID)
+			log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "tunnel edit: unbind alias failed", "error", err, "alias", a, "resource_id", meta.ResourceID)
+			if reply := policyMutationReply(err); reply != "" {
+				res.hadError = true
+				res.policyError = reply
+				return res
+			}
 			res.hadError = true
 		}
 	}
@@ -516,8 +533,9 @@ func (h *Handler) reconcileChannelAliases(ctx context.Context, log *slog.Logger,
 // channelExposureResult buckets the outcome of reconciling a tunnel's channel
 // exposure for the edit summary.
 type channelExposureResult struct {
-	exposed []string // channels newly granted access
-	revoked []string // channels whose access was fully removed
+	policyError string
+	exposed     []string // channels newly granted access
+	revoked     []string // channels whose access was fully removed
 	// aliasRetained holds channels whose allowed_resource_ids grant was cleared
 	// but that STILL expose the resource via a surviving alias binding — so they
 	// remain in AllowedResourceIDsForChannel's union (listable/mintable there).
@@ -572,7 +590,12 @@ func (h *Handler) reconcileChannelExposure(ctx context.Context, log *slog.Logger
 			continue
 		}
 		if err := h.cfg.AdminStore.ExposeResourceToChannel(ctx, meta.TeamID, c, meta.ResourceID); err != nil {
-			log.Error("tunnel edit: expose channel failed", "error", err, "channel_id", c, "resource_id", meta.ResourceID)
+			log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "tunnel edit: expose channel failed", "error", err, "channel_id", c, "resource_id", meta.ResourceID)
+			if reply := policyMutationReply(err); reply != "" {
+				res.hadError = true
+				res.policyError = reply
+				return res
+			}
 			res.hadError = true
 			continue
 		}
@@ -587,7 +610,12 @@ func (h *Handler) reconcileChannelExposure(ctx context.Context, log *slog.Logger
 			continue
 		}
 		if err := h.cfg.AdminStore.RevokeResourceFromChannel(ctx, meta.TeamID, c, meta.ResourceID); err != nil {
-			log.Error("tunnel edit: revoke channel failed", "error", err, "channel_id", c, "resource_id", meta.ResourceID)
+			log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "tunnel edit: revoke channel failed", "error", err, "channel_id", c, "resource_id", meta.ResourceID)
+			if reply := policyMutationReply(err); reply != "" {
+				res.hadError = true
+				res.policyError = reply
+				return res
+			}
 			res.hadError = true
 			continue
 		}
@@ -670,7 +698,9 @@ func formatResourceEditSummary(token, resourceType string, changes []string, ali
 	if !aliasRes.hadError && !chanRes.hadError && nothingApplied {
 		lines = append(lines, "No changes.")
 	}
-	if aliasRes.hadError || chanRes.hadError {
+	if policyError := cmp.Or(aliasRes.policyError, chanRes.policyError); policyError != "" {
+		lines = append(lines, ":warning: "+policyError)
+	} else if aliasRes.hadError || chanRes.hadError {
 		lines = append(lines, ":warning: Some changes may not have applied. Run `/qurl list` to check, and retry if needed.")
 	}
 	return strings.Join(lines, "\n")

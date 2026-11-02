@@ -1419,3 +1419,22 @@ func TestHandleListEditClick_ChannelEnumerationDegrades(t *testing.T) {
 		t.Errorf("enumeration failed yet the other channel appeared in the pre-fill: %s", js)
 	}
 }
+
+func TestResourceEditSummaryPolicyFailure(t *testing.T) {
+	for _, aliasFailure := range []bool{true, false} {
+		aliases := aliasReconcileResult{added: []string{"saved"}}
+		channels := channelExposureResult{}
+		const message = "This channel's settings need operator reconciliation. Contact your qURL operator."
+		if aliasFailure {
+			aliases.hadError = true
+			aliases.policyError = message
+		} else {
+			channels.hadError = true
+			channels.policyError = message
+		}
+		reply := formatResourceEditSummary("app", "", nil, &aliases, &channels)
+		if !strings.Contains(reply, message) || !strings.Contains(reply, "saved") || strings.Contains(reply, "retry if needed") {
+			t.Fatalf("wrong partial-edit next step: %q", reply)
+		}
+	}
+}

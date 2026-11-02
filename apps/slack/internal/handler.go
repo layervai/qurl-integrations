@@ -119,6 +119,9 @@ func SlackRateLimitRetryAfter(err error) string {
 // /qurl setup yet" path — surface a useful next-action instead of the
 // generic auth-failure string.
 func authErrorMessage(err error) string {
+	if reply := policyMutationReply(err); reply != "" {
+		return reply
+	}
 	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
 		return workspaceNotSetupMessage
 	}
@@ -2272,8 +2275,14 @@ func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, us
 
 // authenticatedClient resolves an API key for the team and returns a configured client.
 func (h *Handler) authenticatedClient(ctx context.Context, teamID string) (*client.Client, error) {
+	if err := slackdata.ValidatePolicyAuthorization(ctx, h.cfg.AdminStore, teamID); err != nil {
+		return nil, err
+	}
 	apiKey, err := h.cfg.AuthProvider.APIKey(ctx, teamID)
 	if err != nil {
+		return nil, err
+	}
+	if err := slackdata.ValidatePolicyAuthorization(ctx, h.cfg.AdminStore, teamID); err != nil {
 		return nil, err
 	}
 	return h.cfg.NewClient(apiKey), nil
