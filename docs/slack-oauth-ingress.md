@@ -3,8 +3,13 @@
 Slack OAuth rate limits use the rightmost `X-Forwarded-For` (XFF) address.
 That address is trustworthy only when one controlled Application Load Balancer
 (ALB) appends it and clients cannot reach the application by another path.
-These requirements apply to both account connection (`/oauth/qurl/*`) and app
-installation (`/oauth/slack/*`). They apply before enabling either flow.
+The network requirements apply to both account connection (`/oauth/qurl/*`)
+and app installation (`/oauth/slack/*`). Current main applies the in-app source-IP
+limiter and its fallback warning only to account connection. App-install limits
+are tracked by [#857](https://github.com/layervai/qurl-integrations/issues/857)
+and [PR #1934](https://github.com/layervai/qurl-integrations/pull/1934); do not assume
+they are active until the corresponding source is deployed. Keep this ingress
+boundary before enabling either flow.
 
 ## Required deployment settings
 
@@ -22,7 +27,8 @@ installation (`/oauth/slack/*`). They apply before enabling either flow.
   rightmost-address rule assumes one trusted append hop; it does not validate
   an arbitrary chain of proxies.
 
-The infrastructure module `modules/qurl-webhook-runtime` explicitly sets append
+The `layervai/qurl-integrations-infra` repository's module
+`modules/qurl-webhook-runtime` explicitly sets append
 mode, private task networking and ALB-SG-only container ingress. Its
 `runtime_options.tftest.hcl` includes `oauth_trusted_alb_ingress` to reject a
 change to preserve/remove mode or the declared task ingress boundary. Plan tests
@@ -52,6 +58,12 @@ this boundary.
    association exists. Check all current tasks, not one sample or a desired
    task definition. An inaccessible task or failed API call leaves verification
    incomplete.
+6. Use `aws elbv2 describe-listeners` and `describe-rules` for every listener.
+   Forward actions must target the expected service target groups; HTTP redirect
+   actions must lead to HTTPS. Review any proxy or unexpected action before
+   declaring the path verified. Check the ECS service's `serviceRegistries` and
+   `serviceConnectConfiguration` for Cloud Map or Service Connect paths; an
+   added registration needs a fresh review of the SG and proxy boundary.
 
 Record time, environment, counts and pass/fail results. Keep task IPs, customer
 IDs, OAuth codes, state, tokens and credentials out of public reports. Repeat
@@ -67,4 +79,5 @@ leftmost header or disabling the limiter. Restore the declared proxy boundary
 through the normal reviewed deployment path.
 
 Budgets are per process, and clients behind one NAT share a bucket. This
-limiter supplements edge controls; it is not a global fleet limit.
+limiter groups IPv6 addresses by /64 and supplements edge controls; it is not a
+global fleet limit.
