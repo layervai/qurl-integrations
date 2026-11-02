@@ -195,13 +195,8 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       // and the central registrar's coherently. Don't inline the
       // literal here; the constant is the single source of truth.
       description: `${DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX} (guild=${guildId}${descriptionContext ? `, ${descriptionContext}` : ''})`,
-      // Honor the same env-var kill-switch as the Lambda wrapper so
-      // a multi-region rollout (#827) can disable the sweep on every
-      // call path (Lambda + bot replicas) with a single config flip.
-      // The bot HTTP fleet is exactly the active-active topology
-      // that would cannibalize healthy peers, so this path must
-      // respect the override too — Lambda-only coverage would be
-      // false safety.
+      // Honor the central registrar's kill-switch as an extra operator guard;
+      // both paths require explicit retirement before cross-host deletion (#827).
       urlMigrationSweepEnabled: !isTruthyEnvFlag(process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP),
     });
   } catch (err) {

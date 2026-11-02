@@ -424,7 +424,8 @@ function urlPathname(u) {
 //      landed first sticks. After a rename, that one old-host sub IS
 //      the orphan this sweep targets — regardless of whether the first-
 //      to-register was the central Lambda or a guild link.
-//   4. Liveness gate: BOTH `last_delivery_success === false` AND
+//   4. Explicit retirement marker: description ends with ` [ORPHAN]`.
+//   5. Liveness gate: BOTH `last_delivery_success === false` AND
 //      `failure_count >= URL_MIGRATION_ORPHAN_MIN_FAILURES`. The
 //      compound check tolerates not just transient delivery failures
 //      but also short sustained outages (the floor is 30, not 3, so
@@ -433,44 +434,10 @@ function urlPathname(u) {
 //      brand-new sub with no deliveries yet typically reports
 //      null/undefined — treat that as "presumed alive, do not delete."
 //
-//      LOAD-BEARING ENVIRONMENT-ISOLATION ASSUMPTION:
-//      The description prefix is identical across environments
-//      (`Discord bot view counter`), so the ONLY structural separator
-//      between this sweep and another live environment's sub is the
-//      owner_id scope (subscriptions are listed via the API key's
-//      owner_id). If sandbox and prod (or any two envs) ever share
-//      ONE `QURL_API_KEY` — i.e. resolve to the same `owner_id` in
-//      qurl-service — then a sandbox boot during a prod outage
-//      (`last_delivery_success: false` + `failure_count` past 30)
-//      would DELETE prod's live subscription. Today's deployment
-//      uses per-env SSM `QURL_API_KEY` parameters (one per env), each
-//      backed by a distinct qurl-service API key tied to a distinct
-//      owner_id — confirmed via the infra terraform's per-env
-//      `apiKeySsmParamName` wiring + the API key creation procedure
-//      (each env's key is minted separately). The owner-isolation
-//      invariant is therefore established by configuration, not
-//      enforced in code here. Anything that lets two envs share an
-//      owner_id (key migration, accidental SSM cross-mount, a future
-//      "shared key for stage and prod" decision) MUST flip the
-//      kill-switch BEFORE landing, or the sweep must gain an explicit
-//      env-discriminator first (#827 covers the latter durable fix).
-//
-//      Limitations the gate does NOT cover (see #827 for the durable
-//      fix tracking issue):
-//        - Sustained-outage cannibalization: a sibling in a hard outage
-//          produces the same `last_delivery_success=false` + climbing
-//          `failure_count` signal as a true orphan. These signals
-//          fundamentally can't distinguish the two cases — the durable
-//          fix is a non-signal-based discriminator (host allowlist,
-//          explicit old-host marker, region-tagged description).
-//          Today's deployment is single-host so this is hypothetical.
-//        - First-boot-after-rename: the old sub's `last_delivery_success`
-//          may still be `true` (last delivery before the rename
-//          succeeded). It flips to false only after the first post-
-//          rename delivery fails sig verification. So the immediate
-//          first post-rename boot may not sweep — caught on a
-//          subsequent boot once a real delivery has been attempted.
-//          Acceptable because the hoisted sweep retries every boot.
+//      An operator must first append the exact ` [ORPHAN]` suffix to the
+//      retired subscription's description. Never mark an active peer, even
+//      during a long outage. Failure counts alone cannot identify retirement
+//      (#827); unmarked historical rows require explicit operator cleanup.
 //
 //      TODO(upstream-contract): field names `last_delivery_success` and
 //      `failure_count` are pinned against qurl-service's webhook list
@@ -489,14 +456,8 @@ function urlPathname(u) {
 // failure_count below this is treated as transient (NEAR_MISS), not
 // orphan-confirmed (MATCH). Sized at 30 (not 3) because:
 //   - The motivating orphan had 1475, comfortably above.
-//   - A sustained-but-recoverable peer outage (~minutes) would
-//     reach failure_count=3 trivially, so a small floor buys almost
-//     no protection against the active-active cannibalization
-//     scenario in #827. Raising to 30 means a peer would need to be
-//     down for ~10-30+ minutes (assuming roughly one delivery
-//     attempt per minute) before its sub becomes sweep-eligible,
-//     which is the kind of sustained outage where operator
-//     intervention is already in progress.
+//   - The explicit retirement marker distinguishes a retired endpoint from
+//     a peer outage. The failure floor remains an extra delay before deletion.
 //   - Cost is asymmetric: a true URL-migration orphan's failure_count
 //     climbs unbounded, so the higher floor just delays cleanup by a
 //     bounded amount, not prevents it. A false-positive deletion of a
@@ -531,7 +492,12 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
     if (subHost === null || subPath === null) return ORPHAN_FILTER_RESULTS.NO_MATCH;
     if (subPath !== targetPath) return ORPHAN_FILTER_RESULTS.NO_MATCH;
     if (subHost === targetHost) return ORPHAN_FILTER_RESULTS.NO_MATCH;
-    const subDesc = typeof s.description === 'string' ? s.description : '';
+    // Only an operator's explicit retirement authorizes cross-host cleanup (#827).
+    const retirementMarker = ' [ORPHAN]';
+    if (typeof s.description !== 'string' || !s.description.endsWith(retirementMarker)) {
+      return ORPHAN_FILTER_RESULTS.NO_MATCH;
+    }
+    const subDesc = s.description.slice(0, -retirementMarker.length);
     if (subDesc !== descriptionPrefix && !subDesc.startsWith(prefixWithBoundary)) {
       return ORPHAN_FILTER_RESULTS.NO_MATCH;
     }
@@ -839,9 +805,8 @@ async function ensureWebhookSubscription(opts) {
   // Hard guard: `urlMigrationSweepEnabled=false` collapses the filter
   // to null so no row is classified as orphan or near-miss. The Lambda
   // wrapper reads `QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP`
-  // to flip this without code changes — required defense-in-depth for
-  // the hypothetical active-active multi-region case (#827) where the
-  // sweep would cannibalize healthy peers.
+  // to disable cleanup without code changes. Both call paths also require
+  // the explicit retirement marker, so outage length cannot select a peer.
   const orphanFilter = urlMigrationSweepEnabled
     ? buildUrlMigrationOrphanFilter({
       bridgeUrl,

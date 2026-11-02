@@ -213,6 +213,21 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   defunct URL until manually deleted. Recovery: run the manual
   `DELETE /v1/webhooks/{old_id}` curl from the appendix below for the
   old sub after confirming the new one is healthy.
+- **Automatic cleanup requires explicit retirement (#827)**: before a URL
+  migration, confirm that the old endpoint is retired in every region that
+  shares the API owner and that the new subscription is healthy. To allow
+  automatic cleanup, PATCH only the retired subscription's `description`,
+  preserving its existing text and appending the exact suffix ` [ORPHAN]`.
+  For example, `Discord bot view counter (region=us-east-2, env=sandbox)`
+  becomes `Discord bot view counter (region=us-east-2, env=sandbox) [ORPHAN]`.
+  Use `PATCH /v1/webhooks/{old_id}` with that `description` field; this uses
+  the existing owner-authenticated webhook update API. Never mark a live
+  peer because its delivery attempts fail. The registrar does not add this
+  marker. Unmarked legacy subscriptions remain registered until an operator
+  marks or deletes them. Marked rows must still pass the existing host, path,
+  description-prefix and failed-delivery checks. Deploy the updated library
+  to the central Lambda and all bot replicas before any shared-owner
+  active-active rollout; old registrars still use the unsafe signal-only rule.
 - **API-key blast radius**: the Lambda's `QURL_API_KEY` can list /
   create / PATCH / rotate-secret / DELETE webhook subscriptions in
   addition to minting qURLs. Factor into rotation drills.
