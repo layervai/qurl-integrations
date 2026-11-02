@@ -828,7 +828,8 @@ Access rules are named presets for future shares. They work before account
 linking; `qurl rules sync` merges them with your linked account (`login`,
 `account setup` and `account recover` also sync, uploading rules saved before
 linking), and different edits to the same rule need
-`qurl rules resolve <id-or-name> --use local|account`. A sync that stays local
+`qurl rules resolve <id-or-name> --use local|account` (until then no pending
+edit is uploaded). A sync that stays local
 exits 0; read the JSON `sync` field. Changing or deleting a rule never changes
 existing shares.
 

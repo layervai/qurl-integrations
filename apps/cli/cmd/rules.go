@@ -159,6 +159,7 @@ func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (ac
 	if strings.TrimSpace(selector) == "" {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("--rule requires an access rule ID or exact name"))
 	}
+	// Presets resolve before saved rules; NameTaken keeps saved names off them.
 	if accessrules.IsOnlyFirstPerson(selector) {
 		return accessrules.OnlyFirstPerson(), nil
 	}
@@ -576,7 +577,11 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 	if limits == nil {
 		return nil
 	}
+	// The same checks share applies before any link is printed.
 	link, err := client.MintLimitedLink(ctx, id, *limits)
+	if err = verifyShareLink(id, link, err); err == nil {
+		err = o.verifyLink(ctx, link.QURL, id)
+	}
 	if err != nil {
 		// API errors render on their own, so the CRID and next step are said first.
 		o.printer().Warnf(msgRulesLinkNotMade, id)

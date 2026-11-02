@@ -98,7 +98,7 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 				})
 			}
 
-			if err := verifyShareLink(assessment, link, err); err != nil {
+			if err := verifyShareLink(assessment.Input, link, err); err != nil {
 				return err
 			}
 			if err := opts.verifyLink(cmd.Context(), link.QURL, assessment.Input); err != nil {
@@ -157,7 +157,7 @@ func errValidCRIDRequired() error {
 }
 
 // verifyShareLink rejects unverified responses before any link is used or printed.
-func verifyShareLink(assessment *cridux.Assessment, link *qurlapi.ShareLink, err error) error {
+func verifyShareLink(expectedCRID string, link *qurlapi.ShareLink, err error) error {
 	if errors.Is(err, qurl.ErrNoCRID) {
 		return exitcode.VerificationError(msgVerifyMissing, err)
 	}
@@ -170,7 +170,7 @@ func verifyShareLink(assessment *cridux.Assessment, link *qurlapi.ShareLink, err
 	if link == nil || link.CRID == "" {
 		return exitcode.VerificationError(msgVerifyMissing, qurl.ErrNoCRID)
 	}
-	if subtle.ConstantTimeCompare([]byte(link.CRID), []byte(assessment.Input)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(link.CRID), []byte(expectedCRID)) != 1 {
 		return exitcode.VerificationError(msgVerifyMismatch, qurl.ErrCRIDMismatch)
 	}
 	return nil

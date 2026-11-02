@@ -92,6 +92,16 @@ func TestRuleSnapshotConfiguresPrivateDomainWithVersionGuard(t *testing.T) {
 		t.Fatalf("configure %d %s %s", result.code, result.stdout.String(), result.stderr.String())
 	}
 }
+func TestConfigureRefusesAPublicRule(t *testing.T) {
+	srv := apitest.NewServer(t)
+	for _, rule := range []string{"builtin.public", "once"} {
+		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "access", "configure", srv.Key.CRID, "--rule", rule, "--version", "1"}, shareStateDir: connectorStateTestDir(t)})
+		if result.code != 2 || !strings.Contains(result.stderr.String(), "public rule") || len(srv.Requests()) != 0 {
+			t.Fatalf("%s: %d %s", rule, result.code, result.stderr.String())
+		}
+	}
+}
+
 func TestConfigureAppliesASavedRuleByName(t *testing.T) {
 	srv := apitest.NewServer(t)
 	var sent map[string]any
