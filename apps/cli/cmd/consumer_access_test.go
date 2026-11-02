@@ -191,9 +191,11 @@ func TestConsumerAccessApprovalRequestBodies(t *testing.T) {
 			srv := apitest.NewServer(t)
 			id, version := strings.Repeat("a", 64), "1"
 			flags := []string{"--entitlement", "receipt", "--expires-at", "2027-01-01T00:00:00Z"}
+			// A key opt-in may end sooner than the policy's approval lifetime.
+			keyExpiry := time.Now().AddDate(0, 1, 0).UTC().Truncate(time.Second).Format(time.RFC3339)
 			if key {
 				id, version = "new", "0"
-				flags = []string{"--credential-kind", "device", "--credential-id", "agent-consumer01", "--credential-key", "public-key"}
+				flags = []string{"--credential-kind", "device", "--credential-id", "agent-consumer01", "--credential-key", "public-key", "--expires-at", keyExpiry}
 			}
 			srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/consumer-grants/"+id+"/approve", func(w http.ResponseWriter, r *http.Request) {
 				var body qurl.ConsumerGrantApproval
@@ -201,7 +203,7 @@ func TestConsumerAccessApprovalRequestBodies(t *testing.T) {
 					t.Fatal(err)
 				}
 				if key {
-					if body.ExpectedVersion != 0 || body.CredentialKind != "device" || body.CredentialID != "agent-consumer01" || body.CredentialPublicKey != "public-key" || body.EntitlementID != "" || body.ExpiresAt != nil {
+					if body.ExpectedVersion != 0 || body.CredentialKind != "device" || body.CredentialID != "agent-consumer01" || body.CredentialPublicKey != "public-key" || body.EntitlementID != "" || body.ExpiresAt == nil || body.ExpiresAt.UTC().Format(time.RFC3339) != keyExpiry {
 						t.Fatalf("key body=%+v", body)
 					}
 				} else if body.ExpectedVersion != 1 || body.EntitlementID != "receipt" || body.ExpiresAt == nil || body.ExpiresAt.Format("2006-01-02T15:04:05Z07:00") != "2027-01-01T00:00:00Z" || body.CredentialKind != "" || body.CredentialID != "" || body.CredentialPublicKey != "" {

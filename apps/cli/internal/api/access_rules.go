@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/layervai/qurl-go/qurl"
 
@@ -43,6 +44,13 @@ func (a accountAccessRules) request(ctx context.Context, method string, body any
 			return accessrules.AccountLibrary{}, errors.Join(accessrules.ErrConflict, fixed)
 		}
 		if reply.status == http.StatusForbidden {
+			// A frozen account keeps its own standing message; any other 403
+			// means this identity has no linked account library.
+			var problem *Error
+			if errors.As(reply.problem(), &problem) && strings.EqualFold(problem.Code, "account_frozen") {
+				fixed.Code = problem.Code
+				return accessrules.AccountLibrary{}, fixed
+			}
 			return accessrules.AccountLibrary{}, errors.Join(accessrules.ErrUnlinked, fixed)
 		}
 		return accessrules.AccountLibrary{}, fixed

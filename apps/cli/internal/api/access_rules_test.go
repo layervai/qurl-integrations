@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
@@ -51,6 +52,19 @@ func TestAccessRulesDoesNotTreatAuthOrMalformedAsEmpty(t *testing.T) {
 				t.Fatal("raw error leaked")
 			}
 		})
+	}
+}
+
+func TestAccessRulesFrozenAccountIsNotUnlinked(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/me/access-rules", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":"account_frozen","detail":"private detail"}}`))
+	})
+	_, err := newTestClient(t, srv, nil).AccessRules().Load(t.Context())
+	var apiErr *Error
+	if errors.Is(err, accessrules.ErrUnlinked) || !errors.As(err, &apiErr) || apiErr.Code != "account_frozen" || strings.Contains(err.Error(), "private detail") {
+		t.Fatalf("frozen account: %v", err)
 	}
 }
 

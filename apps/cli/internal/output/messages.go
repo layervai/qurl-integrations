@@ -406,7 +406,7 @@ func CustomerMessages() []string {
 		msgDeviceEnrolled,
 		msgSavedTo,
 		msgAlreadyPublished,
-		msgPublishSettingsDiffer,
+		msgPublishSettingsDiffer, msgWorksOnce,
 		msgPublishFoundExisting,
 		labelAccess, msgPublishPrivate, msgPublishPublic,
 		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers, hintPublishOtherDevices,

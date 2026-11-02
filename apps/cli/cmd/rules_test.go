@@ -92,6 +92,33 @@ func TestRuleSnapshotConfiguresPrivateDomainWithVersionGuard(t *testing.T) {
 		t.Fatalf("configure %d %s %s", result.code, result.stdout.String(), result.stderr.String())
 	}
 }
+func TestConfigureAppliesASavedRuleByName(t *testing.T) {
+	srv := apitest.NewServer(t)
+	var sent map[string]any
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Policy map[string]any `json:"consumer_access"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		sent = body.Policy
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "consumer_access": body.Policy}, nil)
+	})
+	dir := connectorStateTestDir(t)
+	store, err := connectorstate.OpenAccessRules(dir, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Save(t.Context(), 0, &accessrules.Definition{ID: "11111111-1111-4111-8111-111111111111", Name: "Reviewers", Mode: "review", ApprovalExpiresIn: new("7d")}); err != nil {
+		t.Fatal(err)
+	}
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "access", "configure", srv.Key.CRID, "--rule", "Reviewers", "--version", "1", "-o", "json"}, shareStateDir: dir})
+	if result.code != 0 || sent["mode"] != "review" || sent["approval_expires_in"] != "7d" || sent["version"] != float64(2) {
+		t.Fatalf("configure %d sent %v %s", result.code, sent, result.stderr.String())
+	}
+}
+
 func TestRulesSyncAuthFailureKeepsSavedWorkAndIntegrityFailsClosed(t *testing.T) {
 	for _, status := range []int{http.StatusForbidden, http.StatusUnauthorized, http.StatusServiceUnavailable, http.StatusOK} {
 		t.Run(http.StatusText(status), func(t *testing.T) {

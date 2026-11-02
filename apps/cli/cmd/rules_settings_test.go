@@ -115,6 +115,24 @@ func scriptMint(t *testing.T, srv *apitest.Server, bodies *[]map[string]any) {
 	})
 }
 
+func TestFailedMintNamesTheCRIDAndRepublishRecovers(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	scriptPublish(t, srv, false, false, nil, nil)
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", apitest.HandlerRevoked400(t))
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: dir})
+	if result.code == 0 || !strings.Contains(result.stderr.String(), srv.Key.CRID) {
+		t.Fatalf("failed mint %d %s", result.code, result.stderr.String())
+	}
+	var mints []map[string]any
+	scriptPublish(t, srv, false, true, nil, nil)
+	scriptMint(t, srv, &mints)
+	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: dir})
+	if result.code != 0 || len(mints) != 1 || mints[0]["one_time_use"] != true || strings.Contains(result.stdout.String(), "settings_differ") {
+		t.Fatalf("republish %d mints %v %s %s", result.code, mints, result.stdout.String(), result.stderr.String())
+	}
+}
+
 const hourRule = `{"id":"11111111-1111-4111-8111-111111111111","name":"Hour","mode":"public","link_limits":{"expires_in":"1h","session_duration":"30m"}}`
 
 func TestPublishWithLinkLimitsMintsAndLaterSharesUseThem(t *testing.T) {

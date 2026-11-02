@@ -546,7 +546,7 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 		kept, err := o.savedLinkLimits(ctx, id)
 		if err != nil && rule == nil {
 			// A plain republish never asked for rules; it still succeeds.
-			o.printer().Warnf("Published %s, but its saved link limits could not be read, so no link was made: %v", id, err)
+			o.printer().Warnf(msgRulesLimitsUnread+" %v", id, err)
 			return nil
 		}
 		if err != nil {
@@ -570,7 +570,7 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 			err = store.Set(ctx, id, limits)
 		}
 		if err != nil {
-			return fmt.Errorf("published %s, but could not save its link limits on this device: %w", id, err)
+			return fmt.Errorf("published %s, but could not save its link limits on this device; run qurl share %s for a link without them: %w", id, id, err)
 		}
 	}
 	if limits == nil {
@@ -578,7 +578,9 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 	}
 	link, err := client.MintLimitedLink(ctx, id, *limits)
 	if err != nil {
-		return fmt.Errorf("published %s, but could not create its link with the rule's limits; run the same publish again: %w", id, err)
+		// API errors render on their own, so the CRID and next step are said first.
+		o.printer().Warnf(msgRulesLinkNotMade, id)
+		return err
 	}
 	published.LimitedLink = link
 	return nil
