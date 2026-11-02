@@ -92,7 +92,7 @@ func TestPolicySignedLifecycleDynamoDBLocal(t *testing.T) {
 					t.Fatal(err)
 				}
 				if scenario == "unknown legacy retains delivery" {
-					if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(policyTable), Item: map[string]ddbtypes.AttributeValue{"slack_team_id": &ddbtypes.AttributeValueMemberS{Value: team}, "slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "CUNKNOWN"}, "allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_unknown"}}}}); err != nil {
+					if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(policyTable), Item: map[string]ddbtypes.AttributeValue{"slack_team_id": &ddbtypes.AttributeValueMemberS{Value: team}, "slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "CAAAA"}, "allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_unknown"}}}}); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -131,7 +131,7 @@ func TestPolicySignedLifecycleDynamoDBLocal(t *testing.T) {
 				if deleted != 0 {
 					t.Fatal("incomplete legacy cleanup acknowledged its delivery")
 				}
-				unknown, err := store.AllowedResourceIDsForChannel(ctx, team, "CUNKNOWN")
+				unknown, err := store.AllowedResourceIDsForChannel(ctx, team, "CAAAA")
 				if err != nil || len(unknown) != 1 {
 					t.Fatalf("ambiguous policy was lost: %v", err)
 				}

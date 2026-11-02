@@ -137,3 +137,40 @@ func TestPolicySignedHandlerDynamoDBLocal(t *testing.T) {
 		})
 	}
 }
+
+func TestPolicyReadOnlyChooserDynamoDBLocal(t *testing.T) {
+	ddb, workspace, policies := testddb.New(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	store, err := slackdata.NewStore(ctx, slackdata.WithDynamoDBClient(ddb), slackdata.WithTableNames(workspace, policies))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const team = "TCHOOSE01"
+	if err := store.BindWorkspace(ctx, &slackdata.WorkspaceMapping{TeamID: team, OwnerID: testAdminOwnerID}, testAdminUserID); err != nil {
+		t.Fatal(err)
+	}
+	key := map[string]ddbtypes.AttributeValue{"slack_team_id": &ddbtypes.AttributeValueMemberS{Value: team}}
+	if _, err := ddb.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(workspace), Key: key, UpdateExpression: aws.String("REMOVE policy_generation, policy_installation, policy_legacy")}); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	defer upstream.Close()
+	h := newTestHandler(t, upstream)
+	h.cfg.AdminStore = store
+	h.SetAliasStore(store)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+	status, reply := newAdminSlashInvoker(t, h).invokeAdmin("protect", team, testAdminUserID)
+	if status != http.StatusOK || !strings.Contains(reply, "What do you want to protect") {
+		t.Fatalf("chooser failed: %d %q", status, reply)
+	}
+	row, err := ddb.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(workspace), Key: key, ConsistentRead: aws.Bool(true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"policy_generation", "policy_installation", "policy_legacy"} {
+		if _, present := row.Item[name]; present {
+			t.Fatal("read-only chooser initialized policy metadata")
+		}
+	}
+}

@@ -553,7 +553,7 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 			}
 			err := s.deletePolicyForPurge(ctx, teamID, channelID, item, cutoff, binding)
 			var changed *Error
-			if errors.As(err, &changed) && (changed.Code == errCodePolicyPurgeWorkspaceChanged || changed.Code == errCodePolicyPurgeLegacyUnknown) {
+			if errors.As(err, &changed) && changed.Code == errCodePolicyPurgeWorkspaceChanged {
 				return joinSweepErrors(deleteErrs, err)
 			}
 			if err != nil {

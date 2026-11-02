@@ -111,3 +111,14 @@ initialization, plus transaction permissions for a workspace `ConditionCheckItem
 and policy `UpdateItem`/`DeleteItem`. AWS authorizes each action in the
 transaction against its table. Verify the actual operator role as well as the
 bot task role before apply. Do not assume a bot IAM receipt covers statecrawl.
+
+## Reclaiming pre-pivot ownership
+
+A setup reclaim of a legacy Auth0-style owner is a new installation, not an
+ownership transfer. It does not adopt the previous installation's channel
+grants or aliases. Untagged rows require operator reconciliation while old
+writers may still exist. Previously tagged rows belong to the retired
+installation and can be cleared atomically before a new policy write. The
+operator must review and recreate any intended configuration under the new
+owner; reclaim does not silently carry it forward. Preserve this distinction
+when planning legacy migrations.

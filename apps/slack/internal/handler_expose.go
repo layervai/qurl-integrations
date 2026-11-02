@@ -36,7 +36,7 @@ func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, "Guided setup is not configured on this Secure Access Agent deployment. Use `/qurl-admin protect-connector <id>` or `/qurl-admin protect-url $<alias>` instead.")
 		return
 	}
-	if _, allowed := h.requireAliasAdminGate(w, teamID, values, AdminActionExpose); !allowed {
+	if !h.requireAdminStoreSync(w) || !h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), AdminActionExpose) {
 		return
 	}
 	respondSlackBlocks(w, "What do you want to protect in this channel?", exposeChooserBlocks(channelID))
