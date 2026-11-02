@@ -81,6 +81,10 @@ afterAll(async () => {
 });
 
 describe('guild configs', () => {
+  test('setup history event names match the infra contract', () => {
+    expect(AUDIT_EVENTS.QURL_SETUP_CONFIG_DELETED).toBe('qurl_setup_config_deleted');
+    expect(AUDIT_EVENTS.QURL_SETUP_KEY_ROTATED).toBe('qurl_setup_key_rotated');
+  });
   test.each(['admin', undefined])('raw deletion audits only the removed configuration metadata (%s)', async (configuredBy) => {
     ddbMock.on(DeleteCommand).resolves({ Attributes: {
       guild_id: 'g-1', configured_by: configuredBy, qurl_api_key: 'private-key-fixture',
@@ -119,6 +123,7 @@ describe('guild configs', () => {
       configured_at: 'first-setup', updated_at: 'previous-write',
     } });
     await store.setGuildApiKey('g-1', 'private-new-key', configuredBy, SETUP_VIA.PASTE);
+    expect(logger.audit).toHaveBeenCalledTimes(configuredBy === 'admin' ? 1 : 2);
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_KEY_ROTATED, {
       guild_id: 'g-1', configured_by: configuredBy, via: SETUP_VIA.PASTE,
       prior_configured_at: 'first-setup', prior_updated_at: 'previous-write',

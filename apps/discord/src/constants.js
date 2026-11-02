@@ -486,11 +486,15 @@ const AUDIT_EVENTS = {
   // auditSetupAdminChange skips.
   QURL_SETUP_ADMIN_CHANGED: 'qurl_setup_admin_changed',
 
-  // Successful deletion of an existing guild configuration. The paired infra
-  // filter pages on either gateway or HTTP logs; IDs remain log-only fields.
+  // Successful deletion of an existing guild configuration. TODO(upstream-contract):
+  // keep the infra qurl_setup_config_deleted filter/alarm in sync. All guild-config
+  // deletion paths must emit this event; IDs remain log-only fields.
   QURL_SETUP_CONFIG_DELETED: 'qurl_setup_config_deleted',
   // Every successful replacement of an existing key, including same-admin
   // writes. Forensic log only: retries also replace the key, so do not page.
+  // configured_by is the write's supplied actor, not a readback of stored state.
+  // TODO(upstream-contract): keep the infra setup-deletion runbook's history
+  // event name in sync; no metric filter is intended for this event.
   QURL_SETUP_KEY_ROTATED: 'qurl_setup_key_rotated',
 
   // qURL webhook receiver — feeds CloudWatch metric filters +
