@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -24,6 +25,9 @@ const commonRevokeFailedMessage = "Failed to revoke the resource. Please try aga
 
 // revokeLifecycleUncertainNote qualifies a confirmed revoke with incomplete inspection.
 const revokeLifecycleUncertainNote = ":warning: Lifecycle checks were incomplete. Follow the workload teardown steps above."
+
+// Two advisory calls must leave most of the async worker budget for DELETE.
+const revokeAdvisoryTimeout = 3 * time.Second
 
 // revokeTeardownNote is appended only to successful revoke replies. It LEADS
 // with what revoke did do — qurl-service flips the resource to revoked (new
@@ -189,7 +193,9 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 		log.Error("revoke: failed to get API key", "error", err, "team_id", teamID, "user_id", userID)
 		return newActionCoreResult(false, authErrorMessage(err), "Workspace API key was not available.")
 	}
-	resource, err := c.GetResource(ctx, resourceID)
+	readCtx, cancelRead := context.WithTimeout(ctx, revokeAdvisoryTimeout)
+	resource, err := c.GetResource(readCtx, resourceID)
+	cancelRead()
 	resourceType := ""
 	if resource != nil {
 		resourceType = resource.Type
@@ -224,19 +230,26 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 	// revokeTeardownNote explains manual teardown. Recognized tunnels still stop
 	// first to quiesce their serving state before DELETE.
 	// TODO(upstream-contract): qurl-service rejects non-tunnel sharing writes; DELETE authorizes independently.
-	if degradedReason != "" || resourceType == client.ResourceTypeTunnel {
-		if _, err := c.SetSharing(ctx, resourceID, "off"); err != nil {
-			var apiErr *client.APIError
-			if !errors.As(err, &apiErr) || (apiErr.StatusCode != http.StatusNotFound && apiErr.StatusCode != http.StatusGone) {
-				if degradedReason == "" {
-					log.Error("stop tunnel sharing before revoke failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
-					return newActionCoreResult(false, ":warning: "+sanitizeAPIError(err, fmt.Sprintf("Failed to stop sharing `$%s` before revoke", escapeMrkdwnCode(displayToken))), "Sharing could not be stopped before revoke.")
-				}
-				log.Warn("optional sharing stop failed; proceeding to revoke", "error", err, "degraded_reason", degradedReason, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+	var sharingErr error
+	switch {
+	case degradedReason != "":
+		sharingCtx, cancelSharing := context.WithTimeout(ctx, revokeAdvisoryTimeout)
+		_, sharingErr = c.SetSharing(sharingCtx, resourceID, "off")
+		cancelSharing()
+	case resourceType == client.ResourceTypeTunnel:
+		_, sharingErr = c.SetSharing(ctx, resourceID, "off")
+	}
+	if sharingErr != nil {
+		var apiErr *client.APIError
+		if !errors.As(sharingErr, &apiErr) || (apiErr.StatusCode != http.StatusNotFound && apiErr.StatusCode != http.StatusGone) {
+			if degradedReason == "" {
+				log.Error("stop tunnel sharing before revoke failed", "error", sharingErr, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				return newActionCoreResult(false, ":warning: "+sanitizeAPIError(sharingErr, fmt.Sprintf("Failed to stop sharing `$%s` before revoke", escapeMrkdwnCode(displayToken))), "Sharing could not be stopped before revoke.")
 			}
-			// A 404/410 may be a concurrent delete. With degraded metadata, other
-			// stop failures are advisory too; DELETE still authorizes the revoke.
+			log.Warn("optional sharing stop failed; proceeding to revoke", "error", sharingErr, "degraded_reason", degradedReason, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
 		}
+		// A 404/410 may be a concurrent delete. With degraded metadata, other
+		// stop failures are advisory too; DELETE still authorizes the revoke.
 	}
 	if err := c.DeleteResource(ctx, resourceID); err != nil {
 		var apiErr *client.APIError

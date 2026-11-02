@@ -846,3 +846,38 @@ func TestRevokeResource_PurgesOnAlreadyGone(t *testing.T) {
 		t.Errorf("alias %q still bound after revoking an already-gone resource (found=%v, err=%v) — the orphan must be swept on the 404 path too", testRevokeAlias, found, err)
 	}
 }
+
+// TestRevokeResource_AdvisoryTimeoutsReserveDeleteBudget checks the request
+// contexts without sleeping through real timeouts on every CI run.
+func TestRevokeResource_AdvisoryTimeoutsReserveDeleteBudget(t *testing.T) {
+	ts := newAdminTestServers(t)
+	seedRevokeAlias(t, ts)
+	h := newAdminTestHandler(t, ts)
+	ctx, cancel := context.WithTimeout(t.Context(), asyncWorkTimeout)
+	defer cancel()
+	workerDeadline, _ := ctx.Deadline()
+	var probes, deletes int
+	h.cfg.NewClient = func(key string) *client.Client {
+		return client.New(ts.customerServer.URL, key, client.WithRetry(0), client.WithHTTPClient(&http.Client{
+			Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				deadline, ok := req.Context().Deadline()
+				if req.Method == http.MethodDelete {
+					deletes++
+					if !ok || !deadline.Equal(workerDeadline) || req.Context().Err() != nil {
+						t.Error("DELETE did not retain the live worker context")
+					}
+					return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Header: make(http.Header)}, nil
+				}
+				probes++
+				if !ok || time.Until(deadline) > asyncWorkTimeout/4 {
+					t.Error("advisory request can consume the authoritative DELETE budget")
+				}
+				return nil, context.DeadlineExceeded
+			}),
+		}))
+	}
+	result := h.revokeResourceResult(ctx, slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if probes != 2 || deletes != 1 || !result.audit.success || revokeAliasBound(t, h) {
+		t.Errorf("probes=%d, deletes=%d, success=%v; want two bounded failures followed by confirmed revoke and cleanup", probes, deletes, result.audit.success)
+	}
+}
