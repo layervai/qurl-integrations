@@ -178,7 +178,7 @@ func TestRulesHumanCreateNeedsNoUUIDOrVersion(t *testing.T) {
 	}
 	quiet := runCLI(t, &runOpts{args: []string{"rules", "create", "Reviewers", "--mode", "review", "-q"}, env: map[string]string{}, shareStateDir: dir})
 	id := strings.TrimSpace(quiet.stdout.String())
-	if quiet.code != 0 || !regexp.MustCompile(`^[0-9a-f-]{36}$`).MatchString(id) {
+	if quiet.code != 0 || !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(id) {
 		t.Fatalf("quiet create printed %q: %s", quiet.stdout.String(), quiet.stderr.String())
 	}
 	text := runCLI(t, &runOpts{args: []string{"rules", "create", "Partners", "--mode", "keys"}, env: map[string]string{}, shareStateDir: dir})

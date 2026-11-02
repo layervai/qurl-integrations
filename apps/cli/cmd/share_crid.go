@@ -112,7 +112,7 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 		},
 	}
 
-	cmd.Flags().DurationVar(&ttl, "ttl", 0, "requested link lifetime, e.g. 5m or 1h (service may grant less; 1m to 30d with saved link limits)")
+	cmd.Flags().DurationVar(&ttl, "ttl", 0, "requested link lifetime, e.g. 5m or 1h (service may grant less; 1m to 720h with saved link limits)")
 	cmd.Flags().DurationVar(&sessionDuration, "session-duration", 0, "session lifetime after access starts, e.g. 5m or 1h (default: service policy)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
@@ -212,7 +212,7 @@ func (opts *globalOpts) shareWithLimits(cmd *cobra.Command, id string, limits ac
 	if cmd.Flags().Changed("ttl") {
 		limits.ExpiresIn = ttl.String()
 		if _, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn); !ok {
-			return nil, exitcode.UsageError(errors.New("--ttl must be from 1m to 30d for this item's link limits"))
+			return nil, exitcode.UsageError(errors.New("--ttl must be from 1m to 720h for this item's link limits"))
 		}
 	}
 	if cmd.Flags().Changed("session-duration") {

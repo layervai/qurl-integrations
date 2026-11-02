@@ -608,10 +608,12 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 // savedLinkLimits is what a share on this device was created with; nil if nothing.
 func (o *globalOpts) savedLinkLimits(ctx context.Context, id string) (*accessrules.LinkLimits, error) {
 	dir, err := o.resolveShareStateDir("")
+	if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
+		// Without a profile directory nothing was saved on this device.
+		return nil, nil //nolint:nilnil // no profile means no saved limits
+	}
 	if err != nil {
-		// Without a profile directory nothing was saved on this device; the
-		// caller's own path reports the missing profile.
-		return nil, nil //nolint:nilnil,nilerr // no profile means no saved limits
+		return nil, err
 	}
 	store, err := connectorstate.OpenShareRules(dir)
 	if err != nil {
