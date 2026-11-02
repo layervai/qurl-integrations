@@ -63,6 +63,10 @@ function isNonEmptyContainer(value) {
   return value != null && typeof value === 'object' && Object.keys(value).length > 0;
 }
 
+function isNonEmptyByteSequence(value) {
+  return (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) && value.byteLength > 0;
+}
+
 // Exact key names that audit() refuses to emit silently — these are the
 // classic secret-bearers a caller is most likely to leak by accident.
 // Exact-match for general secret names so legitimate audit dimensions like
@@ -114,6 +118,7 @@ function isAuditSecretKey(key) {
 // hide all non-empty strings and are sealed at the depth-5 limit. qURL-link
 // containers are suppressed as a unit because bare elements can be credentials.
 function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecret = false) {
+  if (insideSecret && isNonEmptyByteSequence(value)) return { value: '[REDACTED]', secretKeys };
   if (insideSecret && typeof value === 'string' && value.length > 0) {
     return { value: '[REDACTED]', secretKeys };
   }
@@ -160,6 +165,7 @@ function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecr
 }
 
 function redact(value, depth = 0, insideSecret = false) {
+  if (insideSecret && isNonEmptyByteSequence(value)) return '[REDACTED]';
   if (insideSecret && typeof value === 'string' && value.length > 0) return '[REDACTED]';
   if (insideSecret && depth > 5 && value != null && typeof value === 'object') return '[REDACTED]';
   if (depth > 5 || value == null) return value;
@@ -202,6 +208,7 @@ function sanitizeMessage(message) {
   return message.replace(CONTROL_CHARS_RE, ' ');
 }
 function formatMessage(level, message, meta = {}) {
+  if (meta == null) meta = {};
   let metaStr = '';
   try {
     const safe = redact(meta);

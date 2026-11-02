@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -1302,7 +1303,7 @@ func (e errorHandler) WithGroup(string) slog.Handler {
 func TestRedactingJSONHandlerSuppressesMatchedSecretContainers(t *testing.T) {
 	t.Parallel()
 	for _, key := range []string{"hash", "token", "password", "private_key"} {
-		for _, value := range []any{[]string{testRealToken}, map[string]any{"value": testRealToken, "count": 7}, struct{ Value string }{testRealToken}} {
+		for _, value := range []any{[]string{testRealToken}, map[string]any{"value": testRealToken, "count": 7}, struct{ Value string }{testRealToken}, errors.New(testRealToken)} {
 			var buf bytes.Buffer
 			logger := slog.New(NewRedactingJSONHandler(&buf, nil))
 			logger.Info("secret-container", slog.Any(key, value), slog.Int("adjacent_count", 9))

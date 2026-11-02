@@ -24,6 +24,14 @@ describe('logger', () => {
   });
 
   describe.each(['error', 'warn', 'info', 'debug'])('%s metadata failure safety', (level) => {
+    it('treats null metadata as absent', () => {
+      process.env.LOG_LEVEL = 'debug';
+      logger = require('../src/logger');
+      logger[level]('null-fixture', null);
+      const output = consoleSpy[level === 'info' || level === 'debug' ? 'log' : level];
+      expect(output).toHaveBeenCalledTimes(1);
+      expect(output.mock.calls[0][0]).toMatch(/: null-fixture$/);
+    });
     test.each(['circular', 'bigint', 'getter', 'toJSON'])('%s metadata does not break the caller or leak values', (kind) => {
       process.env.LOG_LEVEL = 'debug';
       logger = require('../src/logger');
@@ -63,6 +71,19 @@ describe('logger', () => {
   });
 
   describe.each(['info', 'audit'])('%s secret containers', (method) => {
+    test.each(['buffer', 'typed-array', 'data-view', 'array-buffer'])('suppresses secret %s bytes directly and in wrappers', (kind) => {
+      logger = require('../src/logger');
+      const bytes = Uint8Array.from([71, 83, 101, 99, 114, 101, 116]);
+      const value = kind === 'buffer' ? Buffer.from(bytes)
+        : kind === 'typed-array' ? bytes
+          : kind === 'data-view' ? new DataView(bytes.buffer) : bytes.buffer;
+      logger[method]('bytes-fixture', { private_key: value, token: { bytes: value }, adjacent_count: 9 });
+      const line = consoleSpy.log.mock.calls[0][0];
+      const fields = method === 'audit' ? JSON.parse(line).audit : JSON.parse(line.slice(line.indexOf('{')));
+      expect(fields.private_key).toBe('[REDACTED]');
+      expect(fields.token).toEqual({ bytes: '[REDACTED]' });
+      expect(fields.adjacent_count).toBe(9);
+    });
     test.each(['array', 'wrapper', 'deep'])('redacts strings in %s containers for every matched key', (shape) => {
       process.env.LOG_LEVEL = 'debug';
       logger = require('../src/logger');
