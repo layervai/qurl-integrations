@@ -143,6 +143,8 @@ lets this identity list the whole bucket. It also lets S3 distinguish a missing
 key (`404`) from a rejected request (`403`) in the origin logs. Viewers receive
 `404` for both.
 
+<!-- TODO(upstream-contract): S3 ListBucket/prefix error semantics and nginx JSON log field names below must match AWS and templates/nginx.conf.template. -->
+
 #### Prefix-limited listing
 
 For `S3_PREFIX=site`, replace the `MissingKeysResolveAs404` statement above with:
@@ -162,8 +164,8 @@ For `S3_PREFIX=site`, replace the `MissingKeysResolveAs404` statement above with
 ```
 
 Keep the `ReadServedObjects` statement. Use the same bucket and prefix in both
-statements and the origin configuration. Write the IAM prefix without leading
-or trailing slashes (`site/*`); `S3_PREFIX=site`, `/site`, and `site/` all select
+statements and the origin configuration. In the IAM patterns, write the prefix
+followed by `/*`, with no leading slash (`site/*`); `S3_PREFIX=site`, `/site`, and `site/` all select
 the same keys. This grants no write, delete, or bucket-wide list access. Other
 attached policies can still grant broader access; replace the broad list grant
 rather than adding this beside it. With an empty `S3_PREFIX`, there is no site
@@ -201,8 +203,8 @@ be added to nginx counts, or the same request can be counted twice. Select the
 origin log group and a short time range in Logs Insights.
 
 This query counts upstream `403`, `429`, and `5xx` outcomes by five-minute bin
-and viewer status. It also matches nginx's comma/colon-separated upstream
-statuses when a request has more than one upstream attempt:
+and viewer status. The regex also accepts nginx's comma/colon-separated status
+format defensively; this origin currently disables multiple upstream attempts:
 
 ```text
 fields @timestamp, layer, status, upstream_status
@@ -244,9 +246,9 @@ fields @timestamp, layer, cache
 
 Cache hits and local request guards can have empty `upstream_status`;
 zero query matches do not prove S3 is healthy or that a request reached it.
-These queries do not print object keys, but raw nginx and Envoy rejection lines
-carry a `key` field. Keep those keys out of metric dimensions and shared incident
-reports. Use Envoy rejection lines as a separate cross-check, not extra request
+These queries do not print object names, but raw nginx lines include `path`
+and `key`, and Envoy rejection lines include `key`. Keep all of these object
+names out of metric dimensions and shared incident reports. Use Envoy rejection lines as a separate cross-check, not extra request
 counts. Query syntax follows the
 [CloudWatch Logs Insights reference](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_QuerySyntax.html).
 
@@ -363,7 +365,8 @@ for a viewer's conditional GET and `416` for an unsatisfiable range.
 
 S3 error bodies, `x-amz-*` response headers, and the 403-vs-404 distinction are
 never leaked to clients. The observed upstream status is logged for alarming;
-its meaning depends on the chosen list policy. Envoy strips the complete `x-amz-*` namespace, including user-defined
+its meaning depends on the chosen list policy. Envoy strips the complete
+`x-amz-*` namespace, including user-defined
 `x-amz-meta-*` values, KMS key IDs, and website redirect metadata, while nginx
 strips Envoy's `x-envoy-upstream-service-time`. Standard HTTP object metadata
 such as `Content-Type`, `Cache-Control`, `Content-Encoding`, `ETag`,
