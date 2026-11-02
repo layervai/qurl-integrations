@@ -82,6 +82,8 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 				return exitcode.UsageError(fmt.Errorf("--session-duration %s must be a positive whole number of seconds", sessionDuration))
 			}
 
+			opts.beginTermsNotice()
+			printer = opts.printer()
 			link, err := opts.shareResource(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
 				TTLSeconds: int(ttl.Seconds()), SessionDurationSeconds: int(sessionDuration / time.Second),
 			})
@@ -93,7 +95,7 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 				return err
 			}
 			reportClamp(printer, ttl, link)
-			return printer.ShareLink(link)
+			return opts.finishTermsNotice(printer.ShareLink(link))
 		},
 	}
 

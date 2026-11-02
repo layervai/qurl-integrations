@@ -15,6 +15,7 @@ import (
 // cannot silently change the CLI's output.
 
 type publishJSON struct {
+	TermsNotice    string              `json:"terms_notice,omitempty"`
 	ConsumerAccess *consumerAccessJSON `json:"consumer_access,omitempty"`
 	Private        *bool               `json:"private,omitempty"`
 	// KeptPublic is true, and otherwise absent, when the target was already
@@ -42,6 +43,7 @@ type publishJSON struct {
 }
 
 type shareLinkJSON struct {
+	TermsNotice      string     `json:"terms_notice,omitempty"`
 	QURL             string     `json:"qurl"`
 	CRID             string     `json:"crid,omitempty"`
 	Type             string     `json:"type,omitempty"`
@@ -193,6 +195,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
+			TermsNotice:    p.TermsNotice,
 			ConsumerAccess: policyDocument(res.ConsumerAccess),
 			Private:        res.Private,
 			KeptPublic:     res.KeptPublic,
@@ -512,6 +515,7 @@ func (p *Printer) publisherRows(ew *errWriter, publisher qurlapi.Publisher, crea
 func (p *Printer) ShareLink(link *qurlapi.ShareLink) error {
 	if p.format == FormatJSON {
 		out := shareLinkJSON{
+			TermsNotice:       p.TermsNotice,
 			QURL:              link.QURL,
 			CRID:              link.CRID,
 			Type:              link.Type,
