@@ -397,10 +397,14 @@ func TestHandleLifecycleEvent_PassesEventCutoffToWorkspacePurge(t *testing.T) {
 	}
 }
 
-func TestHandleLifecycleEvent_RetainsRowsUpdatedAfterEventCutoff(t *testing.T) {
+func TestHandleLifecycleEvent_RetainsUnmarkedRowsForReconciliation(t *testing.T) {
 	ts := newAdminTestServers(t)
 	h := newAdminTestHandler(t, ts)
-	attachLifecycleTestQueue(h)
+	workerErrors := make(chan error, 1)
+	h.cfg.LifecyclePurgeQueue = &lifecycleQueueStub{enqueue: func(_ context.Context, job *LifecyclePurgeJob) error {
+		h.Go(func() { workerErrors <- h.processLifecyclePurgeJob(h.baseCtx, job) })
+		return nil
+	}}
 	provider := &recordingStateDeleter{recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"}}
 	h.cfg.AuthProvider = provider
 	h.cfg.AgentStore = &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
@@ -417,6 +421,8 @@ func TestHandleLifecycleEvent_RetainsRowsUpdatedAfterEventCutoff(t *testing.T) {
 	}, testAdminUserID); err != nil {
 		t.Fatalf("BindWorkspace fresh row: %v", err)
 	}
+	// An old writer has not stamped installation lineage. Cleanup must preserve
+	// this possibly fresh configuration and retain the durable job for recovery.
 	if err := h.cfg.AdminStore.ExposeResourceToChannel(context.Background(), testAdminTeamID, "C_fresh", "r_fresh"); err != nil {
 		t.Fatalf("ExposeResourceToChannel fresh row: %v", err)
 	}
@@ -430,8 +436,13 @@ func TestHandleLifecycleEvent_RetainsRowsUpdatedAfterEventCutoff(t *testing.T) {
 	})
 	h.Wait()
 
-	if provider.deleteStateCalls != 1 {
-		t.Fatalf("DeleteWorkspaceState calls = %d, want 1", provider.deleteStateCalls)
+	if provider.deleteStateCalls != lifecyclePurgeRetryAttempts {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want retry budget %d", provider.deleteStateCalls, lifecyclePurgeRetryAttempts)
+	}
+	workerErr := <-workerErrors
+	var cleanup *slackdata.Error
+	if !errors.As(workerErr, &cleanup) || cleanup.Code != "policy_purge_legacy_ownership_unknown" || lifecyclePurgeErrorIsNonRetryable(workerErr) {
+		t.Fatalf("ambiguous legacy cleanup must remain retryable, got %v", workerErr)
 	}
 	_, admins, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
 	if err != nil {

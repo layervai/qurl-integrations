@@ -18,6 +18,11 @@ const errCodePolicyPurgeWorkspaceChanged = "policy_purge_workspace_changed"
 
 const policyConditionFailed = "ConditionalCheckFailed"
 
+const (
+	exprPolicyInstallation  = "#installation"
+	valuePolicyInstallation = ":installation"
+)
+
 // PolicyAuthorization binds one operation to its installation and caller.
 // Only AuthorizePolicyWrite can populate it; no user-supplied generation is trusted.
 type PolicyAuthorization struct {
@@ -88,8 +93,8 @@ func (s *Store) AuthorizePolicyWrite(ctx context.Context, teamID, userID string)
 			Key:                       map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID)},
 			UpdateExpression:          aws.String("SET #generation = :generation, #installation = :installation, #legacy = :legacy"),
 			ConditionExpression:       aws.String(policyCallerCondition + " AND attribute_not_exists(#generation) AND attribute_not_exists(#installation)"),
-			ExpressionAttributeNames:  map[string]string{"#owner": attrOwnerID, "#admins": attrAdminSlackUserIDs, "#generation": attrPolicyGeneration, "#installation": attrPolicyInstallation, "#legacy": attrPolicyLegacy},
-			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":owner": stringAttr(owner), ":caller": stringAttr(userID), ":generation": stringAttr(rand.Text()), ":installation": stringAttr(rand.Text()), ":legacy": &ddbtypes.AttributeValueMemberBOOL{Value: true}},
+			ExpressionAttributeNames:  map[string]string{"#owner": attrOwnerID, "#admins": attrAdminSlackUserIDs, "#generation": attrPolicyGeneration, exprPolicyInstallation: attrPolicyInstallation, "#legacy": attrPolicyLegacy},
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":owner": stringAttr(owner), ":caller": stringAttr(userID), ":generation": stringAttr(rand.Text()), valuePolicyInstallation: stringAttr(rand.Text()), ":legacy": &ddbtypes.AttributeValueMemberBOOL{Value: true}},
 			ReturnValues:              ddbtypes.ReturnValueAllNew,
 		})
 		if initErr != nil {
@@ -150,8 +155,8 @@ func (s *Store) updatePolicy(ctx context.Context, in *dynamodb.UpdateItemInput) 
 				TableName:                 aws.String(s.WorkspaceMappingsName),
 				Key:                       map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(authorization.teamID)},
 				ConditionExpression:       aws.String(policyCallerCondition + " AND #generation = :generation AND #installation = :installation"),
-				ExpressionAttributeNames:  map[string]string{"#owner": attrOwnerID, "#admins": attrAdminSlackUserIDs, "#generation": attrPolicyGeneration, "#installation": attrPolicyInstallation},
-				ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":owner": stringAttr(authorization.ownerID), ":caller": stringAttr(authorization.userID), ":generation": stringAttr(authorization.generation), ":installation": stringAttr(authorization.installation)},
+				ExpressionAttributeNames:  map[string]string{"#owner": attrOwnerID, "#admins": attrAdminSlackUserIDs, "#generation": attrPolicyGeneration, exprPolicyInstallation: attrPolicyInstallation},
+				ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":owner": stringAttr(authorization.ownerID), ":caller": stringAttr(authorization.userID), ":generation": stringAttr(authorization.generation), valuePolicyInstallation: stringAttr(authorization.installation)},
 			}},
 			{Update: &ddbtypes.Update{
 				TableName: in.TableName, Key: in.Key, UpdateExpression: in.UpdateExpression,

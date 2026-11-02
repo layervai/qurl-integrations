@@ -507,7 +507,8 @@ func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) err
 
 // PurgeTeamChannelPoliciesBefore removes observed orphan policies regardless of
 // timestamp when the binding is absent. Its atomic check protects a concurrent
-// reinstall. A still-bound workspace retains the cutoff guard for newer rows.
+// reinstall. A bound workspace keeps its own installation rows and removes only
+// known retired rows; bindings without lineage retain the legacy cutoff guard.
 func (s *Store) PurgeTeamChannelPoliciesBefore(ctx context.Context, teamID string, cutoff time.Time) error {
 	return s.purgeTeamChannelPolicies(ctx, teamID, cutoff)
 }
@@ -516,13 +517,13 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 	if teamID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeTeamChannelPolicies: team_id is required"}
 	}
-	unbound := false
+	var binding policyPurgeBinding
 	if !cutoff.IsZero() {
-		binding, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(s.WorkspaceMappingsName), Key: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID)}, ConsistentRead: aws.Bool(true)})
+		var err error
+		binding, err = s.policyPurgeBinding(ctx, teamID)
 		if err != nil {
-			return ddbToError("PurgeTeamChannelPolicies.binding", err)
+			return err
 		}
-		unbound = len(binding.Item) == 0
 	}
 	var startKey map[string]ddbtypes.AttributeValue
 	var deleteErrs []error
@@ -538,9 +539,10 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 			// Only the SK is needed to issue the per-row DeleteItem; the rest of
 			// each row is irrelevant to a full delete. Mirrors the projected reads
 			// elsewhere on this table.
-			ProjectionExpression: aws.String("#cid"),
+			ProjectionExpression: aws.String("#cid, #installation"),
 			ExpressionAttributeNames: map[string]string{
-				"#cid": attrSlackChannelID,
+				"#cid":                 attrSlackChannelID,
+				exprPolicyInstallation: attrPolicyInstallation,
 			},
 			ExclusiveStartKey: startKey,
 		})
@@ -559,9 +561,9 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 				})
 				continue
 			}
-			err := s.deletePolicyForPurge(ctx, teamID, channelID, cutoff, unbound)
+			err := s.deletePolicyForPurge(ctx, teamID, channelID, item, cutoff, binding)
 			var changed *Error
-			if errors.As(err, &changed) && changed.Code == errCodePolicyPurgeWorkspaceChanged {
+			if errors.As(err, &changed) && (changed.Code == errCodePolicyPurgeWorkspaceChanged || changed.Code == errCodePolicyPurgeLegacyUnknown) {
 				return joinSweepErrors(deleteErrs, err)
 			}
 			if err != nil {
@@ -573,12 +575,24 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 		}
 		startKey = out.LastEvaluatedKey
 	}
+	if !cutoff.IsZero() {
+		current, err := s.policyPurgeBinding(ctx, teamID)
+		if err != nil {
+			return joinSweepErrors(deleteErrs, err)
+		}
+		if current != binding {
+			return joinSweepErrors(deleteErrs, policyPurgeChanged())
+		}
+	}
 	return errors.Join(deleteErrs...)
 }
 
-func (s *Store) deletePolicyForPurge(ctx context.Context, teamID, channelID string, cutoff time.Time, unbound bool) error {
-	if unbound {
+func (s *Store) deletePolicyForPurge(ctx context.Context, teamID, channelID string, item map[string]ddbtypes.AttributeValue, cutoff time.Time, binding policyPurgeBinding) error {
+	if !cutoff.IsZero() && !binding.bound {
 		return s.deleteUnboundPolicy(ctx, teamID, channelID)
+	}
+	if !cutoff.IsZero() && binding.installation != "" {
+		return s.deleteRetiredPolicy(ctx, teamID, channelID, item, binding)
 	}
 	in := &dynamodb.DeleteItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
