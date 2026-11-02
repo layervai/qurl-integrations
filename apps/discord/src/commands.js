@@ -4169,6 +4169,7 @@ async function handleSetupModal(interaction, { flow_id }) {
   const logFields = {
     guild_id: interaction.guildId,
     configured_by: interaction.user.id,
+    setup_session_id: flow_id,
   };
 
   // `String(...)` coerces any non-string return shape (a hypothetical

@@ -116,7 +116,7 @@ describe('guild configs', () => {
     });
   });
 
-  test.each([['paste', 'setup-flow-123'], ['oauth', 'key-setup-456'], ['paste', undefined], ['oauth', {}]])(
+  test.each([['paste', 'setup-flow-123'], ['oauth', 'key-setup-456'], ['paste', undefined], ['oauth', {}], ['paste', 123]])(
     'setGuildApiKey: carries only a string session ID for %s (%p)', async (via, sessionId) => {
       ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin' } });
       await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', via, sessionId);

@@ -458,7 +458,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       + 'If this keeps happening, contact your layerv.ai admin.');
   }
   logger.info('qURL OAuth setup complete', {
-    guildId, configuredBy: discordUserId, keyPrefix,
+    guildId, configuredBy: discordUserId, keyPrefix, setup_session_id: keyId,
   });
   // Audit evidence must never break setup. Compute only after persistence,
   // on the path that emits it. A fingerprint is never emitted without its
@@ -489,6 +489,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
       guild_id: guildId,
       configured_by: discordUserId,
+      setup_session_id: keyId,
       // Prefix is already shown in the success page and info log; including it
       // makes this forensic event self-contained without exposing the API key.
       key_prefix: keyPrefix || null,
