@@ -1069,7 +1069,7 @@ describe('qurl sends', () => {
     expect(left.guild_sender_id).not.toBe(right.guild_sender_id);
     for (const guildId of [undefined, null, '']) {
       const legacy = await write({ ...send, guildId });
-      expect(legacy).not.toHaveProperty('guild_sender_id');
+      expect(legacy.guild_sender_id).toBe('[null,"sender"]');
       expect(legacy).not.toHaveProperty('guild_id');
     }
   });

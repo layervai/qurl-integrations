@@ -298,7 +298,8 @@ budget, revocation is unconfirmed. Check the grants before manual row cleanup.
 ## Guild-scoped revoke history migration (#83)
 
 The send writer now adds `guild_sender_id = JSON.stringify([guildId, senderDiscordId])`
-when the send has a guild, using the shared `utils/guild-sender-key` encoder.
+using the shared `utils/guild-sender-key` encoder. New sends with no recorded
+guild use `[null, senderId]`, the same explicit legacy bucket as the backfill.
 This is an additive preparation step. The current
 revoke reader still uses the existing sender index, so old records remain visible.
 

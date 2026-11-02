@@ -9,6 +9,7 @@ async function backfillGuildSenderIndex(ddb, tableName, { apply = false } = {}) 
   do {
     const page = await ddb.send(new ScanCommand({
       TableName: tableName,
+      // Strong reads support the final coverage audit; conditions protect each write.
       ConsistentRead: true,
       Limit: 100,
       ProjectionExpression: '#pk, #sk, #guild, #sender, #created, #tuple',
@@ -21,13 +22,13 @@ async function backfillGuildSenderIndex(ddb, tableName, { apply = false } = {}) 
     for (const row of page.Items || []) {
       counts.scanned++;
       const legacy = row.guild_id == null || row.guild_id === '';
-      if (legacy) counts.unscoped++;
       if ((!legacy && typeof row.guild_id !== 'string') ||
           ![row.send_id, row.recipient_discord_id, row.sender_discord_id, row.created_at]
             .every(value => typeof value === 'string' && value.length > 0)) {
         counts.invalid++;
         continue;
       }
+      if (legacy) counts.unscoped++;
       const tuple = guildSenderKey(legacy ? null : row.guild_id, row.sender_discord_id);
       if (Object.hasOwn(row, 'guild_sender_id')) {
         counts[row.guild_sender_id === tuple ? 'indexed' : 'conflicting']++;
@@ -77,15 +78,15 @@ async function main(args = process.argv.slice(2)) {
   try {
     const counts = await backfillGuildSenderIndex(DynamoDBDocumentClient.from(raw), tableArgs[0], { apply });
     console.log(JSON.stringify({ table: tableArgs[0], apply, ...counts }));
-    if (counts.invalid || counts.conflicting || counts.raced) process.exitCode = 2;
+    process.exitCode = counts.invalid || counts.conflicting || counts.raced ? 2 : 0;
   } finally {
     raw.destroy();
   }
 }
 
 if (require.main === module) {
-  main().catch(() => {
-    console.error('Guild/sender backfill failed; inspect configuration and AWS permissions, then rerun.');
+  main().catch(error => {
+    console.error('Guild/sender backfill failed; inspect configuration and AWS permissions, then rerun.', { name: error.name, status: error.$metadata?.httpStatusCode });
     process.exitCode = 1;
   });
 }

@@ -86,3 +86,31 @@ test('a repeated scan cursor stops the migration', async () => {
 test.each([[], ['wrong-table'], [table, '--aply'], [table, '--apply', '--apply']])('CLI refuses ambiguous arguments %p', async (...args) => {
   await expect(main(args)).rejects.toThrow('Usage:');
 });
+
+test.each([
+  [[], 0],
+  [[{ ...row, guild_id: undefined }], 0],
+  [[{ ...row, sender_discord_id: 123 }], 2],
+  [[{ ...row, guild_sender_id: 'conflict' }], 2],
+])('CLI exit status distinguishes expected legacy coverage from invalid/conflicting rows', async (items, expected) => {
+  const { mockClient } = require('aws-sdk-client-mock');
+  const { DynamoDBDocumentClient } = require('@aws-sdk/lib-dynamodb');
+  const mock = mockClient(DynamoDBDocumentClient);
+  const oldRegion = process.env.AWS_REGION;
+  const oldExit = process.exitCode;
+  const output = jest.spyOn(console, 'log').mockImplementation(() => {});
+  process.env.AWS_REGION = 'us-east-2';
+  process.exitCode = undefined;
+  mock.on(ScanCommand).resolves({ Items: items });
+  try {
+    await main([table]);
+    expect(process.exitCode).toBe(expected);
+    expect(mock.commandCalls(UpdateCommand)).toHaveLength(0);
+  } finally {
+    mock.restore();
+    output.mockRestore();
+    process.exitCode = oldExit;
+    if (oldRegion === undefined) delete process.env.AWS_REGION;
+    else process.env.AWS_REGION = oldRegion;
+  }
+});

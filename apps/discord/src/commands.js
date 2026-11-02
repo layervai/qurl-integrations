@@ -1975,12 +1975,10 @@ async function executeSendPipeline(interaction, {
   }
 
   // Validate the future index identity before minting any live links.
-  if (typeof interaction.guildId === 'string' && interaction.guildId.length > 0) {
-    try {
-      guildSenderKey(interaction.guildId, interaction.user.id);
-    } catch (error) {
-      failGate(TypeError, error.message);
-    }
+  try {
+    guildSenderKey(interaction.guildId === '' ? null : interaction.guildId ?? null, interaction.user.id);
+  } catch (error) {
+    failGate(TypeError, error.message);
   }
 
   // Defense-in-depth SSRF re-check. `/qurl send`'s front-half
@@ -3127,12 +3125,10 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
 // user's send.
 async function handleAddRecipients(sendId, usersCollection, originalInteraction, apiKey) {
   const senderDiscordId = originalInteraction.user.id;
-  if (typeof originalInteraction.guildId === 'string' && originalInteraction.guildId.length > 0) {
-    try {
-      guildSenderKey(originalInteraction.guildId, senderDiscordId);
-    } catch {
-      return { msg: 'Cannot add recipients — sender identity is invalid.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
-    }
+  try {
+    guildSenderKey(originalInteraction.guildId === '' ? null : originalInteraction.guildId ?? null, senderDiscordId);
+  } catch {
+    return { msg: 'Cannot add recipients — sender identity is invalid.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
   }
   const sendConfig = await db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
