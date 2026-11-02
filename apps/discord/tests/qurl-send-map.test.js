@@ -1701,11 +1701,29 @@ describe('handleQurlSend — slash entry', () => {
         content: expect.stringMatching(/too many file sends/i),
         ephemeral: true,
       }));
+      expect(logger.audit).toHaveBeenCalledWith('upload_rejected_capacity', {
+        user_id: SENDER_ID, stage: 'entry', active_file_sends: 99, max_concurrent: 5,
+      });
       expect(isOnCooldown(SENDER_ID)).toBe(false);
       expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     } finally {
       setActiveFileSends(originalActive);
     }
+  });
+
+  test('slot-claim capacity rejection emits once without consuming a slot', async () => {
+    const originalActive = getActiveFileSends();
+    try {
+      setActiveFileSends(5);
+      const int = makeInteraction();
+      await executeSendPipeline(int, { apiKey: 'test-key', resourceType: 'file', attachment: VALID_ATTACHMENT,
+        recipients: [makeUser('100000000000000001')], expiresIn: '24h', personalMessage: null });
+      const events = logger.audit.mock.calls.filter(([event]) => event === 'upload_rejected_capacity');
+      expect(events).toHaveLength(1);
+      expect(events[0][1]).toEqual({ user_id: SENDER_ID, stage: 'slot_claim', active_file_sends: 5, max_concurrent: 5 });
+      expect(getActiveFileSends()).toBe(5);
+      expect(int.editReply.mock.calls.at(-1)[0].content).toContain('too many file sends');
+    } finally { setActiveFileSends(originalActive); }
   });
 
   test('rejects when attachment.url is not Discord CDN (SSRF gate) — cooldown PRESERVED (probing defense)', async () => {
