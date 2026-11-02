@@ -873,7 +873,8 @@ func (s *Store) ListAdmins(ctx context.Context, teamID string) (ownerID string, 
 		}
 	}
 	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.WorkspaceMappingsName),
+		TableName:      aws.String(s.WorkspaceMappingsName),
+		ConsistentRead: aws.Bool(true),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},

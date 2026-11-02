@@ -123,7 +123,7 @@ jobs:
       - name: Verify atomic policy writes against DynamoDB Local
         env:
           QURL_TEST_DYNAMODB_LOCAL_ENDPOINT: http://127.0.0.1:8000
-        run: go test -race -count=1 -run '^TestPolicy.*DynamoDBLocal' -v ./apps/slack/internal/slackdata ./apps/slack/internal
+        run: go test -race -count=1 -run '^TestPolicy.*DynamoDBLocal' -v ./apps/slack/internal/slackdata ./apps/slack/internal ./apps/slack/cmd/statecrawl
 
       - name: Run tests with coverage
         run: |
