@@ -177,6 +177,14 @@ func oauthSecondsPerToken() int {
 	return (60 + oauthRateLimitRequestsPerMinute - 1) / oauthRateLimitRequestsPerMinute
 }
 
+// NewRateLimitMiddleware shares one source-IP budget across a flow's routes.
+// Budgets are per process, trust the existing single-ALB forwarding boundary,
+// and group IPv6 sources by /64. Separate flows get separate budgets.
+func NewRateLimitMiddleware(now func() time.Time) func(http.Handler) http.Handler {
+	limiter := newOAuthRateLimiter(now)
+	return func(next http.Handler) http.Handler { return rateLimitOAuth(limiter, next) }
+}
+
 func rateLimitOAuth(limiter *oauthRateLimiter, next http.Handler) http.Handler {
 	if limiter == nil {
 		return next
