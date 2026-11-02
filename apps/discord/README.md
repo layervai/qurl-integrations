@@ -149,6 +149,7 @@ setup) means required to use that feature.
 | `DISCORD_TOKEN` | Yes | Discord bot token |
 | `DISCORD_CLIENT_ID` | Customer install | Numeric Discord application ID for the one-click Add to Discord flow; `PLACEHOLDER` or a malformed value disables that flow |
 | `DISCORD_CLIENT_SECRET` | Customer install | Discord OAuth2 client secret for the one-click Add to Discord flow |
+| `DISCORD_INSTALL_HASHED_STATE` | Rollout | `false` by default. Enable after every callback replica supports hashed state. Invalid values disable customer install. See the install-state rollout below. |
 | `QURL_API_KEY` | `/qurl detect`; Production when `QURL_WEBHOOK_SECRET` is set | Requires `qurl:read` and `qurl:write` for detect; also the fallback for send operations without a server key from `/qurl setup`. |
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `QURL_WEBHOOK_SECRET` | Default webhook | Shared HMAC secret written by the registrar Lambda; required in every process that links guild webhooks when a default subscription exists. |
@@ -301,5 +302,28 @@ budget, revocation is unconfirmed. Check the grants before manual row cleanup.
 
 Setup and install cookies use `__Host-` names with `Secure`, `HttpOnly`,
 `SameSite=Lax`, and `Path=/`. Use HTTPS (or browser-supported localhost) for
-local setup tests. Deploying this change invalidates older setup cookies;
-admins with an in-flight setup must start again.
+local setup tests. Cookies from deployments that used older cookie names do
+not qualify; those admins must start again. The hashed-state rollout below
+preserves the current cookie format and active install callbacks.
+
+### Install-state rollout
+
+The callback accepts a SHA-256 hash of the browser's private session cookie as
+OAuth state, with cookie syntax, expiry, and constant-time comparison enforced.
+This follows [RFC 6749 section 10.12](https://www.rfc-editor.org/rfc/rfc6749#section-10.12).
+
+1. Deploy hash-capable callbacks to every replica with
+   `DISCORD_INSTALL_HASHED_STATE=false`. Older callback replicas can finish their
+   work while newly issued install URLs still use the legacy format.
+2. Confirm every callback replica runs the new code. Set
+   `DISCORD_INSTALL_HASHED_STATE=true` through normal deployment. New install URLs
+   carry only the hash. Existing legacy callbacks remain valid until their
+   original 30-minute expiry, so active installs can still finish.
+3. Test the browser flow across replicas and reject a copied URL without its
+   original cookie. Never log the cookie. During rollback, retain hash-capable
+   callbacks until 30 minutes after the last hashed install was minted. Setting
+   the switch back to false is safe on the current code. Older binaries cannot
+   verify hashed states, so do not deploy them until that window drains.
+
+The source change alone does not complete this rollout. Keep the related item
+in #1456 open until fleet adoption and the real browser install pass.
