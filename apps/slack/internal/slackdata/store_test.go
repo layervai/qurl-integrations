@@ -632,7 +632,7 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 	if stamp, ok := got.ExpressionAttributeValues[exprNow].(*ddbtypes.AttributeValueMemberS); !ok || stamp.Value != "2026-10-31T18:34:56Z" {
 		t.Fatalf("ownership transfer display stamp = %#v", got.ExpressionAttributeValues[exprNow])
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :owner_set" {
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, policy_generation = :policy_generation, updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :owner_set" {
 		t.Errorf("UpdateExpression = %q", exp)
 	}
 	if cond := aws.ToString(got.ConditionExpression); cond != "attribute_exists(slack_team_id) AND owner_id = :current_owner" {
@@ -1678,4 +1678,43 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 			t.Fatalf("deleted channels = %v, want %v", deletedChannels, want)
 		}
 	})
+}
+
+// An installation ID must not depend on wall-clock precision or reuse a prior bind.
+func TestWorkspacePolicyGenerationChangesAtSameClockTime(t *testing.T) {
+	var generations []string
+	store := newStore(&stubDDB{
+		putItemFn: func(in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			generations = append(generations, readString(in.Item, attrPolicyGeneration))
+			return &dynamodb.PutItemOutput{}, nil
+		},
+		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			generation, ok := in.ExpressionAttributeValues[":policy_generation"].(*ddbtypes.AttributeValueMemberS)
+			if !ok {
+				t.Fatal("ownership transfer did not rotate the policy generation")
+			}
+			generations = append(generations, generation.Value)
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	})
+	fixed := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return fixed }
+	for range 2 { // Two fresh binds represent installations separated by a purge.
+		if err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T1", OwnerID: testOwnerSlackID}, testOwnerSlackID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool)
+	for _, generation := range generations {
+		if generation == "" || seen[generation] {
+			t.Fatalf("missing or reused policy generation: %q", generation)
+		}
+		seen[generation] = true
+	}
+	if len(seen) != 3 {
+		t.Fatalf("generation count = %d, want three binding/ownership changes", len(seen))
+	}
 }

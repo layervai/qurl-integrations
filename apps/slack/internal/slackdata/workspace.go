@@ -2,6 +2,7 @@ package slackdata
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -22,7 +23,9 @@ const (
 	attrOwnerID           = "owner_id"
 	attrAdminSlackUserIDs = "admin_slack_user_ids"
 	attrCreatedAt         = "created_at"
-	attrUpdatedAt         = "updated_at"
+	// Identifies a binding independently of clock precision for policy-write fencing.
+	attrPolicyGeneration = "policy_generation"
+	attrUpdatedAt        = "updated_at"
 	// Every guarded workspace_mappings/channel_policies write must refresh
 	// attrUpdatedAtNano, including TTL-backed rate-limit counters. Lifecycle
 	// purges use it as the reinstall-race guard; a writer that skips it can let a
@@ -478,6 +481,7 @@ func workspaceMappingItem(teamID, ownerID, seedAdmin string, created, now time.T
 	updatedAt, updatedAtNano := updatedAtAttrs(now)
 	return map[string]ddbtypes.AttributeValue{
 		attrSlackTeamID:        stringAttr(teamID),
+		attrPolicyGeneration:   stringAttr(rand.Text()),
 		attrOwnerID:            stringAttr(ownerID),
 		attrSeedAdminSlackUser: stringAttr(seedAdmin),
 		attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
@@ -793,14 +797,15 @@ func (s *Store) TransferOwnership(ctx context.Context, teamID, currentOwnerID, n
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
+		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrPolicyGeneration + " = :policy_generation, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
 		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ") AND " + attrOwnerID + " = :current_owner"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":current_owner": stringAttr(currentOwnerID),
-			":new_owner":     stringAttr(newOwnerID),
-			":owner_set":     &ddbtypes.AttributeValueMemberSS{Value: ownerSet},
-			exprNow:          updatedAt,
-			exprNowNano:      updatedAtNano,
+			":policy_generation": stringAttr(rand.Text()),
+			":current_owner":     stringAttr(currentOwnerID),
+			":new_owner":         stringAttr(newOwnerID),
+			":owner_set":         &ddbtypes.AttributeValueMemberSS{Value: ownerSet},
+			exprNow:              updatedAt,
+			exprNowNano:          updatedAtNano,
 		},
 	})
 	if err == nil {
