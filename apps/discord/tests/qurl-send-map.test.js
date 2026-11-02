@@ -1845,6 +1845,33 @@ describe('handleQurlSend — slash entry', () => {
     }
   });
 
+  test.each([
+    ['@everyone', false],
+    ['@everyone', true],
+    ['<@&123456789012345678>', true],
+    ['<@&123456789012345678>', false],
+    ['<@100000000000000051>', true],
+  ])('typed mention audit: %s allowed=%s', async (recipients, allowed) => {
+    const int = makeInteraction({
+      guildId: '123456789012345678',
+      options: { attachment: VALID_ATTACHMENT, recipients },
+      guildMembers: { '100000000000000051': {}, [SENDER_ID]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => allowed) };
+    await handleQurlSend(int);
+    const events = logger.audit.mock.calls.filter(([name]) => name === 'mass_mention_allowed' || name === 'mass_mention_denied');
+    if (recipients.startsWith('<@100')) {
+      expect(events).toEqual([]);
+    } else {
+      expect(events).toEqual([[allowed ? 'mass_mention_allowed' : 'mass_mention_denied', {
+        user_id: SENDER_ID,
+        guild_id: int.guildId,
+        channel_id: int.channelId,
+        ...(allowed ? { expanded_count: 2 } : {}),
+      }]]);
+    }
+  });
+
   test('guild context + no MENTION_EVERYONE → @everyone warning renders + Alice still parses', async () => {
     const aliceId = '400000000000000001';
     const int = makeInteraction({
