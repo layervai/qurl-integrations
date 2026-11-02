@@ -4,6 +4,8 @@ package slacklog
 import "fmt"
 
 const maxIDBytes = 64
+
+// Preserve the existing Web API log marker for every Slack ID kind.
 const invalidIDFormat = "invalid-slack-owner-id-len-%d"
 
 // ID keeps bounded uppercase alphanumeric identifiers readable for triage.
@@ -12,7 +14,7 @@ func ID(id string) string {
 	if id == "" {
 		return ""
 	}
-	// TODO(upstream-contract): if Slack broadens the owner-ID alphabet, update this
+	// TODO(upstream-contract): if Slack broadens the ID alphabet, update this
 	// allowlist and the sanitizer tests in lockstep.
 	if len(id) > maxIDBytes {
 		return fmt.Sprintf(invalidIDFormat, len(id))

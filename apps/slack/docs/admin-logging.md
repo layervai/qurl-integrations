@@ -18,4 +18,12 @@ formed. Do not put identifiers in metric dimensions.
 
 The current callers cover membership/ownership admin handlers, setup and
 uninstall owner gates, the CRID admin denial, and the workspace Web API adapters.
-Free-form API error text uses its separate existing redaction rules.
+For admin/owner Slack identifier fields, use `slacklog.ID` rather than the
+free-form `sanitizeLogValue` helper. Keep `sanitizeLogValue` for free-form text;
+keep API error text under its separate existing redaction rules. Older non-admin
+surfaces are outside this change; use this convention when adding or changing an
+admin/owner ID log there.
+
+The CRID denial previously escaped/truncated malformed IDs; it now uses the
+length-only marker. Valid correlation values and the log message name stay the
+same.
