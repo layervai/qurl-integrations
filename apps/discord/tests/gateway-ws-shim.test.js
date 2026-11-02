@@ -498,6 +498,30 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
     expect(await shim.getActiveGuildCount()).toBe(1);
   });
 
+  it.each(['disconnect', 'stop'])('drops a late guild seed after %s and does not cache it', async mode => {
+    let resolvePage;
+    const page = new Promise(resolve => { resolvePage = resolve; });
+    const { shim, managerInstances, restInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    manager.emit(WebSocketShardEvents.Resumed, 0);
+    manager.emit(WebSocketShardEvents.Dispatch, { data: { t: 'RESUMED', d: {} }, shardId: 0 });
+    restInstances[0].get.mockReturnValueOnce(page);
+    const pending = shim.getActiveGuildCount();
+    if (mode === 'stop') await shim.stop({ flushFinal: false });
+    else manager.emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
+    resolvePage([{ id: 'stale' }]);
+    await expect(pending).resolves.toBe(null);
+    if (mode === 'disconnect') {
+      manager.emit(WebSocketShardEvents.Resumed, 0);
+      manager.emit(WebSocketShardEvents.Dispatch, { data: { t: 'RESUMED', d: {} }, shardId: 0 });
+      restInstances[0].get.mockResolvedValueOnce([{ id: 'fresh-one' }, { id: 'fresh-two' }]);
+      await expect(shim.getActiveGuildCount()).resolves.toBe(2);
+      expect(restInstances[0].get).toHaveBeenCalledTimes(2);
+      await shim.stop({ flushFinal: false });
+    }
+  });
+
   it('retries the pure-RESUME REST seed after a transient request failure', async () => {
     const { shim, managerInstances, restInstances } = makeShim();
     await shim.start({ connect: false });
