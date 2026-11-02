@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -885,7 +886,7 @@ func TestSlashCommandUninstallBareVerbOnlyConfirms(t *testing.T) {
 // card is the only place a workspace learns what it is about to lose, and that
 // "uninstall" does NOT delete their protected resources.
 func TestUninstallConfirmBlocksStateWhatIsClearedAndKept(t *testing.T) {
-	rendered, err := json.Marshal(uninstallConfirmBlocks(commandUser, []string{testAdminTeamID}))
+	rendered, err := json.Marshal(uninstallConfirmBlocks(commandUser, []string{testAdminTeamID}, time.Now()))
 	if err != nil {
 		t.Fatalf("marshal confirm blocks: %v", err)
 	}
@@ -1154,5 +1155,75 @@ func TestUninstallConfirmFailedTeardownReportsNoCleanup(t *testing.T) {
 	// No teardown ran, so the admin must NOT be told data was left behind.
 	if strings.Contains(got, "could not be verified from this click") {
 		t.Fatalf("failed teardown leaked the left-behind-data caveat: %q", got)
+	}
+}
+
+func TestUninstallConfirmClickFreshness(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		expiresIn  time.Duration
+		rawValue   string
+		wantDelete bool
+	}{
+		{name: "last valid second", expiresIn: time.Second, wantDelete: true},
+		{name: "expiry boundary"},
+		{name: "expired", expiresIn: -time.Second},
+		{name: "future clock outside allowance", expiresIn: uninstallConfirmTTL + uninstallConfirmClockSkew + time.Second},
+		{name: "legacy card", rawValue: testAdminTeamID},
+		{name: "malformed expiry", rawValue: "not-a-time|" + testAdminTeamID},
+		{name: "oversized expiry", rawValue: "9223372036854775808|" + testAdminTeamID},
+		{name: "empty scope", rawValue: "1776686700|"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, provider, _ := newLifecycleTestHandler(t)
+			value, ok := uninstallConfirmButtonValue(t, h, testAdminTeamID, testAdminUserID, uninstallGridContext{})
+			if !ok {
+				t.Fatal("missing confirmation card")
+			}
+			scope, fresh := uninstallConfirmationScope(value, fixedNow)
+			if !fresh || scope != testAdminTeamID {
+				t.Fatalf("new card = %q, want fresh team-scoped confirmation", value)
+			}
+			// A fresh signed click can carry a card rendered long before the click.
+			value = strconv.FormatInt(fixedNow.Add(tc.expiresIn).Unix(), 10) + "|" + scope
+			if tc.rawValue != "" {
+				value = tc.rawValue
+			}
+			captured := &capturedResponseURL{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				captured.record(b)
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(srv.Close)
+			body := exposeBlockActionsBodyWithEnterprise(t, testAdminTeamID, "", testAdminUserID, testExposeChannel, srv.URL, uninstallConfirmActionID, value)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+			if w.Code != http.StatusOK {
+				t.Fatalf("click ack = %d, want 200", w.Code)
+			}
+			reply := parseSlackText(t, captured.waitForBody(t, 2*time.Second))
+			h.Wait()
+			if tc.wantDelete {
+				if provider.deleteCalls != 1 {
+					t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+				}
+				return
+			}
+			if provider.deleteCalls != 0 || provider.deleteStateCalls != 0 {
+				t.Fatal("invalid confirmation deleted workspace data")
+			}
+			if !strings.Contains(reply, "confirmation has expired") {
+				t.Fatalf("reply = %q, want restart guidance", reply)
+			}
+			if _, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID); err != nil {
+				t.Fatalf("admin roster changed: %v", err)
+			}
+			entries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testAdminTeamID, "C_one")
+			if err != nil || len(entries) == 0 {
+				t.Fatalf("channel policy changed: entries=%v err=%v", entries, err)
+			}
+			assertLifecycleAgentStatePresent(t, h.cfg.AgentStore, testAdminTeamID)
+		})
 	}
 }

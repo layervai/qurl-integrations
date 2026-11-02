@@ -4,7 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Block Kit wiring for the `/qurl uninstall` confirmation.
@@ -16,7 +18,9 @@ import (
 // dialog rather than firing on the bare verb, matching the posture `/qurl-admin
 // revoke` already uses for a destructive action.
 const (
-	uninstallConfirmActionID = "uninstall_confirm"
+	uninstallConfirmActionID  = "uninstall_confirm"
+	uninstallConfirmTTL       = 5 * time.Minute
+	uninstallConfirmClockSkew = 30 * time.Second
 	// uninstallConfirmFallbackText is the notification/fallback string for the
 	// blocks message; Slack requires non-empty text alongside blocks.
 	uninstallConfirmFallbackText = "Confirm disconnecting qURL from this workspace"
@@ -33,8 +37,9 @@ const (
 // protected resources, and it does not — they live on the qURL account, not in
 // Slack. It also names `--rotate`, because refreshing a key or picking up new
 // scopes is the far more common intent and does not touch this configuration.
-func uninstallConfirmBlocks(command string, purgeWorkspaceIDs []string) []any {
+func uninstallConfirmBlocks(command string, purgeWorkspaceIDs []string, now time.Time) []any {
 	adminCommand := command + adminCommandSuffix
+	value := strconv.FormatInt(now.Add(uninstallConfirmTTL).Unix(), 10) + "|" + strings.Join(purgeWorkspaceIDs, uninstallPurgeIDSeparator)
 	return []any{
 		sectionBlock("*Disconnect qURL from this workspace?*\n\n" +
 			"This clears this workspace's qURL configuration:\n" +
@@ -42,14 +47,29 @@ func uninstallConfirmBlocks(command string, purgeWorkspaceIDs []string) []any {
 			"• Channel access — which resources are available in which channel\n" +
 			"• Channel aliases — the `$name` shortcuts bound in each channel"),
 		sectionBlock("Your protected resources and qURL Connectors are *not* affected — they stay on your qURL account. Reconnecting with `" + command + " setup <email>` restores the connection; channel access and aliases must be set up again."),
+		contextBlock("This confirmation expires after 5 minutes."),
 		contextBlock("To refresh this workspace's qURL key or pick up new scopes, use `" + command + " setup <email> --rotate` instead. That keeps this configuration."),
 		actionsBlock(withConfirmDialog(
-			dangerButtonElement(uninstallConfirmButtonLabel, uninstallConfirmActionID, strings.Join(purgeWorkspaceIDs, uninstallPurgeIDSeparator)),
+			dangerButtonElement(uninstallConfirmButtonLabel, uninstallConfirmActionID, value),
 			"Disconnect qURL?",
 			"This clears this workspace's admin list, channel access, and channel aliases. Your protected resources are not affected.",
 			"Disconnect",
 		)),
 	}
+}
+
+// Old cards must not disconnect a workspace after the caller has walked away.
+// Slack signs this value again on click; the current owner/admin gate still runs.
+func uninstallConfirmationScope(value string, now time.Time) (string, bool) {
+	expires, scope, ok := strings.Cut(value, "|")
+	if !ok || scope == "" {
+		return "", false
+	}
+	expiresAt, err := strconv.ParseInt(expires, 10, 64)
+	if err != nil || expiresAt <= now.Unix() || expiresAt > now.Add(uninstallConfirmTTL+uninstallConfirmClockSkew).Unix() {
+		return "", false
+	}
+	return scope, true
 }
 
 // uninstallPurgeIDsForClick re-validates the partitions the confirmation card
@@ -109,7 +129,6 @@ func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *in
 	)
 	responseURL := payload.ResponseURL
 	teamID, userID := payload.Team.ID, payload.User.ID
-	purgeIDs, droppedIDs := uninstallPurgeIDsForClick(action.Value, teamID, payload.Enterprise.ID)
 
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
 		// Refusals use postResponse, so the card survives and the caller can hand
@@ -118,6 +137,12 @@ func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *in
 		if !h.requireUninstallAdminOrOwnerForClick(ctx, log, responseURL, teamID, userID) {
 			return
 		}
+		scope, fresh := uninstallConfirmationScope(action.Value, h.now())
+		if !fresh {
+			_ = h.replaceOriginalResponse(log, responseURL, "This disconnect confirmation has expired. Run `/qurl uninstall` again to review and confirm the disconnect.")
+			return
+		}
+		purgeIDs, droppedIDs := uninstallPurgeIDsForClick(scope, teamID, payload.Enterprise.ID)
 		reply, purgeScheduled := h.uninstallWorkspaceReply(ctx, teamID, userID, purgeIDs)
 		if purgeScheduled && len(droppedIDs) > 0 {
 			// Only meaningful once a teardown has actually run — emitting this on
