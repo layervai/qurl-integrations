@@ -141,3 +141,9 @@ increase read capacity use and can conflict with writes. Verify real task and
 operator GetItem permissions on both tables, the native paired-read result,
 and deployed read capacity, conflict rate and customer latency before rollout.
 Local emulator success does not establish AWS IAM or production capacity.
+
+Policy reads retry only explicit two-item transaction conflicts, at most twice,
+with 10–20 ms jitter between calls and the caller's deadline. Unknown reasons,
+validation errors and throttling are not retried by this read loop. Persistent
+conflicts still fail closed. Measure workspace-wide conflict rates and latency;
+this bounded retry does not replace the rollout capacity gate.

@@ -2,8 +2,11 @@ package slackdata
 
 import (
 	"context"
+	"errors"
 	"maps"
+	"math/rand/v2"
 	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -44,7 +47,7 @@ func (s *Store) readChannelPolicy(ctx context.Context, in *dynamodb.GetItemInput
 		bindingProjection += ", #admins"
 		bindingNames[exprPolicyAdmins] = attrAdminSlackUserIDs
 	}
-	out, err := transactional.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{
+	request := &dynamodb.TransactGetItemsInput{
 		TransactItems: []ddbtypes.TransactGetItem{
 			{Get: &ddbtypes.Get{
 				TableName:                aws.String(s.WorkspaceMappingsName),
@@ -57,7 +60,8 @@ func (s *Store) readChannelPolicy(ctx context.Context, in *dynamodb.GetItemInput
 				ProjectionExpression: projection, ExpressionAttributeNames: names,
 			}},
 		},
-	})
+	}
+	out, err := readPolicySnapshot(ctx, transactional, request)
 	if err != nil {
 		return nil, ddbToError("ReadChannelPolicy", err)
 	}
@@ -112,4 +116,44 @@ func policyReadBelongsTo(binding, policy map[string]ddbtypes.AttributeValue) (bo
 		return false, nil
 	}
 	return true, nil
+}
+
+// TODO(upstream-contract): DynamoDB cancellation reasons are request-ordered;
+// retry only explicit conflicts, never throttling, validation, or unknown errors.
+func policyReadConflict(err error) bool {
+	var canceled *ddbtypes.TransactionCanceledException
+	if !errors.As(err, &canceled) || len(canceled.CancellationReasons) != 2 {
+		return false
+	}
+	conflict := false
+	for _, reason := range canceled.CancellationReasons {
+		switch aws.ToString(reason.Code) {
+		case "TransactionConflict":
+			conflict = true
+		case "None":
+		default:
+			return false
+		}
+	}
+	return conflict
+}
+
+func readPolicySnapshot(ctx context.Context, client policyReadTransactionClient, request *dynamodb.TransactGetItemsInput) (*dynamodb.TransactGetItemsOutput, error) {
+	var out *dynamodb.TransactGetItemsOutput
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		out, err = client.TransactGetItems(ctx, request)
+		if attempt == 2 || !policyReadConflict(err) {
+			break
+		}
+		//nolint:gosec // Jitter schedules retries; it is not an authentication value.
+		timer := time.NewTimer(time.Duration(10+rand.IntN(11)) * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return out, err
 }

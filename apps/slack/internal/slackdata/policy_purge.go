@@ -43,6 +43,8 @@ func policyPurgeChanged() error {
 	return &Error{StatusCode: http.StatusServiceUnavailable, Code: errCodePolicyPurgeWorkspaceChanged, Title: "Workspace changed during policy cleanup; retry"}
 }
 
+// TODO(upstream-contract): DynamoDB cancellation reasons follow item order;
+// conditional deletes must preserve the workspace and policy checks in that order.
 func (s *Store) deleteRetiredPolicy(ctx context.Context, teamID, channelID string, item map[string]ddbtypes.AttributeValue, binding policyPurgeBinding) error {
 	installation, present, err := policyIdentity(item, attrPolicyInstallation)
 	if err != nil {

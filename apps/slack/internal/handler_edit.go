@@ -232,8 +232,9 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *Vie
 	defer cancel()
 	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		slog.Error("tunnel edit modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
-		respondTunnelEditModalError(w, "Could not verify admin status. Retry in a moment.")
+		slog.Log(adminCtx, storeErrorLogLevel(adminCtx, err, slog.LevelError), "tunnel edit modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		reply := policyAuthorizationReply(err)
+		respondTunnelEditModalError(w, reply)
 		return
 	}
 	if !isAdmin {

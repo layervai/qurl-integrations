@@ -204,6 +204,12 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 			err = store.updatePolicy(workerCtx, mutation)
 			if wantConflict {
 				assertPolicyStatus(t, err, http.StatusConflict)
+				if scenario == "invalid policy lineage" {
+					var se *Error
+					if !errors.As(err, &se) || se.Code != ErrCodePolicyReconciliationRequired {
+						t.Fatalf("malformed lineage did not request repair: %v", err)
+					}
+				}
 			} else if err != nil {
 				t.Fatal(err)
 			}

@@ -232,8 +232,9 @@ func (h *Handler) handleS3WebsiteInstallSubmission(w http.ResponseWriter, payloa
 	defer cancel()
 	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		log.Error("S3 website install modal admin check failed", "error", err)
-		respondS3WebsiteInstallModalError(w, "Could not verify admin status. Retry in a moment.")
+		log.Log(adminCtx, storeErrorLogLevel(adminCtx, err, slog.LevelError), "S3 website install modal admin check failed", "error", err)
+		reply := policyAuthorizationReply(err)
+		respondS3WebsiteInstallModalError(w, reply)
 		return
 	}
 	if !isAdmin {

@@ -365,8 +365,9 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	defer cancel()
 	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		log.Error("tunnel install modal admin check failed", "error", err)
-		respondConnectorInstallModalError(w, "Could not verify admin status. Retry in a moment.")
+		log.Log(adminCtx, storeErrorLogLevel(adminCtx, err, slog.LevelError), "tunnel install modal admin check failed", "error", err)
+		reply := policyAuthorizationReply(err)
+		respondConnectorInstallModalError(w, reply)
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminVerificationFailedResult)
 		return
 	}

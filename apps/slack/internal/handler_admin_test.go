@@ -1495,3 +1495,24 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		}
 	})
 }
+
+func TestPolicyAuthorizationGateRaceReplies(t *testing.T) {
+	for _, gate := range []string{"admin", "owner"} {
+		t.Run(gate, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+			h := newAdminTestHandler(t, ts)
+			ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("legacy initialization raced")})
+			w := httptest.NewRecorder()
+			var allowed bool
+			if gate == "owner" {
+				_, allowed = h.requireTransferOwnerSync(context.Background(), w, testAdminTeamID, testAdminOwnerID)
+			} else {
+				_, allowed = h.requirePolicyAdminSync(w, testAdminTeamID, testAdminOwnerID, AdminAdd)
+			}
+			if allowed || !strings.Contains(w.Body.String(), "Workspace permissions changed") || strings.Contains(w.Body.String(), "upstream error") {
+				t.Fatalf("wrong raced gate reply: %s", w.Body.String())
+			}
+		})
+	}
+}

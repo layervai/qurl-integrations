@@ -108,8 +108,12 @@ func (h *Handler) requireTransferOwnerSync(ctx context.Context, w http.ResponseW
 	}
 	authorization, err := h.cfg.AdminStore.AuthorizePolicyWrite(ctx, teamID, userID)
 	if err != nil {
-		slog.Error("owner authorization failed", "error", err, "team_id", teamID, "user_id", userID)
-		respondSlack(w, ":warning: failed to verify owner status (upstream error; see logs).")
+		slog.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "owner authorization failed", "error", err, "team_id", teamID, "user_id", userID)
+		reply := policyMutationReply(err)
+		if reply == "" {
+			reply = "failed to verify owner status (upstream error; see logs)."
+		}
+		respondSlack(w, ":warning: "+reply)
 		return slackdata.PolicyAuthorization{}, false
 	}
 	if !authorization.IsOwner() {
@@ -236,8 +240,12 @@ func (h *Handler) requireAdminForClick(log *slog.Logger, responseURL, teamID, us
 	authorization, isAdmin, err := h.authorizePolicyWrite(ctx, teamID, userID)
 	cancel()
 	if err != nil {
-		log.Error("admin click gate: check failed", "error", err, "team_id", teamID, "user_id", userID)
-		_ = h.postResponse(log, responseURL, ":warning: failed to verify admin status (upstream error; see logs).")
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "admin click gate: check failed", "error", err, "team_id", teamID, "user_id", userID)
+		reply := policyMutationReply(err)
+		if reply == "" {
+			reply = "failed to verify admin status (upstream error; see logs)."
+		}
+		_ = h.postResponse(log, responseURL, ":warning: "+reply)
 		return slackdata.PolicyAuthorization{}, false
 	}
 	if !isAdmin {
@@ -558,8 +566,12 @@ func (h *Handler) requirePolicyAdminSync(w http.ResponseWriter, teamID, userID s
 	defer cancel()
 	authorization, allowed, err := h.authorizePolicyWrite(ctx, teamID, userID)
 	if err != nil {
-		slog.Error("admin check failed", "error", err, "team_id", teamID, "user_id", userID, "action", string(action))
-		respondSlack(w, ":warning: failed to verify admin status (upstream error; see logs).")
+		slog.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelError), "admin check failed", "error", err, "team_id", teamID, "user_id", userID, "action", string(action))
+		reply := policyMutationReply(err)
+		if reply == "" {
+			reply = "failed to verify admin status (upstream error; see logs)."
+		}
+		respondSlack(w, ":warning: "+reply)
 		return authorization, false
 	}
 	if !allowed {

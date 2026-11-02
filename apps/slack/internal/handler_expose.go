@@ -333,8 +333,9 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *View
 	defer cancel()
 	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		slog.Error("protect url modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
-		respondExposeURLModalError(w, "Could not verify admin status. Retry in a moment.")
+		slog.Log(adminCtx, storeErrorLogLevel(adminCtx, err, slog.LevelError), "protect url modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		reply := policyAuthorizationReply(err)
+		respondExposeURLModalError(w, reply)
 		return
 	}
 	if !isAdmin {
@@ -436,8 +437,9 @@ func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload
 	defer cancel()
 	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		slog.Error("protect url create modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
-		respondExposeURLModalError(w, "Could not verify admin status. Retry in a moment.")
+		slog.Log(adminCtx, storeErrorLogLevel(adminCtx, err, slog.LevelError), "protect url create modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		reply := policyAuthorizationReply(err)
+		respondExposeURLModalError(w, reply)
 		return
 	}
 	if !isAdmin {

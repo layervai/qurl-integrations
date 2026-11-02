@@ -250,6 +250,8 @@ func policyRowBelongsTo(item map[string]ddbtypes.AttributeValue, authorization *
 	return err == nil && ((present && installation == authorization.installation) || (!present && authorization.legacyPolicies))
 }
 
+// TODO(upstream-contract): DynamoDB cancellation reasons follow request order;
+// ALL_OLD includes the conflicting item at that same index.
 func policyTransactionError(err error, authorization *PolicyAuthorization) error {
 	var canceled *ddbtypes.TransactionCanceledException
 	if errors.As(err, &canceled) {
@@ -257,6 +259,9 @@ func policyTransactionError(err error, authorization *PolicyAuthorization) error
 			return policyWorkspaceChanged()
 		}
 		if len(canceled.CancellationReasons) > 1 && aws.ToString(canceled.CancellationReasons[1].Code) == policyConditionFailed {
+			if _, _, identityErr := policyIdentity(canceled.CancellationReasons[1].Item, attrPolicyInstallation); identityErr != nil {
+				return &Error{StatusCode: http.StatusConflict, Code: ErrCodePolicyReconciliationRequired, Title: "This channel's settings need operator reconciliation"}
+			}
 			if !policyRowBelongsTo(canceled.CancellationReasons[1].Item, authorization) {
 				return policyWorkspaceChanged()
 			}

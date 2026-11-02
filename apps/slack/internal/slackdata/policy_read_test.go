@@ -86,3 +86,81 @@ func TestPolicyAtomicReadBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestPolicyAtomicReadConflictRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		codes               []string
+		failures, wantCalls int
+		canceled            bool
+	}{
+		{"one conflict", []string{"TransactionConflict", "None"}, 1, 2, false},
+		{"both conflict", []string{"TransactionConflict", "TransactionConflict"}, 2, 3, false},
+		{"exhausted", []string{"None", "TransactionConflict"}, 4, 3, false},
+		{"mixed failure", []string{"TransactionConflict", "ValidationError"}, 1, 1, false},
+		{"missing reason", []string{"TransactionConflict"}, 1, 1, false},
+		{"empty reasons", nil, 1, 1, false},
+		{"no conflict", []string{"None", "None"}, 1, 1, false},
+		{"canceled wait", []string{"TransactionConflict", "None"}, 1, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			stub := &stubDDB{transactGetItemsFn: func(*dynamodb.TransactGetItemsInput) (*dynamodb.TransactGetItemsOutput, error) {
+				calls++
+				if calls <= tc.failures {
+					reasons := make([]ddbtypes.CancellationReason, len(tc.codes))
+					for i, code := range tc.codes {
+						reasons[i].Code = aws.String(code)
+					}
+					if tc.canceled {
+						cancel()
+					}
+					return nil, &ddbtypes.TransactionCanceledException{CancellationReasons: reasons}
+				}
+				return &dynamodb.TransactGetItemsOutput{Responses: []ddbtypes.ItemResponse{{Item: policyTestWorkspace()}, {Item: map[string]ddbtypes.AttributeValue{attrPolicyInstallation: stringAttr("original-installation")}}}}, nil
+			}}
+			store := newStore(stub)
+			_, err := store.readChannelPolicy(ctx, &dynamodb.GetItemInput{TableName: aws.String("cp"), Key: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr("T1"), attrSlackChannelID: stringAttr("C1")}})
+			if calls != tc.wantCalls {
+				t.Fatalf("calls=%d want=%d", calls, tc.wantCalls)
+			}
+			wantSuccess := tc.wantCalls > tc.failures
+			if (err == nil) != wantSuccess {
+				t.Fatalf("success=%t want=%t: %v", err == nil, wantSuccess, err)
+			}
+		})
+	}
+}
+
+func TestPolicyMalformedLineageRequiresRepair(t *testing.T) {
+	err := policyTransactionError(&ddbtypes.TransactionCanceledException{CancellationReasons: []ddbtypes.CancellationReason{
+		{Code: aws.String("None")},
+		{Code: aws.String(policyConditionFailed), Item: map[string]ddbtypes.AttributeValue{attrPolicyInstallation: &ddbtypes.AttributeValueMemberN{Value: "1"}}},
+	}}, &PolicyAuthorization{})
+	var se *Error
+	if !errors.As(err, &se) || se.Code != ErrCodePolicyReconciliationRequired {
+		t.Fatalf("wrong repair error: %v", err)
+	}
+}
+
+func TestPolicyWorkspaceUpdateWithoutCallerCondition(t *testing.T) {
+	calls := 0
+	store := newStore(&stubDDB{updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+		calls++
+		condition := aws.ToString(in.ConditionExpression)
+		if strings.Contains(condition, "()") || !strings.Contains(condition, "policy_installation = :authorized_installation") {
+			t.Fatalf("invalid authority condition: %s", condition)
+		}
+		return &dynamodb.UpdateItemOutput{}, nil
+	}})
+	authorization := PolicyAuthorization{store: store, teamID: "T1", userID: testCallerSlackID, ownerID: testOwnerSlackID, generation: "generation", installation: "installation"}
+	in := &dynamodb.UpdateItemInput{TableName: aws.String("ws"), Key: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr("T1")}, UpdateExpression: aws.String("REMOVE agent_enabled")}
+	if err := store.updateAuthorizedWorkspace(authorization.Context(context.Background()), in); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || in.ConditionExpression != nil || in.ExpressionAttributeValues != nil {
+		t.Fatal("update mutated caller input or skipped authority")
+	}
+}

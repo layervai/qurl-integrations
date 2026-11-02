@@ -50,3 +50,10 @@ func policyMutationReply(err error) string {
 		return ""
 	}
 }
+
+func policyAuthorizationReply(err error) string {
+	if reply := policyMutationReply(err); reply != "" {
+		return reply
+	}
+	return "Could not verify admin status. Retry in a moment."
+}

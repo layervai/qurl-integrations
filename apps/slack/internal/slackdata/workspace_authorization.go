@@ -19,13 +19,20 @@ func (s *Store) updateAuthorizedWorkspace(ctx context.Context, in *dynamodb.Upda
 	}
 	guarded := *in
 	guarded.ExpressionAttributeValues = maps.Clone(in.ExpressionAttributeValues)
+	if guarded.ExpressionAttributeValues == nil {
+		guarded.ExpressionAttributeValues = make(map[string]ddbtypes.AttributeValue)
+	}
 	for key, value := range map[string]string{":authorized_owner": authorization.ownerID, ":authorized_caller": authorization.userID, ":authorized_generation": authorization.generation, ":authorized_installation": authorization.installation} {
 		if _, present := guarded.ExpressionAttributeValues[key]; present {
 			return policyWorkspaceChanged()
 		}
 		guarded.ExpressionAttributeValues[key] = stringAttr(value)
 	}
-	guarded.ConditionExpression = aws.String("(" + aws.ToString(in.ConditionExpression) + ") AND owner_id = :authorized_owner AND (owner_id = :authorized_caller OR contains(admin_slack_user_ids, :authorized_caller)) AND policy_generation = :authorized_generation AND policy_installation = :authorized_installation")
+	condition := ""
+	if aws.ToString(in.ConditionExpression) != "" {
+		condition = "(" + aws.ToString(in.ConditionExpression) + ") AND "
+	}
+	guarded.ConditionExpression = aws.String(condition + "owner_id = :authorized_owner AND (owner_id = :authorized_caller OR contains(admin_slack_user_ids, :authorized_caller)) AND policy_generation = :authorized_generation AND policy_installation = :authorized_installation")
 	guarded.ReturnValuesOnConditionCheckFailure = ddbtypes.ReturnValuesOnConditionCheckFailureAllOld
 	_, err := s.Client.UpdateItem(ctx, &guarded)
 	var conflict *ddbtypes.ConditionalCheckFailedException
