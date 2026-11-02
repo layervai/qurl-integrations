@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -72,16 +73,33 @@ func TestSlackdataDynamoDBExpressions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	assertRows := func(t *testing.T, table, key string, want int32) {
+		t.Helper()
+		out, err := client.Query(ctx, &dynamodb.QueryInput{
+			TableName: aws.String(table), ConsistentRead: aws.Bool(true),
+			KeyConditionExpression:    aws.String("#pk = :pk"),
+			ExpressionAttributeNames:  map[string]string{"#pk": key},
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":pk": stringAttr(team)},
+		})
+		check(t, err)
+		if out.Count != want {
+			t.Fatalf("fixture partition has %d rows, want %d", out.Count, want)
+		}
+	}
 	t.Run("workspace", func(t *testing.T) {
 		check(t, s.BindWorkspace(ctx, &WorkspaceMapping{TeamID: team, OwnerID: owner}, owner))
 		check(t, s.SetAgentEnabled(ctx, team, true))
 		check(t, s.AddAdmin(ctx, team, admin))
 		check(t, s.RemoveAdmin(ctx, team, admin))
+		beforeTransfer := now
+		now = now.Add(time.Second)
 		check(t, s.TransferOwnership(ctx, team, owner, admin))
-		actual, _, err := s.ListAdmins(ctx, team)
+		check(t, s.DeleteWorkspaceMappingBefore(ctx, team, beforeTransfer))
+		assertRows(t, s.WorkspaceMappingsName, attrSlackTeamID, 1)
+		actual, admins, err := s.ListAdmins(ctx, team)
 		check(t, err)
-		if actual != admin {
-			t.Fatalf("owner = %q", actual)
+		if actual != admin || len(admins) != 2 || !slices.Contains(admins, owner) || !slices.Contains(admins, admin) {
+			t.Fatalf("owner = %q, admins = %v", actual, admins)
 		}
 	})
 	t.Run("aliases and policy sets", func(t *testing.T) {
@@ -105,8 +123,11 @@ func TestSlackdataDynamoDBExpressions(t *testing.T) {
 			t.Fatalf("purged aliases = %v", aliases)
 		}
 		check(t, s.ExposeResourceToChannel(ctx, team, channel, "resource-b"))
+		check(t, s.PurgeTeamChannelPoliciesBefore(ctx, team, now.Add(-time.Second)))
+		assertRows(t, s.ChannelPoliciesName, attrSlackTeamID, 1)
 		check(t, s.RevokeResourceFromChannel(ctx, team, channel, "resource-b"))
 		check(t, s.PurgeTeamChannelPoliciesBefore(ctx, team, now.Add(time.Minute)))
+		assertRows(t, s.ChannelPoliciesName, attrSlackTeamID, 0)
 	})
 	t.Run("agent counter and markers", func(t *testing.T) {
 		for want := int64(1); want <= 2; want++ {
@@ -123,10 +144,22 @@ func TestSlackdataDynamoDBExpressions(t *testing.T) {
 				t.Fatalf("first = %v, want %v", first, want)
 			}
 		}
-		first, err := a.MarkMediaNoticeSent(ctx, team, "conversation")
+		for _, step := range []struct {
+			advance time.Duration
+			want    bool
+		}{{0, true}, {0, false}, {defaultMediaNoticeTTL + time.Second, true}} {
+			now = now.Add(step.advance)
+			first, err := a.MarkMediaNoticeSent(ctx, team, "conversation")
+			check(t, err)
+			if first != step.want {
+				t.Fatalf("media notice = %v, want %v", first, step.want)
+			}
+		}
+		check(t, a.PutAuditEntry(ctx, team, &AuditEntry{Actor: admin, Action: "synthetic"}))
+		entries, err := a.ListAuditEntries(ctx, team, admin, 10)
 		check(t, err)
-		if !first {
-			t.Fatal("first media notice rejected")
+		if len(entries) != 1 || entries[0].Action != "synthetic" {
+			t.Fatalf("audit entries = %v", entries)
 		}
 		check(t, a.PutPendingAction(ctx, team, "action", []byte("synthetic")))
 		claimed, err := a.ClaimPendingAction(ctx, team, "action")
@@ -135,6 +168,8 @@ func TestSlackdataDynamoDBExpressions(t *testing.T) {
 			t.Fatal("pending action not claimed")
 		}
 		check(t, a.PurgeWorkspaceAgentState(ctx, team))
+		assertRows(t, a.TableName, attrAgentPK, 0)
 	})
 	check(t, s.DeleteWorkspaceMappingBefore(ctx, team, now.Add(time.Minute)))
+	assertRows(t, s.WorkspaceMappingsName, attrSlackTeamID, 0)
 }
