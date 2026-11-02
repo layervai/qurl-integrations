@@ -460,7 +460,7 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
         .post('/webhooks/qurl')
         .set('Content-Type', 'application/json')
         .set('QURL-Signature', signBody(unknownRaw))
-      .set(attemptHeaders(unknownRaw))
+        .set(attemptHeaders(unknownRaw))
         .send(unknownRaw);
     }
     const limited = await request(isolatedApp)
@@ -495,7 +495,7 @@ describe('POST /webhooks/qurl — bad-sig limiter scope (only HMAC failures coun
         .post('/webhooks/qurl')
         .set('Content-Type', 'application/json')
         .set('QURL-Signature', signBody(unknownRaw))
-      .set(attemptHeaders(unknownRaw))
+        .set(attemptHeaders(unknownRaw))
         .send(unknownRaw);
       expect(r.status).toBe(401);
     }
@@ -678,7 +678,7 @@ describe('POST /webhooks/qurl — bad-signature rate limit', () => {
         .post('/webhooks/qurl')
         .set('Content-Type', 'application/json')
         .set('QURL-Signature', signBody(raw, 'wrong-secret'))
-      .set(attemptHeaders(raw, 'wrong-secret'))
+        .set(attemptHeaders(raw, 'wrong-secret'))
         .send(raw);
     }
     const res = await request(isolatedApp)
@@ -731,16 +731,27 @@ describe('signed delivery attempt freshness', () => {
 });
 
 describe('authenticated attempt failures do not throttle fresh senders', () => {
+  const receiver = buildRawOnlyApp();
+  it('calibrates the same burst against a real v2 HMAC failure', async () => {
+    const raw = JSON.stringify(VALID_PAYLOAD);
+    let res;
+    for (let i = 0; i < 31; i++) {
+      res = await request(receiver).post('/webhooks/qurl').set('Content-Type', 'application/json')
+        .set('X-Forwarded-For', '192.0.2.52').set('QURL-Signature', signBody(raw))
+        .set(attemptHeaders(raw, 'wrong-v2-secret')).send(raw);
+    }
+    expect(res.status).toBe(429);
+  });
   it.each(['stale', 'missing'])('%s attempts leave fresh delivery available', async (mode) => {
     const raw = JSON.stringify(VALID_PAYLOAD);
     for (let i = 0; i < 31; i++) {
       const headers = mode === 'stale'
         ? attemptHeaders(raw, 'test-qurl-secret', String(Math.floor(Date.now() / 1000) - 301)) : {};
-      const res = await request(app).post('/webhooks/qurl').set('Content-Type', 'application/json')
+      const res = await request(receiver).post('/webhooks/qurl').set('Content-Type', 'application/json')
         .set('X-Forwarded-For', '192.0.2.51').set('QURL-Signature', signBody(raw)).set(headers).send(raw);
       expect(res.status).toBe(401);
     }
-    const res = await request(app).post('/webhooks/qurl').set('Content-Type', 'application/json')
+    const res = await request(receiver).post('/webhooks/qurl').set('Content-Type', 'application/json')
       .set('X-Forwarded-For', '192.0.2.51').set('QURL-Signature', signBody(raw))
       .set(attemptHeaders(raw)).send(raw);
     expect(res.status).toBe(200);

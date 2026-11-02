@@ -1071,11 +1071,13 @@ router.post('/qurl', async (req, res) => {
   // chosen deliberately; do not loosen without re-deriving the
   // threat model.
   if (result !== VERIFY_RESULTS.OK) {
+    // Signed stale/missing attempt headers can be sender drift: do not throttle
+    // fresh deliveries on that IP. A bad v2 HMAC still counts as SIG_INVALID.
+    // Trade-off: stale signed captures can repeat verification and audit work;
+    // no side effects run, but monitor request volume and audit/log costs.
     const isHmacFailure = result === VERIFY_RESULTS.SIG_INVALID
       || result === VERIFY_RESULTS.SIG_HEADER_MISSING
       || result === VERIFY_RESULTS.SIG_HEADER_MALFORMED;
-    // A valid body signature with stale or missing attempt headers can be sender drift;
-    // do not let it throttle fresh deliveries from the same egress IP.
     const isUnknownOwner = result === VERIFY_RESULTS.OWNER_UNKNOWN
       || result === VERIFY_RESULTS.OWNER_ID_MISSING;
     let totalInWindow = null;

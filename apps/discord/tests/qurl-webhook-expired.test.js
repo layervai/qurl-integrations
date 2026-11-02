@@ -107,7 +107,7 @@ function signedRequest(payload) {
     .post('/webhooks/qurl')
     .set('Content-Type', 'application/json')
     .set('QURL-Signature', signBody(raw))
-      .set(attemptHeaders(raw))
+    .set(attemptHeaders(raw))
     .send(raw);
 }
 
