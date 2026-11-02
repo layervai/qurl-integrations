@@ -228,7 +228,12 @@ func TestECSInstallMessageBlocks_MaximumConnectorID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render maximum Connector ID: %v", err)
 	}
-	if _, ok := installMessageBlocks(msg); !ok {
+	blocks, ok := installMessageBlocks(msg)
+	if !ok {
 		t.Fatalf("maximum Connector ID lost copyable Block Kit output (message bytes=%d)", len(msg))
+	}
+	// Prose uses Slack mrkdwn sections, which preserve native link markup.
+	if !strings.Contains(strings.Join(sectionTexts(t, blocks), "\n"), "<https://docs.aws.amazon.com/efs/latest/ug/iam-access-control-nfs-efs.html|EFS IAM policies>") {
+		t.Fatal("EFS IAM link missing from rendered mrkdwn sections")
 	}
 }
