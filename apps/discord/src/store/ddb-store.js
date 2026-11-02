@@ -257,6 +257,8 @@ async function recordQURLSend({
   // string. It rides the `qurl_id-index` GSI for free (projection = ALL).
   if (typeof guildId === 'string' && guildId.length > 0) {
     Item.guild_id = guildId;
+    // JSON tuple keeps tenant/sender boundaries unambiguous for the #83 index.
+    Item.guild_sender_id = JSON.stringify([guildId, senderDiscordId]);
   }
   await ddb.send(new PutCommand({
     TableName: TABLES.qurl_sends,
@@ -291,6 +293,7 @@ function qurlSendBatchItem(s, createdAt) {
   // read (projection = ALL). See recordQURLSend for the full why.
   if (typeof s.guildId === 'string' && s.guildId.length > 0) {
     Item.guild_id = s.guildId;
+    Item.guild_sender_id = JSON.stringify([s.guildId, s.senderDiscordId]);
   }
   return Item;
 }

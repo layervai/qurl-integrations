@@ -295,6 +295,24 @@ the qURLs just minted for the new recipients. Successful cleanup can leave
 residue during status/revoke triage. If cleanup fails or exceeds its wait
 budget, revocation is unconfirmed. Check the grants before manual row cleanup.
 
+## Guild-scoped revoke history migration (#83)
+
+The send writer now adds `guild_sender_id = JSON.stringify([guildId, senderDiscordId])`
+when the send has a guild. This is an additive preparation step. The current
+revoke reader still uses the existing sender index, so old records remain visible.
+
+The infrastructure change must add `guild_sender_id-created_at-index` with the
+same metadata projection as `sender_discord_id-created_at-index`. Deploy the
+writer to every send path, including Add Recipients, before the backfill's final
+verification. A paginated offline backfill must derive the tuple from each row's
+stored `guild_id` and `sender_discord_id`, and condition its update on both source
+fields still matching. It must neither overwrite a different existing tuple nor
+infer a guild for an unscoped historical row. Check remaining unindexed and
+ambiguous rows before switching the reader. Preserve a deliberate recovery path
+for any legacy revocable records; do not use a bounded cross-guild scan as the
+normal guild-scoped query. Index creation, backfill, reader cutover and a two-guild
+Sandbox revoke journey are still required before closing #83.
+
 ## License
 
 [MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.
