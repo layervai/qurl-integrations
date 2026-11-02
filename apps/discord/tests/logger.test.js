@@ -67,6 +67,26 @@ describe('logger', () => {
     });
   });
 
+  it('a canonical exact-match key automatically protects ordinary and audit logs', () => {
+    const fs = require('node:fs');
+    const vm = require('node:vm');
+    const source = fs.readFileSync(require.resolve('../src/logger'), 'utf8');
+    const marker = 'const REDACT_EXACT_KEYS = new Set([';
+    expect(source).toContain(marker);
+    const sandboxModule = { exports: {} };
+    vm.runInNewContext(source.replace(marker, `${marker}'canonical_fixture_field',`), {
+      module: sandboxModule, process: { env: { LOG_LEVEL: 'debug' } }, console,
+    });
+    const candidate = sandboxModule.exports;
+    candidate.info('canonical-fixture', { canonical_fixture_field: 'private-canonical-value' });
+    candidate.audit('canonical-fixture', { canonical_fixture_field: 'private-canonical-value' });
+    expect(consoleSpy.log).toHaveBeenCalledTimes(2);
+    for (const [line] of consoleSpy.log.mock.calls) {
+      expect(line).toContain('"canonical_fixture_field":"[REDACTED]"');
+      expect(line).not.toContain('private-canonical-value');
+    }
+  });
+
   it('info level logs info, warn, error but not debug', () => {
     process.env.LOG_LEVEL = 'info';
     logger = require('../src/logger');
