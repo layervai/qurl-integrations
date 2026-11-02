@@ -6,6 +6,9 @@ Connector (running as a sidecar in the same network namespace) is the sole
 reachable path and applies access control before any traffic reaches the
 origin.
 
+Start with the [customer quickstart](QUICKSTART.md) for Docker Compose,
+ECS/Fargate and Kubernetes, including enrollment and the protected-object smoke.
+
 Published image:
 
 ```sh
