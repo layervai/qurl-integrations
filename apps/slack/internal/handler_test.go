@@ -1203,7 +1203,7 @@ func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
 	if provider.deleteCalls != 0 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
 	}
-	if !strings.Contains(resp[respFieldText], "Usage: `/qurl uninstall`.") {
+	if !strings.Contains(resp[respFieldText], "Usage: `/qurl uninstall [--local-only]`.") {
 		t.Fatalf("uninstall args reply missing usage: %q", resp[respFieldText])
 	}
 }

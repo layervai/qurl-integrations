@@ -16,7 +16,8 @@ import (
 // dialog rather than firing on the bare verb, matching the posture `/qurl-admin
 // revoke` already uses for a destructive action.
 const (
-	uninstallConfirmActionID = "uninstall_confirm"
+	uninstallConfirmActionID          = "uninstall_confirm"
+	uninstallLocalOnlyConfirmActionID = "uninstall_local_only_confirm"
 	// uninstallConfirmFallbackText is the notification/fallback string for the
 	// blocks message; Slack requires non-empty text alongside blocks.
 	uninstallConfirmFallbackText = "Confirm disconnecting qURL from this workspace"
@@ -33,10 +34,18 @@ const (
 // protected resources, and it does not — they live on the qURL account, not in
 // Slack. It also names `--rotate`, because refreshing a key or picking up new
 // scopes is the far more common intent and does not touch this configuration.
-func uninstallConfirmBlocks(command string, purgeWorkspaceIDs []string) []any {
+func uninstallConfirmBlocks(command string, purgeWorkspaceIDs []string, localOnly bool) []any {
 	adminCommand := command + adminCommandSuffix
+	actionID := uninstallConfirmActionID
+	warning := ""
+	dialog := "This clears this workspace's admin list, channel access, and channel aliases. Your protected resources are not affected."
+	if localOnly {
+		actionID = uninstallLocalOnlyConfirmActionID
+		warning = "*Local-only disconnect: the upstream qURL API key will NOT be revoked and may still be live.* Revoke it separately through qURL key management or your operator.\n\n"
+		dialog += " The upstream qURL API key will NOT be revoked and may still be live."
+	}
 	return []any{
-		sectionBlock("*Disconnect qURL from this workspace?*\n\n" +
+		sectionBlock(warning + "*Disconnect qURL from this workspace?*\n\n" +
 			"This clears this workspace's qURL configuration:\n" +
 			"• Admin list — everyone added with `" + adminCommand + " add`\n" +
 			"• Channel access — which resources are available in which channel\n" +
@@ -44,9 +53,9 @@ func uninstallConfirmBlocks(command string, purgeWorkspaceIDs []string) []any {
 		sectionBlock("Your protected resources and qURL Connectors are *not* affected — they stay on your qURL account. Reconnecting with `" + command + " setup <email>` restores the connection; channel access and aliases must be set up again."),
 		contextBlock("To refresh this workspace's qURL key or pick up new scopes, use `" + command + " setup <email> --rotate` instead. That keeps this configuration."),
 		actionsBlock(withConfirmDialog(
-			dangerButtonElement(uninstallConfirmButtonLabel, uninstallConfirmActionID, strings.Join(purgeWorkspaceIDs, uninstallPurgeIDSeparator)),
+			dangerButtonElement(uninstallConfirmButtonLabel, actionID, strings.Join(purgeWorkspaceIDs, uninstallPurgeIDSeparator)),
 			"Disconnect qURL?",
-			"This clears this workspace's admin list, channel access, and channel aliases. Your protected resources are not affected.",
+			dialog,
 			"Disconnect",
 		)),
 	}
@@ -118,7 +127,7 @@ func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *in
 		if !h.requireUninstallAdminOrOwnerForClick(ctx, log, responseURL, teamID, userID) {
 			return
 		}
-		reply, purgeScheduled := h.uninstallWorkspaceReply(ctx, teamID, userID, purgeIDs)
+		reply, purgeScheduled := h.uninstallWorkspaceReply(ctx, teamID, userID, purgeIDs, action.ActionID == uninstallLocalOnlyConfirmActionID)
 		if purgeScheduled && len(droppedIDs) > 0 {
 			// Only meaningful once a teardown has actually run — emitting this on
 			// the ack path would raise cleanup_action_required for refused clicks

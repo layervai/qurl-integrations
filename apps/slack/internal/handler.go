@@ -1463,8 +1463,13 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// uninstall stays on the user command as a lifecycle sibling of setup,
 		// but gates to the recorded workspace owner or explicit qURL admins
 		// before removing the key.
-		h.handleUninstall(w, values)
+		h.handleUninstall(w, values, false)
 	case slashSubcommand(text, uninstallVerb):
+		args := strings.Fields(text)
+		if len(args) == 2 && args[1] == "--local-only" {
+			h.handleUninstall(w, values, true)
+			return
+		}
 		// Bare `/qurl uninstall` is handled above so unsupported deployments can
 		// explain that operator-managed installs are not self-service. Argument
 		// variants land here: advertise usage when uninstall is live, otherwise
@@ -1474,7 +1479,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		if _, _, ok := h.requireUninstallAvailableAndAuthorized(w, values); !ok {
 			return
 		}
-		respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
+		respondSlack(w, fmt.Sprintf("Usage: `%s uninstall [--local-only]`.", command))
 	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated. It minted for an arbitrary URL,
 		// which Slack no longer does — `/qurl get` mints for a tunnel
@@ -1863,7 +1868,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 	respondSlack(w, "Continue "+action+" for `"+echoText(setupCmd.email)+"`: <"+setupURL+"|Continue "+action+">\n\nAuth0 will ask you to sign in with that email after you continue. This link is valid for 5 minutes and only works for you.")
 }
 
-func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values, localOnly bool) {
 	teamID, _, ok := h.requireUninstallAvailableAndAuthorized(w, values)
 	if !ok {
 		return
@@ -1880,7 +1885,7 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 		command = commandUser
 	}
 	purgeIDs := slashUninstallPurgeWorkspaceIDs(values, teamID)
-	respondSlackBlocks(w, uninstallConfirmFallbackText, uninstallConfirmBlocks(command, purgeIDs))
+	respondSlackBlocks(w, uninstallConfirmFallbackText, uninstallConfirmBlocks(command, purgeIDs, localOnly))
 }
 
 func slashUninstallPurgeWorkspaceIDs(values url.Values, teamID string) []string {
@@ -1966,7 +1971,7 @@ var _ workspaceStateBeforeIdentityDeleter = (*auth.DDBProvider)(nil)
 // converge on one teardown path instead of forking the revoke/delete/purge
 // ordering. The bool reports whether local purge was scheduled.
 // The caller owns delivery (response_url) and the context budget.
-func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID string, purgeWorkspaceIDs []string) (string, bool) {
+func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID string, purgeWorkspaceIDs []string, localOnly bool) (string, bool) {
 	// The trailing sentence is the honest boundary of what this command does. It
 	// clears qURL's per-workspace data but deliberately leaves the Slack app —
 	// and the bot token Slack issued to it — in place, because only a fresh Slack
@@ -1976,7 +1981,7 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 	const localSlackDataPurgeScheduledReply = "Local Slack app data for this workspace is being cleared; Slack features stay disconnected until the recorded workspace owner runs `/qurl setup <email>`. The qURL Slack app itself stays installed — to remove it and the Slack token it was granted, remove qURL from your workspace's Slack app management page."
 
 	// Shown only on the revoked=true paths (204/404), which are unreachable for a
-	// self-revoke (see classifyUninstallRevokeError) — defensive for #806. The
+	// self-revoke (see classifyUninstallRevokeError) — defensive for a future owner-authenticated revoke. The
 	// "(or was already revoked upstream)" hedge covers the 404 case it would surface.
 	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\n" + localSlackDataPurgeScheduledReply
 
@@ -2023,7 +2028,32 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 	// revoked reports whether the upstream key was revoked; a non-nil error means
 	// the key may still be live, so abort before local removal to preserve the
 	// stored key_id for a retry rather than orphaning it.
-	revoked, err := h.revokeWorkspaceUpstreamKey(ctx, teamID, userID)
+	var revoked bool
+	var err error
+	localOnlyCaveat := ""
+	if localOnly {
+		keyID := ""
+		if provider, ok := h.cfg.AuthProvider.(workspaceKeyRevoker); ok {
+			keyID, err = provider.APIKeyID(ctx, teamID)
+			if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+				err = nil
+			}
+		}
+		if err != nil {
+			slog.Error("/qurl uninstall: local-only key id read failed; preserving credentials", "event", "local_disconnect_refused", "error", err, "team_id", teamID)
+			return ":warning: Could not read the upstream key ID. Nothing was disconnected. Try again or contact your qURL operator.", false
+		}
+		localOnlyCaveat = "\n\n:warning: The upstream qURL API key was NOT revoked and may still be live. "
+		if keyID != "" {
+			localOnlyCaveat += "Key ID: `" + echoText(keyID) + "`. "
+		} else {
+			localOnlyCaveat += "No upstream key ID was recorded. "
+		}
+		localOnlyCaveat += "Revoke it through qURL account/API-key management or contact your qURL operator."
+		slog.Warn("/qurl uninstall: explicit local-only disconnect; upstream key not revoked", "event", "local_disconnect_requested", "team_id", teamID, "caller_user_id", userID, "key_id", keyID, "upstream_revoked", false)
+	} else {
+		revoked, err = h.revokeWorkspaceUpstreamKey(ctx, teamID, userID)
+	}
 	if err != nil {
 		// Covers all abort arms — a failed revoke, but also the key_id read and
 		// client-build (KMS) failures where no revoke was even attempted — so the
@@ -2043,7 +2073,7 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 				return revokedReply, true
 			}
 			schedulePurge("qurl_key_not_configured")
-			return "qURL isn't currently connected to this workspace.\n\n" + localSlackDataPurgeScheduledReply + "\n\nContact your qURL operator if the owner is unavailable.", true
+			return "qURL isn't currently connected to this workspace.\n\n" + localSlackDataPurgeScheduledReply + "\n\nContact your qURL operator if the owner is unavailable." + localOnlyCaveat, true
 		case errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported):
 			return uninstallUnsupportedMessage, false
 		default:
@@ -2055,6 +2085,9 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
 	if revoked {
 		return revokedReply, true
+	}
+	if localOnly {
+		return "qURL has been disconnected from this workspace's Slack commands.\n\n" + localSlackDataPurgeScheduledReply + localOnlyCaveat, true
 	}
 	return "qURL has been disconnected from this workspace's Slack commands.\n\n" + localSlackDataPurgeScheduledReply + "\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.", true
 }
@@ -2114,7 +2147,7 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 		return false, err
 	}
 	// For a live key this DELETE always 403s → local-only degrade (by design, see
-	// classifyUninstallRevokeError); the call is kept for the #806 owner-auth path.
+	// classifyUninstallRevokeError); the call also supports a future owner-authenticated revoke.
 	if err := c.RevokeAPIKey(ctx, keyID); err != nil {
 		return classifyUninstallRevokeError(err, teamID, userID, keyID)
 	}
@@ -2150,14 +2183,14 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 //     401s, both before the existence check; there is no "valid credential +
 //     missing target" path. This arm — like the 204 success path in
 //     revokeWorkspaceUpstreamKey — is defensive scaffolding for a future
-//     owner-authenticated revoke (#806), where the credential and target differ
+//     owner-authenticated revoke, where the credential and target differ
 //     and a 404 (or a real 204) can occur.
 //   - everything else (other 4xx, 5xx, transport, timeout): possibly-still-live —
 //     return the error so the caller aborts and the stored key_id survives.
 //
 // Net for a self-revoke: only 403/401 (→ degrade) and 5xx/transport (→ abort)
 // occur in prod, so `upstream_revoked` is effectively always false and the
-// revoked=true arms never fire until the #806 owner-auth path lands.
+// revoked=true arms never fire until an owner-authenticated revoke path lands.
 //
 // 401/403 are structural, never transient FOR A LIVE KEY: 403 is a deterministic
 // gate, and qurl-service's auth middleware returns 401 only for a genuinely
@@ -2170,11 +2203,8 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 // 403), TestAPIKeyAuth_RevokedKey / TestAPIKeyAuth_ExpiredKey (dead → 401), and
 // TestAPIKeyAuth_RepoError_Returns500 (infra → 500, not 401).
 //
-// Flipping 401/403 to abort (tell the admin to retry/escalate instead of a silent
-// local-only disconnect) is deliberately sequenced behind the force/local-only
-// escape hatch (#806); until that lands the degrade is the safe interim — without
-// it, a deployment that refuses the revoke would leave admins unable to
-// disconnect at all.
+// Keep the existing self-revoke status handling for normal uninstall. The
+// explicit --local-only escape hatch skips the upstream call entirely.
 func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string) (revoked bool, err error) {
 	var apiErr *client.APIError
 	if errors.As(revokeErr, &apiErr) {

@@ -885,7 +885,7 @@ func TestSlashCommandUninstallBareVerbOnlyConfirms(t *testing.T) {
 // card is the only place a workspace learns what it is about to lose, and that
 // "uninstall" does NOT delete their protected resources.
 func TestUninstallConfirmBlocksStateWhatIsClearedAndKept(t *testing.T) {
-	rendered, err := json.Marshal(uninstallConfirmBlocks(commandUser, []string{testAdminTeamID}))
+	rendered, err := json.Marshal(uninstallConfirmBlocks(commandUser, []string{testAdminTeamID}, false))
 	if err != nil {
 		t.Fatalf("marshal confirm blocks: %v", err)
 	}
