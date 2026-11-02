@@ -425,7 +425,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // TODO(#1366): persist the verified qURL owner identity and reject a
   // setup re-run that would silently repoint this guild to another owner.
   try {
-    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH);
+    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH, keyId);
   } catch (err) {
     logger.error('Failed to persist guild API key after successful mint', {
       error: err?.message, guildId, discordUserId, keyId,

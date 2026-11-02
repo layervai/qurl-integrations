@@ -4228,7 +4228,7 @@ async function handleSetupModal(interaction, { flow_id }) {
     });
   }
 
-  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE);
+  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE, flow_id);
   logger.info('Guild API key configured', logFields);
 
   fireAndForgetLinkGuildWebhookSubscription({

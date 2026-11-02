@@ -1711,7 +1711,7 @@ describe('handleSetupModal (dispatcher path)', () => {
     );
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(mockDb.setGuildApiKey).toHaveBeenCalledWith(
-      'guild-1', VALID_KEY, 'user-1', 'paste',
+      'guild-1', VALID_KEY, 'user-1', 'paste', '0:1#guild-1#ch-1#user-1',
     );
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
