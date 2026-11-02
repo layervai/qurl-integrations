@@ -363,6 +363,7 @@ const PERSONAL_MESSAGE_INPUT_MAX = 280;
 // from it rather than maintaining the parallel copy.
 const MASS_MENTION_HINT_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])|<@&\d+>/u;
 const ROLE_MENTION_HINT_RE = /<@&\d+>/u;
+const CHANNEL_MENTION_HINT_RE = /<#\d+>/u;
 
 // discord.js `Guild._patch` only sets `memberCount` from the gateway
 // GUILD_CREATE payload. The REST `GET /guilds/:id?with_counts=true`
@@ -854,6 +855,8 @@ function isValidExpiry(v) {
 // max_values hard limit. Used by both the initial confirm-card picker
 // and the post-send "Add Recipients" flow — keep them in lockstep.
 const USER_SELECT_PER_PICK_CAP = 25;
+// Local log-volume threshold, not a recipient or protocol limit.
+const RECIPIENT_CAP_LOG_WARN_MULTIPLIER = 2;
 
 // Shared render caps for warnings-block bullets that surface user-
 // or admin-controlled strings (invalidTokens, roleMentionsDeniedNames).
@@ -4495,6 +4498,7 @@ function selfDestructOptionToSeconds(value) {
 // Splitting the buckets prevents the 429-rendered-as-"left the
 // server" misdirection.
 //
+// Keeps parsed mention order regardless of cache hits.
 // Fetches the cache-miss tail in parallel via `batchSettled` (the
 // same helper used by the DM fan-out path; honors Discord's per-route
 // rate-limit bucket by capping concurrent in-flight calls).
@@ -4502,12 +4506,14 @@ async function resolveRecipientUsers(interaction, ids) {
   if (!interaction.guild) {
     return { users: [], unresolvedIds: [...ids], transientFailureIds: [] };
   }
-  const users = [];
+  // Failed lookups leave holes, removed after ordered results are assembled.
+  const users = new Array(ids.length);
   const missQueue = [];
-  for (const id of ids) {
+  for (let index = 0; index < ids.length; index++) {
+    const id = ids[index];
     const cached = interaction.guild.members.cache.get(id);
-    if (cached) users.push(cached.user);
-    else missQueue.push(id);
+    if (cached) users[index] = cached.user;
+    else missQueue.push({ id, index });
   }
   if (missQueue.length === 0) {
     return { users, unresolvedIds: [], transientFailureIds: [] };
@@ -4515,10 +4521,10 @@ async function resolveRecipientUsers(interaction, ids) {
 
   const unresolvedIds = [];
   const transientFailureIds = [];
-  const results = await batchSettled(missQueue, async (id) => {
+  const results = await batchSettled(missQueue, async ({ id, index }) => {
     try {
       const m = await interaction.guild.members.fetch(id);
-      return { id, user: m.user, kind: 'ok' };
+      return { id, index, user: m.user, kind: 'ok' };
     } catch (err) {
       // Discord error 10007 is "Unknown Member" — recipient really
       // left the guild. Anything else (429 rate-limit surfacing past
@@ -4530,23 +4536,23 @@ async function resolveRecipientUsers(interaction, ids) {
           recipient_id: id, error: err && err.message, code: err && err.code,
         });
       }
-      return { id, user: null, kind: is10007 ? 'unknown_member' : 'transient' };
+      return { id, index, user: null, kind: is10007 ? 'unknown_member' : 'transient' };
     }
   });
   for (const r of results) {
     // batchSettled wraps each callback in Promise.allSettled — fulfilled
-    // results carry our `{id, user, kind}` shape. The callback never
+    // results carry our `{id, index, user, kind}` shape. The callback never
     // throws (try/catch above) so a `rejected` status is unreachable in
     // practice; bucket as transient if it ever does fire.
     if (r.status !== 'fulfilled' || !r.value) continue;
     if (r.value.user != null) {
-      users.push(r.value.user);
+      users[r.value.index] = r.value.user;
       continue;
     }
     if (r.value.kind === 'transient') transientFailureIds.push(r.value.id);
     else unresolvedIds.push(r.value.id);
   }
-  return { users, unresolvedIds, transientFailureIds };
+  return { users: users.filter(Boolean), unresolvedIds, transientFailureIds };
 }
 
 // Filter resolved Users: drop bots, detect whether the sender is
@@ -4561,24 +4567,7 @@ async function resolveRecipientUsers(interaction, ids) {
 // is always false on that path (the content renderer's "Send includes
 // you." notice would be misleading after exclusion).
 //
-// Known v1 cap-skew: parseRecipientMentions caps to QURL_SEND_MAX_RECIPIENTS
-// BEFORE knowing which IDs are bots. A mention list of
-// [bot1, bot2, ..., bot25, user1] with cap=25 yields ids=[bot1..bot25]
-// and post-filter valid=[]. The user sees "all recipients dropped" and
-// has to re-run with bots removed. Acceptable since (a) it requires a
-// pathological mention list to trip, (b) the failure mode is loud
-// rather than silent. Cost dimension worth flagging: 25 cache-miss
-// bot mentions still hit `members.fetch` 25 times (via batchSettled's
-// 5-at-a-time fan-out, in 5 rate-limit-budget burns) before partition
-// drops them all — small absolute cost but burns per-guild rate-limit
-// budget that legitimate ops elsewhere could use. The durable fix is
-// the v2 resolve-then-cap refactor tracked in #304.
-//
-// Self-mention cap behavior: since self-send is supported, `<@me>` now
-// CONSUMES a cap slot like any other mention. So `<@me> <@u1>..<@u25>`
-// yields self + 24 others (was: 25 others, pre self-send). This is
-// symmetric with the bot cap-skew above and aligns with the supported-
-// recipient model — sender is just another recipient.
+// Self-send uses a recipient slot like any other human recipient.
 function partitionRecipients(users, senderId, { excludeSender = false } = {}) {
   // Dedup contract is OWNED upstream: parseRecipientMentions dedupes
   // via a Set (recipient-parser.js:197-198) and the UserSelectMenu
@@ -5594,7 +5583,18 @@ async function handleQurlSlashSend(interaction, params) {
       }
     }
 
-    const { valid, droppedBots, selfIncluded } = partitionRecipients(resolved.users, interaction.user.id);
+    const { valid: eligible, droppedBots } = partitionRecipients(resolved.users, interaction.user.id);
+    const valid = eligible.slice(0, config.QURL_SEND_MAX_RECIPIENTS);
+    const cappedCount = eligible.length - valid.length;
+    const selfIncluded = valid.some(user => user.id === interaction.user.id);
+    if (cappedCount > 0) {
+      const groupMention = hasMassMention || CHANNEL_MENTION_HINT_RE.test(recipientsRaw || '');
+      const log = !groupMention && eligible.length > config.QURL_SEND_MAX_RECIPIENTS * RECIPIENT_CAP_LOG_WARN_MULTIPLIER
+        ? logger.warn : logger.debug;
+      log('qurl send/map: capping resolved recipient list', {
+        uniqueCount: eligible.length, cap: config.QURL_SEND_MAX_RECIPIENTS, cappedCount,
+      });
+    }
 
     // `needsPicker` is true when the user supplied no `recipients:`
     // value at all. When they DID supply one but it post-filtered to
@@ -5619,7 +5619,7 @@ async function handleQurlSlashSend(interaction, params) {
     const roleMentionsDeniedNames = resolveRoleNames(interaction.guild, parsed.roleMentionsDenied);
     const warningsBlock = renderRecipientWarnings({
       invalidTokens: parsed.invalidTokens,
-      cappedCount: parsed.cappedCount,
+      cappedCount,
       unresolvedIds: resolved.unresolvedIds,
       transientFailureIds: resolved.transientFailureIds,
       droppedBots,
@@ -5636,7 +5636,7 @@ async function handleQurlSlashSend(interaction, params) {
         && resolved.unresolvedIds.length === 0
         && droppedBots === 0
         && parsed.invalidTokens.length === 0
-        && parsed.cappedCount === 0
+        && cappedCount === 0
         && roleMentionsDeniedNames.length === 0;
       if (transientOnly) {
         return interaction.editReply({
@@ -5653,7 +5653,7 @@ async function handleQurlSlashSend(interaction, params) {
         && resolved.unresolvedIds.length === 0
         && resolved.transientFailureIds.length === 0
         && parsed.invalidTokens.length === 0
-        && parsed.cappedCount === 0
+        && cappedCount === 0
         && roleMentionsDeniedNames.length === 0;
       const detail = breakdownEmpty
         ? '\n\nMake sure you @-mention real users (bots are skipped automatically).'
