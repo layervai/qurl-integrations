@@ -228,6 +228,7 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   description-prefix and failed-delivery checks. Deploy the updated library
   to the central Lambda and all bot replicas before any shared-owner
   active-active rollout; old registrars still use the unsafe signal-only rule.
+  Keep the sweep disabled until every registrar is confirmed upgraded.
   Any registrar sharing the API owner can clean a marked row; the marker is
   not scoped to one region or environment. If the last delivery succeeded,
   cleanup waits for failed deliveries even after marking. The API limits

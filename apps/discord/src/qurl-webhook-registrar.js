@@ -442,6 +442,7 @@ function urlPathname(u) {
 //      retired subscription's description. Never mark an active peer, even
 //      during a long outage. Failure counts alone cannot identify retirement
 //      (#827); unmarked historical rows require explicit operator cleanup.
+//      Any registrar sharing the API owner can delete marked rows; see the runbook.
 //      Marked rows whose last delivery succeeded still wait for failed deliveries.
 //
 //      TODO(upstream-contract): field names `last_delivery_success` and
@@ -865,7 +866,7 @@ async function ensureWebhookSubscription(opts) {
     const cacheKey = `unmarked:${bridgeUrl}:${unmarkedCount}`;
     if (!nearMissLogSuppressionCache.has(cacheKey)) {
       nearMissLogSuppressionCache.add(cacheKey);
-      logger.info('URL-migration cleanup retained rows without explicit retirement; see the webhook rollout runbook', {
+      logger.info('Cross-host webhook subscriptions retained without retirement markers; they may be live peers', {
         unmarked_count: unmarkedCount, url: bridgeUrl,
       });
     }

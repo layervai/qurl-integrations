@@ -1122,7 +1122,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       await ensureWebhookSubscription(BOT_OPTS);
       await ensureWebhookSubscription(BOT_OPTS);
       const lines = logSpy.mock.calls.map(([line]) => line)
-        .filter(line => line.includes('retained rows without explicit retirement'));
+        .filter(line => line.includes('retained without retirement markers'));
       expect(lines).toHaveLength(2);
       expect(lines[0]).toContain('"unmarked_count":1');
       expect(lines[1]).toContain('"unmarked_count":2');
@@ -1135,6 +1135,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
 
   it('warns when a live same-URL subscription is still marked retired without mutating it', async () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     const secret = 'whsec_1234567890abcdef';
     try {
       mockFetchResponses({
@@ -1144,9 +1145,11 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         .resolves.toMatchObject({ action: 'reused', webhookId: 'wh_orphan', secret });
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Active webhook subscription is marked retired'));
       expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(secret);
+      expect(logSpy.mock.calls.some(([line]) => line.includes('retained without retirement markers'))).toBe(false);
       expect(global.fetch.mock.calls.every(([, options]) => options.method === 'GET')).toBe(true);
     } finally {
       warnSpy.mockRestore();
+      logSpy.mockRestore();
     }
   });
 
@@ -1774,7 +1777,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     let nearMissLogged = false;
     const logSpy = jest.spyOn(console, 'log').mockImplementation((line) => {
       if (typeof line === 'string' && (line.includes('liveness-gated near-misses')
-          || line.includes('retained rows without explicit retirement'))) {
+          || line.includes('retained without retirement markers'))) {
         nearMissLogged = true;
       }
     });
