@@ -150,10 +150,8 @@ owns the share and turns it off when it exits.`,
 				return err
 			}
 			if target.kind == publishTargetLocal {
-				for _, name := range []string{"description", "tag", "alias"} {
-					if cmd.Flags().Changed(name) {
-						return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", name))
-					}
+				if err := rejectLocalPublishMetadata(cmd); err != nil {
+					return err
 				}
 				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access)
 			}
@@ -881,6 +879,15 @@ func validateDeviceKeys(flag string, keys []string) error {
 			return fmt.Errorf("%s requires unique canonical base64 X25519 public keys", flag)
 		}
 		seen[key] = true
+	}
+	return nil
+}
+
+func rejectLocalPublishMetadata(cmd *cobra.Command) error {
+	for _, name := range []string{"description", "tag", "alias"} {
+		if cmd.Flags().Changed(name) {
+			return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", name))
+		}
 	}
 	return nil
 }

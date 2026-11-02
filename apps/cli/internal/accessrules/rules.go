@@ -41,6 +41,8 @@ const (
 	SyncPending     = "pending"
 	SyncOffline     = "offline"
 	SyncConflict    = "conflict"
+	// UseAccount resolves a conflict with the account edit; SyncLocal keeps the local one.
+	UseAccount = "account"
 )
 
 // Definition holds only future-publication policy, never recipient grants.

@@ -257,7 +257,7 @@ func (s *AccessRuleStore) Delete(ctx context.Context, version int64, selector st
 // Resolve deliberately keeps the local or latest account definition for one
 // conflicting rule, selected by ID or exact name.
 func (s *AccessRuleStore) Resolve(ctx context.Context, version int64, selector, use string) (accessrules.Snapshot, error) {
-	if use != accessrules.SyncLocal && use != "account" {
+	if use != accessrules.SyncLocal && use != accessrules.UseAccount {
 		return accessrules.Snapshot{}, errors.New("choose local or account")
 	}
 	return s.update(ctx, func(j *accessRuleJournal) error {
@@ -270,7 +270,7 @@ func (s *AccessRuleStore) Resolve(ctx context.Context, version int64, selector, 
 			return err
 		}
 		id := rule.ID
-		if use == "account" {
+		if use == accessrules.UseAccount {
 			index := slices.IndexFunc(j.Items, func(d accessrules.Definition) bool { return d.ID == id })
 			remote := slices.IndexFunc(j.Base, func(d accessrules.Definition) bool { return d.ID == id })
 			switch {

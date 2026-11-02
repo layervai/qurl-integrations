@@ -64,7 +64,7 @@ func TestRuleSnapshotPublishingSurvivesLibraryDeletion(t *testing.T) {
 	}
 }
 func TestRuleFlagsRejectCombinationsBeforeStateOrNetwork(t *testing.T) {
-	for _, flags := range [][]string{{"--rule", "builtin.keys", "--public=false"}, {"--rule", "builtin.keys", "--access", "review"}, {"--rule", "builtin.keys", "--rule-file", "-"}} {
+	for _, flags := range [][]string{{"--rule", "builtin.keys", "--public=false"}, {"--rule", "builtin.keys", "--access", "review"}, {"--rule", "builtin.keys", "--rule-file", "-"}, {"--rule", "builtin.keys", "--stripe-price", "price_1"}} {
 		result := runCLI(t, &runOpts{args: append([]string{"publish", "https://api.example.com"}, flags...), env: map[string]string{}})
 		if result.code != 2 {
 			t.Fatalf("flags %v exit %d %s", flags, result.code, result.stderr.String())

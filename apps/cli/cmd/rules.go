@@ -90,7 +90,7 @@ func rulesCmd(opts *globalOpts) *cobra.Command {
 	var use string
 	var resolveVersion int64
 	resolve := &cobra.Command{Use: "resolve <id-or-name>", Short: "Choose the local or account edit for one conflicting rule", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if !slices.Contains([]string{"local", "account"}, use) {
+		if !slices.Contains([]string{accessrules.SyncLocal, accessrules.UseAccount}, use) {
 			return exitcode.UsageError(errors.New("use --use local or --use account"))
 		}
 		if err := checkOptionalRuleVersion(cmd, resolveVersion); err != nil {
@@ -315,7 +315,7 @@ func validateRuleSelectionFlags(cmd *cobra.Command) error {
 	if cmd.Flags().Changed(ruleFlag) && cmd.Flags().Changed(ruleFileFlag) {
 		return exitcode.UsageError(errors.New("choose --rule or --rule-file, not both"))
 	}
-	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerContract, modeFlag} {
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerContract, modeFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
 		if cmd.Flags().Lookup(name) != nil && cmd.Flags().Changed(name) {
 			return exitcode.UsageError(errors.New("an access rule cannot be combined with other access settings"))
 		}
