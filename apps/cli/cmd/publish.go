@@ -86,7 +86,7 @@ requests on for that resource.
 
 Where the deployment offers it, a public resource can also be opened by anyone
 who has its CRID. The deployment this release ships does not offer it yet.
-Privacy is set at creation and cannot be changed later. Publishing a target
+Privacy is set at creation; a publish retry cannot change it. Publishing a target
 again reuses its resource, with the privacy it has.
 
 If you published a target with a release that made resources public by
@@ -96,6 +96,10 @@ it with "qurl delete <CRID>" and publish again; the new resource gets a new
 CRID. A flag that asks for what the existing resource is not is refused:
 --allow-device-key or --allow-requests for a public resource, --public for a
 private one.
+
+For paid contract access, use "qurl access configure" with the Stripe account
+and price to make an existing public CRID private. Removing payment keeps it
+private. Publishing the same target again does not change its payment policy.
 
 Authorized users open the resource with "qurl get <CRID>". The --quiet flag
 prints only the CRID. Use --foreground for CI or daemon debugging; that process
