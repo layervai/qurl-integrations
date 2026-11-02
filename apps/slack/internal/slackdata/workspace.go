@@ -206,25 +206,20 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 		return false, "", nil
 	}
 	ownerID = readString(out.Item, attrOwnerID)
-	// The workspace owner (recorded by `/qurl setup` at bind time) is always
-	// an admin. A fresh bind seeds admin_slack_user_ids with the owner, but
-	// that link is written once: legacy rows and rows where the owner was
-	// later dropped from the set can leave the owner absent from it, locking
-	// them out of every admin affordance — including the `/qurl list` Edit
-	// button. Grant admin off owner_id directly so the gate self-heals on
-	// read. owner_id is the write-once Slack user-id anchor; a shape-mismatched
-	// legacy owner_id (an Auth0 sub) can never equal a real Slack user id, so
-	// this cannot over-grant.
-	if ownerID != "" && ownerID == slackUserID {
-		return true, ownerID, nil
+	return workspaceCallerIsAdmin(out.Item, slackUserID), ownerID, nil
+}
+
+// The owner remains an admin even if a legacy row omits it from the admin set.
+func workspaceCallerIsAdmin(item map[string]ddbtypes.AttributeValue, userID string) bool {
+	if owner := readString(item, attrOwnerID); owner != "" && owner == userID {
+		return true
 	}
-	admins := readStringSet(out.Item, attrAdminSlackUserIDs)
-	for _, u := range admins {
-		if u == slackUserID {
-			return true, ownerID, nil
+	for _, admin := range readStringSet(item, attrAdminSlackUserIDs) {
+		if admin == userID {
+			return true
 		}
 	}
-	return false, ownerID, nil
+	return false
 }
 
 // SetAgentEnabled writes the per-workspace conversation-mode toggle on the

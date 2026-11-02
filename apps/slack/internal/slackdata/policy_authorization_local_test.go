@@ -1,0 +1,226 @@
+package slackdata
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"reflect"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+)
+
+// Trigger deletion at the last write boundary, including a forbidden direct-write
+// fallback. The actual commit and condition evaluation still run in DynamoDB.
+type policyCommitBoundaryDDB struct {
+	*dynamodb.Client
+	beforeCommit func()
+	policyTable  string
+}
+
+func (d *policyCommitBoundaryDDB) interleave() {
+	if d.beforeCommit != nil {
+		f := d.beforeCommit
+		d.beforeCommit = nil
+		f()
+	}
+}
+
+func (d *policyCommitBoundaryDDB) TransactWriteItems(ctx context.Context, in *dynamodb.TransactWriteItemsInput, options ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+	d.interleave()
+	return d.Client.TransactWriteItems(ctx, in, options...)
+}
+
+func (d *policyCommitBoundaryDDB) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, options ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	if aws.ToString(in.TableName) == d.policyTable {
+		d.interleave()
+	}
+	return d.Client.UpdateItem(ctx, in, options...)
+}
+
+func localPolicyStore(t *testing.T) (*Store, *dynamodb.Client) {
+	t.Helper()
+	endpoint := os.Getenv("QURL_TEST_DYNAMODB_LOCAL_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("set QURL_TEST_DYNAMODB_LOCAL_ENDPOINT to run native policy transactions")
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Port() == "" || !net.ParseIP(parsed.Hostname()).IsLoopback() || (parsed.Path != "" && parsed.Path != "/") {
+		t.Fatal("policy tests require an explicit loopback DynamoDB Local endpoint")
+	}
+	transport := &http.Transport{Proxy: nil}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := dynamodb.New(dynamodb.Options{
+		Region: "us-east-1", BaseEndpoint: aws.String(endpoint), RetryMaxAttempts: 1,
+		Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+			return aws.Credentials{AccessKeyID: "local", SecretAccessKey: "local"}, nil
+		}),
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
+	workspaceTable, policyTable := "slack931-workspace-"+suffix, "slack931-policy-"+suffix
+	for _, table := range []struct {
+		name string
+		sort bool
+	}{{workspaceTable, false}, {policyTable, true}} {
+		attributes := []ddbtypes.AttributeDefinition{{AttributeName: aws.String(attrSlackTeamID), AttributeType: ddbtypes.ScalarAttributeTypeS}}
+		keys := []ddbtypes.KeySchemaElement{{AttributeName: aws.String(attrSlackTeamID), KeyType: ddbtypes.KeyTypeHash}}
+		if table.sort {
+			attributes = append(attributes, ddbtypes.AttributeDefinition{AttributeName: aws.String(attrSlackChannelID), AttributeType: ddbtypes.ScalarAttributeTypeS})
+			keys = append(keys, ddbtypes.KeySchemaElement{AttributeName: aws.String(attrSlackChannelID), KeyType: ddbtypes.KeyTypeRange})
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err := client.CreateTable(ctx, &dynamodb.CreateTableInput{TableName: aws.String(table.name), AttributeDefinitions: attributes, KeySchema: keys, BillingMode: ddbtypes.BillingModePayPerRequest})
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, err := client.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: aws.String(table.name)}); err != nil {
+				t.Errorf("delete local test table: %v", err)
+			}
+		})
+	}
+	store := &Store{Client: client, WorkspaceMappingsName: workspaceTable, ChannelPoliciesName: policyTable, Now: func() time.Time { return time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC) }}
+	return store, client
+}
+
+func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
+	store, client := localPolicyStore(t)
+	index := 0
+	for _, scenario := range []string{"current admin", "deleted binding", "reinstall at same clock time", "revoked admin", "owner transferred away and back", "legacy binding", "delete at commit boundary", "alias conflict"} {
+		t.Run(scenario, func(t *testing.T) {
+			index++
+			teamID := fmt.Sprintf("T%08d", index)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			bind := func() {
+				t.Helper()
+				if err := store.BindWorkspace(ctx, &WorkspaceMapping{TeamID: teamID, OwnerID: testOwnerSlackID}, testOwnerSlackID); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.AddAdmin(ctx, teamID, testCallerSlackID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bind()
+			workspaceKey := map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID)}
+			if scenario == "legacy binding" {
+				if _, err := client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(store.WorkspaceMappingsName), Key: workspaceKey, UpdateExpression: aws.String("REMOVE policy_generation")}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gateCtx, cancelGate := context.WithCancel(ctx)
+			authorization, err := store.AuthorizePolicyWrite(gateCtx, teamID, testCallerSlackID)
+			cancelGate()
+			if err != nil {
+				t.Fatal(err)
+			}
+			workerCtx := authorization.Context(ctx)
+			mutation := &dynamodb.UpdateItemInput{TableName: aws.String(store.ChannelPoliciesName), Key: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID), attrSlackChannelID: stringAttr("C00000001")}, UpdateExpression: aws.String("SET allowed_resource_ids = :resources"), ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":resources": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_old"}}}}
+			wantConflict := false
+			wantResources := []string{"r_old"}
+			switch scenario {
+			case "deleted binding":
+				if err := store.DeleteWorkspaceMapping(ctx, teamID); err != nil {
+					t.Fatal(err)
+				}
+				wantConflict = true
+				wantResources = nil
+			case "reinstall at same clock time":
+				if err := store.DeleteWorkspaceMapping(ctx, teamID); err != nil {
+					t.Fatal(err)
+				}
+				bind() // Identical owner, admin and clock; only the installation changes.
+				fresh, err := store.AuthorizePolicyWrite(ctx, teamID, testCallerSlackID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fresh.generation == authorization.generation {
+					t.Fatal("reinstall reused its generation")
+				}
+				newMutation := *mutation
+				newMutation.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{":resources": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_new"}}}
+				if err := store.updatePolicy(fresh.Context(ctx), &newMutation); err != nil {
+					t.Fatal(err)
+				}
+				wantConflict = true
+				wantResources = []string{"r_new"}
+			case "revoked admin":
+				if err := store.RemoveAdmin(ctx, teamID, testCallerSlackID); err != nil {
+					t.Fatal(err)
+				}
+				wantConflict = true
+				wantResources = nil
+			case "owner transferred away and back":
+				if err := store.TransferOwnership(ctx, teamID, testOwnerSlackID, testOtherSlackID); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.TransferOwnership(ctx, teamID, testOtherSlackID, testOwnerSlackID); err != nil {
+					t.Fatal(err)
+				}
+				wantConflict = true
+				wantResources = nil
+			case "legacy binding":
+				row, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(store.WorkspaceMappingsName), Key: workspaceKey, ConsistentRead: aws.Bool(true)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if readString(row.Item, attrPolicyGeneration) == "" || !reflect.DeepEqual(row.Item[attrUpdatedAtNano], unixNanoAttr(store.Now())) {
+					t.Fatal("legacy generation missing or purge cutoff changed")
+				}
+			case "delete at commit boundary":
+				boundary := &policyCommitBoundaryDDB{Client: client, policyTable: store.ChannelPoliciesName, beforeCommit: func() {
+					if _, err := client.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: aws.String(store.WorkspaceMappingsName), Key: workspaceKey}); err != nil {
+						t.Fatal(err)
+					}
+				}}
+				store.Client = boundary
+				t.Cleanup(func() { store.Client = client })
+				wantConflict = true
+				wantResources = nil
+			case "alias conflict":
+				mutation.ConditionExpression = aws.String("attribute_not_exists(allowed_resource_ids)")
+				if err := store.updatePolicy(workerCtx, mutation); err != nil {
+					t.Fatal(err)
+				}
+				err = store.updatePolicy(workerCtx, mutation)
+				var condition *ddbtypes.ConditionalCheckFailedException
+				if !errors.As(err, &condition) {
+					t.Fatalf("policy conflict lost its type: %v", err)
+				}
+				return
+			case "current admin":
+				// gateCtx is canceled above; authority must work with the worker's live ctx.
+			}
+			err = store.updatePolicy(workerCtx, mutation)
+			if wantConflict {
+				assertPolicyStatus(t, err, http.StatusConflict)
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			row, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: mutation.TableName, Key: mutation.Key, ConsistentRead: aws.Bool(true)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wantResources == nil && len(row.Item) != 0 {
+				t.Fatal("refused write materialized an orphan policy row")
+			}
+			got := readStringSet(row.Item, attrAllowedResourceIDs)
+			if !reflect.DeepEqual(got, wantResources) {
+				t.Fatalf("policy after %s = %v, want %v", scenario, got, wantResources)
+			}
+			store.Client = client
+		})
+	}
+}

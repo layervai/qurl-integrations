@@ -281,6 +281,10 @@ func ddbToError(op string, err error) error {
 	if err == nil {
 		return nil
 	}
+	var mapped *Error
+	if errors.As(err, &mapped) && mapped.Code == ErrCodePolicyWorkspaceChanged {
+		return err
+	}
 	var ccfe *ddbtypes.ConditionalCheckFailedException
 	if errors.As(err, &ccfe) {
 		// Caller decides the status code via their wrapper — we
