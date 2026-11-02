@@ -316,6 +316,26 @@ for any legacy revocable records; do not use a bounded cross-guild scan as the
 normal guild-scoped query. Index creation, backfill, reader cutover and a two-guild
 Sandbox revoke journey are still required before closing #83.
 
+Run the offline audit from `apps/discord` with the approved environment's AWS
+profile and explicit region/table. It defaults to dry-run:
+
+```sh
+AWS_PROFILE=layerv-integrations AWS_REGION=us-east-2 node scripts/backfill-guild-sender-index.js qurl-bot-discord-sandbox-qurl-sends
+```
+
+Only add `--apply` in the authorized migration window. The scan reads at most 100
+rows per page and projects identity/index fields, never links. It uses constant
+page memory but scans the whole table, so budget the offline read/write cost.
+Each update is conditional on the row, guild, sender and creation time still
+matching, with no existing tuple. Interrupted runs can be repeated. A concurrent
+writer, missing guild, invalid identity/timestamp or conflicting tuple is counted
+and left unchanged; these unresolved counts cause exit 2. Other failures stop the
+run with exit 1. A dry-run can exit 0 with `candidates > 0`: it does not establish
+migration completion. After all writers are adopted, rerun the audit until
+`candidates`, `unscoped`, `invalid`, `conflicting` and `raced` are zero, or retain
+an explicit legacy recovery plan before the reader cutover. An indexed-row count
+does not verify that the GSI is ACTIVE, IAM is refreshed, or index reads work.
+
 ## License
 
 [MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.

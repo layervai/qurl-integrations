@@ -3822,3 +3822,20 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(message.content).not.toMatch(/\u202E/u);
   });
 });
+
+describe('guild history identity preflight', () => {
+  test.each([undefined, null, '', 123])('initial send rejects invalid sender %p before minting', async (id) => {
+    const interaction = makeInteraction({ guildId: 'guild', user: { id } });
+    await expect(executeSendPipeline(interaction, makePipelineParams())).rejects.toThrow('non-empty string guild and sender IDs');
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
+
+  test.each([undefined, null, '', 123])('Add Recipients rejects invalid sender %p before minting', async (id) => {
+    const interaction = makeInteraction({ guildId: 'guild', user: { id } });
+    const result = await handleAddRecipients('send', new Map(), interaction, 'key');
+    expect(result).toMatchObject({ delivered: 0, newLinks: [], msg: expect.stringContaining('sender identity is invalid') });
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
+});
