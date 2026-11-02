@@ -101,18 +101,27 @@ rebuild, so a share the platform keeps refusing costs one knock per five
 minutes at steady state — the same cadence as `single` mode's one
 registration attempt, with a knock in front of it.
 
-The mode is folded into the daemon's job version (`5/<version>` for `single`,
-`5/<version>/per-share` otherwise) and written into the per-user job as an
+The mode is folded into the daemon's job version (`6/<version>` for `single`,
+`6/<version>/per-share` otherwise) and written into the per-user job as an
 explicit `--share-group-mode`, so a resident daemon always runs in the mode
 its job was installed for. Changing the mode is therefore a job-definition
 change: the next `qurl start`, `restart`, or `publish` replaces the resident
 daemon in the new mode, the same path a binary-version change takes.
 
+A validated host product adds `/client/<encoded-product>` to the job version.
+The hidden `--client-product-b64` argument carries the same base64url value
+to prevent task schedulers from expanding product characters; an
+empty value clears inherited host attribution. Explicitly changing or clearing the
+product replaces a managed daemon, just as a mode change does. Unset or invalid
+CLI values preserve a running native daemon's installed product.
+
 A package upgrade replaces the binary without rewriting the job. The upgraded
 daemon still starts from that job when only the version part differs, and the
 next `qurl start`, `restart`, or `publish` replaces the job as above. A job for
-another mode or another leading protocol number is refused; that daemon waits
+another mode or an unreadable leading protocol number is refused; that daemon waits
 an hour before it exits, so the service manager cannot restart it in a loop.
+Protocol 5 jobs remain readable after this upgrade; the next native
+start/publish still replaces their definition to pin the host product.
 The same wait applies to a job whose flags the binary cannot read, which an
 older binary meets after a downgrade. While a daemon waits, its shares are
 down: the next `qurl start`, `restart`, or `publish` replaces the job.

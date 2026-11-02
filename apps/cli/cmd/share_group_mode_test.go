@@ -113,16 +113,16 @@ func TestDaemonJobRefusalHoldEndsWhenTheDaemonIsStopped(t *testing.T) {
 // it exits, so the native manager cannot restart it in a tight loop.
 func TestDaemonRunRejectsAJobVersionForAnotherMode(t *testing.T) {
 	holds := stubDaemonJobRefusalHold(t)
-	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--job-version", "5/test", "--share-group-mode", "per-share"}})
-	if res.code != 1 || !strings.Contains(res.stderr.String(), `does not match binary "5/test/per-share"`) {
+	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--job-version", "6/test", "--share-group-mode", "per-share"}})
+	if res.code != 1 || !strings.Contains(res.stderr.String(), `does not match binary "6/test/per-share"`) {
 		t.Fatalf("mode-mismatched job version = exit %d stderr %q", res.code, res.stderr.String())
 	}
-	single := runCLI(t, &runOpts{args: []string{"daemon", "run", "--job-version", "5/test/per-share", "--share-group-mode", "single"}})
-	if single.code != 1 || !strings.Contains(single.stderr.String(), `does not match binary "5/test"`) {
+	single := runCLI(t, &runOpts{args: []string{"daemon", "run", "--job-version", "6/test/per-share", "--share-group-mode", "single"}})
+	if single.code != 1 || !strings.Contains(single.stderr.String(), `does not match binary "6/test"`) {
 		t.Fatalf("single-mode daemon accepted a per-share job version: exit %d stderr %q", single.code, single.stderr.String())
 	}
 	protocol := runCLI(t, &runOpts{args: []string{"daemon", "run", "--job-version", "4/test"}})
-	if protocol.code != 1 || !strings.Contains(protocol.stderr.String(), `does not match binary "5/test"`) {
+	if protocol.code != 1 || !strings.Contains(protocol.stderr.String(), `does not match binary "6/test"`) {
 		t.Fatalf("daemon accepted a job for another protocol: exit %d stderr %q", protocol.code, protocol.stderr.String())
 	}
 	if !slices.Equal(*holds, []time.Duration{daemonJobRefusalHold, daemonJobRefusalHold, daemonJobRefusalHold}) {
@@ -179,7 +179,7 @@ func TestDaemonJobLogPathsAreReadFromUnparsedArguments(t *testing.T) {
 // keeps reporting the job's own version so the next ensure replaces the job.
 func TestDaemonRunAcceptsAJobFromAnotherBinaryVersion(t *testing.T) {
 	holds := stubDaemonJobRefusalHold(t)
-	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--state-dir", t.TempDir(), "--job-version", "5/earlier"}})
+	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--state-dir", t.TempDir(), "--job-version", "6/earlier"}})
 	if strings.Contains(res.stderr.String(), "does not match binary") {
 		t.Fatalf("daemon refused a job from another binary version: exit %d stderr %q", res.code, res.stderr.String())
 	}
@@ -195,7 +195,7 @@ func TestDaemonRunAcceptsAJobFromAnotherBinaryVersion(t *testing.T) {
 	_, opts := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: io.Discard, Err: io.Discard})
 	opts.resolvedShareGroupMode = connectordaemon.GroupModeSingle
 	opts.resolvedSupervision = connectorstate.RuntimeSupervisionNative
-	for job, want := range map[string]string{"5/earlier": "5/earlier", "5/test": "5/test", "": "5/test"} {
+	for job, want := range map[string]string{"6/earlier": "6/earlier", "6/test": "6/test", "": "6/test"} {
 		got, err := admitDaemonJobVersion(context.Background(), opts, job)
 		if err != nil || got != want {
 			t.Fatalf("admitDaemonJobVersion(%q) = %q, %v; want %q", job, got, err, want)
@@ -212,6 +212,8 @@ func TestDaemonRunAcceptsAJobFromAnotherBinaryVersion(t *testing.T) {
 func TestShareDaemonJobCarriesTheResolvedShareGroupMode(t *testing.T) {
 	_, opts := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: io.Discard, Err: io.Discard})
 	opts.resolvedEndpoint = config.DefaultEndpoint
+	opts.resolvedClientProduct = "host-app/1"
+	opts.resolvedClientProductExplicit = true
 	opts.resolvedShareGroupMode = connectordaemon.GroupModePerShare
 	dir := t.TempDir()
 	daemon, err := opts.newShareDaemon(filepath.Join(dir, "state"), filepath.Join(dir, "logs"))
@@ -221,6 +223,9 @@ func TestShareDaemonJobCarriesTheResolvedShareGroupMode(t *testing.T) {
 	controller, ok := daemon.(*connectordaemon.JobController)
 	if !ok {
 		t.Fatalf("production share daemon controller is %T, want the native job controller", controller)
+	}
+	if controller.ClientProduct != "host-app/1" || !controller.ClientProductExplicit {
+		t.Fatalf("job product = %q", controller.ClientProduct)
 	}
 	if controller.ShareGroupMode != connectordaemon.GroupModePerShare {
 		t.Fatalf("job controller mode = %q, want the resolved per-share mode", controller.ShareGroupMode)

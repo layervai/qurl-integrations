@@ -229,3 +229,60 @@ func TestPublishRejectsExplicitEmptyContractBeforeRequest(t *testing.T) {
 		t.Fatal("empty contract reached API")
 	}
 }
+
+func TestConsumerAccessConfiguresStripeContractAndConfirmsEveryPaymentField(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Policy   qurl.ConsumerAccessPolicy `json:"consumer_access"`
+			Expected int64                     `json:"expected_consumer_access_version"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Policy.Payment == nil || body.Policy.Payment.AccountID != "acct_publisher" || body.Policy.Payment.PriceID != "price_product" || body.Policy.Payment.AccessSeconds != 3600 {
+			t.Fatalf("invalid payment policy: %+v", body.Policy)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "consumer_access": body.Policy}, nil)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "access", "configure", srv.Key.CRID, "--mode", "contract", "--contract", "sale", "--version", "0", "--stripe-account", "acct_publisher", "--stripe-price", "price_product", "--payment-access-seconds", "3600", "-o", "json"}})
+	if result.code != 0 {
+		t.Fatalf("exit=%d stderr=%s", result.code, result.stderr.String())
+	}
+	if !strings.Contains(result.stdout.String(), `"price_id": "price_product"`) {
+		t.Fatalf("payment receipt missing: %s", result.stdout.String())
+	}
+}
+func TestStripePaymentFlagsRefusePartialOrWrongPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		mode, account, price string
+		seconds              int64
+	}{{"review", "acct_p", "price_p", 0}, {"contract", "acct_p", "", 0}, {"contract", "acct_p", "price_p", -1}, {"contract", "acct_wrong/route", "price_p", 0}} {
+		policy := &qurl.ConsumerAccessPolicy{Mode: tt.mode, ContractID: "sale", Version: 1}
+		if err := setStripePayment(policy, tt.account, tt.price, tt.seconds); err == nil {
+			t.Fatal("invalid payment flags accepted")
+		}
+	}
+}
+
+func TestPublisherPaymentsCommandsUseSDKAndShowThreePercent(t *testing.T) {
+	for _, operation := range []string{"connect", "account"} {
+		t.Run(operation, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			method, path := http.MethodGet, "/v1/payments/account"
+			data := map[string]any{"account_id": "acct_publisher", "layerv_fee_percent": 3}
+			if operation == "connect" {
+				method, path = http.MethodPost, "/v1/payments/connect"
+				data = map[string]any{"url": "https://connect.stripe.com/oauth/authorize?state=fixture"}
+			}
+			srv.Script(method, path, func(w http.ResponseWriter, _ *http.Request) { apitest.WriteEnvelope(t, w, http.StatusOK, data, nil) })
+			result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", operation, "-o", "json"}})
+			if result.code != 0 {
+				t.Fatalf("exit=%d error=%s", result.code, result.stderr.String())
+			}
+			if !strings.Contains(result.stdout.String(), `"layerv_fee_percent": 3`) {
+				t.Fatalf("missing fee: %s", result.stdout.String())
+			}
+		})
+	}
+}
