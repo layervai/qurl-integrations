@@ -95,6 +95,7 @@ make_release_assets() {
   tar -czf "$dir/assets/$archive" -C "$build" qurl
   printf '%s  %s\n' "$(sha256_of "$dir/assets/$archive")" "$archive" \
     > "$dir/assets/checksums.txt"
+  printf 'fixture-bundle\n' > "$dir/assets/checksums.txt.sigstore.json"
 }
 
 # new_fixdir <name> — prepares the next case's fixture dir and assigns the
@@ -105,6 +106,18 @@ new_fixdir() {
   fixdir="$tmp_parent/$((case_no + 1))-$1"
   mkdir -p "$fixdir/assets" "$fixdir/bin"
   make_curl_stub "$fixdir"
+  cat > "$fixdir/cosign" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 8 && "$1" == verify-blob && "$2" == --bundle ]]
+[[ "$4" == --certificate-identity && "$5" == 'https://github.com/layervai/qurl-integrations/.github/workflows/release-please.yml@refs/heads/main' ]]
+[[ "$6" == --certificate-oidc-issuer && "$7" == https://token.actions.githubusercontent.com ]]
+[[ "${3##*/}" == checksums.txt.sigstore.json && "${8##*/}" == checksums.txt ]]
+[[ "$(cat "$3")" == fixture-bundle && -s "$8" ]]
+printf '%s\n' "$@" > "$FIXDIR/cosign.log"
+[[ ! -f "$FIXDIR/cosign-fail" ]]
+STUB
+  chmod +x "$fixdir/cosign"
 }
 
 # run_case <expected_status> <expected_output_substring> [version] [path]
@@ -493,5 +506,37 @@ make_release_assets "$fixdir" 0.2.0
 printf '#!/bin/sh\necho 1000\n' > "$fixdir/id"
 chmod +x "$fixdir/id"
 RUN_INSTALL_DIR=- RUN_HOME=- run_case nonzero "HOME is not set; set INSTALL_DIR" 0.2.0
+
+# --- Signature verification must precede extraction or installation.
+new_fixdir valid-signature
+make_release_assets "$fixdir" 0.2.0
+run_case 0 "Installed qurl v0.2.0" 0.2.0
+assert_installed 0.2.0
+[[ -s "$fixdir/cosign.log" ]] || { echo "signature verifier was not called" >&2; exit 1; }
+
+new_fixdir invalid-signature
+make_release_assets "$fixdir" 0.2.0
+touch "$fixdir/cosign-fail"
+run_case 1 "Release signature verification failed; refusing to install" 0.2.0
+[[ ! -e "$fixdir/bin/qurl" ]] || { echo "installed despite bad signature" >&2; exit 1; }
+
+new_fixdir missing-signature
+make_release_assets "$fixdir" 0.2.0
+rm "$fixdir/assets/checksums.txt.sigstore.json"
+run_case 1 "Failed to download checksums.txt.sigstore.json" 0.2.0
+[[ ! -e "$fixdir/bin/qurl" ]] || { echo "installed without required signature" >&2; exit 1; }
+
+new_fixdir no-cosign
+make_release_assets "$fixdir" 0.2.0
+toolbox="$fixdir/toolbox"
+mkdir -p "$toolbox"
+for tool in sh bash gzip uname tr grep sed mktemp tar awk chmod mv cat cp rm mkdir id find dirname sha256sum shasum; do
+  tool_path="$(command -v "$tool" || true)"
+  [[ -z "$tool_path" ]] || ln -s "$tool_path" "$toolbox/$tool"
+done
+ln -s "$fixdir/curl" "$toolbox/curl"
+run_case 0 "publisher identity is NOT verified" 0.2.0 "$toolbox"
+assert_installed 0.2.0
+if grep -q sigstore "$fixdir/curl.log"; then echo "downloaded signature without verifier" >&2; exit 1; fi
 
 echo "install.sh tests passed (${case_no} cases)"
