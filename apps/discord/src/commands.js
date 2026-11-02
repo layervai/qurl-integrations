@@ -5583,6 +5583,7 @@ async function handleQurlSlashSend(interaction, params) {
         user_id: interaction.user.id,
         guild_id: interaction.guildId,
         channel_id: interaction.channelId,
+        // Total parsed candidates, including mixed mentions, after dedup and cap.
         ...(parsed.massMentionExpanded ? { expanded_count: parsed.ids.length } : {}),
       });
     }

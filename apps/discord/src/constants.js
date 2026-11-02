@@ -195,7 +195,10 @@ const LOG_EVENTS = Object.freeze({
 // don't trigger false-positive redactions. The substring approach
 // would have made the redaction unsafe; exact-match makes it safe.
 const AUDIT_EVENTS = {
-  // Query-only typed mass-mention permission signals; no metric filter required.
+  // Query-only typed @everyone denials and actual cache expansions at parse time,
+  // not dispatch receipts. Allowed empty/all-bot/cap-full attempts emit neither.
+  // expanded_count is the capped total parsed candidate count, including mixed mentions.
+  // Actor/guild/channel IDs are query context, never metric dimensions; no filter required.
   MASS_MENTION_ALLOWED: 'mass_mention_allowed',
   MASS_MENTION_DENIED: 'mass_mention_denied',
   // UPLOAD_SUCCESS fires after upload + mintLinksInBatches + sufficiency
