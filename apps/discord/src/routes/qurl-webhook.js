@@ -44,6 +44,8 @@ const SIGNATURE_HEADER = 'qurl-signature';
 // webhook — make the regex flag the regression instead of the /i flag
 // silently absorbing it.
 const SIGNATURE_PATTERN = /^[0-9a-f]{64}$/;
+// TODO(upstream-contract): qurl-service signs v2.<Unix seconds>.<raw body>.
+const ATTEMPT_FRESHNESS_WINDOW_MS = 300_000;
 
 // Replace control chars (0x00-0x1f + DEL) with '?' so attacker-
 // controlled strings can't spoof field separators or inject newlines
@@ -84,7 +86,8 @@ const VERIFY_RESULTS = Object.freeze({
   OWNER_ID_MISSING: 'owner_id_missing',         // parse failed OR field absent
   CACHE_UNPRIMED: 'cache_unprimed',             // 503 — registry hasn't completed first scan
   OWNER_UNKNOWN: 'owner_unknown',               // 401 — registry primed, owner not registered
-  REPLAY_REJECTED: 'replay_rejected',
+  ATTEMPT_HEADERS_INVALID: 'attempt_headers_invalid', // 401 — missing or malformed v2 headers
+  REPLAY_REJECTED: 'replay_rejected', // 401 — authenticated attempt outside the window
   SIG_INVALID: 'sig_invalid',                   // HMAC mismatch on real secret
 });
 
@@ -159,13 +162,13 @@ function verifyAndResolve(req) {
   if (typeof timestamp !== 'string' || !/^[1-9][0-9]{0,15}$/.test(timestamp)
       || !Number.isSafeInteger(Number(timestamp) * 1000)
       || typeof attemptSignature !== 'string' || !SIGNATURE_PATTERN.test(attemptSignature)) {
-    return { result: VERIFY_RESULTS.REPLAY_REJECTED, ownerId };
+    return { result: VERIFY_RESULTS.ATTEMPT_HEADERS_INVALID, ownerId };
   }
   const signedAttempt = Buffer.concat([Buffer.from(`v2.${timestamp}.`), req.rawBody]);
   if (!verifyHmacSha256(signedAttempt, secret, attemptSignature)) {
     return { result: VERIFY_RESULTS.SIG_INVALID, ownerId };
   }
-  if (Math.abs(Date.now() - Number(timestamp) * 1000) > 300_000) {
+  if (Math.abs(Date.now() - Number(timestamp) * 1000) > ATTEMPT_FRESHNESS_WINDOW_MS) {
     return { result: VERIFY_RESULTS.REPLAY_REJECTED, ownerId };
   }
   return { result: VERIFY_RESULTS.OK, ownerId, body };
@@ -1070,8 +1073,9 @@ router.post('/qurl', async (req, res) => {
   if (result !== VERIFY_RESULTS.OK) {
     const isHmacFailure = result === VERIFY_RESULTS.SIG_INVALID
       || result === VERIFY_RESULTS.SIG_HEADER_MISSING
-      || result === VERIFY_RESULTS.SIG_HEADER_MALFORMED
-      || result === VERIFY_RESULTS.REPLAY_REJECTED;
+      || result === VERIFY_RESULTS.SIG_HEADER_MALFORMED;
+    // A valid body signature with stale or missing attempt headers can be sender drift;
+    // do not let it throttle fresh deliveries from the same egress IP.
     const isUnknownOwner = result === VERIFY_RESULTS.OWNER_UNKNOWN
       || result === VERIFY_RESULTS.OWNER_ID_MISSING;
     let totalInWindow = null;

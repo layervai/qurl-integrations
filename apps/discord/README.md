@@ -311,7 +311,11 @@ The receiver requires `QURL-Timestamp` (Unix seconds) and
 raw body). It checks both body integrity and a 300-second past/future window
 before any event side effect. Missing, duplicate, or malformed freshness
 headers fail closed. There is no fallback to body-only authentication.
-Rejected freshness emits `qurl_webhook_replay_rejected`. Event-ID deduplication
+An authenticated attempt outside the window emits `qurl_webhook_replay_rejected`.
+Missing or malformed attempt headers emit `qurl_webhook_signature_invalid` with
+`result=attempt_headers_invalid`. These failures do not consume the bad-signature
+IP limit; a bad v2 HMAC still does. Monitor both audit results and signature 429s.
+Event-ID deduplication
 still applies inside the freshness window.
 
 Deploy and verify the sender preparation before this receiver. Each retry must

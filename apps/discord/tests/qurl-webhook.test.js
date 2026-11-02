@@ -720,10 +720,30 @@ describe('signed delivery attempt freshness', () => {
       expect(res.status).toBe(status);
       if (status === 200) expect(mockRecordQurlView).toHaveBeenCalledTimes(1);
       else expect(mockRecordQurlView).not.toHaveBeenCalled();
-      if (['expired attempt', 'future attempt', 'missing timestamp', 'missing v2'].includes(_name)) {
+      if (['expired attempt', 'future attempt'].includes(_name)) {
         expect(mockAudit).toHaveBeenCalledWith('qurl_webhook_replay_rejected', expect.any(Object));
+      } else if (status === 401) {
+        expect(mockAudit).toHaveBeenCalledWith('qurl_webhook_signature_invalid', expect.any(Object));
+        expect(mockAudit).not.toHaveBeenCalledWith('qurl_webhook_replay_rejected', expect.any(Object));
       }
     } finally { clock.mockRestore(); }
+  });
+});
+
+describe('authenticated attempt failures do not throttle fresh senders', () => {
+  it.each(['stale', 'missing'])('%s attempts leave fresh delivery available', async (mode) => {
+    const raw = JSON.stringify(VALID_PAYLOAD);
+    for (let i = 0; i < 31; i++) {
+      const headers = mode === 'stale'
+        ? attemptHeaders(raw, 'test-qurl-secret', String(Math.floor(Date.now() / 1000) - 301)) : {};
+      const res = await request(app).post('/webhooks/qurl').set('Content-Type', 'application/json')
+        .set('X-Forwarded-For', '192.0.2.51').set('QURL-Signature', signBody(raw)).set(headers).send(raw);
+      expect(res.status).toBe(401);
+    }
+    const res = await request(app).post('/webhooks/qurl').set('Content-Type', 'application/json')
+      .set('X-Forwarded-For', '192.0.2.51').set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw)).send(raw);
+    expect(res.status).toBe(200);
   });
 });
 
