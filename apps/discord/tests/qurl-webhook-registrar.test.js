@@ -1103,6 +1103,36 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     expect(deleted).toBe(false);
   });
 
+  it('logs retained unmarked counts once per count without deleting peers', async () => {
+    _internals._resetUrlMigrationOrphanDeleteSuppressionCache();
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    let reads = 0;
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => {
+          reads += 1;
+          const rows = [deadOrphan({ description: BOT_DESC })];
+          if (reads > 2) rows.push(deadOrphan({ webhook_id: 'wh_typo', description: `${BOT_DESC} [ORPHAN] ` }));
+          rows.push(deadOrphan({ webhook_id: 'wh_other', description: 'Other service [ORPHAN]' }));
+          return { body: { data: rows } };
+        },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      const lines = logSpy.mock.calls.map(([line]) => line)
+        .filter(line => line.includes('retained rows without explicit retirement'));
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain('"unmarked_count":1');
+      expect(lines[1]).toContain('"unmarked_count":2');
+      expect(global.fetch.mock.calls.filter(([, options]) => options.method === 'DELETE')).toHaveLength(0);
+    } finally {
+      logSpy.mockRestore();
+      _internals._resetUrlMigrationOrphanDeleteSuppressionCache();
+    }
+  });
+
   it('deletes a cross-host orphan with matching description + dead liveness before creating fresh at the new URL', async () => {
     let orphanDeleted = false;
     let createCalled = false;
@@ -1803,7 +1833,18 @@ describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () =>
   ])('rejects an absent or inexact retirement suffix: %s', (description) => {
     const filter = buildUrlMigrationOrphanFilter({ bridgeUrl: 'https://bot.example/webhooks/qurl', descriptionPrefix: 'X' });
     expect(filter({ url: 'https://peer.example/webhooks/qurl', description,
-      last_delivery_success: false, failure_count: Number.MAX_SAFE_INTEGER })).toBe(ORPHAN_FILTER_RESULTS.NO_MATCH);
+      last_delivery_success: false, failure_count: Number.MAX_SAFE_INTEGER })).toBe(
+      typeof description === 'string' ? ORPHAN_FILTER_RESULTS.NEAR_MISS_RETIREMENT : ORPHAN_FILTER_RESULTS.NO_MATCH,
+    );
+  });
+
+  it.each([
+    ['X [ORPHAN]', ORPHAN_FILTER_RESULTS.MATCH],
+    ['Xylophone [ORPHAN]', ORPHAN_FILTER_RESULTS.NO_MATCH],
+  ])('retains the exact prefix boundary with a retirement suffix: %s', (description, expected) => {
+    const filter = buildUrlMigrationOrphanFilter({ bridgeUrl: 'https://bot.example/webhooks/qurl', descriptionPrefix: 'X' });
+    expect(filter({ url: 'https://peer.example/webhooks/qurl', description,
+      last_delivery_success: false, failure_count: 1475 })).toBe(expected);
   });
 
   it('returns null when descriptionPrefix is empty (sweep disabled)', () => {

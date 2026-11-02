@@ -215,6 +215,7 @@ function canonicalUrl(u) {
 const ORPHAN_FILTER_RESULTS = Object.freeze({
   MATCH: 'match',
   NEAR_MISS_LIVENESS: 'near-miss-liveness',
+  NEAR_MISS_RETIREMENT: 'near-miss-retirement',
   NO_MATCH: 'no-match',
 });
 
@@ -225,7 +226,8 @@ const ORPHAN_FILTER_RESULTS = Object.freeze({
 // requested explicitly; loop bounded at 50 iterations (5000 subs)
 // so a misbehaving cursor can't spin forever.
 //
-// Always returns `{ matches, orphans, nearMissCount }`. `orphans` is
+// Always returns `{ matches, orphans, nearMissCount, unmarkedCount }`.
+// `unmarkedCount` counts matching cross-host rows awaiting explicit retirement. `orphans` is
 // the subset of the walk's rows that the `orphanFilter(s)` classifies
 // as a full match (URL-migration leftovers, see
 // buildUrlMigrationOrphanFilter). `nearMissCount` is the count of rows
@@ -237,7 +239,7 @@ const ORPHAN_FILTER_RESULTS = Object.freeze({
 //
 // Two terminal states to distinguish:
 //   - natural exhaustion (cursor walk ends, no more pages) → returns
-//     {matches, orphans, nearMissCount}, possibly empty. Caller takes
+//     {matches, orphans, nearMissCount, unmarkedCount}, possibly empty. Caller takes
 //     create-fresh on empty matches.
 //   - 50-page cap hit (cursor never ends) → THROWS, refuses to fall
 //     through to create-fresh which would silently compound
@@ -247,6 +249,7 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl, orpha
   const matches = [];
   const orphans = [];
   let nearMissCount = 0;
+  let unmarkedCount = 0;
   let cursor = '';
   for (let i = 0; i < 50; i++) {
     // Explicit limit=100 (vs relying on a server default that could
@@ -266,10 +269,11 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl, orpha
         const verdict = orphanFilter(s);
         if (verdict === ORPHAN_FILTER_RESULTS.MATCH) orphans.push(s);
         else if (verdict === ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS) nearMissCount += 1;
+        else if (verdict === ORPHAN_FILTER_RESULTS.NEAR_MISS_RETIREMENT) unmarkedCount += 1;
       }
     }
     const next = resp && resp.meta && resp.meta.next_cursor;
-    if (!next) return { matches, orphans, nearMissCount };
+    if (!next) return { matches, orphans, nearMissCount, unmarkedCount };
     cursor = next;
   }
   throw new Error('findExistingSubscriptions: pagination cap hit (50 pages, ~5000 subs); possible stuck cursor — refusing to fall through to create-fresh which would compound duplicates');
@@ -474,7 +478,7 @@ function urlPathname(u) {
 // observational.
 const URL_MIGRATION_ORPHAN_MIN_FAILURES = 30;
 // ORPHAN_FILTER_RESULTS defined above findExistingSubscriptions (the
-// only consumer) so the tri-state predicate composes cleanly. The
+// only consumer) so the predicate composes cleanly. The
 // observability rationale for the tri-state: "matched everything except
 // the liveness gate" is the case we WANT to surface in CloudWatch so an
 // operator can grep CloudWatch for "schema field is missing" (TODO
@@ -492,15 +496,16 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
     if (subHost === null || subPath === null) return ORPHAN_FILTER_RESULTS.NO_MATCH;
     if (subPath !== targetPath) return ORPHAN_FILTER_RESULTS.NO_MATCH;
     if (subHost === targetHost) return ORPHAN_FILTER_RESULTS.NO_MATCH;
-    // Only an operator's explicit retirement authorizes cross-host cleanup (#827).
+    // TODO(upstream-contract): webhook PATCH/list preserve description verbatim (500-character schema limit).
     const retirementMarker = ' [ORPHAN]';
-    if (typeof s.description !== 'string' || !s.description.endsWith(retirementMarker)) {
-      return ORPHAN_FILTER_RESULTS.NO_MATCH;
-    }
-    const subDesc = s.description.slice(0, -retirementMarker.length);
+    if (typeof s.description !== 'string') return ORPHAN_FILTER_RESULTS.NO_MATCH;
+    const isRetired = s.description.endsWith(retirementMarker);
+    const subDesc = isRetired ? s.description.slice(0, -retirementMarker.length) : s.description;
     if (subDesc !== descriptionPrefix && !subDesc.startsWith(prefixWithBoundary)) {
       return ORPHAN_FILTER_RESULTS.NO_MATCH;
     }
+    // Delivery failures never authorize retirement, even during a long peer outage.
+    if (!isRetired) return ORPHAN_FILTER_RESULTS.NEAR_MISS_RETIREMENT;
     // From here on: host + path + description all match (a "candidate").
     // Liveness gate decides match vs near-miss. Both checks below
     // route an unparseable / missing field to NEAR_MISS_LIVENESS
@@ -813,7 +818,7 @@ async function ensureWebhookSubscription(opts) {
       descriptionPrefix: deriveDescriptionPrefix(description),
     })
     : null;
-  const { matches, orphans, nearMissCount } = await findExistingSubscriptions({
+  const { matches, orphans, nearMissCount, unmarkedCount } = await findExistingSubscriptions({
     apiEndpoint, apiKey, bridgeUrl, orphanFilter,
   });
 
@@ -851,6 +856,16 @@ async function ensureWebhookSubscription(opts) {
         near_miss_count: nearMissCount,
         orphan_delete_attempts: orphans.length,
         url: bridgeUrl,
+      });
+    }
+  }
+
+  if (unmarkedCount > 0) {
+    const cacheKey = `unmarked:${bridgeUrl}:${unmarkedCount}`;
+    if (!nearMissLogSuppressionCache.has(cacheKey)) {
+      nearMissLogSuppressionCache.add(cacheKey);
+      logger.info('URL-migration cleanup retained rows without explicit retirement; see the webhook rollout runbook', {
+        unmarked_count: unmarkedCount, url: bridgeUrl,
       });
     }
   }

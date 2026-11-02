@@ -228,6 +228,12 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   description-prefix and failed-delivery checks. Deploy the updated library
   to the central Lambda and all bot replicas before any shared-owner
   active-active rollout; old registrars still use the unsafe signal-only rule.
+  Any registrar sharing the API owner can clean a marked row; the marker is
+  not scoped to one region or environment. If the last delivery succeeded,
+  cleanup waits for failed deliveries even after marking. The API limits
+  descriptions to 500 characters; preserve room for the nine-character suffix.
+  A bounded INFO count reports matching rows retained without retirement;
+  inspect the webhook list and this runbook before marking any row.
 - **API-key blast radius**: the Lambda's `QURL_API_KEY` can list /
   create / PATCH / rotate-secret / DELETE webhook subscriptions in
   addition to minting qURLs. Factor into rotation drills.
