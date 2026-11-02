@@ -27,8 +27,7 @@ boundary before enabling either flow.
   rightmost-address rule assumes one trusted append hop; it does not validate
   an arbitrary chain of proxies.
 
-The `layervai/qurl-integrations-infra` repository's module
-`modules/qurl-webhook-runtime` explicitly sets append
+The infra repo's `modules/qurl-webhook-runtime` module explicitly sets append
 mode, private task networking and ALB-SG-only container ingress. Its
 `runtime_options.tftest.hcl` includes `oauth_trusted_alb_ingress` to reject a
 change to preserve/remove mode or the declared task ingress boundary. Plan tests
