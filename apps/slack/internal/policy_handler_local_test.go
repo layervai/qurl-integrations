@@ -56,10 +56,10 @@ func TestPolicySignedHandlerDynamoDBLocal(t *testing.T) {
 					}
 					return store.BindChannelAlias(authorization.Context(ctx), team, channel, "fresh", "r_fresh")
 				case "owner transferred away and back":
-					if err := store.TransferOwnership(ctx, team, testAdminOwnerID, "UOTHER001"); err != nil {
+					if err := store.TransferOwnership(testPolicyContext(ctx, t, store, team, testAdminOwnerID), team, testAdminOwnerID, "UOTHER001"); err != nil {
 						return err
 					}
-					return store.TransferOwnership(ctx, team, "UOTHER001", testAdminOwnerID)
+					return store.TransferOwnership(testPolicyContext(ctx, t, store, team, "UOTHER001"), team, "UOTHER001", testAdminOwnerID)
 				}
 				return nil
 			}

@@ -42,7 +42,7 @@ func TestPolicyBindingCutoffDynamoDBLocal(t *testing.T) {
 				case "remove admin":
 					err = store.RemoveAdmin(nativeWorkspaceOwnerContext(ctx, t, store, team), team, testCallerSlackID)
 				case "transfer owner":
-					err = store.TransferOwnership(ctx, team, testOwnerSlackID, testOtherSlackID)
+					err = store.TransferOwnership(nativeWorkspaceOwnerContext(ctx, t, store, team), team, testOwnerSlackID, testOtherSlackID)
 				case "agent toggle":
 					err = store.SetAgentEnabled(nativeWorkspaceOwnerContext(ctx, t, store, team), team, true)
 				}

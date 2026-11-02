@@ -37,6 +37,9 @@ type PolicyAuthorization struct {
 	legacyPolicies bool
 }
 
+// IsOwner reports whether this captured caller held the owner role.
+func (a *PolicyAuthorization) IsOwner() bool { return a.ownerID != "" && a.userID == a.ownerID }
+
 type policyAuthorizationContextKey struct{}
 
 // Context carries the authorization through an independently bounded async worker.

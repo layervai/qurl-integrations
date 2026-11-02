@@ -333,7 +333,7 @@ func TestPolicyRetiredRowRecoveryStopsOnUnknownFailure(t *testing.T) {
 }
 
 func TestWorkspaceWritesRequireCapturedAuthority(t *testing.T) {
-	for _, operation := range []string{"add", "remove", "toggle"} {
+	for _, operation := range []string{"add", "remove", "toggle", "transfer"} {
 		t.Run(operation, func(t *testing.T) {
 			store := newStore(&stubDDB{getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 				return &dynamodb.GetItemOutput{Item: policyTestWorkspace()}, nil
@@ -349,8 +349,22 @@ func TestWorkspaceWritesRequireCapturedAuthority(t *testing.T) {
 				err = store.RemoveAdmin(context.Background(), "T1", testOtherSlackID)
 			case "toggle":
 				err = store.SetAgentEnabled(context.Background(), "T1", true)
+			case "transfer":
+				err = store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID)
 			}
 			assertPolicyStatus(t, err, http.StatusConflict)
 		})
 	}
+}
+
+func TestTransferRequiresCapturedOwnerRole(t *testing.T) {
+	store := newStore(&stubDDB{updateItemFn: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+		t.Fatal("non-owner transferred ownership")
+		return nil, errors.New("unexpected transfer")
+	}})
+	authorization := PolicyAuthorization{store: store, teamID: "T1", userID: testCallerSlackID, ownerID: testOwnerSlackID, generation: "current", installation: "current"}
+	if authorization.IsOwner() {
+		t.Fatal("admin snapshot confers owner role")
+	}
+	assertPolicyStatus(t, store.TransferOwnership(authorization.Context(context.Background()), "T1", testOwnerSlackID, testOtherSlackID), http.StatusConflict)
 }

@@ -450,6 +450,7 @@ func TestHandleAdminTransferOwnership_OwnerOffAdminSetKeepsOldOwnerAdmin(t *test
 func TestHandleAdminTransferOwnership_SelfTransferNoops(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "self-transfer should bail before TransferOwnership")
 
 	h := newAdminTestHandler(t, ts)
@@ -475,6 +476,7 @@ func TestHandleAdminTransferOwnership_SelfTransferNoops(t *testing.T) {
 func TestHandleAdminTransferOwnership_LookupUnconfiguredRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "nil SlackUserLookup should fail before TransferOwnership")
 
 	h := newAdminTestHandler(t, ts)
@@ -581,6 +583,7 @@ func TestHandleAdminTransferOwnership_BadTargetRejected(t *testing.T) {
 func TestHandleAdminTransferOwnership_UnknownTargetRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "unknown target should fail before TransferOwnership")
 	var logBuf bytes.Buffer
 	prevLogger := slog.Default()
@@ -615,6 +618,7 @@ func TestHandleAdminTransferOwnership_UnknownTargetRejected(t *testing.T) {
 func TestHandleAdminTransferOwnership_LookupTransientErrorRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "transient target lookup error should fail before TransferOwnership")
 
 	h := newAdminTestHandler(t, ts)
@@ -642,6 +646,7 @@ func TestHandleAdminTransferOwnership_LookupTransientErrorRejected(t *testing.T)
 func TestHandleAdminTransferOwnership_MissingUsersReadScopeRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "missing users:read should fail before TransferOwnership")
 
 	h := newAdminTestHandler(t, ts)
@@ -669,6 +674,7 @@ func TestHandleAdminTransferOwnership_MissingUsersReadScopeRejected(t *testing.T
 func TestHandleAdminTransferOwnership_MissingSlackBotTokenRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "missing Slack bot token should fail before TransferOwnership")
 
 	h := newAdminTestHandler(t, ts)

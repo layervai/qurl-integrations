@@ -24,7 +24,7 @@ func TestPolicyLegacyTransferDynamoDBLocal(t *testing.T) {
 	if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(store.ChannelPoliciesName), Item: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(team), attrSlackChannelID: stringAttr(channel), attrAllowedResourceIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{"r_existing"}}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.TransferOwnership(ctx, team, testOwnerSlackID, testOtherSlackID); err != nil {
+	if err := store.TransferOwnership(nativeWorkspaceOwnerContext(ctx, t, store, team), team, testOwnerSlackID, testOtherSlackID); err != nil {
 		t.Fatal(err)
 	}
 	authorization, err := store.AuthorizePolicyWrite(ctx, team, testOtherSlackID)
@@ -37,7 +37,7 @@ func TestPolicyLegacyTransferDynamoDBLocal(t *testing.T) {
 	if err := store.ExposeResourceToChannel(authorization.Context(ctx), team, channel, "r_new"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.TransferOwnership(ctx, team, testOtherSlackID, testOwnerSlackID); err != nil {
+	if err := store.TransferOwnership(nativeWorkspaceOwnerContext(ctx, t, store, team), team, testOtherSlackID, testOwnerSlackID); err != nil {
 		t.Fatal(err)
 	}
 	fresh, err := store.AuthorizePolicyWrite(ctx, team, testOwnerSlackID)
@@ -62,7 +62,7 @@ func TestPolicyLegacyTransferDynamoDBLocal(t *testing.T) {
 }
 
 func TestPolicyLegacyTransferRaceDynamoDBLocal(t *testing.T) {
-	for _, scenario := range []string{"reinstall during initialization", "ownership changes during retry"} {
+	for _, scenario := range []string{"reinstall during initialization", "ownership changes before commit"} {
 		t.Run(scenario, func(t *testing.T) {
 			store, client := localPolicyStore(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -79,37 +79,36 @@ func TestPolicyLegacyTransferRaceDynamoDBLocal(t *testing.T) {
 				t.Fatal(err)
 			}
 			boundary := &policyCommitBoundaryDDB{Client: client, policyTable: store.WorkspaceMappingsName}
-			boundary.beforeCommit = func() {
+			store.Client = boundary
+			if scenario == "reinstall during initialization" {
 				boundary.beforeCommit = func() {
-					if scenario == "reinstall during initialization" {
-						if err := store.DeleteWorkspaceMapping(ctx, team); err != nil {
+					if err := store.DeleteWorkspaceMapping(ctx, team); err != nil {
+						t.Fatal(err)
+					}
+					bind()
+				}
+			}
+			authorization, err := store.AuthorizePolicyWrite(ctx, team, testOwnerSlackID)
+			if err == nil {
+				if scenario == "ownership changes before commit" {
+					boundary.beforeCommit = func() {
+						if err := store.TransferOwnership(nativeWorkspaceOwnerContext(ctx, t, store, team), team, testOwnerSlackID, testCallerSlackID); err != nil {
 							t.Fatal(err)
 						}
-						bind()
-					} else {
-						boundary.beforeCommit = func() {
-							if err := store.TransferOwnership(ctx, team, testOwnerSlackID, testCallerSlackID); err != nil {
-								t.Fatal(err)
-							}
-							if err := store.TransferOwnership(ctx, team, testCallerSlackID, testOwnerSlackID); err != nil {
-								t.Fatal(err)
-							}
+						if err := store.TransferOwnership(nativeWorkspaceOwnerContext(ctx, t, store, team), team, testCallerSlackID, testOwnerSlackID); err != nil {
+							t.Fatal(err)
 						}
 					}
 				}
+				err = store.TransferOwnership(authorization.Context(ctx), team, testOwnerSlackID, testOtherSlackID)
 			}
-			store.Client = boundary
-			err := store.TransferOwnership(ctx, team, testOwnerSlackID, testOtherSlackID)
 			assertPolicyStatus(t, err, 409)
 			row, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(store.WorkspaceMappingsName), Key: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(team)}, ConsistentRead: aws.Bool(true)})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if readString(row.Item, attrOwnerID) != testOwnerSlackID {
-				t.Fatal("legacy retry transferred a changed workspace")
-			}
-			if readString(row.Item, attrPolicyInstallation) == "" {
-				t.Fatal("legacy retry left an incomplete identity")
+			if readString(row.Item, attrOwnerID) != testOwnerSlackID || readString(row.Item, attrPolicyInstallation) == "" {
+				t.Fatal("stale transfer changed workspace identity")
 			}
 		})
 	}

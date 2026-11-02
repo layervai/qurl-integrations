@@ -5,12 +5,13 @@ installation before upstream work. Each mutation checks that snapshot in the
 same DynamoDB transaction as the policy change. Ownership transfer changes the
 authorization generation and preserves the installation and its configuration.
 A new bind creates a new installation. If ownership transfer reaches an old
-binding before its first policy write, it initializes the legacy identity before
-rotating the generation. That bounded retry checks both initialized IDs, so it
-cannot follow a concurrent reinstall or ownership change.
+binding before its first policy write, the owner gate initializes the legacy
+identity before the Slack target lookup. The transfer uses that same captured
+identity at commit and never obtains fresh authority after the lookup.
 
 Admin membership writes and agent-toggle writes also carry the first mutation
-gate's snapshot. Agent status and usage replies stay read-only. The mutation
+gate's snapshot. Ownership transfer also requires a captured owner role and
+the original generation/installation at commit. Agent status and usage replies stay read-only. The mutation
 condition and current caller/owner/generation/installation checks run in one
 workspace-row update. Revocation or reinstall during a command cannot authorize
 an old admin to change the new roster. Missing authorization has no direct-write

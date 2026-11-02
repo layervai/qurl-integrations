@@ -617,7 +617,7 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 	})
 	now := time.Date(2026, 10, 31, 12, 34, 56, 123456789, time.FixedZone("test", -6*60*60))
 	store.Now = func() time.Time { return now }
-	if err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID); err != nil {
+	if err := store.TransferOwnership(unitPolicyContext(t, store), "T1", testOwnerSlackID, testOtherSlackID); err != nil {
 		t.Fatalf("TransferOwnership: %v", err)
 	}
 	if got == nil {
@@ -635,7 +635,7 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 	if exp := aws.ToString(got.UpdateExpression); exp != "SET "+preserveBindingTimeUpdate+"owner_id = :new_owner, policy_generation = :policy_generation, updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :owner_set" {
 		t.Errorf("UpdateExpression = %q", exp)
 	}
-	if cond := aws.ToString(got.ConditionExpression); cond != "attribute_exists(slack_team_id) AND owner_id = :current_owner AND attribute_exists(policy_installation)" {
+	if cond := aws.ToString(got.ConditionExpression); !strings.Contains(cond, "(attribute_exists(slack_team_id) AND owner_id = :current_owner AND attribute_exists(policy_installation))") || !strings.Contains(cond, "policy_generation = :authorized_generation") || !strings.Contains(cond, "policy_installation = :authorized_installation") {
 		t.Errorf("ConditionExpression = %q", cond)
 	}
 	if team, _ := got.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS); team == nil || team.Value != "T1" {
@@ -670,7 +670,7 @@ func TestTransferOwnership_DisambiguatesConditionalFailure(t *testing.T) {
 				}}, nil
 			},
 		})
-		err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID)
+		err := store.TransferOwnership(unitPolicyContext(t, store), "T1", testOwnerSlackID, testOtherSlackID)
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -693,7 +693,7 @@ func TestTransferOwnership_DisambiguatesConditionalFailure(t *testing.T) {
 				return &dynamodb.GetItemOutput{}, nil
 			},
 		})
-		err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID)
+		err := store.TransferOwnership(unitPolicyContext(t, store), "T1", testOwnerSlackID, testOtherSlackID)
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -713,7 +713,7 @@ func TestTransferOwnership_DisambiguatesConditionalFailure(t *testing.T) {
 				return nil, errors.New("transport blip")
 			},
 		})
-		err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID)
+		err := store.TransferOwnership(unitPolicyContext(t, store), "T1", testOwnerSlackID, testOtherSlackID)
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -1707,7 +1707,7 @@ func TestWorkspacePolicyGenerationChangesAtSameClockTime(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID); err != nil {
+	if err := store.TransferOwnership(unitPolicyContext(t, store), "T1", testOwnerSlackID, testOtherSlackID); err != nil {
 		t.Fatal(err)
 	}
 	seen := make(map[string]bool)

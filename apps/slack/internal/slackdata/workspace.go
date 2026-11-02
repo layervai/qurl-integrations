@@ -796,10 +796,10 @@ func (s *Store) TransferOwnership(ctx context.Context, teamID, currentOwnerID, n
 			Title:      "TransferOwnership: new_owner_id must be a Slack user ID",
 		}
 	}
-	return s.transferOwnership(ctx, teamID, currentOwnerID, newOwnerID, nil)
-}
-
-func (s *Store) transferOwnership(ctx context.Context, teamID, currentOwnerID, newOwnerID string, legacy *PolicyAuthorization) error {
+	authorization, ok := ctx.Value(policyAuthorizationContextKey{}).(PolicyAuthorization)
+	if !ok || !authorization.IsOwner() || authorization.userID != currentOwnerID {
+		return policyWorkspaceChanged()
+	}
 	ownerSet := []string{currentOwnerID}
 	if newOwnerID != currentOwnerID {
 		ownerSet = append(ownerSet, newOwnerID)
@@ -822,12 +822,7 @@ func (s *Store) transferOwnership(ctx context.Context, teamID, currentOwnerID, n
 			exprNowNano:          updatedAtNano,
 		},
 	}
-	if legacy != nil {
-		in.ConditionExpression = aws.String(aws.ToString(in.ConditionExpression) + " AND " + attrPolicyGeneration + " = :expected_generation AND " + attrPolicyInstallation + " = :expected_installation")
-		in.ExpressionAttributeValues[":expected_generation"] = stringAttr(legacy.generation)
-		in.ExpressionAttributeValues[":expected_installation"] = stringAttr(legacy.installation)
-	}
-	_, err := s.Client.UpdateItem(ctx, in)
+	err := s.updateAuthorizedWorkspace(ctx, in)
 	if err == nil {
 		return nil
 	}
@@ -850,24 +845,6 @@ func (s *Store) transferOwnership(ctx context.Context, teamID, currentOwnerID, n
 			StatusCode: http.StatusNotFound,
 			Code:       ErrCodeWorkspaceNotBound,
 			Title:      "TransferOwnership: workspace is not bound",
-		}
-	}
-	if readString(out.Item, attrOwnerID) == currentOwnerID {
-		if legacy != nil {
-			return policyWorkspaceChanged()
-		}
-		_, generationPresent := out.Item[attrPolicyGeneration]
-		_, installationPresent := out.Item[attrPolicyInstallation]
-		if !generationPresent && !installationPresent {
-			// Initialize once before rotating the generation; preserve legacy config.
-			authorization, initErr := s.AuthorizePolicyWrite(ctx, teamID, currentOwnerID)
-			if initErr != nil {
-				return initErr
-			}
-			if !authorization.legacyPolicies {
-				return policyWorkspaceChanged()
-			}
-			return s.transferOwnership(ctx, teamID, currentOwnerID, newOwnerID, &authorization)
 		}
 	}
 

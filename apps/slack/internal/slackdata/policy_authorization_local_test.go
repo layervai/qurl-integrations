@@ -143,10 +143,10 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 				wantConflict = true
 				wantResources = nil
 			case "owner transferred away and back":
-				if err := store.TransferOwnership(ctx, teamID, testOwnerSlackID, testOtherSlackID); err != nil {
+				if err := store.TransferOwnership(nativeWorkspaceOwnerContext(ctx, t, store, teamID), teamID, testOwnerSlackID, testOtherSlackID); err != nil {
 					t.Fatal(err)
 				}
-				if err := store.TransferOwnership(ctx, teamID, testOtherSlackID, testOwnerSlackID); err != nil {
+				if err := store.TransferOwnership(nativeWorkspaceOwnerContext(ctx, t, store, teamID), teamID, testOtherSlackID, testOwnerSlackID); err != nil {
 					t.Fatal(err)
 				}
 				wantConflict = true
@@ -155,7 +155,7 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 				if err := store.updatePolicy(workerCtx, mutation); err != nil {
 					t.Fatal(err)
 				}
-				if err := store.TransferOwnership(ctx, teamID, testOwnerSlackID, testOtherSlackID); err != nil {
+				if err := store.TransferOwnership(nativeWorkspaceOwnerContext(ctx, t, store, teamID), teamID, testOwnerSlackID, testOtherSlackID); err != nil {
 					t.Fatal(err)
 				}
 				fresh, err := store.AuthorizePolicyWrite(ctx, teamID, testCallerSlackID)
