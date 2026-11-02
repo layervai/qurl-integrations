@@ -635,57 +635,18 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	return getResult{text: fallbackText, blocks: blocks}, nil
 }
 
-// resolveTokenForGet resolves a `$<token>` (channel alias, tunnel slug, or URL
-// resource alias) to a mintable resource for /qurl get, enforcing channel
-// authorization. Resolution order:
+// resolveTokenForGet resolves a channel alias, tunnel slug, or URL resource alias
+// through the shared channel policy. A channel binding authorizes its own target;
+// other matches must belong to the channel allow-set. Foreign and unknown names
+// use the same reply, so resolution cannot enumerate another channel's resources.
 //
-//  1. Channel alias binding (`channel_policies.alias_bindings`). The
-//     presence of the binding in THIS channel is itself the
-//     authorization signal — `/qurl-admin set-alias` is the admin act
-//     that authorizes a resource for use here.
-//  2. Tunnel-slug fallback. When no binding matches, the token may
-//     still be a tunnel slug: `/qurl list` renders `$<slug>` for tunnels
-//     granted to this channel via `allowed_resource_ids` that have no
-//     `alias_bindings` entry here (e.g. a tunnel protected in this channel
-//     from the `/qurl list` Edit modal without an alias). Resolve the
-//     slug to its resource_id and gate it through the channel allow-set
-//     ([Handler.allowedResourceIDsForGet]) so the list→get round-trip the
-//     list advertises stays honest — the user references the `$<slug>`,
-//     never the opaque resource_id.
-//  3. Listed URL resource-alias fallback. URL resources do not have tunnel slugs,
-//     but `/qurl list` renders resource aliases when present. Resolve that
-//     alias from the resource page and choose a channel-allowed match before
-//     minting; if more than one channel-allowed resource shares that alias,
-//     fail closed as ambiguous rather than minting an arbitrary row.
+// URL aliases use metadata for authorized IDs. Older producers retain one catalog
+// page; unseen allowed IDs make that fallback incomplete, not a unique match.
+// Legacy direct-URL bindings cannot be metadata rows and do not count as unseen IDs.
 //
-// Cost note: this runs BEFORE the per-user rate-limit gate in getWork — the gate
-// only fires once a token resolves, so a typo never burns the user's quota (see
-// getWork). For a CONFIGURED channel (one with a non-empty allow-set), a binding
-// miss therefore incurs its upstream resource lookups (slug, then the first-page
-// alias scan when needed) un-throttled by that gate, including for plain typos.
-// That's the deliberate "spend a read rather than burn the user's quota on a
-// fat-fingered alias" tradeoff — don't "optimize" it away by short-circuiting the
-// fallbacks on a binding miss in a configured channel. Each scan is bounded by
-// listResourcesScanLimit and Slack's own per-user slash-command throttle bounds
-// the request rate. If the in-bot limiter ever needs to shed this resolution
-// cost too, add a cheap token-shape pre-filter before the alias scan rather than
-// moving the gate back ahead of resolution.
-//
-// One NARROW exception (closes #534): when the channel allow-set is EMPTY (a
-// "cold" channel with no protected resources), BOTH fallbacks below would be
-// gated out anyway — neither a tunnel slug nor a resource alias can match an
-// empty set — so the upstream GET /v1/resources?slug= would be pure waste. Worse,
-// it's an UNMETERED probe surface: those upstream lookups run before the per-user
-// rate-limit gate, so `/qurl get $typo1`, `$typo2`, … from a cold channel fan out
-// one upstream hop each against the workspace API key, throttled only by Slack's
-// own slash-command limit. So the cold-channel case is short-circuited on the
-// allow-set DDB read alone. This is NOT the blanket "skip the fallbacks on a
-// binding miss" the tradeoff above warns against: it suppresses the hop ONLY when
-// the downstream channel gate is guaranteed to reject every fallback result.
-//
-// Caller must have already checked AdminStore (getWork does this before
-// resolving). Returns a [*userError] on lookup failure, not-a-known-token, or
-// not-allowed-here.
+// Resolution precedes the per-user mint limiter: a typo spends a bounded read,
+// not the user's quota. Bound aliases and empty channels avoid upstream reads.
+// Lookup failures stop resolution. The caller must first check AdminStore.
 func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string) (string, error) {
 	resolved, err := resolveChannelToken(token, h.channelTokenSourceForGet(ctx, log, teamID, channelID, token))
 	switch {
@@ -726,9 +687,10 @@ func (h *Handler) channelTokenSourceForGet(ctx context.Context, log *slog.Logger
 			if via == channelTokenSlug {
 				resources, err = h.lookupTunnelSlugResources(ctx, teamID, token)
 			} else {
-				resources, err = h.lookupListedResourceCandidatesForGet(ctx, teamID, allowed)
+				resources, err = h.lookupListedResourceCandidatesForGet(ctx, log, teamID, allowed)
 			}
 			if errors.Is(err, errChannelTokenIncomplete) {
+				log.Debug("get: channel token candidate set incomplete", "team_id", teamID, "channel_id", channelID)
 				return nil, err
 			}
 			if err != nil {
@@ -744,7 +706,7 @@ func (h *Handler) channelTokenSourceForGet(ctx context.Context, log *slog.Logger
 	}
 }
 
-func (h *Handler) lookupListedResourceCandidatesForGet(ctx context.Context, teamID string, allowed map[string]struct{}) ([]client.Resource, error) {
+func (h *Handler) lookupListedResourceCandidatesForGet(ctx context.Context, log *slog.Logger, teamID string, allowed map[string]struct{}) ([]client.Resource, error) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		if !errors.Is(err, auth.ErrWorkspaceNotConfigured) {
@@ -752,7 +714,7 @@ func (h *Handler) lookupListedResourceCandidatesForGet(ctx context.Context, team
 		}
 		return nil, err
 	}
-	return lookupChannelResourceAliasCandidates(ctx, c, allowed)
+	return lookupChannelResourceAliasCandidates(ctx, log, c, allowed)
 }
 
 // allowedResourceIDsForGet returns the resource IDs mintable from channelID:
@@ -772,10 +734,9 @@ func (h *Handler) lookupListedResourceCandidatesForGet(ctx context.Context, team
 // with the list-side scan, this closes the former TODO(#460) list/mint
 // asymmetry for visible rows: you can only see resources protected here, and
 // minted tokens are rechecked against this same allow-set. URL resource-alias
-// fallback and duplicate-alias ambiguity detection still depend on the first
-// listResourcesScanLimit rows until #590 moves listing/resolution to an
-// allow-set-driven fetch; channel aliases and tunnel slugs do not depend on
-// that scan.
+// fallback and duplicate detection use metadata for these IDs. Old producers use
+// one catalog page and refuse a match when that page cannot prove uniqueness.
+// Channel bindings and live tunnel-slug lookups do not depend on that fallback.
 //
 // Returns [*userError] on AdminStore-nil or allow-set fetch failure so callers
 // fail closed. Used by the tunnel-slug and listed URL resource-alias fallbacks

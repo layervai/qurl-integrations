@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -84,8 +85,13 @@ func resolveChannelToken(token string, source channelTokenSource) (*channelToken
 	return nil, errChannelTokenNotFound
 }
 
-// A bounded alias lookup cannot prove uniqueness if unseen allowed IDs remain.
-func lookupChannelResourceAliasCandidates(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+// Metadata resolves only channel-authorized IDs. Old producers retain one bounded catalog page.
+func lookupChannelResourceAliasCandidates(ctx context.Context, log *slog.Logger, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+	resources, err := fetchResourceMetadata(ctx, log, c, allowed)
+	if !errors.Is(err, errResourceMetadataUnavailable) {
+		return resources, err
+	}
+	log.Debug("channel token: metadata route unavailable; using bounded catalog lookup")
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
 	if err != nil {
 		return nil, err
@@ -93,7 +99,9 @@ func lookupChannelResourceAliasCandidates(ctx context.Context, c *client.Client,
 	if page.HasMore {
 		missing := make(map[string]struct{}, len(allowed))
 		for id := range allowed {
-			missing[id] = struct{}{}
+			if !isLegacyDirectURLBinding(id) {
+				missing[id] = struct{}{}
+			}
 		}
 		for i := range page.Resources {
 			delete(missing, page.Resources[i].ResourceID)

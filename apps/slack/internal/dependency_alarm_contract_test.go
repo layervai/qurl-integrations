@@ -159,7 +159,7 @@ func TestHandleGet_CredentialProviderAlarmContract(t *testing.T) {
 					if !errors.Is(lookupErr, auth.ErrWorkspaceNotConfigured) || errors.Is(lookupErr, errCredentialLookup) {
 						t.Fatalf("missing workspace classification changed: %v", lookupErr)
 					}
-					_, lookupErr = h.lookupListedResourceCandidatesForGet(context.Background(), testAdminTeamID, map[string]struct{}{testResourceIDFix: {}})
+					_, lookupErr = h.lookupListedResourceCandidatesForGet(context.Background(), slog.Default(), testAdminTeamID, map[string]struct{}{testResourceIDFix: {}})
 					if !errors.Is(lookupErr, auth.ErrWorkspaceNotConfigured) || errors.Is(lookupErr, errCredentialLookup) {
 						t.Fatalf("missing workspace classification changed: %v", lookupErr)
 					}

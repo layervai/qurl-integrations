@@ -421,7 +421,7 @@ func (b *agentBackend) channelTokenSourceForResolve(ctx context.Context, tc *age
 				}
 				return out.Resources, nil
 			}
-			return lookupChannelResourceAliasCandidates(ctx, c, allowed)
+			return lookupChannelResourceAliasCandidates(ctx, b.log, c, allowed)
 		},
 	}
 }

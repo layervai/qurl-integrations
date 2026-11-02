@@ -119,7 +119,13 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	if err != nil {
 		return b.failInspect("inspect token: aliases", err)
 	}
-	resolved, msg := resolveInspectableResource(token, entries, resources, partial)
+	resolved, msg := resolveInspectableResource(token, entries, resources, allowed, func(via string, scope map[string]struct{}) ([]client.Resource, error) {
+		// TODO(upstream-contract): tunnel slugs are owner-unique; URL aliases need a complete allowed set.
+		if partial && via == channelTokenResourceAlias {
+			return lookupChannelResourceAliasCandidates(ctx, b.log, c, scope)
+		}
+		return resources, nil
+	})
 	if msg != "" {
 		return msg, false, nil
 	}
@@ -161,12 +167,10 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	return formatInspectedSnapshot(token, resolved, snapshot), true, nil
 }
 
-func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource, partial bool) (resolved *channelTokenResource, userMsg string) {
+func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource, allowed map[string]struct{}, candidates func(string, map[string]struct{}) ([]client.Resource, error)) (resolved *channelTokenResource, userMsg string) {
 	byID := make(map[string]*client.Resource, len(resources))
-	allowed := make(map[string]struct{}, len(resources))
 	for i := range resources {
 		byID[resources[i].ResourceID] = &resources[i]
-		allowed[resources[i].ResourceID] = struct{}{}
 	}
 	resolved, err := resolveChannelToken(token, channelTokenSource{
 		alias: func() (*channelTokenResource, error) {
@@ -177,13 +181,8 @@ func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, r
 			}
 			return nil, errChannelTokenNotFound
 		},
-		allowed: func() (map[string]struct{}, error) {
-			if partial {
-				return nil, errChannelTokenIncomplete
-			}
-			return allowed, nil
-		},
-		candidates: func(string, map[string]struct{}) ([]client.Resource, error) { return resources, nil },
+		allowed:    func() (map[string]struct{}, error) { return allowed, nil },
+		candidates: candidates,
 	})
 	disp := escapeMrkdwnCode(token)
 	switch {

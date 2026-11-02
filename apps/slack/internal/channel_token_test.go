@@ -3,6 +3,7 @@ package internal
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -171,10 +172,19 @@ func TestAgentResolveUsesSharedLegacyAndResourceAliasPolicy(t *testing.T) {
 func TestAgentTokenAliasLookupHasOnePageBudget(t *testing.T) {
 	for _, complete := range []bool{false, true} {
 		t.Run(strconv.FormatBool(complete), func(t *testing.T) {
-			b, _ := newBackendUnderTest(t, false)
+			b, store := newBackendUnderTest(t, false)
+			if complete {
+				if err := store.BindChannelAlias(context.Background(), "T1", "C1", "legacy", "https://legacy.example.test"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var pages atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodPost {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
 				if r.URL.Query().Get("slug") != "" {
 					_, _ = w.Write([]byte(`{"data":[]}`))
 					return
@@ -235,26 +245,95 @@ func TestInspectPartialSnapshotCannotMintGuessedAlias(t *testing.T) {
 	for _, rows := range [][]client.Resource{nil, {{ResourceID: "r_1", Type: client.ResourceTypeURL, Alias: "report"}}} {
 		t.Run(strconv.Itoa(len(rows)), func(t *testing.T) {
 			b, _ := newBackendUnderTest(t, false)
-			b.resourcesOnce.Do(func() {
-				b.resources = rows
-				b.resourcesPartial = true
-			})
-			var requests atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				requests.Add(1)
+			b.resourcesOnce.Do(func() { b.resources = rows; b.resourcesPartial = true })
+			var batches, mints atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/v1/resources/batch-get" {
+					batches.Add(1)
+					writeMetadataFixture(t, w, []client.Resource{{ResourceID: "r_1", Type: client.ResourceTypeURL, Alias: "report"}, {ResourceID: "r_2", Type: client.ResourceTypeURL, Alias: "report"}})
+					return
+				}
+				mints.Add(1)
 				w.WriteHeader(http.StatusInternalServerError)
 			}))
 			t.Cleanup(server.Close)
 			b.authClient = func(context.Context, string) (*client.Client, error) { return client.New(server.URL, "key"), nil }
 			got, summarized, err := b.InspectToken(context.Background(), backendTC(), "report")
-			if err != nil || summarized || got != channelTokenIncompleteMessage || requests.Load() != 0 {
-				t.Fatalf("partial alias was minted: message=%q summarized=%t err=%v HTTP=%d", got, summarized, err, requests.Load())
+			if err != nil || summarized || !strings.Contains(got, "matches multiple resources") || mints.Load() != 0 || batches.Load() != 1 {
+				t.Fatalf("partial alias guessed instead of checked: message=%q summarized=%t err=%v mints=%d metadata=%d", got, summarized, err, mints.Load(), batches.Load())
 			}
 		})
 	}
-	bound, msg := resolveInspectableResource("bound", []slackdata.PolicyEntry{{Alias: "bound", ResourceID: "r_bound"}}, nil, true)
+	bound, msg := resolveInspectableResource("bound", []slackdata.PolicyEntry{{Alias: "bound", ResourceID: "r_bound"}}, nil, nil, nil)
 	if msg != "" || bound == nil || bound.ResourceID != "r_bound" {
-		t.Fatalf("authoritative binding was blocked by partial metadata: resolved=%+v message=%q", bound, msg)
+		t.Fatalf("binding blocked by missing metadata: resolved=%+v message=%q", bound, msg)
+	}
+}
+
+func TestAgentTokenMetadataHandlesDeletedAndLegacyBindings(t *testing.T) {
+	b, store := newBackendUnderTest(t, false)
+	if err := store.BindChannelAlias(context.Background(), "T1", "C1", "legacy", "https://legacy.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	var batches, catalog atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/resources/batch-get" {
+			batches.Add(1)
+			var input struct {
+				ResourceIDs []string `json:"resource_ids"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Error(err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if !reflect.DeepEqual(input.ResourceIDs, []string{"r_1", "r_2"}) {
+				t.Errorf("metadata IDs=%v", input.ResourceIDs)
+			}
+			// r_2 was deleted. Its absence is authoritative, not an incomplete catalog.
+			writeMetadataFixture(t, w, []client.Resource{{ResourceID: "r_1", Type: client.ResourceTypeURL, Alias: "report"}})
+			return
+		}
+		if r.URL.Query().Get("slug") == "" {
+			catalog.Add(1)
+		}
+		writeResourceListFixture(t, w, nil, "", false)
+	}))
+	t.Cleanup(server.Close)
+	b.authClient = func(context.Context, string) (*client.Client, error) { return client.New(server.URL, "key"), nil }
+	got, err := b.ResolveToken(context.Background(), backendTC(), "report")
+	if err != nil || !strings.Contains(got, "protected resource") || batches.Load() != 1 || catalog.Load() != 0 {
+		t.Fatalf("metadata did not resolve around legacy/deleted IDs: message=%q err=%v metadata=%d catalog=%d", got, err, batches.Load(), catalog.Load())
+	}
+}
+
+func TestInspectPartialSnapshotKeepsKnownSlug(t *testing.T) {
+	b, _ := newBackendUnderTest(t, false)
+	b.resourcesOnce.Do(func() {
+		b.resources = []client.Resource{{ResourceID: "r_2", Type: client.ResourceTypeTunnel, Status: client.StatusActive, Slug: "staging"}}
+		b.resourcesPartial = true
+	})
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html><title>Staging overview</title><body>Ready</body></html>"))
+	}))
+	t.Cleanup(page.Close)
+	var mints, other atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_2/qurls" {
+			mints.Add(1)
+			respondQURLEnvelope(t, w, map[string]any{"resource_id": "r_2", "qurl_link": page.URL, "qurl_site": page.URL})
+			return
+		}
+		other.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	b.allowInspectableLoopbackHosts = true
+	b.authClient = func(context.Context, string) (*client.Client, error) { return client.New(server.URL, "key"), nil }
+	got, summarized, err := b.InspectToken(context.Background(), backendTC(), "staging")
+	if err != nil || !summarized || !strings.Contains(got, "Staging overview") || mints.Load() != 1 || other.Load() != 0 {
+		t.Fatalf("known unique slug was blocked or rescanned: message=%q summarized=%t err=%v mints=%d other=%d", got, summarized, err, mints.Load(), other.Load())
 	}
 }
 
@@ -281,5 +360,43 @@ func TestHandleGet_PartialResourceAliasesCannotMint(t *testing.T) {
 	_, _, reply := newAdminSlashInvoker(t, h).invokeAdminAsync("get $docs", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, channelTokenIncompleteMessage) || mints.Load() != 0 || pages.Load() != 1 {
 		t.Fatalf("partial alias was minted or misreported: message=%q mints=%d pages=%d", reply, mints.Load(), pages.Load())
+	}
+}
+
+func TestResourceMetadataLater404DoesNotFallBackToCatalog(t *testing.T) {
+	allowed := make(map[string]struct{}, client.ResourceBatchGetMaxIDs+1)
+	for i := 0; i <= client.ResourceBatchGetMaxIDs; i++ {
+		allowed["r_meta_"+strconv.Itoa(i)] = struct{}{}
+	}
+	var batches, catalog atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			catalog.Add(1)
+			writeResourceListFixture(t, w, nil, "", false)
+			return
+		}
+		if batches.Add(1) > 1 {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var input struct {
+			ResourceIDs []string `json:"resource_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		rows := make([]client.Resource, 0, len(input.ResourceIDs))
+		for _, id := range input.ResourceIDs {
+			rows = append(rows, client.Resource{ResourceID: id, Type: client.ResourceTypeTunnel})
+		}
+		writeMetadataFixture(t, w, rows)
+	}))
+	t.Cleanup(server.Close)
+	rows, err := (&Handler{}).fetchAllowedResources(context.Background(), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), client.New(server.URL, "key", client.WithRetry(0)), allowed)
+	var apiErr *client.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound || rows != nil || batches.Load() != 2 || catalog.Load() != 0 {
+		t.Fatalf("later failure was weakened into fallback: rows=%d err=%v batches=%d catalog=%d", len(rows), err, batches.Load(), catalog.Load())
 	}
 }

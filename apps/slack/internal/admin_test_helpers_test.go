@@ -46,6 +46,8 @@ func newAdminTestServers(t *testing.T) *adminTestServers {
 		ddb:            newFakeDDB(t, names, nil),
 		tableNames:     names,
 	}
+	// These legacy-producer fixtures do not expose metadata unless a test registers it.
+	ts.customerRoutes[http.MethodPost+" /v1/resources/batch-get"] = func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }
 	// Guided Connector installs always read the authoritative lifecycle and
 	// restart it before minting install credentials. Individual tests can
 	// replace these exact routes when they need failure or prior-on behavior.
