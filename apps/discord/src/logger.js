@@ -200,8 +200,14 @@ function sanitizeMessage(message) {
   return message.replace(CONTROL_CHARS_RE, ' ');
 }
 function formatMessage(level, message, meta = {}) {
-  const safe = redact(meta);
-  const metaStr = Object.keys(safe).length > 0 ? ` ${JSON.stringify(safe)}` : '';
+  let metaStr = '';
+  try {
+    const safe = redact(meta);
+    if (Object.keys(safe).length > 0) metaStr = ` ${JSON.stringify(safe)}`;
+  } catch {
+    // Metadata and thrown error messages can contain secrets; emit neither on failure.
+    metaStr = ' [meta_serialization_failed]';
+  }
   return `[${formatTimestamp()}] ${level.toUpperCase()}: ${sanitizeMessage(message)}${metaStr}`;
 }
 

@@ -23,6 +23,28 @@ describe('logger', () => {
     jest.restoreAllMocks();
   });
 
+  describe.each(['error', 'warn', 'info', 'debug'])('%s metadata failure safety', (level) => {
+    test.each(['circular', 'bigint', 'getter', 'toJSON'])('%s metadata does not break the caller or leak values', (kind) => {
+      process.env.LOG_LEVEL = 'debug';
+      logger = require('../src/logger');
+      let meta = { value: 'private-metadata-value' };
+      if (kind === 'circular') meta.self = meta;
+      if (kind === 'bigint') meta.amount = 1n;
+      if (kind === 'getter') Object.defineProperty(meta, 'broken', {
+        enumerable: true, get() { throw new Error('private-metadata-value'); },
+      });
+      if (kind === 'toJSON') meta.toJSON = () => { throw new Error('private-metadata-value'); };
+      expect(() => logger[level]('caller-message\nforged-line', meta)).not.toThrow();
+      const output = consoleSpy[level === 'info' || level === 'debug' ? 'log' : level];
+      expect(output).toHaveBeenCalledTimes(1);
+      const line = output.mock.calls[0][0];
+      expect(line).toContain(`${level.toUpperCase()}: caller-message forged-line`);
+      expect(line).toContain('[meta_serialization_failed]');
+      expect(line).not.toContain('private-metadata-value');
+      expect(line).not.toContain('\n');
+    });
+  });
+
   it('info level logs info, warn, error but not debug', () => {
     process.env.LOG_LEVEL = 'info';
     logger = require('../src/logger');
