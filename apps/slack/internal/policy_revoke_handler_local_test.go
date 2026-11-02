@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,11 +77,34 @@ func TestPolicyRevokeHandlerDynamoDBLocal(t *testing.T) {
 				}
 			}
 			store.Client = db
-			upstream := httptest.NewServer(http.NotFoundHandler())
+			deletes := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != testResourcesPath+"/r_dead" {
+					http.NotFound(w, r)
+					return
+				}
+				if r.Method == http.MethodGet {
+					respondQURLEnvelope(t, w, map[string]any{"resource": map[string]any{testKeyResourceID: "r_dead", testKeyType: "url", testKeyStatus: "active"}})
+					return
+				}
+				if r.Method == http.MethodDelete {
+					deletes++
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				http.NotFound(w, r)
+			}))
 			defer upstream.Close()
 			h := newTestHandler(t, upstream)
 			h.cfg.AdminStore = store
-			h.purgeResourceBindings(ctx, slog.Default(), team, "r_dead")
+			h.cfg.AuthProvider = &recordingAuthProvider{apiKey: "local-test-key"}
+			reply := h.revokeResource(ctx, slog.Default(), team, testAdminOwnerID, "r_dead", "dead")
+			if deletes != 1 || !strings.Contains(reply, "Revoked") {
+				t.Fatalf("upstream revoke not completed: %q", reply)
+			}
+			if strings.Contains(reply, "Channel bindings may remain") != (mode != "one rebind") {
+				t.Fatalf("cleanup residue was misreported: %q", reply)
+			}
 			wantCalls := 2
 			if mode == "binding removed" {
 				wantCalls = 1

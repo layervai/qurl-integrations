@@ -24,6 +24,8 @@ const revokeUsageMessage = "Usage: `/qurl-admin revoke $<id>` — revoke a prote
 // *userError — but a future refactor mustn't leak an internal error to Slack.
 const commonRevokeFailedMessage = "Failed to revoke the resource. Please try again."
 
+const revokeBindingsRemainNote = "\n\n:warning: Channel bindings may remain because local cleanup did not complete. Contact your qURL operator to finish cleanup."
+
 // revokeTeardownNote is appended only to successful revoke replies. It LEADS
 // with what revoke did do — qurl-service flips the resource to revoked (new
 // viewers blocked) and deletes its viewer sessions — because to an admin of a
@@ -195,8 +197,8 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 			switch apiErr.StatusCode {
 			case http.StatusNotFound, http.StatusGone:
 				log.Info("revoke: resource not found before lifecycle teardown", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
-				h.purgeResourceBindings(ctx, log, teamID, resourceID)
-				return newActionCoreResult(false, fmt.Sprintf("`$%s` not found — already revoked, or check the id.", escapeMrkdwnCode(displayToken)), "Resource was not found or was already revoked.")
+				cleanupNote := h.purgeResourceBindings(ctx, log, teamID, resourceID)
+				return newActionCoreResult(false, fmt.Sprintf("`$%s` not found — already revoked, or check the id.", escapeMrkdwnCode(displayToken))+cleanupNote, "Resource was not found or was already revoked.")
 			case http.StatusUnauthorized, http.StatusForbidden:
 				log.Warn("revoke: upstream auth rejected", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
 				return newActionCoreResult(false, "This workspace's API key was rejected by the qURL service — re-run `/qurl setup <email>` to reconnect.", "Workspace API key was rejected.")
@@ -237,8 +239,8 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 				// resource without sweeping the bot's channel policies). Sweep here
 				// too, not only on the live-delete path. Idempotent and safe: for a
 				// genuinely typo'd id that references no channel, it's a no-op.
-				h.purgeResourceBindings(ctx, log, teamID, resourceID)
-				return newActionCoreResult(false, fmt.Sprintf("`$%s` not found — already revoked, or check the id.", escapeMrkdwnCode(displayToken)), "Resource was not found or was already revoked.")
+				cleanupNote := h.purgeResourceBindings(ctx, log, teamID, resourceID)
+				return newActionCoreResult(false, fmt.Sprintf("`$%s` not found — already revoked, or check the id.", escapeMrkdwnCode(displayToken))+cleanupNote, "Resource was not found or was already revoked.")
 			case http.StatusUnauthorized, http.StatusForbidden:
 				// API key rejected — point at /qurl setup so the admin has
 				// a concrete reconnect path rather than a generic error.
@@ -254,8 +256,8 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 	// must not leave an orphaned `$alias` behind (one that still reports "already
 	// bound" yet lists no resource). Best-effort and post-success — the resource
 	// is already gone, so a sweep failure only leaves a recoverable orphan and
-	// must not change the revoke reply.
-	h.purgeResourceBindings(ctx, log, teamID, resourceID)
+	// must not hide the completed revocation. Report any remaining bindings.
+	cleanupNote := h.purgeResourceBindings(ctx, log, teamID, resourceID)
 	// The teardown note rides on the SUCCESS branch only. A REPEAT revoke lands
 	// here, not on the 404 branch — qurl-service answers 204 for an
 	// already-revoked resource (RevokeQurl returns nil once the status is
@@ -263,7 +265,7 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 	// names may well still be running. The 404 branch means "never owned, or a
 	// typo'd id", where this workspace has no confirmation it ever ran anything,
 	// so pointing the admin at teardown would be a guess.
-	return newActionCoreResult(true, fmt.Sprintf("Revoked `$%s` and all its qURLs.\n\n%s", escapeMrkdwnCode(displayToken), revokeTeardownNote), "Resource and all of its qURLs were revoked.")
+	return newActionCoreResult(true, fmt.Sprintf("Revoked `$%s` and all its qURLs.\n\n%s", escapeMrkdwnCode(displayToken), revokeTeardownNote)+cleanupNote, "Resource and all of its qURLs were revoked.")
 }
 
 // purgeResourceBindings removes the just-revoked resourceID from every channel
@@ -276,18 +278,19 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 // `/qurl-admin unset-alias`.
 //
 // Best-effort: an AdminStore-nil deployment has no channel policies to sweep, and
-// any read/write failure is logged and skipped rather than surfaced — the revoke
-// already succeeded upstream, and a missed binding is recoverable.
-func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, teamID, resourceID string) {
+// read/write failures do not undo the upstream revocation. Log each failure
+// and return a warning note so the user can arrange cleanup.
+func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, teamID, resourceID string) string {
 	if h.cfg.AdminStore == nil {
-		return
+		return ""
 	}
 	channels, err := h.cfg.AdminStore.ChannelsForResource(ctx, teamID, resourceID)
 	if err != nil {
 		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "revoke: channel-binding sweep failed; an orphaned alias may remain",
 			"error", err, "team_id", teamID, "resource_id", resourceID)
-		return
+		return revokeBindingsRemainNote
 	}
+	cleanupNote := ""
 	for _, channelID := range channels {
 		unbound, err := h.cfg.AdminStore.PurgeResourceFromChannel(ctx, teamID, channelID, resourceID)
 		var conflict *ddbtypes.ConditionalCheckFailedException
@@ -298,6 +301,7 @@ func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, t
 		if err != nil {
 			log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "revoke: failed to purge resource from a channel; an orphaned alias may remain",
 				"error", err, "team_id", teamID, "channel_id", channelID, "resource_id", resourceID)
+			cleanupNote = revokeBindingsRemainNote
 			continue
 		}
 		if len(unbound) > 0 {
@@ -305,6 +309,7 @@ func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, t
 				"team_id", teamID, "channel_id", channelID, "resource_id", resourceID, "aliases", unbound)
 		}
 	}
+	return cleanupNote
 }
 
 // handleListRevokeClick handles the admin-only red "Revoke" button on a
