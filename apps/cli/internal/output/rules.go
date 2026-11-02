@@ -46,6 +46,9 @@ func (p *Printer) AccessRules(snapshot *accessrules.Snapshot) error {
 		ew.printf("  %s  %q  %s\n", d.ID, d.Name, AccessRuleSummary(d))
 	}
 	ew.printf("\nVersion: %d\nSync: %s\n", snapshot.LocalVersion, snapshot.Sync)
+	if len(snapshot.Conflicts) > 0 {
+		ew.printf("Conflicts: %s (keep one with qurl rules resolve <rule> --use local or --use account)\n", strings.Join(snapshot.Conflicts, ", "))
+	}
 	return ew.flush(nil)
 }
 

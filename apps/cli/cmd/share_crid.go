@@ -112,7 +112,7 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 		},
 	}
 
-	cmd.Flags().DurationVar(&ttl, "ttl", 0, "requested link lifetime, e.g. 5m or 1h (service may grant less)")
+	cmd.Flags().DurationVar(&ttl, "ttl", 0, "requested link lifetime, e.g. 5m or 1h (service may grant less; 1m to 30d with saved link limits)")
 	cmd.Flags().DurationVar(&sessionDuration, "session-duration", 0, "session lifetime after access starts, e.g. 5m or 1h (default: service policy)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 

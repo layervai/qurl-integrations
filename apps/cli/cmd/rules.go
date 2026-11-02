@@ -248,7 +248,7 @@ func (o *globalOpts) runRulesSync(ctx context.Context) error {
 // deferred is false when err must fail the command instead.
 func ruleSyncNotice(snapshot *accessrules.Snapshot, err error) (notice string, deferred bool) {
 	// A zero snapshot means the journal was never read, so nothing stays pending.
-	if journalRead := snapshot.SchemaVersion == 1; err != nil && !journalRead {
+	if journalRead := snapshot.SchemaVersion != 0; err != nil && !journalRead {
 		return "", false
 	}
 	switch {
@@ -570,7 +570,7 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 			err = store.Set(ctx, id, limits)
 		}
 		if err != nil {
-			return fmt.Errorf("published %s, but could not save its link limits on this device; run qurl share %s for a link without them: %w", id, id, err)
+			return fmt.Errorf("%s was published, but its link limits could not be saved on this device: %w", id, err)
 		}
 	}
 	if limits == nil {
@@ -580,6 +580,10 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 	if err != nil {
 		// API errors render on their own, so the CRID and next step are said first.
 		o.printer().Warnf(msgRulesLinkNotMade, id)
+		if rule == nil {
+			// A plain republish never asked for a link; it still succeeds.
+			return nil
+		}
 		return err
 	}
 	published.LimitedLink = link

@@ -48,6 +48,16 @@ func TestPublishConsumerPolicyRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestConsumerPolicyConfirmationComparesPayment(t *testing.T) {
+	requested := &qurl.ConsumerAccessPolicy{Mode: "contract", Version: 1, ContractID: "sale", Payment: &qurl.CRIDPaymentPolicy{AccountID: "acct_one", PriceID: "price_one", AccessSeconds: 3600}}
+	same, other := *requested, *requested
+	same.Payment = &qurl.CRIDPaymentPolicy{AccountID: "acct_one", PriceID: "price_one", AccessSeconds: 3600}
+	other.Payment = &qurl.CRIDPaymentPolicy{AccountID: "acct_one", PriceID: "price_two", AccessSeconds: 3600}
+	if !consumerPolicyConfirmed(requested, &same, nil) || consumerPolicyConfirmed(requested, &other, nil) {
+		t.Fatal("payment policy not compared by value")
+	}
+}
+
 func TestPublishConsumerPolicyRejectsMixedAccessBeforeRequest(t *testing.T) {
 	srv := apitest.NewServer(t)
 	for _, opts := range []PublishOptions{

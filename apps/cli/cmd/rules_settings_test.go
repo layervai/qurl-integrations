@@ -133,6 +133,36 @@ func TestFailedMintNamesTheCRIDAndRepublishRecovers(t *testing.T) {
 	}
 }
 
+func TestPlainRepublishSurvivesAFailedMint(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	scriptPublish(t, srv, false, false, nil, nil)
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "qurl_link": "https://qurl.link/at_limited"}, nil)
+	})
+	if result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once"}, shareStateDir: dir}); result.code != 0 {
+		t.Fatalf("first publish %d %s", result.code, result.stderr.String())
+	}
+	scriptPublish(t, srv, false, true, nil, nil)
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", apitest.HandlerRevoked400(t))
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--public"}, shareStateDir: dir})
+	if result.code != 0 || !strings.Contains(result.stderr.String(), srv.Key.CRID) {
+		t.Fatalf("plain republish %d %s", result.code, result.stderr.String())
+	}
+}
+
+func TestPublishRejectsALinkForAnotherCRID(t *testing.T) {
+	srv := apitest.NewServer(t)
+	scriptPublish(t, srv, false, false, nil, nil)
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": "ahpv" + strings.Repeat("a", 52), "qurl_link": "https://qurl.link/at_other"}, nil)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: connectorStateTestDir(t)})
+	if result.code == 0 || strings.Contains(result.stdout.String(), "at_other") {
+		t.Fatalf("foreign link accepted %d %s", result.code, result.stdout.String())
+	}
+}
+
 const hourRule = `{"id":"11111111-1111-4111-8111-111111111111","name":"Hour","mode":"public","link_limits":{"expires_in":"1h","session_duration":"30m"}}`
 
 func TestPublishWithLinkLimitsMintsAndLaterSharesUseThem(t *testing.T) {
@@ -237,7 +267,7 @@ func TestPublishSendsApprovalsLastInThePolicy(t *testing.T) {
 }
 
 func TestRepublishWithOtherSettingsWarns(t *testing.T) {
-	const warning = "This item is already shared with other settings. Use qurl access configure to change it."
+	const warning = "This item is already shared with other settings, which were kept. Use qurl access configure to change its access, or delete and publish it again for new link limits."
 	for _, tc := range []struct {
 		name     string
 		private  bool

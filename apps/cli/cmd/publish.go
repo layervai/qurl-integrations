@@ -103,7 +103,7 @@ private one.
 To choose who can open it, pass --rule with a default access rule's name or
 a saved rule's ID or name (see "qurl rules list"). --rule once is Only the
 first person: a link that works for whoever opens it first and expires in an
-hour.
+hour. The resource itself is public; only that link is limited.
 
 For paid contract access, use "qurl access configure" with the Stripe account
 and price to make an existing public CRID private. Removing payment keeps it
