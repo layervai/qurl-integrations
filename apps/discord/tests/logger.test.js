@@ -32,7 +32,7 @@ describe('logger', () => {
       expect(output).toHaveBeenCalledTimes(1);
       expect(output.mock.calls[0][0]).toMatch(/: null-fixture$/);
     });
-    test.each(['circular', 'bigint', 'getter', 'toJSON'])('%s metadata does not break the caller or leak values', (kind) => {
+    test.each(['circular', 'bigint', 'getter'])('%s metadata does not break the caller or leak values', (kind) => {
       process.env.LOG_LEVEL = 'debug';
       logger = require('../src/logger');
       let meta = { value: 'private-metadata-value' };
@@ -41,7 +41,6 @@ describe('logger', () => {
       if (kind === 'getter') Object.defineProperty(meta, 'broken', {
         enumerable: true, get() { throw new Error('private-metadata-value'); },
       });
-      if (kind === 'toJSON') meta.toJSON = () => { throw new Error('private-metadata-value'); };
       expect(() => logger[level]('caller-message\nforged-line', meta)).not.toThrow();
       const output = consoleSpy[level === 'info' || level === 'debug' ? 'log' : level];
       expect(output).toHaveBeenCalledTimes(1);
@@ -53,7 +52,7 @@ describe('logger', () => {
     });
   });
 
-  test.each(['circular', 'bigint', 'getter', 'toJSON'])('audit contains %s metadata failures without leaking error text', (kind) => {
+  test.each(['circular', 'bigint', 'getter'])('audit contains %s metadata failures without leaking error text', (kind) => {
     logger = require('../src/logger');
     const meta = { value: 'private-audit-value' };
     if (kind === 'circular') meta.self = meta;
@@ -61,7 +60,6 @@ describe('logger', () => {
     if (kind === 'getter') Object.defineProperty(meta, 'broken', {
       enumerable: true, get() { throw new Error('private-audit-value'); },
     });
-    if (kind === 'toJSON') meta.toJSON = () => { throw new Error('private-audit-value'); };
     expect(() => logger.audit('audit-fixture', meta)).not.toThrow();
     expect(consoleSpy.log).toHaveBeenCalledTimes(1);
     const line = consoleSpy.log.mock.calls[0][0];
@@ -71,23 +69,42 @@ describe('logger', () => {
   });
 
   describe.each(['info', 'audit'])('%s executable metadata', (method) => {
-    test.each(['root', 'secret-wrapper', 'function-value', 'array-element'])('does not execute or leak a %s serializer', (shape) => {
+    test.each(['root', 'secret-wrapper', 'function-value', 'array-element', 'throwing-hook'])('omits a %s serializer while keeping safe metadata', (shape) => {
       logger = require('../src/logger');
       const hook = jest.fn(() => 'private-serializer-value');
-      const wrapper = { toJSON: hook };
+      if (shape === 'throwing-hook') hook.mockImplementation(() => { throw new Error('private-serializer-value'); });
+      const wrapper = { toJSON: hook, value: 'private-serializer-value', count: 7 };
       const callable = () => undefined;
       callable.toJSON = hook;
-      const meta = shape === 'root' ? wrapper
+      const meta = shape === 'root' || shape === 'throwing-hook' ? { toJSON: hook, token: 'private-serializer-value' }
         : shape === 'secret-wrapper' ? { token: wrapper }
           : shape === 'function-value' ? { token: callable }
             : { token: [callable] };
+      meta.adjacent_count = 9;
       expect(() => logger[method]('serializer-fixture', meta)).not.toThrow();
       expect(hook).not.toHaveBeenCalled();
       expect(consoleSpy.log).toHaveBeenCalledTimes(1);
       const line = consoleSpy.log.mock.calls[0][0];
       expect(line).not.toContain('private-serializer-value');
-      if (method === 'audit') expect(JSON.parse(line).audit.event).toBe('audit_serialization_failed');
-      else expect(line).toContain('[meta_serialization_failed]');
+      const fields = method === 'audit' ? JSON.parse(line).audit : JSON.parse(line.slice(line.indexOf('{')));
+      expect(fields.adjacent_count).toBe(9);
+      if (method === 'audit') expect(fields.event).toBe('serializer-fixture');
+      if (shape === 'root' || shape === 'throwing-hook') expect(fields.token).toBe('[REDACTED]');
+      if (shape === 'secret-wrapper') expect(fields.token).toEqual({ value: '[REDACTED]', count: 7 });
+      if (shape === 'function-value') expect(fields).not.toHaveProperty('token');
+      if (shape === 'array-element') expect(fields.token).toEqual([null]);
+    });
+
+    it('keeps event names and IDs when a non-secret callback is present', () => {
+      logger = require('../src/logger');
+      const callback = jest.fn();
+      logger[method]('callback-fixture', { send_id: 's1', callback, count: 2 });
+      expect(callback).not.toHaveBeenCalled();
+      const line = consoleSpy.log.mock.calls[0][0];
+      const fields = method === 'audit' ? JSON.parse(line).audit : JSON.parse(line.slice(line.indexOf('{')));
+      expect(fields).toMatchObject({ send_id: 's1', count: 2 });
+      expect(fields).not.toHaveProperty('callback');
+      if (method === 'audit') expect(fields.event).toBe('callback-fixture');
     });
 
     it('does not invoke array map or species hooks during redaction', () => {

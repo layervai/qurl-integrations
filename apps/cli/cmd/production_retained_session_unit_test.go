@@ -62,7 +62,7 @@ func TestProductionRetainedSessionNilTransportUsesFreshConnection(t *testing.T) 
 			return
 		}
 		peers <- r.RemoteAddr
-		http.SetCookie(w, &http.Cookie{Name: "qurl_vsession", Value: "replacement-capability", HttpOnly: true})
+		http.SetCookie(w, &http.Cookie{Name: "qurl_vsession", Value: "replacement-capability", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 		_, _ = io.WriteString(w, "marker")
 	}))
 	t.Cleanup(server.Close)
@@ -70,7 +70,7 @@ func TestProductionRetainedSessionNilTransportUsesFreshConnection(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability", HttpOnly: true})
+	request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	for range 2 {
 		if err := productionRetainedSessionFetch(request, "marker", nil); err != nil {
 			t.Fatal(err)
@@ -81,7 +81,7 @@ func TestProductionRetainedSessionNilTransportUsesFreshConnection(t *testing.T) 
 	}
 }
 
-func TestProductionRetainedSessionRefusesUnisolatedDefaultTransport(t *testing.T) {
+func TestProductionRetainedSessionCloneRefusesCustomRoundTripper(t *testing.T) {
 	_, err := productionRetainedSessionCloneTransport(retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("unused non-transport stub")
 	}))

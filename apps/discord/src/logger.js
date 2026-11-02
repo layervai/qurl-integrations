@@ -118,8 +118,8 @@ function isAuditSecretKey(key) {
 // hide all non-empty strings and are sealed at the depth-5 limit. qURL-link
 // containers are suppressed as a unit because bare elements can be credentials.
 function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecret = false) {
-  // Callable metadata can run toJSON after redaction and reintroduce secrets.
-  if (typeof value === 'function') throw new TypeError('Executable log metadata');
+  // Omit functions within the bounded walk so JSON cannot run caller hooks.
+  if (typeof value === 'function') return { value: undefined, secretKeys };
   if (insideSecret && isNonEmptyByteSequence(value)) return { value: '[REDACTED]', secretKeys };
   if (insideSecret && typeof value === 'string' && value.length > 0) {
     return { value: '[REDACTED]', secretKeys };
@@ -158,8 +158,6 @@ function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecr
         // example, a user-id-to-link map), so suppress the whole non-empty
         // container instead of risking a leak. Empty containers are safe.
         out[k] = '[REDACTED]';
-      } else if (v != null && typeof v === 'object') {
-        out[k] = redactAuditSecrets(v, depth + 1, secretKeys, true).value;
       } else {
         out[k] = redactAuditSecrets(v, depth + 1, secretKeys, true).value;
       }
@@ -171,7 +169,7 @@ function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecr
 }
 
 function redact(value, depth = 0, insideSecret = false) {
-  if (typeof value === 'function') throw new TypeError('Executable log metadata');
+  if (typeof value === 'function') return undefined;
   if (insideSecret && isNonEmptyByteSequence(value)) return '[REDACTED]';
   if (insideSecret && typeof value === 'string' && value.length > 0) return '[REDACTED]';
   if (insideSecret && depth > 5 && value != null && typeof value === 'object') return '[REDACTED]';
@@ -196,8 +194,6 @@ function redact(value, depth = 0, insideSecret = false) {
         out[k] = '[REDACTED]';
       } else if (isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
         out[k] = '[REDACTED]';
-      } else if (v != null && typeof v === 'object') {
-        out[k] = redact(v, depth + 1, true);
       } else {
         out[k] = redact(v, depth + 1, true);
       }
@@ -286,8 +282,8 @@ const logger = {
     if (meta == null || typeof meta !== 'object' || Array.isArray(meta)) meta = {};
     try {
       // Targeted secret redaction: walk meta, replace the value of any
-      // key in AUDIT_SECRET_KEYS with '[REDACTED]', return the first
-      // offending key name so the operator log below can name it. Safe
+      // key in AUDIT_SECRET_KEYS with '[REDACTED]', return the deduplicated
+      // offending keys so the operator log below can name all of them. Safe
       // to redact because exact-match doesn't false-positive on
       // legitimate dimensions (proven by the tokens_minted test).
       const { value: cleanedMeta, secretKeys } = redactAuditSecrets(meta);
