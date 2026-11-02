@@ -2167,6 +2167,43 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
   });
 });
 
+describe('Connector upload-size rejection reaches Discord (#1373)', () => {
+  it.each([['initial send', true], ['add recipients', true], ['initial send', false], ['add recipients', false]])('%s handles the real connector response (known size=%s)', async (path, knownSize) => {
+    const realConnector = jest.requireActual('../src/connector');
+    const originalFetch = globalThis.fetch;
+    const interaction = makeInteraction();
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => '8' }, arrayBuffer: async () => new ArrayBuffer(8) })
+      .mockResolvedValueOnce({ ok: false, status: 400, text: async () => JSON.stringify({
+        success: false, error: knownSize ? 'File too large, max 7MB' : 'raw-upstream-secret unknown error', token: 'raw-upstream-secret',
+      }) });
+    mockDownloadAndUpload.mockImplementationOnce((...args) => realConnector.downloadAndUpload(...args));
+    let message;
+    try {
+      if (path === 'initial send') {
+        await executeSendPipeline(interaction, makePipelineParams());
+        message = interaction.editReply.mock.calls.at(-1)[0].content;
+      } else {
+        mockDb.getSendConfig.mockResolvedValueOnce({
+          connector_resource_id: 'res-1', expires_in: '30m',
+          attachment_url: 'https://cdn.discordapp.com/x.png',
+          attachment_name: 'x.png', attachment_content_type: 'image/png',
+        });
+        const result = await handleAddRecipients('send-size', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]), interaction, 'apikey');
+        message = result.msg;
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    if (knownSize) expect(message).toMatch(/exceeds.*upload size limit.*smaller file/i);
+    else expect(message).toMatch(/Failed to (create|prepare) links/);
+    expect(message).not.toContain('7MB');
+    expect(message).not.toContain('raw-upstream-secret');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('raw-upstream-secret');
+    expect(mockMintLinks).not.toHaveBeenCalled();
+  });
+});
+
 describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, primary site)', () => {
   it('primary site never logs apiDetail for quota_exceeded or an unmarked apiCode', async () => {
     for (const fields of [
