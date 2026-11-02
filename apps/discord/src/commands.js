@@ -8082,11 +8082,17 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
       components: [],
     }).catch(logIgnoredDiscordErr);
     if (!rawCapped) return undefined;
-    return interaction.followUp({
+    const recovery = {
       content: `Your typed note (copy and paste it after re-running):\n\`\`\`\n${rawCapped}\n\`\`\``,
       ephemeral: true,
       allowedMentions: { parse: [] },
-    }).catch(logIgnoredDiscordErr);
+    };
+    // A fence in the note would change its rendered text; a private file keeps it exact.
+    if (rawCapped.includes('```')) {
+      recovery.content = 'Your typed note is attached. Copy and paste it after re-running:';
+      recovery.files = [new AttachmentBuilder(Buffer.from(rawCapped, 'utf8'), { name: 'note.txt' })];
+    }
+    return interaction.followUp(recovery).catch(logIgnoredDiscordErr);
   }
   return rerenderConfirmCard(interaction, newPayload);
 }

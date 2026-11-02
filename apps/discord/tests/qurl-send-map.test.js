@@ -5548,6 +5548,30 @@ describe('handleConfirmNoteModal', () => {
     });
   });
 
+  test.each(['conflict', 'not_found'])('%s preserves code fences exactly in a private text attachment', async (result) => {
+    mockTransitionFlow.mockResolvedValueOnce({ result });
+    const raw = '```js\nconst x = "@everyone";\n```\n[my link](https://example.com)';
+    const int = makeModalInteraction({ inputValue: raw });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const recovery = int.followUp.mock.calls[0][0];
+    expect(recovery.ephemeral).toBe(true);
+    expect(recovery.allowedMentions).toEqual({ parse: [] });
+    expect(recovery.content).not.toContain(raw);
+    expect(recovery.files).toHaveLength(1);
+    expect(recovery.files[0].name).toBe('note.txt');
+    expect(recovery.files[0].buf.toString('utf8')).toBe(raw);
+  });
+
+  test('a maximum-length Unicode note stays within the Discord message limit', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    const raw = '🌍'.repeat(280);
+    const int = makeModalInteraction({ inputValue: raw });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const recovery = int.followUp.mock.calls[0][0];
+    expect(recovery.content).toContain(raw);
+    expect(recovery.content.length).toBeLessThanOrEqual(2000);
+  });
+
   test.each(['conflict', 'not_found'])('%s does not recover an empty or whitespace-only note', async (result) => {
     for (const inputValue of ['', '  \n\t']) {
       mockTransitionFlow.mockResolvedValueOnce({ result });
