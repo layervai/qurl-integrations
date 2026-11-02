@@ -166,6 +166,7 @@ func TestStatePutTelemetryHasNoStatePayload(t *testing.T) {
 			if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
 				t.Fatal(err)
 			}
+			// Deliberate privacy tripwire: new global or state attributes need review.
 			if len(record) != 5 || record["msg"] != "oauth state put" || record["result"] != tc.result {
 				t.Fatalf("unexpected telemetry fields: %v", record)
 			}

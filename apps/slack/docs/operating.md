@@ -1179,7 +1179,9 @@ This event counts shared-pool rejections, including the slash-command busy ackno
 The state-write telemetry for issue #935 emits JSON `msg="oauth state put"`
 with only numeric `duration_ms` and a fixed `result`: `success`, `timeout`,
 `canceled`, or `error`. It measures the `PutState` call, including SDK retries
-and transport time. It does not measure the full Slack acknowledgement. No
+and transport time. A `timeout` can come from the 2-second store deadline or a
+shorter parent request deadline; it does not prove the full store budget elapsed.
+It does not measure the full Slack acknowledgement. No
 state handle, nonce, PKCE verifier, email, team/user ID, or error text is logged.
 
 When the source and paired infra change are adopted, `OAuthStatePutDurationMs`
