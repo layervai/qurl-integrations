@@ -726,3 +726,28 @@ describe('signed delivery attempt freshness', () => {
     } finally { clock.mockRestore(); }
   });
 });
+
+describe('Go HTTP delivery wire contract', () => {
+  const captured = require('./fixtures/qurl-attempt-wire.json');
+  it.each([
+    ['current attempt for old event', 0, false, 200],
+    ['captured request after window', 301_000, false, 401],
+    ['captured request before window', -301_000, false, 401],
+    ['legacy body signature cannot replace v2', 0, true, 401],
+  ])('%s', async (_name, clockOffset, removeV2, status) => {
+    const attemptTime = Number(captured.headers['QURL-Timestamp']) * 1000;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(attemptTime + clockOffset);
+    try {
+      const headers = { ...captured.headers };
+      if (removeV2) delete headers['QURL-Signature-V2'];
+      const res = await request(app).post('/webhooks/qurl')
+        .set('X-Forwarded-For', '192.0.2.50').set('Content-Type', 'application/json')
+        .set(headers).send(captured.body);
+      expect(res.status).toBe(status);
+      if (status === 200) {
+        expect(mockRecordQurlView).toHaveBeenCalledTimes(1);
+        expect(Date.parse(JSON.parse(captured.body).timestamp)).toBeLessThan(attemptTime - 300_000);
+      } else expect(mockRecordQurlView).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+});

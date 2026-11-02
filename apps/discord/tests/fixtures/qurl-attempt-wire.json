@@ -1,0 +1,11 @@
+{
+  "body": "{\"data\":{\"access_count\":1,\"consumed\":false,\"qurl_id\":\"q_aaaaaaaaaa1\",\"resource_id\":\"r_111\"},\"id\":\"evt_attempt_contract\",\"type\":\"qurl.accessed\",\"owner_id\":\"usr_test\",\"timestamp\":\"2026-11-01T00:00:00Z\",\"api_version\":\"2024-01-01\"}",
+  "description": "Synthetic request captured from the Go HTTP delivery method; test secret is test-qurl-secret.",
+  "headers": {
+    "QURL-Delivery": "wd_SjyKbI9_xW43rMeB",
+    "QURL-Event": "qurl.accessed",
+    "QURL-Signature": "295b4cc0f5d85267e4820dc31de4fe0e0ff339b9cf45ac2c78db71fa89fa364d",
+    "QURL-Signature-V2": "cc03f20f7e86ac5cdc56609f71018da55b345848159f062a286f37983e073a88",
+    "QURL-Timestamp": "1793640422"
+  }
+}
