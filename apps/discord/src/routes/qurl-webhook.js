@@ -25,6 +25,7 @@ const express = require('express');
 const db = require('../store');
 const config = require('../config');
 const logger = require('../logger');
+const { resourceIdLogRef } = require('../utils/resource-id');
 const { AUDIT_EVENTS, QURL_WEBHOOK_EVENTS, DM_STATUS } = require('../constants');
 const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hardening');
 const subs = require('../webhook-subscriptions');
@@ -487,7 +488,7 @@ async function flipRecipientDMToClosed({ qurlId, eventId, label, skipIfAttr, bui
 async function handleQurlExpired(req, res, { data, eventId }) {
   if (!data || typeof data.qurl_id !== 'string' || !data.qurl_id) {
     logger.warn('qURL webhook qurl.expired missing qurl_id', {
-      qurl_id: data?.qurl_id, resource_id: data?.resource_id, event_id: eventId,
+      qurl_id: data?.qurl_id, resource_ref: resourceIdLogRef(data?.resource_id), event_id: eventId,
     });
     return res.status(200).json({ status: 'invalid-payload' });
   }
@@ -1110,7 +1111,7 @@ router.post('/qurl', async (req, res) => {
     // Limit logged fields — `data` is post-trust but unbounded in shape
     // and may include attacker-influenced src_ip/user_agent for non-
     // transit resources. Log only the keys the pipeline actually reads.
-    logger.warn('qURL webhook qurl.accessed missing qurl_id', { qurl_id: data?.qurl_id, resource_id: data?.resource_id });
+    logger.warn('qURL webhook qurl.accessed missing qurl_id', { qurl_id: data?.qurl_id, resource_ref: resourceIdLogRef(data?.resource_id) });
     return res.status(200).json({ status: 'invalid-payload' });
   }
 

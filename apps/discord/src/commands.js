@@ -2318,7 +2318,7 @@ async function executeSendPipeline(interaction, {
       requestId: err?.$metadata?.requestId,
       errorMessage: persistenceErrorMessageForLog(err),
       linkCount: qurlLinks.length,
-      orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
+      orphanedResources: qurlLinks.map(l => ({ resource_ref: resourceIdLogRef(l.resourceId), qurlId: l.qurlId })),
     });
     clearCooldown(interaction.user.id);
     return interaction.editReply({

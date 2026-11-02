@@ -133,6 +133,42 @@ resource can take about 17 minutes. Check completion logs before manual cleanup.
 Load-test upload records rejected by SDK 2.x stay in the cleanup ledger;
 remove them only after cleanup or link expiry is confirmed.
 
+## Resource log references
+
+Upload, mint, create and revoke logs use `resource_ref`, computed by the existing
+`resourceIdLogRef` helper. A returned CRID uses `crid_ref`. Each string reference
+is `sha256:` followed by the first 12 hexadecimal digest characters. Missing or
+non-string IDs produce a type marker. API requests,
+responses and stored IDs are unchanged. Update saved queries that used the raw
+`resource_id` or `crid` log fields.
+
+To find logs for an ID you already obtained through an authorized resource lookup,
+run this offline prompt from the repo root. The ID is not part of shell history:
+
+```sh
+cd apps/discord
+node -e '
+const { createInterface } = require("node:readline");
+const { validateResourceId, resourceIdLogRef } = require("./src/utils/resource-id");
+const input = createInterface({ input: process.stdin, output: process.stdout });
+input.question("Resource ID: ", id => {
+  try {
+    validateResourceId(id);
+    console.log(resourceIdLogRef(id));
+  } catch {
+    console.error("Invalid resource ID format");
+    process.exitCode = 1;
+  } finally {
+    input.close();
+  }
+});
+'
+```
+
+Filter `@message` for the printed reference in Logs Insights. It is a correlation
+hint, not a unique ID or an access credential. Confirm the actual resource through
+the authorized API before any action; a reference cannot be reversed into an ID.
+
 ## Configuration
 
 The bot is a Node.js service (**Node ≥ 22**) backed by DynamoDB. Copy
