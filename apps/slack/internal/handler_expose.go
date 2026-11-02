@@ -36,7 +36,7 @@ func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, "Guided setup is not configured on this Secure Access Agent deployment. Use `/qurl-admin protect-connector <id>` or `/qurl-admin protect-url $<alias>` instead.")
 		return
 	}
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionExpose) {
+	if _, allowed := h.requireAliasAdminGate(w, teamID, values, AdminActionExpose); !allowed {
 		return
 	}
 	respondSlackBlocks(w, "What do you want to protect in this channel?", exposeChooserBlocks(channelID))
@@ -328,7 +328,7 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *View
 	// the deliberate fail-closed check — same posture as the install/edit modals.
 	adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 	defer cancel()
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
+	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
 		slog.Error("protect url modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "Could not verify admin status. Retry in a moment.")
@@ -348,6 +348,7 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *View
 		"view_id", payload.View.ID,
 	)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		ctx = authorization.Context(ctx)
 		msg := h.bindURLResourceToChannel(ctx, log, meta.TeamID, meta.ChannelID, channelAlias, resourceID)
 		_ = h.postResponse(log, meta.ResponseURL, msg)
 	}) {
@@ -430,7 +431,7 @@ func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload
 
 	adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 	defer cancel()
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
+	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
 		slog.Error("protect url create modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "Could not verify admin status. Retry in a moment.")
@@ -450,6 +451,7 @@ func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload
 		"view_id", payload.View.ID,
 	)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		ctx = authorization.Context(ctx)
 		msg := h.createOrFindAndExposeURLResourceFromModal(ctx, log, meta.TeamID, meta.ChannelID, args)
 		_ = h.postResponse(log, meta.ResponseURL, msg)
 	}) {

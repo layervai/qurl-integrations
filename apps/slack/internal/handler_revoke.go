@@ -338,10 +338,11 @@ func (h *Handler) handleListRevokeClick(w http.ResponseWriter, payload *interact
 		// Mutation gate, fail-closed and bounded off h.baseCtx. (AdminStore is
 		// unreachable-nil in practice — the Revoke button only renders when
 		// listCallerCanEdit passes — but requireAdminForClick fails safe anyway.)
-		if !h.requireAdminForClick(log, responseURL, teamID, userID, "this command is admin-only") {
+		authorization, allowed := h.requireAdminForClick(log, responseURL, teamID, userID, "this command is admin-only")
+		if !allowed {
 			return
 		}
-		_ = h.postResponse(log, responseURL, h.revokeResource(ctx, log, teamID, userID, snapshot.ResourceID, snapshot.Token))
+		_ = h.postResponse(log, responseURL, h.revokeResource(authorization.Context(ctx), log, teamID, userID, snapshot.ResourceID, snapshot.Token))
 	}) {
 		log.Warn("async pool saturated — dropping list Revoke click")
 		h.Go(func() { _ = h.postResponse(log, responseURL, ackBusy) })

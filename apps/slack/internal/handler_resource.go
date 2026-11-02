@@ -150,12 +150,13 @@ func (h *Handler) handleExposeURL(w http.ResponseWriter, values url.Values) {
 	if !ok {
 		return
 	}
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionExposeURL) {
+	authorization, allowed := h.requireAliasAdminGate(w, teamID, values, AdminActionExposeURL)
+	if !allowed {
 		return
 	}
 
 	h.runAsync(w, "protect_url", values, func(ctx context.Context, log *slog.Logger) {
-		msg := h.exposeURLResourceInChannel(ctx, log, teamID, channelID, args)
+		msg := h.exposeURLResourceInChannel(authorization.Context(ctx), log, teamID, channelID, args)
 		_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
 	})
 }

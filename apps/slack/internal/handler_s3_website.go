@@ -230,7 +230,7 @@ func (h *Handler) handleS3WebsiteInstallSubmission(w http.ResponseWriter, payloa
 
 	adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 	defer cancel()
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
+	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
 		log.Error("S3 website install modal admin check failed", "error", err)
 		respondS3WebsiteInstallModalError(w, "Could not verify admin status. Retry in a moment.")
@@ -262,6 +262,7 @@ func (h *Handler) handleS3WebsiteInstallSubmission(w http.ResponseWriter, payloa
 	setupStartedAt := time.Unix(meta.CreatedAtUnix, 0)
 	req.attemptID = tunnelBootstrapModalAttemptID(payload.View.ID, setupStartedAt)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		ctx = authorization.Context(ctx)
 		h.processS3WebsiteInstall(ctx, log, req)
 	}) {
 		respondS3WebsiteInstallModalError(w, modalBusyMsg)

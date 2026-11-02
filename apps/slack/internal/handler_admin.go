@@ -217,25 +217,25 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string,
 // (not a request ctx) so a client abort can't cancel the deliberate gate.
 // adminOnlyMsg is the surface-specific denial copy (warning prefix added here).
 // Shared by the /qurl list Revoke button and the conversation-mode confirm card.
-func (h *Handler) requireAdminForClick(log *slog.Logger, responseURL, teamID, userID, adminOnlyMsg string) bool {
+func (h *Handler) requireAdminForClick(log *slog.Logger, responseURL, teamID, userID, adminOnlyMsg string) (slackdata.PolicyAuthorization, bool) {
 	if h.cfg.AdminStore == nil {
 		_ = h.postResponse(log, responseURL, ":warning: Admin features are not configured for this deployment.")
-		return false
+		return slackdata.PolicyAuthorization{}, false
 	}
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
+	authorization, isAdmin, err := h.authorizePolicyWrite(ctx, teamID, userID)
 	cancel()
 	if err != nil {
 		log.Error("admin click gate: check failed", "error", err, "team_id", teamID, "user_id", userID)
 		_ = h.postResponse(log, responseURL, ":warning: failed to verify admin status (upstream error; see logs).")
-		return false
+		return slackdata.PolicyAuthorization{}, false
 	}
 	if !isAdmin {
 		log.Warn("admin click gate: non-admin denied", "team_id", teamID, "user_id", userID)
 		_ = h.postResponse(log, responseURL, ":warning: "+adminOnlyMsg)
-		return false
+		return slackdata.PolicyAuthorization{}, false
 	}
-	return true
+	return authorization, true
 }
 
 // handleAdminAdd promotes the target Slack user to admin on the
@@ -508,4 +508,35 @@ func (h *Handler) handleAdminTransferOwnership(w http.ResponseWriter, teamID, en
 	}
 	slog.Info("admin transfer ownership succeeded", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
 	respondSlack(w, fmt.Sprintf("Transferred qURL workspace ownership to <@%s>. They can now run `/qurl setup`; the qURL account/key will not change until they do.", target))
+}
+
+// authorizePolicyWrite keeps the existing denial/error split while capturing
+// immutable authority before upstream work or an async handoff.
+func (h *Handler) authorizePolicyWrite(ctx context.Context, teamID, userID string) (slackdata.PolicyAuthorization, bool, error) {
+	authorization, err := h.cfg.AdminStore.AuthorizePolicyWrite(ctx, teamID, userID)
+	var denied *slackdata.Error
+	if errors.As(err, &denied) && denied.StatusCode == http.StatusForbidden {
+		return authorization, false, nil
+	}
+	return authorization, err == nil, err
+}
+
+func (h *Handler) requirePolicyAdminSync(w http.ResponseWriter, teamID, userID string, action AdminAction) (slackdata.PolicyAuthorization, bool) {
+	if teamID == "" || userID == "" {
+		respondSlack(w, ":warning: missing team_id or user_id in slash command payload")
+		return slackdata.PolicyAuthorization{}, false
+	}
+	ctx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+	defer cancel()
+	authorization, allowed, err := h.authorizePolicyWrite(ctx, teamID, userID)
+	if err != nil {
+		slog.Error("admin check failed", "error", err, "team_id", teamID, "user_id", userID, "action", string(action))
+		respondSlack(w, ":warning: failed to verify admin status (upstream error; see logs).")
+		return authorization, false
+	}
+	if !allowed {
+		slog.Warn("admin command denied: non-admin", "team_id", teamID, "user_id", userID, "action", string(action))
+		respondSlack(w, ":warning: That command is admin-only. Ask a workspace qURL admin to run it.")
+	}
+	return authorization, allowed
 }

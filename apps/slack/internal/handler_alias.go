@@ -287,18 +287,14 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 	return
 }
 
-// requireAliasAdminGate is the in-code admin gate shared by set-alias and
-// unset-alias: Slack does not restrict a slash command to workspace admins,
-// so the `/qurl-admin` registration can't be the gate. It checks AdminStore
-// is wired (requireAdminStoreSync — guarantees AdminStore, == aliasStore in
-// prod per cmd/main.go SetAliasStore, is non-nil for CheckAdmin) and that
-// the caller is a qURL admin (requireAdminSync). Returns false (and has
-// written the reply) when either fails; callers `if !h.requireAliasAdminGate(...) { return }`.
-func (h *Handler) requireAliasAdminGate(w http.ResponseWriter, teamID string, values url.Values, action AdminAction) bool {
+// requireAliasAdminGate checks store configuration and captures current admin
+// authority before alias resolution or a worker handoff. A false result means
+// the denial has already been written to the response.
+func (h *Handler) requireAliasAdminGate(w http.ResponseWriter, teamID string, values url.Values, action AdminAction) (slackdata.PolicyAuthorization, bool) {
 	if !h.requireAdminStoreSync(w) {
-		return false
+		return slackdata.PolicyAuthorization{}, false
 	}
-	return h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), action)
+	return h.requirePolicyAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), action)
 }
 
 // handleSetAlias routes `/qurl-admin set-alias $<alias> <target>`.
@@ -353,12 +349,13 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// the usage reply rather than a bare denial. The gate's guarantee is "no
 	// slug resolve or store mutation before the admin check," not "no parser
 	// feedback to non-admins."
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionSetAlias) {
+	authorization, allowed := h.requireAliasAdminGate(w, teamID, values, AdminActionSetAlias)
+	if !allowed {
 		return
 	}
 	slug := strings.TrimPrefix(args.Target, "$")
 	h.runAsync(w, "setalias_slug", values, func(ctx context.Context, log *slog.Logger) {
-		msg := h.resolveAndBindTunnelSlugAlias(ctx, log, teamID, channelID, args.Alias, slug)
+		msg := h.resolveAndBindTunnelSlugAlias(authorization.Context(ctx), log, teamID, channelID, args.Alias, slug)
 		_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
 	})
 }
@@ -493,11 +490,12 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 	// Admin gate, in code (see requireAliasAdminGate). Runs after
 	// aliasPreamble (IDs + store-wired check) but before UnbindChannelAlias,
 	// so a non-admin is denied before any store write.
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionUnsetAlias) {
+	authorization, allowed := h.requireAliasAdminGate(w, teamID, values, AdminActionUnsetAlias)
+	if !allowed {
 		return
 	}
 
-	respondSlack(w, h.unbindAliasResult(ctx, teamID, channelID, args.Alias))
+	respondSlack(w, h.unbindAliasResult(authorization.Context(ctx), teamID, channelID, args.Alias))
 }
 
 // unbindAliasResult clears the alias binding in (teamID, channelID) and renders the

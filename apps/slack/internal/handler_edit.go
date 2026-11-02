@@ -229,7 +229,7 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *Vie
 	// modal submission.
 	adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 	defer cancel()
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
+	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
 		slog.Error("tunnel edit modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
 		respondTunnelEditModalError(w, "Could not verify admin status. Retry in a moment.")
@@ -250,6 +250,7 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *Vie
 		"view_id", payload.View.ID,
 	)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		ctx = authorization.Context(ctx)
 		h.processTunnelEdit(ctx, log, &meta, displayName, nameChanged, aliases, desiredChannels)
 	}) {
 		respondTunnelEditModalError(w, modalBusyMsg)

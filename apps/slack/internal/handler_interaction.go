@@ -363,7 +363,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	// abort does not cancel the deliberate fail-closed authorization check.
 	adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 	defer cancel()
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
+	authorization, isAdmin, err := h.authorizePolicyWrite(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
 		log.Error("tunnel install modal admin check failed", "error", err)
 		respondConnectorInstallModalError(w, "Could not verify admin status. Retry in a moment.")
@@ -382,6 +382,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	setupStartedAt := time.Unix(meta.CreatedAtUnix, 0)
 	req.attemptID = tunnelBootstrapModalAttemptID(payload.View.ID, setupStartedAt)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		ctx = authorization.Context(ctx)
 		result := h.processTunnelInstallCore(ctx, log, req)
 		h.recordTunnelInstallAgentAuditAsync(log, req, result)
 	}) {

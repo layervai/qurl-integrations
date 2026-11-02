@@ -402,14 +402,15 @@ func (h *Handler) handleExposeConnector(w http.ResponseWriter, values url.Values
 		respondSlack(w, ":warning: missing channel_id in slash command payload")
 		return
 	}
-	if !h.requireAdminSync(w, teamID, userID, AdminActionExposeConnector) {
+	authorization, allowed := h.requirePolicyAdminSync(w, teamID, userID, AdminActionExposeConnector)
+	if !allowed {
 		return
 	}
 
 	setupStartedAt := h.now()
 	attemptID := tunnelBootstrapTypedAttemptID(values.Get(fieldTriggerID), setupStartedAt)
 	h.runAsync(w, "tunnel_install", values, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstall(ctx, log, &tunnelInstallRequest{
+		h.processTunnelInstall(authorization.Context(ctx), log, &tunnelInstallRequest{
 			teamID:       teamID,
 			enterpriseID: enterpriseID,
 			channelID:    channelID,
