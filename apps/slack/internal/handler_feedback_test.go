@@ -287,22 +287,14 @@ func TestHandleFeedbackSubmissionPostsAndConfirms(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
 
-	select {
-	case payload := <-posted:
-		if !strings.Contains(string(payload), "App crashes on login") {
-			t.Errorf("posted feedback missing summary: %s", payload)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("PostFeedback was not called")
+	payload := waitForTestValue(t, posted, "PostFeedback was not called")
+	if !strings.Contains(string(payload), "App crashes on login") {
+		t.Errorf("posted feedback missing summary: %s", payload)
 	}
 
-	select {
-	case got := <-confirmed:
-		if !strings.Contains(got, "Thanks") {
-			t.Errorf("confirmation = %q, want a thank-you", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no confirmation posted to response_url")
+	got := waitForTestValue(t, confirmed, "no confirmation posted to response_url")
+	if !strings.Contains(got, "Thanks") {
+		t.Errorf("confirmation = %q, want a thank-you", got)
 	}
 }
 
@@ -353,13 +345,9 @@ func TestHandleFeedbackSubmissionDeliveryFailure(t *testing.T) {
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/interactions", body, body))
 
 	// A delivery failure must surface a retry ephemeral — never silently drop.
-	select {
-	case got := <-notified:
-		if strings.Contains(got, "Thanks") || !strings.Contains(got, "Couldn't send") {
-			t.Errorf("delivery-failure ephemeral = %q, want retry copy", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no failure ephemeral posted to response_url")
+	got := waitForTestValue(t, notified, "no failure ephemeral posted to response_url")
+	if strings.Contains(got, "Thanks") || !strings.Contains(got, "Couldn't send") {
+		t.Errorf("delivery-failure ephemeral = %q, want retry copy", got)
 	}
 }
 
