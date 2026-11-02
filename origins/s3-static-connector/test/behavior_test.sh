@@ -315,6 +315,17 @@ curl -s -o /dev/null "$base/cacheprobe.json?_t=1"
 curl -s -o /dev/null "$base/cacheprobe.json?_t=2"
 expect_stub_gets_since "cacheprobe upstream GETs (query excluded + cached)" "$mark" 'GET /cacheprobe.json ' 1
 
+# Cacheable error metadata must not poison nginx's cache before error masking.
+for code in 403 404; do
+  mark="$(stub_log_mark)"
+  for attempt in 1 2; do
+    fetch "$base/cacheable-$code.json"
+    expect_eq "cacheable $code attempt $attempt viewer status" "$(status_code)" 404
+    expect_eq "cacheable $code attempt $attempt body masked" "$(cat "$B")" "Not Found"
+  done
+  expect_stub_gets_since "cacheable $code re-fetches upstream" "$mark" "GET /cacheable-$code.json " 2
+done
+
 # 6b. deploy automation can target one local nginx cache path without evicting
 # unrelated paths.
 before_entries=$(cache_entries)

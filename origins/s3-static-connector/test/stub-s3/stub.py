@@ -96,6 +96,12 @@ class Handler(BaseHTTPRequestHandler):
             # Simulate IAM propagation completing after the startup HEAD.
             return self._send(403 if head_only else 200, b"recovered",
                               ctype="text/plain", head_only=head_only)
+        if key in ("cacheable-403.json", "cacheable-404.json"):
+            status = 403 if "403" in key else 404
+            return self._send(status, b"private error body", cache="max-age=300",
+                              head_only=head_only, extra={
+                                  "Expires": "Wed, 01 Jan 2031 00:00:00 GMT",
+                                  "X-Accel-Expires": "300"})
         if "badrequest" in key:
             return self._send(400, b"<Error><Code>InvalidRequest</Code></Error>",
                               ctype="application/xml", head_only=head_only)

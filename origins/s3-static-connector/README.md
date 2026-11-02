@@ -207,7 +207,15 @@ the staging-soak bucket before this image is reused for such keyspaces. Treat
 the SigV4 exotic-key soak as a hard reuse gate, tracked in GitHub issue #854.
 
 Successful responses pass through the object's `Content-Type` and `Cache-Control`
-verbatim. These security headers are set on **every** response (200/404/405/5xx):
+verbatim. Before nginx's cache, Envoy replaces cache metadata on non-object
+responses with `Cache-Control: no-store` and removes `Expires` and
+`X-Accel-Expires`. This also applies to S3-compatible endpoints that mark errors
+cacheable. A `304` keeps its cache metadata for object revalidation. Error bodies
+and viewer statuses still follow the masking rules below. When upgrading an
+existing replica, clear its cache or replace the replica so an older cached error
+cannot survive the change.
+
+These security headers are set on **every** response (200/404/405/5xx):
 
 - `Strict-Transport-Security: max-age=31536000; includeSubDomains`
 - `X-Frame-Options: DENY`
