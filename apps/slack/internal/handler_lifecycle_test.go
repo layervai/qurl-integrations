@@ -13,6 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
@@ -423,8 +427,8 @@ func TestHandleLifecycleEvent_RetainsUnmarkedRowsForReconciliation(t *testing.T)
 	}
 	// An old writer has not stamped installation lineage. Cleanup must preserve
 	// this possibly fresh configuration and retain the durable job for recovery.
-	if err := h.cfg.AdminStore.ExposeResourceToChannel(context.Background(), testAdminTeamID, "C_fresh", "r_fresh"); err != nil {
-		t.Fatalf("ExposeResourceToChannel fresh row: %v", err)
+	if _, err := h.cfg.AdminStore.Client.PutItem(context.Background(), &dynamodb.PutItemInput{TableName: aws.String(h.cfg.AdminStore.ChannelPoliciesName), Item: map[string]ddbtypes.AttributeValue{"slack_team_id": &ddbtypes.AttributeValueMemberS{Value: testAdminTeamID}, "slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C_fresh"}, "allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_fresh"}}}}); err != nil {
+		t.Fatal(err)
 	}
 
 	_ = h.handleLifecycleEvent(context.Background(), &slackEventEnvelope{

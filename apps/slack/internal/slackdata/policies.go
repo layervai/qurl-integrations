@@ -281,7 +281,7 @@ func (s *Store) updateChannelResourceSet(ctx context.Context, operation, updateV
 		}
 	}
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	err := s.updatePolicy(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
@@ -411,7 +411,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	if len(aliasKeys) > 0 {
 		in.ExpressionAttributeValues[":removed_resource"] = stringAttr(resourceID)
 	}
-	if _, err := s.Client.UpdateItem(ctx, in); err != nil {
+	if err := s.updatePolicy(ctx, in); err != nil {
 		return nil, ddbToError("PurgeResourceFromChannel", err)
 	}
 	return aliasKeys, nil

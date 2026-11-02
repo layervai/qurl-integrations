@@ -16,8 +16,17 @@ func TestPolicyRevokeDynamoDBLocalAliasReboundAtCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	const team, channel = "TREVOKE01", "CREVOKE01"
+	if err := store.BindWorkspace(ctx, &WorkspaceMapping{TeamID: team, OwnerID: testOwnerSlackID}, testOwnerSlackID); err != nil {
+		t.Fatal(err)
+	}
+	authorization, err := store.AuthorizePolicyWrite(ctx, team, testOwnerSlackID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = authorization.Context(ctx)
+
 	key := map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(team), attrSlackChannelID: stringAttr(channel)}
-	_, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(store.ChannelPoliciesName), Item: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(team), attrSlackChannelID: stringAttr(channel), attrAliasBindings: &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{"reuse": stringAttr("r_dead")}}, attrAllowedResourceIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dead"}}}})
+	_, err = client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(store.ChannelPoliciesName), Item: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(team), attrSlackChannelID: stringAttr(channel), attrPolicyInstallation: stringAttr(authorization.installation), attrAliasBindings: &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{"reuse": stringAttr("r_dead")}}, attrAllowedResourceIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dead"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}

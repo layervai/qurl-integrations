@@ -927,13 +927,13 @@ func TestBindChannelAlias_WritesAliasMapEntry(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	})
-	if err := store.BindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard", "r_prod_dash01"); err != nil {
+	if err := store.BindChannelAlias(unitPolicyContext(t, store), "T1", "C1", "prod-dashboard", "r_prod_dash01"); err != nil {
 		t.Fatalf("BindChannelAlias: %v", err)
 	}
 	if len(calls) != 2 {
 		t.Fatalf("UpdateItem calls = %d, want 2", len(calls))
 	}
-	if got := aws.ToString(calls[0].UpdateExpression); got != "SET #ab = :empty, updated_at = :now, updated_at_unix_nano = :now_nano" {
+	if got := aws.ToString(calls[0].UpdateExpression); got != "SET #policy_lineage = :policy_lineage, #ab = :empty, updated_at = :now, updated_at_unix_nano = :now_nano" {
 		t.Errorf("seed UpdateExpression = %q", got)
 	}
 	if now, ok := calls[0].ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
@@ -942,10 +942,10 @@ func TestBindChannelAlias_WritesAliasMapEntry(t *testing.T) {
 	if nowNano, ok := calls[0].ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
 		t.Errorf("seed :now_nano = %#v, want unix nanos", calls[0].ExpressionAttributeValues[":now_nano"])
 	}
-	if got := aws.ToString(calls[1].UpdateExpression); got != "SET #ab.#a = :rid, updated_at = :now, updated_at_unix_nano = :now_nano" {
+	if got := aws.ToString(calls[1].UpdateExpression); got != "SET #policy_lineage = :policy_lineage, #ab.#a = :rid, updated_at = :now, updated_at_unix_nano = :now_nano" {
 		t.Errorf("write UpdateExpression = %q", got)
 	}
-	if got := aws.ToString(calls[1].ConditionExpression); got != "attribute_not_exists(#ab.#a)" {
+	if got := aws.ToString(calls[1].ConditionExpression); !strings.Contains(got, "AND (attribute_not_exists(#ab.#a))") {
 		t.Errorf("write ConditionExpression = %q", got)
 	}
 	if calls[1].ExpressionAttributeNames["#ab"] != attrAliasBindings || calls[1].ExpressionAttributeNames["#a"] != "prod-dashboard" {
@@ -974,7 +974,7 @@ func TestBindChannelAlias_DuplicateReturnsSentinel(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	})
-	err := store.BindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard", "r_prod_dash01")
+	err := store.BindChannelAlias(unitPolicyContext(t, store), "T1", "C1", "prod-dashboard", "r_prod_dash01")
 	if !errors.Is(err, ErrAliasAlreadyBound) {
 		t.Fatalf("err = %v, want ErrAliasAlreadyBound", err)
 	}
@@ -986,7 +986,7 @@ func TestUnbindChannelAlias_NotFoundReturnsSentinel(t *testing.T) {
 			return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("missing")}
 		},
 	})
-	err := store.UnbindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard")
+	err := store.UnbindChannelAlias(unitPolicyContext(t, store), "T1", "C1", "prod-dashboard")
 	if !errors.Is(err, ErrAliasNotFound) {
 		t.Fatalf("err = %v, want ErrAliasNotFound", err)
 	}
@@ -1028,13 +1028,13 @@ func TestExposeResourceToChannel_AddsToAllowedSet(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	})
-	if err := store.ExposeResourceToChannel(context.Background(), "T1", "C9", "r_target01"); err != nil {
+	if err := store.ExposeResourceToChannel(unitPolicyContext(t, store), "T1", "C9", "r_target01"); err != nil {
 		t.Fatalf("ExposeResourceToChannel: %v", err)
 	}
 	if got == nil {
 		t.Fatal("UpdateItem not called")
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "SET updated_at = :now, updated_at_unix_nano = :now_nano ADD allowed_resource_ids :rids" {
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET #policy_lineage = :policy_lineage, updated_at = :now, updated_at_unix_nano = :now_nano ADD allowed_resource_ids :rids" {
 		t.Errorf("UpdateExpression = %q, want SET updated_at = :now, updated_at_unix_nano = :now_nano ADD allowed_resource_ids :rids", exp)
 	}
 	if tbl := aws.ToString(got.TableName); tbl != "cp" {
@@ -1068,13 +1068,13 @@ func TestRevokeResourceFromChannel_DeletesFromAllowedSet(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	})
-	if err := store.RevokeResourceFromChannel(context.Background(), "T1", "C9", "r_target01"); err != nil {
+	if err := store.RevokeResourceFromChannel(unitPolicyContext(t, store), "T1", "C9", "r_target01"); err != nil {
 		t.Fatalf("RevokeResourceFromChannel: %v", err)
 	}
 	if got == nil {
 		t.Fatal("UpdateItem not called")
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "SET updated_at = :now, updated_at_unix_nano = :now_nano DELETE allowed_resource_ids :rids" {
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET #policy_lineage = :policy_lineage, updated_at = :now, updated_at_unix_nano = :now_nano DELETE allowed_resource_ids :rids" {
 		t.Errorf("UpdateExpression = %q, want SET updated_at = :now, updated_at_unix_nano = :now_nano DELETE allowed_resource_ids :rids", exp)
 	}
 	if now, ok := got.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
@@ -1097,13 +1097,13 @@ func TestExposeRevokeChannel_RejectEmptyArgs(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{}, nil // unreachable after Fatal; non-nil to satisfy nilnil
 		},
 	})
-	if err := store.ExposeResourceToChannel(context.Background(), "", "C1", "r1"); err == nil {
+	if err := store.ExposeResourceToChannel(unitPolicyContext(t, store), "", "C1", "r1"); err == nil {
 		t.Error("ExposeResourceToChannel(empty team): want error")
 	}
-	if err := store.ExposeResourceToChannel(context.Background(), "T1", "C1", ""); err == nil {
+	if err := store.ExposeResourceToChannel(unitPolicyContext(t, store), "T1", "C1", ""); err == nil {
 		t.Error("ExposeResourceToChannel(empty resource): want error")
 	}
-	if err := store.RevokeResourceFromChannel(context.Background(), "T1", "", "r1"); err == nil {
+	if err := store.RevokeResourceFromChannel(unitPolicyContext(t, store), "T1", "", "r1"); err == nil {
 		t.Error("RevokeResourceFromChannel(empty channel): want error")
 	}
 }
@@ -1234,7 +1234,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 			},
 		})
 
-		unbound, err := store.PurgeResourceFromChannel(context.Background(), "T1", "C1", deadID)
+		unbound, err := store.PurgeResourceFromChannel(unitPolicyContext(t, store), "T1", "C1", deadID)
 		if err != nil {
 			t.Fatalf("PurgeResourceFromChannel: %v", err)
 		}
@@ -1245,7 +1245,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 			t.Fatal("no UpdateItem issued")
 		}
 		expr := aws.ToString(captured.UpdateExpression)
-		if !strings.Contains(expr, "SET #updated_at = :now") {
+		if !strings.Contains(expr, "#updated_at = :now") {
 			t.Errorf("UpdateExpression missing updated_at SET: %q", expr)
 		}
 		if !strings.Contains(expr, "#updated_at_nano = :now_nano") {
@@ -1274,7 +1274,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 		// REMOVE — it must be the STALE alias, never the survivor.
 		var removed []string
 		for ref, name := range captured.ExpressionAttributeNames {
-			if ref == exprAliasBindings || name == attrUpdatedAt || name == attrUpdatedAtNano {
+			if ref == exprAliasBindings || name == attrUpdatedAt || name == attrUpdatedAtNano || name == attrSlackTeamID || name == attrPolicyInstallation {
 				continue
 			}
 			removed = append(removed, name)
@@ -1300,7 +1300,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 				return &dynamodb.UpdateItemOutput{}, nil
 			},
 		})
-		unbound, err := store.PurgeResourceFromChannel(context.Background(), "T1", "C1", deadID)
+		unbound, err := store.PurgeResourceFromChannel(unitPolicyContext(t, store), "T1", "C1", deadID)
 		if err != nil {
 			t.Fatalf("PurgeResourceFromChannel: %v", err)
 		}
@@ -1332,7 +1332,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 				return &dynamodb.UpdateItemOutput{}, nil
 			},
 		})
-		unbound, err := store.PurgeResourceFromChannel(context.Background(), "T1", "C1", deadID)
+		unbound, err := store.PurgeResourceFromChannel(unitPolicyContext(t, store), "T1", "C1", deadID)
 		if err != nil {
 			t.Fatalf("PurgeResourceFromChannel: %v", err)
 		}
@@ -1347,7 +1347,7 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 	t.Run("missing args rejected", func(t *testing.T) {
 		store := newStore(&stubDDB{})
 		for _, args := range [][3]string{{"", "C1", deadID}, {"T1", "", deadID}, {"T1", "C1", ""}} {
-			if _, err := store.PurgeResourceFromChannel(context.Background(), args[0], args[1], args[2]); err == nil {
+			if _, err := store.PurgeResourceFromChannel(unitPolicyContext(t, store), args[0], args[1], args[2]); err == nil {
 				t.Errorf("PurgeResourceFromChannel(%q,%q,%q): want bad-request error", args[0], args[1], args[2])
 			}
 		}
@@ -1720,4 +1720,29 @@ func TestWorkspacePolicyGenerationChangesAtSameClockTime(t *testing.T) {
 	if len(seen) != 3 {
 		t.Fatalf("generation count = %d, want three binding/ownership changes", len(seen))
 	}
+}
+
+// Expression tests use an explicit store-scoped snapshot. Native tests cover
+// workspace condition evaluation and failed-transaction atomicity.
+func unitPolicyContext(t *testing.T, store *Store) context.Context {
+	t.Helper()
+	if stub, ok := store.Client.(*stubDDB); ok {
+		store.Client = &policyTestDDB{stubDDB: stub, transact: func(in *dynamodb.TransactWriteItemsInput) error {
+			if len(in.TransactItems) != 2 || in.TransactItems[0].ConditionCheck == nil || in.TransactItems[1].Update == nil {
+				t.Fatal("policy mutation bypassed its atomic workspace check")
+			}
+			update := in.TransactItems[1].Update
+			if !strings.Contains(aws.ToString(update.ConditionExpression), "#policy_lineage = :policy_lineage") {
+				t.Fatal("policy mutation lacks installation condition")
+			}
+			_, err := stub.UpdateItem(context.Background(), &dynamodb.UpdateItemInput{TableName: update.TableName, Key: update.Key, UpdateExpression: update.UpdateExpression, ConditionExpression: update.ConditionExpression, ExpressionAttributeNames: update.ExpressionAttributeNames, ExpressionAttributeValues: update.ExpressionAttributeValues})
+			var conflict *ddbtypes.ConditionalCheckFailedException
+			if errors.As(err, &conflict) {
+				return &ddbtypes.TransactionCanceledException{CancellationReasons: []ddbtypes.CancellationReason{{Code: aws.String("None")}, {Code: aws.String(policyConditionFailed)}}}
+			}
+			return err
+		}}
+	}
+	authorization := PolicyAuthorization{store: store, teamID: "T1", userID: testOwnerSlackID, ownerID: testOwnerSlackID, generation: "unit-generation", installation: "unit-installation"}
+	return authorization.Context(context.Background())
 }

@@ -4,13 +4,15 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
-// purger is the single mutation the apply path performs: the bot's
-// PurgeResourceFromChannel cascade. *slackdata.Store satisfies it; tests inject
-// a fake to assert the dry-run path never calls it and the apply path calls it
-// with the right (team, channel, resource) triples.
+// purger captures current workspace authority before the apply path uses the
+// bot's guarded purge cascade. Dry runs never call these methods.
 type purger interface {
+	ListAdmins(context.Context, string) (string, []string, error)
+	AuthorizePolicyWrite(context.Context, string, string) (slackdata.PolicyAuthorization, error)
 	PurgeResourceFromChannel(ctx context.Context, teamID, channelID, resourceID string) ([]string, error)
 }
 
@@ -120,7 +122,7 @@ func (r *report) settle(ctx context.Context, store purger, logger *slog.Logger) 
 // sweep, since the purge is idempotent and a re-run retries cleanly.
 func (r *report) applyPurge(ctx context.Context, store purger, logger *slog.Logger, targets []purgeTarget) error {
 	for _, t := range targets {
-		unbound, err := store.PurgeResourceFromChannel(ctx, t.teamID, t.channelID, t.resourceID)
+		unbound, err := purgeCurrentPolicy(ctx, store, t)
 		if err != nil {
 			r.stats.PurgeErrors.Add(1)
 			logger.Error("purge failed; an orphan may remain", "team_id", t.teamID, "channel_id", t.channelID, "resource_id", t.resourceID, "error", err)
@@ -208,4 +210,18 @@ func kindRank(k findingKind) int {
 	default:
 		return 7
 	}
+}
+
+// Apply uses the operator's IAM authority, with the current workspace owner
+// captured before the policy read so a concurrent rebind invalidates the write.
+func purgeCurrentPolicy(ctx context.Context, store purger, target purgeTarget) ([]string, error) {
+	owner, _, err := store.ListAdmins(ctx, target.teamID)
+	if err != nil {
+		return nil, err
+	}
+	authorization, err := store.AuthorizePolicyWrite(ctx, target.teamID, owner)
+	if err != nil {
+		return nil, err
+	}
+	return store.PurgeResourceFromChannel(authorization.Context(ctx), target.teamID, target.channelID, target.resourceID)
 }

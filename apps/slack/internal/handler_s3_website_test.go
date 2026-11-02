@@ -600,7 +600,7 @@ func TestS3WebsiteInstallRefusesWhenPostDMUnwiredBeforeMintingKey(t *testing.T) 
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
 	inv := newAdminSlashInvoker(t, h)
-	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(inv.responseU.URL, fixedNow, tunnelEnvDocker))
+	h.processS3WebsiteInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testS3WebsiteInstallRequest(inv.responseU.URL, fixedNow, tunnelEnvDocker))
 
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
 	if !strings.Contains(async, "No enrollment token was minted") || !strings.Contains(async, "Slack DM delivery") {
@@ -661,7 +661,7 @@ func TestS3WebsiteInstallInstructionsDeliveryFailureRevokesAndSendsDiscardNotice
 	h.cfg.S3OriginImage = testS3OriginImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, now, tunnelEnvDocker))
+	h.processS3WebsiteInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, now, tunnelEnvDocker))
 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
@@ -742,7 +742,7 @@ func TestS3WebsiteInstallRevokesWhenAPIKeyPlaintextMissing(t *testing.T) {
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	inv := newAdminSlashInvoker(t, h)
-	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(inv.responseU.URL, now, tunnelEnvDocker))
+	h.processS3WebsiteInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testS3WebsiteInstallRequest(inv.responseU.URL, now, tunnelEnvDocker))
 
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
 	if !strings.Contains(async, "did not return an enrollment token") {
@@ -800,7 +800,7 @@ func TestS3WebsiteInstallRevokesWhenAPIKeyFailsShellValidation(t *testing.T) {
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	inv := newAdminSlashInvoker(t, h)
-	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(inv.responseU.URL, now, tunnelEnvDocker))
+	h.processS3WebsiteInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testS3WebsiteInstallRequest(inv.responseU.URL, now, tunnelEnvDocker))
 
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
 	if !strings.Contains(async, "unexpected format") {
@@ -2176,7 +2176,7 @@ func TestS3WebsiteInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
 	h.cfg.S3OriginImage = testS3OriginImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
+	h.processS3WebsiteInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
 	if resourceHits != 0 || keyHits != 0 || sharingHits != 0 || len(*dmPosts) != 0 {
 		t.Fatalf("resource creates = %d, key mints = %d, sharing writes = %d, DMs = %d; want all 0", resourceHits, keyHits, sharingHits, len(*dmPosts))
 	}
@@ -2223,7 +2223,7 @@ func TestS3WebsiteInstallRendersOwnerFromIdentity(t *testing.T) {
 	h.cfg.S3OriginImage = testS3OriginImageRef
 	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, now, tunnelEnvDocker))
+	h.processS3WebsiteInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, now, tunnelEnvDocker))
 	joined := strings.Join(*responseBodiesPtr, "\n")
 	if !strings.Contains(joined, "owner_id: '"+testOwnerID+"'") || !strings.Contains(joined, "version: 2") {
 		t.Fatalf("rendered install did not carry the identity owner in a v2 config:\n%s", joined)
@@ -2292,7 +2292,7 @@ func TestS3WebsiteInstallRejectsWhenTargetNotEchoed(t *testing.T) {
 	h.cfg.S3OriginImage = testS3OriginImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
+	h.processS3WebsiteInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
 	if len(*dmPosts) != 0 || revokeHits != 1 || !strings.Contains(strings.Join(*bodies, "\n"), kindFirstUnconfirmedInstallMessage) {
 		t.Fatalf("DM posts = %d, revokes = %d, bodies = %q; want no DM, one revoke, shared copy", len(*dmPosts), revokeHits, *bodies)
 	}
@@ -2312,7 +2312,7 @@ func TestS3WebsiteInstallRejectsConnectorTargetCredential(t *testing.T) {
 	h.cfg.S3OriginImage = testS3OriginImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
+	h.processS3WebsiteInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
 	if len(*dmPosts) != 0 || revokeHits != 1 {
 		t.Fatalf("DM posts = %d, revokes = %d; want no DM and one revoke", len(*dmPosts), revokeHits)
 	}
@@ -2344,7 +2344,7 @@ func TestS3WebsiteInstallFailsClosedForNonAPIKeyPrincipal(t *testing.T) {
 	h.cfg.S3OriginImage = testS3OriginImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
+	h.processS3WebsiteInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
 	if resourceHits != 0 || keyHits != 0 || len(*dmPosts) != 0 || !strings.Contains(strings.Join(*bodies, "\n"), "not an account API key") {
 		t.Fatalf("creates = %d, mints = %d, DMs = %d, bodies = %q; want no mutation and the non-API-key copy", resourceHits, keyHits, len(*dmPosts), *bodies)
 	}
@@ -2363,7 +2363,7 @@ func TestS3WebsiteInstallRejectsWhenClaimNotEchoed(t *testing.T) {
 	h.cfg.S3OriginImage = testS3OriginImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
+	h.processS3WebsiteInstall(testPolicyContext(context.Background(), t, h.cfg.AdminStore, testAdminTeamID, testAdminUserID), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
 	if len(*dmPosts) != 0 || revokeHits != 1 || !strings.Contains(strings.Join(*bodies, "\n"), kindFirstUnconfirmedInstallMessage) {
 		t.Fatalf("DM posts = %d, revokes = %d, bodies = %q; want no DM, one revoke, shared copy", len(*dmPosts), revokeHits, *bodies)
 	}

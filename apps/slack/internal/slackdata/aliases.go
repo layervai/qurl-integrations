@@ -44,7 +44,7 @@ func (s *Store) BindChannelAlias(ctx context.Context, teamID, channelID, aliasNa
 	}
 
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	err := s.updatePolicy(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
@@ -83,7 +83,7 @@ func (s *Store) UnbindChannelAlias(ctx context.Context, teamID, channelID, alias
 	}
 
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	err := s.updatePolicy(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
@@ -112,7 +112,7 @@ func (s *Store) UnbindChannelAlias(ctx context.Context, teamID, channelID, alias
 
 func (s *Store) ensureAliasBindingsMap(ctx context.Context, teamID, channelID string) error {
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	err := s.updatePolicy(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),

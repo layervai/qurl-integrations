@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -507,7 +506,7 @@ func seedDisplayNameAliasTunnel(t *testing.T, capPatch *capturedPatch) *Handler 
 		testKeyStatus:     client.StatusActive,
 	}, capPatch))
 	seedAliasAdminGate(t, h, testAliasTeamID)
-	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
+	if err := h.cfg.AdminStore.BindChannelAlias(testPolicyFixtureContext(t, h.cfg.AdminStore, testAliasTeamID), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
 		t.Fatalf("seed channel alias binding: %v", err)
 	}
 	return h
@@ -580,7 +579,7 @@ func TestSetDisplayName_ChannelAliasToURLResourceRejected(t *testing.T) {
 		testKeyStatus:     client.StatusActive,
 	}, capPatch))
 	seedAliasAdminGate(t, h, testAliasTeamID)
-	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, urlResourceID); err != nil {
+	if err := h.cfg.AdminStore.BindChannelAlias(testPolicyFixtureContext(t, h.cfg.AdminStore, testAliasTeamID), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, urlResourceID); err != nil {
 		t.Fatalf("seed channel alias binding: %v", err)
 	}
 
@@ -613,7 +612,7 @@ func TestSetDisplayName_ChannelAliasToRevokedTunnelRejected(t *testing.T) {
 		testKeyStatus:     client.StatusRevoked,
 	}, capPatch))
 	seedAliasAdminGate(t, h, testAliasTeamID)
-	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
+	if err := h.cfg.AdminStore.BindChannelAlias(testPolicyFixtureContext(t, h.cfg.AdminStore, testAliasTeamID), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
 		t.Fatalf("seed channel alias binding: %v", err)
 	}
 
@@ -681,7 +680,7 @@ func TestSetDisplayName_ChannelAliasPastScanWindow(t *testing.T) {
 		testKeyStatus:     client.StatusActive,
 	}, capPatch))
 	seedAliasAdminGate(t, h, testAliasTeamID)
-	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
+	if err := h.cfg.AdminStore.BindChannelAlias(testPolicyFixtureContext(t, h.cfg.AdminStore, testAliasTeamID), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
 		t.Fatalf("seed channel alias binding: %v", err)
 	}
 
@@ -716,7 +715,7 @@ func TestSetDisplayName_RevokedTargetOnFirstPageWithMorePages(t *testing.T) {
 		testKeyStatus:     client.StatusRevoked,
 	}, capPatch))
 	seedAliasAdminGate(t, h, testAliasTeamID)
-	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
+	if err := h.cfg.AdminStore.BindChannelAlias(testPolicyFixtureContext(t, h.cfg.AdminStore, testAliasTeamID), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
 		t.Fatalf("seed channel alias binding: %v", err)
 	}
 
@@ -802,7 +801,7 @@ func TestSetDisplayName_LegacyURLBindingRefused(t *testing.T) {
 	// then resolves to a legacy raw-URL binding.
 	h := newTestHandler(t, displayNameQURLServer(t, "some-other-slug", capPatch))
 	seedAliasAdminGate(t, h, testAliasTeamID)
-	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, "https://legacy.example.com"); err != nil {
+	if err := h.cfg.AdminStore.BindChannelAlias(testPolicyFixtureContext(t, h.cfg.AdminStore, testAliasTeamID), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, "https://legacy.example.com"); err != nil {
 		t.Fatalf("seed legacy URL binding: %v", err)
 	}
 
