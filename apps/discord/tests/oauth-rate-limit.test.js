@@ -31,6 +31,16 @@ describe('OAuth rate-limit store', () => {
     jest.restoreAllMocks();
   });
 
+  it('prevents raw Map writes from bypassing the eviction index', () => {
+    expect(() => Map.prototype.set.call(rateLimitStore, 'bypass', { 'discord-install-entry': [now] }))
+      .toThrow(TypeError);
+    expect(rateLimitStore.size).toBe(0);
+    rateLimitStore.set('indexed', { 'discord-install-entry': [now] });
+    expect([...rateLimitStore]).toEqual([['indexed', { 'discord-install-entry': [now] }]]);
+    expect(rateLimitStore.evictInstallOnlyEntry()).toBe(true);
+    expect(rateLimitStore.size).toBe(0);
+  });
+
   it('sweeps expired buckets independently and preserves a live sibling bucket', () => {
     const expired = now - config.RATE_LIMIT_WINDOW_MS * 2 - 1;
     const recent = now - config.RATE_LIMIT_WINDOW_MS;

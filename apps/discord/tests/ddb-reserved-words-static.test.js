@@ -201,14 +201,14 @@ describe('DDB reserved-words static check — full src scan', () => {
     // interpolate runtime values). Ceiling so a refactor that turns
     // many literals into template-with-substitutions doesn't quietly
     // defeat the check. Today's expected dynamic sites:
-    //   - flow-state.js (a few template-with-expression Filter/Update)
-    //   - ddb-store.js (setGuildDefaultWebhookOwner's audited CAS join)
+    //   - flow-state.js (update and delete builders)
+    //   - ddb-store.js (updateSendConfig field builder)
     // If this assertion fires, audit each newly-dynamic expression
     // against the reserved-words list manually + raise the ceiling.
     const dynamic = [];
     for (const f of files) {
       dynamic.push(...findViolations(f).filter(v => v.dynamic));
     }
-    expect(dynamic.length).toBeLessThan(8);
+    expect(dynamic.length).toBeLessThan(4);
   });
 });

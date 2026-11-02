@@ -56,7 +56,7 @@ const db = require('../src/store');
 const discord = require('../src/discord');
 const logger = require('../src/logger');
 const guildWebhookLink = require('../src/guild-webhook-link');
-const { AUDIT_EVENTS } = require('../src/constants');
+const { QUERY_ONLY_AUDIT_EVENTS } = require('../src/constants');
 const { signQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 const {
   QURL_OAUTH_SESSION_COOKIE,
@@ -404,7 +404,7 @@ describe('qurl-oauth routes', () => {
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
       expect(discord.sendDM).not.toHaveBeenCalled();
       expect(logger.audit).not.toHaveBeenCalledWith(
-        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
+        QUERY_ONLY_AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
         expect.anything(),
       );
     });
@@ -458,7 +458,7 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain('/qurl send is ready');
       expect(res.text).not.toContain('/qurl map');
       expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', 'oauth');
-      expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
+      expect(logger.audit).toHaveBeenCalledWith(QUERY_ONLY_AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
         guild_id: 'guild-1',
         configured_by: 'admin-2',
         key_prefix: 'lv_live_abc1',
@@ -527,7 +527,7 @@ describe('qurl-oauth routes', () => {
         'oauth',
       );
       expect(logger.audit).toHaveBeenCalledWith(
-        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
+        QUERY_ONLY_AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
         expect.objectContaining({
           qurl_account_subject_fingerprint: null,
           qurl_account_fingerprint_key_epoch: null,
@@ -608,7 +608,7 @@ describe('qurl-oauth routes', () => {
       expect(deleteCall).toBeDefined();
       expect(deleteCall[0]).toContain('/v1/api-keys/key-orphan-1');
       expect(logger.audit).not.toHaveBeenCalledWith(
-        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
+        QUERY_ONLY_AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
         expect.anything(),
       );
     });
@@ -635,7 +635,7 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toMatch(/<dt>API key prefix<\/dt>\s*<dd>lv_live_a<\/dd>/);
       expect(res.text).not.toMatch(/<dt>qURL account<\/dt>/);
       expect(logger.audit).toHaveBeenCalledWith(
-        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
+        QUERY_ONLY_AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
         expect.objectContaining({ qurl_account_subject_fingerprint: null }),
       );
     });
@@ -658,7 +658,7 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain('qURL is connected');
       expect(res.text).not.toMatch(/<dt>qURL account<\/dt>/);
       expect(logger.audit).toHaveBeenCalledWith(
-        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
+        QUERY_ONLY_AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
         expect.objectContaining({ qurl_account_subject_fingerprint: null }),
       );
     });
