@@ -494,6 +494,7 @@ const AUDIT_EVENTS = {
   // (separate from this repo). Flat counters only: do NOT promote
   // qurl_id/resource_id to dimensions (unbounded).
   QURL_WEBHOOK_RECEIVED: 'qurl_webhook_received',
+  QURL_WEBHOOK_REPLAY_REJECTED: 'qurl_webhook_replay_rejected',
   // Sustained rate = SSM secret drift OR attacker probing.
   QURL_WEBHOOK_SIGNATURE_INVALID: 'qurl_webhook_signature_invalid',
   // Legit traffic NEVER triggers — sustained rate = sustained attacker.

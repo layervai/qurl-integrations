@@ -4,6 +4,8 @@
 // SignPayload):
 //   header  `QURL-Signature`  bare hex HMAC-SHA256 (NO `sha256=` prefix —
 //                             that's GitHub's shape)
+//   headers `QURL-Timestamp` Unix seconds and `QURL-Signature-V2` signing
+//           v2.timestamp.rawBody; attempts must be within 300 seconds.
 //   body    {id, type, data:{qurl_id, resource_id, access_count, consumed},
 //            owner_id, timestamp, api_version}
 //
@@ -82,6 +84,7 @@ const VERIFY_RESULTS = Object.freeze({
   OWNER_ID_MISSING: 'owner_id_missing',         // parse failed OR field absent
   CACHE_UNPRIMED: 'cache_unprimed',             // 503 — registry hasn't completed first scan
   OWNER_UNKNOWN: 'owner_unknown',               // 401 — registry primed, owner not registered
+  REPLAY_REJECTED: 'replay_rejected',
   SIG_INVALID: 'sig_invalid',                   // HMAC mismatch on real secret
 });
 
@@ -150,6 +153,20 @@ function verifyAndResolve(req) {
 
   if (!verifyHmacSha256(req.rawBody, secret, signature)) {
     return { result: VERIFY_RESULTS.SIG_INVALID, ownerId };
+  }
+  const timestamp = req.headers['qurl-timestamp'];
+  const attemptSignature = req.headers['qurl-signature-v2'];
+  if (typeof timestamp !== 'string' || !/^[1-9][0-9]{0,15}$/.test(timestamp)
+      || !Number.isSafeInteger(Number(timestamp) * 1000)
+      || typeof attemptSignature !== 'string' || !SIGNATURE_PATTERN.test(attemptSignature)) {
+    return { result: VERIFY_RESULTS.REPLAY_REJECTED, ownerId };
+  }
+  const signedAttempt = Buffer.concat([Buffer.from(`v2.${timestamp}.`), req.rawBody]);
+  if (!verifyHmacSha256(signedAttempt, secret, attemptSignature)) {
+    return { result: VERIFY_RESULTS.SIG_INVALID, ownerId };
+  }
+  if (Math.abs(Date.now() - Number(timestamp) * 1000) > 300_000) {
+    return { result: VERIFY_RESULTS.REPLAY_REJECTED, ownerId };
   }
   return { result: VERIFY_RESULTS.OK, ownerId, body };
 }
@@ -1053,7 +1070,8 @@ router.post('/qurl', async (req, res) => {
   if (result !== VERIFY_RESULTS.OK) {
     const isHmacFailure = result === VERIFY_RESULTS.SIG_INVALID
       || result === VERIFY_RESULTS.SIG_HEADER_MISSING
-      || result === VERIFY_RESULTS.SIG_HEADER_MALFORMED;
+      || result === VERIFY_RESULTS.SIG_HEADER_MALFORMED
+      || result === VERIFY_RESULTS.REPLAY_REJECTED;
     const isUnknownOwner = result === VERIFY_RESULTS.OWNER_UNKNOWN
       || result === VERIFY_RESULTS.OWNER_ID_MISSING;
     let totalInWindow = null;
@@ -1074,7 +1092,8 @@ router.post('/qurl', async (req, res) => {
       ? sanitizeForLog(ownerId.slice(0, 64))
       : ownerId;
     logger.warn('qURL webhook verification failed', { ip, totalInWindow, result, ownerId: safeOwnerId });
-    logger.audit(auditEvent, { total_in_window: totalInWindow, result });
+    logger.audit(result === VERIFY_RESULTS.REPLAY_REJECTED
+      ? AUDIT_EVENTS.QURL_WEBHOOK_REPLAY_REJECTED : auditEvent, { total_in_window: totalInWindow, result });
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
@@ -1088,14 +1107,6 @@ router.post('/qurl', async (req, res) => {
     logger.warn('qURL webhook missing or non-string body.id (per-event replay key)');
     return res.status(200).json({ status: 'invalid-payload' });
   }
-
-  // TODO(freshness): the signature pins payload integrity but not
-  // freshness. A captured event with a never-seen `id` and a
-  // sufficiently-advanced access_count would still be accepted long
-  // after capture. qurl-service includes a signed `timestamp` field;
-  // adding a `now() - body.timestamp > N` rejection would close the
-  // replay window. Out of scope for this PR (qurl-service is the only
-  // valid emitter today).
 
   if (eventType === QURL_WEBHOOK_EVENTS.EXPIRED) {
     return handleQurlExpired(req, res, { data, eventId });

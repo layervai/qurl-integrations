@@ -1,3 +1,4 @@
+const attemptHeaders = require('./helpers/qurl-webhook-attempt');
 
 const crypto = require('crypto');
 
@@ -86,6 +87,7 @@ async function deliverWebhook(payload) {
     .post('/webhooks/qurl')
     .set('Content-Type', 'application/json')
     .set('QURL-Signature', sig)
+    .set(attemptHeaders(raw, process.env.QURL_WEBHOOK_SECRET))
     .send(raw);
 }
 
