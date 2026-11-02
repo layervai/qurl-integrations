@@ -2457,3 +2457,15 @@ describe('unconfirmed revocation acknowledgement', () => {
     expect(ddbMock.commandCalls(QueryCommand).filter(call => !call.args[0].input.IndexName)).toHaveLength(1);
   });
 });
+
+
+test('acknowledged history is owner-scoped and skips recipient-count queries', async () => {
+  ddbMock.on(QueryCommand).resolves({ Items: [{ send_id: 'own', created_at: 'new' }, { send_id: 'other', created_at: 'old' }] });
+  ddbMock.on(GetCommand).callsFake(input => ({ Item: {
+    sender_discord_id: input.Key.send_id === 'own' ? 'sender' : 'other-sender',
+    revoke_acknowledged_at: 'time', revoked_at: 'time',
+  } }));
+  expect(await store.getRecentSends('sender', 5, { acknowledgedOnly: true }))
+    .toEqual([{ send_id: 'own', revocation_confirmed: true }]);
+  expect(ddbMock.commandCalls(QueryCommand).filter(call => !call.args[0].input.IndexName)).toHaveLength(0);
+});

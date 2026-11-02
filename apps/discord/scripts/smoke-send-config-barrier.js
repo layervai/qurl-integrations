@@ -92,8 +92,10 @@ async function main() {
       } }));
     }
     assert.deepEqual((await store.getRecentSends(menuSender, 5)).map(row => row.send_id), [liveId]);
-    console.log('Barrier writes, owner-only acknowledgement, blocked Add transaction, later retry, and pagination past100 hidden sends passed.');
-    console.log('All three revocation barriers survived real conditional writes.');
+    const history = await store.getRecentSends(menuSender, 5, { acknowledgedOnly: true });
+    assert.equal(history.length, 5);
+    assert(history.every(row => row.send_id !== liveId && !row.revocation_confirmed));
+    console.log('Barrier writes, owner-only acknowledgement, blocked Add transaction, later retry, and pagination past 100 hidden sends passed.');
   } finally {
     try {
       for (const name of created.reverse()) await client.send(new DeleteTableCommand({ TableName: name }));

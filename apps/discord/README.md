@@ -346,6 +346,9 @@ The check creates and deletes its own disposable table.
 A failed DELETE is not proof that a resource is gone. The sender can use the
 send ID shown on an unconfirmed result with `/qurl revoke`:
 
+- `action:inspect` without an ID lists up to five acknowledged sends from the
+  existing bounded recent-history window. Save the ID when you acknowledge a
+  send; an older ID can still be inspected directly beyond that window.
 - `send-id:<ID> action:inspect` shows the stored state without deletion.
 - `send-id:<ID> action:acknowledge` records that deletion is unconfirmed and
   hides the send from the normal retry menu. Links may still allow access.
@@ -360,7 +363,8 @@ can confirm deletion; it cannot reopen the send for more recipients.
 
 Rollout order: deploy the guarded `saveSendConfig` writer to every worker and
 registrar that can run a send before adopting this acknowledgement change.
-Verify that no old writer or in-flight old send remains. Keep this feature's
+Verify that no old writer or in-flight old send remains. Keep that guard on
+rollback too; never restore an unguarded writer while revocation markers exist. Keep this feature's
 main adoption on hold until that prerequisite is met. An old unguarded writer
 can replace the state after a concurrent revoke. No new table or index is
 required. Never clear either marker to make an acknowledged send reusable.

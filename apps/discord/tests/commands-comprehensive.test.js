@@ -2048,7 +2048,57 @@ describe('owner-only unconfirmed revoke recovery', () => {
   it('acknowledgement alone blocks Add Recipients even if the pending marker is absent', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({ revoke_acknowledged_at: 'time' });
     const result = await handleAddRecipients(sendId, new Map(), makeInteraction(), 'test-key');
-    expect(result.msg).toContain('revocation is pending');
+    expect(result.msg).toContain('deletion was acknowledged');
+    expect(result.msg).toContain(`send-id:${sendId} action:retry`);
     expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
   });
+
+  it('normalizes pasted uppercase IDs before owner lookup', async () => {
+    await _test.handleRevoke(recovery('inspect', sendId.toUpperCase()), null);
+    expect(mockDb.getSendRevocationState).toHaveBeenCalledWith(sendId, 'user-1');
+  });
+
+  it.each([
+    [{ revoked_at: 'time' }, 'Deletion confirmed.'],
+    [{ revoke_acknowledged_at: 'time' }, 'Acknowledged and hidden'],
+    [{}, 'No revocation has been requested.'],
+  ])('inspects stored state %p without mutations', async (state, expected) => {
+    mockDb.getSendRevocationState.mockResolvedValueOnce(state);
+    const interaction = recovery();
+    await _test.handleRevoke(interaction, null);
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining(expected) });
+    expect(mockDb.acknowledgeSendRevocation).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+  });
+
+  it.each([{ revoked_at: 'time' }, {}])('does not retry a send without unconfirmed state %p', async state => {
+    mockDb.getSendRevocationState.mockResolvedValueOnce(state);
+    const interaction = recovery('retry');
+    await _test.handleRevoke(interaction, 'test-key');
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining('no unconfirmed revocation') });
+  });
+
+  it('routes retry through current guild-key resolution', async () => {
+    mockDb.getGuildApiKey.mockResolvedValueOnce('guild-key');
+    await handleCommand(recovery('retry'));
+    expect(mockDb.getGuildApiKey).toHaveBeenCalledWith('guild-1');
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
+  });
+
+  it('recovers recent acknowledged IDs without a key or a deletion', async () => {
+    mockDb.getRecentSends.mockResolvedValueOnce([{ send_id: sendId, revocation_confirmed: false }]);
+    const interaction = recovery('inspect', null);
+    await handleCommand(interaction);
+    expect(mockDb.getRecentSends).toHaveBeenCalledWith('user-1', 5, { acknowledgedOnly: true });
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining(sendId) });
+    expect(mockDb.getGuildApiKey).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+  });
+
+  it('passes the recovery ID through both inline and slash result renderers', () => {
+    expect(_test.safeRevokeHeader(sendId, 0, 1)).toContain(sendId);
+    expect(_test.renderRevokeMsg(sendId, [], 1, false, 0).content).toContain(sendId);
+  });
+
 });

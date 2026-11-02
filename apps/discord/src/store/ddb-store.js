@@ -706,7 +706,7 @@ async function isSendRevoked(sendId) {
   return Boolean(res.Item?.revoked_at);
 }
 
-async function getRecentSends(senderDiscordId, limit = 10) {
+async function getRecentSends(senderDiscordId, limit = 10, { acknowledgedOnly = false } = {}) {
   if (!Number.isInteger(limit) || limit <= 0) {
     throw new TypeError('getRecentSends: limit must be a positive integer');
   }
@@ -743,8 +743,9 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   const configBySendId = new Map();
   const sendIdOrder = [];
   let ExclusiveStartKey;
+  // At most1000 GSI rows and1000 unique config reads; no unbounded history scan.
   const MAX_GSI_PAGES = 10;
-  const TARGET_UNIQUE_SENDS = limit * 2;
+  const TARGET_UNIQUE_SENDS = acknowledgedOnly ? limit : limit * 2;
   // Per-page GSI Limit: caps RCU on the hot path. Without it, a
   // sender whose latest send fanned out to 1000 recipients reads
   // ALL 1000 rows (1MB / 8KB-ish per row → up to ~125 RCU
@@ -790,10 +791,20 @@ async function getRecentSends(senderDiscordId, limit = 10) {
     newIds.forEach((id, index) => {
       const cfg = configs[index].Item;
       configBySendId.set(id, cfg);
-      if (!cfg?.revoked_at && !cfg?.revoke_acknowledged_at) sendIdOrder.push(id);
+      const eligible = acknowledgedOnly
+        ? cfg?.sender_discord_id === senderDiscordId && Boolean(cfg.revoke_acknowledged_at)
+        : !cfg?.revoked_at && !cfg?.revoke_acknowledged_at;
+      if (eligible) sendIdOrder.push(id);
     });
     ExclusiveStartKey = sendsRes.LastEvaluatedKey;
     if (!ExclusiveStartKey) break;
+  }
+
+  if (acknowledgedOnly) {
+    return sendIdOrder.slice(0, limit).map(id => ({
+      send_id: id,
+      revocation_confirmed: Boolean(configBySendId.get(id).revoked_at),
+    }));
   }
 
   // Query each eligible send's base-table partition for exact recipient counts.

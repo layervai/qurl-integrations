@@ -3140,7 +3140,13 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       newLinks: [], delivered: 0, failed: 0, newRecipients: [],
     };
   }
-  if (sendConfig.revoking_at || sendConfig.revoke_acknowledged_at) {
+  if (sendConfig.revoke_acknowledged_at) {
+    return {
+      msg: `Cannot add recipients — deletion was acknowledged without confirmation. Use \`/qurl revoke send-id:${sendId} action:retry\` to retry deletion. This does not reopen the send.`,
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+  if (sendConfig.revoking_at) {
     return {
       msg: 'Cannot add recipients — revocation is pending; retry `/qurl revoke`.',
       newLinks: [], delivered: 0, failed: 0, newRecipients: [],
@@ -3694,17 +3700,27 @@ const REVOKE_SELECT_CUSTOM_ID = 'qurl_revoke_select';
 const REVOKE_FLOW_TTL_SECONDS = 60;
 
 async function handleRevoke(interaction, apiKey) {
-  const sendId = interaction.options?.getString?.('send-id');
+  const sendId = interaction.options?.getString?.('send-id')?.toLowerCase();
   const requestedAction = interaction.options?.getString?.('action');
   const action = requestedAction || 'inspect';
-  if ((sendId || requestedAction) && (!REVOKE_SEND_ID_REGEX.test(sendId || '') || !['inspect', 'retry', 'acknowledge'].includes(action))) {
+  const history = !sendId && requestedAction === 'inspect';
+  if ((sendId || requestedAction) && !history && (!REVOKE_SEND_ID_REGEX.test(sendId || '') || !['inspect', 'retry', 'acknowledge'].includes(action))) {
     return interaction.reply({ content: 'Use a valid send ID with action inspect, retry, or acknowledge.', ephemeral: true });
   }
-  if (!apiKey && (!sendId || action === 'retry')) {
+  if (!apiKey && !history && (!sendId || action === 'retry')) {
     return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
   }
   await interaction.deferReply({ ephemeral: true });
 
+  if (history) {
+    const acknowledged = (await db.getRecentSends(interaction.user.id, 5, { acknowledgedOnly: true }))
+      .filter(row => REVOKE_SEND_ID_REGEX.test(row.send_id));
+    return interaction.editReply({ content: acknowledged.length > 0
+      ? 'Acknowledged sends in the recent search window:\n'
+        + acknowledged.map(row => `- \`${row.send_id}\`: deletion ${row.revocation_confirmed ? 'confirmed' : 'not confirmed'}`).join('\n')
+        + '\nUse `/qurl revoke` with a send-id and action inspect or retry.'
+      : 'No acknowledged sends were found in the recent search window. You can still inspect an older saved send ID directly.' });
+  }
   let recentSends;
   if (sendId) {
     const state = await db.getSendRevocationState(sendId, interaction.user.id);
@@ -9031,7 +9047,7 @@ const commands = [
             .setDescription('Inspect or manage an unconfirmed revoke by its send ID')
             .setRequired(false).setMaxLength(36))
           .addStringOption(opt => opt.setName('action')
-            .setDescription('Action for the send ID (default: inspect)')
+            .setDescription('Inspect acknowledged sends, or manage a send ID (default: inspect)')
             .setRequired(false).addChoices(
               { name: 'Inspect state (no deletion)', value: 'inspect' },
               { name: 'Retry unconfirmed deletion', value: 'retry' },
