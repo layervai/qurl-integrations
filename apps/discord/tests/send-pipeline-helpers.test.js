@@ -1,5 +1,7 @@
 
 
+const { resourceIdLogRef } = require('../src/utils/resource-id');
+
 jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test-api-key',
   QURL_ENDPOINT: 'https://api.test.local',
@@ -492,7 +494,7 @@ describe('qURL client', () => {
   describe('createOneTimeLink', () => {
     it('sends correct POST body with one_time_use: true', async () => {
       globalThis.fetch = jest.fn().mockImplementation(async () => Response.json({
-        data: { resource_id: 'res-1', qurl_link: 'https://q.test/abc' },
+        data: { resource_id: 'res-1', crid: 'crid-fixture', qurl_link: 'https://q.test/abc' },
       }, { status: 201 }));
 
       const result = await qurl.createOneTimeLink('https://example.com', '24h', 'test label');
@@ -510,6 +512,11 @@ describe('qURL client', () => {
 
       expect(result.resource_id).toBe('res-1');
       expect(result.qurl_link).toBe('https://q.test/abc');
+      expect(result.crid).toBe('crid-fixture');
+      const logger = require('../src/logger');
+      expect(logger.info).toHaveBeenCalledWith('Created one-time qURL', {
+        resource_ref: resourceIdLogRef('res-1'), crid_ref: resourceIdLogRef('crid-fixture'), expires_in: '24h',
+      });
     });
 
     it('throws on API error', async () => {
@@ -548,7 +555,7 @@ describe('qURL client', () => {
       expect(opts.method).toBe('DELETE');
       const logger = require('../src/logger');
       expect(logger.info).toHaveBeenCalledWith('Revoked qURL resource', {
-        resource_id: CRID_RESOURCE_ID,
+        resource_ref: resourceIdLogRef(CRID_RESOURCE_ID),
       });
     });
 

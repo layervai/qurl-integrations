@@ -133,6 +133,53 @@ resource can take about 17 minutes. Check completion logs before manual cleanup.
 Load-test upload records rejected by SDK 2.x stay in the cleanup ledger;
 remove them only after cleanup or link expiry is confirmed.
 
+## Resource log references
+
+Upload, mint, create and revoke logs use `resource_ref`, computed by the existing
+`resourceIdLogRef` helper. A returned CRID uses `crid_ref`. Each string reference
+is `sha256:` followed by the first 12 hexadecimal digest characters. Missing or
+non-string IDs produce a type marker. API requests,
+responses and stored IDs are unchanged. Update saved queries that used the raw
+`resource_id` or `crid` log fields.
+
+To find logs for an ID you already obtained through an authorized resource lookup,
+run this offline prompt from the repo root. It accepts resource IDs and CRIDs.
+The ID is not part of shell history, but terminal input is echoed into scrollback:
+
+```sh
+cd apps/discord
+node -e '
+const { createInterface } = require("node:readline");
+const { validateResourceId, resourceIdLogRef } = require("./src/utils/resource-id");
+const input = createInterface({ input: process.stdin, output: process.stdout });
+input.question("Resource ID: ", id => {
+  try {
+    validateResourceId(id);
+    console.log(resourceIdLogRef(id));
+  } catch {
+    console.error("Invalid resource ID format");
+    process.exitCode = 1;
+  } finally {
+    input.close();
+  }
+});
+'
+```
+
+Filter `@message` for the printed reference in Logs Insights. It is a correlation
+hint, not a unique ID or an access credential. It is not a lookup key; a known
+candidate ID can be hashed and compared, so a reference does not conceal a
+guessable ID. Confirm the actual resource through the authorized API before action.
+
+For an orphaned-resource error, start with its logged `qurlId`. With the same
+owner's API key, `GET /v1/qurls/{id}` accepts that qURL ID and returns the parent
+resource. Compare the logged reference against the returned `resource_id` or
+`crid`, then use the existing connector child-revoke path for the logged qURL IDs.
+Keep a foreign/unknown child's 404 or a reference mismatch as a stop condition.
+Do not delete the parent resource: it may contain other recipients' links.
+Verify this lookup on the deployed API before adopting these log-field changes;
+the source contract alone is not a served-API check.
+
 ## Configuration
 
 The bot is a Node.js service (**Node ≥ 22**) backed by DynamoDB. Copy

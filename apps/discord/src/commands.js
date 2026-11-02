@@ -2305,8 +2305,9 @@ async function executeSendPipeline(interaction, {
   } catch (err) {
     // Log only non-secret identifiers so an operator can manually revoke the
     // orphaned qURLs. qurlLink carries its live access token in the fragment
-    // and must never reach logs. resourceId + qurlId are the identities the
-    // bot's child revoke (revokeMintedLinks) needs to reconcile each orphan.
+    // and must never reach logs. The logged qurlId can resolve its parent
+    // through the authorized API; compare resource_ref before child cleanup
+    // (see the README's Resource log references section).
     // Scrub err.message even for AWS service exceptions: validation messages
     // can echo offending request values, but contain useful failure details.
     logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
@@ -2318,7 +2319,7 @@ async function executeSendPipeline(interaction, {
       requestId: err?.$metadata?.requestId,
       errorMessage: persistenceErrorMessageForLog(err),
       linkCount: qurlLinks.length,
-      orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
+      orphanedResources: qurlLinks.map(l => ({ resource_ref: resourceIdLogRef(l.resourceId), qurlId: l.qurlId })),
     });
     clearCooldown(interaction.user.id);
     return interaction.editReply({

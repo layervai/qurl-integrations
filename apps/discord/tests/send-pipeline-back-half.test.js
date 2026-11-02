@@ -2327,8 +2327,8 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     );
     expect(failureLog).toBeDefined();
     expect(failureLog[1].orphanedResources).toEqual([
-      { resourceId: 'resource-public-id', qurlId: 'q_orphaned_link_one' },
-      { resourceId: 'resource-public-id', qurlId: 'q_orphaned_link_two' },
+      { resource_ref: require('../src/utils/resource-id').resourceIdLogRef('resource-public-id'), qurlId: 'q_orphaned_link_one' },
+      { resource_ref: require('../src/utils/resource-id').resourceIdLogRef('resource-public-id'), qurlId: 'q_orphaned_link_two' },
     ]);
     expect(failureLog[1]).toEqual(expect.objectContaining({
       errorName: 'ValidationException',
