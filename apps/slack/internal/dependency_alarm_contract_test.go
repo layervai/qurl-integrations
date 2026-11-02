@@ -159,7 +159,7 @@ func TestHandleGet_CredentialProviderAlarmContract(t *testing.T) {
 					if !errors.Is(lookupErr, auth.ErrWorkspaceNotConfigured) || errors.Is(lookupErr, errCredentialLookup) {
 						t.Fatalf("missing workspace classification changed: %v", lookupErr)
 					}
-					_, lookupErr = h.lookupListedResourceAliasesForGet(context.Background(), slog.Default(), testAdminTeamID, "unconfigured")
+					_, lookupErr = h.lookupListedResourceCandidatesForGet(context.Background(), slog.Default(), testAdminTeamID, map[string]struct{}{testResourceIDFix: {}})
 					if !errors.Is(lookupErr, auth.ErrWorkspaceNotConfigured) || errors.Is(lookupErr, errCredentialLookup) {
 						t.Fatalf("missing workspace classification changed: %v", lookupErr)
 					}
@@ -177,7 +177,7 @@ func TestHandleGet_CredentialProviderAlarmContract(t *testing.T) {
 					newAdminSlashInvoker(t, h).invokeAdminAsync("get $unconfigured", testAdminTeamID, testAdminUserID)
 					msg = "get: tunnel-slug fallback lookup failed"
 				case "resource-alias":
-					_, _, err := h.resolveListedResourceAliasForGet(context.Background(), slog.Default(), testAdminTeamID, "C_test", testAdminUserID, "unconfigured", map[string]struct{}{testResourceIDFix: {}})
+					_, err := h.channelTokenSourceForGet(context.Background(), slog.Default(), testAdminTeamID, "C_test", "unconfigured").candidates(channelTokenResourceAlias, map[string]struct{}{testResourceIDFix: {}})
 					if err == nil {
 						t.Fatal("expected lookup failure")
 					}

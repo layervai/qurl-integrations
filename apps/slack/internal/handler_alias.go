@@ -451,25 +451,33 @@ func logAliasBound(teamID, channelID, alias, slug, resourceID string) {
 	)
 }
 
-func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug string) (string, error) {
+func (h *Handler) lookupTunnelSlugResources(ctx context.Context, teamID, slug string) ([]client.Resource, error) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		if !errors.Is(err, auth.ErrWorkspaceNotConfigured) {
 			err = fmt.Errorf("%w: %w", errCredentialLookup, err)
 		}
-		return "", err
+		return nil, err
 	}
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Slug: slug})
 	if err != nil {
+		return nil, err
+	}
+	return page.Resources, nil
+}
+
+func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug string) (string, error) {
+	resources, err := h.lookupTunnelSlugResources(ctx, teamID, slug)
+	if err != nil {
 		return "", err
 	}
-	for i := range page.Resources {
-		resource := &page.Resources[i]
+	for i := range resources {
+		resource := &resources[i]
 		// Defense-in-depth: the server's `?slug=` filter is single-
 		// purpose, but re-assert type/slug/active here so an upstream
 		// regression can't leak a non-tunnel, wrong-slug, or revoked
-		// resource into mintable state (this resolves the resource_id
-		// that both /qurl-admin set-alias and /qurl get then mint against).
+		// resource into the admin binding. Channel reads apply the shared
+		// channel-token resolver to the same live lookup results.
 		if resource.Type == client.ResourceTypeTunnel && resource.Slug == slug && resource.Status == client.StatusActive {
 			return resource.ResourceID, nil
 		}

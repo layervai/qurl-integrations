@@ -644,27 +644,50 @@ const listMaxResourcePages = 50
 
 const listMetadataConcurrency = 5
 
+var errResourceMetadataUnavailable = errors.New("resource metadata route unavailable")
+
 // fetchAllowedResources reads only channel-bound metadata. Missing IDs do not
 // cause catalog scans or remove bindings: a later request can resolve them again.
 // Old producers retain the bounded catalog walk until the metadata route is deployed.
 func (h *Handler) fetchAllowedResources(ctx context.Context, log *slog.Logger, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+	resources, err := fetchResourceMetadata(ctx, log, c, allowed)
+	if errors.Is(err, errResourceMetadataUnavailable) {
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) {
+			log.Debug("list: metadata route unavailable; using bounded catalog lookup", "status", apiErr.StatusCode)
+		}
+		return h.fetchAllowedResourcesLegacy(ctx, log, c, allowed)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return filterListableResources(resources), nil
+}
+
+// fetchResourceMetadata excludes legacy URL bindings and treats missing IDs as
+// authoritative absences. Only an absent initial route permits catalog fallback;
+// a later batch failure discards all partial results.
+func fetchResourceMetadata(ctx context.Context, log *slog.Logger, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
 	if len(allowed) == 0 {
 		return []client.Resource{}, nil
 	}
 	ids := make([]string, 0, len(allowed))
 	for id := range allowed {
-		ids = append(ids, id)
+		if !isLegacyDirectURLBinding(id) {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return []client.Resource{}, nil
 	}
 	sort.Strings(ids)
 	firstEnd := min(len(ids), client.ResourceBatchGetMaxIDs)
 	first, err := c.BatchGetResources(ctx, ids[:firstEnd])
 	if err != nil {
 		var apiErr *client.APIError
-		// TODO(upstream-contract): batch-get returns 200 [] for missing IDs;
-		// only absent routes use 404/405. Auth and store errors fail closed.
+		// TODO(upstream-contract): unknown IDs return 200 []; only an absent route uses 404/405.
 		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusMethodNotAllowed) {
-			log.Debug("list: metadata route unavailable; using bounded catalog lookup", "status", apiErr.StatusCode)
-			return h.fetchAllowedResourcesLegacy(ctx, log, c, allowed)
+			return nil, fmt.Errorf("%w: %w", errResourceMetadataUnavailable, err)
 		}
 		return nil, err
 	}
@@ -704,7 +727,7 @@ launch:
 		matched = append(matched, resources...)
 	}
 	log.Debug("list: resource metadata lookup complete", "requested", len(ids), "returned", len(matched))
-	return filterListableResources(matched), nil
+	return matched, nil
 }
 
 // fetchAllowedResourcesLegacy satisfies the full channel allow-set across pages (#590/#596/#599), up to the cap.
