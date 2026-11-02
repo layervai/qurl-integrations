@@ -531,6 +531,39 @@ describe('POST /webhooks/qurl — coarse unknown-owner IP budget', () => {
   });
 });
 
+describe('POST /webhooks/qurl — unknown-owner capacity preservation', () => {
+  beforeAll(() => {
+    jest.resetModules();
+  });
+
+  it('keeps exhausted owner counters at capacity while admitting a valid known owner', async () => {
+    const hardening = jest.requireActual('../src/utils/webhook-hardening');
+    const createLimiter = hardening.createBadSigLimiter;
+    const factory = jest.spyOn(hardening, 'createBadSigLimiter').mockImplementation((options = {}) =>
+      createLimiter({ ...options, globalCap: options.max === 150 ? 2 : options.globalCap }));
+    let isolatedApp;
+    try {
+      // eslint-disable-next-line global-require
+      isolatedApp = require('../src/server').app;
+    } finally {
+      factory.mockRestore();
+    }
+    const send = (ownerId) => {
+      const raw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: ownerId });
+      return request(isolatedApp).post('/webhooks/qurl')
+        .set('Content-Type', 'application/json').set('QURL-Signature', signBody(raw)).send(raw);
+    };
+    for (let i = 0; i < 150; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await send('usr_drifted')).status).toBe(401);
+    }
+    expect((await send('usr_second')).status).toBe(401);
+    expect((await send('usr_rotated')).status).toBe(429);
+    expect((await send('usr_drifted')).status).toBe(429);
+    expect((await send('usr_test')).status).toBe(200);
+  });
+});
+
 describe('POST /webhooks/qurl — bad-sig limiter scope (only HMAC failures count)', () => {
   beforeAll(() => {
     jest.resetModules();

@@ -67,7 +67,9 @@ const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
 // the existing limiter's global entry cap. A wider IP budget limits unknown-owner
 // 401 responses under owner rotation. Attempts already limited for one
 // owner do not consume that IP budget; verified known owners bypass both.
-const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000 });
+// At the tuple-store cap, refuse unseen unknown owners until the sweep frees
+// space rather than let owner rotation erase active counters.
+const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000, preserveAtCapacity: true });
 const unknownOwnerIpLimiter = createBadSigLimiter({ max: 1500, windowMs: 60_000 });
 
 // Reason codes returned from verifyAndResolve. Caller maps them to
