@@ -1319,3 +1319,17 @@ func TestRedactingJSONHandlerSuppressesMatchedSecretContainers(t *testing.T) {
 		}
 	}
 }
+
+func TestRedactingJSONHandlerSuppressesSensitiveNumericGroupsButKeepsScalarCounters(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := slog.New(NewRedactingJSONHandler(&buf, nil))
+	logger.Info("usage", slog.Group("token_usage", slog.Int("input", 7), slog.Int("output", 3)), slog.Int("token_count", 10))
+	fields := decodeLogLine(t, buf.String())
+	if fields["token_usage"] != redactedLogValue {
+		t.Fatalf("sensitive container was not suppressed: %#v", fields)
+	}
+	if fields["token_count"] != float64(10) {
+		t.Fatalf("scalar counter changed: %#v", fields)
+	}
+}

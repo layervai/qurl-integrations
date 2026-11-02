@@ -135,7 +135,7 @@ function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecr
       // Blank non-empty strings; recurse into non-null objects/arrays so a
       // `{ auth_token: { ... } }` accident still has its inner sensitive
       // keys examined. General-secret recursion uses exact-match — legit audit
-      // dimensions like `tokens_minted` survive (pinned by test). Push outer key
+      // dimensions like `tokens_minted` survive (pinned by test). Add the outer key
       // BEFORE recursing for parent-first warn-line order. qURL link
       // containers are the exception and are suppressed as a unit below.
       secretKeys.add(k);

@@ -80,6 +80,7 @@ describe('logger', () => {
         expect(line).not.toContain('another-private-value');
         expect(line).toContain('[REDACTED]');
         expect(line).toContain('"adjacent_count":9');
+        if (shape === 'wrapper' && key === 'hash') expect(line).toContain('"count":7');
       }
     });
   });

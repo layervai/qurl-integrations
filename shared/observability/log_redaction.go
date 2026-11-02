@@ -20,8 +20,8 @@ const (
 
 // Mirrors Discord's substring policy exactly; intentionally do not broaden
 // this to generic names like "key" without changing both implementations.
-// This mirrors Discord's redact() path, not its wider audit() secret list;
-// #221 should account for both lists when consolidating the definitions.
+// Key-name parity with Discord's ordinary logger is covered by source guards;
+// its audit policy adds exact credential names.
 var redactSubstrings = [...]string{
 	"token",
 	"secret",
@@ -45,8 +45,8 @@ var contentHashLogKeys = [...]string{
 	"body_hash",
 }
 
-// Keep this mirror discoverable with the Discord logger until #221
-// consolidates the cross-app redaction key definitions.
+// The cross-language source guard keeps this set in sync with Discord's
+// canonical exact-match set, which also feeds its audit policy.
 var redactExactKeys = func() map[string]struct{} {
 	keys := make(map[string]struct{}, len(contentHashLogKeys)+1)
 	for _, key := range contentHashLogKeys {
@@ -63,12 +63,11 @@ func NewRedactingJSONHandler(w io.Writer, opts *slog.HandlerOptions) slog.Handle
 }
 
 // NewRedactingHandler wraps next with qURL's shared log redaction policy.
-// For Discord parity, matched keys blank non-empty strings, byte sequences, and
-// JSON-marshaled string scalars. Other scalars, including numbers, are
-// preserved; most matched-key containers and collections are walked by inner
-// field names rather than fully suppressed. qURL access-link containers are
-// suppressed as a unit because inner keys are not guaranteed to identify
-// bearer values. Map values are walked only when their Go map keys are strings.
+// Key-name rules match Discord. Matched non-empty Go containers are suppressed
+// as a unit because wrappers and marshalers can hide sensitive values under
+// harmless inner names. Scalar counters and unmatched context are preserved.
+// Discord instead walks general containers, hiding strings and keeping numbers.
+// Map values are walked only when their Go map keys are strings.
 // Struct values passed through slog.Any are only reflected when nested
 // redaction changes them. In that case, rich struct output can differ from
 // encoding/json details like omitempty, string coercion, or embedded-field
