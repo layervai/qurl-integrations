@@ -63,10 +63,12 @@ const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
 //
 // Unknown owners share NAT egress with valid tenants, so budget (IP, owner)
 // independently and never apply this limiter to a verified known owner.
-// Owner IDs are untrusted: hash the tuple to bound retained key size, and keep
-// the existing limiter's global entry cap. Rotating owners can avoid this
-// per-owner budget; it does not limit aggregate request volume.
+// Owner IDs are untrusted: hash the tuple to bound retained key size and keep
+// the existing limiter's global entry cap. A wider IP budget limits unknown-owner
+// 401 responses under owner rotation. Attempts already limited for one
+// owner do not consume that IP budget; verified known owners bypass both.
 const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000 });
+const unknownOwnerIpLimiter = createBadSigLimiter({ max: 1500, windowMs: 60_000 });
 
 // Reason codes returned from verifyAndResolve. Caller maps them to
 // HTTP status + audit event + rate-limiter interaction in one place
@@ -1005,7 +1007,8 @@ function respondRateLimited(res, ip) {
 
 router.post('/qurl', async (req, res) => {
   const ip = req.ip || 'unknown';
-  // Signature abuse remains IP-scoped and is checked before verification.
+  // Signature abuse stays IP-scoped before verification; unknown budgets
+  // follow the registry lookup so valid/recovered owners cannot be blocked.
   if (badSigLimiter.shouldThrottle(ip)) return respondRateLimited(res, ip);
 
   const { result, ownerId, body } = verifyAndResolve(req);
@@ -1055,7 +1058,10 @@ router.post('/qurl', async (req, res) => {
     if (isHmacFailure) totalInWindow = badSigLimiter.recordBadSig(ip);
     else if (isUnknownOwner) {
       const key = createHash('sha256').update(JSON.stringify([ip, ownerId ?? null])).digest('hex');
-      if (unknownOwnerLimiter.shouldThrottle(key)) return respondRateLimited(res, ip);
+      if (unknownOwnerLimiter.shouldThrottle(key) || unknownOwnerIpLimiter.shouldThrottle(ip)) {
+        return respondRateLimited(res, ip);
+      }
+      unknownOwnerIpLimiter.recordBadSig(ip);
       totalInWindow = unknownOwnerLimiter.recordBadSig(key);
       if (result === VERIFY_RESULTS.OWNER_ID_MISSING) {
         logger.warn('qURL webhook raw body missing or non-string owner_id');
@@ -1190,6 +1196,7 @@ router.post('/qurl', async (req, res) => {
 router.stopIntervals = function stopIntervals() {
   badSigLimiter.stopSweep();
   unknownOwnerLimiter.stopSweep();
+  unknownOwnerIpLimiter.stopSweep();
   clearInterval(senderCounterCacheSweepTimer);
   for (const { timer } of senderCounterFlushTimers.values()) clearTimeout(timer);
   senderCounterFlushTimers.clear();

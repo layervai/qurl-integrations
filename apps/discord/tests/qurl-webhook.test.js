@@ -1,6 +1,7 @@
 
 const crypto = require('crypto');
 const express = require('express');
+const { AUDIT_EVENTS } = require('../src/constants');
 
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
@@ -488,6 +489,45 @@ describe('POST /webhooks/qurl — unknown-owner fairness behind shared NAT', () 
     expect((await send('usr_test')).status).toBe(200);
     mockOwnerSecrets.set(owner, 'test-qurl-secret');
     expect((await send(owner)).status).toBe(200);
+  });
+});
+
+describe('POST /webhooks/qurl — coarse unknown-owner IP budget', () => {
+  beforeAll(() => {
+    jest.resetModules();
+  });
+
+  function send(app, ownerId, ip) {
+    const raw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: ownerId });
+    return request(app).post('/webhooks/qurl')
+      .set('X-Forwarded-For', ip).set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw)).send(raw);
+  }
+
+  it('bounds rotating-owner failures while admitting a verified sibling', async () => {
+    // eslint-disable-next-line global-require
+    const isolatedApp = require('../src/server').app;
+    isolatedApp.set('trust proxy', true);
+    for (let i = 0; i < 1500; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await send(isolatedApp, `usr_rotating_${i}`, '198.51.100.1')).status).toBe(401);
+    }
+    expect((await send(isolatedApp, 'usr_next', '198.51.100.1')).status).toBe(429);
+    expect((await send(isolatedApp, 'usr_test', '198.51.100.1')).status).toBe(200);
+    expect(jest.requireMock('../src/logger').audit)
+      .toHaveBeenCalledWith(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, {});
+  });
+
+  it('does not let a single exhausted owner consume the wider IP budget', async () => {
+    // eslint-disable-next-line global-require
+    const isolatedApp = require('../src/server').app;
+    isolatedApp.set('trust proxy', true);
+    for (let i = 0; i < 1500; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await send(isolatedApp, 'usr_drifted', '198.51.100.2')).status).toBe(i < 150 ? 401 : 429);
+    }
+    expect((await send(isolatedApp, 'usr_sibling', '198.51.100.2')).status).toBe(401);
+    expect((await send(isolatedApp, 'usr_test', '198.51.100.2')).status).toBe(200);
   });
 });
 
