@@ -600,6 +600,7 @@ func (o *globalOpts) mintRuleLink(ctx context.Context, client qurlapi.Client, ru
 	}
 	// The same checks share applies before any link is printed.
 	link, err := client.MintLimitedLink(ctx, id, *limits)
+	o.forgetTombstonedLinkLimits(ctx, id, err)
 	if err = verifyShareLink(id, link, err); err == nil {
 		err = o.verifyLink(ctx, link.QURL, id)
 	}
@@ -635,6 +636,24 @@ func (o *globalOpts) savedLinkLimits(ctx context.Context, id string) (*accessrul
 		return nil, ruleCommandError(err)
 	}
 	return limits, nil
+}
+
+// Only the resource tombstone confirms these defaults can never be used again.
+func (o *globalOpts) forgetTombstonedLinkLimits(ctx context.Context, id string, requestErr error) {
+	var apiErr *qurlapi.Error
+	if ctx.Err() != nil || !errors.As(requestErr, &apiErr) || apiErr.StatusCode != http.StatusGone || apiErr.Code != "resource_tombstoned" {
+		return
+	}
+	store, err := o.shareRuleStore()
+	if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
+		return
+	}
+	if err == nil {
+		err = store.Set(ctx, id, nil)
+	}
+	if err != nil {
+		o.printer().Warnf("Saved link limits for the deleted resource could not be removed: %v", err)
+	}
 }
 
 func forgetLinkLimits(ctx context.Context, dir, id string) error {

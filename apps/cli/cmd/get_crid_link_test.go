@@ -1663,13 +1663,14 @@ func accountKeyOpts(
 ) *globalOpts {
 	t.Helper()
 	opts := &globalOpts{
-		resolvedEndpoint: srv.URL,
-		version:          "test",
-		lookupEnv:        func(key string) (string, bool) { return testAPIKey, key == "QURL_API_KEY" },
-		newRequestID:     func() string { return "cli-req-fixed" },
-		sleep:            func(time.Duration) {},
-		cridLinkOffered:  offered,
-		requestCRIDLink:  answer,
+		resolveShareStateDir: func(string) (string, error) { return "", connectorstate.ErrNoDefaultStateDir },
+		resolvedEndpoint:     srv.URL,
+		version:              "test",
+		lookupEnv:            func(key string) (string, bool) { return testAPIKey, key == "QURL_API_KEY" },
+		newRequestID:         func() string { return "cli-req-fixed" },
+		sleep:                func(time.Duration) {},
+		cridLinkOffered:      offered,
+		requestCRIDLink:      answer,
 		requestCRIDLinkAsDevice: func(ctx context.Context, deviceKey qurl.DeviceKeySource, resourceCRID string) (*qurl.CRIDLink, error) {
 			link, err := answer(ctx, resourceCRID)
 			if !errors.Is(err, qurl.ErrCRIDLinkNotFound) {
