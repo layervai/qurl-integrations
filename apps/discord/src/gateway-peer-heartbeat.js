@@ -62,6 +62,8 @@ const {
   DeleteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
+const { AUDIT_EVENTS } = require('./constants');
+
 const DEFAULT_FRESHNESS_WINDOW_SECONDS = 6;
 const DEFAULT_TTL_SECONDS = 60;
 
@@ -145,10 +147,20 @@ function createPeerHeartbeat({
     // Only write lock_holder if provided. DDB rejects undefined
     // attribute values and back-compat callers may not pass it.
     if (lockHolder) item.lock_holder = lockHolder;
-    await ddbClient.send(new PutCommand({
-      TableName: tableName,
-      Item: item,
-    }));
+    try {
+      await ddbClient.send(new PutCommand({
+        TableName: tableName,
+        Item: item,
+      }));
+    } catch (err) {
+      logger.audit?.(AUDIT_EVENTS.GATEWAY_PEER_HEARTBEAT_WRITE_ERROR, {
+        shard_id: shardId, instance_id: instanceId, result: 'error',
+      });
+      throw err;
+    }
+    logger.audit?.(AUDIT_EVENTS.GATEWAY_PEER_HEARTBEAT_WRITE, {
+      shard_id: shardId, instance_id: instanceId, result: 'written',
+    });
   }
 
   // Scan-and-filter for peers eligible to receive a push-handoff.

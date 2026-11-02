@@ -25,7 +25,7 @@ function makeLock({ clock, ttlSeconds, instanceId = 'inst-A', lockHolder = 'task
   const docClient = DynamoDBDocumentClient.from(rawClient);
   const ddbMock = mockClient(docClient);
   const logger = {
-    info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+    info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
   };
   const lock = createGatewayLock({
     ddbClient: docClient,
@@ -444,5 +444,52 @@ describe('readCurrentHolder', () => {
 describe('default TTL', () => {
   it('exports the documented 6 second lease', () => {
     expect(DEFAULT_TTL_SECONDS).toBe(6);
+  });
+});
+
+describe('gateway lock audit counters', () => {
+  const { AUDIT_EVENTS } = require('../src/constants');
+  const identity = { shard_id: '0:1', instance_id: 'inst-A' };
+
+  it('counts successful acquisition and renewal, and only actual renewal CAS loss', async () => {
+    const { lock, ddbMock, logger } = makeLock();
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(UpdateCommand).resolves({});
+    expect(await lock.acquireLock()).toMatchObject({ acquired: true });
+    expect(await lock.renewLock()).toMatchObject({ renewed: true });
+    ddbMock.on(UpdateCommand).rejects(ccfe());
+    expect(await lock.renewLock()).toEqual({ renewed: false });
+    expect(await lock.renewLock()).toEqual({ renewed: false });
+    expect(logger.audit.mock.calls).toEqual([
+      [AUDIT_EVENTS.GATEWAY_LOCK_ACQUIRED, { ...identity, result: 'acquired' }],
+      [AUDIT_EVENTS.GATEWAY_LOCK_RENEWED, { ...identity, result: 'renewed' }],
+      [AUDIT_EVENTS.GATEWAY_LOCK_LOST_CAS, { ...identity, result: 'cas_failed' }],
+    ]);
+  });
+
+  it('does not report peer contention or transport errors as unexpected CAS loss', async () => {
+    const { lock, ddbMock, logger } = makeLock();
+    ddbMock.on(PutCommand).rejects(ccfe());
+    expect(await lock.acquireLock()).toEqual({ acquired: false });
+    expect(logger.audit).not.toHaveBeenCalled();
+    ddbMock.on(PutCommand).resolves({});
+    await lock.acquireLock();
+    logger.audit.mockClear();
+    const failure = new Error('DDB transport unavailable');
+    ddbMock.on(UpdateCommand).rejects(failure);
+    await expect(lock.renewLock()).rejects.toBe(failure);
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  it.each(['released', 'transferred'])('counts successful %s outcomes on the release counter', async (result) => {
+    const { lock, ddbMock, logger } = makeLock();
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(UpdateCommand).resolves({});
+    ddbMock.on(DeleteCommand).resolves({});
+    await lock.acquireLock();
+    logger.audit.mockClear();
+    if (result === 'released') expect(await lock.releaseLock()).toEqual({ released: true });
+    else expect(await lock.transferLock('inst-B', 'task-B/inst-B')).toMatchObject({ transferred: true });
+    expect(logger.audit.mock.calls).toEqual([[AUDIT_EVENTS.GATEWAY_LOCK_RELEASED, { ...identity, result }]]);
   });
 });

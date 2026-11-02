@@ -23,7 +23,7 @@ function makeHeartbeat({
   const docClient = DynamoDBDocumentClient.from(rawClient);
   const ddbMock = mockClient(docClient);
   const logger = {
-    info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+    info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
   };
   const heartbeat = createPeerHeartbeat({
     ddbClient: docClient,
@@ -341,5 +341,21 @@ describe('default constants', () => {
     expect(DEFAULT_FRESHNESS_WINDOW_SECONDS).toBe(6);
     expect(DEFAULT_TTL_SECONDS).toBe(60);
     expect(DEFAULT_TTL_SECONDS).toBe(DEFAULT_FRESHNESS_WINDOW_SECONDS * 10);
+  });
+});
+
+describe('peer heartbeat audit counters', () => {
+  const { AUDIT_EVENTS } = require('../src/constants');
+
+  it('counts completed writes and transport failures while preserving the error', async () => {
+    const { heartbeat, ddbMock, logger } = makeHeartbeat();
+    ddbMock.on(PutCommand).resolves({});
+    await heartbeat.writeHeartbeat();
+    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.GATEWAY_PEER_HEARTBEAT_WRITE, { shard_id: '0:1', instance_id: 'inst-A', result: 'written' });
+    const failure = new Error('DDB unavailable');
+    ddbMock.on(PutCommand).rejects(failure);
+    await expect(heartbeat.writeHeartbeat()).rejects.toBe(failure);
+    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.GATEWAY_PEER_HEARTBEAT_WRITE_ERROR, { shard_id: '0:1', instance_id: 'inst-A', result: 'error' });
+    expect(logger.audit).toHaveBeenCalledTimes(2);
   });
 });

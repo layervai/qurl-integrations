@@ -281,6 +281,14 @@ const AUDIT_EVENTS = {
   // See commands.js handleCommand for the precedence table.
   INTERACTION_HANDLED: 'interaction_handled',
 
+  // TODO(upstream-contract): gateway coordination filters and alarm in the infra repo.
+  GATEWAY_LOCK_ACQUIRED: 'gateway_lock_acquired_total',
+  GATEWAY_LOCK_RENEWED: 'gateway_lock_renewed_total',
+  GATEWAY_LOCK_LOST_CAS: 'gateway_lock_lost_cas_total',
+  GATEWAY_LOCK_RELEASED: 'gateway_lock_released_total',
+  GATEWAY_PEER_HEARTBEAT_WRITE: 'gateway_peer_heartbeat_writes_total',
+  GATEWAY_PEER_HEARTBEAT_WRITE_ERROR: 'gateway_peer_heartbeat_write_errors_total',
+
   // Positive-signal heartbeat. Emitted every 30 s when the composite
   // readiness check passes (client.isReady() && ws.ping > 0 &&
   // ack_age_ms < 60000). Missing emissions = wedge.
