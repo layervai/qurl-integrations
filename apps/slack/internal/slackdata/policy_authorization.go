@@ -154,7 +154,7 @@ func (s *Store) updatePolicy(ctx context.Context, in *dynamodb.UpdateItemInput) 
 	if !ok {
 		return &Error{StatusCode: http.StatusInternalServerError, Title: "Atomic policy writes are unavailable"}
 	}
-	_, err = transactional.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+	request := &dynamodb.TransactWriteItemsInput{
 		ClientRequestToken: aws.String(rand.Text()),
 		TransactItems: []ddbtypes.TransactWriteItem{
 			{ConditionCheck: &ddbtypes.ConditionCheck{
@@ -166,8 +166,8 @@ func (s *Store) updatePolicy(ctx context.Context, in *dynamodb.UpdateItemInput) 
 			}},
 			{Update: update},
 		},
-	})
-	return policyTransactionError(err, &authorization)
+	}
+	return commitPolicyUpdate(ctx, transactional, request, &authorization)
 }
 
 // deleteUnboundPolicy removes late old writes regardless of their wall-clock
@@ -255,4 +255,32 @@ func policyTransactionError(err error, authorization *PolicyAuthorization) error
 		}
 	}
 	return err
+}
+
+// A known retired row can be cleared without adopting its grants. Both the
+// cleanup and retry retain the original authority; neither can follow a rebind.
+func commitPolicyUpdate(ctx context.Context, client policyTransactionClient, request *dynamodb.TransactWriteItemsInput, authorization *PolicyAuthorization) error {
+	_, err := client.TransactWriteItems(ctx, request)
+	var canceled *ddbtypes.TransactionCanceledException
+	if !errors.As(err, &canceled) || len(canceled.CancellationReasons) != 2 || aws.ToString(canceled.CancellationReasons[0].Code) != "None" || aws.ToString(canceled.CancellationReasons[1].Code) != policyConditionFailed {
+		return policyTransactionError(err, authorization)
+	}
+	retired, present, identityErr := policyIdentity(canceled.CancellationReasons[1].Item, attrPolicyInstallation)
+	if identityErr != nil || !present || retired == authorization.installation {
+		return policyTransactionError(err, authorization)
+	}
+	update := request.TransactItems[1].Update
+	_, cleanupErr := client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{ClientRequestToken: aws.String(rand.Text()), TransactItems: []ddbtypes.TransactWriteItem{
+		request.TransactItems[0],
+		{Delete: &ddbtypes.Delete{TableName: update.TableName, Key: update.Key, ConditionExpression: aws.String(exprPolicyInstallation + " = " + valuePolicyInstallation), ExpressionAttributeNames: map[string]string{exprPolicyInstallation: attrPolicyInstallation}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{valuePolicyInstallation: stringAttr(retired)}}},
+	}})
+	if cleanupErr != nil {
+		if errors.As(cleanupErr, &canceled) {
+			return policyWorkspaceChanged()
+		}
+		return cleanupErr
+	}
+	request.ClientRequestToken = aws.String(rand.Text())
+	_, err = client.TransactWriteItems(ctx, request)
+	return policyTransactionError(err, authorization)
 }

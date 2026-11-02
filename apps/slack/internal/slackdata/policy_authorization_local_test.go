@@ -147,6 +147,10 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 				mutation.ExpressionAttributeValues[":now"] = stringAttr("2026-11-02T12:00:00Z")
 				wantResources = []string{"r_prior"}
 				wantConflict = true
+				if scenario == "retired policy row" {
+					wantConflict = false
+					wantResources = []string{"r_old"}
+				}
 				if scenario == "legacy existing policy" {
 					wantConflict = false
 					wantResources = []string{"r_old", "r_prior"}

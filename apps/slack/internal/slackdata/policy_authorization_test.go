@@ -3,6 +3,7 @@ package slackdata
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -297,5 +298,36 @@ func TestPolicyWorkspaceConflictSurvivesStoreErrorMapping(t *testing.T) {
 	var mapped *Error
 	if !errors.As(err, &mapped) || mapped.Code != ErrCodePolicyWorkspaceChanged {
 		t.Fatalf("workspace conflict lost its code: %v", err)
+	}
+}
+
+func TestPolicyRetiredRowRecoveryStopsOnUnknownFailure(t *testing.T) {
+	for _, failAt := range []int{2, 3} {
+		t.Run(fmt.Sprintf("transaction_%d", failAt), func(t *testing.T) {
+			failure := errors.New("commit response interrupted")
+			calls := 0
+			tokens := map[string]bool{}
+			client := &policyTestDDB{stubDDB: &stubDDB{}, transact: func(in *dynamodb.TransactWriteItemsInput) error {
+				calls++
+				token := aws.ToString(in.ClientRequestToken)
+				if token == "" || tokens[token] {
+					t.Fatal("recovery reused a transaction identity")
+				}
+				tokens[token] = true
+				if calls == 1 {
+					return &ddbtypes.TransactionCanceledException{CancellationReasons: []ddbtypes.CancellationReason{{Code: aws.String("None")}, {Code: aws.String(policyConditionFailed), Item: map[string]ddbtypes.AttributeValue{attrPolicyInstallation: stringAttr("retired")}}}}
+				}
+				if calls == failAt {
+					return failure
+				}
+				return nil
+			}}
+			store := newStore(client)
+			authorization := PolicyAuthorization{store: store, teamID: "T1", userID: testCallerSlackID, ownerID: testOwnerSlackID, generation: "current", installation: "current"}
+			err := store.ExposeResourceToChannel(authorization.Context(context.Background()), "T1", "C1", "r_requested")
+			if !errors.Is(err, failure) || calls != failAt {
+				t.Fatalf("unknown failure was retried or lost: calls=%d err=%v", calls, err)
+			}
+		})
 	}
 }
