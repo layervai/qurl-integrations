@@ -77,6 +77,48 @@ const (
 	ecsRestartAttemptPeriodSeconds  = 60
 )
 
+// EFS access points select per-slug directories; ECS rootDirectory must stay "/".
+const ecsFargateVolumesJSON = `{
+  "volumes": [
+    {
+      "name": "qurl-agent-state",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "<fs-id>",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "<fsap-agent-state-id>",
+          "iam": "ENABLED"
+        }
+      }
+    },
+    {
+      "name": "qurl-config",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "<fs-id>",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "<fsap-config-id>",
+          "iam": "ENABLED"
+        }
+      }
+    },
+    {
+      "name": "qurl-bootstrap",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "<fs-id>",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "<fsap-bootstrap-id>",
+          "iam": "ENABLED"
+        }
+      }
+    }
+  ]
+}`
+
 func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (string, error) {
 	containerJSON, err := renderECSSidecarContainerJSON(args, image)
 	if err != nil {
@@ -91,6 +133,10 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		return "", err
 	}
 	containerBlock, err := slackCodeBlock(containerJSON)
+	if err != nil {
+		return "", err
+	}
+	volumesBlock, err := slackCodeBlock(ecsFargateVolumesJSON)
 	if err != nil {
 		return "", err
 	}
@@ -109,7 +155,9 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		configBlock + "\n\n" +
 		"3. Add this non-essential qURL sidecar container to the same task definition as the target container:\n\n" +
 		containerBlock + "\n\n" +
-		"4. Add EFS-backed volumes named qurl-agent-state, qurl-config, and qurl-bootstrap. Do not share qurl-agent-state across concurrently running sidecars. Stop the old task before a replacement mounts the same state (for an ECS service, use deployment maximumPercent 100 and minimumHealthyPercent 0). After the task logs show qURL connected, deploy a warm-start revision without `--enrollment-token-file` or the qurl-bootstrap mount; verify it reconnects from qurl-agent-state, then delete the enrollment-token file.", nil
+		"4. Merge this volumes block into the task definition. Replace the file-system and access-point placeholders with your EFS IDs:\n\n" +
+		volumesBlock + "\n\n" +
+		"5. Create three EFS access points with separate root directories `/qurl/" + args.Slug + "/state`, `/qurl/" + args.Slug + "/config`, and `/qurl/" + args.Slug + "/bootstrap`. Set each access point POSIX user and root-directory owner to UID/GID `" + ecsConnectorUser + "` with mode `0700`. Keep ECS rootDirectory `/`; the access point selects its own root. Put share.yaml and enrollment-token at the roots of the config and bootstrap access points; the sidecar reads `/etc/qurl/share.yaml` and `/run/secrets/qurl/enrollment-token`. Its writable state is under `/var/lib/qurl-volume/state`. Use the task role for EFS IAM authorization: allow elasticfilesystem:ClientMount on the file system, restricted to these access points with the elasticfilesystem:AccessPointArn condition. Allow elasticfilesystem:ClientWrite only through the state access point. Permit NFS port 2049 between the task and EFS mount-target security groups. Do not share qurl-agent-state across concurrently running sidecars; each active task needs its own state directory and access point. Stop the old task before a replacement mounts the same state (for an ECS service, use deployment maximumPercent 100 and minimumHealthyPercent 0). After the task logs show qURL connected, deploy a warm-start revision without `--enrollment-token-file` or the qurl-bootstrap mount; verify it reconnects from qurl-agent-state, then delete the enrollment-token file.", nil
 }
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (string, error) {
