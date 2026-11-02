@@ -9169,7 +9169,7 @@ const commands = [
           logger.warn('qURL status configuration read failed', {
             guild_id: interaction.guildId,
             status: Number.isInteger(error?.$metadata?.httpStatusCode)
-              ? error.$metadata.httpStatusCode : qurlApiErrorStatus(error),
+              ? error.$metadata.httpStatusCode : (Number.isInteger(error?.status) ? error.status : null),
             code: error?.code ?? null,
             error_name: error?.name ?? null,
             failure_stage: 'configuration_store',
@@ -9259,6 +9259,7 @@ const commands = [
             logger.warn('qURL status identity check failed', {
               guild_id: interaction.guildId,
               status,
+              // Reuse callQurl's redacted format; never inspect the original message/body.
               code: error?.code ?? (failureStage === 'qurl_service' ? qurlApiErrorCode(error) : null),
               error_name: error?.name ?? null,
               failure_stage: failureStage,
@@ -9293,8 +9294,11 @@ const commands = [
             // getIdentity enforces this shape; default anyway so a contract
             // drift lands in the verdict machinery, not the generic catch-all.
             const { key_prefix: rawKeyPrefix, scopes: allScopes = [] } = identity?.api_key ?? {};
-            const keyId = typeof identity?.api_key?.key_id === 'string'
-              ? sanitizeIdentityValue(identity.api_key.key_id) : '';
+            // Keep IDs whole: shortening them could hide the only differing byte.
+            // Reject unsafe or oversized values instead of displaying a partial ID.
+            const rawKeyId = identity?.api_key?.key_id;
+            const keyId = typeof rawKeyId === 'string' && rawKeyId.length <= 128
+              && !/[^A-Za-z0-9_-]/.test(rawKeyId) ? rawKeyId : '';
             const keyIdLine = keyId ? 'Key ID: `' + keyId + '`\n' : '';
             // TODO(upstream-contract): 12 mirrors qurl-service's
             // APIKeyDisplayPrefixLength (the issued prefix is exactly 12 bytes),

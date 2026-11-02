@@ -212,6 +212,7 @@ async function getIdentity(apiKey, guildId) {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (cause) {
+      // Fetch rejects redirects and URL failures too; keep this category broad and body-free.
       const code = cause?.name === 'TimeoutError' || cause?.name === 'AbortError'
         ? ERROR_CODE_TIMEOUT : ERROR_CODE_NETWORK;
       const error = qurlApiError('GET', '/me', code);

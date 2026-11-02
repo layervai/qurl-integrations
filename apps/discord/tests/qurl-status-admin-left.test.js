@@ -689,7 +689,7 @@ describe('/qurl status through the real identity transport', () => {
     ['invalid shape', () => Promise.resolve({ ok: true, status: 200, json: async () => ({ data: {} }) }), 'identity_invalid_shape', null],
     ['HTTP failure', () => Promise.resolve({ ok: false, status: 503, body: { cancel: jest.fn() } }), '503', 503],
   ])('records a safe %s code after transport redaction', async (_name, fetchResult, code, status) => {
-    db.getGuildConfig.mockResolvedValue({ configured_by: 'admin-original', updated_at: '2026-01-01' });
+    db.getGuildConfig.mockResolvedValueOnce({ configured_by: 'admin-original', updated_at: '2026-01-01' });
     mockGetIdentity.mockImplementation(jest.requireActual('../src/qurl').getIdentity);
     globalThis.fetch = jest.fn(fetchResult);
     const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
@@ -720,12 +720,25 @@ describe('/qurl status through the real identity transport', () => {
 
   it('distinguishes keys that share the same display prefix', async () => {
     db.getGuildConfig.mockResolvedValue({ configured_by: 'admin-original', updated_at: '2026-01-01' });
-    for (const keyId of ['key-first', 'key-second']) {
+    for (const keyId of ['key-first', 'key-second', 'a'.repeat(127) + '1', 'a'.repeat(127) + '2']) {
       mockGetIdentity.mockResolvedValue({ api_key: { key_id: keyId, key_prefix: 'same-prefix', scopes: [] } });
       const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
       // eslint-disable-next-line no-await-in-loop
       await handleCommand(interaction);
       expect(interaction._editReply.mock.calls[0][0].content).toContain('Key ID: `' + keyId + '`');
     }
+  });
+});
+
+describe('/qurl status key-ID display boundary', () => {
+  it.each(['`@everyone`', '@everyone', 'x'.repeat(129), 'key\nnew-line'])('omits an unsafe or oversized key ID %s', async keyId => {
+    db.getGuildConfig.mockResolvedValueOnce({ configured_by: 'admin-original', updated_at: '2026-01-01' });
+    mockGetIdentity.mockResolvedValueOnce({ api_key: { key_id: keyId, key_prefix: 'same-prefix', scopes: [] } });
+    const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
+    await handleCommand(interaction);
+    const content = interaction._editReply.mock.calls[0][0].content;
+    expect(content).not.toContain('Key ID:');
+    expect(content).not.toContain('@everyone');
+    expect(content.length).toBeLessThanOrEqual(2000);
   });
 });
