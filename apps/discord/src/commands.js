@@ -4800,6 +4800,8 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
     users: [...userMap.values()],
     massMentionDenied,
     droppedFromRoles: droppedFromRolesSet.size,
+    droppedFromEveryoneRoleOnly: droppedFromRolesSet.size > 0
+      && interaction.roles?.size === 1 && interaction.roles.has(guild?.id),
     iterationBoundHit: boundLogged,
     everyoneCacheCold,
     namedRoleMembersUnavailable,
@@ -4841,6 +4843,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  *   transientFailureIds?: string[],
  *   droppedBots?: number,
  *   droppedFromRoles?: number,
+ *   droppedFromEveryoneRoleOnly?: boolean,
  *   iterationBoundHit?: boolean,
  *   massMentionDenied?: boolean,
  *   everyoneCacheCold?: boolean,
@@ -4855,6 +4858,7 @@ function renderRecipientWarnings({
   transientFailureIds = [],
   droppedBots = 0,
   droppedFromRoles = 0,
+  droppedFromEveryoneRoleOnly = false,
   iterationBoundHit = false,
   massMentionDenied = false,
   everyoneCacheCold = false,
@@ -4913,7 +4917,9 @@ function renderRecipientWarnings({
     // recipient count). Distinct copy from droppedBots since the
     // user took a different picker action (selecting a role rather
     // than an individual bot).
-    lines.push(`• ${droppedFromRoles} bot(s) filtered from picked role(s) — skipped.`);
+    lines.push(droppedFromEveryoneRoleOnly
+      ? `• ${droppedFromRoles} bot(s) skipped from \`@everyone\` — bots cannot receive qURL links.`
+      : `• ${droppedFromRoles} bot(s) filtered from picked role(s) — skipped.`);
   }
   if (iterationBoundHit) {
     lines.push('• Picked role(s) are too large to fully evaluate — try fewer or smaller roles.');
@@ -6838,6 +6844,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     users: selected,
     massMentionDenied,
     droppedFromRoles,
+    droppedFromEveryoneRoleOnly,
     iterationBoundHit,
     everyoneCacheCold,
     namedRoleMembersUnavailable,
@@ -6964,7 +6971,8 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // but pin the parity here against future drift.
     const reasons = [];
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
-    if (droppedFromRoles > 0 && !iterationBoundHit) reasons.push('Picked role(s) have no non-bot members');
+    if (droppedFromRoles > 0 && !iterationBoundHit) reasons.push(droppedFromEveryoneRoleOnly
+      ? '`@everyone` has no non-bot members' : 'Picked role(s) have no non-bot members');
     if (iterationBoundHit) reasons.push('Picked role(s) are too large to fully evaluate — try fewer or smaller roles');
     if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
     if (namedRoleMembersUnavailable.size > 0) reasons.push("Picked role(s) couldn't be loaded — try again in a few seconds");
@@ -7013,6 +7021,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   const newWarningsBlock = renderRecipientWarnings({
     droppedBots,
     droppedFromRoles,
+    droppedFromEveryoneRoleOnly,
     iterationBoundHit,
     massMentionDenied,
     everyoneCacheCold,

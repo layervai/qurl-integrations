@@ -745,7 +745,7 @@ describe('resolveMentionableSelection', () => {
   test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold, roleMentionsDenied }', () => {
     const int = makeMentionableInteraction({});
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
-    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'iterationBoundHit', 'massMentionDenied', 'namedRoleMembersUnavailable', 'roleMentionsDenied', 'users']);
+    expect(Object.keys(r).sort()).toEqual(['droppedFromEveryoneRoleOnly', 'droppedFromRoles', 'everyoneCacheCold', 'iterationBoundHit', 'massMentionDenied', 'namedRoleMembersUnavailable', 'roleMentionsDenied', 'users']);
   });
 
   describe('role-mention permission gate (#326)', () => {
@@ -4133,6 +4133,32 @@ describe('handleConfirmUserSelect', () => {
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/@everyone/);
     expect(updated.content).toMatch(/Mention Everyone/);
+  });
+
+  test('bot-only everyone pick identifies everyone in its rejection', async () => {
+    const bot = makeUser('700000000000000001', { bot: true });
+    const int = makeSelectInteraction({ users: [], canMentionEveryone: true,
+      guildMemberCache: new Map([[bot.id, { user: bot }]]) });
+    int.roles = new Map([[int.guild.id, { id: int.guild.id }]]);
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('`@everyone` has no non-bot members');
+  });
+
+  test.each(['everyone', 'named', 'mixed'])('filtered bot warning identifies %s picks', async (source) => {
+    const user = makeUser('100000000000000001');
+    const bot = makeUser('700000000000000001', { bot: true });
+    const members = new Map([[user.id, { user }], [bot.id, { user: bot }]]);
+    const int = makeSelectInteraction({ users: [], canMentionEveryone: true, guildMemberCache: members });
+    const named = ['named-role', { id: 'named-role', mentionable: true, members }];
+    const everyone = [int.guild.id, { id: int.guild.id }];
+    int.roles = new Map(source === 'everyone' ? [everyone] : source === 'named' ? [named] : [named, everyone]);
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const warning = mockTransitionFlow.mock.calls[0][2].payload.warningsBlock;
+    expect(warning).toContain(source === 'everyone'
+      ? '1 bot(s) skipped from `@everyone` — bots cannot receive qURL links.'
+      : '1 bot(s) filtered from picked role(s) — skipped.');
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain(warning.trim());
   });
 
   test.each([false, true])('bounded role scan gives a visible limit warning (valid user=%s)', async (withUser) => {
