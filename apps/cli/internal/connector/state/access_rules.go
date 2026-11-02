@@ -222,10 +222,13 @@ func (s *AccessRuleStore) Save(ctx context.Context, version int64, d *accessrule
 			return accessrules.ErrConflict
 		case slices.Contains(j.Conflicts, d.ID):
 			return accessrules.ErrRuleConflict
-		case accessrules.NameTaken(j.Items, d):
-			return accessrules.ErrDuplicateName
 		}
 		index := slices.IndexFunc(j.Items, func(item accessrules.Definition) bool { return item.ID == d.ID })
+		// An edit that keeps its name is never refused for a duplicate a merge brought in.
+		renamed := index < 0 || j.Items[index].Name != d.Name
+		if renamed && accessrules.NameTaken(j.Items, d) {
+			return accessrules.ErrDuplicateName
+		}
 		if index < 0 {
 			j.Items = append(j.Items, *d)
 		} else {

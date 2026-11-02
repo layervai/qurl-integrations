@@ -173,7 +173,8 @@ func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) 
 	}
 	if crid.Validate(id) == nil {
 		// A deleted share's link limits are never used again; forgetting them
-		// never blocks the cleanup below, and a leftover entry is harmless.
+		// never blocks the cleanup below, and callers report a cleanup error
+		// as a warning after the committed delete.
 		defer func() { err = errors.Join(err, forgetLinkLimits(ctx, stateDir, id)) }()
 	}
 	registry, local, err := findDeletedLocalShare(ctx, opts, stateDir, id)

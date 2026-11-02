@@ -335,7 +335,7 @@ func validateRuleSelectionFlags(cmd *cobra.Command) error {
 // reconcileRulesAfterLink never fails the login; it warns when rules stay pending.
 func (o *globalOpts) reconcileRulesAfterLink(ctx context.Context) {
 	// Bounded so a slow service cannot hold up a login that already succeeded.
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	snapshot, err := o.syncRules(ctx)
 	notice, deferred := ruleSyncNotice(&snapshot, err)
@@ -344,9 +344,9 @@ func (o *globalOpts) reconcileRulesAfterLink(ctx context.Context) {
 			notice = msgRulesNotSynced
 		}
 	}
-	// A read journal with no saved rules has nothing waiting, so any sync
-	// failure stays quiet; an unreadable journal still warns.
-	if snapshot.SchemaVersion != 0 && len(snapshot.Items) == 0 && len(snapshot.Conflicts) == 0 {
+	// A never-linked journal with no saved rules has nothing waiting, so any
+	// sync failure stays quiet; a linked or unreadable journal still warns.
+	if snapshot.Sync == accessrules.SyncLocal && len(snapshot.Items) == 0 && len(snapshot.Conflicts) == 0 {
 		notice = ""
 	}
 	if notice != "" && !o.quiet {

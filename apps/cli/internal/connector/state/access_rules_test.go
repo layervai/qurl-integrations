@@ -196,6 +196,27 @@ func TestAccessRulesSyncMergeConflictAndAccountIsolation(t *testing.T) {
 		t.Fatalf("wrong account upload %v", err)
 	}
 }
+func TestAccessRulesMergedDuplicateNamesStayEditable(t *testing.T) {
+	store := openAccessRulesTestStore(t)
+	local := accessrules.Definition{ID: ruleID, Name: "Team", Mode: "keys"}
+	if _, err := store.Save(t.Context(), 0, &local); err != nil {
+		t.Fatal(err)
+	}
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "account-one", Items: []accessrules.Definition{{ID: "22222222-2222-4222-8222-222222222222", Name: "Team", Mode: "review"}}}}
+	got, err := store.Sync(t.Context(), remote)
+	if err != nil || len(got.Items) != 2 {
+		t.Fatalf("merge %+v %v", got, err)
+	}
+	local.Mode = "invite_only"
+	if _, err = store.Save(t.Context(), got.LocalVersion, &local); err != nil {
+		t.Fatalf("edit that keeps a merged duplicate name refused: %v", err)
+	}
+	local.Name = "team"
+	if _, err = store.Save(t.Context(), -1, &local); !errors.Is(err, accessrules.ErrDuplicateName) {
+		t.Fatalf("rename onto another rule's name: %v", err)
+	}
+}
+
 func TestAccessRulesSyncRefetchesAfterCASAndPreservesPendingOnFailure(t *testing.T) {
 	store := openAccessRulesTestStore(t)
 	_, err := store.Save(t.Context(), 0, &accessrules.Definition{ID: ruleID, Name: "Local", Mode: "keys"})
