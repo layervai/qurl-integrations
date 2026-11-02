@@ -55,7 +55,7 @@ const {
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { getIdentity } = require('./qurl');
 const { resourceIdLogRef } = require('./utils/resource-id');
-const { qurlApiErrorStatus } = require('./utils/qurl-errors');
+const { qurlApiErrorCode, qurlApiErrorStatus } = require('./utils/qurl-errors');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
@@ -9165,9 +9165,14 @@ const commands = [
         let guildConfig;
         try {
           guildConfig = await db.getGuildConfig(interaction.guildId);
-        } catch {
+        } catch (error) {
           logger.warn('qURL status configuration read failed', {
             guild_id: interaction.guildId,
+            status: Number.isInteger(error?.$metadata?.httpStatusCode)
+              ? error.$metadata.httpStatusCode : qurlApiErrorStatus(error),
+            code: error?.code ?? null,
+            error_name: error?.name ?? null,
+            failure_stage: 'configuration_store',
           });
           return interaction.editReply({
             content: '⚠️ **The qURL status check could not be completed.**\n'
@@ -9254,7 +9259,7 @@ const commands = [
             logger.warn('qURL status identity check failed', {
               guild_id: interaction.guildId,
               status,
-              code: error?.code ?? null,
+              code: error?.code ?? (failureStage === 'qurl_service' ? qurlApiErrorCode(error) : null),
               error_name: error?.name ?? null,
               failure_stage: failureStage,
             });
@@ -9275,7 +9280,8 @@ const commands = [
             // brute-force concern does not apply: the prefix is a namespace
             // plus a few leading bytes of a >=28-char key, and it only reaches
             // the ManageGuild-gated ephemeral reply. Trade-off: a fingerprint
-            // answered "same key as last setup?"; two keys can share a prefix.
+            // answered "same key as last setup?"; the key ID below restores that
+            // distinction because two keys can share a prefix.
             // TODO(upstream-contract): keep this aligned with /v1/me.
             //
             // Inline-code content renders backslashes literally, so strip
@@ -9287,6 +9293,9 @@ const commands = [
             // getIdentity enforces this shape; default anyway so a contract
             // drift lands in the verdict machinery, not the generic catch-all.
             const { key_prefix: rawKeyPrefix, scopes: allScopes = [] } = identity?.api_key ?? {};
+            const keyId = typeof identity?.api_key?.key_id === 'string'
+              ? sanitizeIdentityValue(identity.api_key.key_id) : '';
+            const keyIdLine = keyId ? 'Key ID: `' + keyId + '`\n' : '';
             // TODO(upstream-contract): 12 mirrors qurl-service's
             // APIKeyDisplayPrefixLength (the issued prefix is exactly 12 bytes),
             // so a service prefix renders whole and matches the setup DM; a
@@ -9306,6 +9315,7 @@ const commands = [
               if (!scopes) scopes = '_none_';
               return `✅ **qURL is configured**\n` +
                 `Key prefix: \`${keyPrefix}\`\n` +
+                keyIdLine +
                 `Scopes: ${scopes}\n`;
             };
             verdict = renderHealthyVerdict(shownScopes.length);
