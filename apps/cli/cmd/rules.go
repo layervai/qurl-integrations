@@ -337,6 +337,9 @@ func (o *globalOpts) reconcileRulesAfterLink(ctx context.Context) {
 	}
 }
 
+// modeChoices lists --mode values in the order every client offers them.
+const modeChoices = "public, invite_only, review, email_capture, email_domain, keys or contract"
+
 // approvalsLast maps --approvals-last choices to approval_expires_in; never is empty.
 var approvalsLast = map[string]string{"1d": "1d", "7d": "7d", "30d": "30d", "90d": "90d", "never": ""}
 
@@ -348,13 +351,16 @@ type ruleSettingFlags struct {
 
 func (f *ruleSettingFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.expiresIn, "expires-in", "", "public rules: each shared link expires after this long, such as 1h or 7d (1m to 30d)")
-	cmd.Flags().BoolVar(&f.oneBrowser, "one-browser", false, "public rules: Only the first person. Anyone else sees that the link no longer works (alias --once)")
-	cmd.Flags().StringVar(&f.sessionLength, "session-length", "", "public rules: Stays open for: how long they can use it after opening the link, such as 30m (1s to 24h)")
+	cmd.Flags().BoolVar(&f.oneBrowser, "once", false, "public rules: Only the first person. Anyone else sees that the link no longer works (alias --one-browser)")
+	cmd.Flags().StringVar(&f.sessionLength, "stays-open-for", "", "public rules: how long they can use it after opening the link, such as 30m (1s to 24h) (alias --session-length)")
 	cmd.Flags().StringVar(&f.approvals, "approvals-last", "", "review and keys rules: 1d, 7d, 30d, 90d or never (default: never)")
-	// --once is the short spelling of --one-browser.
+	// The earlier names stay accepted, and named in help, for released clients.
 	cmd.Flags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
-		if name == "once" {
-			name = "one-browser"
+		switch name {
+		case "one-browser":
+			name = "once"
+		case "session-length":
+			name = "stays-open-for"
 		}
 		return pflag.NormalizedName(name)
 	})
@@ -365,9 +371,9 @@ func (f *ruleSettingFlags) apply(cmd *cobra.Command, d *accessrules.Definition) 
 	changed := func(names ...string) bool {
 		return slices.ContainsFunc(names, func(name string) bool { return cmd.Flags().Changed(name) })
 	}
-	if changed("expires-in", "one-browser", "session-length") {
+	if changed("expires-in", "once", "stays-open-for") {
 		if d.Mode != accessrules.ModePublic {
-			return errors.New("--expires-in, --one-browser and --session-length apply only to --mode public")
+			return errors.New("--expires-in, --once and --stays-open-for apply only to --mode public")
 		}
 		if !changed("expires-in") {
 			return errors.New("link limits need --expires-in, such as --expires-in 1h")
@@ -375,15 +381,15 @@ func (f *ruleSettingFlags) apply(cmd *cobra.Command, d *accessrules.Definition) 
 		if _, ok := accessrules.LinkExpiry.Parse(f.expiresIn); !ok {
 			return errors.New("--expires-in must be from 1m to 30d, such as 1h or 7d")
 		}
-		if changed("session-length") && !accessrules.ValidSessionLength(f.sessionLength) {
-			return errors.New("--session-length must be whole seconds from 1s to 24h, such as 30m")
+		if changed("stays-open-for") && !accessrules.ValidSessionLength(f.sessionLength) {
+			return errors.New("--stays-open-for must be whole seconds from 1s to 24h, such as 30m")
 		}
 		// Only flags given are stored, so an unset limit stays absent.
 		d.LinkLimits = &accessrules.LinkLimits{ExpiresIn: f.expiresIn}
-		if changed("one-browser") {
+		if changed("once") {
 			d.LinkLimits.OneTimeUse = new(f.oneBrowser)
 		}
-		if changed("session-length") {
+		if changed("stays-open-for") {
 			d.LinkLimits.SessionDuration = new(f.sessionLength)
 		}
 	}
@@ -413,7 +419,7 @@ Who can open it (--mode):
 Public rules with --expires-in share a link that expires instead of the
 item's permanent address; qurl share makes later links with the same limits.
 Approvals last (review and keys rules) is how long each approval lasts.`, Example: `  qurl rules create "Acme team" --mode email_domain --email-domain acme.com
-  qurl rules create "Quick look" --mode public --expires-in 1h --session-length 30m
+  qurl rules create "Quick look" --mode public --expires-in 1h --stays-open-for 30m
   qurl rules create "Client review" --mode review --approvals-last 7d
   qurl rules create "Lab devices" --mode keys --approvals-last 30d`, Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if cmd.Flags().Changed(consumerContract) && mode != accessrules.ModeContract {
@@ -451,7 +457,7 @@ Approvals last (review and keys rules) is how long each approval lasts.`, Exampl
 		}
 		return opts.printer().AccessRule(&definition)
 	}}
-	cmd.Flags().StringVar(&mode, modeFlag, "", "public, keys, invite_only, email_capture, email_domain, review or contract")
+	cmd.Flags().StringVar(&mode, modeFlag, "", modeChoices)
 	cmd.Flags().StringVar(&domain, "email-domain", "", "email domain for domain access, such as acme.com")
 	cmd.Flags().StringVar(&contract, consumerContract, "", "integration reference for Custom access, where your service decides who gets in")
 	cmd.Flags().StringVar(&emailsFile, "emails-file", "", "use - to read optional additional email addresses as a JSON array")
@@ -497,7 +503,7 @@ func ruleInputError(d *accessrules.Definition) error {
 	}
 	switch {
 	case !slices.Contains(accessrules.Modes(), d.Mode):
-		return errors.New("--mode must be one of: " + strings.Join(accessrules.Modes(), ", "))
+		return errors.New("--mode must be one of: " + modeChoices)
 	case !validWith(func(p *accessrules.Definition) {
 		*p = accessrules.Definition{ID: p.ID, Name: p.Name, Mode: accessrules.ModePublic}
 	}):

@@ -53,7 +53,7 @@ func (p *Printer) AccessRules(snapshot *accessrules.Snapshot) error {
 // is what --rule takes. TestDefaultRulesMatchCatalog keeps them identical.
 var defaultRules = []struct{ id, selector, label, line string }{
 	{"public", "builtin.public", "Anyone with the link", "Anyone who gets the link can open it."},
-	{"once", accessrules.OnlyFirstPersonID, accessrules.OnlyFirstPersonLabel, "Works for whoever opens it first. Then it’s used up."},
+	{"once", accessrules.OnlyFirstPersonID, accessrules.OnlyFirstPersonLabel, "The first person to open it within 1 hour gets in. Then it’s used up."},
 	{"invite_only", "builtin.invite_only", "People you invite", "Only the email addresses you add can open it."},
 	{"review", "builtin.review", "People you approve", "They confirm their email and ask. You approve each person."},
 }
@@ -76,7 +76,7 @@ func (p *Printer) accessRuleLine(d *accessrules.Definition) error {
 }
 
 // AccessRuleSummary is the contract's one-line rule summary, such as
-// "Anyone with the link · links expire in 1 hour · single-use".
+// "Anyone with the link · links expire in 1 hour · only the first person".
 func AccessRuleSummary(d *accessrules.Definition) string {
 	parts := []string{accessRuleLabel(d.Mode)}
 	if d.Mode == accessrules.ModeEmailDomain && d.EmailDomain != "" {
@@ -92,7 +92,7 @@ func AccessRuleSummary(d *accessrules.Definition) string {
 	if l := d.LinkLimits; l != nil {
 		parts = append(parts, "links expire in "+ruleDuration(l.ExpiresIn))
 		if l.OneTimeUse != nil && *l.OneTimeUse {
-			parts = append(parts, "single-use")
+			parts = append(parts, "only the first person")
 		}
 		if l.SessionDuration != nil {
 			parts = append(parts, "stays open for "+ruleDuration(*l.SessionDuration))
@@ -137,10 +137,10 @@ func plural(n int, word string) string {
 // them identical.
 var accessModes = []struct{ mode, label, line string }{
 	{"public", "Anyone with the link", "Anyone who gets the link can open it."},
-	{"email_capture", "Anyone with a verified email", "Anyone can open it after confirming their email."},
-	{"email_domain", "Work or school email", "Only people with an email at your domain can open it."},
 	{"invite_only", "People you invite", "Only the email addresses you add can open it."},
 	{"review", "People you approve", "They confirm their email and ask. You approve each person."},
+	{"email_capture", "Anyone with a verified email", "Anyone can open it after confirming their email."},
+	{"email_domain", "Work or school email", "Only people with an email at your domain can open it."},
 	{"keys", "Devices you approve", "No email needed. They send you their passkey’s details, and you approve it."},
 	{"contract", "Custom access", "Your app or service decides who gets in."},
 }

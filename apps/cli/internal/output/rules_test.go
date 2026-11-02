@@ -57,7 +57,7 @@ func TestAccessRulesListShowsDefaultsThenSavedRules(t *testing.T) {
 	}
 	want := `Default access rules
   Anyone with the link   Anyone who gets the link can open it.
-  Only the first person  Works for whoever opens it first. Then it’s used up.
+  Only the first person  The first person to open it within 1 hour gets in. Then it’s used up.
   People you invite      Only the email addresses you add can open it.
   People you approve     They confirm their email and ask. You approve each person.
 
@@ -82,7 +82,7 @@ func TestAccessRuleSummaryUsesContractCopy(t *testing.T) {
 		rule accessrules.Definition
 		want string
 	}{
-		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}, "Anyone with the link · links expire in 1 hour · single-use"},
+		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}, "Anyone with the link · links expire in 1 hour · only the first person"},
 		{accessrules.Definition{Mode: "review", ApprovalExpiresIn: new("7d")}, "People you approve · approvals last 7 days"},
 		{accessrules.Definition{Mode: "email_domain", EmailDomain: "acme.com"}, "People at acme.com"},
 		{accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "90m", SessionDuration: new("1d")}}, "Anyone with the link · links expire in 90 minutes · stays open for 1 day"},

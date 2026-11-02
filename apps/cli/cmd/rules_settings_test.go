@@ -21,6 +21,8 @@ func TestRulesCreateTakesSettingsForItsModeOnly(t *testing.T) {
 	}{
 		{[]string{"Quick look", "--mode", "public", "--expires-in", "1h", "--one-browser", "--session-length", "30m"},
 			accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true), SessionDuration: new("30m")}}},
+		{[]string{"Stays open", "--mode", "public", "--expires-in", "1h", "--once", "--stays-open-for", "30m"},
+			accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true), SessionDuration: new("30m")}}},
 		{[]string{"Once", "--mode", "public", "--expires-in", "1h", "--once"},
 			accessrules.Definition{Mode: "public", LinkLimits: &accessrules.LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}}},
 		{[]string{"Reviewers", "--mode", "review", "--approvals-last", "7d"}, accessrules.Definition{Mode: "review", ApprovalExpiresIn: new("7d")}},
@@ -43,7 +45,7 @@ func TestRulesCreateTakesSettingsForItsModeOnly(t *testing.T) {
 		{[]string{"--mode", "review", "--expires-in", "1h"}, "apply only to --mode public"},
 		{[]string{"--mode", "public", "--one-browser"}, "need --expires-in"},
 		{[]string{"--mode", "public", "--expires-in", "45d"}, "--expires-in must be from 1m to 30d"},
-		{[]string{"--mode", "public", "--expires-in", "1h", "--session-length", "2d"}, "--session-length must be whole seconds from 1s to 24h"},
+		{[]string{"--mode", "public", "--expires-in", "1h", "--session-length", "2d"}, "--stays-open-for must be whole seconds from 1s to 24h"},
 		{[]string{"--mode", "public", "--approvals-last", "7d"}, "--approvals-last applies only to --mode review or keys"},
 		{[]string{"--mode", "review", "--approvals-last", "2d"}, "--approvals-last must be one of"},
 		// Removed settings are gone, not ignored.
@@ -55,8 +57,15 @@ func TestRulesCreateTakesSettingsForItsModeOnly(t *testing.T) {
 			t.Errorf("%v: exit %d %s", tc.args, result.code, result.stderr.String())
 		}
 	}
+	// Released Desktop detects rule settings by these names in help.
+	help := runCLI(t, &runOpts{args: []string{"rules", "create", "--help"}, env: map[string]string{}, shareStateDir: dir}).stdout.String()
+	for _, want := range []string{"--once", "--one-browser", "--stays-open-for", "--session-length", "--expires-in", "--approvals-last"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help lacks %s", want)
+		}
+	}
 	listed := runCLI(t, &runOpts{args: []string{"rules", "list"}, env: map[string]string{}, shareStateDir: dir})
-	for _, want := range []string{"Anyone with the link · links expire in 1 hour · single-use · stays open for 30 minutes", "People you approve · approvals last 7 days"} {
+	for _, want := range []string{"Anyone with the link · links expire in 1 hour · only the first person · stays open for 30 minutes", "People you approve · approvals last 7 days"} {
 		if !strings.Contains(listed.stdout.String(), want) {
 			t.Errorf("list lacks %q:\n%s", want, listed.stdout.String())
 		}
