@@ -2372,6 +2372,7 @@ async function executeSendPipeline(interaction, {
     return { recipientId: link.recipientId, username: recipient?.username, sent: result.ok === true };
   }, 5);
 
+  // Collector-local delivery history; a restored collector must seed this from persisted items.
   const addRecipientExclusions = new Set([interaction.user.id]);
   for (const r of dmResults) {
     if (r.status === 'fulfilled' && r.value.sent) {
@@ -2913,6 +2914,10 @@ async function executeSendPipeline(interaction, {
             const warnings = renderRecipientWarnings({
               droppedBots,
               droppedFromRoles: selection.droppedFromRoles,
+              droppedFromEveryoneRoleOnly: selection.droppedFromEveryoneRoleOnly,
+              iterationBoundHit: selection.iterationBoundHit,
+              namedRoleMembersUnavailableCount: selection.namedRoleMembersUnavailable.size,
+              alreadyDeliveredCount: selection.alreadyDeliveredCount,
               massMentionDenied: selection.massMentionDenied,
               everyoneCacheCold: selection.everyoneCacheCold,
               roleMentionsDeniedNames: resolveRoleNames(selectInteraction.guild, selection.roleMentionsDenied),
@@ -2931,7 +2936,7 @@ async function executeSendPipeline(interaction, {
             for (const id of addResult.deliveredRecipientIds || []) addRecipientExclusions.add(id);
 
             // Extend recipients[] for the post-revoke names line.
-            // Dedupe by id — re-Add of an already-included user.
+            // Dedupe names by id — a failed delivery can be retried.
             if (addResult.newRecipients?.length) {
               const existingIds = new Set(recipients.map(r => r.id));
               for (const r of addResult.newRecipients) {
@@ -2981,7 +2986,10 @@ async function executeSendPipeline(interaction, {
               }
             }
 
-            await selectInteraction.editReply({ content: [addResult.msg, addResult.delivered > 0 ? warnings : ''].filter(Boolean).join('\n'), components: [] });
+            await selectInteraction.editReply({
+              content: [addResult.msg, addResult.dispatchAttempted ? warnings : ''].filter(Boolean).join('\n'),
+              components: [],
+            });
           } catch (err) {
             const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
             // Generic user-facing message; real details only land in logs.
@@ -3636,7 +3644,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   let msg = `Added ${delivered} recipient${delivered !== 1 ? 's' : ''}`;
   if (failed > 0) msg += ` (${failed} could not be reached)`;
   logger.info('/qurl add recipients', { sendId, delivered, failed });
-  return { msg, newLinks, delivered, failed, newRecipients: resolvedRecipients, deliveredRecipientIds };
+  return { msg, newLinks, delivered, failed, newRecipients: resolvedRecipients, deliveredRecipientIds, dispatchAttempted: true };
 }
 
 // --- /qurl revoke handler ---
@@ -4669,9 +4677,18 @@ function partitionRecipients(users, senderId, { excludeSender = false } = {}) {
 function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id = null, excludedUserIds }) {
   const guild = interaction.guild;
   const userMap = new Map();
+  const pickedBots = new Map();
+  const alreadyDeliveredIds = new Set();
   if (interaction.users && typeof interaction.users.values === 'function') {
     for (const u of interaction.users.values()) {
-      if (u && u.id && !excludedUserIds?.has(u.id)) userMap.set(u.id, u);
+      if (!u?.id) continue;
+      if (excludedUserIds?.has(u.id)) {
+        if (u.id !== interaction.user?.id) alreadyDeliveredIds.add(u.id);
+        continue;
+      }
+      // Bots remain in the result for warnings, but cannot consume human capacity.
+      if (u.bot) pickedBots.set(u.id, u);
+      else userMap.set(u.id, u);
     }
   }
   let massMentionDenied = false;
@@ -4817,7 +4834,11 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
         // will report it via droppedBots. Skipping here means it
         // doesn't ALSO tick the role-side bot signal — avoids
         // surfacing two warnings for the same underlying bot.
-        if (excludedUserIds?.has(memberId) || userMap.has(memberId)) continue;
+        if (excludedUserIds?.has(memberId)) {
+          if (memberId !== interaction.user?.id) alreadyDeliveredIds.add(memberId);
+          continue;
+        }
+        if (userMap.has(memberId) || pickedBots.has(memberId)) continue;
         if (droppedFromRolesSet.has(memberId)) continue;
         if (isBotMember(member)) {
           droppedFromRolesSet.add(memberId);
@@ -4831,7 +4852,8 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
     }
   }
   return {
-    users: [...userMap.values()],
+    users: [...userMap.values(), ...pickedBots.values()],
+    alreadyDeliveredCount: alreadyDeliveredIds.size,
     massMentionDenied,
     droppedFromRoles: droppedFromRolesSet.size,
     droppedFromEveryoneRoleOnly: droppedFromRolesSet.size > 0
@@ -4873,6 +4895,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  * @param {{
  *   invalidTokens?: string[],
  *   cappedCount?: number,
+ *   alreadyDeliveredCount?: number,
  *   unresolvedIds?: string[],
  *   transientFailureIds?: string[],
  *   droppedBots?: number,
@@ -4888,6 +4911,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
 function renderRecipientWarnings({
   invalidTokens = [],
   cappedCount = 0,
+  alreadyDeliveredCount = 0,
   unresolvedIds = [],
   transientFailureIds = [],
   droppedBots = 0,
@@ -4908,7 +4932,10 @@ function renderRecipientWarnings({
   const sanitizeForBullet = (s) =>
     sliceWithEllipsis(s.replace(/`/g, ''), WARNING_NAME_CODEPOINT_CAP, '…');
   if (cappedCount > 0) {
-    lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — ${cappedCount} recipient(s) past the cap were dropped.`);
+    lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — at least ${cappedCount} recipient(s) past the cap were dropped.`);
+  }
+  if (alreadyDeliveredCount > 0) {
+    lines.push(`• ${alreadyDeliveredCount} recipient(s) already received this send — skipped.`);
   }
   if (invalidTokens.length > 0) {
     // recipient-parser.js's docstring is explicit: invalidTokens are

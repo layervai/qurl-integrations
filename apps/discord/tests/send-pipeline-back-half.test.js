@@ -2440,7 +2440,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
   async function collectRolePick({
     everyone = false, permission = false, mentionable = true, cap = 50,
     direct = false, directBot = false, cold = false, overlap = false,
-    initialPartialFailure = false, revoked = false, firstAdditionalResult, pickedMembers,
+    initialPartialFailure = false, revoked = false, additionalResults = [], pickedMembers, pickedUsers,
   } = {}) {
     const config = require('../src/config');
     const { PermissionFlagsBits } = require('discord.js');
@@ -2462,8 +2462,10 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
         members: { cache, list: jest.fn(async () => { for (const [id, member] of members) cache.set(id, member); return members; }) } };
       interaction.guild = guild;
       const selectInteraction = {
+        user: interaction.user,
         guild, roles: new Map([[role.id, role]]),
-        users: new Map([...(direct ? [['u3', humans[1]]] : []), ...(directBot ? [[bot.id, bot]] : [])]),
+        users: new Map(pickedUsers ? pickedUsers.map(user => [user.id, user])
+          : [...(direct ? [['u3', humans[1]]] : []), ...(directBot ? [[bot.id, bot]] : [])]),
         memberPermissions: { has: jest.fn(flag => flag === PermissionFlagsBits.MentionEveryone && permission) },
         deferUpdate: jest.fn().mockResolvedValue(undefined),
         editReply: jest.fn().mockResolvedValue(undefined),
@@ -2479,7 +2481,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       mockMintLinks.mockImplementation(async (_id, { n }) => Array.from({ length: n }, (_, i) => ({
         qurl_link: `https://q.test/role-${i}`, qurl_id: `q_role_${i}`, resource_id: 'res-added',
       })));
-      if (firstAdditionalResult) mockSendDM.mockResolvedValueOnce(firstAdditionalResult);
+      for (const result of additionalResults) mockSendDM.mockResolvedValueOnce(result);
       await collect(click);
       return { selectInteraction, selectReply, click, guild, collect, makeClick, interaction, storedConfig };
     } finally {
@@ -2566,7 +2568,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
   test.each([false, true])('later role picks skip successful additions and retry failed additions (partial=%s)', async (partial) => {
     const { collect, makeClick, selectInteraction, storedConfig } = await collectRolePick({
-      firstAdditionalResult: partial ? { ok: false } : undefined,
+      additionalResults: partial ? [{ ok: false }] : [],
     });
     const nextSelect = { ...selectInteraction, editReply: jest.fn().mockResolvedValue(undefined) };
     const nextClick = makeClick('add');
@@ -2584,6 +2586,42 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     } finally {
       clearCooldown('sender-1');
     }
+  });
+
+  test('mixed direct and role picks explain already-delivered recipients once', async () => {
+    const { selectInteraction } = await collectRolePick({ overlap: true, cap: 4, pickedUsers: [
+      { id: 'u1', username: 'Alice' }, { id: 'u3', username: 'Carol' },
+    ] });
+    expect(mockSendDM.mock.calls.map(([id]) => id)).toEqual(['u1', 'u3', 'u2']);
+    expect(selectInteraction.editReply.mock.calls[0][0].content).toContain('1 recipient(s) already received this send — skipped.');
+  });
+
+  test('directly picked bots do not take the capacity reserved for role members', async () => {
+    const { selectInteraction } = await collectRolePick({ cap: 4, pickedUsers: [
+      { id: 'bot-a', username: 'Robot A', bot: true }, { id: 'bot-b', username: 'Robot B', bot: true },
+    ], pickedMembers: [
+      { id: 'u2', username: 'Bob' }, { id: 'u3', username: 'Carol' }, { id: 'u4', username: 'Dave' },
+    ] });
+    expect(mockSendDM.mock.calls.map(([id]) => id)).toEqual(['u1', 'u2', 'u3', 'u4']);
+    expect(selectInteraction.editReply.mock.calls[0][0].content).toContain('2 bot(s) cannot receive');
+  });
+
+  test.each([
+    { cap: 2, results: [{ ok: false }], warning: /Capped at 2/ },
+    { cap: 50, results: [{ ok: false }, { ok: false }], warning: /1 bot\(s\) filtered/ },
+  ])('completed zero-delivery attempts keep selection warnings (cap=$cap)', async ({ cap, results, warning }) => {
+    const { selectInteraction } = await collectRolePick({ cap, additionalResults: results });
+    const content = selectInteraction.editReply.mock.calls[0][0].content;
+    expect(content).toContain('Added 0 recipients');
+    expect(content).toMatch(warning);
+  });
+
+  test('Add Recipients warns when role expansion reaches its scan bound', async () => {
+    const { selectInteraction } = await collectRolePick({ cap: 2, pickedMembers: Array.from({ length: 9 }, (_, i) => ({
+      id: `role-bot-${i}`, username: 'Robot', bot: true,
+    })) });
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(selectInteraction.editReply.mock.calls[0][0].content).toContain('too large to fully evaluate');
   });
 
   async function setupRevocableSend({ initialPartialFailure = false } = {}) {
@@ -2607,6 +2645,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       qurl_link: `https://q.test/original${index || ''}`, resource_id: 'res-initial', qurl_id: `q_original${index || ''}`,
     })));
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    // Alice's first DM fails; Dave keeps the confirmation collector available.
     if (initialPartialFailure) mockSendDM.mockResolvedValueOnce({ ok: false });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
     mockDb.saveSendConfig.mockResolvedValue(undefined);
