@@ -80,3 +80,20 @@ through the normal reviewed deployment path.
 Budgets are per process, and clients behind one NAT share a bucket. This
 limiter groups IPv6 addresses by /64 and supplements edge controls; it is not a
 global fleet limit.
+
+## Fallback alert context
+
+After the issue #866 metric filter and alarms are adopted, the environment's
+`OAuthClientIPFallbackWarnings` metric has only two bounded dimensions:
+`Reason` and `Fallback`. The alarm name, description and metric dimensions
+identify the pair in the notification. Reasons are `missing_x_forwarded_for`,
+`empty_x_forwarded_for`, and `invalid_x_forwarded_for`; fallbacks are
+`remote_addr` and `unknown`. No address, header, query, state or identity is a
+metric dimension. There are six fixed pairs.
+
+The first warning in a one-minute window notifies the existing runtime alerts
+topic. A quiet period can send recovery; it does not prove emitter/filter
+health. The app limits warning logs per reason/fallback pair per process, so
+this counts warning records, not requests or clients. Check ALB append mode and
+the complete ingress boundary above first. Do not disable the limiter, trust a
+client-selected XFF value, or widen task ingress to silence the alarm.
