@@ -129,6 +129,17 @@ func TestAccountLoginsReconcileGuestRulesWithoutChangingLoginResult(t *testing.T
 	}
 }
 
+func TestLoginWithNoSavedRulesStaysQuietWhenSyncIsDeferred(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/me/access-rules", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "login", "-o", "json"}, env: map[string]string{}, stdin: strings.NewReader(testAPIKey + "\n"), shareStateDir: connectorStateTestDir(t)})
+	if result.code != 0 || strings.Contains(result.stderr.String(), "Access rules") {
+		t.Fatalf("login %d stderr %q", result.code, result.stderr.String())
+	}
+}
+
 func assertLoginIdentityAndRuleRead(t *testing.T, requests []apitest.RecordedRequest, key string) {
 	t.Helper()
 	if len(requests) != 2 {

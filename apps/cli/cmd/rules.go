@@ -32,7 +32,7 @@ const (
 func rulesCmd(opts *globalOpts) *cobra.Command {
 	command := &cobra.Command{Use: "rules", Short: "Manage access rules for future shares", Long: "Share with a default access rule or save your own. Rules work locally before account linking. Changing or deleting a saved rule leaves existing shares unchanged.", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
 	command.AddCommand(ruleCreateCmd(opts))
-	command.AddCommand(&cobra.Command{Use: "capabilities", Short: "Report supported access rules without signing in", Args: noArgs, RunE: func(_ *cobra.Command, _ []string) error { return opts.printer().AccessRuleCapabilities() }})
+	command.AddCommand(&cobra.Command{Use: "capabilities", Short: "Report supported access rules as JSON without signing in", Args: noArgs, RunE: func(_ *cobra.Command, _ []string) error { return opts.printer().AccessRuleCapabilities() }})
 	command.AddCommand(&cobra.Command{Use: "list", Short: "List the default access rules and your saved rules", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		return opts.printRuleStore(func(store *connectorstate.AccessRuleStore) (accessrules.Snapshot, error) {
 			return store.Snapshot(cmd.Context())
@@ -87,7 +87,7 @@ func ruleResolveCmd(opts *globalOpts) *cobra.Command {
 	var use string
 	var version int64
 	cmd := &cobra.Command{Use: "resolve <id-or-name>", Short: "Choose the local or account edit for one conflicting rule", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if !slices.Contains([]string{accessrules.SyncLocal, accessrules.UseAccount}, use) {
+		if !slices.Contains([]string{accessrules.UseLocal, accessrules.UseAccount}, use) {
 			return exitcode.UsageError(errors.New("use --use local or --use account"))
 		}
 		if err := checkOptionalRuleVersion(cmd, version); err != nil {
@@ -342,6 +342,10 @@ func (o *globalOpts) reconcileRulesAfterLink(ctx context.Context) {
 			notice = msgRulesNotSynced
 		}
 	}
+	// A device with no saved rules has nothing waiting, so a deferred sync stays quiet.
+	if deferred && len(snapshot.Items) == 0 && len(snapshot.Conflicts) == 0 {
+		notice = ""
+	}
 	if notice != "" && !o.quiet {
 		o.printer().Warnf("%s", notice)
 	}
@@ -438,6 +442,7 @@ Approvals last (review and keys rules) is how long each approval lasts.`, Exampl
 		if (cmd.Flags().Changed("email-domain") || cmd.Flags().Changed("emails-file")) && mode != accessrules.ModeEmailDomain {
 			return exitcode.UsageError(errors.New("--email-domain and --emails-file apply only to --mode email_domain"))
 		}
+		// A random (version 4, RFC 4122 variant) UUID; no UUID package is in the module graph.
 		var id [16]byte
 		if _, err := rand.Read(id[:]); err != nil {
 			return err
@@ -522,8 +527,10 @@ func ruleInputError(d *accessrules.Definition) error {
 		return errors.New("--email-domain must be a domain such as acme.com")
 	case d.Mode == accessrules.ModeEmailDomain:
 		return errors.New("--emails-file must list each email address once, such as name@acme.com")
-	default:
+	case d.Mode == accessrules.ModeContract:
 		return errors.New("--contract must be 1 to 128 letters, digits, hyphens or underscores")
+	default:
+		return fmt.Errorf("invalid access rule: %w", d.Validate(false))
 	}
 }
 

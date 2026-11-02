@@ -42,7 +42,8 @@ const (
 	SyncPending     = "pending"
 	SyncOffline     = "offline"
 	SyncConflict    = "conflict"
-	// UseAccount resolves a conflict with the account edit; SyncLocal keeps the local one.
+	// UseLocal and UseAccount choose which edit resolves a conflict.
+	UseLocal   = "local"
 	UseAccount = "account"
 )
 
@@ -106,7 +107,7 @@ func ParseDuration(s string) (time.Duration, error) {
 	if n < 0 {
 		return 0, errors.New("invalid duration: negative value not allowed")
 	}
-	// Local guard (not yet upstream): a huge count would overflow into range.
+	// Local guard (qurl-service#2054 adds it upstream): a huge count would overflow into range.
 	if n > int(math.MaxInt64/int64(7*day)) {
 		return 0, fmt.Errorf("invalid duration: %s", s)
 	}

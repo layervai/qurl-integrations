@@ -258,7 +258,7 @@ func (s *AccessRuleStore) Delete(ctx context.Context, version int64, selector st
 // Resolve deliberately keeps the local or latest account definition for one
 // conflicting rule, selected by ID or exact name.
 func (s *AccessRuleStore) Resolve(ctx context.Context, version int64, selector, use string) (accessrules.Snapshot, error) {
-	if use != accessrules.SyncLocal && use != accessrules.UseAccount {
+	if use != accessrules.UseLocal && use != accessrules.UseAccount {
 		return accessrules.Snapshot{}, errors.New("choose local or account")
 	}
 	return s.update(ctx, func(j *accessRuleJournal) error {
@@ -378,8 +378,9 @@ func (s *AccessRuleStore) switchAccount(j *accessRuleJournal, accountID string) 
 }
 func (s *AccessRuleStore) syncFailure(ctx context.Context, cause error) (accessrules.Snapshot, error) {
 	snapshot, err := s.update(ctx, func(j *accessRuleJournal) error {
+		// A journal never linked to an account has nothing to be offline from.
 		j.Sync = accessrules.SyncOffline
-		if errors.Is(cause, accessrules.ErrUnlinked) && j.AccountID == "" {
+		if j.AccountID == "" {
 			j.Sync = accessrules.SyncLocal
 		}
 		return nil

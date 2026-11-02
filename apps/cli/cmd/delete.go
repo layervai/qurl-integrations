@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/layervai/qurl-go/crid"
-
 	"github.com/spf13/cobra"
+
+	"github.com/layervai/qurl-go/crid"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"

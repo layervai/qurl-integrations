@@ -160,6 +160,10 @@ func TestRulesSyncAuthFailureKeepsSavedWorkAndIntegrityFailsClosed(t *testing.T)
 			if err != nil || len(snapshot.Items) != 1 {
 				t.Fatalf("pending work lost %+v %v", snapshot, err)
 			}
+			// Never linked, so a failed first sync leaves the rules local, not offline.
+			if status != http.StatusOK && snapshot.Sync != accessrules.SyncLocal {
+				t.Fatalf("never-linked journal sync = %q", snapshot.Sync)
+			}
 		})
 	}
 }
