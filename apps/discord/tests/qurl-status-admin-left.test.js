@@ -687,6 +687,8 @@ describe('/qurl status through the real identity transport', () => {
     ['timeout', () => Promise.reject(new DOMException(`timeout detail ${STORED_KEY}`, 'TimeoutError')), 'timeout', null],
     ['abort', () => Promise.reject(new DOMException(`abort detail ${STORED_KEY}`, 'AbortError')), 'timeout', null],
     ['invalid JSON', () => Promise.resolve({ ok: true, status: 200, json: async () => { throw new SyntaxError(STORED_KEY); } }), 'identity_invalid_json', null],
+    ['body timeout', () => Promise.resolve({ ok: true, status: 200, json: async () => { throw new DOMException(STORED_KEY, 'TimeoutError'); } }), 'timeout', null],
+    ['body abort', () => Promise.resolve({ ok: true, status: 200, json: async () => { throw new DOMException(STORED_KEY, 'AbortError'); } }), 'timeout', null],
     ['invalid shape', () => Promise.resolve({ ok: true, status: 200, json: async () => ({ data: {} }) }), 'identity_invalid_shape', null],
     ['HTTP failure', () => Promise.resolve({ ok: false, status: 503, body: { cancel: jest.fn() } }), '503', 503],
   ])('records a safe %s code after transport redaction', async (_name, fetchResult, code, status) => {
