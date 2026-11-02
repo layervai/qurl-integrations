@@ -36,5 +36,8 @@ func DecodeStrictJSON(data []byte, target any) error {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(target)
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	return rejectTrailingJSON(decoder)
 }

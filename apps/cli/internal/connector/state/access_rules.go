@@ -204,7 +204,8 @@ func (s *AccessRuleStore) update(ctx context.Context, change func(*accessRuleJou
 	return j.snapshot(), nil
 }
 
-// Snapshot reads the validated journal without authentication or network.
+// Snapshot reads the validated journal without authentication or network. It
+// takes the store lock on purpose, so the read is consistent with any writer.
 func (s *AccessRuleStore) Snapshot(ctx context.Context) (accessrules.Snapshot, error) {
 	return s.update(ctx, nil)
 }

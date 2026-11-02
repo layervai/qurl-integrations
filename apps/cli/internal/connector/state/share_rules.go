@@ -34,14 +34,15 @@ func OpenShareRules(dir string) (*ShareRuleStore, error) {
 	if dir == "" {
 		return nil, errors.New("share rules require a profile")
 	}
-	if err := EnsureDirMode(dir); err != nil {
-		return nil, err
-	}
 	return &ShareRuleStore{dir: dir}, nil
 }
 
-// Get returns the link limits recorded for id, or nil.
+// Get returns the link limits recorded for id, or nil. Without a saved file
+// it creates no directory or lock, so plain shares stay read-only here.
 func (s *ShareRuleStore) Get(ctx context.Context, id string) (*accessrules.LinkLimits, error) {
+	if !s.saved() {
+		return nil, nil //nolint:nilnil // nil limits mean none were saved
+	}
 	var limits *accessrules.LinkLimits
 	err := s.update(ctx, func(state *shareRulesState) bool {
 		if kept, ok := state.Shares[id]; ok {
@@ -57,6 +58,12 @@ func (s *ShareRuleStore) Set(ctx context.Context, id string, limits *accessrules
 	if crid.Validate(id) != nil || limits != nil && limits.Validate() != nil {
 		return errors.New("invalid share link limits")
 	}
+	if limits == nil && !s.saved() {
+		return nil
+	}
+	if err := EnsureDirMode(s.dir); err != nil {
+		return err
+	}
 	return s.update(ctx, func(state *shareRulesState) bool {
 		if limits == nil {
 			_, had := state.Shares[id]
@@ -66,6 +73,13 @@ func (s *ShareRuleStore) Set(ctx context.Context, id string, limits *accessrules
 		state.Shares[id] = *limits
 		return true
 	})
+}
+
+// saved reports whether the file may exist; any other Lstat error is left
+// for the locked read to report.
+func (s *ShareRuleStore) saved() bool {
+	_, err := os.Lstat(filepath.Join(s.dir, shareRulesFile))
+	return !errors.Is(err, os.ErrNotExist)
 }
 
 func (s *ShareRuleStore) update(ctx context.Context, change func(*shareRulesState) bool) error {

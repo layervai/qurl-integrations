@@ -278,7 +278,7 @@ func TestParseDurationMatchesServiceGrammar(t *testing.T) {
 			t.Errorf("ParseDuration(%q) = %v %v, want %v", value, got, err, want)
 		}
 	}
-	for _, value := range []string{"", "d", "-1d", "1y", "abc"} {
+	for _, value := range []string{"", "d", "-1d", "1y", "abc", "15250284452472d"} {
 		if _, err := ParseDuration(value); err == nil {
 			t.Errorf("ParseDuration(%q) accepted", value)
 		}

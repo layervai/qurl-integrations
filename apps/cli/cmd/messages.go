@@ -311,7 +311,7 @@ const (
 	msgRulesNotFound      = "No access rule has that ID or name. Run qurl rules list to see them."
 	msgRulesAmbiguous     = "More than one access rule has that name. Use its ID from qurl rules list."
 	msgRulesDuplicateName = "An access rule with that name already exists. Choose another name."
-	msgRulesLimit         = "Access rules are limited to 100 rules and about 250 KB in total. Delete rules you no longer need, then try again."
+	msgRulesLimit         = "Access rules are limited to 100 rules and 256 KB in total. Delete rules you no longer need, then try again."
 	msgRulesNotSynced     = "Could not sync access rules with your account. Your saved rules are preserved."
 	msgRulesLocalOnly     = "Access rules are saved on this device only. Run qurl account setup to sync them with an account."
 	msgRulesUnlinked      = "Access rules stay on this device: it is not linked to an active account."

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
 	"os"
@@ -177,6 +178,15 @@ func TestShareFailsClosedOnDamagedLinkLimits(t *testing.T) {
 	}
 }
 
+func TestShareWithoutSavedLimitsLeavesStateUntouched(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := filepath.Join(t.TempDir(), "never-created")
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}, shareStateDir: dir})
+	if _, err := os.Lstat(dir); result.code != 0 || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("share %d created state (%v): %s", result.code, err, result.stderr.String())
+	}
+}
+
 func TestPublishSendsApprovalsLastInThePolicy(t *testing.T) {
 	for _, mode := range []string{"review", "keys"} {
 		srv := apitest.NewServer(t)
@@ -278,6 +288,31 @@ func TestPublishRuleOnceMintsAndRepublishMintsAgain(t *testing.T) {
 		if got["expires_in"] != "1h" || got["one_time_use"] != true || got["session_duration"] != "1h" {
 			t.Errorf("mint %d sent %v", i, got)
 		}
+	}
+	saved := func() string {
+		data, err := os.ReadFile(filepath.Join(dir, "share_rules.json")) //nolint:gosec // G304: test-owned temporary state directory and fixed filename.
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	if !strings.Contains(saved(), srv.Key.CRID) {
+		t.Fatal("publish did not save the link limits")
+	}
+	if result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"}, shareStateDir: dir}); result.code != 0 || strings.Contains(saved(), srv.Key.CRID) {
+		t.Fatalf("delete %d kept the link limits: %s", result.code, result.stderr.String())
+	}
+}
+
+func TestQuietPublishWithOncePrintsItsLink(t *testing.T) {
+	srv := apitest.NewServer(t)
+	var mints []map[string]any
+	scriptMint(t, srv, &mints)
+	scriptPublish(t, srv, false, false, nil, nil)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-q"}, shareStateDir: connectorStateTestDir(t)})
+	lines := strings.Split(strings.TrimSpace(result.stdout.String()), "\n")
+	if result.code != 0 || len(lines) != 2 || lines[0] != srv.Key.CRID || !strings.HasPrefix(lines[1], "https://") {
+		t.Fatalf("quiet publish %d %q %s", result.code, result.stdout.String(), result.stderr.String())
 	}
 }
 

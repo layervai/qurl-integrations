@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/layervai/qurl-go/crid"
+
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
@@ -168,6 +170,12 @@ func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) 
 			return nil
 		}
 		return err
+	}
+	if crid.Validate(id) == nil {
+		// A deleted share's link limits are never used again.
+		if err := forgetLinkLimits(ctx, stateDir, id); err != nil {
+			return err
+		}
 	}
 	registry, local, err := findDeletedLocalShare(ctx, opts, stateDir, id)
 	if err != nil {

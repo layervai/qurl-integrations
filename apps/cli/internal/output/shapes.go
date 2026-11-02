@@ -235,6 +235,11 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			SettingsDiffer: res.OtherSettings,
 		})
 	case p.quiet:
+		// A rule's temporary link follows the CRID; with once it is the only copy.
+		if res.LimitedLink != nil {
+			_, err := fmt.Fprintf(p.out, "%s\n%s\n", res.CRID, res.LimitedLink.QURL)
+			return err
+		}
 		_, err := fmt.Fprintln(p.out, res.CRID)
 		return err
 	default:

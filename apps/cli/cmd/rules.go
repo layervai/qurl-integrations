@@ -24,6 +24,8 @@ const (
 	accessFlag   = "access"
 	ruleFlag     = "rule"
 	ruleFileFlag = "rule-file"
+	// builtInPrefix marks the catalog's ready-made rule IDs, such as builtin.review.
+	builtInPrefix = "builtin."
 )
 
 func rulesCmd(opts *globalOpts) *cobra.Command {
@@ -35,57 +37,68 @@ func rulesCmd(opts *globalOpts) *cobra.Command {
 			return store.Snapshot(cmd.Context())
 		})
 	}})
+	command.AddCommand(ruleSaveCmd(opts), ruleDeleteCmd(opts))
+	command.AddCommand(&cobra.Command{Use: "sync", Short: "Synchronize saved rules with your linked account; read the JSON sync field, since a deferred sync exits 0", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		return opts.runRulesSync(cmd.Context())
+	}})
+	command.AddCommand(ruleResolveCmd(opts))
+	return command
+}
+
+func ruleSaveCmd(opts *globalOpts) *cobra.Command {
 	var file string
-	var saveVersion int64
-	save := &cobra.Command{Use: "save", Short: "Save one custom rule from JSON on standard input", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if saveVersion < 0 || saveVersion >= accessrules.MaxVersion {
+	var version int64
+	cmd := &cobra.Command{Use: "save", Short: "Save one custom rule from JSON on standard input", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if version < 0 || version >= accessrules.MaxVersion {
 			return exitcode.UsageError(errors.New("--version must be the current local access rules version"))
 		}
 		definition, err := readRuleDefinition(cmd, opts, file, "--file")
 		if err != nil {
 			return err
 		}
-		if definition.Validate(false) != nil {
+		if strings.HasPrefix(definition.ID, builtInPrefix) {
 			return exitcode.UsageError(errors.New("ready-made rules cannot be edited; save a custom rule with its own UUID"))
 		}
 		return opts.printRuleStore(func(store *connectorstate.AccessRuleStore) (accessrules.Snapshot, error) {
-			return store.Save(cmd.Context(), saveVersion, &definition)
+			return store.Save(cmd.Context(), version, &definition)
 		})
 	}}
-	save.Flags().StringVar(&file, "file", "", "use - to read the access rule JSON from standard input")
-	save.Flags().Int64Var(&saveVersion, "version", -1, "current local access rules version")
-	command.AddCommand(save)
-	var deleteVersion int64
-	remove := &cobra.Command{Use: "delete <id-or-name>", Short: "Delete a saved rule; existing shares keep their access settings", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if err := checkOptionalRuleVersion(cmd, deleteVersion); err != nil {
+	cmd.Flags().StringVar(&file, "file", "", "use - to read the access rule JSON from standard input")
+	cmd.Flags().Int64Var(&version, "version", -1, "current local access rules version")
+	return cmd
+}
+
+func ruleDeleteCmd(opts *globalOpts) *cobra.Command {
+	var version int64
+	cmd := &cobra.Command{Use: "delete <id-or-name>", Short: "Delete a saved rule; existing shares keep their access settings", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := checkOptionalRuleVersion(cmd, version); err != nil {
 			return err
 		}
 		return opts.printRuleStore(func(store *connectorstate.AccessRuleStore) (accessrules.Snapshot, error) {
-			return store.Delete(cmd.Context(), deleteVersion, args[0])
+			return store.Delete(cmd.Context(), version, args[0])
 		})
 	}}
-	remove.Flags().Int64Var(&deleteVersion, "version", -1, "fail unless access rules are still at this version")
-	command.AddCommand(remove)
-	command.AddCommand(&cobra.Command{Use: "sync", Short: "Synchronize saved rules with your linked account", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		return opts.runRulesSync(cmd.Context())
-	}})
+	cmd.Flags().Int64Var(&version, "version", -1, "fail unless access rules are still at this version")
+	return cmd
+}
+
+func ruleResolveCmd(opts *globalOpts) *cobra.Command {
 	var use string
-	var resolveVersion int64
-	resolve := &cobra.Command{Use: "resolve <id-or-name>", Short: "Choose the local or account edit for one conflicting rule", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	var version int64
+	cmd := &cobra.Command{Use: "resolve <id-or-name>", Short: "Choose the local or account edit for one conflicting rule", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if !slices.Contains([]string{accessrules.SyncLocal, accessrules.UseAccount}, use) {
 			return exitcode.UsageError(errors.New("use --use local or --use account"))
 		}
-		if err := checkOptionalRuleVersion(cmd, resolveVersion); err != nil {
+		if err := checkOptionalRuleVersion(cmd, version); err != nil {
 			return err
 		}
 		return opts.printRuleStore(func(store *connectorstate.AccessRuleStore) (accessrules.Snapshot, error) {
-			return store.Resolve(cmd.Context(), resolveVersion, args[0], use)
+			return store.Resolve(cmd.Context(), version, args[0], use)
 		})
 	}}
-	resolve.Flags().StringVar(&use, "use", "", "local or account")
-	resolve.Flags().Int64Var(&resolveVersion, "version", -1, "fail unless access rules are still at this version")
-	command.AddCommand(resolve)
-	return command
+	cmd.Flags().StringVar(&use, "use", "", "local or account")
+	cmd.Flags().Int64Var(&version, "version", -1, "fail unless access rules are still at this version")
+	return cmd
 }
 
 // checkOptionalRuleVersion allows an omitted --version, which acts on the
@@ -121,6 +134,7 @@ func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file, flag string)
 	if file != "-" {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("use " + flag + " - and pipe one access rule as JSON"))
 	}
+	// readRequestBody is the CLI's bounded stdin reader; the method only names the body in its errors.
 	body, err := readRequestBody(cmd.Context(), opts.streams, http.MethodPut)
 	if err != nil {
 		return accessrules.Definition{}, err
@@ -132,7 +146,7 @@ func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file, flag string)
 	if connectorstate.DecodeStrictJSON(body, &definition) != nil {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("invalid access rule definition"))
 	}
-	if err := definition.Validate(strings.HasPrefix(definition.ID, "builtin.")); err != nil {
+	if err := definition.Validate(strings.HasPrefix(definition.ID, builtInPrefix)); err != nil {
 		return accessrules.Definition{}, exitcode.UsageError(fmt.Errorf("invalid access rule definition: %w", err))
 	}
 	return definition, nil
@@ -231,7 +245,8 @@ func (o *globalOpts) runRulesSync(ctx context.Context) error {
 // ruleSyncNotice explains a sync that kept saved rules pending on this device.
 // deferred is false when err must fail the command instead.
 func ruleSyncNotice(snapshot *accessrules.Snapshot, err error) (notice string, deferred bool) {
-	if err != nil && snapshot.SchemaVersion != 1 {
+	// A zero snapshot means the journal was never read, so nothing stays pending.
+	if journalRead := snapshot.SchemaVersion == 1; err != nil && !journalRead {
 		return "", false
 	}
 	switch {
@@ -576,6 +591,14 @@ func (o *globalOpts) savedLinkLimits(ctx context.Context, id string) (*accessrul
 		return nil, ruleCommandError(err)
 	}
 	return limits, nil
+}
+
+func forgetLinkLimits(ctx context.Context, dir, id string) error {
+	store, err := connectorstate.OpenShareRules(dir)
+	if err == nil {
+		err = store.Set(ctx, id, nil)
+	}
+	return err
 }
 
 func (o *globalOpts) shareRuleStore() (*connectorstate.ShareRuleStore, error) {

@@ -825,9 +825,12 @@ immediate revocation. See
 ### Saved access rules
 
 Access rules are named presets for future shares. They work before account
-linking; `qurl rules sync` merges them with your linked account, and different
-edits to the same rule need `qurl rules resolve <id-or-name> --use local|account`.
-Changing or deleting a rule never changes existing shares.
+linking; `qurl rules sync` merges them with your linked account (`login`,
+`account setup` and `account recover` also sync, uploading rules saved before
+linking), and different edits to the same rule need
+`qurl rules resolve <id-or-name> --use local|account`. A sync that stays local
+exits 0; read the JSON `sync` field. Changing or deleting a rule never changes
+existing shares.
 
 ```sh
 qurl rules create Reviewers --mode review --approvals-last 7d
@@ -845,8 +848,9 @@ qurl publish http://127.0.0.1:8080 --rule once
 A public rule with link limits makes `publish` mint a temporary link (`Link:`,
 JSON `link`) and keeps the limits for later `qurl share <CRID>` links on this
 device. Approvals last is part of the resource policy and the service enforces
-it. Publishing again to an existing item keeps its settings; JSON reports
-`"settings_differ": true` when the rule differs.
+it. Publishing again to an existing item with a different access policy fails
+without changing it; different link limits or approval lifetime keep the
+existing settings and JSON reports `"settings_differ": true`.
 
 Supervising apps call `qurl rules capabilities -o json` (offline), read and edit
 with `rules list|save|delete|sync|resolve -o json` (`save` reads one rule from

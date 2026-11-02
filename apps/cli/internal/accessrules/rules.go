@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -104,6 +105,10 @@ func ParseDuration(s string) (time.Duration, error) {
 	}
 	if n < 0 {
 		return 0, errors.New("invalid duration: negative value not allowed")
+	}
+	// Local guard (not yet upstream): a huge count would overflow into range.
+	if n > int(math.MaxInt64/int64(7*day)) {
+		return 0, fmt.Errorf("invalid duration: %s", s)
 	}
 	switch unit {
 	case "d":
@@ -467,6 +472,8 @@ func (l AccountLibrary) Validate() error {
 
 // UnmarshalJSON preserves field presence so irrelevant empty settings cannot pass.
 // It accepts exactly the contract's fields; a write-back therefore never drops one.
+// TODO(upstream-contract): a new rule field from qurl-service fails sync on
+// released CLIs until the catalog schema is versioned or older clients are served without it.
 func (d *Definition) UnmarshalJSON(data []byte) error {
 	type plain Definition
 	var fields map[string]json.RawMessage

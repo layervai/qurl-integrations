@@ -110,7 +110,7 @@ and price to make an existing public CRID private. Removing payment keeps it
 private. Publishing the same target again does not change its payment policy.
 
 Authorized users open the resource with "qurl get <CRID>". The --quiet flag
-prints only the CRID. Use --foreground for CI or daemon debugging; that process
+prints only the CRID, then any temporary link a rule minted. Use --foreground for CI or daemon debugging; that process
 owns the share and turns it off when it exits.`,
 		Example: `  qurl publish http://127.0.0.1:3000
   qurl publish http://localhost:8080 --id local-dashboard
