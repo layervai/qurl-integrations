@@ -6,6 +6,9 @@ Connector (running as a sidecar in the same network namespace) is the sole
 reachable path and applies access control before any traffic reaches the
 origin.
 
+Start with the [customer quickstart](QUICKSTART.md) for Docker Compose,
+ECS/Fargate and Kubernetes, including enrollment and the protected-object smoke.
+
 Published image:
 
 ```sh
@@ -137,20 +140,136 @@ on the bucket:
 }
 ```
 
-Scope `s3:GetObject` to `S3_PREFIX` (`/site/*` above); drop the prefix segment
-for a whole-bucket deployment. `s3:ListBucket` is what makes S3 answer a missing
-key with `404 NoSuchKey` instead of `403 AccessDenied`, which is the distinction
-the preflight and the `upstream_status` alarms both depend on — so grant it on
-the bare bucket ARN, matching the `connector-protected-site` construct the
-website infrastructure already ships. An `s3:prefix` condition is **not** an
-equivalent narrowing here: that key is supplied per List request and is absent
-from the authorization check `GetObject` performs, so conditioning the grant
-sends missing keys back to `403`. Confine enumeration with a bucket policy
-instead. A prefix-scoped variant is tracked in GitHub issue #894, along with the
-CloudWatch queries for these statuses. This broad `s3:ListBucket` grant is an
-intentional #894 tradeoff: it preserves the 403-vs-404 operator signal at the
-cost of enumeration permission for this identity. Do not silently replace it
-with an `s3:prefix` condition until #894 changes that signal and policy shape.
+Scope `s3:GetObject` to `S3_PREFIX` (`site/*` above); drop the prefix segment
+for a whole-bucket deployment. The unconditional `s3:ListBucket` grant above
+lets this identity list the whole bucket. It also lets S3 distinguish a missing
+key (`404`) from a rejected request (`403`) in the origin logs. Viewers receive
+`404` for both.
+
+<!-- TODO(upstream-contract): S3 ListBucket/prefix error semantics and nginx JSON log field names below must match AWS and templates/nginx.conf.template. -->
+
+#### Prefix-limited listing
+
+For `S3_PREFIX=site`, replace the `MissingKeysResolveAs404` statement above with:
+
+```json
+{
+  "Sid": "ListOnlyServedPrefix",
+  "Effect": "Allow",
+  "Action": "s3:ListBucket",
+  "Resource": "arn:aws:s3:::EXAMPLE-BUCKET",
+  "Condition": {
+    "StringLike": {
+      "s3:prefix": ["site/*"]
+    }
+  }
+}
+```
+
+Keep the `ReadServedObjects` statement. Use the same bucket and prefix in both
+statements and the origin configuration. In the IAM patterns, write the prefix
+followed by `/*`, with no leading slash (`site/*`); `S3_PREFIX=site`, `/site`, and `site/` all select
+the same keys. This grants no write, delete, or bucket-wide list access. Other
+attached policies can still grant broader access; replace the broad list grant
+rather than adding this beside it. With an empty `S3_PREFIX`, there is no site
+prefix to narrow; use the broad grant or a dedicated bucket.
+
+The prefix condition applies to list requests, not to `GetObject`. With this
+policy, a missing object can therefore produce upstream `403`, just like a
+rejected read. The viewer still gets `404`, and the startup preflight may report
+`preflight_request_rejected` when the index object is absent. Treat a `403`
+alarm as a request-rejection signal, not proof of bad credentials. Check for a
+missing key as well as IAM, region, endpoint, and signing settings. See the
+[AWS GetObject error contract](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)
+and [prefix condition examples](https://docs.aws.amazon.com/AmazonS3/latest/userguide/amazon-s3-policy-keys.html).
+
+For example, an operator with this role can check the exact index key with:
+
+```sh
+aws s3api list-objects-v2 --bucket EXAMPLE-BUCKET --prefix site/index.html \
+  --query "Contents[?Key == 'site/index.html'].Key" --output json
+```
+
+`null` or `[]` means this exact key is absent; a failed list request needs an
+IAM/credential check. Replace both key literals together. Use a dedicated
+bucket if the deployment needs both an unconditional list grant for clear
+missing-key diagnostics and isolation from other sites' object names.
+SSE-KMS objects also need permission to decrypt with their specific KMS key;
+the S3 statements above do not grant that permission.
+
+### Operator queries and troubleshooting
+
+Ship the origin container's stdout to a CloudWatch log group. nginx emits JSON
+with `layer: "nginx"`, numeric viewer `status`, and string `upstream_status`.
+Envoy's separate `layer: "origin"` lines report rejected requests and must not
+be added to nginx counts, or the same request can be counted twice. Select the
+origin log group and a short time range in Logs Insights.
+
+This query counts upstream `403`, `429`, and `5xx` outcomes by five-minute bin
+and viewer status. The regex also accepts nginx's comma/colon-separated status
+format defensively; this origin currently disables multiple upstream attempts:
+
+```text
+fields @timestamp, layer, status, upstream_status
+| filter layer = "nginx"
+| filter upstream_status like /(^|[ ,:])(403|429|5[0-9]{2})($|[ ,:])/
+| stats count(*) as requests by bin(5m), upstream_status, status
+```
+
+The upstream is the Envoy signer, not S3 directly. nginx can record `502`/`504`
+when it cannot reach Envoy; Envoy can return `503`/`504` when it cannot reach
+S3. The status alone does not identify which hop failed. Compare nginx error
+logs and Envoy logs before assigning a cause. See the
+[nginx upstream status reference](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#var_upstream_status).
+
+To count viewer failures, including `5xx` generated by nginx or Envoy,
+use:
+
+```text
+fields @timestamp, layer, status, upstream_status, cache
+| filter layer = "nginx" and status >= 500
+| stats count(*) as requests by bin(5m), status, upstream_status, cache
+```
+
+These are request counts, not unique-object counts. Inline revalidation can
+fall back to a stale object with viewer `200` and a logged upstream error; the
+first query covers that case. Background refresh is different: the configured
+`proxy_cache_background_update on` uses a subrequest, and nginx defaults to
+`log_subrequest off`. Its failure is absent from these nginx access queries.
+Check nginx error logs and signer logs; viewer `200` alone does not prove a
+refresh succeeded. See [nginx subrequest logging](https://nginx.org/en/docs/http/ngx_http_core_module.html#log_subrequest).
+
+Track stale serving separately as an indirect signal, not proof of an error:
+
+```text
+fields @timestamp, layer, cache
+| filter layer = "nginx" and cache in ["STALE", "UPDATING"]
+| stats count(*) as requests by bin(5m), cache
+```
+
+Cache hits and local request guards can have empty `upstream_status`;
+zero query matches do not prove S3 is healthy or that a request reached it.
+These queries do not print object names, but raw nginx lines include `path`
+and `key`, and Envoy rejection lines include `key`. Keep all of these object
+names out of metric dimensions and shared incident reports. Use Envoy rejection lines as a separate cross-check, not extra request
+counts. Query syntax follows the
+[CloudWatch Logs Insights reference](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_QuerySyntax.html).
+
+| Symptom | Viewer response on an uncached request | Operator check |
+| --- | --- | --- |
+| S3 rejects the request (`403`) | `404 Not Found` | Confirm the object exists under the configured prefix; then check the role/provider chain, bucket policy, KMS key, region, endpoint and signing settings. Prefix-limited listing also makes missing keys look like `403`. |
+| Throttle-class response (`429`) or S3 `503 SlowDown` | `502 Bad Gateway` | Check both `429` and `503` trends and S3 request load. A `503` can also come from Envoy; use signer logs and S3 metrics to identify the cause. Keep the nginx cache enabled and investigate repeated misses before raising request volume. |
+| Object is missing (`404` with an unconditional list grant) | `404 Not Found` | Check the exact case-sensitive key, prefix and index document; sync the missing object. |
+| S3 returns `5xx`, or the signer/S3 path is unreachable | `502 Bad Gateway` | Compare upstream statuses with viewer `5xx`; check origin/signer health, AWS service health and network egress. Upstream `5xx` can also be generated by nginx or Envoy. |
+
+S3 normally signals request-rate throttling with `503 SlowDown`, which is
+included in the first query. With a stale cache entry, the configured
+`http_503` fallback can serve `200`; `429` has no such stale fallback. See the
+[AWS S3 performance guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance-design-patterns.html).
+
+The viewer never receives the S3 error body or `x-amz-*` headers. Existing
+production origin alarms must still be configured; these read-only queries do
+not create alarms, notification routes, or IAM grants.
 
 ### Startup preflight
 
@@ -167,6 +286,8 @@ Envoy signer before nginx starts, and reports the verdict as
 | other statuses | `preflight_upstream_error` | serves and asks the operator to inspect the status and logs |
 | no response | `preflight_no_response` | serves |
 
+With prefix-limited listing, a missing index may take the `403` rejection
+path instead of `preflight_object_missing`; see [IAM policy](#iam-policy).
 The HTTP status alone does not identify the cause: credentials, IAM,
 `AWS_REGION`, endpoint selection, or other request configuration can all be
 responsible. The log identifies the condition that nginx masks as a viewer
@@ -221,13 +342,20 @@ replaces; viewer TLS is terminated before traffic reaches nginx.
 
 ## Error mapping
 
+With the [prefix-limited list policy](#prefix-limited-listing), a missing key
+can log `403` rather than `404`. Both still map to viewer `404`. The legacy
+SigV4-denied alarm name does not establish an authentication failure. Missing
+asset requests (including viewer typos or old asset paths after a deployment)
+can raise that alarm; evaluate its baseline and thresholds before switching
+policies. Use preflight, exact-key listing and runtime logs to identify causes.
+
 | Condition | Client status | Body | Observability |
 | --- | ---: | --- | --- |
 | Missing key (S3 `404`) | 404 | `Not Found` | access log `upstream_status:404` |
 | S3 request rejected (`403`) | 404 | `Not Found` | access log `upstream_status:403` (drives the SigV4-denied alarm) |
 | Wrong-region bucket (S3 `301 PermanentRedirect`) | 404 | `Not Found` | access log `upstream_status:301` |
 | Any other S3 `3xx`/`4xx` response | 404 | `Not Found` | access log preserves the exact `upstream_status` |
-| S3 throttle (`429`) | 502 | `Bad Gateway` | access log `upstream_status:429` |
+| Throttle-class `429` | 502 | `Bad Gateway` | access log `upstream_status:429`; S3 normally uses `503 SlowDown`, covered by the `5xx` row |
 | Any S3 `5xx` / Envoy down / credential-chain failure | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
 | Method other than GET/HEAD | 405 | `Method Not Allowed` | access log only |
 
@@ -239,8 +367,9 @@ error mapping. The other exceptions are responses nginx produces itself: `304`
 for a viewer's conditional GET and `416` for an unsatisfiable range.
 
 S3 error bodies, `x-amz-*` response headers, and the 403-vs-404 distinction are
-never leaked to clients; the distinction is preserved in the access log for
-alarming. Envoy strips the complete `x-amz-*` namespace, including user-defined
+never leaked to clients. The observed upstream status is logged for alarming;
+its meaning depends on the chosen list policy. Envoy strips the complete
+`x-amz-*` namespace, including user-defined
 `x-amz-meta-*` values, KMS key IDs, and website redirect metadata, while nginx
 strips Envoy's `x-envoy-upstream-service-time`. Standard HTTP object metadata
 such as `Content-Type`, `Cache-Control`, `Content-Encoding`, `ETag`,
@@ -352,11 +481,10 @@ intentionally uses bash >= 5.1 for PID-scoped `wait -n`.
 
 ## Deploy requirements
 
-- The signing identity needs **`s3:GetObject`** on the served keys **and**
-  **`s3:ListBucket`** on the bucket — without ListBucket, a missing key returns
-  `AccessDenied` (403) instead of `NoSuchKey` (404), muddying the
-  request-rejection signal. The deliberately broad grant and #894 follow-up,
-  plus non-EC2 credential sources, are in
+- The signing identity needs **`s3:GetObject`** on the served keys. Choose the
+  [broad-list policy](#iam-policy) for clear missing-key diagnostics, or the
+  [prefix-limited listing policy](#prefix-limited-listing) for less enumeration
+  access with an ambiguous upstream `403`. Non-EC2 credential sources are in
   [AWS credentials](#aws-credentials).
 - IMDSv2 from inside a container requires **hop-limit 2** on the host. Hosts
   with no instance role must supply credentials explicitly; check the
