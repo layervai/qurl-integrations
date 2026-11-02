@@ -195,6 +195,8 @@ const LOG_EVENTS = Object.freeze({
 // don't trigger false-positive redactions. The substring approach
 // would have made the redaction unsafe; exact-match makes it safe.
 const AUDIT_EVENTS = {
+  // Counted by the infra capacity alarm; actor/stage are log context, not dimensions.
+  UPLOAD_REJECTED_CAPACITY: 'upload_rejected_capacity',
   // UPLOAD_SUCCESS fires after upload + mintLinksInBatches + sufficiency
   // check all succeed — i.e. when the send is fully prepared and ready
   // to dispatch. It's not just the connector POST. Name is kept literal
