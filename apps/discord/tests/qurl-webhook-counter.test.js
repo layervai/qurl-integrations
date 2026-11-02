@@ -1,3 +1,4 @@
+const attemptHeaders = require('./helpers/qurl-webhook-attempt');
 
 const crypto = require('crypto');
 
@@ -107,6 +108,7 @@ function signedRequest(payload = VALID_PAYLOAD) {
     .post('/webhooks/qurl')
     .set('Content-Type', 'application/json')
     .set('QURL-Signature', signBody(raw))
+    .set(attemptHeaders(raw))
     .send(raw);
 }
 

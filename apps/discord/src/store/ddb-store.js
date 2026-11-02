@@ -413,6 +413,8 @@ async function recordQURLSendBatch(sends, options = {}) {
 // in qurl-bot-ddb), refreshed on every write. Safely past the longest
 // monitor lifetime (1h cap) + longest link expiry (7d) + DDB's ~48h
 // TTL precision — no monitor will ever read a row about to reap.
+// TODO(upstream-contract): retain replay state beyond the full 600-second
+// signed-attempt acceptance interval (±300s), including receiver clock drift.
 const QURL_VIEW_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 // `consumed` is persisted + returned by getQurlViews but not yet

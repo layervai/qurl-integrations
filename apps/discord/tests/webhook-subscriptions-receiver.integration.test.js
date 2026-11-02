@@ -1,3 +1,4 @@
+const attemptHeaders = require('./helpers/qurl-webhook-attempt');
 
 const crypto = require('crypto');
 
@@ -75,6 +76,7 @@ describe('webhook-subscriptions → receiver integration (seam contract)', () =>
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', sig)
+      .set(attemptHeaders(raw, 'sec_integration'))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'recorded' });
@@ -100,6 +102,7 @@ describe('webhook-subscriptions → receiver integration (seam contract)', () =>
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', sig)
+      .set(attemptHeaders(raw, 'sec_known'))
       .send(raw);
     expect(res.status).toBe(503);
   });
@@ -125,6 +128,7 @@ describe('webhook-subscriptions → receiver integration (seam contract)', () =>
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', sig)
+      .set(attemptHeaders(raw, 'sec_known'))
       .send(raw);
     expect(res.status).toBe(401);
   });

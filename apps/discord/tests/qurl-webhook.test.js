@@ -1,3 +1,4 @@
+const attemptHeaders = require('./helpers/qurl-webhook-attempt');
 
 const crypto = require('crypto');
 const express = require('express');
@@ -125,6 +126,7 @@ describe('POST /webhooks/qurl — sender view-counter fast-path gate (feat #60, 
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
   };
 
@@ -171,6 +173,7 @@ describe('POST /webhooks/qurl — subscription-registry primed-vs-unprimed seman
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(503);
   });
@@ -184,6 +187,7 @@ describe('POST /webhooks/qurl — subscription-registry primed-vs-unprimed seman
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(401);
   });
@@ -197,6 +201,7 @@ describe('POST /webhooks/qurl — subscription-registry primed-vs-unprimed seman
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(503);
   });
@@ -209,6 +214,7 @@ describe('POST /webhooks/qurl — signature verification', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'recorded' });
@@ -226,6 +232,7 @@ describe('POST /webhooks/qurl — signature verification', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw, 'wrong-secret'))
+      .set(attemptHeaders(raw, 'wrong-secret'))
       .send(raw);
     expect(res.status).toBe(401);
     expect(mockRecordQurlView).not.toHaveBeenCalled();
@@ -269,6 +276,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual(expect.objectContaining({ status: 'ignored' }));
@@ -283,6 +291,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'invalid-payload' });
@@ -296,6 +305,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'invalid-payload' });
@@ -312,6 +322,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'invalid-payload' });
@@ -327,6 +338,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'invalid-payload' });
@@ -341,6 +353,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'dedup' });
@@ -353,6 +366,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(500);
   });
@@ -363,6 +377,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(mockRecordQurlView).toHaveBeenCalledWith(expect.objectContaining({
       eventId: 'evt-1',
@@ -376,6 +391,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'invalid-payload' });
@@ -389,6 +405,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'invalid-payload' });
@@ -402,6 +419,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'invalid-payload' });
@@ -415,6 +433,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(mockRecordQurlView).toHaveBeenCalledWith(expect.objectContaining({ consumed: false }));
   });
@@ -441,12 +460,14 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
         .post('/webhooks/qurl')
         .set('Content-Type', 'application/json')
         .set('QURL-Signature', signBody(unknownRaw))
+        .set(attemptHeaders(unknownRaw))
         .send(unknownRaw);
     }
     const limited = await request(isolatedApp)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(unknownRaw))
+      .set(attemptHeaders(unknownRaw))
       .send(unknownRaw);
     expect(limited.status).toBe(429);
   });
@@ -474,6 +495,7 @@ describe('POST /webhooks/qurl — bad-sig limiter scope (only HMAC failures coun
         .post('/webhooks/qurl')
         .set('Content-Type', 'application/json')
         .set('QURL-Signature', signBody(unknownRaw))
+        .set(attemptHeaders(unknownRaw))
         .send(unknownRaw);
       expect(r.status).toBe(401);
     }
@@ -483,6 +505,7 @@ describe('POST /webhooks/qurl — bad-sig limiter scope (only HMAC failures coun
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(validRaw))
+      .set(attemptHeaders(validRaw))
       .send(validRaw);
     expect(valid.status).toBe(200);
   });
@@ -498,6 +521,7 @@ describe('POST /webhooks/qurl — multi-secret HMAC selection (BYOK view counter
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw, 'secret-B'))
+      .set(attemptHeaders(raw, 'secret-B'))
       .send(raw);
     expect(res.status).toBe(401);
     expect(mockRecordQurlView).not.toHaveBeenCalled();
@@ -511,6 +535,7 @@ describe('POST /webhooks/qurl — multi-secret HMAC selection (BYOK view counter
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw, 'guild-specific-secret'))
+      .set(attemptHeaders(raw, 'guild-specific-secret'))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'recorded' });
@@ -525,6 +550,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
       .set('X-Forwarded-For', '198.51.100.42')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'recorded' });
@@ -544,6 +570,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
       .set('X-Forwarded-For', '198.51.100.43')
       .set('Content-Type', 'application/octet-stream')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(401);
     expect(mockLoggerWarn).toHaveBeenCalledWith(
@@ -561,6 +588,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(401);
     expect(mockRecordQurlView).not.toHaveBeenCalled();
@@ -573,6 +601,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(401);
   });
@@ -584,6 +613,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(401);
   });
@@ -594,6 +624,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect([400, 500]).toContain(res.status);
     expect(mockLoggerWarn).not.toHaveBeenCalledWith(
@@ -609,6 +640,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(big))
+      .set(attemptHeaders(big))
       .send(big);
     expect([400, 413, 500]).toContain(res.status);
     expect(mockRecordQurlView).not.toHaveBeenCalled();
@@ -622,6 +654,7 @@ describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => 
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     const auditCalls = mockAudit.mock.calls;
     const ownerMissCall = auditCalls.find(([event]) => event === 'qurl_webhook_cache_miss_unknown_owner');
@@ -645,13 +678,107 @@ describe('POST /webhooks/qurl — bad-signature rate limit', () => {
         .post('/webhooks/qurl')
         .set('Content-Type', 'application/json')
         .set('QURL-Signature', signBody(raw, 'wrong-secret'))
+        .set(attemptHeaders(raw, 'wrong-secret'))
         .send(raw);
     }
     const res = await request(isolatedApp)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw))
       .send(raw);
     expect(res.status).toBe(429);
+  });
+});
+
+describe('signed delivery attempt freshness', () => {
+  const now = 1_793_638_800_000;
+  const cases = [
+    ['current attempt with old event', 0, {}, 200],
+    ['past edge', -300, {}, 200],
+    ['future edge', 300, {}, 200],
+    ['expired attempt', -301, {}, 401],
+    ['future attempt', 301, {}, 401],
+    ['missing timestamp', 0, { 'QURL-Timestamp': null }, 401],
+    ['missing v2', 0, { 'QURL-Signature-V2': null }, 401],
+    ['decimal timestamp', 0, { 'QURL-Timestamp': '1793638800.5' }, 401],
+    ['unsafe timestamp', 0, { 'QURL-Timestamp': '9999999999999999' }, 401],
+    ['duplicate timestamp', 0, { 'QURL-Timestamp': ['1793638800', '1793638800'] }, 401],
+    ['duplicate signature', 0, { 'QURL-Signature-V2': ['a'.repeat(64), 'a'.repeat(64)] }, 401],
+    ['bad signature', 0, { 'QURL-Signature-V2': 'a'.repeat(64) }, 401],
+    ['changed signed timestamp', -301, { 'QURL-Timestamp': '1793638800' }, 401],
+  ];
+  it.each(cases)('%s', async (_name, offset, overrides, status) => {
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const raw = JSON.stringify(VALID_PAYLOAD);
+      const headers = { ...attemptHeaders(raw, 'test-qurl-secret', String(now / 1000 + offset)), ...overrides };
+      let req = request(app).post('/webhooks/qurl').set('Content-Type', 'application/json')
+        .set('X-Forwarded-For', '192.0.2.49').set('QURL-Signature', signBody(raw));
+      for (const [key, value] of Object.entries(headers)) if (value !== null) req = req.set(key, value);
+      const res = await req.send(raw);
+      expect(res.status).toBe(status);
+      if (status === 200) expect(mockRecordQurlView).toHaveBeenCalledTimes(1);
+      else expect(mockRecordQurlView).not.toHaveBeenCalled();
+      if (['expired attempt', 'future attempt'].includes(_name)) {
+        expect(mockAudit).toHaveBeenCalledWith('qurl_webhook_replay_rejected', expect.any(Object));
+      } else if (status === 401) {
+        expect(mockAudit).toHaveBeenCalledWith('qurl_webhook_signature_invalid', expect.any(Object));
+        expect(mockAudit).not.toHaveBeenCalledWith('qurl_webhook_replay_rejected', expect.any(Object));
+      }
+    } finally { clock.mockRestore(); }
+  });
+});
+
+describe('authenticated attempt failures do not throttle fresh senders', () => {
+  const receiver = buildRawOnlyApp();
+  it('calibrates the same burst against a real v2 HMAC failure', async () => {
+    const raw = JSON.stringify(VALID_PAYLOAD);
+    let res;
+    for (let i = 0; i < 31; i++) {
+      res = await request(receiver).post('/webhooks/qurl').set('Content-Type', 'application/json')
+        .set('X-Forwarded-For', '192.0.2.52').set('QURL-Signature', signBody(raw))
+        .set(attemptHeaders(raw, 'wrong-v2-secret')).send(raw);
+    }
+    expect(res.status).toBe(429);
+  });
+  it.each(['stale', 'missing'])('%s attempts leave fresh delivery available', async (mode) => {
+    const raw = JSON.stringify(VALID_PAYLOAD);
+    for (let i = 0; i < 31; i++) {
+      const headers = mode === 'stale'
+        ? attemptHeaders(raw, 'test-qurl-secret', String(Math.floor(Date.now() / 1000) - 301)) : {};
+      const res = await request(receiver).post('/webhooks/qurl').set('Content-Type', 'application/json')
+        .set('X-Forwarded-For', '192.0.2.51').set('QURL-Signature', signBody(raw)).set(headers).send(raw);
+      expect(res.status).toBe(401);
+    }
+    const res = await request(receiver).post('/webhooks/qurl').set('Content-Type', 'application/json')
+      .set('X-Forwarded-For', '192.0.2.51').set('QURL-Signature', signBody(raw))
+      .set(attemptHeaders(raw)).send(raw);
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('Go HTTP delivery wire contract', () => {
+  const captured = require('./fixtures/qurl-attempt-wire.json');
+  it.each([
+    ['current attempt for old event', 0, false, 200],
+    ['captured request after window', 301_000, false, 401],
+    ['captured request before window', -301_000, false, 401],
+    ['legacy body signature cannot replace v2', 0, true, 401],
+  ])('%s', async (_name, clockOffset, removeV2, status) => {
+    const attemptTime = Number(captured.headers['QURL-Timestamp']) * 1000;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(attemptTime + clockOffset);
+    try {
+      const headers = { ...captured.headers };
+      if (removeV2) delete headers['QURL-Signature-V2'];
+      const res = await request(app).post('/webhooks/qurl')
+        .set('X-Forwarded-For', '192.0.2.50').set('Content-Type', 'application/json')
+        .set(headers).send(captured.body);
+      expect(res.status).toBe(status);
+      if (status === 200) {
+        expect(mockRecordQurlView).toHaveBeenCalledTimes(1);
+        expect(Date.parse(JSON.parse(captured.body).timestamp)).toBeLessThan(attemptTime - 300_000);
+      } else expect(mockRecordQurlView).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
   });
 });

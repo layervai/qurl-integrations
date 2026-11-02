@@ -95,6 +95,17 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
 
 - Header: `QURL-Signature` = bare-hex HMAC-SHA256 over the raw body.
   No `sha256=` prefix — that's the GitHub wire shape, NOT this one.
+- `QURL-Timestamp` is canonical decimal Unix seconds for this HTTP attempt.
+- `QURL-Signature-V2` is lowercase hex HMAC-SHA256 over the exact bytes
+  `v2.<QURL-Timestamp>.<raw body>`, using the same webhook secret. Both signatures
+  are required. The attempt time must be within ±300 seconds; event `timestamp`
+  is not the freshness clock. Invalid v2 never falls back to body-only signing.
+- Authenticated attempts outside the window emit `qurl_webhook_replay_rejected`.
+  Missing/malformed attempt headers emit `qurl_webhook_signature_invalid` with
+  `result=attempt_headers_invalid`; a bad v2 HMAC uses `result=sig_invalid`.
+  These results return 401 before side effects. See the
+  [sender-first rollout and rollback requirements](../README.md#webhook-freshness-rollout)
+  before changing either service.
 - Body: `{id, type, data:{qurl_id, resource_id, access_count, consumed},
   owner_id, timestamp, api_version}` (peer is qurl-service's
   `WebhookEvent` payload). Field names matter: `type` is the event

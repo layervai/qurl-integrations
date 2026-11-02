@@ -303,3 +303,27 @@ Setup and install cookies use `__Host-` names with `Secure`, `HttpOnly`,
 `SameSite=Lax`, and `Path=/`. Use HTTPS (or browser-supported localhost) for
 local setup tests. Deploying this change invalidates older setup cookies;
 admins with an in-flight setup must start again.
+
+### Webhook freshness rollout
+
+The receiver requires `QURL-Timestamp` (Unix seconds) and
+`QURL-Signature-V2` (lowercase hex HMAC-SHA256 of `v2.` + timestamp + `.` +
+raw body). It checks both body integrity and a 300-second past/future window
+before any event side effect. Missing, duplicate, or malformed freshness
+headers fail closed. There is no fallback to body-only authentication.
+An authenticated attempt outside the window emits `qurl_webhook_replay_rejected`.
+Missing or malformed attempt headers emit `qurl_webhook_signature_invalid` with
+`result=attempt_headers_invalid`. These failures do not consume the bad-signature
+IP limit; a bad v2 HMAC still does. Monitor both audit results and signature 429s.
+Event-ID deduplication
+still applies inside the freshness window.
+
+Deploy and verify the sender preparation before this receiver. Each retry must
+sign a new attempt timestamp while retaining the original event timestamp and
+ID. Verify every active sender, delayed retries, past/future rejection, and
+normal view/expiry/consumed updates through the normal Sandbox journey. Keep
+this receiver release on hold until the sender is deployed in that environment.
+Do not use the original event timestamp to decide attempt freshness. A sender
+rollback requires a coordinated receiver rollback; the strict receiver rejects
+legacy-only attempts. No deployment or production release is authorized by
+these source changes.
