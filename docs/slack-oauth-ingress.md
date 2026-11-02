@@ -91,8 +91,9 @@ identify the pair in the notification. Reasons are `missing_x_forwarded_for`,
 `remote_addr` and `unknown`. No address, header, query, state or identity is a
 metric dimension. There are six fixed pairs.
 
-The first warning in a one-minute window notifies the existing runtime alerts
-topic. A quiet period can send recovery; it does not prove emitter/filter
+One breaching minute in a five-period evaluation window notifies the existing
+runtime alerts topic. This keeps first-warning detection and reduces recovery
+flapping after isolated warnings. A quiet evaluation window can send recovery; it does not prove emitter/filter
 health. The app limits warning logs per reason/fallback pair per process, so
 this counts warning records, not requests or clients. Check ALB append mode and
 the complete ingress boundary above first. Do not disable the limiter, trust a

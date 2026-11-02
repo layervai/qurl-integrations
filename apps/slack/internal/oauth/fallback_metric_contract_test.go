@@ -13,6 +13,7 @@ import (
 	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
+// Keep sequential: this test replaces the process-wide default logger.
 func TestOAuthFallbackMetricContract(t *testing.T) {
 	var logs bytes.Buffer
 	previous := slog.Default()
@@ -41,6 +42,7 @@ func TestOAuthFallbackMetricContract(t *testing.T) {
 			if err := json.Unmarshal(logs.Bytes(), &event); err != nil {
 				t.Fatal(err)
 			}
+			// This checks the emitter in isolation; infra matches named fields, not a global logger key count.
 			if len(event) != 6 || event["msg"] != "oauth client ip using fallback" || event["path"] != StartPath || event["reason"] != header.reason || event["fallback"] != remote.fallback {
 				t.Fatalf("fallback metric contract changed: %v", event)
 			}
@@ -49,6 +51,7 @@ func TestOAuthFallbackMetricContract(t *testing.T) {
 					t.Fatal("fallback event leaked input")
 				}
 			}
+			// Verbose output is a fixture source for the read-only AWS filter check.
 			t.Logf("fallback_json=%s", logs.Bytes())
 		}
 	}

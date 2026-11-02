@@ -296,6 +296,8 @@ func (l *oauthClientIPFallbackLogLimiter) allow(key string) bool {
 	return false
 }
 
+// Keep new reasons aligned with TestOAuthFallbackMetricContract, the ingress
+// runbook and the paired infra allowlist before using them in alerts.
 func oauthForwardedForFallbackReason(headers []string) string {
 	candidate, ok := oauthRightmostForwardedForValue(headers)
 	if !ok {
