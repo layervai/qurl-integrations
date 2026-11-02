@@ -104,6 +104,8 @@ function largeSendThreshold() {
   return Math.min(LARGE_SEND_RECIPIENT_FLOOR, half || 1);
 }
 
+const CONNECTOR_UPLOAD_SIZE_MESSAGE = 'This file exceeds the Connector upload size limit. Use a smaller file.';
+
 // classifyMintFailure maps a thrown error from the upload + mint phase
 // of /qurl send into a small enum of reason strings. Used as the
 // `reason` field on the QURL_SEND_CREATE_LINK_FAILURE audit event
@@ -2224,6 +2226,9 @@ async function executeSendPipeline(interaction, {
     // Surface a specific message for known upstream failure codes so the
     // user knows what to do (re-upload to refresh the per-resource quota)
     // instead of seeing a generic "try again" that won't help.
+    if (resourceType === RESOURCE_TYPES.FILE && error.apiCode === 'upload_too_large') {
+      return interaction.editReply({ content: CONNECTOR_UPLOAD_SIZE_MESSAGE });
+    }
     if (error.apiCode === 'quota_exceeded') {
       const isFile = resourceType === RESOURCE_TYPES.FILE;
       const verb = isFile ? 're-upload the file' : 'edit the location query and resend';
@@ -3291,9 +3296,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         // never reaches a Discord reply. (The expiry-shaped user copy is
         // pre-existing; decoupling it from the network case is tracked in #634.)
         const isExpired = /403|expired|network|CDN/i.test(err.message || '');
-        const msg = isExpired
-          ? 'Original attachment URL has expired. Please create a new send.'
-          : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
+        const msg = err.apiCode === 'upload_too_large'
+          ? CONNECTOR_UPLOAD_SIZE_MESSAGE
+          : isExpired
+            ? 'Original attachment URL has expired. Please create a new send.'
+            : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', {
           sendId,
           error: err.message,
