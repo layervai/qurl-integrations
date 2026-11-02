@@ -384,9 +384,12 @@ func TestHandleAdminTransferOwnership_EnterpriseIDPassedToLookup(t *testing.T) {
 func TestHandleAdminTransferOwnership_RacedOwnerChangeReturnsOwnerOnly(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
-	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("owner changed after gate")})
-
 	h := newAdminTestHandler(t, ts)
+	// Isolate the injected transfer failure from one-time legacy initialization.
+	if _, err := h.cfg.AdminStore.AuthorizePolicyWrite(context.Background(), testAdminTeamID, testAdminOwnerID); err != nil {
+		t.Fatal(err)
+	}
+	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("owner changed after gate")})
 	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
 		if userID != testTargetUserID {
 			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)

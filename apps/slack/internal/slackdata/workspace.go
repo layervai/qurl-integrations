@@ -786,18 +786,22 @@ func (s *Store) TransferOwnership(ctx context.Context, teamID, currentOwnerID, n
 			Title:      "TransferOwnership: new_owner_id must be a Slack user ID",
 		}
 	}
+	return s.transferOwnership(ctx, teamID, currentOwnerID, newOwnerID, nil)
+}
+
+func (s *Store) transferOwnership(ctx context.Context, teamID, currentOwnerID, newOwnerID string, legacy *PolicyAuthorization) error {
 	ownerSet := []string{currentOwnerID}
 	if newOwnerID != currentOwnerID {
 		ownerSet = append(ownerSet, newOwnerID)
 	}
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	in := &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
 		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrPolicyGeneration + " = :policy_generation, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
-		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ") AND " + attrOwnerID + " = :current_owner"),
+		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ") AND " + attrOwnerID + " = :current_owner AND attribute_exists(" + attrPolicyInstallation + ")"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":policy_generation": stringAttr(rand.Text()),
 			":current_owner":     stringAttr(currentOwnerID),
@@ -806,7 +810,13 @@ func (s *Store) TransferOwnership(ctx context.Context, teamID, currentOwnerID, n
 			exprNow:              updatedAt,
 			exprNowNano:          updatedAtNano,
 		},
-	})
+	}
+	if legacy != nil {
+		in.ConditionExpression = aws.String(aws.ToString(in.ConditionExpression) + " AND " + attrPolicyGeneration + " = :expected_generation AND " + attrPolicyInstallation + " = :expected_installation")
+		in.ExpressionAttributeValues[":expected_generation"] = stringAttr(legacy.generation)
+		in.ExpressionAttributeValues[":expected_installation"] = stringAttr(legacy.installation)
+	}
+	_, err := s.Client.UpdateItem(ctx, in)
 	if err == nil {
 		return nil
 	}
@@ -831,6 +841,25 @@ func (s *Store) TransferOwnership(ctx context.Context, teamID, currentOwnerID, n
 			Title:      "TransferOwnership: workspace is not bound",
 		}
 	}
+	if readString(out.Item, attrOwnerID) == currentOwnerID {
+		if legacy != nil {
+			return policyWorkspaceChanged()
+		}
+		_, generationPresent := out.Item[attrPolicyGeneration]
+		_, installationPresent := out.Item[attrPolicyInstallation]
+		if !generationPresent && !installationPresent {
+			// Initialize once before rotating the generation; preserve legacy config.
+			authorization, initErr := s.AuthorizePolicyWrite(ctx, teamID, currentOwnerID)
+			if initErr != nil {
+				return initErr
+			}
+			if !authorization.legacyPolicies {
+				return policyWorkspaceChanged()
+			}
+			return s.transferOwnership(ctx, teamID, currentOwnerID, newOwnerID, &authorization)
+		}
+	}
+
 	return &Error{
 		StatusCode: http.StatusConflict,
 		Code:       ErrCodeOwnerTransferNotOwner,

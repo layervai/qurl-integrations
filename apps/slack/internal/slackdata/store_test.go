@@ -635,7 +635,7 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, policy_generation = :policy_generation, updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :owner_set" {
 		t.Errorf("UpdateExpression = %q", exp)
 	}
-	if cond := aws.ToString(got.ConditionExpression); cond != "attribute_exists(slack_team_id) AND owner_id = :current_owner" {
+	if cond := aws.ToString(got.ConditionExpression); cond != "attribute_exists(slack_team_id) AND owner_id = :current_owner AND attribute_exists(policy_installation)" {
 		t.Errorf("ConditionExpression = %q", cond)
 	}
 	if team, _ := got.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS); team == nil || team.Value != "T1" {

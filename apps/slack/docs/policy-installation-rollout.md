@@ -4,7 +4,10 @@ Policy writes capture the current admin, owner, authorization generation, and
 installation before upstream work. Each mutation checks that snapshot in the
 same DynamoDB transaction as the policy change. Ownership transfer changes the
 authorization generation and preserves the installation and its configuration.
-A new bind creates a new installation.
+A new bind creates a new installation. If ownership transfer reaches an old
+binding before its first policy write, it initializes the legacy identity before
+rotating the generation. That bounded retry checks both initialized IDs, so it
+cannot follow a concurrent reinstall or ownership change.
 
 ## Default behavior
 
