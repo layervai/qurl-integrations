@@ -1663,6 +1663,7 @@ func accountKeyOpts(
 ) *globalOpts {
 	t.Helper()
 	opts := &globalOpts{
+		// This account-key test has no profile for tombstone cleanup.
 		resolveShareStateDir: func(string) (string, error) { return "", connectorstate.ErrNoDefaultStateDir },
 		resolvedEndpoint:     srv.URL,
 		version:              "test",

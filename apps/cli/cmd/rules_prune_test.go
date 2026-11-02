@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,8 +13,10 @@ import (
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func TestDeletedResourcePrunesOnlyConfirmedTombstoneLimits(t *testing.T) {
@@ -144,5 +149,32 @@ func TestTombstoneCleanupFailureKeepsRequestError(t *testing.T) {
 	raw, err := os.ReadFile(path) //nolint:gosec // Test-owned profile fixture.
 	if err != nil || string(raw) != "damaged" {
 		t.Fatalf("invalid state overwritten: %q %v", raw, err)
+	}
+}
+
+func TestTombstoneCleanupWithoutSavedLimitsCreatesNothing(t *testing.T) {
+	for _, name := range []string{"no file", "no profile", "canceled"} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "no-saved-profile")
+			var diagnostics bytes.Buffer
+			opts := &globalOpts{streams: &output.Streams{Err: &diagnostics}, resolveShareStateDir: func(string) (string, error) {
+				if name == "no profile" {
+					return "", connectorstate.ErrNoDefaultStateDir
+				}
+				return dir, nil
+			}}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if name == "canceled" {
+				cancel()
+			}
+			opts.forgetTombstonedLinkLimits(ctx, apitest.FixedResourceKey(t).CRID, &qurlapi.Error{StatusCode: http.StatusGone, Code: "resource_tombstoned"})
+			if diagnostics.Len() != 0 {
+				t.Fatalf("unexpected warning: %s", diagnostics.String())
+			}
+			if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("cleanup created profile state: %v", err)
+			}
+		})
 	}
 }

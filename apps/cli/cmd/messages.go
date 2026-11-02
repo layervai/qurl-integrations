@@ -247,7 +247,7 @@ func customerMessages() []string {
 		msgRulesFileDamaged, msgRulesRuleConflict, msgRulesChanged, msgRulesOtherAccount, msgRulesNotFound,
 		msgRulesAmbiguous, msgRulesDuplicateName, msgRulesLimit, msgRulesNotSynced, msgRulesLocalOnly,
 		msgRulesUnlinked, msgRulesSignIn, msgRulesUnavailable, msgRulesBusy, msgRulesConflict,
-		msgRulesLinkNotMade, msgRulesLimitsUnread,
+		msgRulesLinkNotMade, msgRulesLimitsUnread, msgRulesLimitsNotRemoved,
 		msgVerifyMismatch,
 		msgVerifyMissing,
 		msgSavedSkillOutdated,
@@ -321,6 +321,7 @@ const (
 	msgRulesBusy          = "Your account's access rules kept changing. Run qurl rules sync again."
 	msgRulesConflict      = "Some access rules changed here and in your account. Keep one version with qurl rules resolve <rule> --use local or --use account."
 	// %s is the published CRID in the two messages below.
-	msgRulesLinkNotMade  = "Published %s, but its link with the rule's limits was not made. Run the same publish again."
-	msgRulesLimitsUnread = "Published %s, but its saved link limits could not be read, so no link was made."
+	msgRulesLinkNotMade      = "Published %s, but its link with the rule's limits was not made. Run the same publish again."
+	msgRulesLimitsUnread     = "Published %s, but its saved link limits could not be read, so no link was made."
+	msgRulesLimitsNotRemoved = "%s is deleted, but its saved link limits could not be removed: %v"
 )

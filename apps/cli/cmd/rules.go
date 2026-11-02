@@ -638,21 +638,22 @@ func (o *globalOpts) savedLinkLimits(ctx context.Context, id string) (*accessrul
 	return limits, nil
 }
 
-// Only the resource tombstone confirms these defaults can never be used again.
+// TODO(upstream-contract): only qurl-service's 410 resource_tombstoned
+// confirms the resource is permanently gone and its limits can be forgotten.
 func (o *globalOpts) forgetTombstonedLinkLimits(ctx context.Context, id string, requestErr error) {
 	var apiErr *qurlapi.Error
 	if ctx.Err() != nil || !errors.As(requestErr, &apiErr) || apiErr.StatusCode != http.StatusGone || apiErr.Code != "resource_tombstoned" {
 		return
 	}
-	store, err := o.shareRuleStore()
+	dir, err := o.resolveShareStateDir("")
 	if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
 		return
 	}
 	if err == nil {
-		err = store.Set(ctx, id, nil)
+		err = forgetLinkLimits(ctx, dir, id)
 	}
 	if err != nil {
-		o.printer().Warnf("Saved link limits for the deleted resource could not be removed: %v", err)
+		o.printer().Warnf(msgRulesLimitsNotRemoved, id, err)
 	}
 }
 
