@@ -18,9 +18,10 @@ request line is echoed to stderr (docker logs) so the test can assert cache
 behavior by counting upstream hits.
 """
 import sys
-from sigv4 import verify_sigv4
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, unquote
+
+from sigv4 import verify_sigv4
 
 # key (no leading slash) -> (content_type, cache_control_or_None, body bytes)
 FIXTURES = {
@@ -44,6 +45,7 @@ FIXTURES = {
     # cacheable); the range test serves the 206 from cache.
     "range.bin": ("application/octet-stream", "max-age=300", b"0123456789"),
     "home.htm": ("text/html", None, b"home"),
+    "site/a+b.txt": ("text/plain", None, b"prefixed-plus"),
     "site/index.html": ("text/html", None, b"prefixed-index"),
     "site/website/index.html": ("text/html", None, b"prefixed"),
 }

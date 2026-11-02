@@ -17,7 +17,7 @@
 /v1.2/docs                  -> /v1.2/docs (dot suppresses rewrite)         [crypto]
 /about.                     -> /about.                                    [crypto]
 /deep/path                  -> /deep/path/index.html                      [crypto]
-GET /range.bin Range: 0-3    -> 206 partial                                 [crypto]
+GET /range.bin Range: 0-3    -> nginx 206; upstream full object verified    [behavior/crypto]
 HEAD /metrics.json          -> 200 no body                                 [crypto]
 /a+b.txt                    -> /a%2Bb.txt (encoded before signing)        [crypto]
 /a%2Bb.txt                  -> /a%2Bb.txt (encoded plus)                  [crypto]

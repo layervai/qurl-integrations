@@ -208,8 +208,8 @@ Normal unreserved paths need no header rewrite; cache hits stay in nginx.
 
 Spaces, literal percent signs, `?`, `#`, control bytes and non-ASCII keys are
 rejected with the normal viewer 404 before reaching the signer. Supporting
-those keys needs a different first-hop escaping strategy. Other legacy ASCII
-punctuation is not newly rejected by an alphabet allow-list.
+those keys needs a different first-hop escaping strategy. The fixture matrix defines the tested punctuation contract; other ASCII
+punctuation retains legacy proxy behavior and needs its own validation before use.
 
 The local S3 fixture verifies SigV4 HMACs with synthetic credentials. Its
 canonical-request verifier is checked against AWS's published S3 signing
@@ -229,7 +229,10 @@ AWS IAM, TLS, credential-provider or object-deployment readiness.
 
 Objects whose names contain repeated slashes are not directly addressable:
 nginx normalization selects the single-slash path. Queries remain stripped
-before signing; Range and HEAD remain covered by the cryptographic fixture.
+before signing. Range behavior is tested on the nginx response/cache path;
+the AWS unit vector covers signing a Range header. HEAD uses real signed
+upstream requests. The fixture also requires zero signature mismatches across
+all upstream paths, including simulated error responses.
 See [the complete fixture matrix](test/sigv4_fixtures.txt). Use an image built
 from this contract before depending on exotic keys: the existing Slack-pinned
 image predates it and must be replaced after producer publication. Its existing

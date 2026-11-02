@@ -571,6 +571,15 @@ mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/website"
 expect_stub_gets_since "CACHE_DEFAULT_TTL caches metadata-less object" "$mark" 'GET /site/website/index.html ' 0
 
+if [ "$waive_security_contract" != "true" ]; then
+  mark="$(stub_log_mark)"
+  fetch --path-as-is "$base/a%2Bb.txt"
+  expect_eq "S3_PREFIX encoded plus status" "$(status_code)" 200
+  expect_eq "S3_PREFIX encoded plus signed path" "$(hval X-Stub-Path)" '/site/a%2Bb.txt'
+  expect_eq "S3_PREFIX encoded plus body" "$(cat "$B")" 'prefixed-plus'
+  expect_stub_gets_since "S3_PREFIX encoded plus reaches S3 once" "$mark" 'GET /site/a%2Bb.txt ' 1
+fi
+
 if [ "$waive_security_contract" = "true" ]; then
   message="Known pre-fix S3 origin digest remains pinned by Slack; the control-char, upstream-response, request-preflight and exotic-key assertions are waived only for this exact immutable image. Rotate the pin after the producer changes publish, then remove S3_ORIGIN_SECURITY_WAIVER_IMAGE."
   if [ "${GITHUB_ACTIONS:-false}" = "true" ]; then
@@ -777,6 +786,15 @@ else
   expect_eq "runtime request rejection logged once, missing key logs none" "$auth_lines" 1
   expect_origin_log "runtime rejection status is a JSON number" '"status":403'
   expect_origin_log "runtime rejection includes the S3 key" '"key":"/not-synced-yet/forbidden.json"'
+fi
+
+# A viewer 404 can mask a signer failure on an error-path fixture. All signed
+# requests must verify, not only those whose object response happens to be 200.
+if signature_log=$(docker logs "$STUB" 2>&1); then
+  signature_mismatches=$(printf '%s\n' "$signature_log" | grep -c '^STUB signature mismatch' || true)
+  expect_eq "all signed upstream requests verify" "$signature_mismatches" 0
+else
+  no "could not read the S3 signature verification log"
 fi
 
 echo "-------------------------------------------"
