@@ -86,11 +86,11 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 			}
 
 			limits, err := opts.savedLinkLimits(cmd.Context(), assessment.Input)
-			if err != nil && !errors.Is(err, errNoSavedLinkLimits) {
+			if err != nil {
 				return err
 			}
 			var link *qurlapi.ShareLink
-			if err == nil {
+			if limits != nil {
 				link, err = opts.shareWithLimits(cmd, assessment.Input, *limits, ttl, sessionDuration)
 			} else {
 				link, err = opts.shareResource(cmd.Context(), assessment.Input, qurlapi.ShareOptions{

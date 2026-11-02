@@ -115,31 +115,31 @@ func ParseDuration(s string) (time.Duration, error) {
 	}
 }
 
-// ApprovalDuration is how long an approval lasts; false means it never expires.
-func ApprovalDuration(expiresIn *string) (time.Duration, bool) {
-	if expiresIn == nil {
-		return 0, false
+// Validate checks the limits against the service's link bounds.
+func (l LinkLimits) Validate() error {
+	if _, ok := LinkExpiry.Parse(l.ExpiresIn); !ok {
+		return errors.New("link_limits.expires_in must be from 1m to 30d")
 	}
-	return ApprovalExpiry.Parse(*expiresIn)
+	if l.SessionDuration != nil && !ValidSessionLength(*l.SessionDuration) {
+		return errors.New("link_limits.session_duration must be whole seconds from 1s to 24h")
+	}
+	return nil
 }
 
 func (d *Definition) validateSettings() error {
 	if l := d.LinkLimits; l != nil {
-		_, expiry := LinkExpiry.Parse(l.ExpiresIn)
-		switch {
-		case d.Mode != ModePublic:
+		if d.Mode != ModePublic {
 			return errors.New("link limits apply only to public rules")
-		case !expiry:
-			return errors.New("link_limits.expires_in must be from 1m to 30d")
-		case l.SessionDuration != nil && !ValidSessionLength(*l.SessionDuration):
-			return errors.New("link_limits.session_duration must be whole seconds from 1s to 24h")
+		}
+		if err := l.Validate(); err != nil {
+			return err
 		}
 	}
 	if d.ApprovalExpiresIn != nil {
 		if !ApprovalsApply(d.Mode) {
 			return errors.New("approval_expires_in applies only to review and keys rules")
 		}
-		if _, ok := ApprovalDuration(d.ApprovalExpiresIn); !ok {
+		if _, ok := ApprovalExpiry.Parse(*d.ApprovalExpiresIn); !ok {
 			return errors.New("approval_expires_in must be from 1h to 365d")
 		}
 	}
@@ -381,20 +381,11 @@ func Merge(base, local, remote []Definition) (items []Definition, conflicts []st
 	result := make([]Definition, 0, len(local)+len(remote))
 	conflicts = []string{}
 	ids := []string{}
-	for i := range remote {
-		d := &remote[i]
-		ids = append(ids, d.ID)
-	}
-	for i := range local {
-		d := &local[i]
-		if !slices.Contains(ids, d.ID) {
-			ids = append(ids, d.ID)
-		}
-	}
-	for i := range base {
-		d := &base[i]
-		if !slices.Contains(ids, d.ID) {
-			ids = append(ids, d.ID)
+	for _, side := range [][]Definition{remote, local, base} {
+		for i := range side {
+			if !slices.Contains(ids, side[i].ID) {
+				ids = append(ids, side[i].ID)
+			}
 		}
 	}
 	for _, id := range ids {

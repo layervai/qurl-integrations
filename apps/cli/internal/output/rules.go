@@ -63,10 +63,6 @@ func (p *Printer) AccessRule(d *accessrules.Definition) error {
 	if p.format == FormatJSON {
 		return p.writeJSON(d)
 	}
-	return p.accessRuleLine(d)
-}
-
-func (p *Printer) accessRuleLine(d *accessrules.Definition) error {
 	if p.quiet {
 		_, err := fmt.Fprintln(p.out, d.ID)
 		return err

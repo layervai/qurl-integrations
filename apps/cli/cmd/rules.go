@@ -31,15 +31,9 @@ func rulesCmd(opts *globalOpts) *cobra.Command {
 	command.AddCommand(ruleCreateCmd(opts))
 	command.AddCommand(&cobra.Command{Use: "capabilities", Short: "Report supported access rules without signing in", Args: noArgs, RunE: func(_ *cobra.Command, _ []string) error { return opts.printer().AccessRuleCapabilities() }})
 	command.AddCommand(&cobra.Command{Use: "list", Short: "List the default access rules and your saved rules", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		store, err := opts.ruleStore()
-		if err != nil {
-			return ruleCommandError(err)
-		}
-		snapshot, err := store.Snapshot(cmd.Context())
-		if err != nil {
-			return ruleCommandError(err)
-		}
-		return opts.printer().AccessRules(&snapshot)
+		return opts.printRuleStore(func(store *connectorstate.AccessRuleStore) (accessrules.Snapshot, error) {
+			return store.Snapshot(cmd.Context())
+		})
 	}})
 	var file string
 	var saveVersion int64
@@ -54,15 +48,9 @@ func rulesCmd(opts *globalOpts) *cobra.Command {
 		if definition.Validate(false) != nil {
 			return exitcode.UsageError(errors.New("ready-made rules cannot be edited; save a custom rule with its own UUID"))
 		}
-		store, err := opts.ruleStore()
-		if err != nil {
-			return ruleCommandError(err)
-		}
-		snapshot, err := store.Save(cmd.Context(), saveVersion, &definition)
-		if err != nil {
-			return ruleCommandError(err)
-		}
-		return opts.printer().AccessRules(&snapshot)
+		return opts.printRuleStore(func(store *connectorstate.AccessRuleStore) (accessrules.Snapshot, error) {
+			return store.Save(cmd.Context(), saveVersion, &definition)
+		})
 	}}
 	save.Flags().StringVar(&file, "file", "", "use - to read the access rule JSON from standard input")
 	save.Flags().Int64Var(&saveVersion, "version", -1, "current local access rules version")
@@ -72,15 +60,9 @@ func rulesCmd(opts *globalOpts) *cobra.Command {
 		if err := checkOptionalRuleVersion(cmd, deleteVersion); err != nil {
 			return err
 		}
-		store, err := opts.ruleStore()
-		if err != nil {
-			return ruleCommandError(err)
-		}
-		snapshot, err := store.Delete(cmd.Context(), deleteVersion, args[0])
-		if err != nil {
-			return ruleCommandError(err)
-		}
-		return opts.printer().AccessRules(&snapshot)
+		return opts.printRuleStore(func(store *connectorstate.AccessRuleStore) (accessrules.Snapshot, error) {
+			return store.Delete(cmd.Context(), deleteVersion, args[0])
+		})
 	}}
 	remove.Flags().Int64Var(&deleteVersion, "version", -1, "fail unless access rules are still at this version")
 	command.AddCommand(remove)
@@ -96,15 +78,9 @@ func rulesCmd(opts *globalOpts) *cobra.Command {
 		if err := checkOptionalRuleVersion(cmd, resolveVersion); err != nil {
 			return err
 		}
-		store, err := opts.ruleStore()
-		if err != nil {
-			return ruleCommandError(err)
-		}
-		snapshot, err := store.Resolve(cmd.Context(), resolveVersion, args[0], use)
-		if err != nil {
-			return ruleCommandError(err)
-		}
-		return opts.printer().AccessRules(&snapshot)
+		return opts.printRuleStore(func(store *connectorstate.AccessRuleStore) (accessrules.Snapshot, error) {
+			return store.Resolve(cmd.Context(), resolveVersion, args[0], use)
+		})
 	}}
 	resolve.Flags().StringVar(&use, "use", "", "local or account")
 	resolve.Flags().Int64Var(&resolveVersion, "version", -1, "fail unless access rules are still at this version")
@@ -119,6 +95,19 @@ func checkOptionalRuleVersion(cmd *cobra.Command, version int64) error {
 		return exitcode.UsageError(errors.New("--version must be the current local access rules version"))
 	}
 	return nil
+}
+
+// printRuleStore runs one store operation and prints the resulting snapshot.
+func (o *globalOpts) printRuleStore(do func(*connectorstate.AccessRuleStore) (accessrules.Snapshot, error)) error {
+	store, err := o.ruleStore()
+	if err != nil {
+		return ruleCommandError(err)
+	}
+	snapshot, err := do(store)
+	if err != nil {
+		return ruleCommandError(err)
+	}
+	return o.printer().AccessRules(&snapshot)
 }
 
 func (o *globalOpts) ruleStore() (*connectorstate.AccessRuleStore, error) {
@@ -535,7 +524,7 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 	}
 	if existing {
 		kept, err := o.savedLinkLimits(ctx, id)
-		if err != nil && !errors.Is(err, errNoSavedLinkLimits) {
+		if err != nil {
 			return err
 		}
 		if rule != nil {
@@ -567,30 +556,24 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 	return nil
 }
 
-// savedLinkLimits is what a share on this device was created with, if anything.
+// savedLinkLimits is what a share on this device was created with; nil if nothing.
 func (o *globalOpts) savedLinkLimits(ctx context.Context, id string) (*accessrules.LinkLimits, error) {
 	dir, err := o.resolveShareStateDir("")
 	if err != nil {
 		// Without a profile directory nothing was saved on this device; the
 		// caller's own path reports the missing profile.
-		return nil, errNoSavedLinkLimits
+		return nil, nil //nolint:nilnil,nilerr // no profile means no saved limits
 	}
 	store, err := connectorstate.OpenShareRules(dir)
 	if err != nil {
 		return nil, ruleCommandError(err)
 	}
 	limits, err := store.Get(ctx, id)
-	switch {
-	case err != nil:
+	if err != nil {
 		return nil, ruleCommandError(err)
-	case limits == nil:
-		return nil, errNoSavedLinkLimits
 	}
 	return limits, nil
 }
-
-// errNoSavedLinkLimits means this device saved no link limits for a share.
-var errNoSavedLinkLimits = errors.New("no saved link limits")
 
 func (o *globalOpts) shareRuleStore() (*connectorstate.ShareRuleStore, error) {
 	dir, err := o.resolveShareStateDir("")

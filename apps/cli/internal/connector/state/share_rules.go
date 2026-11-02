@@ -54,7 +54,7 @@ func (s *ShareRuleStore) Get(ctx context.Context, id string) (*accessrules.LinkL
 
 // Set records limits for id, or forgets id when limits is nil.
 func (s *ShareRuleStore) Set(ctx context.Context, id string, limits *accessrules.LinkLimits) error {
-	if crid.Validate(id) != nil || limits != nil && !validLinkLimits(*limits) {
+	if crid.Validate(id) != nil || limits != nil && limits.Validate() != nil {
 		return errors.New("invalid share link limits")
 	}
 	return s.update(ctx, func(state *shareRulesState) bool {
@@ -66,12 +66,6 @@ func (s *ShareRuleStore) Set(ctx context.Context, id string, limits *accessrules
 		state.Shares[id] = *limits
 		return true
 	})
-}
-
-// validLinkLimits applies a public rule's own validation to kept limits.
-func validLinkLimits(limits accessrules.LinkLimits) bool {
-	rule := accessrules.Definition{ID: "00000000-0000-4000-8000-000000000000", Name: "kept", Mode: accessrules.ModePublic, LinkLimits: &limits}
-	return rule.Validate(false) == nil
 }
 
 func (s *ShareRuleStore) update(ctx context.Context, change func(*shareRulesState) bool) error {
@@ -107,7 +101,7 @@ func (s *shareRulesState) valid() bool {
 		return false
 	}
 	for id, limits := range s.Shares {
-		if crid.Validate(id) != nil || !validLinkLimits(limits) {
+		if crid.Validate(id) != nil || limits.Validate() != nil {
 			return false
 		}
 	}
