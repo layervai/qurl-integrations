@@ -876,6 +876,9 @@ or configuring contract access. The service verifies payment; manual approval
 is unavailable. LayerV collects 3%, including subscription renewals. One-time
 prices accept `--payment-access-seconds`; zero lasts for the resource lifetime.
 Recurring prices require zero and grant only the paid invoice period.
+Adding payment with `qurl access configure` makes an existing public CRID private.
+Removing payment keeps it private. Publishing the same target again does not
+change its payment policy.
 
 `qurl access --help` lists all owner actions. Changes require the current
 version. If session removal is pending, retry the exact removal and version;
