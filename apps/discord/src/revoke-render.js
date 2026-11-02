@@ -6,6 +6,7 @@ const { escapeDiscordMarkdown } = require('./utils/sanitize');
 
 // Shared truncation limit for both send + revoke recipient lists.
 const REVOKE_TRUNC_LIMIT = 5;
+const REVOKE_SEND_ID_REGEX = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 // Discord message content cap is 2000 chars. Leave headroom for the
 // header + "Revoked for: " prefix; force truncation in renderRevokeContent
@@ -20,7 +21,7 @@ const REVOKE_FOR_PREFIX = '\nRevoked for: ';
 // unconfirmed-failure guidance, and already-opened-session caveat. Used by
 // both the inline-button path (via renderRevokeContent) and the slash-command
 // /qurl revoke handler so a future wording change lands in one place.
-function buildRevokeHeader(success, total, { finalizationFailed = false } = {}) {
+function buildRevokeHeader(success, total, { finalizationFailed = false, sendId } = {}) {
   if (
     !Number.isSafeInteger(success)
     || !Number.isSafeInteger(total)
@@ -40,7 +41,10 @@ function buildRevokeHeader(success, total, { finalizationFailed = false } = {}) 
   const finalization = finalizationFailed
     ? ' qURL could not save the final revocation state. Retry with `/qurl revoke` to finish.'
     : '';
-  return `Revoked ${success}/${total} user${total !== 1 ? 's' : ''}.${failure}${finalization}${note}`;
+  const recovery = (failed > 0 || finalizationFailed) && REVOKE_SEND_ID_REGEX.test(sendId || '')
+    ? `\nSend ID: \`${sendId}\`. Use \`/qurl revoke\` with this ID and action inspect, retry, or acknowledge. Acknowledgement does not confirm deletion.`
+    : '';
+  return `Revoked ${success}/${total} user${total !== 1 ? 's' : ''}.${failure}${finalization}${note}${recovery}`;
 }
 
 // Builds the post-revoke confirmation message body. User-centric:
@@ -55,8 +59,8 @@ function buildRevokeHeader(success, total, { finalizationFailed = false } = {}) 
 // `success` is required and authoritative; it may exceed the names the caller
 // could resolve. The header reflects that count while the names list reflects
 // only what's renderable.
-function renderRevokeContent({ names, total, showAll, success, finalizationFailed = false }) {
-  let content = buildRevokeHeader(success, total, { finalizationFailed });
+function renderRevokeContent({ sendId, names, total, showAll, success, finalizationFailed = false }) {
+  let content = buildRevokeHeader(success, total, { finalizationFailed, sendId });
 
   if (names.length === 0) {
     return { content, needsExpand: false, attachmentText: null };
@@ -86,6 +90,7 @@ function renderRevokeContent({ names, total, showAll, success, finalizationFaile
 }
 
 module.exports = {
+  REVOKE_SEND_ID_REGEX,
   REVOKE_TRUNC_LIMIT,
   REVOKE_CONTENT_SAFE_MAX,
   buildRevokeHeader,

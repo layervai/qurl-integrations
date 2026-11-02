@@ -148,6 +148,8 @@ const mockDb = {
   markSendRevoking: jest.fn().mockResolvedValue(true),
   markSendRevoked: jest.fn().mockResolvedValue(true),
   getSendConfig: jest.fn(),
+  getSendRevocationState: jest.fn(),
+  acknowledgeSendRevocation: jest.fn(),
   saveSendConfig: jest.fn(),
   forceLink: jest.fn(),
   hasMilestoneBeenAnnounced: jest.fn(() => false),
@@ -1961,5 +1963,92 @@ describe('autocomplete handling', () => {
     await handleCommand(interaction);
 
     expect(interaction.respond).toHaveBeenCalledWith([]);
+  });
+});
+
+
+describe('owner-only unconfirmed revoke recovery', () => {
+  const sendId = '12345678-1234-1234-1234-123456789abc';
+  function recovery(action = 'inspect', id = sendId) {
+    const interaction = makeInteraction();
+    interaction.options.getSubcommand.mockReturnValue('revoke');
+    interaction.options.getString.mockImplementation(name => name === 'send-id' ? id : name === 'action' ? action : null);
+    return interaction;
+  }
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDb.getSendRevocationState.mockResolvedValue({ send_id: sendId, sender_discord_id: 'user-1', revoking_at: 'time' });
+    mockDb.acknowledgeSendRevocation.mockResolvedValue(true);
+    mockSupersedeOrCreate.mockResolvedValue({ created: true });
+  });
+
+  it('inspects without a working API key or any deletion', async () => {
+    const config = require('../src/config');
+    const prior = config.QURL_API_KEY;
+    config.QURL_API_KEY = null;
+    try {
+      const interaction = recovery();
+      await handleCommand(interaction);
+      expect(mockDb.getGuildApiKey).not.toHaveBeenCalled();
+      expect(mockDb.getSendRevocationState).toHaveBeenCalledWith(sendId, 'user-1');
+      expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining('Deletion is not confirmed.') });
+      expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+    } finally { config.QURL_API_KEY = prior; }
+  });
+
+  it('acknowledges explicitly without claiming deletion or clearing the barrier', async () => {
+    const interaction = recovery('acknowledge');
+    await _test.handleRevoke(interaction, null);
+    expect(mockDb.acknowledgeSendRevocation).toHaveBeenCalledWith(sendId, 'user-1');
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining('Links may still allow access.') });
+    expect(interaction.editReply.mock.calls[0][0].content).toContain('Add Recipients stays blocked.');
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+  });
+
+  it('does not disclose or mutate an unavailable or foreign send', async () => {
+    mockDb.getSendRevocationState.mockResolvedValueOnce(undefined);
+    const interaction = recovery('acknowledge');
+    await _test.handleRevoke(interaction, null);
+    expect(mockDb.acknowledgeSendRevocation).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: 'This send is unavailable to you.' });
+  });
+
+  it('reports a lost acknowledgement condition without success', async () => {
+    mockDb.acknowledgeSendRevocation.mockResolvedValueOnce(false);
+    const interaction = recovery('acknowledge');
+    await _test.handleRevoke(interaction, null);
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining('No acknowledgement was recorded.') });
+  });
+
+  it('retries an acknowledged send through the normal deduplicated select flow', async () => {
+    mockDb.getSendRevocationState.mockResolvedValueOnce({ revoke_acknowledged_at: 'time', revoking_at: 'time' });
+    const interaction = recovery('retry');
+    await _test.handleRevoke(interaction, 'test-key');
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ components: expect.any(Array) }));
+    expect(mockDb.getRecentSends).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+  });
+
+  it('retry still requires a key', async () => {
+    const interaction = recovery('retry');
+    await _test.handleRevoke(interaction, null);
+    expect(interaction.reply).toHaveBeenCalledWith({ content: 'qURL API key is not configured.', ephemeral: true });
+    expect(mockDb.getSendRevocationState).not.toHaveBeenCalled();
+  });
+
+  it.each([['acknowledge', 'bad-id'], ['bad-action', sendId], ['acknowledge', null]])('rejects invalid recovery %s/%s before a read', async (action, id) => {
+    const interaction = recovery(action, id);
+    await _test.handleRevoke(interaction, null);
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('valid send ID') }));
+    expect(mockDb.getSendRevocationState).not.toHaveBeenCalled();
+  });
+
+  it('acknowledgement alone blocks Add Recipients even if the pending marker is absent', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({ revoke_acknowledged_at: 'time' });
+    const result = await handleAddRecipients(sendId, new Map(), makeInteraction(), 'test-key');
+    expect(result.msg).toContain('revocation is pending');
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
   });
 });

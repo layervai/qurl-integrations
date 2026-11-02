@@ -876,7 +876,7 @@ describe('qurl sends', () => {
     expect(items[0].ConditionCheck).toEqual({
       TableName: 'test-prefix-qurl-send-configs',
       Key: { send_id: 's1' },
-      ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at)',
+      ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at)',
       ExpressionAttributeValues: { ':sender': 'sender' },
     });
     expect(items[1].Put.TableName).toBe('test-prefix-qurl-sends');
@@ -2400,4 +2400,60 @@ test('late send config writes preserve all revocation barriers', async () => {
   await store.saveSendConfig({ sendId: 'send-1', senderDiscordId: 'sender', resourceType: 'file' });
   expect(ddbMock.commandCalls(PutCommand)[0].args[0].input.ConditionExpression)
     .toBe('attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at)');
+});
+
+
+describe('unconfirmed revocation acknowledgement', () => {
+  test('owner acknowledgement is conditional, durable and distinct from deletion', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    expect(await store.acknowledgeSendRevocation('send-1', 'sender')).toBe(true);
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ConditionExpression).toBe('sender_discord_id = :s AND attribute_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at)');
+    expect(input.UpdateExpression).toBe('SET revoke_acknowledged_at = :t, revoke_acknowledged_by = :s');
+    expect(input.UpdateExpression).not.toContain('REMOVE');
+    expect(input.ExpressionAttributeValues[':s']).toBe('sender');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.REVOKE_ACKNOWLEDGED, { send_id: 'send-1', sender_discord_id: 'sender' });
+  });
+
+  test('failed condition never reports or audits an acknowledgement', async () => {
+    ddbMock.on(UpdateCommand).rejects({ name: 'ConditionalCheckFailedException' });
+    expect(await store.acknowledgeSendRevocation('send-1', 'sender')).toBe(false);
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('storage failure propagates without an acknowledgement audit', async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error('storage unavailable'));
+    await expect(store.acknowledgeSendRevocation('send-1', 'sender')).rejects.toThrow('storage unavailable');
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('invalid sender cannot read or acknowledge state', async () => {
+    expect(await store.acknowledgeSendRevocation('send-1', '')).toBe(false);
+    expect(await store.getSendRevocationState('send-1', '')).toBeUndefined();
+    expect(ddbMock.calls()).toHaveLength(0);
+  });
+
+  test('state inspection is consistent, owner-scoped and does not request secrets', async () => {
+    const state = { send_id: 'send-1', sender_discord_id: 'sender', revoking_at: 'time' };
+    ddbMock.on(GetCommand).resolves({ Item: state });
+    expect(await store.getSendRevocationState('send-1', 'other')).toBeUndefined();
+    expect(await store.getSendRevocationState('send-1', 'sender')).toEqual(state);
+    const input = ddbMock.commandCalls(GetCommand)[0].args[0].input;
+    expect(input.ConsistentRead).toBe(true);
+    expect(input.ProjectionExpression).not.toMatch(/token|attachment|url|personal_message/);
+  });
+
+  test('acknowledged sends do not consume the menu search window', async () => {
+    const hidden = Array.from({ length: 10 }, (_, i) => ({ send_id: `hidden-${i}`, created_at: 'newer' }));
+    ddbMock.on(QueryCommand).callsFake(input => {
+      if (!input.IndexName) return { Items: [] };
+      return input.ExclusiveStartKey
+        ? { Items: [{ send_id: 'live', created_at: 'older' }] }
+        : { Items: hidden, LastEvaluatedKey: { send_id: 'next' } };
+    });
+    ddbMock.on(GetCommand).callsFake(input => ({ Item: input.Key.send_id === 'live' ? undefined : { revoke_acknowledged_at: 'time', revoking_at: 'time' } }));
+    expect((await store.getRecentSends('sender', 5)).map(row => row.send_id)).toEqual(['live']);
+    expect(ddbMock.commandCalls(QueryCommand).filter(call => call.args[0].input.IndexName)).toHaveLength(2);
+    expect(ddbMock.commandCalls(QueryCommand).filter(call => !call.args[0].input.IndexName)).toHaveLength(1);
+  });
 });
