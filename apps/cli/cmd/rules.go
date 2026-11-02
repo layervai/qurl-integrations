@@ -528,12 +528,15 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 			return err
 		}
 		if rule != nil {
-			approvals := ""
-			if published.ConsumerAccess != nil {
-				approvals = published.ConsumerAccess.ApprovalExpiresIn
-			}
+			// Only approvals can differ here (Publish refuses any other policy
+			// change); SameDefinition compares them in the service's stored form.
 			policy := rule.Policy(1)
-			published.OtherSettings = !accessrules.SameEffectiveLinkLimits(kept, limits) || approvals != policy.ApprovalExpiresIn
+			received := policy
+			received.ApprovalExpiresIn = ""
+			if published.ConsumerAccess != nil {
+				received.ApprovalExpiresIn = published.ConsumerAccess.ApprovalExpiresIn
+			}
+			published.OtherSettings = !accessrules.SameEffectiveLinkLimits(kept, limits) || !received.SameDefinition(policy)
 		}
 		limits = kept
 	} else if limits != nil {
