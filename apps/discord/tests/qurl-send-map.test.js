@@ -2810,7 +2810,7 @@ describe('handleConfirmSendClick', () => {
     );
   });
 
-  test('partial transient lookup at Send click — /qurl map payload produces /qurl map rerun hint', async () => {
+  test('stale Maps confirmation recommends the supported file command, never the retired command', async () => {
     const flaky = '100000000000000099';
     const mapPayload = {
       ...validPayload,
@@ -2828,11 +2828,11 @@ describe('handleConfirmSendClick', () => {
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
     await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: mapPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/rerun \/qurl map/),
+      content: expect.stringMatching(/rerun \/qurl send/),
       ephemeral: true,
     }));
     expect(int.followUp).not.toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/rerun \/qurl send/),
+      content: expect.stringMatching(/rerun \/qurl map/),
     }));
   });
 

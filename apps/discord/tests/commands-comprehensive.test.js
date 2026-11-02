@@ -1901,6 +1901,15 @@ describe('Maps is retired even with the legacy flag enabled', () => {
     expect(interaction.respond).toHaveBeenCalledWith([]);
   });
 
+  it('contains an expired cached autocomplete acknowledgement', async () => {
+    const interaction = makeInteraction({
+      isAutocomplete: jest.fn(() => true),
+      respond: jest.fn().mockRejectedValue(Object.assign(new Error('Unknown interaction'), { code: 10062 })),
+    });
+    await expect(handleCommand(interaction)).resolves.toBeUndefined();
+    expect(interaction.respond).toHaveBeenCalledWith([]);
+  });
+
   it('dispatcher replies with rename hint for stale `/qurl file` submissions (post-rename to /qurl send)', async () => {
     const interaction = makeInteraction({
       options: {

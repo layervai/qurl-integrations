@@ -7911,8 +7911,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // signal that N != the count shown on the card. Distinct wording
   // for the two buckets — "left the server" is stable, "lookup
   // blipped" encourages a fresh rerun if they want to include the
-  // missed recipients. The rerun hint names the actual subcommand
-  // they invoked (resourceType drives /qurl send vs /qurl map).
+  // missed recipients. The retry hint names the supported file command.
   //
   // followUp (not edited into the "Preparing send…" editReply) is
   // INTENTIONAL: executeSendPipeline will rewrite editReply to
@@ -7921,7 +7920,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // message. followUp is a separate ephemeral that persists past
   // the back-half's editReply rewrites.
   if (partialLeftCount > 0 || partialTransientCount > 0) {
-    const rerunCommand = payload.resourceType === RESOURCE_TYPES.MAPS ? '/qurl map' : '/qurl send';
+    const rerunCommand = '/qurl send';
     const parts = [];
     if (partialLeftCount > 0) {
       parts.push(`${partialLeftCount} recipient${partialLeftCount === 1 ? '' : 's'} had left the server`);
@@ -9123,7 +9122,7 @@ function isAckTimeoutError(err) {
 // Handle command interactions
 async function handleCommand(interaction) {
   // Retired Maps definitions may still send cached autocomplete requests.
-  if (interaction.isAutocomplete()) return interaction.respond([]);
+  if (interaction.isAutocomplete()) return interaction.respond([]).catch(logIgnoredDiscordErr);
 
   if (!interaction.isChatInputCommand()) return;
 
