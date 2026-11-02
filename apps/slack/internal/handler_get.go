@@ -687,123 +687,59 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 // resolving). Returns a [*userError] on lookup failure, not-a-known-token, or
 // not-allowed-here.
 func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string) (string, error) {
-	resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, token)
-	if err != nil {
-		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "get: alias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID, "token", token)
-		return "", &userError{msg: serviceUnreachableMessage}
-	}
-	if found {
-		// Legacy-binding guard: the pre-resource `/qurl set-alias`
-		// stored raw URLs verbatim in alias_bindings, and those rows can
-		// survive. Resolving one would hand a URL to the resource-scoped mint
-		// call and surface as the generic retry error, stranding the user.
-		// Reject the historical URL SHAPE rather than requiring an ID prefix:
-		// qurl-service resource IDs are opaque and the public-key cutover
-		// intentionally replaced the former internal `r_` REST identifier.
-		if isLegacyDirectURLBinding(resourceID) {
-			log.Warn("get: channel alias bound to a non-resource-id target — refusing to mint", "team_id", teamID, "channel_id", channelID, "token", token)
-			return "", &userError{msg: legacyAliasBindingMessage(token)}
-		}
-		return resourceID, nil
-	}
-
-	// No binding — fetch the channel allow-set FIRST (a DDB read), BEFORE any
-	// upstream lookup. An empty set means neither the tunnel-slug fallback nor
-	// the resource-alias fallback could pass the channel gate below, so the
-	// upstream GET /v1/resources?slug= would be pure waste — and an unmetered
-	// cold-channel probe surface (#534), since these fallbacks run ahead of the
-	// per-user rate-limit gate. Short-circuit on the DDB read alone. This
-	// NARROWS the "spend a read rather than burn quota on a typo" tradeoff
-	// documented above: it still holds for a CONFIGURED channel; only a channel
-	// with no protected resources spends nothing upstream. It is NOT a blanket
-	// skip of the fallbacks on a binding miss — it suppresses the hop solely for
-	// the case the downstream channel gate is guaranteed to reject anyway.
-	allowedSet, authErr := h.allowedResourceIDsForGet(ctx, log, teamID, channelID)
-	if authErr != nil {
-		return "", authErr
-	}
-	if len(allowedSet) == 0 {
-		log.Debug("get: channel has no protected resources — skipping slug/alias fallback", "team_id", teamID, "channel_id", channelID, "token", token)
+	resolved, err := resolveChannelToken(token, h.channelTokenSourceForGet(ctx, log, teamID, channelID, token))
+	switch {
+	case errors.Is(err, errChannelTokenLegacy):
+		log.Warn("get: channel alias bound to a non-resource-id target — refusing to mint", "team_id", teamID, "channel_id", channelID, "token", token)
+		return "", &userError{msg: legacyAliasBindingMessage(token)}
+	case errors.Is(err, errChannelTokenAmbiguous):
+		log.Debug("get: token matched multiple resources allowed in channel — refusing ambiguous mint", "team_id", teamID, "channel_id", channelID, "user_id", userID, "token", token)
+		return "", &userError{msg: ambiguousResourceAliasMessage(token)}
+	case errors.Is(err, errChannelTokenNotFound):
 		return "", &userError{msg: noResourceForAliasMessage(token)}
+	case err != nil:
+		return "", err
+	default:
+		return resolved.ResourceID, nil
 	}
-
-	// Try the token as a tunnel slug, then authorize against the set above.
-	slugResourceID, slugErr := h.resolveTunnelSlugAliasTarget(ctx, teamID, token)
-	if slugErr != nil {
-		if !errors.Is(slugErr, errTunnelSlugNotFound) {
-			log.Log(ctx, storeErrorLogLevel(ctx, slugErr, slog.LevelWarn), "get: tunnel-slug fallback lookup failed", "error", slugErr, "team_id", teamID, "slug", token)
-			return "", &userError{msg: serviceUnreachableMessage}
-		}
-		aliasResourceID, aliasFound, aliasErr := h.resolveListedResourceAliasForGet(ctx, log, teamID, channelID, userID, token, allowedSet)
-		if aliasErr != nil {
-			return "", aliasErr
-		}
-		if !aliasFound {
-			// Neither a channel alias, live tunnel slug, nor resource alias.
-			return "", &userError{msg: noResourceForAliasMessage(token)}
-		}
-		return aliasResourceID, nil
-	}
-	if _, allowed := allowedSet[slugResourceID]; !allowed {
-		if aliasResourceID, aliasFound, aliasErr := h.resolveListedResourceAliasForGet(ctx, log, teamID, channelID, userID, token, allowedSet); aliasErr != nil {
-			return "", aliasErr
-		} else if aliasFound {
-			return aliasResourceID, nil
-		}
-		// Collapse to the SAME "not configured" copy as the slug-not-found
-		// branch above. A non-admin must not be able to distinguish "this slug
-		// exists in the workspace but isn't allowed in this channel" from "no
-		// such slug" — that gap is a tunnel-slug enumeration oracle. Logs the
-		// real reason for operators; the wire text stays uniform.
-		log.Debug("get: tunnel slug resolved but not allowed in channel — surfacing not-configured copy", "team_id", teamID, "channel_id", channelID, "user_id", userID, "slug", token)
-		return "", &userError{msg: noResourceForAliasMessage(token)}
-	}
-	return slugResourceID, nil
 }
 
-func (h *Handler) resolveListedResourceAliasForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string, allowedSet map[string]struct{}) (resourceID string, found bool, err error) {
-	// Both current callers pass a non-nil allowedSet: the cold-channel
-	// short-circuit in resolveTokenForGet returns early on an empty set, so a
-	// non-empty set always reaches here. This re-fetch is therefore currently
-	// unreachable and is retained only as defensive depth for any future caller.
-	if allowedSet == nil {
-		var authErr error
-		allowedSet, authErr = h.allowedResourceIDsForGet(ctx, log, teamID, channelID)
-		if authErr != nil {
-			return "", false, authErr
-		}
+func (h *Handler) channelTokenSourceForGet(ctx context.Context, log *slog.Logger, teamID, channelID, token string) channelTokenSource {
+	return channelTokenSource{
+		alias: func() (*channelTokenResource, error) {
+			id, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, token)
+			if err != nil {
+				log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "get: alias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID, "token", token)
+				return nil, &userError{msg: serviceUnreachableMessage}
+			}
+			if !found {
+				return nil, errChannelTokenNotFound
+			}
+			return &channelTokenResource{ResourceID: id}, nil
+		},
+		allowed: func() (map[string]struct{}, error) { return h.allowedResourceIDsForGet(ctx, log, teamID, channelID) },
+		candidates: func(via string) ([]client.Resource, error) {
+			var resources []client.Resource
+			var err error
+			if via == channelTokenSlug {
+				resources, err = h.lookupTunnelSlugResources(ctx, teamID, token)
+			} else {
+				resources, err = h.lookupListedResourceCandidatesForGet(ctx, log, teamID)
+			}
+			if err != nil {
+				message := "get: tunnel-slug fallback lookup failed"
+				if via == channelTokenResourceAlias {
+					message = "get: resource-alias fallback lookup failed"
+				}
+				log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), message, "error", err, "team_id", teamID, "channel_id", channelID, "token", token)
+				return nil, &userError{msg: serviceUnreachableMessage}
+			}
+			return resources, nil
+		},
 	}
-	resources, aliasErr := h.lookupListedResourceAliasesForGet(ctx, log, teamID, token)
-	if aliasErr != nil {
-		log.Log(ctx, storeErrorLogLevel(ctx, aliasErr, slog.LevelWarn), "get: resource-alias fallback lookup failed", "error", aliasErr, "team_id", teamID, "alias", token)
-		return "", false, &userError{msg: serviceUnreachableMessage}
-	}
-	if len(resources) == 0 {
-		return "", false, nil
-	}
-
-	allowedMatches := make([]string, 0, len(resources))
-	for i := range resources {
-		if _, ok := allowedSet[resources[i].ResourceID]; ok {
-			allowedMatches = append(allowedMatches, resources[i].ResourceID)
-		}
-	}
-	if len(allowedMatches) == 1 {
-		return allowedMatches[0], true, nil
-	}
-	if len(allowedMatches) > 1 {
-		log.Debug("get: resource alias matched multiple resources allowed in channel — refusing ambiguous mint", "team_id", teamID, "channel_id", channelID, "user_id", userID, "alias", token, "match_count", len(allowedMatches))
-		return "", false, &userError{msg: ambiguousResourceAliasMessage(token)}
-	}
-	if len(resources) == 1 {
-		log.Debug("get: resource alias resolved but not allowed in channel — surfacing not-configured copy", "team_id", teamID, "channel_id", channelID, "user_id", userID, "alias", token)
-	} else {
-		log.Debug("get: resource alias matched only resources not allowed in channel — surfacing not-configured copy", "team_id", teamID, "channel_id", channelID, "user_id", userID, "alias", token, "match_count", len(resources))
-	}
-	return "", false, nil
 }
 
-func (h *Handler) lookupListedResourceAliasesForGet(ctx context.Context, log *slog.Logger, teamID, alias string) ([]client.Resource, error) {
+func (h *Handler) lookupListedResourceCandidatesForGet(ctx context.Context, log *slog.Logger, teamID string) ([]client.Resource, error) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		if !errors.Is(err, auth.ErrWorkspaceNotConfigured) {
@@ -815,23 +751,10 @@ func (h *Handler) lookupListedResourceAliasesForGet(ctx context.Context, log *sl
 	if err != nil {
 		return nil, err
 	}
-	out := make([]client.Resource, 0, 1)
-	for i := range page.Resources {
-		resource := page.Resources[i]
-		if resource.Status == client.StatusRevoked {
-			continue
-		}
-		if !isURLResource(&resource) {
-			continue
-		}
-		if resource.Alias == alias {
-			out = append(out, resource)
-		}
-	}
 	if page.HasMore {
 		log.Debug("get: resource lookup scanned first page only", "scan_limit", listResourcesScanLimit, "team_id", teamID)
 	}
-	return out, nil
+	return page.Resources, nil
 }
 
 // allowedResourceIDsForGet returns the resource IDs mintable from channelID:

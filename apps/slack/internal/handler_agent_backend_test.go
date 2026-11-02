@@ -663,7 +663,7 @@ func TestResolveInspectableResource_Branches(t *testing.T) {
 		t.Fatalf("stale-scan alias: resolved=%+v msg=%q", resolved, msg)
 	}
 	// A token matching two resource aliases is ambiguous — refuse rather than guess.
-	dupes := []client.Resource{{ResourceID: "r_a", Alias: "shared"}, {ResourceID: "r_b", Alias: "shared"}}
+	dupes := []client.Resource{{ResourceID: "r_a", Alias: "shared", Type: client.ResourceTypeURL}, {ResourceID: "r_b", Alias: "shared", Type: client.ResourceTypeURL}}
 	if resolved, msg := resolveInspectableResource("shared", nil, dupes); resolved != nil || !strings.Contains(msg, "matches multiple resources") {
 		t.Fatalf("ambiguous alias: resolved=%v msg=%q", resolved, msg)
 	}

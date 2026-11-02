@@ -47,12 +47,6 @@ var (
 	agentInspectSpacePattern   = regexp.MustCompile(`\s+`)
 )
 
-type inspectedResource struct {
-	ResourceID string
-	Resource   *client.Resource
-	Via        string
-}
-
 type inspectedSnapshot struct {
 	Title           string
 	MetaDescription string
@@ -176,48 +170,35 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	return formatInspectedSnapshot(token, resolved, snapshot), true, nil
 }
 
-func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource) (resolved *inspectedResource, userMsg string) {
-	// token drives matching (below) raw; disp is the mrkdwn-escaped echo used in the
-	// user-facing messages, which post to a public card on the confirm path.
-	disp := escapeMrkdwnCode(token)
+func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource) (resolved *channelTokenResource, userMsg string) {
 	byID := make(map[string]*client.Resource, len(resources))
+	allowed := make(map[string]struct{}, len(resources))
 	for i := range resources {
 		byID[resources[i].ResourceID] = &resources[i]
+		allowed[resources[i].ResourceID] = struct{}{}
 	}
-	for i := range entries {
-		if entries[i].Alias != token {
-			continue
-		}
-		if isLegacyDirectURLBinding(entries[i].ResourceID) {
-			return nil, fmt.Sprintf("`$%s` is bound in this channel, but it still points at a legacy direct URL binding that can't be summarized automatically. Ask your Slack admin to rebind it to a protected resource.", disp)
-		}
-		// Resource may be nil if the binding's id isn't in the scanned channel set (a
-		// stale scan) — the mint still runs (the binding IS in THIS channel's policy, so
-		// scope holds) and Create fails server-side for a truly dead id; the formatters
-		// nil-guard, so a live-but-unscanned resource just yields a description-less card.
-		// This differs from resolveTokenForGet's live lookup; tracked for unification in #961.
-		return &inspectedResource{ResourceID: entries[i].ResourceID, Resource: byID[entries[i].ResourceID], Via: "channel alias"}, ""
-	}
-
-	for i := range resources {
-		if resources[i].Slug == token {
-			return &inspectedResource{ResourceID: resources[i].ResourceID, Resource: &resources[i], Via: "connector slug"}, ""
-		}
-	}
-
-	aliasMatches := make([]*client.Resource, 0, 1)
-	for i := range resources {
-		if resources[i].Alias == token {
-			aliasMatches = append(aliasMatches, &resources[i])
-		}
-	}
-	switch len(aliasMatches) {
-	case 0:
-		return nil, fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", disp)
-	case 1:
-		return &inspectedResource{ResourceID: aliasMatches[0].ResourceID, Resource: aliasMatches[0], Via: "resource alias"}, ""
-	default:
+	resolved, err := resolveChannelToken(token, channelTokenSource{
+		alias: func() (*channelTokenResource, error) {
+			for _, entry := range entries {
+				if entry.Alias == token {
+					return &channelTokenResource{ResourceID: entry.ResourceID, Resource: byID[entry.ResourceID]}, nil
+				}
+			}
+			return nil, errChannelTokenNotFound
+		},
+		allowed:    func() (map[string]struct{}, error) { return allowed, nil },
+		candidates: func(string) ([]client.Resource, error) { return resources, nil },
+	})
+	disp := escapeMrkdwnCode(token)
+	switch {
+	case errors.Is(err, errChannelTokenLegacy):
+		return nil, fmt.Sprintf("`$%s` is bound in this channel, but it still points at a legacy direct URL binding that can't be summarized automatically. Ask your Slack admin to rebind it to a protected resource.", disp)
+	case errors.Is(err, errChannelTokenAmbiguous):
 		return nil, fmt.Sprintf("`$%s` matches multiple resources reachable in this channel, so I can't tell which page to summarize.", disp)
+	case resolved == nil:
+		return nil, fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", disp)
+	default:
+		return resolved, ""
 	}
 }
 
@@ -574,7 +555,7 @@ func containsAnyString(s string, needles ...string) bool {
 	return false
 }
 
-func formatInspectedSnapshot(token string, resolved *inspectedResource, snapshot *inspectedSnapshot) string {
+func formatInspectedSnapshot(token string, resolved *channelTokenResource, snapshot *inspectedSnapshot) string {
 	var b strings.Builder
 	b.WriteString("Summary of the page behind `$")
 	b.WriteString(escapeMrkdwnCode(token))
@@ -602,7 +583,7 @@ func formatInspectedSnapshot(token string, resolved *inspectedResource, snapshot
 	return b.String()
 }
 
-func formatProtectedInspectableResource(token string, resolved *inspectedResource, unsupported *protectedInspectableContentError) string {
+func formatProtectedInspectableResource(token string, resolved *channelTokenResource, unsupported *protectedInspectableContentError) string {
 	var b strings.Builder
 	b.WriteString("Protected resource for `$")
 	b.WriteString(escapeMrkdwnCode(token))
@@ -617,7 +598,7 @@ func formatProtectedInspectableResource(token string, resolved *inspectedResourc
 	return b.String()
 }
 
-func writeResolvedInspectableResourceLines(b *strings.Builder, resolved *inspectedResource) {
+func writeResolvedInspectableResourceLines(b *strings.Builder, resolved *channelTokenResource) {
 	// Via is an internal constant (trusted). Description/Type come from the qURL API
 	// (admin-set) but are still echoed to a public card, so escape them for mrkdwn.
 	b.WriteString("- Resolved via ")

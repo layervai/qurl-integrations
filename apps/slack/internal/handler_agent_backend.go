@@ -357,46 +357,80 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 	if token == "" {
 		return "Provide a $alias or $slug to resolve.", nil
 	}
-	// Channel alias first. No `allowed`-set gate here (unlike the slug branch
-	// below): LookupChannelAlias reads only THIS channel's alias_bindings, so it is
-	// inherently same-channel — no cross-channel leak — and
-	// ChannelScopedResourceIDs unions alias_bindings into the allowed set, so a
-	// bound rid is in `allowed` by construction; a gate would be a no-op. (A binding
-	// to a since-deleted workspace resource would resolve here while list_resources
-	// omits it, but gating on `allowed` wouldn't change that — the rid is still in
-	// the union.)
-	if _, found, err := b.store.LookupChannelAlias(ctx, tc.TeamID, tc.ChannelID, token); err != nil {
-		return b.fail("resolve token: alias lookup", err)
-	} else if found {
-		// Confirm it resolves, but don't surface the opaque resource id it binds to.
-		return fmt.Sprintf("`$%s` is an alias bound in this channel.", token), nil
-	}
-	// Otherwise a tunnel slug, but only reveal it if it's reachable here.
-	allowed, err := b.channelAllowed(ctx, tc)
-	if err != nil {
-		return b.fail("resolve token: channel scope", err)
-	}
-	c, nudge, err := b.authClientForTurn(ctx, "resolve token: client", tc)
-	if err != nil {
-		return "", err
-	}
-	if nudge != "" {
-		return nudge, nil
-	}
-	out, err := c.ListResources(ctx, client.ListResourcesInput{Slug: token})
-	if err != nil {
-		return b.fail("resolve token", err)
-	}
-	for i := range out.Resources {
-		r := &out.Resources[i]
-		if _, ok := allowed[r.ResourceID]; ok {
-			// Symmetric with the alias branch above: confirm it resolves without echoing
-			// the token twice (embedding formatResourceLine would repeat `$token`) or
-			// coupling to that helper's bullet format. "connector" already conveys the type.
-			return fmt.Sprintf("`$%s` is a connector in this channel.", token), nil
+	resolved, err := resolveChannelToken(token, b.channelTokenSourceForResolve(ctx, tc, token))
+	disp := escapeMrkdwnCode(token)
+	switch {
+	case errors.Is(err, errChannelTokenLegacy):
+		return legacyAliasBindingMessage(disp), nil
+	case errors.Is(err, errChannelTokenAmbiguous):
+		return ambiguousResourceAliasMessage(disp), nil
+	case errors.Is(err, errChannelTokenNotFound) && b.resourceScanPartial():
+		return channelResourcesIncompleteEmpty, nil
+	case errors.Is(err, errChannelTokenNotFound):
+		return fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", disp), nil
+	case err != nil:
+		var userErr *userError
+		if errors.As(err, &userErr) {
+			return userErr.msg, nil
 		}
+		return b.fail("resolve token", err)
+	case resolved.Via == channelTokenAlias:
+		return fmt.Sprintf("`$%s` is an alias bound in this channel.", disp), nil
+	case resolved.Via == channelTokenSlug:
+		return fmt.Sprintf("`$%s` is a connector in this channel.", disp), nil
+	default:
+		return fmt.Sprintf("`$%s` is a protected resource in this channel.", disp), nil
 	}
-	return fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", token), nil
+}
+
+func (b *agentBackend) channelTokenSourceForResolve(ctx context.Context, tc *agent.TurnContext, token string) channelTokenSource {
+	var c *client.Client
+	var allowed map[string]struct{}
+	return channelTokenSource{
+		alias: func() (*channelTokenResource, error) {
+			id, found, err := b.store.LookupChannelAlias(ctx, tc.TeamID, tc.ChannelID, token)
+			if err != nil {
+				return nil, fmt.Errorf("alias lookup: %w", err)
+			}
+			if !found {
+				return nil, errChannelTokenNotFound
+			}
+			return &channelTokenResource{ResourceID: id}, nil
+		},
+		allowed: func() (map[string]struct{}, error) {
+			var err error
+			allowed, err = b.channelAllowed(ctx, tc)
+			if err != nil {
+				return nil, fmt.Errorf("channel scope: %w", err)
+			}
+			return allowed, nil
+		},
+		candidates: func(via string) ([]client.Resource, error) {
+			if c == nil {
+				var nudge string
+				var err error
+				c, nudge, err = b.authClientForTurn(ctx, "resolve token: client", tc)
+				if err != nil {
+					return nil, err
+				}
+				if nudge != "" {
+					return nil, &userError{msg: nudge}
+				}
+			}
+			if via == channelTokenSlug {
+				out, err := c.ListResources(ctx, client.ListResourcesInput{Slug: token})
+				if err != nil {
+					return nil, err
+				}
+				return out.Resources, nil
+			}
+			resources, _, err := b.channelResources(ctx, c, allowed)
+			if err != nil {
+				return nil, err
+			}
+			return resources, nil
+		},
+	}
 }
 
 // Quota reports the workspace plan and usage.
