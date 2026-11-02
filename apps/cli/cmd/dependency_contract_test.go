@@ -57,6 +57,7 @@ func TestCLIConnectorRuntimeHasNoSessionRelaySurface(t *testing.T) {
 		"ClientBaseURL",
 		"EnrollmentCredential",
 		"EnrollmentCredentialProvider",
+		"RequiredRegistrationKeyKind", // Pre-REG key-kind policy; no session transport.
 		"RecoveryCredentialProvider",
 		"RefreshMode",
 		"UDPOptions",

@@ -25,19 +25,22 @@ import (
 
 func publishCmd(opts *globalOpts) *cobra.Command {
 	var (
-		ruleSelector      string
-		ruleFile          string
-		consumerMode      string
-		contractID        string
-		description       string
-		tags              []string
-		alias             string
-		connectorID       string
-		public            bool
-		private           bool
-		allowRequests     bool
-		allowedDeviceKeys []string
-		foreground        bool
+		ruleSelector         string
+		ruleFile             string
+		consumerMode         string
+		stripeAccount        string
+		stripePrice          string
+		paymentAccessSeconds int64
+		contractID           string
+		description          string
+		tags                 []string
+		alias                string
+		connectorID          string
+		public               bool
+		private              bool
+		allowRequests        bool
+		allowedDeviceKeys    []string
+		foreground           bool
 	)
 
 	cmd := &cobra.Command{
@@ -86,7 +89,7 @@ requests on for that resource.
 
 Where the deployment offers it, a public resource can also be opened by anyone
 who has its CRID. The deployment this release ships does not offer it yet.
-Privacy is set at creation and cannot be changed later. Publishing a target
+Privacy is set at creation; a publish retry cannot change it. Publishing a target
 again reuses its resource, with the privacy it has.
 
 If you published a target with a release that made resources public by
@@ -101,6 +104,10 @@ To choose who can open it, pass --rule with a default access rule's name or
 a saved rule's ID or name (see "qurl rules list"). --rule once is Only the
 first person: a link that works for whoever opens it first and expires in an
 hour.
+
+For paid contract access, use "qurl access configure" with the Stripe account
+and price to make an existing public CRID private. Removing payment keeps it
+private. Publishing the same target again does not change its payment policy.
 
 Authorized users open the resource with "qurl get <CRID>". The --quiet flag
 prints only the CRID. Use --foreground for CI or daemon debugging; that process
@@ -132,6 +139,9 @@ owns the share and turns it off when it exits.`,
 				return err
 			}
 			if err := opts.applyPublishRule(cmd, &access, ruleSelector, ruleFile); err != nil {
+				return err
+			}
+			if err := setStripePayment(access.ConsumerAccess, stripeAccount, stripePrice, paymentAccessSeconds); err != nil {
 				return err
 			}
 
@@ -174,6 +184,9 @@ owns the share and turns it off when it exits.`,
 
 	cmd.Flags().StringVar(&ruleSelector, ruleFlag, "", "access rule: once, a default rule's name, or a saved rule's ID or name")
 	cmd.Flags().StringVar(&ruleFile, ruleFileFlag, "", "use - to publish the access rule snapshot from standard input")
+	cmd.Flags().StringVar(&stripeAccount, stripeAccountFlag, "", "connected publisher Stripe account")
+	cmd.Flags().StringVar(&stripePrice, stripePriceFlag, "", "Stripe price for paid contract access; LayerV collects 3%")
+	cmd.Flags().Int64Var(&paymentAccessSeconds, paymentAccessSecondsFlag, 0, "one-time access duration; zero lasts for the resource lifetime; subscriptions require zero")
 	cmd.Flags().StringVar(&consumerMode, "access", "", "private access mode: keys, invite_only, email_capture, review or contract")
 	cmd.Flags().StringVar(&contractID, "contract", "", "publisher contract identifier for contract access")
 	cmd.Flags().BoolVar(&public, "public", false, "let anyone who has the CRID open the resource (default: private, only you and the devices you allow)")
@@ -206,7 +219,7 @@ owns the share and turns it off when it exits.`,
 // resource.
 func publishAccessFlags(cmd *cobra.Command) []string {
 	var named []string
-	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerContract, ruleFlag, ruleFileFlag} {
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerContract, ruleFlag, ruleFileFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
 		flag := cmd.Flags().Lookup(name)
 		if flag == nil || !flag.Changed {
 			continue
@@ -711,7 +724,7 @@ func runForegroundLocalPublish(
 		// strand a desired-on share without this foreground process as its owner.
 		retErr = compensateLocalPublish(client, registry, resolved.Resource, retErr)
 	}()
-	jobVersion, err := connectordaemon.JobVersion(opts.version, opts.resolvedShareGroupMode)
+	jobVersion, err := connectordaemon.JobVersion(opts.version, opts.resolvedShareGroupMode, opts.resolvedClientProduct)
 	if err != nil {
 		return err
 	}
@@ -723,7 +736,7 @@ func runForegroundLocalPublish(
 	cancelDaemon = cancel
 	daemonErr = make(chan error, 1)
 	go func() { daemonErr <- opts.runForegroundDaemon(daemonCtx, opts, stateDir, jobVersion) }()
-	ipc := connectordaemon.IPCClient{SocketPath: socketPath}
+	ipc := connectordaemon.IPCClient{SocketPath: socketPath, StateDir: stateDir}
 	readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	readyErr := make(chan error, 1)
 	go func() { readyErr <- ipc.WaitReady(readyCtx) }()
