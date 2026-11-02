@@ -85,7 +85,7 @@ jest.mock('discord.js', () => {
     ButtonBuilder: jest.fn().mockImplementation(() => makeChainable()),
     ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
     ChannelType: { GuildText: 0, DM: 1, GuildVoice: 2, GuildStageVoice: 13 },
-    ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
+    ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5, MentionableSelect: 7 },
     StringSelectMenuBuilder: jest.fn().mockImplementation(() => makeChainable()),
     UserSelectMenuBuilder: jest.fn().mockImplementation(() => makeChainable()),
     MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => makeChainable()),
@@ -93,7 +93,7 @@ jest.mock('discord.js', () => {
     TextInputBuilder: jest.fn().mockImplementation(() => makeChainable()),
     TextInputStyle: { Short: 1, Paragraph: 2 },
     AttachmentBuilder: jest.fn().mockImplementation((buf, opts) => ({ buf, name: opts?.name })),
-    PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
+    PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n, MentionEveryone: 131072n },
   };
 });
 
@@ -1798,6 +1798,7 @@ describe('buildRevokeHeader (slash-command revoke path)', () => {
 
 function makeUsersCollection(users) {
   return {
+    values: () => users.values(),
     filter: jest.fn((fn) => {
       const filtered = users.filter(fn);
       return {
@@ -2436,6 +2437,94 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
 });
 
 describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)', () => {
+  async function collectRolePick({ everyone = false, permission = false, mentionable = true, cap = 50, direct = false, directBot = false, cold = false } = {}) {
+    const config = require('../src/config');
+    const previousCap = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = cap;
+    try {
+      const { collect, makeClick, interaction } = await setupRevocableSend();
+      const humans = [{ id: 'u2', username: 'Bob' }, { id: 'u3', username: 'Carol' }];
+      const bot = { id: 'bot-1', username: 'Robot', bot: true };
+      const members = new Map([...humans, bot, interaction.user].map(user => [user.id, { id: user.id, user }]));
+      const cache = cold ? new Map() : members;
+      const role = { id: everyone ? 'guild-1' : 'role-team', name: 'Team', mentionable,
+        get members() { return cache; } };
+      const guild = { id: 'guild-1', name: 'Test Guild', iconURL: jest.fn(() => null), memberCount: members.size, roles: { cache: new Map([[role.id, role]]) },
+        members: { cache, list: jest.fn(async () => { for (const [id, member] of members) cache.set(id, member); return members; }) } };
+      interaction.guild = guild;
+      const selectInteraction = {
+        guild, roles: new Map([[role.id, role]]),
+        users: new Map([...(direct ? [['u3', humans[1]]] : []), ...(directBot ? [[bot.id, bot]] : [])]),
+        memberPermissions: { has: jest.fn(flag => flag === 131072n && permission) },
+        deferUpdate: jest.fn().mockResolvedValue(undefined),
+        editReply: jest.fn().mockResolvedValue(undefined),
+      };
+      const selectReply = { awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction) };
+      const click = makeClick('add');
+      click.reply.mockResolvedValueOnce(selectReply);
+      mockDb.getSendConfig.mockResolvedValueOnce({ connector_resource_id: 'res-initial', expires_in: '30m',
+        attachment_url: 'https://cdn.discordapp.com/x.png', attachment_name: 'x.png', attachment_content_type: 'image/png' });
+      if (direct || (everyone ? permission : mentionable || permission)) {
+        mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
+        mockMintLinks.mockImplementationOnce(async (_id, { n }) => Array.from({ length: n }, (_, i) => ({
+          qurl_link: `https://q.test/role-${i}`, qurl_id: `q_role_${i}`, resource_id: 'res-added',
+        })));
+      }
+      await collect(click);
+      return { selectInteraction, selectReply, click, guild };
+    } finally {
+      clearCooldown('sender-1');
+      config.QURL_SEND_MAX_RECIPIENTS = previousCap;
+    }
+  }
+
+  test.each([false, true])('Add Recipients expands a permitted role after cache prewarm (cold=%s)', async (cold) => {
+    const { selectInteraction, selectReply, click, guild } = await collectRolePick({ cold });
+    expect(logger.error.mock.calls).toEqual([]);
+    expect(selectReply.awaitMessageComponent).toHaveBeenCalledWith({ componentType: 7, time: 60000 });
+    const menu = click.reply.mock.calls[0][0].components[0].components[0];
+    expect(menu.setCustomId).toHaveBeenCalledWith(expect.stringMatching(/^qurl_addusers_/));
+    expect(menu.setPlaceholder).toHaveBeenCalledWith('Select users or roles to send to');
+    expect(mockSendDM.mock.calls.map(([id]) => id)).toEqual(['u1', 'u2', 'u3']);
+    expect(selectInteraction.editReply.mock.calls[0][0].content).toMatch(/1 bot\(s\) filtered/);
+    expect(guild.members.list).toHaveBeenCalledTimes(cold ? 1 : 0);
+  });
+
+  test.each([false, true])('Add Recipients gates @everyone on current permission (%s)', async (permission) => {
+    const { selectInteraction } = await collectRolePick({ everyone: true, permission });
+    expect(mockSendDM.mock.calls.map(([id]) => id)).toEqual(permission ? ['u1', 'u2', 'u3'] : ['u1']);
+    if (!permission) expect(selectInteraction.editReply.mock.calls[0][0].content).toMatch(/permission/i);
+  });
+
+  test('Add Recipients rejects a non-mentionable role and names it in the warning', async () => {
+    const { selectInteraction } = await collectRolePick({ mentionable: false });
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(selectInteraction.editReply.mock.calls[0][0].content).toContain('Team');
+  });
+
+  test('Add Recipients still delivers a direct pick beside a denied role', async () => {
+    const { selectInteraction } = await collectRolePick({ mentionable: false, direct: true });
+    expect(mockSendDM.mock.calls.map(([id]) => id)).toEqual(['u1', 'u3']);
+    expect(selectInteraction.editReply.mock.calls[0][0].content).toContain('Team');
+  });
+
+  test('MENTION_EVERYONE permits a non-mentionable custom role', async () => {
+    await collectRolePick({ mentionable: false, permission: true });
+    expect(mockSendDM.mock.calls.map(([id]) => id)).toEqual(['u1', 'u2', 'u3']);
+  });
+
+  test('direct bot picks share the existing warning without receiving a link', async () => {
+    const { selectInteraction } = await collectRolePick({ directBot: true });
+    expect(mockSendDM.mock.calls.map(([id]) => id)).toEqual(['u1', 'u2', 'u3']);
+    expect(selectInteraction.editReply.mock.calls[0][0].content).toMatch(/1 bot\(s\) cannot receive/);
+  });
+
+  test('role expansion respects remaining send capacity and gives a direct pick priority', async () => {
+    const { selectInteraction } = await collectRolePick({ cap: 2, direct: true });
+    expect(mockSendDM.mock.calls.map(([id]) => id)).toEqual(['u1', 'u3']);
+    expect(selectInteraction.editReply.mock.calls[0][0].content).toContain('Capped at 2');
+  });
+
   async function setupRevocableSend() {
     const collectHandlers = {};
     const response = {

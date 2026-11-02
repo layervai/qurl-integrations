@@ -7,7 +7,6 @@ const {
   ButtonStyle,
   ComponentType,
   StringSelectMenuBuilder,
-  UserSelectMenuBuilder,
   MentionableSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
@@ -850,7 +849,7 @@ function isValidExpiry(v) {
   return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v);
 }
 
-// Per-pick cap on UserSelectMenuBuilder.setMaxValues, set to Discord's
+// Per-pick cap on recipient menus' setMaxValues, set to Discord's
 // max_values hard limit. Used by both the initial confirm-card picker
 // and the post-send "Add Recipients" flow — keep them in lockstep.
 const USER_SELECT_PER_PICK_CAP = 25;
@@ -2870,16 +2869,16 @@ async function executeSendPipeline(interaction, {
           }
           setCooldown(interaction.user.id);
 
-          // Show user select menu — collect the response on the REPLY message.
+          // Collect users and roles on the private picker reply.
           const maxSelect = Math.min(
             USER_SELECT_PER_PICK_CAP,
             remaining,
             DISCORD_SELECT_MAX_VALUES_HARD_CAP,
           );
           const userSelectRow = new ActionRowBuilder().addComponents(
-            new UserSelectMenuBuilder()
+            new MentionableSelectMenuBuilder()
               .setCustomId(`qurl_addusers_${sendId}`)
-              .setPlaceholder('Select users to send to')
+              .setPlaceholder('Select users or roles to send to')
               .setMinValues(1)
               .setMaxValues(maxSelect)
           );
@@ -2892,13 +2891,32 @@ async function executeSendPipeline(interaction, {
 
           try {
             const selectInteraction = await selectReply.awaitMessageComponent({
-              componentType: ComponentType.UserSelect,
+              componentType: ComponentType.MentionableSelect,
               time: 60000,
             });
 
             await selectInteraction.deferUpdate();
+            if (selectInteraction.roles?.size > 0) {
+              await prewarmGuildMembersCache(selectInteraction.guild, { caller: 'addRecipients' });
+            }
+            const selection = resolveMentionableSelection({
+              interaction: selectInteraction,
+              canMentionEveryone: !!selectInteraction.guild
+                && selectInteraction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true,
+            });
+            const { valid, droppedBots } = partitionRecipients(selection.users, interaction.user.id, { excludeSender: true });
+            // One role can exceed the remaining send capacity even when only one picker value is selected.
+            const additional = valid.slice(0, remaining);
+            const warnings = renderRecipientWarnings({
+              droppedBots,
+              droppedFromRoles: selection.droppedFromRoles,
+              massMentionDenied: selection.massMentionDenied,
+              everyoneCacheCold: selection.everyoneCacheCold,
+              roleMentionsDeniedNames: resolveRoleNames(selectInteraction.guild, selection.roleMentionsDenied),
+              cappedCount: valid.length - additional.length,
+            });
             const addResult = await handleAddRecipients(
-              sendId, selectInteraction.users, interaction, apiKey,
+              sendId, additional, interaction, apiKey,
             );
 
             // Extend recipients[] for the post-revoke names line.
@@ -2952,7 +2970,7 @@ async function executeSendPipeline(interaction, {
               }
             }
 
-            await selectInteraction.editReply({ content: addResult.msg, components: [] });
+            await selectInteraction.editReply({ content: [addResult.msg, warnings].filter(Boolean).join('\n'), components: [] });
           } catch (err) {
             const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
             // Generic user-facing message; real details only land in logs.
