@@ -452,6 +452,45 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
   });
 });
 
+describe('POST /webhooks/qurl — unknown-owner fairness behind shared NAT', () => {
+  beforeAll(() => {
+    jest.resetModules();
+  });
+
+  it('isolates unknown-owner budgets, admits valid siblings and recovers when an owner becomes known', async () => {
+    // eslint-disable-next-line global-require
+    const isolatedApp = require('../src/server').app;
+    isolatedApp.set('trust proxy', true);
+    mockPrimed = true;
+    mockWithinLag = false;
+    mockOwnerSecrets.clear();
+    mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
+    const owner = 'usr_' + 'x'.repeat(128) + 'A';
+    const sibling = 'usr_' + 'x'.repeat(128) + 'B';
+    const send = (ownerId, ip = '192.0.2.1') => {
+      const raw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: ownerId });
+      return request(isolatedApp).post('/webhooks/qurl')
+        .set('X-Forwarded-For', ip).set('Content-Type', 'application/json')
+        .set('QURL-Signature', signBody(raw)).send(raw);
+    };
+    for (let i = 0; i < 150; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await send(owner)).status).toBe(401);
+    }
+    expect((await send(owner)).status).toBe(429);
+    expect((await send(owner, '192.0.2.2')).status).toBe(401);
+    expect((await send(sibling)).status).toBe(401);
+    for (let i = 0; i < 150; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await send(null)).status).toBe(401);
+    }
+    expect((await send(null)).status).toBe(429);
+    expect((await send('usr_test')).status).toBe(200);
+    mockOwnerSecrets.set(owner, 'test-qurl-secret');
+    expect((await send(owner)).status).toBe(200);
+  });
+});
+
 describe('POST /webhooks/qurl — bad-sig limiter scope (only HMAC failures count)', () => {
   beforeAll(() => {
     jest.resetModules();
