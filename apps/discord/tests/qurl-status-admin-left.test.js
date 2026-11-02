@@ -685,12 +685,13 @@ describe('/qurl status through the real identity transport', () => {
   it.each([
     ['network', () => Promise.reject(new TypeError(`network detail ${STORED_KEY}`)), 'network_error', null],
     ['timeout', () => Promise.reject(new DOMException(`timeout detail ${STORED_KEY}`, 'TimeoutError')), 'timeout', null],
+    ['abort', () => Promise.reject(new DOMException(`abort detail ${STORED_KEY}`, 'AbortError')), 'timeout', null],
     ['invalid JSON', () => Promise.resolve({ ok: true, status: 200, json: async () => { throw new SyntaxError(STORED_KEY); } }), 'identity_invalid_json', null],
     ['invalid shape', () => Promise.resolve({ ok: true, status: 200, json: async () => ({ data: {} }) }), 'identity_invalid_shape', null],
     ['HTTP failure', () => Promise.resolve({ ok: false, status: 503, body: { cancel: jest.fn() } }), '503', 503],
   ])('records a safe %s code after transport redaction', async (_name, fetchResult, code, status) => {
     db.getGuildConfig.mockResolvedValueOnce({ configured_by: 'admin-original', updated_at: '2026-01-01' });
-    mockGetIdentity.mockImplementation(jest.requireActual('../src/qurl').getIdentity);
+    mockGetIdentity.mockImplementationOnce(jest.requireActual('../src/qurl').getIdentity);
     globalThis.fetch = jest.fn(fetchResult);
     const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
     await handleCommand(interaction);
@@ -719,9 +720,9 @@ describe('/qurl status through the real identity transport', () => {
   });
 
   it('distinguishes keys that share the same display prefix', async () => {
-    db.getGuildConfig.mockResolvedValue({ configured_by: 'admin-original', updated_at: '2026-01-01' });
     for (const keyId of ['key-first', 'key-second', 'a'.repeat(127) + '1', 'a'.repeat(127) + '2']) {
-      mockGetIdentity.mockResolvedValue({ api_key: { key_id: keyId, key_prefix: 'same-prefix', scopes: [] } });
+      db.getGuildConfig.mockResolvedValueOnce({ configured_by: 'admin-original', updated_at: '2026-01-01' });
+      mockGetIdentity.mockResolvedValueOnce({ api_key: { key_id: keyId, key_prefix: 'same-prefix', scopes: [] } });
       const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
       // eslint-disable-next-line no-await-in-loop
       await handleCommand(interaction);
@@ -730,8 +731,32 @@ describe('/qurl status through the real identity transport', () => {
   });
 });
 
+describe('/qurl status error metadata boundary', () => {
+  it.each(['configuration_store', 'key_store'].flatMap(stage => [
+    null, 42, { detail: STORED_KEY }, 'bad\nidentifier', 'x'.repeat(129),
+  ].map(value => [stage, value])))(
+    'omits malformed %s error metadata %p', async (stage, value) => {
+      const error = Object.assign(new Error('private detail'), { code: value, name: value });
+      if (stage === 'configuration_store') {
+        db.getGuildConfig.mockRejectedValueOnce(error);
+      } else {
+        db.getGuildConfig.mockResolvedValueOnce({ configured_by: 'admin-original' });
+        db.getGuildApiKey.mockRejectedValueOnce(error);
+      }
+      const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
+      await handleCommand(interaction);
+      expect(logger.warn).toHaveBeenCalledWith(
+        stage === 'configuration_store' ? 'qURL status configuration read failed' : 'qURL status identity check failed',
+        expect.objectContaining({ code: null, error_name: null, failure_stage: stage }),
+      );
+      expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(STORED_KEY);
+      expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('private detail');
+    },
+  );
+});
+
 describe('/qurl status key-ID display boundary', () => {
-  it.each(['`@everyone`', '@everyone', 'x'.repeat(129), 'key\nnew-line'])('omits an unsafe or oversized key ID %s', async keyId => {
+  it.each(['`@everyone`', '@everyone', 'x'.repeat(129), 'key\nnew-line', undefined, null, 42, {}])('omits an unsafe or oversized key ID %s', async keyId => {
     db.getGuildConfig.mockResolvedValueOnce({ configured_by: 'admin-original', updated_at: '2026-01-01' });
     mockGetIdentity.mockResolvedValueOnce({ api_key: { key_id: keyId, key_prefix: 'same-prefix', scopes: [] } });
     const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
