@@ -52,4 +52,10 @@ func TestOAuthFallbackMetricContract(t *testing.T) {
 			t.Logf("fallback_json=%s", logs.Bytes())
 		}
 	}
+	logs.Reset()
+	healthy := httptest.NewRequest(http.MethodGet, StartPath, http.NoBody)
+	healthy.Header.Set("X-Forwarded-For", "private-invalid-header, 192.0.2.2")
+	if got := oauthClientIPWithFallbackLogLimiter(healthy, newOAuthClientIPFallbackLogLimiter(time.Now)); got != "192.0.2.2" || logs.Len() != 0 {
+		t.Fatal("trusted appended IP emitted a fallback signal")
+	}
 }
