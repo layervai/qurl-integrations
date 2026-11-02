@@ -33,16 +33,6 @@ var redactSubstrings = [...]string{
 	"qurl_link",
 }
 
-var qurlAccessLinkSubstrings = func() []string {
-	var substrings []string
-	for _, substring := range redactSubstrings {
-		if strings.HasPrefix(substring, "qurl") {
-			substrings = append(substrings, substring)
-		}
-	}
-	return substrings
-}()
-
 var contentHashLogKeys = [...]string{
 	logKeyHash,
 	"md5",
@@ -126,7 +116,7 @@ func redactAttrs(attrs []slog.Attr, depth int) []slog.Attr {
 
 func redactAttr(attr slog.Attr, depth int) slog.Attr {
 	if shouldRedactKey(attr.Key) {
-		attr.Value = redactMatchedValue(attr.Key, attr.Value, depth+1)
+		attr.Value = redactMatchedValue(attr.Value, depth+1)
 		return attr
 	}
 
@@ -156,7 +146,7 @@ func redactResolvedValue(value slog.Value, depth int) slog.Value {
 	return value
 }
 
-func redactMatchedValue(key string, value slog.Value, depth int) slog.Value {
+func redactMatchedValue(value slog.Value, depth int) slog.Value {
 	value = value.Resolve()
 	if value.Kind() == slog.KindString && value.String() != "" {
 		return slog.StringValue(redactedLogValue)
@@ -164,31 +154,14 @@ func redactMatchedValue(key string, value slog.Value, depth int) slog.Value {
 	if value.Kind() == slog.KindAny && matchedScalarNeedsRedaction(value.Any()) {
 		return slog.StringValue(redactedLogValue)
 	}
-	if isQurlAccessLinkKey(key) && ((value.Kind() == slog.KindGroup && len(value.Group()) > 0) ||
-		(value.Kind() == slog.KindAny && isSuppressibleContainer(value.Any()))) {
-		// A qurlLinks container semantically consists of live bearer links.
-		// Inner keys are not guaranteed to describe bearer values (for example,
-		// a user-id-to-link map), so suppress the whole non-empty container
-		// instead of risking a leak. Empty containers are safe.
+	if (value.Kind() == slog.KindGroup && len(value.Group()) > 0) ||
+		(value.Kind() == slog.KindAny && isSuppressibleContainer(value.Any())) {
+		// A matched key makes the whole non-empty container sensitive: inner
+		// names do not reliably identify strings that carry its secret value.
 		return slog.StringValue(redactedLogValue)
 	}
-	// Match Discord's behavior: other scalars, including numbers, pass through;
-	// non-qURL containers are walked so nested sensitive fields can still be
-	// found. A matched object such as slog.Any("token",
-	// SomeStruct{Public: "ok"}) can still emit safe inner fields; qURL access-
-	// link containers were suppressed above because their bare elements carry
-	// bearer credentials without inner field names.
+	// Non-string scalars and empty containers retain their original values.
 	return redactResolvedValue(value, depth)
-}
-
-func isQurlAccessLinkKey(key string) bool {
-	key = strings.ToLower(key)
-	for _, substring := range qurlAccessLinkSubstrings {
-		if strings.Contains(key, substring) {
-			return true
-		}
-	}
-	return false
 }
 
 func redactAny(value any, depth int) (any, bool) {
@@ -327,7 +300,7 @@ func fieldNeedsRedaction(key string, value any, depth int) bool {
 		if matchedScalarNeedsRedaction(value) {
 			return true
 		}
-		if isQurlAccessLinkKey(key) && isSuppressibleContainer(value) {
+		if isSuppressibleContainer(value) {
 			return true
 		}
 	}
@@ -496,7 +469,7 @@ func redactAnyField(key string, value any, depth int) (any, bool) {
 		if matchedScalarNeedsRedaction(value) {
 			return redactedLogValue, true
 		}
-		if isQurlAccessLinkKey(key) && isSuppressibleContainer(value) {
+		if isSuppressibleContainer(value) {
 			return redactedLogValue, true
 		}
 	}

@@ -110,10 +110,9 @@ function isAuditSecretKey(key) {
 // General secrets use exact-match so legitimate dimensions like
 // `tokens_minted` survive. qURL access-link strings/containers additionally
 // use isQurlAccessLinkKey so decorated field names cannot bypass audit
-// redaction; non-string scalar dimensions still survive. Recurses into most
-// matched-key non-null object/array values (depth-5 cap inherited from the
-// function body); qURL access-link containers are suppressed as a unit because
-// bare strings inside them have no inner key to match.
+// redaction; non-string scalar dimensions still survive. Matched containers
+// hide all non-empty strings and are sealed at the depth-5 limit. qURL-link
+// containers are suppressed as a unit because bare elements can be credentials.
 function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecret = false) {
   if (insideSecret && typeof value === 'string' && value.length > 0) {
     return { value: '[REDACTED]', secretKeys };
@@ -267,43 +266,43 @@ const logger = {
     // 'object' so the typeof check alone would let `audit('x', [1,2])`
     // through and produce a confusing `{0:1,1:2,event,agent}` payload.
     if (meta == null || typeof meta !== 'object' || Array.isArray(meta)) meta = {};
-    // Targeted secret redaction: walk meta, replace the value of any
-    // key in AUDIT_SECRET_KEYS with '[REDACTED]', return the first
-    // offending key name so the operator log below can name it. Safe
-    // to redact because exact-match doesn't false-positive on
-    // legitimate dimensions (proven by the tokens_minted test).
-    const { value: cleanedMeta, secretKeys } = redactAuditSecrets(meta);
-    if (secretKeys.size > 0) {
-      // Logged via console.error so it surfaces at error level in
-      // CloudWatch (the logger has no separate warn channel that
-      // emits at error severity). Defense-in-depth alongside the
-      // value redaction above — the redacted payload still emits,
-      // but the operator can grep the error log to find every
-      // misbehaving call site and remove the key from meta. ALL
-      // offending keys are listed so a caller fixing the first
-      // doesn't have to re-run to discover the second.
-      const namedKeys = Array.from(secretKeys, k => `"${sanitizeMessage(k)}"`).join(', ');
-      console.error(`[${formatTimestamp()}] ERROR: logger.audit received sensitive metadata key(s) [${namedKeys}] in event=${sanitizeMessage(event)}; value(s) redacted in emitted payload — caller must remove from meta`);
-    }
-    // Spread cleaned meta first, then pin event + agent last so a
-    // caller passing `agent` or `event` in meta cannot overwrite the
-    // canonical value the CloudWatch filters key off of.
-    const auditPayload = { ...cleanedMeta, event, agent: 'discord' };
-    // Single-line JSON, parseable by `{ $.audit.event = "..." }`
-    // CloudWatch filter syntax. No timestamp prefix — the JSON has
-    // its own ts field. console.log adds a trailing newline.
-    //
-    // Wrap JSON.stringify in try/catch — a circular reference, BigInt,
-    // or other non-serializable value in meta would otherwise throw
-    // out of audit() and into the caller, which on the per-recipient
-    // batchSettled callback would fail an entire DM. Audit must never
-    // break the user-visible flow; degrade to an error log instead.
     try {
+      // Targeted secret redaction: walk meta, replace the value of any
+      // key in AUDIT_SECRET_KEYS with '[REDACTED]', return the first
+      // offending key name so the operator log below can name it. Safe
+      // to redact because exact-match doesn't false-positive on
+      // legitimate dimensions (proven by the tokens_minted test).
+      const { value: cleanedMeta, secretKeys } = redactAuditSecrets(meta);
+      if (secretKeys.size > 0) {
+        // Logged via console.error so it surfaces at error level in
+        // CloudWatch (the logger has no separate warn channel that
+        // emits at error severity). Defense-in-depth alongside the
+        // value redaction above — the redacted payload still emits,
+        // but the operator can grep the error log to find every
+        // misbehaving call site and remove the key from meta. ALL
+        // offending keys are listed so a caller fixing the first
+        // doesn't have to re-run to discover the second.
+        const namedKeys = Array.from(secretKeys, k => `"${sanitizeMessage(k)}"`).join(', ');
+        console.error(`[${formatTimestamp()}] ERROR: logger.audit received sensitive metadata key(s) [${namedKeys}] in event=${sanitizeMessage(event)}; value(s) redacted in emitted payload — caller must remove from meta`);
+      }
+      // Spread cleaned meta first, then pin event + agent last so a
+      // caller passing `agent` or `event` in meta cannot overwrite the
+      // canonical value the CloudWatch filters key off of.
+      const auditPayload = { ...cleanedMeta, event, agent: 'discord' };
+      // Single-line JSON, parseable by `{ $.audit.event = "..." }`
+      // CloudWatch filter syntax. No timestamp prefix — the JSON has
+      // its own ts field. console.log adds a trailing newline.
+      //
+      // Wrap JSON.stringify in try/catch — a circular reference, BigInt,
+      // or other non-serializable value in meta would otherwise throw
+      // out of audit() and into the caller, which on the per-recipient
+      // batchSettled callback would fail an entire DM. Audit must never
+      // break the user-visible flow; degrade to an error log instead.
       console.log(JSON.stringify({
         audit: auditPayload,
         ts: formatTimestamp(),
       }));
-    } catch (err) {
+    } catch {
       // Two-tier degradation: emit a minimal audit line with a fixed
       // synthetic event so CloudWatch metric filters can pattern-match
       // `{ $.audit.event = "audit_serialization_failed" }` and surface
@@ -317,12 +316,12 @@ const logger = {
             event: 'audit_serialization_failed',
             agent: 'discord',
             original_event: String(event),
-            reason: sanitizeMessage(err && err.message),
+            reason: 'metadata_processing_failed',
           },
           ts: formatTimestamp(),
         }));
-      } catch (fallbackErr) {
-        console.error(`[${formatTimestamp()}] ERROR: logger.audit serialization failed event=${sanitizeMessage(event)} reason=${sanitizeMessage(err && err.message)} fallback_reason=${sanitizeMessage(fallbackErr && fallbackErr.message)}`);
+      } catch {
+        console.error(`[${formatTimestamp()}] ERROR: logger.audit metadata processing failed`);
       }
     }
   },

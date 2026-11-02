@@ -45,6 +45,23 @@ describe('logger', () => {
     });
   });
 
+  test.each(['circular', 'bigint', 'getter', 'toJSON'])('audit contains %s metadata failures without leaking error text', (kind) => {
+    logger = require('../src/logger');
+    const meta = { value: 'private-audit-value' };
+    if (kind === 'circular') meta.self = meta;
+    if (kind === 'bigint') meta.amount = 1n;
+    if (kind === 'getter') Object.defineProperty(meta, 'broken', {
+      enumerable: true, get() { throw new Error('private-audit-value'); },
+    });
+    if (kind === 'toJSON') meta.toJSON = () => { throw new Error('private-audit-value'); };
+    expect(() => logger.audit('audit-fixture', meta)).not.toThrow();
+    expect(consoleSpy.log).toHaveBeenCalledTimes(1);
+    const line = consoleSpy.log.mock.calls[0][0];
+    expect(JSON.parse(line).audit).toEqual({ event: 'audit_serialization_failed', agent: 'discord',
+      original_event: 'audit-fixture', reason: 'metadata_processing_failed' });
+    expect(line).not.toContain('private-audit-value');
+  });
+
   describe.each(['info', 'audit'])('%s secret containers', (method) => {
     test.each(['array', 'wrapper', 'deep'])('redacts strings in %s containers for every matched key', (shape) => {
       process.env.LOG_LEVEL = 'debug';
