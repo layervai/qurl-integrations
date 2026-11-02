@@ -899,6 +899,7 @@ func TestUninstallConfirmBlocksStateWhatIsClearedAndKept(t *testing.T) {
 		"not* affected", // resources survive
 		"--rotate",      // the non-destructive alternative
 		uninstallConfirmActionID,
+		strconv.FormatInt(int64(uninstallConfirmTTL/time.Minute), 10) + " minutes",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("confirmation card missing %q: %s", want, got)
@@ -1164,10 +1165,12 @@ func TestUninstallConfirmClickFreshness(t *testing.T) {
 		expiresIn  time.Duration
 		rawValue   string
 		wantDelete bool
+		stranger   bool
 	}{
 		{name: "last valid second", expiresIn: time.Second, wantDelete: true},
 		{name: "expiry boundary"},
 		{name: "expired", expiresIn: -time.Second},
+		{name: "expired stranger", expiresIn: -time.Second, stranger: true},
 		{name: "future clock outside allowance", expiresIn: uninstallConfirmTTL + uninstallConfirmClockSkew + time.Second},
 		{name: "legacy card", rawValue: testAdminTeamID},
 		{name: "malformed expiry", rawValue: "not-a-time|" + testAdminTeamID},
@@ -1189,6 +1192,14 @@ func TestUninstallConfirmClickFreshness(t *testing.T) {
 			if tc.rawValue != "" {
 				value = tc.rawValue
 			}
+			wantOwner, wantAdmins, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			userID := testAdminUserID
+			if tc.stranger {
+				userID = "USTRANGER000"
+			}
 			captured := &capturedResponseURL{}
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, _ := io.ReadAll(r.Body)
@@ -1196,7 +1207,7 @@ func TestUninstallConfirmClickFreshness(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			}))
 			t.Cleanup(srv.Close)
-			body := exposeBlockActionsBodyWithEnterprise(t, testAdminTeamID, "", testAdminUserID, testExposeChannel, srv.URL, uninstallConfirmActionID, value)
+			body := exposeBlockActionsBodyWithEnterprise(t, testAdminTeamID, "", userID, testExposeChannel, srv.URL, uninstallConfirmActionID, value)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
 			if w.Code != http.StatusOK {
@@ -1213,11 +1224,16 @@ func TestUninstallConfirmClickFreshness(t *testing.T) {
 			if provider.deleteCalls != 0 || provider.deleteStateCalls != 0 {
 				t.Fatal("invalid confirmation deleted workspace data")
 			}
-			if !strings.Contains(reply, "confirmation has expired") {
-				t.Fatalf("reply = %q, want restart guidance", reply)
+			wantReply := "confirmation has expired"
+			if tc.stranger {
+				wantReply = "can disconnect it"
 			}
-			if _, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID); err != nil {
-				t.Fatalf("admin roster changed: %v", err)
+			if !strings.Contains(reply, wantReply) {
+				t.Fatalf("reply = %q, want %q", reply, wantReply)
+			}
+			owner, admins, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+			if err != nil || owner != wantOwner || !slices.Equal(admins, wantAdmins) {
+				t.Fatalf("admin roster changed: owner=%q admins=%v err=%v", owner, admins, err)
 			}
 			entries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testAdminTeamID, "C_one")
 			if err != nil || len(entries) == 0 {
