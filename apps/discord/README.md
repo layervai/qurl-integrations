@@ -298,13 +298,16 @@ budget, revocation is unconfirmed. Check the grants before manual row cleanup.
 ## Guild-scoped revoke history migration (#83)
 
 The send writer now adds `guild_sender_id = JSON.stringify([guildId, senderDiscordId])`
-when the send has a guild. This is an additive preparation step. The current
+when the send has a guild, using the shared `utils/guild-sender-key` encoder.
+This is an additive preparation step. The current
 revoke reader still uses the existing sender index, so old records remain visible.
 
 The infrastructure change must add `guild_sender_id-created_at-index` with the
 same metadata projection as `sender_discord_id-created_at-index`. Deploy the
 writer to every send path, including Add Recipients, before the backfill's final
-verification. A paginated offline backfill must derive the tuple from each row's
+verification. DynamoDB indexes rows that already carry the tuple automatically;
+the offline backfill only needs rows that predate writer adoption and lack it.
+A paginated offline backfill must derive the tuple from each row's
 stored `guild_id` and `sender_discord_id`, and condition its update on both source
 fields still matching. It must neither overwrite a different existing tuple nor
 infer a guild for an unscoped historical row. Check remaining unindexed and
