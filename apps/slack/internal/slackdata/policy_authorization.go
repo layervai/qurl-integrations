@@ -266,13 +266,19 @@ func commitPolicyUpdate(ctx context.Context, client policyTransactionClient, req
 		return policyTransactionError(err, authorization)
 	}
 	retired, present, identityErr := policyIdentity(canceled.CancellationReasons[1].Item, attrPolicyInstallation)
-	if identityErr != nil || !present || retired == authorization.installation {
+	if identityErr != nil || len(canceled.CancellationReasons[1].Item) == 0 || (present && retired == authorization.installation) || (!present && (authorization.legacyPolicies || !authorization.store.legacyPolicyWritersRetired)) {
 		return policyTransactionError(err, authorization)
+	}
+	rowCondition := "attribute_not_exists(" + exprPolicyInstallation + ")"
+	var rowValues map[string]ddbtypes.AttributeValue
+	if present {
+		rowCondition = exprPolicyInstallation + " = " + valuePolicyInstallation
+		rowValues = map[string]ddbtypes.AttributeValue{valuePolicyInstallation: stringAttr(retired)}
 	}
 	update := request.TransactItems[1].Update
 	_, cleanupErr := client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{ClientRequestToken: aws.String(rand.Text()), TransactItems: []ddbtypes.TransactWriteItem{
 		request.TransactItems[0],
-		{Delete: &ddbtypes.Delete{TableName: update.TableName, Key: update.Key, ConditionExpression: aws.String(exprPolicyInstallation + " = " + valuePolicyInstallation), ExpressionAttributeNames: map[string]string{exprPolicyInstallation: attrPolicyInstallation}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{valuePolicyInstallation: stringAttr(retired)}}},
+		{Delete: &ddbtypes.Delete{TableName: update.TableName, Key: update.Key, ConditionExpression: aws.String(rowCondition), ExpressionAttributeNames: map[string]string{exprPolicyInstallation: attrPolicyInstallation}, ExpressionAttributeValues: rowValues}},
 	}})
 	if cleanupErr != nil {
 		if errors.As(cleanupErr, &canceled) {

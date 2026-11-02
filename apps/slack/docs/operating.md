@@ -27,6 +27,9 @@ first user to connect an unbound workspace can reach it (qURL is
 first-come-claims). The overwrite guard for an already-bound workspace lives
 at the OAuth-callback bind layer.
 
+For installation-aware policy writes and legacy-row retirement, follow the
+[policy installation rollout](policy-installation-rollout.md).
+
 ## Architecture
 
 - **Runtime:** stateless HTTP service, shipped as a small container. Sits

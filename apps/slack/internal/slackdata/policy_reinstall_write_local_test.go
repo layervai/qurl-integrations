@@ -11,7 +11,7 @@ import (
 )
 
 func TestPolicyReinstallWriteDynamoDBLocal(t *testing.T) {
-	for _, scenario := range []string{"grant replaces retired row", "alias replaces retired row", "fresh row wins cleanup", "revoked at cleanup", "revoked at retry", "fresh grant wins retry"} {
+	for _, scenario := range []string{"grant replaces retired row", "alias replaces retired row", "fresh row wins cleanup", "revoked at cleanup", "revoked at retry", "fresh grant wins retry", "untagged before retirement", "untagged after retirement"} {
 		t.Run(scenario, func(t *testing.T) {
 			store, client := localPolicyStore(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -33,6 +33,13 @@ func TestPolicyReinstallWriteDynamoDBLocal(t *testing.T) {
 				}
 			}
 			put("retired", "r_retired")
+			if scenario == "untagged before retirement" || scenario == "untagged after retirement" {
+				if _, err := client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(store.ChannelPoliciesName), Key: key, UpdateExpression: aws.String("REMOVE policy_installation")}); err != nil {
+					t.Fatal(err)
+				}
+				store.legacyPolicyWritersRetired = scenario == "untagged after retirement"
+			}
+
 			revoke := func() {
 				if err := store.RemoveAdmin(ctx, team, testCallerSlackID); err != nil {
 					t.Fatal(err)
@@ -59,7 +66,7 @@ func TestPolicyReinstallWriteDynamoDBLocal(t *testing.T) {
 			} else {
 				err = store.ExposeResourceToChannel(authorization.Context(ctx), team, channel, "r_requested")
 			}
-			if scenario == "fresh row wins cleanup" || scenario == "revoked at cleanup" || scenario == "revoked at retry" {
+			if scenario == "fresh row wins cleanup" || scenario == "revoked at cleanup" || scenario == "revoked at retry" || scenario == "untagged before retirement" {
 				assertPolicyStatus(t, err, 409)
 			} else if err != nil {
 				t.Fatal(err)
@@ -70,6 +77,13 @@ func TestPolicyReinstallWriteDynamoDBLocal(t *testing.T) {
 			}
 			resources := allowedResourceIDsFromItem(row.Item)
 			switch scenario {
+			case "untagged before retirement":
+				if len(resources) != 1 {
+					t.Fatal("ambiguous policy changed before retirement")
+				}
+				if _, ok := resources["r_retired"]; !ok {
+					t.Fatal("ambiguous grant was lost")
+				}
 			case "fresh row wins cleanup":
 				if len(resources) != 1 {
 					t.Fatal("cleanup changed concurrent row")

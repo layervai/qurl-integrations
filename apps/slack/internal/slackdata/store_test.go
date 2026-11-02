@@ -1746,3 +1746,21 @@ func unitPolicyContext(t *testing.T, store *Store) context.Context {
 	authorization := PolicyAuthorization{store: store, teamID: "T1", userID: testOwnerSlackID, ownerID: testOwnerSlackID, generation: "unit-generation", installation: "unit-installation"}
 	return authorization.Context(context.Background())
 }
+
+func TestLegacyWriterRetirementConfiguration(t *testing.T) {
+	for _, raw := range []string{"", "false", "true", "invalid"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv(EnvLegacyPolicyWritersRetired, raw)
+			store, err := NewStore(context.Background(), WithDynamoDBClient(&stubDDB{}), WithTableNames("ws", "cp"))
+			if raw == "invalid" {
+				if err == nil {
+					t.Fatal("invalid retirement state accepted")
+				}
+				return
+			}
+			if err != nil || store.legacyPolicyWritersRetired != (raw == "true") {
+				t.Fatalf("retirement configuration: %v %v", store, err)
+			}
+		})
+	}
+}
