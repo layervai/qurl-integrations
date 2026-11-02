@@ -8074,16 +8074,18 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  if (result.result === 'conflict') {
-    return interaction.editReply({
-      content: 'Send was superseded — re-run the command.',
+  if (result.result === 'conflict' || result.result === 'not_found') {
+    await interaction.editReply({
+      content: result.result === 'conflict'
+        ? 'Send was superseded — re-run the command.'
+        : 'This send expired — re-run the command.',
       components: [],
     }).catch(logIgnoredDiscordErr);
-  }
-  if (result.result === 'not_found') {
-    return interaction.editReply({
-      content: 'This send expired — re-run the command.',
-      components: [],
+    if (!rawCapped) return undefined;
+    return interaction.followUp({
+      content: `Your typed note (copy and paste it after re-running):\n\`\`\`\n${rawCapped}\n\`\`\``,
+      ephemeral: true,
+      allowedMentions: { parse: [] },
     }).catch(logIgnoredDiscordErr);
   }
   return rerenderConfirmCard(interaction, newPayload);

@@ -5532,6 +5532,47 @@ describe('handleConfirmNoteModal', () => {
     }));
   });
 
+  test.each(['conflict', 'not_found'])('%s privately recovers the typed note without changing the version fence', async (result) => {
+    mockTransitionFlow.mockResolvedValueOnce({ result });
+    const raw = '**my note**\n@everyone <@123> `literal`';
+    const int = makeModalInteraction({ inputValue: raw });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 7 } });
+    expect(mockTransitionFlow).toHaveBeenCalledTimes(1);
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 7, expect.anything());
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({ components: [] }));
+    expect(int.followUp).toHaveBeenCalledTimes(1);
+    expect(int.followUp).toHaveBeenCalledWith({
+      content: `Your typed note (copy and paste it after re-running):\n\`\`\`\n${raw}\n\`\`\``,
+      ephemeral: true,
+      allowedMentions: { parse: [] },
+    });
+  });
+
+  test.each(['conflict', 'not_found'])('%s does not recover an empty or whitespace-only note', async (result) => {
+    for (const inputValue of ['', '  \n\t']) {
+      mockTransitionFlow.mockResolvedValueOnce({ result });
+      const int = makeModalInteraction({ inputValue });
+      await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
+      expect(int.editReply).toHaveBeenCalled();
+      expect(int.followUp).not.toHaveBeenCalled();
+    }
+  });
+
+  test('note recovery still runs when the superseded-card edit fails', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    const int = makeModalInteraction({ inputValue: 'keep this note' });
+    int.editReply.mockRejectedValueOnce(new Error('Unknown message'));
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('keep this note'), ephemeral: true }));
+  });
+
+  test('failed recovery follow-up does not escape the handler', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    const int = makeModalInteraction({ inputValue: 'keep this note' });
+    int.followUp.mockRejectedValueOnce(new Error('Discord unavailable'));
+    await expect(handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } })).resolves.toBeUndefined();
+  });
+
   test('getTextInputValue throws → ephemeral followUp ("could not read"), NO transitionFlow, existing note preserved', async () => {
     const int = makeModalInteraction({ inputValue: 'hi' });
     int.fields.getTextInputValue = jest.fn(() => {
