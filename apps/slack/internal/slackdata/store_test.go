@@ -1475,6 +1475,9 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 		var deletedChannels []string
 		store := newStore(&stubDDB{
 			queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				if !aws.ToBool(in.ConsistentRead) {
+					t.Fatal("purge must strongly read every table page before acknowledging cleanup")
+				}
 				if got := aws.ToString(in.TableName); got != "cp" {
 					t.Errorf("Query table = %q, want %q", got, "cp")
 				}
