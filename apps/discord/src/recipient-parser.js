@@ -283,7 +283,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // an empty result rather than throwing. Caller branches on
   // `ids.length === 0` to decide whether to render the recipient picker.
   if (raw == null || typeof raw !== 'string') {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, partialCache: false, partialMemberCache: null, roleMentionsDenied: [] };
   }
   // Mirror the `raw` guard for `interaction` so a null/undefined
   // caller-bug surfaces as an empty result instead of a TypeError
@@ -291,7 +291,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // a clearer crash site for "no caller context"; the parser
   // doesn't gain anything by failing here.
   if (interaction == null) {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, partialCache: false, partialMemberCache: null, roleMentionsDenied: [] };
   }
   // Length-cap BEFORE regex matching to keep the global-flag iteration
   // bounded under adversarial input. The /g flag scans linearly but
@@ -321,7 +321,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     }
   }
   if (input.length === 0) {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, partialCache: false, partialMemberCache: null, roleMentionsDenied: [] };
   }
 
   // `seen` is the canonical post-filter unique-candidate set (every
@@ -623,13 +623,12 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // first, and @everyone fills the remainder. Reversing this order
   // silently drops explicit mentions when the cache is partial.
   let massMentionExpanded = false;
+  let partialMemberCache = null;
   if (everyonePresent && allowMassMention) {
+    partialMemberCache = getPartialMemberCache(guild);
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
-      // PARTIAL-CACHE BLIND SPOT: same caveat as role expansion
-      // above — in large guilds without a recent GUILD_MEMBERS
-      // chunk, the cache reflects only the currently-loaded subset,
-      // not the guild's true member count. Acceptable v1; in
+      // A partial member cache is reported to the sender. In
       // realistic guilds (where bots are <1% of members) the cap
       // (QURL_SEND_MAX_RECIPIENTS) bounds the iteration via the
       // `break` below. The pathological all-bots case still walks
@@ -768,7 +767,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // `massMentionDenied` instead) or when the cache was cold /
   // cap-saturated by the time the walk reached it (caller's
   // `valid.length` check still catches that downstream).
-  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, roleMentionsDenied };
+  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, partialCache: partialMemberCache !== null, partialMemberCache, roleMentionsDenied };
 }
 
 // `isVoiceChannelType` is the same voice/stage-voice predicate the
@@ -781,7 +780,17 @@ function isVoiceChannelType(type) {
   return type === VOICE_CHANNEL_TYPE || type === STAGE_VOICE_CHANNEL_TYPE;
 }
 
+// Capture coverage before selection; a later gateway update must not hide a partial pick.
+function getPartialMemberCache(guild) {
+  const cachedCount = guild?.members?.cache?.size;
+  const totalCount = guild?.memberCount;
+  return Number.isSafeInteger(cachedCount) && cachedCount >= 0
+    && Number.isSafeInteger(totalCount) && totalCount > cachedCount
+    ? { cachedCount, totalCount } : null;
+}
+
 module.exports = {
+  getPartialMemberCache,
   parseRecipientMentions,
   isVoiceChannelType,
   isBotMember,
