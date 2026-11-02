@@ -191,9 +191,6 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: mockGetResourceStatus,
 }));
 
-
-
-
 const mockCreateFlow = jest.fn().mockResolvedValue({ created: true, version: 1 });
 const mockLoadFlow = jest.fn();
 const mockDeleteFlow = jest.fn().mockResolvedValue({ deleted: true });
@@ -1837,7 +1834,6 @@ describe('handleSetupModal (dispatcher path)', () => {
 
 describe('Maps is retired even with the legacy flag enabled', () => {
 
-
   it('SETUP_SUCCESS_MSG omits /qurl map', () => {
     expect(_test.SETUP_SUCCESS_MSG).not.toContain('/qurl map');
     expect(_test.SETUP_SUCCESS_MSG).toContain('/qurl send');
@@ -1890,7 +1886,7 @@ describe('Maps is retired even with the legacy flag enabled', () => {
     expect(interaction.deferReply).not.toHaveBeenCalled();
   });
 
-  it('autocomplete for /qurl map location does NOT call searchPlaces (Places quota safety)', async () => {
+  it('cached Maps autocomplete returns no choices', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),

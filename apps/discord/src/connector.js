@@ -1318,10 +1318,4 @@ async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
   }
 }
 
-/**
- * Upload a JSON object to the connector as a file.
- * Used for structured payloads like location data.
- */
-
-
 module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, revokeMintedLinks, detectWatermark, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };

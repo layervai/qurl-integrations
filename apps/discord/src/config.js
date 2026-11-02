@@ -547,7 +547,8 @@ module.exports = {
     || (process.env.NODE_ENV === 'production' ? 'https://get.qurl.link:9808' : 'http://localhost:9808'),
 
   // DETECT_COMMAND_ENABLED gates /qurl detect (#1101): default OFF.
-  // Its value is read once at module load and requires a restart. The connector /api/detect backend 503/404s until the watermark
+  // Its value is read once at module load and requires a restart. The
+  // connector /api/detect backend 503/404s until the watermark
   // stack is ACTIVATED (a separate gated step AFTER the connector deploys), so
   // detect stays DARK until an operator flips this at activation — no
   // visible-but-failing command in the interim.

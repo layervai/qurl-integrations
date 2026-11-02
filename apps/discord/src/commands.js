@@ -249,9 +249,6 @@ const { renderViewCounter } = require('./view-counter-render');
 // --- QURL send helpers ---
 
 
-
-
-
 const { DISPLAY_NAME_FALLBACK, sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls } = require('./utils/sanitize');
 
 // Best-effort host extraction for log lines. URL parsing throws on
@@ -2952,7 +2949,6 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Send configuration not found.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
-
   // getSendConfig runs after the user-select await, so revoking_at/revoked_at
   // catch button, slash-command, and out-of-band revokes that landed while
   // the Add Recipients picker was open. recordQURLSendBatch repeats this
@@ -2972,7 +2968,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   }
 
   if (sendConfig.actual_url || (sendConfig.resource_type === RESOURCE_TYPES.MAPS)) {
-    return { msg: 'Cannot add recipients — Maps sharing has been retired. Existing links can still be revoked.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
+    return { msg: 'Cannot add recipients — location/URL sharing through this bot has been retired. Existing links can still be revoked.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
   // #352 entry gate. Shares the same `EXPIRY_LABELS` membership
@@ -5887,8 +5883,6 @@ async function handleQurlSend(interaction) {
     resourceLabel: sanitizeContentLabel(attachment.name),
   });
 }
-
-
 
 // ──────────────────────────────────────────────────────────────────────
 // /qurl detect — watermark attribution (#1101)

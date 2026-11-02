@@ -180,9 +180,6 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: mockGetResourceStatus,
 }));
 
-
-
-
 const crypto = require('crypto');
 const originalRandomBytes = crypto.randomBytes;
 const MOCK_NONCE = 'deadbeef01234567';
@@ -193,7 +190,7 @@ crypto.randomBytes = jest.fn((size) => {
 crypto.randomUUID = jest.fn(() => 'mock-uuid-9999');
 
 const { commands, handleCommand, _test } = require('../src/commands');
-const { sendCooldowns, setCooldown, isGoogleMapsURL } = _test;
+const { sendCooldowns, setCooldown } = _test;
 
 function makeInteraction(overrides = {}) {
   const base = {
@@ -275,7 +272,7 @@ describe('handleCommand — autocomplete edge cases', () => {
     expect(interaction.reply).not.toHaveBeenCalled();
   });
 
-  it('routes autocomplete to the /qurl map location handler (which gates on /qurl + map + location)', async () => {
+  it('cached Maps autocomplete returns no choices', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       guildId: 'guild-1',
