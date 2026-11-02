@@ -95,7 +95,9 @@ func run(ctx context.Context, stdout, stderr io.Writer, args []string, getenv fu
 	cfg.Token = getenv(tokenEnv)
 	cfg.StartedAt = now().UTC()
 	cfg.HTTPClient = slacksmoke.NewHTTPClient(budget.Request)
-	cfg.HTTPClient.Transport = transport
+	if transport != nil {
+		cfg.HTTPClient.Transport = transport
+	}
 
 	if err := prepareScanConfig(cfg); err != nil {
 		writeConfigValidationError(stderr, tokenEnv, err)

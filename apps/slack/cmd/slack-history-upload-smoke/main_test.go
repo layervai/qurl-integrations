@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,15 +39,29 @@ func testEnv(token string) func(string) string {
 
 func fixedNow() time.Time { return time.Unix(1723600000, 0).UTC() }
 
+type historyCountingTransport struct {
+	base  http.RoundTripper
+	calls *atomic.Int64
+}
+
+func (tr historyCountingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tr.calls.Add(1)
+	return tr.base.RoundTrip(req)
+}
+
 // runCLI drives run end to end and returns the exit code plus both streams.
 func runCLI(t *testing.T, srv *httptest.Server, args []string, getenv func(string) string) (code int, stdoutText, stderrText string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	var transport http.RoundTripper
+	var calls atomic.Int64
 	if srv != nil {
-		transport = srv.Client().Transport
+		transport = historyCountingTransport{base: srv.Client().Transport, calls: &calls}
 	}
 	code = run(context.Background(), &stdout, &stderr, args, getenv, fixedNow, transport)
+	if srv != nil && calls.Load() == 0 {
+		t.Fatal("CLI requests bypassed the fake-server transport")
+	}
 	return code, stdout.String(), stderr.String()
 }
 
