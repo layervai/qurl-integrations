@@ -537,9 +537,8 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 				":tid": stringAttr(teamID),
 			},
-			// Only the SK is needed to issue the per-row DeleteItem; the rest of
-			// each row is irrelevant to a full delete. Mirrors the projected reads
-			// elsewhere on this table.
+			// Read only row identity and installation lineage; cleanup does not
+			// need to load the alias maps or resource sets.
 			ProjectionExpression: aws.String("#cid, #installation"),
 			ExpressionAttributeNames: map[string]string{
 				"#cid":                 attrSlackChannelID,
