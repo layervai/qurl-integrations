@@ -29,8 +29,33 @@ func (s *Store) updateAuthorizedWorkspace(ctx context.Context, in *dynamodb.Upda
 	guarded.ReturnValuesOnConditionCheckFailure = ddbtypes.ReturnValuesOnConditionCheckFailureAllOld
 	_, err := s.Client.UpdateItem(ctx, &guarded)
 	var conflict *ddbtypes.ConditionalCheckFailedException
-	if errors.As(err, &conflict) && len(conflict.Item) != 0 && (readString(conflict.Item, attrOwnerID) != authorization.ownerID || readString(conflict.Item, attrPolicyGeneration) != authorization.generation || readString(conflict.Item, attrPolicyInstallation) != authorization.installation || !workspaceCallerIsAdmin(conflict.Item, authorization.userID)) {
+	if errors.As(err, &conflict) && len(conflict.Item) != 0 && !matchesPolicyAuthorization(conflict.Item, &authorization) {
 		return policyWorkspaceChanged()
 	}
 	return err
+}
+
+// ValidatePolicyAuthorization checks captured mutation scope before selecting
+// credentials. Ordinary read contexts do not incur a workspace read.
+func ValidatePolicyAuthorization(ctx context.Context, store *Store, teamID string) error {
+	raw := ctx.Value(policyAuthorizationContextKey{})
+	if raw == nil {
+		return nil
+	}
+	authorization, ok := raw.(PolicyAuthorization)
+	if !ok || store == nil || authorization.store != store || authorization.teamID != teamID || authorization.generation == "" || authorization.installation == "" {
+		return policyWorkspaceChanged()
+	}
+	out, err := store.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(store.WorkspaceMappingsName), Key: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID)}, ConsistentRead: aws.Bool(true)})
+	if err != nil {
+		return ddbToError("ValidatePolicyAuthorization", err)
+	}
+	if !matchesPolicyAuthorization(out.Item, &authorization) {
+		return policyWorkspaceChanged()
+	}
+	return nil
+}
+
+func matchesPolicyAuthorization(item map[string]ddbtypes.AttributeValue, authorization *PolicyAuthorization) bool {
+	return readString(item, attrOwnerID) == authorization.ownerID && readString(item, attrPolicyGeneration) == authorization.generation && readString(item, attrPolicyInstallation) == authorization.installation && workspaceCallerIsAdmin(item, authorization.userID)
 }

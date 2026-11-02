@@ -93,3 +93,5 @@ Inspect and retry retained jobs after recovery. Do not manually tag an ambiguous
 row as current or delete it based only on its wall-clock timestamp. Historical
 rows which cannot be attributed require a separate operator reconciliation based
 on current binding and upstream resource evidence.
+
+Mutating requests validate their captured workspace authority before and after API key lookup. This prevents a revoked caller or an old installation from selecting a replacement installation credential. Display-name changes carry the same captured scope as URL creation. Ordinary read contexts do not add these workspace reads. This check cannot cancel an upstream request that was already sent before a later revocation.

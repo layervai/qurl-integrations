@@ -186,7 +186,8 @@ func (h *Handler) handleSetDisplayName(w http.ResponseWriter, values url.Values)
 	// interaction. The parser usage hints above are surfaced before the
 	// gate (the grammar is public — it's in the ungated `/qurl-admin help`),
 	// matching the set-alias posture.
-	if !h.requireAdminSync(w, teamID, userID, AdminActionSetDisplayName) {
+	authorization, allowed := h.requirePolicyAdminSync(w, teamID, userID, AdminActionSetDisplayName)
+	if !allowed {
 		return
 	}
 
@@ -196,7 +197,7 @@ func (h *Handler) handleSetDisplayName(w http.ResponseWriter, values url.Values)
 	channelID := strings.TrimSpace(values.Get(fieldChannelID))
 
 	h.runAsync(w, "set_display_name", values, func(ctx context.Context, log *slog.Logger) {
-		msg := h.resolveAndSetTunnelDisplayName(ctx, log, teamID, channelID, id, name)
+		msg := h.resolveAndSetTunnelDisplayName(authorization.Context(ctx), log, teamID, channelID, id, name)
 		_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
 	})
 }
@@ -221,14 +222,15 @@ func (h *Handler) handleUnsetDisplayName(w http.ResponseWriter, values url.Value
 		return
 	}
 
-	if !h.requireAdminSync(w, teamID, userID, AdminActionUnsetDisplayName) {
+	authorization, allowed := h.requirePolicyAdminSync(w, teamID, userID, AdminActionUnsetDisplayName)
+	if !allowed {
 		return
 	}
 
 	channelID := strings.TrimSpace(values.Get(fieldChannelID))
 
 	h.runAsync(w, "unset_display_name", values, func(ctx context.Context, log *slog.Logger) {
-		msg := h.resolveAndResetTunnelDisplayName(ctx, log, teamID, channelID, id)
+		msg := h.resolveAndResetTunnelDisplayName(authorization.Context(ctx), log, teamID, channelID, id)
 		_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
 	})
 }
