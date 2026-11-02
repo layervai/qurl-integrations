@@ -1003,6 +1003,15 @@ enabled on `workspace_mappings.expires_at`. Durable workspace binding rows must
 not write `expires_at`; DynamoDB TTL is table-wide and would reap any real row
 that accidentally carried a numeric value.
 
+If a peer has already advanced to the next window, tasks share that window's
+budget instead of resetting it backward. A counter more than one window ahead
+fails closed with `rate_limit_clock_skew`; its count, window, and expiry stay
+unchanged. The user gets an operator-check message rather than a large retry
+estimate. Check every writer's clock and the stored window before repair. Do
+not delete/reset the counter or disable the gate to shorten the wait: that can
+reuse a consumed budget. Correcting a clock does not repair an existing future
+counter automatically; any manual repair must preserve its consumed budget.
+
 ## Environment variables
 
 | Variable | Required | Description |
