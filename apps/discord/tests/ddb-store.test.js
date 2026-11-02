@@ -58,6 +58,14 @@ const { AUDIT_EVENTS, SETUP_VIA } = require('../src/constants');
 
 const DOOR_WARN = 'Unrecognized setup door; any admin-change audit for this write records via=unknown';
 
+const DEFAULT_OWNER_EXPECTED_CONDITION = '#apiKey = :storedApiKey AND ' +
+  '((:storedSecretPresent = :present AND #storedSecret = :storedSecret) OR ' +
+  '(:storedSecretPresent = :absent AND attribute_not_exists(#storedSecret))) AND ' +
+  '((:storedWebhookIdPresent = :present AND #storedWebhookId = :storedWebhookId) OR ' +
+  '(:storedWebhookIdPresent = :absent AND attribute_not_exists(#storedWebhookId))) AND ' +
+  '((:storedOwnerPresent = :present AND #storedOwner = :storedOwner) OR ' +
+  '(:storedOwnerPresent = :absent AND attribute_not_exists(#storedOwner)))';
+
 function defaultOwnerArgs(overrides = {}) {
   return {
     webhookOwnerId: 'usr_default',
@@ -373,10 +381,10 @@ describe('guild configs', () => {
     const input = calls[0].args[0].input;
     expect(input.Key).toEqual({ guild_id: 'g_default' });
     expect(input.ConditionExpression).toBe(
-      'qurl_api_key = :storedApiKey AND webhook_secret = :storedSecret AND webhook_id = :storedWebhookId AND webhook_owner_id = :storedOwner',
+      DEFAULT_OWNER_EXPECTED_CONDITION,
     );
     expect(input.UpdateExpression).toBe(
-      'REMOVE webhook_id, webhook_secret SET webhook_owner_id = :woid, updated_at = :u',
+      'REMOVE #storedWebhookId, #storedSecret SET #storedOwner = :woid, #updatedAt = :u',
     );
     expect(input.ExpressionAttributeValues).toMatchObject({
       ':woid': 'usr_default',
@@ -388,6 +396,38 @@ describe('guild configs', () => {
     });
     expect(Object.values(input.ExpressionAttributeValues)).not.toContain('whsec_default');
   });
+
+  test.each(Array.from({ length: 8 }, (_, mask) => [Boolean(mask & 1), Boolean(mask & 2), Boolean(mask & 4)]))(
+    'default-owner CAS preserves snapshot presence: secret=%p id=%p owner=%p',
+    async (secretPresent, idPresent, ownerPresent) => {
+      const row = { guild_id: 'g_default', qurl_api_key: mockCiphertext('lv_default_alias') };
+      if (secretPresent) row.webhook_secret = mockCiphertext('whsec_default');
+      if (idPresent) row.webhook_id = 'wh_default';
+      if (ownerPresent) row.webhook_owner_id = 'usr_default';
+      ddbMock.on(GetCommand).resolves({ Item: row });
+      ddbMock.on(UpdateCommand).resolves({});
+      if (secretPresent && !ownerPresent) {
+        await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+          .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_MISSING' });
+        expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+        return;
+      }
+      await store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs());
+      const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+      expect(input.ConditionExpression).toBe(DEFAULT_OWNER_EXPECTED_CONDITION);
+      expect(input.ExpressionAttributeNames).toEqual({
+        '#apiKey': 'qurl_api_key', '#updatedAt': 'updated_at',
+        '#storedSecret': 'webhook_secret', '#storedWebhookId': 'webhook_id', '#storedOwner': 'webhook_owner_id',
+      });
+      expect(input.ExpressionAttributeValues).toMatchObject({
+        ':present': true, ':absent': false,
+        ':storedSecretPresent': secretPresent, ':storedWebhookIdPresent': idPresent, ':storedOwnerPresent': ownerPresent,
+        ':storedSecret': secretPresent ? row.webhook_secret : null,
+        ':storedWebhookId': idPresent ? row.webhook_id : null,
+        ':storedOwner': ownerPresent ? row.webhook_owner_id : null,
+      });
+    },
+  );
 
   test('setGuildDefaultWebhookOwner: leaves a mismatched legacy secret untouched', async () => {
     ddbMock.on(GetCommand).resolves({
@@ -419,7 +459,7 @@ describe('guild configs', () => {
 
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.ConditionExpression).toBe(
-      'qurl_api_key = :storedApiKey AND attribute_not_exists(webhook_secret) AND attribute_not_exists(webhook_id) AND attribute_not_exists(webhook_owner_id)',
+      DEFAULT_OWNER_EXPECTED_CONDITION,
     );
     expect(input.ExpressionAttributeValues).toMatchObject({
       ':storedApiKey': storedApiKey,
