@@ -884,8 +884,10 @@ func TestInstallCallbackThrottleBeforeExchange(t *testing.T) {
 		defer func() { _ = resp.Body.Close() }()
 		if cookie == nil {
 			for _, c := range resp.Cookies() {
-				cookie = c
-				break
+				if c.Name == stateCookieName {
+					cookie = c
+					break
+				}
 			}
 		}
 		return resp.StatusCode

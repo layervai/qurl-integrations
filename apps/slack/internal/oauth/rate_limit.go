@@ -13,8 +13,8 @@ import (
 )
 
 // In-memory buckets are per process. Multiple Slack OAuth replicas behind the
-// ALB each enforce this budget independently. Within one replica, /start and
-// /callback share a source-IP bucket, so shared NAT egresses share budget; ALB
+// ALB each enforce this budget independently. Each flow shares one source-IP
+// bucket across its routes; flows have separate budgets. NAT egresses share budget; ALB
 // routing can still send a client's flow to different replicas. IPv6 clients
 // are grouped by /64 to avoid per-address rotation within one client network.
 const (
@@ -210,7 +210,7 @@ func rateLimitOAuth(limiter *oauthRateLimiter, next http.Handler) http.Handler {
 		}
 		renderOAuthErrorPage(w, http.StatusTooManyRequests, "Too many setup attempts",
 			"Too many qURL™ setup requests came from this IP address.",
-			"Wait a moment, then return to Slack and try again.")
+			"Wait a moment, then try again.")
 	})
 }
 
