@@ -5578,6 +5578,15 @@ async function handleQurlSlashSend(interaction, params) {
     const parsed = parseRecipientMentions(recipientsRaw, interaction, {
       allowMassMention: canMentionEveryone,
     });
+    if (interaction.guild && (parsed.massMentionDenied || parsed.massMentionExpanded)) {
+      logger.audit(parsed.massMentionDenied ? AUDIT_EVENTS.MASS_MENTION_DENIED : AUDIT_EVENTS.MASS_MENTION_ALLOWED, {
+        user_id: interaction.user.id,
+        guild_id: interaction.guildId,
+        channel_id: interaction.channelId,
+        // Total parsed candidates, including mixed mentions, after dedup and cap.
+        ...(parsed.massMentionExpanded ? { expanded_count: parsed.ids.length } : {}),
+      });
+    }
 
     let resolved = { users: [], unresolvedIds: [], transientFailureIds: [] };
     if (parsed.ids.length > 0) {
