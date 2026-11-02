@@ -28,6 +28,10 @@ const (
 )
 
 func TestRateLimitErrorMessage(t *testing.T) {
+	clockSkew := &slackdata.Error{StatusCode: http.StatusServiceUnavailable, Code: slackdata.ErrCodeRateLimitClockSkew}
+	if got := rateLimitErrorMessage(clockSkew); got != "Rate limiting needs an operator check. Please contact the bot administrator." {
+		t.Fatalf("clock-state copy = %q", got)
+	}
 	notBound := &slackdata.Error{
 		StatusCode: http.StatusNotFound,
 		Code:       slackdata.ErrCodeWorkspaceNotBound,

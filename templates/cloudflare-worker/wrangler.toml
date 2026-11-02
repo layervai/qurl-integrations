@@ -1,0 +1,3 @@
+name = "qurl-mint"
+main = "src/index.js"
+compatibility_date = "2026-10-30"

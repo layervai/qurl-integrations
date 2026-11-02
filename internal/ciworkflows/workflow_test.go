@@ -3069,6 +3069,11 @@ type pullRequestTriggerSpec struct {
 // exactly the ones that guard cannot see.
 var otherPullRequestWorkflows = []pullRequestTriggerSpec{
 	{
+		path:  "edge-templates.yml",
+		paths: []string{"templates/**", ".github/workflows/edge-templates.yml"},
+		why:   "Tests only the standalone edge examples; no required context or application deployment.",
+	},
+	{
 		path:     "codeql.yml",
 		branches: []string{"main"},
 		why: "Deliberately narrow. CodeQL produces no required context, so a stacked PR " +
@@ -3111,23 +3116,27 @@ var otherPullRequestWorkflows = []pullRequestTriggerSpec{
 	},
 	{
 		path:                    "dependency-age-check-actions.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:                    "dependency-age-check-docker.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:                    "dependency-age-check-go.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:                    "dependency-age-check-pip.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:  "pr-title.yml",

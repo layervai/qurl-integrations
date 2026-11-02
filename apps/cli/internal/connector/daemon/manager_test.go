@@ -1899,3 +1899,15 @@ func TestManagerWithholdsUnixOriginWithoutOwnerOnlyParent(t *testing.T) {
 	waitServing(t, manager, "a")
 	waitServing(t, manager, "b")
 }
+
+func emptyManager(t *testing.T) *Manager {
+	t.Helper()
+	manager, err := NewManager(
+		&memoryRegistry{shares: map[string]connectorstate.LocalShare{}},
+		newFakeGroupFactory(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manager
+}
