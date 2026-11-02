@@ -107,7 +107,7 @@ function isAuditSecretKey(key) {
 // Returns a cloned meta value with any object key in AUDIT_SECRET_KEYS
 // replaced by '[REDACTED]'. Recurses to depth 5 with redact()'s array
 // handling so a buried `{ context: { auth_token } }` is also covered.
-// Also returns `secretKeys`, an array of every offending key observed
+// Also returns `secretKeys`, a Set of every offending key observed
 // (deduped, in encounter order) so audit() can name all of them in
 // the warn line — partial reporting would let a caller fix one key
 // and re-run only to discover another the next time.
@@ -119,7 +119,7 @@ function isAuditSecretKey(key) {
 // matched-key non-null object/array values (depth-5 cap inherited from the
 // function body); qURL access-link containers are suppressed as a unit because
 // bare strings inside them have no inner key to match.
-function redactAuditSecrets(value, depth = 0, secretKeys = [], insideSecret = false) {
+function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecret = false) {
   if (insideSecret && typeof value === 'string' && value.length > 0) {
     return { value: '[REDACTED]', secretKeys };
   }
@@ -144,7 +144,7 @@ function redactAuditSecrets(value, depth = 0, secretKeys = [], insideSecret = fa
       // dimensions like `tokens_minted` survive (pinned by test). Push outer key
       // BEFORE recursing for parent-first warn-line order. qURL link
       // containers are the exception and are suppressed as a unit below.
-      if (!secretKeys.includes(k)) secretKeys.push(k);
+      secretKeys.add(k);
       if (typeof v === 'string' && v.length > 0) {
         out[k] = '[REDACTED]';
       } else if (isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
@@ -278,7 +278,7 @@ const logger = {
     // to redact because exact-match doesn't false-positive on
     // legitimate dimensions (proven by the tokens_minted test).
     const { value: cleanedMeta, secretKeys } = redactAuditSecrets(meta);
-    if (secretKeys.length > 0) {
+    if (secretKeys.size > 0) {
       // Logged via console.error so it surfaces at error level in
       // CloudWatch (the logger has no separate warn channel that
       // emits at error severity). Defense-in-depth alongside the
@@ -287,7 +287,7 @@ const logger = {
       // misbehaving call site and remove the key from meta. ALL
       // offending keys are listed so a caller fixing the first
       // doesn't have to re-run to discover the second.
-      const namedKeys = secretKeys.map(k => `"${sanitizeMessage(k)}"`).join(', ');
+      const namedKeys = Array.from(secretKeys, k => `"${sanitizeMessage(k)}"`).join(', ');
       console.error(`[${formatTimestamp()}] ERROR: logger.audit received secret-shaped key(s) [${namedKeys}] in event=${sanitizeMessage(event)}; value(s) redacted in emitted payload — caller must remove from meta`);
     }
     // Spread cleaned meta first, then pin event + agent last so a

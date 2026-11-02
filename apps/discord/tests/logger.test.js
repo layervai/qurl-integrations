@@ -287,6 +287,23 @@ describe('logger', () => {
       expect(typeof fallback.audit.reason).toBe('string');
     });
 
+    it('reports repeated nested secret keys once in first-seen order', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+      const rows = Array.from({ length: 1000 }, () => ({ token: 'private-token', password: 'private-password' }));
+      logger.audit('dedup-fixture', { auth_token: { rows }, count: rows.length });
+      expect(consoleSpy.error).toHaveBeenCalledTimes(1);
+      const warning = consoleSpy.error.mock.calls[0][0];
+      expect(warning).toContain('key(s) ["auth_token", "token", "password"]');
+      expect(warning).not.toContain('private-');
+      const output = consoleSpy.log.mock.calls[0][0];
+      expect(output).not.toContain('private-');
+      const record = JSON.parse(output).audit;
+      expect(record.count).toBe(1000);
+      expect(record.auth_token.rows).toHaveLength(1000);
+      expect(record.auth_token.rows[999]).toEqual({ token: '[REDACTED]', password: '[REDACTED]' });
+    });
+
     it('redacts secret-shaped key VALUES while keeping siblings intact + warns', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
