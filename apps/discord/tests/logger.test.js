@@ -70,6 +70,43 @@ describe('logger', () => {
     expect(line).not.toContain('private-audit-value');
   });
 
+  describe.each(['info', 'audit'])('%s executable metadata', (method) => {
+    test.each(['root', 'secret-wrapper', 'function-value', 'array-element'])('does not execute or leak a %s serializer', (shape) => {
+      logger = require('../src/logger');
+      const hook = jest.fn(() => 'private-serializer-value');
+      const wrapper = { toJSON: hook };
+      const callable = () => undefined;
+      callable.toJSON = hook;
+      const meta = shape === 'root' ? wrapper
+        : shape === 'secret-wrapper' ? { token: wrapper }
+          : shape === 'function-value' ? { token: callable }
+            : { token: [callable] };
+      expect(() => logger[method]('serializer-fixture', meta)).not.toThrow();
+      expect(hook).not.toHaveBeenCalled();
+      expect(consoleSpy.log).toHaveBeenCalledTimes(1);
+      const line = consoleSpy.log.mock.calls[0][0];
+      expect(line).not.toContain('private-serializer-value');
+      if (method === 'audit') expect(JSON.parse(line).audit.event).toBe('audit_serialization_failed');
+      else expect(line).toContain('[meta_serialization_failed]');
+    });
+
+    it('does not invoke array map or species hooks during redaction', () => {
+      logger = require('../src/logger');
+      const values = ['private-array-value'];
+      values.map = jest.fn(() => ['private-array-value']);
+      const constructor = jest.fn(() => Array);
+      Object.defineProperty(values, 'constructor', { get: constructor });
+      logger[method]('array-fixture', { token: values, adjacent_count: 9 });
+      expect(values.map).not.toHaveBeenCalled();
+      expect(constructor).not.toHaveBeenCalled();
+      const line = consoleSpy.log.mock.calls[0][0];
+      expect(line).not.toContain('private-array-value');
+      const fields = method === 'audit' ? JSON.parse(line).audit : JSON.parse(line.slice(line.indexOf('{')));
+      expect(fields.token).toEqual(['[REDACTED]']);
+      expect(fields.adjacent_count).toBe(9);
+    });
+  });
+
   describe.each(['info', 'audit'])('%s secret containers', (method) => {
     test.each(['buffer', 'typed-array', 'data-view', 'array-buffer'])('suppresses secret %s bytes directly and in wrappers', (kind) => {
       logger = require('../src/logger');
@@ -110,6 +147,7 @@ describe('logger', () => {
     const fs = require('node:fs');
     const vm = require('node:vm');
     const source = fs.readFileSync(require.resolve('../src/logger'), 'utf8');
+    // Inject into an isolated copy so this check needs no production-only export.
     const marker = 'const REDACT_EXACT_KEYS = new Set([';
     expect(source).toContain(marker);
     const sandboxModule = { exports: {} };

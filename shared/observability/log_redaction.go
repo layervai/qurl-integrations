@@ -63,7 +63,7 @@ func NewRedactingJSONHandler(w io.Writer, opts *slog.HandlerOptions) slog.Handle
 }
 
 // NewRedactingHandler wraps next with qURL's shared log redaction policy.
-// Key-name rules match Discord. Matched non-empty Go containers are suppressed
+// Key-name rules match Discord. Matched Go structs and non-empty collections are suppressed
 // as a unit because wrappers and marshalers can hide sensitive values under
 // harmless inner names. Scalar counters and unmatched context are preserved.
 // Discord instead walks general containers, hiding strings and keeping numbers.
@@ -155,7 +155,7 @@ func redactMatchedValue(value slog.Value, depth int) slog.Value {
 	}
 	if (value.Kind() == slog.KindGroup && len(value.Group()) > 0) ||
 		(value.Kind() == slog.KindAny && isSuppressibleContainer(value.Any())) {
-		// A matched key makes the whole non-empty container sensitive: inner
+		// A matched key makes structs and non-empty collections sensitive: inner
 		// names do not reliably identify strings that carry its secret value.
 		return slog.StringValue(redactedLogValue)
 	}
@@ -164,8 +164,8 @@ func redactMatchedValue(value slog.Value, depth int) slog.Value {
 }
 
 func redactAny(value any, depth int) (any, bool) {
-	// This intentionally mirrors the Discord logger's depth-5 contract:
-	// beyond the cap, values pass through unchanged rather than risking an
+	// The depth bound matches Discord; container handling differs as documented above.
+	// Beyond the cap, values pass through unchanged rather than risking an
 	// unbounded walk. Redaction is a bounded backstop, not a complete guarantee
 	// for arbitrarily deep payloads.
 	if depth > maxRedactionDepth || value == nil {

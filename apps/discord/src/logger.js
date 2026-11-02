@@ -118,6 +118,8 @@ function isAuditSecretKey(key) {
 // hide all non-empty strings and are sealed at the depth-5 limit. qURL-link
 // containers are suppressed as a unit because bare elements can be credentials.
 function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecret = false) {
+  // Callable metadata can run toJSON after redaction and reintroduce secrets.
+  if (typeof value === 'function') throw new TypeError('Executable log metadata');
   if (insideSecret && isNonEmptyByteSequence(value)) return { value: '[REDACTED]', secretKeys };
   if (insideSecret && typeof value === 'string' && value.length > 0) {
     return { value: '[REDACTED]', secretKeys };
@@ -129,7 +131,11 @@ function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecr
     return { value, secretKeys };
   }
   if (Array.isArray(value)) {
-    const arr = value.map((v) => redactAuditSecrets(v, depth + 1, secretKeys, insideSecret).value);
+    // A plain array copy avoids caller-controlled map and species hooks.
+    const arr = new Array(value.length);
+    for (let i = 0; i < arr.length; i += 1) {
+      arr[i] = redactAuditSecrets(value[i], depth + 1, secretKeys, insideSecret).value;
+    }
     return { value: arr, secretKeys };
   }
   const out = {};
@@ -155,7 +161,7 @@ function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecr
       } else if (v != null && typeof v === 'object') {
         out[k] = redactAuditSecrets(v, depth + 1, secretKeys, true).value;
       } else {
-        out[k] = v;
+        out[k] = redactAuditSecrets(v, depth + 1, secretKeys, true).value;
       }
     } else {
       out[k] = redactAuditSecrets(v, depth + 1, secretKeys, insideSecret).value;
@@ -165,11 +171,16 @@ function redactAuditSecrets(value, depth = 0, secretKeys = new Set(), insideSecr
 }
 
 function redact(value, depth = 0, insideSecret = false) {
+  if (typeof value === 'function') throw new TypeError('Executable log metadata');
   if (insideSecret && isNonEmptyByteSequence(value)) return '[REDACTED]';
   if (insideSecret && typeof value === 'string' && value.length > 0) return '[REDACTED]';
   if (insideSecret && depth > 5 && value != null && typeof value === 'object') return '[REDACTED]';
   if (depth > 5 || value == null) return value;
-  if (Array.isArray(value)) return value.map(v => redact(v, depth + 1, insideSecret));
+  if (Array.isArray(value)) {
+    const arr = new Array(value.length);
+    for (let i = 0; i < arr.length; i += 1) arr[i] = redact(value[i], depth + 1, insideSecret);
+    return arr;
+  }
   if (typeof value !== 'object') return value;
   const out = {};
   for (const [k, v] of Object.entries(value)) {
@@ -188,7 +199,7 @@ function redact(value, depth = 0, insideSecret = false) {
       } else if (v != null && typeof v === 'object') {
         out[k] = redact(v, depth + 1, true);
       } else {
-        out[k] = v;
+        out[k] = redact(v, depth + 1, true);
       }
     } else {
       out[k] = redact(v, depth + 1, insideSecret);

@@ -52,10 +52,38 @@ func TestProductionRetainedSessionUsesFreshConnectionWithOriginalGrant(t *testin
 	}
 }
 
+// Exercise the nil-transport path without replacing process-wide transport state.
+func TestProductionRetainedSessionNilTransportUsesFreshConnection(t *testing.T) {
+	peers := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("qurl_vsession")
+		if r.URL.RequestURI() != "/content?retained=original" || err != nil || cookie.Value != "original-capability" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		peers <- r.RemoteAddr
+		http.SetCookie(w, &http.Cookie{Name: "qurl_vsession", Value: "replacement-capability", HttpOnly: true})
+		_, _ = io.WriteString(w, "marker")
+	}))
+	t.Cleanup(server.Close)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/content?retained=original", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability", HttpOnly: true})
+	for range 2 {
+		if err := productionRetainedSessionFetch(request, "marker", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first, second := <-peers, <-peers; first == second {
+		t.Fatal("nil transport reused a pooled connection")
+	}
+}
+
 func TestProductionRetainedSessionRefusesUnisolatedDefaultTransport(t *testing.T) {
 	_, err := productionRetainedSessionCloneTransport(retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) {
-		t.Fatal("retained-session proof used an unisolated transport")
-		return nil, errors.New("unexpected shared transport")
+		return nil, errors.New("unused non-transport stub")
 	}))
 	if err == nil || err.Error() != "retained production session transport could not be isolated" {
 		t.Fatal("unisolated transport did not fail safely")
