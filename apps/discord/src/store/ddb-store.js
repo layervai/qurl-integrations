@@ -709,10 +709,20 @@ async function isSendRevoked(sendId) {
   return Boolean(res.Item?.revoked_at);
 }
 
-async function getRecentSends(senderDiscordId, limit = 10) {
+async function getRecentSends(senderDiscordId, limit = 10, { guildId } = {}) {
   if (!Number.isInteger(limit) || limit <= 0) {
     throw new TypeError('getRecentSends: limit must be a positive integer');
   }
+  const scoped = guildId !== undefined;
+  // TODO(upstream-contract): both history indexes require ALL metadata projection in the infra repo.
+  const indexQuery = scoped ? {
+    IndexName: 'guild_sender_id-created_at-index',
+    KeyConditionExpression: 'guild_sender_id = :s',
+  } : {
+    IndexName: 'sender_discord_id-created_at-index',
+    KeyConditionExpression: 'sender_discord_id = :s',
+  };
+  const partitionKey = scoped ? guildSenderKey(guildId, senderDiscordId) : senderDiscordId;
   // This is the revoke-menu query (handleRevoke is its only production
   // caller). Its result deliberately prioritizes retryable revocations over
   // global newest-first ordering, including when a one-slot caller is used.
@@ -762,9 +772,8 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   for (let page = 0; page < MAX_GSI_PAGES && sendIdOrder.length < TARGET_UNIQUE_SENDS; page++) {
     const sendsRes = await ddb.send(new QueryCommand({
       TableName: TABLES.qurl_sends,
-      IndexName: 'sender_discord_id-created_at-index',
-      KeyConditionExpression: 'sender_discord_id = :s',
-      ExpressionAttributeValues: { ':s': senderDiscordId },
+      ...indexQuery,
+      ExpressionAttributeValues: { ':s': partitionKey },
       ScanIndexForward: false,
       Limit: GSI_PAGE_LIMIT,
       ExclusiveStartKey,
@@ -778,6 +787,9 @@ async function getRecentSends(senderDiscordId, limit = 10) {
     // ScanIndexForward to true, revisit this — first-seen would
     // become oldest-wins which isn't what we want.
     for (const row of sendsRes.Items || []) {
+      // Reject stale/corrupt derived keys instead of showing another scope.
+      if (scoped && (row.sender_discord_id !== senderDiscordId ||
+          (guildId === null ? row.guild_id != null && row.guild_id !== '' : row.guild_id !== guildId))) continue;
       if (!metaBySendId.has(row.send_id)) {
         sendIdOrder.push(row.send_id);
         metaBySendId.set(row.send_id, row);

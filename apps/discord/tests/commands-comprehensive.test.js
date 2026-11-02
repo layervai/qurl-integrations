@@ -697,6 +697,36 @@ describe('/qurl revoke subcommand', () => {
     mockSupersedeOrCreate.mockResolvedValue({ created: true, version: 1 });
   });
 
+  it.each([
+    [true, null, { guildId: 'guild-1' }],
+    [true, 'legacy', { guildId: null }],
+    [false, null, undefined],
+  ])('selects history without mixing guilds (multiTenant=%p, choice=%p)', async (multiTenant, choice, scope) => {
+    const config = require('../src/config');
+    const old = config.isMultiTenant;
+    config.isMultiTenant = multiTenant;
+    try {
+      mockDb.getRecentSends.mockResolvedValue([]);
+      const interaction = makeInteraction();
+      interaction.options.getSubcommand.mockReturnValue('revoke');
+      interaction.options.getString.mockImplementation(name => name === 'history' ? choice : null);
+      await commands.find(c => c.data.name === 'qurl').execute(interaction);
+      if (scope) expect(mockDb.getRecentSends).toHaveBeenCalledWith('user-1', 5, scope);
+      else expect(mockDb.getRecentSends).toHaveBeenCalledWith('user-1', 5);
+    } finally {
+      config.isMultiTenant = old;
+    }
+  });
+
+  it('explains legacy key/server recovery when showing old sends', async () => {
+    mockDb.getRecentSends.mockResolvedValue([{ send_id: 'legacy', resource_type: 'file', recipient_count: 1, created_at: new Date().toISOString() }]);
+    const interaction = makeInteraction();
+    interaction.options.getSubcommand.mockReturnValue('revoke');
+    interaction.options.getString.mockReturnValue('legacy');
+    await commands.find(c => c.data.name === 'qurl').execute(interaction);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Use the original server and API key') }));
+  });
+
   it('shows no recent sends message', async () => {
     mockDb.getRecentSends.mockReturnValue([]);
     const cmd = commands.find(c => c.data.name === 'qurl');

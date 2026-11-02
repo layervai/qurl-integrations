@@ -1074,6 +1074,24 @@ describe('qurl sends', () => {
     }
   });
 
+  test.each(['guild-A', 'guild-B', null])('getRecentSends scopes the index query to guild %p and rejects mismatched rows', async (guildId) => {
+    const sends = [
+      { send_id: 'A', sender_discord_id: 'sender', guild_id: 'guild-A' },
+      { send_id: 'B', sender_discord_id: 'sender', guild_id: 'guild-B' },
+      { send_id: 'legacy', sender_discord_id: 'sender' },
+      { send_id: 'foreign', sender_discord_id: 'other', guild_id: guildId },
+    ];
+    ddbMock.on(QueryCommand).callsFake(input => input.IndexName
+      ? { Items: sends }
+      : { Items: [{ send_id: input.ExpressionAttributeValues[':sid'], dm_status: 'sent' }] });
+    ddbMock.on(GetCommand).resolves({});
+    const result = await store.getRecentSends('sender', 5, { guildId });
+    expect(result.map(send => send.send_id)).toEqual([guildId === null ? 'legacy' : guildId.at(-1)]);
+    const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(query).toMatchObject({ IndexName: 'guild_sender_id-created_at-index', KeyConditionExpression: 'guild_sender_id = :s', ExpressionAttributeValues: { ':s': JSON.stringify([guildId, 'sender']) }, Limit: 100 });
+    expect(query).not.toHaveProperty('FilterExpression');
+  });
+
   test('getRecentSends: uses base-table Query per send for accurate recipient_count', async () => {
     ddbMock.on(QueryCommand).callsFake((input) => {
       const cmd = input;
