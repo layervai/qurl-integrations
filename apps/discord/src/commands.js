@@ -2372,9 +2372,11 @@ async function executeSendPipeline(interaction, {
     return { recipientId: link.recipientId, username: recipient?.username, sent: result.ok === true };
   }, 5);
 
+  const addRecipientExclusions = new Set([interaction.user.id]);
   for (const r of dmResults) {
     if (r.status === 'fulfilled' && r.value.sent) {
       delivered++;
+      addRecipientExclusions.add(r.value.recipientId);
     } else {
       failed++;
       if (r.status === 'fulfilled') {
@@ -2901,6 +2903,7 @@ async function executeSendPipeline(interaction, {
             }
             const selection = resolveMentionableSelection({
               interaction: selectInteraction,
+              excludedUserIds: addRecipientExclusions,
               canMentionEveryone: !!selectInteraction.guild
                 && selectInteraction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true,
             });
@@ -2915,9 +2918,17 @@ async function executeSendPipeline(interaction, {
               roleMentionsDeniedNames: resolveRoleNames(selectInteraction.guild, selection.roleMentionsDenied),
               cappedCount: valid.length - additional.length,
             });
+            if (additional.length === 0) {
+              await selectInteraction.editReply({
+                content: ['No new recipients selected. Existing recipients and yourself are excluded.', warnings].filter(Boolean).join('\n'),
+                components: [],
+              });
+              return;
+            }
             const addResult = await handleAddRecipients(
               sendId, additional, interaction, apiKey,
             );
+            for (const id of addResult.deliveredRecipientIds || []) addRecipientExclusions.add(id);
 
             // Extend recipients[] for the post-revoke names line.
             // Dedupe by id — re-Add of an already-included user.
@@ -2970,7 +2981,7 @@ async function executeSendPipeline(interaction, {
               }
             }
 
-            await selectInteraction.editReply({ content: [addResult.msg, warnings].filter(Boolean).join('\n'), components: [] });
+            await selectInteraction.editReply({ content: [addResult.msg, addResult.delivered > 0 ? warnings : ''].filter(Boolean).join('\n'), components: [] });
           } catch (err) {
             const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
             // Generic user-facing message; real details only land in logs.
@@ -3181,8 +3192,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     };
   }
 
-  // Filter out bots and the sender. Convert the Discord Collection to a
-  // plain array so later callers (map/forEach over newRecipients[i]) work.
+  // Arrays and Discord Collections both support filter/values. Normalize
+  // to an array while excluding bots and the sender before dispatch.
   const newRecipients = [...usersCollection
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];
@@ -3598,12 +3609,15 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // One persist write per recipient regardless of links.length —
     // both store methods key on (send_id, recipient_discord_id).
     await persistDispatchResult(sendId, recipient.id, result);
-    return { sent: result.ok === true, username: recipient.username };
+    return { sent: result.ok === true, username: recipient.username, recipientId: recipient.id };
   }, 5);
 
+  const deliveredRecipientIds = [];
   for (const r of dmResults) {
-    if (r.status === 'fulfilled' && r.value.sent) delivered++;
-    else failed++;
+    if (r.status === 'fulfilled' && r.value.sent) {
+      delivered++;
+      deliveredRecipientIds.push(r.value.recipientId);
+    } else failed++;
   }
 
   // newLinks pairs each qurlId with the recipient's username so the
@@ -3622,7 +3636,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   let msg = `Added ${delivered} recipient${delivered !== 1 ? 's' : ''}`;
   if (failed > 0) msg += ` (${failed} could not be reached)`;
   logger.info('/qurl add recipients', { sendId, delivered, failed });
-  return { msg, newLinks, delivered, failed, newRecipients: resolvedRecipients };
+  return { msg, newLinks, delivered, failed, newRecipients: resolvedRecipients, deliveredRecipientIds };
 }
 
 // --- /qurl revoke handler ---
@@ -4650,12 +4664,14 @@ function partitionRecipients(users, senderId, { excludeSender = false } = {}) {
 // in prod and plain Maps in tests. Both implement `.values()`,
 // `.entries()`, and `Symbol.iterator` — the duck-type guards below
 // gate on the methods we actually call.
-function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id = null }) {
+// Add Recipients excludes the sender and successful prior deliveries before
+// either picked users or role members consume expansion capacity.
+function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id = null, excludedUserIds }) {
   const guild = interaction.guild;
   const userMap = new Map();
   if (interaction.users && typeof interaction.users.values === 'function') {
     for (const u of interaction.users.values()) {
-      if (u && u.id) userMap.set(u.id, u);
+      if (u && u.id && !excludedUserIds?.has(u.id)) userMap.set(u.id, u);
     }
   }
   let massMentionDenied = false;
@@ -4801,7 +4817,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
         // will report it via droppedBots. Skipping here means it
         // doesn't ALSO tick the role-side bot signal — avoids
         // surfacing two warnings for the same underlying bot.
-        if (userMap.has(memberId)) continue;
+        if (excludedUserIds?.has(memberId) || userMap.has(memberId)) continue;
         if (droppedFromRolesSet.has(memberId)) continue;
         if (isBotMember(member)) {
           droppedFromRolesSet.add(memberId);
