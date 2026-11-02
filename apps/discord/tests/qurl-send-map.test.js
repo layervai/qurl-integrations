@@ -2250,6 +2250,16 @@ describe('handleQurlSend — slash entry', () => {
       expect(replies.every(([reply]) => !reply.content?.includes('members were cached'))).toBe(true);
     });
 
+    test('empty typed everyone shows zero cached counts in the rejection', async () => {
+      const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' } });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = 10;
+      await handleQurlSend(int);
+      expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+      expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Only 0 of 10 members') }));
+      expect(int.editReply.mock.calls.some(([reply]) => reply.content?.includes('Member cache not yet ready'))).toBe(false);
+    });
+
     test.each([3, 10])('typed everyone shows partial counts only when needed (total=%s)', async (total) => {
       const int = makeInteraction({
         options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },

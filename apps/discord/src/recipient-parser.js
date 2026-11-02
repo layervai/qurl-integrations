@@ -237,7 +237,10 @@ function isBotMember(member) {
 
 // Resolve a list of mention tokens (raw "<@..>" / "<@&..>" / `@everyone`)
 // to a flat user-ID list with the cap + bot filter applied. Returns
-// `{ ids, invalidTokens, cappedCount, massMentionDenied, roleMentionsDenied }`;
+// `{ ids, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded,
+//    roleMentionsDenied, partialCache, partialMemberCache }`;
+// `partialMemberCache` holds cached/total member counts only for an allowed
+// @everyone attempt with known incomplete coverage; `partialCache` flags it.
 // never throws on parse errors — invalid tokens always land in
 // `invalidTokens` for caller-side surfacing. Sender is NOT filtered —
 // self-send is supported; the confirm-card renderer surfaces a neutral

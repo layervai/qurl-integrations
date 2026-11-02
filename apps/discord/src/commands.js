@@ -5629,7 +5629,7 @@ async function handleQurlSlashSend(interaction, params) {
       unresolvedIds: resolved.unresolvedIds,
       transientFailureIds: resolved.transientFailureIds,
       droppedBots,
-      partialMemberCache: !isDmContext ? parsed.partialMemberCache : null,
+      partialMemberCache: parsed.partialCache && !isDmContext ? parsed.partialMemberCache : null,
       massMentionDenied: parsed.massMentionDenied && !isDmContext,
       roleMentionsDeniedNames,
     });

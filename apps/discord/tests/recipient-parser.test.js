@@ -648,6 +648,7 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
   test.each([
     [true, 10, true],
     [true, 2, false],
+    [true, 1, false],
     [true, undefined, false],
     [false, 10, false],
   ])('partial cache: permission=%s total=%s reports=%s', (allowed, total, partial) => {
@@ -656,6 +657,14 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
     const result = parseRecipientMentions('@everyone', int, { allowMassMention: allowed });
     expect(result.partialCache).toBe(partial);
     expect(result.partialMemberCache).toEqual(partial ? { cachedCount: 2, totalCount: 10 } : null);
+  });
+
+  test('empty known cache reports zero cached members', () => {
+    const int = makeInteraction();
+    int.guild.memberCount = 10;
+    const result = parseRecipientMentions('@everyone', int, { allowMassMention: true });
+    expect(result.partialCache).toBe(true);
+    expect(result.partialMemberCache).toEqual({ cachedCount: 0, totalCount: 10 });
   });
 
   test('partial cache is absent for DMs and explicit mentions', () => {
