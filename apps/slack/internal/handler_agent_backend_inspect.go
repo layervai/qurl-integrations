@@ -149,7 +149,7 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	// sending it a 400). Nothing is lost — the confirm path that gates every inspect
 	// already writes the durable record via recordAgentAudit, where Action=inspect
 	// and Target=$<token> say the same thing and the operator can actually read it.
-	out, err := c.Create(ctx, client.CreateInput{
+	out, err := c.Create(ctx, &client.CreateInput{
 		ResourceID:      resolved.ResourceID,
 		Label:           agentInspectLinkLabel,
 		ExpiresIn:       resourceLinkExpiry,

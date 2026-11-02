@@ -181,16 +181,17 @@ func consumerManagementDocument(result *qurlapi.ConsumerManagementResult) any {
 }
 
 type consumerAccessJSON struct {
-	Mode       string `json:"mode"`
-	Version    int64  `json:"version"`
-	ContractID string `json:"contract_id,omitempty"`
+	Mode       string                  `json:"mode"`
+	Version    int64                   `json:"version"`
+	ContractID string                  `json:"contract_id,omitempty"`
+	Payment    *qurl.CRIDPaymentPolicy `json:"payment,omitempty"`
 }
 
 func policyDocument(policy *qurl.ConsumerAccessPolicy) *consumerAccessJSON {
 	if policy == nil {
 		return nil
 	}
-	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID}
+	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID, Payment: policy.Payment}
 }
 
 func consumerTerminalText(value string) string {

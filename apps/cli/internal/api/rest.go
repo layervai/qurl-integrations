@@ -1230,7 +1230,7 @@ func consumerPolicyConfirmed(requested, received *qurl.ConsumerAccessPolicy, fou
 	if requested == nil {
 		return true
 	}
-	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID &&
+	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID && samePaymentPolicy(received.Payment, requested.Payment) &&
 		(received.Version == requested.Version || (foundExisting != nil && *foundExisting && received.Version > requested.Version && received.Version < 1<<53))
 }
 
@@ -1242,4 +1242,11 @@ func confirmPublishConsumerPolicy(requested *qurl.ConsumerAccessPolicy, publishe
 		return fmt.Errorf("%w: the existing resource has a different private access policy; check `qurl status <CRID>` and use `qurl access configure` to change it", ErrPublishAccessConflict)
 	}
 	return fmt.Errorf("%w: API did not confirm the requested private access policy; the resource may exist; check `qurl list` before you retry", qurl.ErrInvalidAPIResponse)
+}
+
+func samePaymentPolicy(a, b *qurl.CRIDPaymentPolicy) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
