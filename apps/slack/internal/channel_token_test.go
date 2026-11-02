@@ -264,8 +264,8 @@ func TestInspectPartialSnapshotCannotMintGuessedAlias(t *testing.T) {
 			}
 		})
 	}
-	bound, msg := resolveInspectableResource("bound", []slackdata.PolicyEntry{{Alias: "bound", ResourceID: "r_bound"}}, nil, nil, nil)
-	if msg != "" || bound == nil || bound.ResourceID != "r_bound" {
+	bound, msg, err := resolveInspectableResource("bound", []slackdata.PolicyEntry{{Alias: "bound", ResourceID: "r_bound"}}, nil, nil, nil)
+	if err != nil || msg != "" || bound == nil || bound.ResourceID != "r_bound" {
 		t.Fatalf("binding blocked by missing metadata: resolved=%+v message=%q", bound, msg)
 	}
 }
@@ -308,32 +308,50 @@ func TestAgentTokenMetadataHandlesDeletedAndLegacyBindings(t *testing.T) {
 }
 
 func TestInspectPartialSnapshotKeepsKnownSlug(t *testing.T) {
-	b, _ := newBackendUnderTest(t, false)
-	b.resourcesOnce.Do(func() {
-		b.resources = []client.Resource{{ResourceID: "r_2", Type: client.ResourceTypeTunnel, Status: client.StatusActive, Slug: "staging"}}
-		b.resourcesPartial = true
-	})
-	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = w.Write([]byte("<html><title>Staging overview</title><body>Ready</body></html>"))
-	}))
-	t.Cleanup(page.Close)
-	var mints, other atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_2/qurls" {
-			mints.Add(1)
-			respondQURLEnvelope(t, w, map[string]any{"resource_id": "r_2", "qurl_link": page.URL, "qurl_site": page.URL})
-			return
-		}
-		other.Add(1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(server.Close)
-	b.allowInspectableLoopbackHosts = true
-	b.authClient = func(context.Context, string) (*client.Client, error) { return client.New(server.URL, "key"), nil }
-	got, summarized, err := b.InspectToken(context.Background(), backendTC(), "staging")
-	if err != nil || !summarized || !strings.Contains(got, "Staging overview") || mints.Load() != 1 || other.Load() != 0 {
-		t.Fatalf("known unique slug was blocked or rescanned: message=%q summarized=%t err=%v mints=%d other=%d", got, summarized, err, mints.Load(), other.Load())
+	for _, observed := range []bool{true, false} {
+		t.Run(strconv.FormatBool(observed), func(t *testing.T) {
+			b, _ := newBackendUnderTest(t, false)
+			b.resourcesOnce.Do(func() {
+				if observed {
+					b.resources = []client.Resource{{ResourceID: "r_2", Type: client.ResourceTypeTunnel, Status: client.StatusActive, Slug: "staging"}}
+				}
+				b.resourcesPartial = true
+			})
+			page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = w.Write([]byte("<html><title>Staging overview</title><body>Ready</body></html>"))
+			}))
+			t.Cleanup(page.Close)
+			var mints, other, batches atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/v1/resources/batch-get" {
+					batches.Add(1)
+					writeMetadataFixture(t, w, []client.Resource{{ResourceID: "r_2", Type: client.ResourceTypeTunnel, Status: client.StatusActive, Slug: "staging"}})
+					return
+				}
+				if r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_2/qurls" {
+					mints.Add(1)
+					respondQURLEnvelope(t, w, map[string]any{"resource_id": "r_2", "qurl_link": page.URL, "qurl_site": page.URL})
+					return
+				}
+				other.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			t.Cleanup(server.Close)
+			b.allowInspectableLoopbackHosts = true
+			b.authClient = func(context.Context, string) (*client.Client, error) { return client.New(server.URL, "key"), nil }
+			got, summarized, err := b.InspectToken(context.Background(), backendTC(), "staging")
+			if err != nil || !summarized || !strings.Contains(got, "Staging overview") || mints.Load() != 1 || other.Load() != 0 {
+				t.Fatalf("known unique slug was blocked or rescanned: message=%q summarized=%t err=%v mints=%d other=%d", got, summarized, err, mints.Load(), other.Load())
+			}
+			expectedBatches := int32(1)
+			if observed {
+				expectedBatches = 0
+			}
+			if batches.Load() != expectedBatches {
+				t.Fatalf("metadata reads=%d want=%d", batches.Load(), expectedBatches)
+			}
+		})
 	}
 }
 
@@ -398,5 +416,73 @@ func TestResourceMetadataLater404DoesNotFallBackToCatalog(t *testing.T) {
 	var apiErr *client.APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound || rows != nil || batches.Load() != 2 || catalog.Load() != 0 {
 		t.Fatalf("later failure was weakened into fallback: rows=%d err=%v batches=%d catalog=%d", len(rows), err, batches.Load(), catalog.Load())
+	}
+}
+
+func TestInspectMetadataFailureIsHardFailure(t *testing.T) {
+	b, _ := newBackendUnderTest(t, false)
+	b.resourcesOnce.Do(func() {
+		b.resources = []client.Resource{{ResourceID: "r_1", Type: client.ResourceTypeURL, Alias: "report"}}
+		b.resourcesPartial = true
+	})
+	var logs bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&logs, nil))
+	var batches, other atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/resources/batch-get" {
+			batches.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		other.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	t.Cleanup(server.Close)
+	b.authClient = func(context.Context, string) (*client.Client, error) {
+		return client.New(server.URL, "key", client.WithRetry(0)), nil
+	}
+	got, summarized, err := b.InspectToken(context.Background(), backendTC(), "report")
+	var apiErr *client.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusInternalServerError || got != "" || summarized || batches.Load() != 1 || other.Load() != 0 || bytes.Count(logs.Bytes(), []byte("agent backend read failed")) != 1 {
+		t.Fatalf("upstream failure hidden or duplicated: message=%q summarized=%t err=%v metadata=%d other=%d", got, summarized, err, batches.Load(), other.Load())
+	}
+}
+
+func TestHandleGet_MetadataAliasResolvesWithoutCatalog(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_visible", "r_deleted")
+	var batches, catalog, mints atomic.Int32
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("slug") == "" {
+			catalog.Add(1)
+		}
+		writeResourceListFixture(t, w, nil, "", false)
+	})
+	ts.addCustomer("POST", "/v1/resources/batch-get", func(w http.ResponseWriter, r *http.Request) {
+		batches.Add(1)
+		var input struct {
+			ResourceIDs []string `json:"resource_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if !reflect.DeepEqual(input.ResourceIDs, []string{"r_deleted", "r_visible"}) {
+			t.Errorf("metadata IDs=%v", input.ResourceIDs)
+		}
+		writeMetadataFixture(t, w, []client.Resource{{ResourceID: "r_visible", Type: client.ResourceTypeURL, Status: client.StatusActive, Alias: "docs"}})
+	})
+	ts.addCustomer("POST", "/v1/resources/r_visible/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		mints.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/metadata-docs", "r_visible")
+	})
+	h := newAdminTestHandler(t, ts)
+	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAdminTeamID, "C_test", "legacy", "https://legacy.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, reply := newAdminSlashInvoker(t, h).invokeAdminAsync("get $docs", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, "https://qurl.link/metadata-docs") || batches.Load() != 1 || catalog.Load() != 0 || mints.Load() != 1 {
+		t.Fatalf("metadata alias did not mint: message=%q metadata=%d catalog=%d mints=%d", reply, batches.Load(), catalog.Load(), mints.Load())
 	}
 }

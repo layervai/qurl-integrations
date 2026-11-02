@@ -119,13 +119,31 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	if err != nil {
 		return b.failInspect("inspect token: aliases", err)
 	}
-	resolved, msg := resolveInspectableResource(token, entries, resources, allowed, func(via string, scope map[string]struct{}) ([]client.Resource, error) {
-		// TODO(upstream-contract): tunnel slugs are owner-unique; URL aliases need a complete allowed set.
-		if partial && via == channelTokenResourceAlias {
-			return lookupChannelResourceAliasCandidates(ctx, b.log, c, scope)
+	var repaired []client.Resource
+	repairReady := false
+	resolved, msg, err := resolveInspectableResource(token, entries, resources, allowed, func(via string, scope map[string]struct{}) ([]client.Resource, error) {
+		if !partial {
+			return resources, nil
 		}
-		return resources, nil
+		// TODO(upstream-contract): observed tunnel slugs are owner-unique; missing matches need repair.
+		if via == channelTokenSlug {
+			if _, matchErr := matchChannelTokenCandidates(token, via, resources, scope); !errors.Is(matchErr, errChannelTokenNotFound) {
+				return resources, nil
+			}
+		}
+		if !repairReady {
+			var readErr error
+			repaired, readErr = lookupChannelResourceAliasCandidates(ctx, b.log, c, scope)
+			if readErr != nil {
+				return nil, readErr
+			}
+			repairReady = true
+		}
+		return repaired, nil
 	})
+	if err != nil {
+		return b.failInspect("inspect token: resolve", err)
+	}
 	if msg != "" {
 		return msg, false, nil
 	}
@@ -167,12 +185,12 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	return formatInspectedSnapshot(token, resolved, snapshot), true, nil
 }
 
-func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource, allowed map[string]struct{}, candidates func(string, map[string]struct{}) ([]client.Resource, error)) (resolved *channelTokenResource, userMsg string) {
+func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource, allowed map[string]struct{}, candidates func(string, map[string]struct{}) ([]client.Resource, error)) (resolved *channelTokenResource, userMsg string, err error) {
 	byID := make(map[string]*client.Resource, len(resources))
 	for i := range resources {
 		byID[resources[i].ResourceID] = &resources[i]
 	}
-	resolved, err := resolveChannelToken(token, channelTokenSource{
+	resolved, err = resolveChannelToken(token, channelTokenSource{
 		alias: func() (*channelTokenResource, error) {
 			for _, entry := range entries {
 				if entry.Alias == token {
@@ -187,15 +205,17 @@ func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, r
 	disp := escapeMrkdwnCode(token)
 	switch {
 	case errors.Is(err, errChannelTokenIncomplete):
-		return nil, channelTokenIncompleteMessage
+		return nil, channelTokenIncompleteMessage, nil
 	case errors.Is(err, errChannelTokenLegacy):
-		return nil, fmt.Sprintf("`$%s` is bound in this channel, but it still points at a legacy direct URL binding that can't be summarized automatically. Ask your Slack admin to rebind it to a protected resource.", disp)
+		return nil, fmt.Sprintf("`$%s` is bound in this channel, but it still points at a legacy direct URL binding that can't be summarized automatically. Ask your Slack admin to rebind it to a protected resource.", disp), nil
 	case errors.Is(err, errChannelTokenAmbiguous):
-		return nil, fmt.Sprintf("`$%s` matches multiple resources reachable in this channel, so I can't tell which page to summarize.", disp)
-	case resolved == nil:
-		return nil, fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", disp)
+		return nil, fmt.Sprintf("`$%s` matches multiple resources reachable in this channel, so I can't tell which page to summarize.", disp), nil
+	case errors.Is(err, errChannelTokenNotFound):
+		return nil, fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", disp), nil
+	case err != nil:
+		return nil, "", err
 	default:
-		return resolved, ""
+		return resolved, "", nil
 	}
 }
 

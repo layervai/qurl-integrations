@@ -60,27 +60,36 @@ func resolveChannelToken(token string, source channelTokenSource) (*channelToken
 		if err != nil {
 			return nil, err
 		}
-		var match *client.Resource
-		for i := range resources {
-			r := &resources[i]
-			if _, ok := allowed[r.ResourceID]; !ok {
-				continue
-			}
-			matches := r.Type == client.ResourceTypeTunnel && r.Status == client.StatusActive && r.Slug == token
-			if via == channelTokenResourceAlias {
-				matches = isURLResource(r) && r.Status != client.StatusRevoked && r.Alias == token
-			}
-			if !matches {
-				continue
-			}
-			if match != nil && match.ResourceID != r.ResourceID {
-				return nil, errChannelTokenAmbiguous
-			}
-			match = r
+		match, err := matchChannelTokenCandidates(token, via, resources, allowed)
+		if errors.Is(err, errChannelTokenNotFound) {
+			continue
 		}
-		if match != nil {
-			return &channelTokenResource{ResourceID: match.ResourceID, Resource: match, Via: via}, nil
+		return match, err
+	}
+	return nil, errChannelTokenNotFound
+}
+
+func matchChannelTokenCandidates(token, via string, resources []client.Resource, allowed map[string]struct{}) (*channelTokenResource, error) {
+	var match *client.Resource
+	for i := range resources {
+		r := &resources[i]
+		if _, ok := allowed[r.ResourceID]; !ok {
+			continue
 		}
+		matches := r.Type == client.ResourceTypeTunnel && r.Status == client.StatusActive && r.Slug == token
+		if via == channelTokenResourceAlias {
+			matches = isURLResource(r) && r.Status != client.StatusRevoked && r.Alias == token
+		}
+		if !matches {
+			continue
+		}
+		if match != nil && match.ResourceID != r.ResourceID {
+			return nil, errChannelTokenAmbiguous
+		}
+		match = r
+	}
+	if match != nil {
+		return &channelTokenResource{ResourceID: match.ResourceID, Resource: match, Via: via}, nil
 	}
 	return nil, errChannelTokenNotFound
 }

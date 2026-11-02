@@ -653,18 +653,18 @@ func TestInspectAllowedEntryHost_RequiresHTTPSInProduction(t *testing.T) {
 func TestResolveInspectableResource_Branches(t *testing.T) {
 	// A channel alias bound to a raw URL id (legacy direct-URL binding) can't be
 	// summarized — surface the rebind guidance, never mint.
-	if resolved, msg := resolveInspectableResource("docs", []slackdata.PolicyEntry{{Alias: "docs", ResourceID: "https://legacy.example.com"}}, nil, nil, nil); resolved != nil || !strings.Contains(msg, "legacy direct URL binding") {
+	if resolved, msg, err := resolveInspectableResource("docs", []slackdata.PolicyEntry{{Alias: "docs", ResourceID: "https://legacy.example.com"}}, nil, nil, nil); err != nil || resolved != nil || !strings.Contains(msg, "legacy direct URL binding") {
 		t.Fatalf("legacy binding: resolved=%v msg=%q", resolved, msg)
 	}
 	// A channel alias whose resource id isn't in the scanned set (stale scan) still
 	// resolves — with a nil Resource, so the card is description-less but the mint runs
 	// (the binding is in THIS channel's policy, so scope holds).
-	if resolved, msg := resolveInspectableResource("dash", []slackdata.PolicyEntry{{Alias: "dash", ResourceID: "r_unscanned"}}, nil, nil, nil); msg != "" || resolved == nil || resolved.Resource != nil || resolved.Via != "channel alias" || resolved.ResourceID != "r_unscanned" {
+	if resolved, msg, err := resolveInspectableResource("dash", []slackdata.PolicyEntry{{Alias: "dash", ResourceID: "r_unscanned"}}, nil, nil, nil); err != nil || msg != "" || resolved == nil || resolved.Resource != nil || resolved.Via != "channel alias" || resolved.ResourceID != "r_unscanned" {
 		t.Fatalf("stale-scan alias: resolved=%+v msg=%q", resolved, msg)
 	}
 	// A token matching two resource aliases is ambiguous — refuse rather than guess.
 	dupes := []client.Resource{{ResourceID: "r_a", Alias: "shared", Type: client.ResourceTypeURL}, {ResourceID: "r_b", Alias: "shared", Type: client.ResourceTypeURL}}
-	if resolved, msg := resolveInspectableResource("shared", nil, dupes, map[string]struct{}{"r_a": {}, "r_b": {}}, func(string, map[string]struct{}) ([]client.Resource, error) { return dupes, nil }); resolved != nil || !strings.Contains(msg, "matches multiple resources") {
+	if resolved, msg, err := resolveInspectableResource("shared", nil, dupes, map[string]struct{}{"r_a": {}, "r_b": {}}, func(string, map[string]struct{}) ([]client.Resource, error) { return dupes, nil }); err != nil || resolved != nil || !strings.Contains(msg, "matches multiple resources") {
 		t.Fatalf("ambiguous alias: resolved=%v msg=%q", resolved, msg)
 	}
 }

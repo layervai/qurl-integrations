@@ -644,8 +644,10 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 // page; unseen allowed IDs make that fallback incomplete, not a unique match.
 // Legacy direct-URL bindings cannot be metadata rows and do not count as unseen IDs.
 //
-// Resolution precedes the per-user mint limiter: a typo spends a bounded read,
-// not the user's quota. Bound aliases and empty channels avoid upstream reads.
+// Resolution precedes the per-user mint limiter. A miss costs one slug lookup
+// plus ceil(authorized IDs / ResourceBatchGetMaxIDs) metadata reads, at most five
+// concurrent; a typo does not burn mint quota. Bindings and empty channels avoid
+// these upstream reads.
 // Lookup failures stop resolution. The caller must first check AdminStore.
 func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string) (string, error) {
 	resolved, err := resolveChannelToken(token, h.channelTokenSourceForGet(ctx, log, teamID, channelID, token))
