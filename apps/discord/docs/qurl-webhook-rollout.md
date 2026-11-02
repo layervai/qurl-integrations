@@ -234,6 +234,14 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   descriptions to 500 characters; preserve room for the nine-character suffix.
   A bounded INFO count reports matching rows retained without retirement;
   inspect the webhook list and this runbook before marking any row.
+- **Rollback to a retired URL**: disable the URL-migration sweep in every
+  registrar sharing the API owner, then wait for in-flight registrar invocations
+  and DELETE requests to finish. The switch does not cancel work already started.
+  Before reusing the old URL, remove every trailing ` [ORPHAN]` marker with an
+  owner-authenticated description PATCH and read it back. Confirm that the
+  restored subscription is healthy before enabling cleanup again. Reusing a
+  marked row emits a WARN; that warning does not remove its marker or stop a
+  different registrar from deleting it. Never use the warning as rollback safety.
 - **API-key blast radius**: the Lambda's `QURL_API_KEY` can list /
   create / PATCH / rotate-secret / DELETE webhook subscriptions in
   addition to minting qURLs. Factor into rotation drills.

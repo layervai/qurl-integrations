@@ -1133,6 +1133,32 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     }
   });
 
+  it('warns when a live same-URL subscription is still marked retired without mutating it', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const secret = 'whsec_1234567890abcdef';
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [deadOrphan({ url: NEW_URL })] } }),
+      });
+      await expect(ensureWebhookSubscription({ ...BOT_OPTS, initialSecret: secret }))
+        .resolves.toMatchObject({ action: 'reused', webhookId: 'wh_orphan', secret });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Active webhook subscription is marked retired'));
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(secret);
+      expect(global.fetch.mock.calls.every(([, options]) => options.method === 'GET')).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it.each([undefined, null, 42, {}, []])('preserves same-URL reuse with a non-string description: %s', async (description) => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [deadOrphan({ url: NEW_URL, description })] } }),
+    });
+    await expect(ensureWebhookSubscription({ ...BOT_OPTS, initialSecret: 'whsec_1234567890abcdef' }))
+      .resolves.toMatchObject({ action: 'reused', webhookId: 'wh_orphan' });
+    expect(global.fetch.mock.calls.every(([, options]) => options.method === 'GET')).toBe(true);
+  });
+
   it('deletes a cross-host orphan with matching description + dead liveness before creating fresh at the new URL', async () => {
     let orphanDeleted = false;
     let createCalled = false;
@@ -1747,7 +1773,8 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     let deleted = false;
     let nearMissLogged = false;
     const logSpy = jest.spyOn(console, 'log').mockImplementation((line) => {
-      if (typeof line === 'string' && line.includes('liveness-gated near-misses')) {
+      if (typeof line === 'string' && (line.includes('liveness-gated near-misses')
+          || line.includes('retained rows without explicit retirement'))) {
         nearMissLogged = true;
       }
     });
@@ -1755,6 +1782,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [
           deadOrphan({ webhook_id: 'wh_would_orphan' }),
+          deadOrphan({ webhook_id: 'wh_unmarked', description: BOT_DESC }),
           { webhook_id: 'wh_would_near_miss', url: OLD_URL, description: `${BOT_DESC} [ORPHAN]`, events: ['qurl.accessed'], failure_count: 0, last_delivery_success: true },
         ] } }),
         'DELETE /v1/webhooks/wh_would_orphan': () => { deleted = true; return { status: 204, body: '' }; },

@@ -215,7 +215,7 @@ function canonicalUrl(u) {
 const ORPHAN_FILTER_RESULTS = Object.freeze({
   MATCH: 'match',
   NEAR_MISS_LIVENESS: 'near-miss-liveness',
-  NEAR_MISS_RETIREMENT: 'near-miss-retirement',
+  NEAR_MISS_RETIREMENT: 'near-miss-retirement', // Matching peer; not marked for deletion.
   NO_MATCH: 'no-match',
 });
 
@@ -227,15 +227,15 @@ const ORPHAN_FILTER_RESULTS = Object.freeze({
 // so a misbehaving cursor can't spin forever.
 //
 // Always returns `{ matches, orphans, nearMissCount, unmarkedCount }`.
-// `unmarkedCount` counts matching cross-host rows awaiting explicit retirement. `orphans` is
-// the subset of the walk's rows that the `orphanFilter(s)` classifies
+// `orphans` is the subset of the walk's rows that the `orphanFilter(s)` classifies
 // as a full match (URL-migration leftovers, see
 // buildUrlMigrationOrphanFilter). `nearMissCount` is the count of rows
 // that matched host+path+description but failed the liveness gate —
 // useful observability: if the sweep DELETEs nothing despite a known
 // rename, an operator can grep CloudWatch for the near-miss log to
 // distinguish "qurl-service schema drifted (field missing)" from
-// "everything looks alive."
+// "everything looks alive." Only marked rows reach the liveness diagnostics.
+// `unmarkedCount` counts matching cross-host rows awaiting explicit retirement.
 //
 // Two terminal states to distinguish:
 //   - natural exhaustion (cursor walk ends, no more pages) → returns
@@ -442,6 +442,7 @@ function urlPathname(u) {
 //      retired subscription's description. Never mark an active peer, even
 //      during a long outage. Failure counts alone cannot identify retirement
 //      (#827); unmarked historical rows require explicit operator cleanup.
+//      Marked rows whose last delivery succeeded still wait for failed deliveries.
 //
 //      TODO(upstream-contract): field names `last_delivery_success` and
 //      `failure_count` are pinned against qurl-service's webhook list
@@ -477,6 +478,7 @@ function urlPathname(u) {
 // semantics when they exist; absent that, the assumption is
 // observational.
 const URL_MIGRATION_ORPHAN_MIN_FAILURES = 30;
+const URL_MIGRATION_RETIREMENT_MARKER = ' [ORPHAN]';
 // ORPHAN_FILTER_RESULTS defined above findExistingSubscriptions (the
 // only consumer) so the predicate composes cleanly. The
 // observability rationale for the tri-state: "matched everything except
@@ -497,10 +499,9 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
     if (subPath !== targetPath) return ORPHAN_FILTER_RESULTS.NO_MATCH;
     if (subHost === targetHost) return ORPHAN_FILTER_RESULTS.NO_MATCH;
     // TODO(upstream-contract): webhook PATCH/list preserve description verbatim (500-character schema limit).
-    const retirementMarker = ' [ORPHAN]';
     if (typeof s.description !== 'string') return ORPHAN_FILTER_RESULTS.NO_MATCH;
-    const isRetired = s.description.endsWith(retirementMarker);
-    const subDesc = isRetired ? s.description.slice(0, -retirementMarker.length) : s.description;
+    const isRetired = s.description.endsWith(URL_MIGRATION_RETIREMENT_MARKER);
+    const subDesc = isRetired ? s.description.slice(0, -URL_MIGRATION_RETIREMENT_MARKER.length) : s.description;
     if (subDesc !== descriptionPrefix && !subDesc.startsWith(prefixWithBoundary)) {
       return ORPHAN_FILTER_RESULTS.NO_MATCH;
     }
@@ -871,6 +872,11 @@ async function ensureWebhookSubscription(opts) {
   }
 
   const existing = pickSurvivor(matches);
+  if (typeof existing?.description === 'string' && existing.description.endsWith(URL_MIGRATION_RETIREMENT_MARKER)) {
+    logger.warn('Active webhook subscription is marked retired; remove retirement markers before reusing its URL', {
+      webhook_id: existing.webhook_id, url: bridgeUrl,
+    });
+  }
   const wasDedupe = matches.length > 1 && existing != null;
   if (wasDedupe) {
     const losers = matches.filter(s => s.webhook_id !== existing.webhook_id);
