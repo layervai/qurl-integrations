@@ -245,7 +245,9 @@ anyone runs `/qurl get` to mint a one-time link.
 
 See [apps/slack/README.md](apps/slack/README.md) for the full command reference
 and onboarding walkthrough, and [apps/slack/docs/operating.md](apps/slack/docs/operating.md)
-for deploying and operating the Secure Access Agent.
+for deploying and operating the Secure Access Agent. See the
+[Slack OAuth ingress runbook](docs/slack-oauth-ingress.md) for the trusted proxy
+and source-IP rate-limit requirements.
 
 ## Development
 
