@@ -110,8 +110,10 @@ func uninstallPurgeIDsForClick(value, teamID, enterpriseID string) (purge, dropp
 // real mutation boundary: the card is an ephemeral only its requester can see,
 // but a click must never be trusted on the strength of having rendered a button.
 func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *interactionPayload, action interactionAction) {
+	localOnly := action.ActionID == uninstallLocalOnlyConfirmActionID
 	log := slog.With(
 		"command", "uninstall_confirm",
+		"local_only", localOnly,
 		"team_id", sanitizeLogValue(payload.Team.ID),
 		"enterprise_id", sanitizeLogValue(payload.Enterprise.ID),
 		"user_id", sanitizeLogValue(payload.User.ID),
@@ -127,7 +129,7 @@ func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *in
 		if !h.requireUninstallAdminOrOwnerForClick(ctx, log, responseURL, teamID, userID) {
 			return
 		}
-		reply, purgeScheduled := h.uninstallWorkspaceReply(ctx, teamID, userID, purgeIDs, action.ActionID == uninstallLocalOnlyConfirmActionID)
+		reply, purgeScheduled := h.uninstallWorkspaceReply(ctx, teamID, userID, purgeIDs, localOnly)
 		if purgeScheduled && len(droppedIDs) > 0 {
 			// Only meaningful once a teardown has actually run — emitting this on
 			// the ack path would raise cleanup_action_required for refused clicks

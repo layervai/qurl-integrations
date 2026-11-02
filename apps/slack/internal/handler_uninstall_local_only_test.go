@@ -22,7 +22,7 @@ func TestUninstallLocalOnlySignedCommandAndClick(t *testing.T) {
 		wantCard, wantDelete                    bool
 	}{
 		{name: "disconnect despite upstream outage", keyID: "key_workspace_001", want: "key_workspace_001", wantCard: true, wantDelete: true},
-		{name: "unknown legacy key", want: "No upstream key ID was recorded", wantCard: true, wantDelete: true},
+		{name: "unknown legacy key", want: "No upstream key ID is available", wantCard: true, wantDelete: true},
 		{name: "no configured key", keyErr: auth.ErrWorkspaceNotConfigured, deleteErr: auth.ErrWorkspaceNotConfigured, want: "NOT revoked", wantCard: true, wantDelete: true},
 		{name: "key read failure preserves credentials", keyErr: errors.New("store unavailable"), want: "Nothing was disconnected", wantCard: true},
 		{name: "local delete failure", keyID: "key_workspace_001", deleteErr: errors.New("delete unavailable"), want: "could not disconnect", wantCard: true, wantDelete: true},
@@ -120,5 +120,15 @@ func TestUninstallLocalOnlyKeepsGuardedLifecyclePurge(t *testing.T) {
 	entries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testAdminTeamID, "C_one")
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("channel policy remains: %v %v", entries, err)
+	}
+}
+
+func TestUninstallLocalOnlyRejectsExtraArguments(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	h := newUninstallAdminTestHandler(t, provider)
+	reply := slashResponseForWorkspaceUser(t, h, commandUser, "uninstall --local-only extra", testAdminTeamID, testAdminUserID)
+	h.Wait()
+	if provider.deleteCalls != 0 || provider.apiKey != "test-key" || !strings.Contains(reply[respFieldText], "Usage:") {
+		t.Fatalf("unexpected argument mutation or reply: %v", reply)
 	}
 }

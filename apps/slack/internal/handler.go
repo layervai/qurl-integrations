@@ -1981,7 +1981,8 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 	const localSlackDataPurgeScheduledReply = "Local Slack app data for this workspace is being cleared; Slack features stay disconnected until the recorded workspace owner runs `/qurl setup <email>`. The qURL Slack app itself stays installed — to remove it and the Slack token it was granted, remove qURL from your workspace's Slack app management page."
 
 	// Shown only on the revoked=true paths (204/404), which are unreachable for a
-	// self-revoke (see classifyUninstallRevokeError) — defensive for a future owner-authenticated revoke. The
+	// self-revoke (see classifyUninstallRevokeError). These are defensive for
+	// a future owner-authenticated revoke. The
 	// "(or was already revoked upstream)" hedge covers the 404 case it would surface.
 	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\n" + localSlackDataPurgeScheduledReply
 
@@ -2047,7 +2048,7 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 		if keyID != "" {
 			localOnlyCaveat += "Key ID: `" + echoText(keyID) + "`. "
 		} else {
-			localOnlyCaveat += "No upstream key ID was recorded. "
+			localOnlyCaveat += "No upstream key ID is available. "
 		}
 		localOnlyCaveat += "Revoke it through qURL account/API-key management or contact your qURL operator."
 		slog.Warn("/qurl uninstall: explicit local-only disconnect; upstream key not revoked", "event", "local_disconnect_requested", "team_id", teamID, "caller_user_id", userID, "key_id", keyID, "upstream_revoked", false)

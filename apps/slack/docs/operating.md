@@ -755,7 +755,8 @@ operator implications:
   operator tooling. The local disconnect removes `key_id` from the workspace
   row, so this `WARN` line's `key_id` field is the **only** surviving pointer to
   the still-live key — capture it promptly and make sure the log group's
-  retention outlives the manual-revoke turnaround. The explicit `--local-only` path also gives the key ID to the admin in its reply.
+  retention outlives the manual-revoke turnaround. The explicit `--local-only` path also gives the key ID to the admin in its
+  reply.
 - `upstream qURL key not revoked — local-only disconnect` (`status=401`): the
   workspace key was already revoked or expired upstream (e.g. a prior rotation),
   so qurl-service rejected the credential before the revoke. The key is already
@@ -792,12 +793,11 @@ urgently, the recorded workspace owner or a qURL admin can run
 the upstream key will not be revoked. The click re-checks the same owner/admin
 gate as normal uninstall, reads the key ID before deleting local credentials,
 and skips the upstream DELETE. A key-ID read failure leaves credentials intact.
-The reply gives the stored key ID (or says none was recorded) and directs the
+The reply gives the stored key ID (or says no ID is available) and directs the
 admin to qURL account/API-key management or the operator for manual revocation.
 The structured `local_disconnect_requested` warning records the key ID and
 `upstream_revoked=false`; it does not claim the key is dead. Local cleanup uses
 the same guarded purge as normal uninstall. The Slack app itself stays installed.
-
 
 ## Teardowns refused on Slack payload shape drift
 
