@@ -70,3 +70,26 @@ func TestRequiredChangeFiltersCoverTheirSource(t *testing.T) {
 		})
 	}
 }
+
+func TestDiscordChangeFilterExcludesGoSharedCode(t *testing.T) {
+	workflow := readWorkflow(t, "discord.yml")
+	for i := range workflow.Jobs[changesJobID].Steps {
+		current := &workflow.Jobs[changesJobID].Steps[i]
+		if current.ID != "filter" {
+			continue
+		}
+		raw, ok := current.With["filters"].(string)
+		if !ok {
+			t.Fatal("missing filter definitions")
+		}
+		var filters map[string][]string
+		if err := yaml.Unmarshal([]byte(raw), &filters); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(filters["discord"], "shared/**") {
+			t.Fatal("Go-only shared changes must not run the Node app and image gates")
+		}
+		return
+	}
+	t.Fatal("missing Discord change filter")
+}

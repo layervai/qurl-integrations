@@ -338,7 +338,11 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
     }),
   );
 
-  logger.info('Created one-time qURL', { resource_id: result.resource_id, crid: result.crid, expires_in: expiresIn });
+  logger.info('Created one-time qURL', {
+    resource_ref: resourceIdLogRef(result.resource_id),
+    crid_ref: result.crid ? resourceIdLogRef(result.crid) : undefined,
+    expires_in: expiresIn,
+  });
   return result;
 }
 
@@ -359,7 +363,7 @@ async function deleteLink(resourceId, apiKey) {
     () => client.deleteResource(resourceId),
     { logContext: { resource_ref: resourceIdLogRef(resourceId) } },
   );
-  logger.info('Revoked qURL resource', { resource_id: resourceId });
+  logger.info('Revoked qURL resource', { resource_ref: resourceIdLogRef(resourceId) });
 }
 
 // Revoke ordinary (non-connector-managed) children one by one, never their

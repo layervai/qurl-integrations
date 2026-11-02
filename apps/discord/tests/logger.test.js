@@ -23,6 +23,94 @@ describe('logger', () => {
     jest.restoreAllMocks();
   });
 
+  it.each(['error', 'warn', 'info', 'debug'])('keeps %s logging safe for invalid metadata', (level) => {
+    process.env.LOG_LEVEL = 'debug';
+    logger = require('../src/logger');
+    const circular = {};
+    circular.self = circular;
+    expect(() => logger[level]('cycle', { circular })).not.toThrow();
+    expect(() => logger[level]('big integer', { unsupported: 1n })).not.toThrow();
+    expect(() => logger[level]('getter', {
+      get field() { throw new Error('do-not-log-this-secret'); },
+    })).not.toThrow();
+    const lines = Object.values(consoleSpy).flatMap(spy => spy.mock.calls.map(call => call[0]));
+    expect(lines.some(line => line.includes('[REPEATED]'))).toBe(true);
+    expect(lines.filter(line => line.includes('[meta_serialization_failed]'))).toHaveLength(2);
+    expect(lines.join('\n')).not.toContain('do-not-log-this-secret');
+  });
+
+  it.each([...new Set([
+    ...require('../src/logger').__testExports.REDACT_EXACT_KEYS,
+    ...require('../src/logger').__testExports.AUDIT_SECRET_KEYS,
+    'myPassword', 'myApiKey',
+  ])])('redacts contained strings for %s without dropping numeric dimensions', (key) => {
+    process.env.LOG_LEVEL = 'info';
+    logger = require('../src/logger');
+    for (const value of [['do-not-log-this-secret'], { value: 'do-not-log-this-secret', count: 3 }]) {
+      logger.info('wrapped secret', { [key]: value, count: 7 });
+      if (!['myPassword', 'myApiKey'].includes(key)) {
+        logger.audit('wrapped_secret', { [key]: value, count: 7 });
+      }
+    }
+    const lines = Object.values(consoleSpy).flatMap(spy => spy.mock.calls.map(call => call[0]));
+    expect(lines.join('\n')).not.toContain('do-not-log-this-secret');
+    expect(lines.join('\n')).toContain('"count":7');
+  });
+
+  it('does not run caller serialization hooks or repeat secret key names', () => {
+    process.env.LOG_LEVEL = 'info';
+    logger = require('../src/logger');
+    const toJSON = jest.fn(() => ({ token: 'hook-secret' }));
+    logger.info('hook', { toJSON });
+    logger.audit('hook', { toJSON });
+    expect(toJSON).not.toHaveBeenCalled();
+    expect(() => logger.audit('getter', {
+      get field() { throw new Error('getter-secret'); },
+    })).not.toThrow();
+    expect(consoleSpy.log.mock.calls.map(call => call[0]).join('\n')).not.toContain('getter-secret');
+    logger.audit('unique', { hash: [{ token: 'one' }, { token: 'two' }], secret: 'three' });
+    expect(consoleSpy.error.mock.calls[0][0]).toContain('["hash", "token", "secret"]');
+    expect(consoleSpy.log.mock.calls.map(call => call[0]).join('\n')).not.toContain('hook-secret');
+  });
+
+  it('bounds shared cyclic metadata and hides secret binary values', () => {
+    process.env.LOG_LEVEL = 'info';
+    logger = require('../src/logger');
+    const graph = {};
+    for (let i = 0; i < 20; i += 1) graph[`child${i}`] = graph;
+    logger.info('cycle', graph);
+    logger.audit('cycle', graph);
+    for (const call of consoleSpy.log.mock.calls) {
+      expect(call[0].length).toBeLessThan(2000);
+      expect(call[0]).toContain('[REPEATED]');
+    }
+    consoleSpy.log.mockClear();
+    for (const bytes of [Buffer.from('binary-secret'), new Uint8Array([17, 23]), new ArrayBuffer(8)]) {
+      logger.info('binary', { private_key: bytes, bytes });
+      logger.audit('binary', { private_key: bytes, bytes });
+    }
+    for (const call of consoleSpy.log.mock.calls) {
+      expect(call[0]).toContain('"private_key":"[REDACTED]"');
+      expect(call[0]).toContain('[BINARY ');
+      expect(call[0]).not.toContain('binary-secret');
+    }
+    consoleSpy.log.mockClear();
+    logger.audit('counts', { token: { count: 3, value: 'secret' } });
+    expect(JSON.parse(consoleSpy.log.mock.calls[0][0]).audit.token).toEqual({ count: 3, value: '[REDACTED]' });
+  });
+
+  it('never serializes unexamined deep metadata', () => {
+    process.env.LOG_LEVEL = 'info';
+    logger = require('../src/logger');
+    let nested = { token: 'deep-secret' };
+    for (let i = 0; i < 8; i += 1) nested = { nested };
+    logger.info('deep', nested);
+    logger.audit('deep', nested);
+    const lines = consoleSpy.log.mock.calls.map(call => call[0]).join('\n');
+    expect(lines).not.toContain('deep-secret');
+    expect(lines).toContain('[TRUNCATED]');
+  });
+
   it('info level logs info, warn, error but not debug', () => {
     process.env.LOG_LEVEL = 'info';
     logger = require('../src/logger');
@@ -229,9 +317,7 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      const circ = {};
-      circ.self = circ;
-      expect(() => logger.audit('upload_success', { circ })).not.toThrow();
+      expect(() => logger.audit('upload_success', { unsupported: 1n })).not.toThrow();
 
       const auditLines = consoleSpy.log.mock.calls.map(c => {
         try { return JSON.parse(c[0]); } catch { return null; }
@@ -239,8 +325,30 @@ describe('logger', () => {
       const fallback = auditLines.find(l => l.audit && l.audit.event === 'audit_serialization_failed');
       expect(fallback).toBeDefined();
       expect(fallback.audit.agent).toBe('discord');
-      expect(fallback.audit.original_event).toBe('upload_success');
-      expect(typeof fallback.audit.reason).toBe('string');
+      expect(fallback.audit).toEqual({
+        event: 'audit_serialization_failed',
+        agent: 'discord',
+        reason: 'metadata_serialization_failed',
+      });
+    });
+
+    it.each([false, true])('omits caller data from audit fallback (serializer failure: %s)', (serializerFailure) => {
+      logger = require('../src/logger');
+      const event = { toString: jest.fn(() => { throw new Error('event-secret'); }) };
+      if (serializerFailure) {
+        jest.spyOn(JSON, 'stringify').mockImplementation(() => { throw new Error('serializer-secret'); });
+      }
+
+      expect(() => logger.audit(event, { unsupported: 1n })).not.toThrow();
+
+      expect(event.toString).not.toHaveBeenCalled();
+      const lines = Object.values(consoleSpy).flatMap(spy => spy.mock.calls.map(call => call[0]));
+      expect(lines.join('\n')).toContain('serialization');
+      expect(lines.join('\n')).not.toMatch(/event-secret|serializer-secret|original_event/);
+      if (serializerFailure) {
+        expect(consoleSpy.error).toHaveBeenCalledTimes(1);
+        expect(consoleSpy.error.mock.calls[0][0]).toContain('audit serialization failed');
+      }
     });
 
     it('redacts secret-shaped key VALUES while keeping siblings intact + warns', () => {
@@ -250,11 +358,40 @@ describe('logger', () => {
       logger.audit('upload_success', { send_id: 's1', auth_token: 'sk-abc123' });
 
       expect(consoleSpy.error).toHaveBeenCalled();
-      expect(consoleSpy.error.mock.calls[0][0]).toContain('secret-shaped key');  // singular OR plural, matches "secret-shaped key" prefix
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('sensitive key');  // singular or plural
       expect(consoleSpy.error.mock.calls[0][0]).toContain('auth_token');
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.auth_token).toBe('[REDACTED]');
       expect(parsed.audit.send_id).toBe('s1');
+    });
+
+    it('does not run serialization hooks on an invalid audit event', () => {
+      logger = require('../src/logger');
+      const event = {
+        toJSON: jest.fn(() => 'event-secret'),
+        toString: jest.fn(() => { throw new Error('event-conversion'); }),
+      };
+
+      expect(() => logger.audit(event, { count: 3 })).not.toThrow();
+
+      expect(event.toJSON).not.toHaveBeenCalled();
+      expect(event.toString).not.toHaveBeenCalled();
+      const payload = JSON.parse(consoleSpy.log.mock.calls[0][0]).audit;
+      expect(payload.event).toBe('invalid_audit_event');
+      expect(payload.count).toBe(3);
+      expect(consoleSpy.log.mock.calls[0][0]).not.toContain('event-secret');
+    });
+
+    it('keeps the caller event out of sensitive-key diagnostics', () => {
+      logger = require('../src/logger');
+      logger.audit('untrusted-event-value', { auth_token: 'private-value' });
+
+      const warnings = consoleSpy.error.mock.calls.map(call => call[0]).join('\n');
+      expect(warnings).toContain('auth_token');
+      expect(warnings).not.toMatch(/untrusted-event-value|private-value/);
+      const payload = JSON.parse(consoleSpy.log.mock.calls[0][0]).audit;
+      expect(payload.event).toBe('untrusted-event-value');
+      expect(payload.auth_token).toBe('[REDACTED]');
     });
 
     it.each(['qurlLink', 'qurl_link', 'qurlLinkUrl', 'qurl_link_url', 'qurlLinks', 'qurl_links'])(
@@ -584,7 +721,7 @@ describe('logger', () => {
       logger.audit('upload_success', { send_id: 's1', hash: FULL_MD5 });
 
       expect(consoleSpy.error).toHaveBeenCalledTimes(1);
-      expect(consoleSpy.error.mock.calls[0][0]).toContain('secret-shaped key');
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('sensitive key');
       expect(consoleSpy.error.mock.calls[0][0]).toContain('hash');
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.hash).toBe('[REDACTED]');
@@ -638,7 +775,7 @@ describe('logger', () => {
 
       const line = consoleSpy.log.mock.calls[0][0];
       expect(line).toContain('"token":"[REDACTED]"');
-      expect(line).toContain('"nested_hash":"also-secret"');
+      expect(line).toContain('"nested_hash":"[REDACTED]"');
       expect(line).not.toContain('real-secret');
     });
 
@@ -703,7 +840,7 @@ describe('logger', () => {
 
       logger.audit('upload_success', { send_id: 's1', hash: { myToken: 'audit-survives' } });
       const auditParsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
-      expect(auditParsed.audit.hash.myToken).toBe('audit-survives');
+      expect(auditParsed.audit.hash.myToken).toBe('[REDACTED]');
 
       consoleSpy.log.mockClear();
 

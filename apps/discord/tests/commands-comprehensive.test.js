@@ -271,6 +271,11 @@ function makeInteraction(overrides = {}) {
   return { ...base, ...overrides };
 }
 
+afterAll(() => {
+  crypto.randomBytes = originalRandomBytes;
+  crypto.randomUUID = originalRandomUUID;
+});
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockDb.markSendRevoked.mockReset();
@@ -695,6 +700,38 @@ describe('/qurl help subcommand', () => {
 describe('/qurl revoke subcommand', () => {
   beforeEach(() => {
     mockSupersedeOrCreate.mockResolvedValue({ created: true, version: 1 });
+  });
+
+  it.each(['guild-a', 'guild-b'])('passes the current server to the multi-tenant revoke query: %s', async (guildId) => {
+    const config = require('../src/config');
+    config.isMultiTenant = true;
+    mockDb.getRecentSends.mockReturnValue([]);
+    try {
+      const interaction = makeInteraction({
+        guildId,
+        options: { ...makeInteraction().options, getSubcommand: jest.fn(() => 'revoke') },
+      });
+      await commands.find(c => c.data.name === 'qurl').execute(interaction);
+      expect(mockDb.getRecentSends).toHaveBeenCalledWith(interaction.user.id, 5, guildId);
+    } finally {
+      config.isMultiTenant = false;
+    }
+  });
+
+  it('does not read an unscoped history for a multi-tenant direct message', async () => {
+    const config = require('../src/config');
+    config.isMultiTenant = true;
+    try {
+      const interaction = makeInteraction({
+        guildId: null,
+        options: { ...makeInteraction().options, getSubcommand: jest.fn(() => 'revoke') },
+      });
+      await commands.find(c => c.data.name === 'qurl').execute(interaction);
+      expect(mockDb.getRecentSends).not.toHaveBeenCalled();
+      expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Use this command in a server.' });
+    } finally {
+      config.isMultiTenant = false;
+    }
   });
 
   it('shows no recent sends message', async () => {
