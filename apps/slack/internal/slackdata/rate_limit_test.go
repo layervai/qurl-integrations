@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -171,156 +170,123 @@ func TestCheckRateLimit_WorkspaceNotBoundDoesNotCreateCounter(t *testing.T) {
 }
 
 func TestPurgeTeamRateLimitCountersBefore(t *testing.T) {
-	t.Run("disabled skips full-table scan", func(t *testing.T) {
-		scanned := false
-		store := newRateLimitStore(&stubDDB{
-			scanFn: func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
-				scanned = true
-				return &dynamodb.ScanOutput{}, nil
-			},
-		})
-
-		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", time.Now()); err != nil {
-			t.Fatalf("PurgeTeamRateLimitCountersBefore disabled: %v", err)
-		}
-		if scanned {
-			t.Fatal("disabled rate-limit purge issued a full-table scan")
-		}
-	})
-
-	t.Run("scans prefix and deletes paged counters with cutoff guard", func(t *testing.T) {
-		cutoff := time.Date(2026, 7, 8, 12, 0, 0, 123, time.UTC)
-		prefix := rateLimitTeamPrefix("T1")
-		var scans []*dynamodb.ScanInput
-		var deleted []string
-		store := newRateLimitStore(&stubDDB{
-			scanFn: func(in *dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
-				scans = append(scans, in)
-				if aws.ToString(in.TableName) != "workspace_mappings" {
-					t.Fatalf("Scan table = %q, want workspace_mappings", aws.ToString(in.TableName))
-				}
-				if got := aws.ToString(in.FilterExpression); got != "begins_with(#tid, :prefix)" {
-					t.Fatalf("Scan FilterExpression = %q", got)
-				}
-				if got := aws.ToString(in.ProjectionExpression); got != "#tid" {
-					t.Fatalf("Scan ProjectionExpression = %q", got)
-				}
-				if got := in.ExpressionAttributeNames["#tid"]; got != attrSlackTeamID {
-					t.Fatalf("Scan #tid = %q, want %q", got, attrSlackTeamID)
-				}
-				if got := readString(map[string]ddbtypes.AttributeValue{attrSlackTeamID: in.ExpressionAttributeValues[":prefix"]}, attrSlackTeamID); got != prefix {
-					t.Fatalf("Scan :prefix = %q, want %q", got, prefix)
-				}
-				switch len(scans) {
-				case 1:
-					if len(in.ExclusiveStartKey) != 0 {
-						t.Fatalf("first scan ExclusiveStartKey = %v, want empty", in.ExclusiveStartKey)
-					}
-					return &dynamodb.ScanOutput{
-						Items: []map[string]ddbtypes.AttributeValue{
-							{attrSlackTeamID: stringAttr(prefix + "user-a")},
-						},
-						LastEvaluatedKey: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(prefix + "user-a")},
-					}, nil
-				case 2:
-					if got := readString(in.ExclusiveStartKey, attrSlackTeamID); got != prefix+"user-a" {
-						t.Fatalf("second scan ExclusiveStartKey = %q, want first page key", got)
-					}
-					return &dynamodb.ScanOutput{
-						Items: []map[string]ddbtypes.AttributeValue{
-							{attrSlackTeamID: stringAttr(prefix + "user-b")},
-						},
-					}, nil
-				default:
-					t.Fatalf("unexpected scan call %d", len(scans))
-					return nil, errors.New("unexpected scan call")
-				}
-			},
-			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
-				key := readString(in.Key, attrSlackTeamID)
-				deleted = append(deleted, key)
-				if got := aws.ToString(in.ConditionExpression); got != purgeCutoffCondition {
-					t.Fatalf("Delete ConditionExpression = %q", got)
-				}
-				if got := in.ExpressionAttributeNames["#updated_at_nano"]; got != attrUpdatedAtNano {
-					t.Fatalf("Delete #updated_at_nano = %q, want %q", got, attrUpdatedAtNano)
-				}
-				if got, want := readNumber(in.ExpressionAttributeValues, ":purge_cutoff_nano"), cutoff.UnixNano(); got != want {
-					t.Fatalf("Delete cutoff = %d, want %d", got, want)
-				}
-				return &dynamodb.DeleteItemOutput{}, nil
-			},
-		})
-		store.RateLimitEnabled = true
-
+	cutoff := time.Unix(1700000000, 0).UTC()
+	prefix := rateLimitTeamPrefix("T1")
+	first := prefix + strings.Repeat("0", 32)
+	second := prefix + "0" + strings.Repeat("1", 31)
+	t.Run("disabled makes no queries or scans", func(t *testing.T) {
+		store := newRateLimitStore(&stubDDB{queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+			t.Fatal("disabled cleanup queried DDB")
+			return nil, nil //nolint:nilnil // Exercise a malformed empty SDK response.
+		}, scanFn: func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
+			t.Fatal("cleanup scanned the table")
+			return nil, nil //nolint:nilnil // Exercise a malformed empty SDK response.
+		}})
+		store.RateLimitEnabled = false
 		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", cutoff); err != nil {
-			t.Fatalf("PurgeTeamRateLimitCountersBefore: %v", err)
-		}
-		wantDeleted := []string{prefix + "user-a", prefix + "user-b"}
-		if strings.Join(deleted, ",") != strings.Join(wantDeleted, ",") {
-			t.Fatalf("deleted = %v, want %v", deleted, wantDeleted)
+			t.Fatal(err)
 		}
 	})
-
-	t.Run("delete errors do not stop remaining counters", func(t *testing.T) {
-		prefix := rateLimitTeamPrefix("T1")
-		var deleted []string
+	t.Run("queries bounded workspace shards and preserves pagination and cutoff", func(t *testing.T) {
+		queries, deleted := 0, 0
 		store := newRateLimitStore(&stubDDB{
 			scanFn: func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
-				return &dynamodb.ScanOutput{
-					Items: []map[string]ddbtypes.AttributeValue{
-						{attrSlackTeamID: stringAttr(prefix + "fail")},
-						{attrSlackTeamID: stringAttr(prefix + "ok")},
-					},
-				}, nil
+				t.Fatal("cleanup must never scan the table")
+				return nil, nil //nolint:nilnil // Exercise a malformed empty SDK response.
+			},
+			queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				queries++
+				if aws.ToString(in.TableName) != "workspace_mappings" || aws.ToString(in.IndexName) != rateLimitIndexName || aws.ToInt32(in.Limit) != 100 || aws.ToBool(in.ConsistentRead) {
+					t.Fatal("wrong index/query budget")
+				}
+				if aws.ToString(in.KeyConditionExpression) != "#partition = :partition AND begins_with(#tid, :prefix)" || aws.ToString(in.ProjectionExpression) != "#tid" {
+					t.Fatal("query escaped its key-only workspace scope")
+				}
+				if readString(in.ExpressionAttributeValues, ":prefix") != prefix {
+					t.Fatal("wrong workspace prefix")
+				}
+				if readString(in.ExpressionAttributeValues, ":partition") != rateLimitPartition("T1", "0") {
+					return &dynamodb.QueryOutput{}, nil
+				}
+				if len(in.ExclusiveStartKey) == 0 {
+					return &dynamodb.QueryOutput{Items: []map[string]ddbtypes.AttributeValue{{attrSlackTeamID: stringAttr(first)}}, LastEvaluatedKey: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(first), attrRateLimitPartition: stringAttr(rateLimitPartition("T1", "0"))}}, nil
+				}
+				if readString(in.ExclusiveStartKey, attrSlackTeamID) != first || readString(in.ExclusiveStartKey, attrRateLimitPartition) != rateLimitPartition("T1", "0") {
+					t.Fatal("lost index pagination key")
+				}
+				return &dynamodb.QueryOutput{Items: []map[string]ddbtypes.AttributeValue{{attrSlackTeamID: stringAttr(second)}}}, nil
 			},
 			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
-				key := readString(in.Key, attrSlackTeamID)
-				deleted = append(deleted, key)
-				if strings.HasSuffix(key, "fail") {
-					return nil, errors.New("ddb delete down")
+				deleted++
+				if aws.ToString(in.ConditionExpression) != purgeCutoffCondition || readNumber(in.ExpressionAttributeValues, exprPurgeCutoffNano) != cutoff.UnixNano() {
+					t.Fatal("lost reinstall cutoff guard")
 				}
 				return &dynamodb.DeleteItemOutput{}, nil
 			},
 		})
 		store.RateLimitEnabled = true
-
-		err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", time.Time{})
-		if err == nil {
-			t.Fatal("PurgeTeamRateLimitCountersBefore: want joined delete error")
+		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", cutoff); err != nil {
+			t.Fatal(err)
 		}
-		var storeErr *Error
-		if !errors.As(err, &storeErr) || storeErr.StatusCode != http.StatusServiceUnavailable {
-			t.Fatalf("PurgeTeamRateLimitCountersBefore err = %v, want joined 503 *Error", err)
-		}
-		wantDeleted := []string{prefix + "fail", prefix + "ok"}
-		if strings.Join(deleted, ",") != strings.Join(wantDeleted, ",") {
-			t.Fatalf("deleted = %v, want %v", deleted, wantDeleted)
+		if queries != rateLimitShardCount+1 || deleted != 2 {
+			t.Fatalf("queries=%d deletes=%d", queries, deleted)
 		}
 	})
-
-	t.Run("guarded delete skips counters updated after cutoff", func(t *testing.T) {
-		var deletes int
-		store := newRateLimitStore(&stubDDB{
-			scanFn: func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
-				return &dynamodb.ScanOutput{
-					Items: []map[string]ddbtypes.AttributeValue{
-						{attrSlackTeamID: stringAttr(rateLimitTeamPrefix("T1") + "new")},
-					},
-				}, nil
-			},
-			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
-				deletes++
-				return nil, &ddbtypes.ConditionalCheckFailedException{}
-			},
-		})
+	t.Run("delete errors do not stop siblings or later shards", func(t *testing.T) {
+		deleted := 0
+		store := newRateLimitStore(&stubDDB{queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+			if readString(in.ExpressionAttributeValues, ":partition") != rateLimitPartition("T1", "0") {
+				return &dynamodb.QueryOutput{}, nil
+			}
+			return &dynamodb.QueryOutput{Items: []map[string]ddbtypes.AttributeValue{{attrSlackTeamID: stringAttr(first)}, {attrSlackTeamID: stringAttr(second)}}}, nil
+		}, deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+			deleted++
+			if deleted == 1 {
+				return nil, errors.New("DDB unavailable")
+			}
+			return &dynamodb.DeleteItemOutput{}, nil
+		}})
 		store.RateLimitEnabled = true
-
-		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", time.Now()); err != nil {
-			t.Fatalf("PurgeTeamRateLimitCountersBefore newer row err = %v, want nil", err)
+		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", cutoff); err == nil {
+			t.Fatal("lost delete failure")
 		}
-		if deletes != 1 {
-			t.Fatalf("DeleteItem calls = %d, want 1", deletes)
+		if deleted != 2 {
+			t.Fatal("a failed delete stopped sibling cleanup")
+		}
+	})
+	t.Run("newer counter is retained after conditional delete refusal", func(t *testing.T) {
+		store := newRateLimitStore(&stubDDB{queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+			if readString(in.ExpressionAttributeValues, ":partition") != rateLimitPartition("T1", "0") {
+				return &dynamodb.QueryOutput{}, nil
+			}
+			return &dynamodb.QueryOutput{Items: []map[string]ddbtypes.AttributeValue{{attrSlackTeamID: stringAttr(first)}}}, nil
+		}, deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+			return nil, &ddbtypes.ConditionalCheckFailedException{}
+		}})
+		store.RateLimitEnabled = true
+		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", cutoff); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("foreign index row is never deleted", func(t *testing.T) {
+		store := newRateLimitStore(&stubDDB{queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+			return &dynamodb.QueryOutput{Items: []map[string]ddbtypes.AttributeValue{{attrSlackTeamID: stringAttr(rateLimitTeamPrefix("T2") + "foreign")}}}, nil
+		}, deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+			t.Fatal("deleted a foreign counter")
+			return nil, nil //nolint:nilnil // Exercise a malformed empty SDK response.
+		}})
+		store.RateLimitEnabled = true
+		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", cutoff); err == nil {
+			t.Fatal("foreign index data was accepted")
+		}
+	})
+	t.Run("missing query response is an error", func(t *testing.T) {
+		store := newRateLimitStore(&stubDDB{queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+			return nil, nil //nolint:nilnil // Exercise a malformed empty SDK response.
+		}})
+		store.RateLimitEnabled = true
+		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", cutoff); err == nil {
+			t.Fatal("missing response accepted")
 		}
 	})
 }

@@ -493,13 +493,12 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 //
 // Best-effort by construction: it attempts to delete every row it observes
 // during the Query pass, even after an individual DeleteItem fails, then returns
-// the joined delete errors at the end. A row created after the Query completes
-// is not seen — acceptable here because once the Slack app is uninstalled the
-// bot can no longer be invoked to create new policy rows, so the set is
-// effectively frozen before the purge runs. A missed channel_policies row has no
-// TTL and can persist unless a later uninstall/revoke delivery triggers another
-// purge, so lifecycle callers should treat returned errors as meaningful cleanup
-// signals even though the Slack ack has already been sent. Sequential DeleteItem
+// the joined delete errors at the end. Strong table queries see committed rows
+// on each page; they do not form a snapshot or stop in-flight writers. Missed
+// rows have no TTL. Durable cleanup and reinstall-safe writer fencing remain
+// required (#931); a successful sweep alone does not establish that every row
+// is gone. Lifecycle callers must treat returned errors as cleanup failures.
+// Sequential DeleteItem
 // (not BatchWriteItem) keeps the [DynamoDBClient] surface unchanged; per-team
 // channel-policy rows are bounded by the channels a workspace used the bot in,
 // so the round-trips stay modest.
@@ -523,7 +522,9 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 	var deleteErrs []error
 	for {
 		out, err := s.Client.Query(ctx, &dynamodb.QueryInput{
-			TableName:              aws.String(s.ChannelPoliciesName),
+			TableName: aws.String(s.ChannelPoliciesName),
+			// Do not acknowledge cleanup after a stale page hides committed rows.
+			ConsistentRead:         aws.Bool(true),
 			KeyConditionExpression: aws.String(attrSlackTeamID + " = :tid"),
 			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 				":tid": stringAttr(teamID),

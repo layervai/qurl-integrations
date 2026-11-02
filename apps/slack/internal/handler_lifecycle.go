@@ -291,17 +291,9 @@ func lifecyclePurgeCutoff(env *slackEventEnvelope, observedAt time.Time) time.Ti
 	return observedAt
 }
 
-// handleLifecycleEvent runs the Slack app-uninstall / token-revoke cascade. It is
-// reached from handleEvent for an event_callback whose inner type is an install
-// teardown, AFTER the Slack signature has been verified and AFTER handleEvent has
-// already committed to responding 200 OK. It therefore never touches the
-// http.ResponseWriter — the ack is the caller's job — and it schedules the purge
-// asynchronously so a slow DDB sweep can't delay (or fail) the 200 that stops
-// Slack from retrying the delivery forever.
-//
-// A purge with no resolvable workspace id is dropped with a log line: there are
-// no rows to delete and issuing a delete against an empty key would only 400.
-func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
+// handleLifecycleEvent persists local cleanup before handleEvent acknowledges
+// the signed teardown. A persistence failure leaves Slack free to retry.
+func (h *Handler) handleLifecycleEvent(ctx context.Context, env *slackEventEnvelope) error {
 	purgeCutoff := lifecyclePurgeCutoff(env, h.now())
 	partitionResolution := resolveSlackEventPartitions(env)
 	workspaceIDs := partitionResolution.lifecyclePurge
@@ -315,39 +307,33 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 	)
 	if len(workspaceIDs) == 0 && len(agentStateOnlyIDs) == 0 {
 		log.Warn("lifecycle event with no team_id/enterprise_id — nothing to purge")
-		return
+		return nil
 	}
-	log.Info("lifecycle event received — purging workspace data",
+	log.Info("lifecycle event received — queueing local cleanup",
 		"workspace_id_count", len(workspaceIDs),
 		"agent_state_only_workspace_id_count", len(agentStateOnlyIDs),
-		"purge_cutoff", purgeCutoff.UTC().Format(time.RFC3339),
+		"purge_cutoff", purgeCutoff.UTC().Format(time.RFC3339Nano),
 		"upstream_qurl_key_revoke_deferred", true,
 		"follow_up_issue", "layervai/qurl-integrations#926",
 	)
-	// Off the request goroutine: handleEvent has already written 200, and the
-	// purge's DeleteItem/Query calls must not block (or fail) that ack. h.Go waits
-	// for the purge goroutine to unwind during shutdown, but h.baseCtx cancellation
-	// can still abort the sweep before it completes; #927 tracks durable recovery
-	// for that ack-after-loss window. This deliberately bypasses the general async
-	// semaphore: lifecycle events are rare, and dropping a teardown because the
-	// slash/agent pool is full would lose the signal after Slack has already
-	// received 200.
-	h.Go(func() {
-		baseCtx := h.baseCtx
-		if baseCtx == nil {
-			baseCtx = context.Background()
-		}
-		for _, workspaceID := range workspaceIDs {
-			ctx, cancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
-			h.purgeWorkspaceWithRetry(ctx, log.With("workspace_id", workspaceID), workspaceID, purgeCutoff, purgeScopeFull)
-			cancel()
-		}
-		for _, workspaceID := range agentStateOnlyIDs {
-			ctx, cancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
-			h.purgeAgentStateWithRetry(ctx, log.With("workspace_id", workspaceID, "agent_state_only", true), workspaceID)
-			cancel()
-		}
-	})
+
+	var enqueueErr error
+	if h.cfg.LifecyclePurgeQueue == nil {
+		enqueueErr = errors.New("durable lifecycle purge queue is not configured")
+	} else {
+		enqueueErr = h.cfg.LifecyclePurgeQueue.Enqueue(ctx, &LifecyclePurgeJob{
+			Version: lifecyclePurgeJobVersion, WorkspaceIDs: workspaceIDs,
+			AgentStateOnlyIDs: agentStateOnlyIDs, Cutoff: purgeCutoff,
+		})
+	}
+	if enqueueErr != nil {
+		// A failed handoff has no queue record to inspect. Keep only the signed
+		// partition identities and exact cutoff needed for operator reconciliation.
+		log.Error("lifecycle purge was not durably accepted", "cleanup_action_required", true,
+			"workspace_ids", workspaceIDs, "agent_state_only_workspace_ids", agentStateOnlyIDs,
+			"purge_cutoff", purgeCutoff.UTC().Format(time.RFC3339Nano))
+	}
+	return enqueueErr
 }
 
 // workspaceStateDeleter is the optional capability a mutable AuthProvider
@@ -527,14 +513,14 @@ func logWorkspaceStateDeleted(log *slog.Logger, identity auth.DeletedWorkspaceSt
 	log.Info("purgeWorkspace: deleted workspace_state row", attrs...)
 }
 
-func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger, workspaceID string, cutoff time.Time, scope purgeScope) {
-	retryLifecyclePurge(ctx, log, "purgeWorkspace", func(attemptLog *slog.Logger) error {
+func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger, workspaceID string, cutoff time.Time, scope purgeScope) error {
+	return retryLifecyclePurge(ctx, log, "purgeWorkspace", func(attemptLog *slog.Logger) error {
 		return h.purgeWorkspace(ctx, attemptLog, workspaceID, cutoff, scope)
 	})
 }
 
-func (h *Handler) purgeAgentStateWithRetry(ctx context.Context, log *slog.Logger, workspaceID string) {
-	retryLifecyclePurge(ctx, log, "purgeAgentState", func(attemptLog *slog.Logger) error {
+func (h *Handler) purgeAgentStateWithRetry(ctx context.Context, log *slog.Logger, workspaceID string) error {
+	return retryLifecyclePurge(ctx, log, "purgeAgentState", func(attemptLog *slog.Logger) error {
 		return h.purgeAgentStatePartition(ctx, attemptLog, workspaceID)
 	})
 }
@@ -556,12 +542,12 @@ func (h *Handler) purgeAgentStatePartition(ctx context.Context, log *slog.Logger
 	return nil
 }
 
-func retryLifecyclePurge(ctx context.Context, log *slog.Logger, op string, purge func(*slog.Logger) error) {
+func retryLifecyclePurge(ctx context.Context, log *slog.Logger, op string, purge func(*slog.Logger) error) error {
 	for attempt := 1; attempt <= lifecyclePurgeRetryAttempts; attempt++ {
 		attemptLog := log.With("attempt", attempt, "max_attempts", lifecyclePurgeRetryAttempts)
 		err := purge(attemptLog)
 		if err == nil {
-			return
+			return nil
 		}
 		if lifecyclePurgeErrorIsNonRetryable(err) {
 			// Malformed local rows will not heal on a retry; surface the same
@@ -571,7 +557,7 @@ func retryLifecyclePurge(ctx context.Context, log *slog.Logger, op string, purge
 				"cleanup_action_required", true,
 				"error", err,
 			)
-			return
+			return err
 		}
 		if attempt == lifecyclePurgeRetryAttempts {
 			// Keep cleanup_action_required stable: infra repo #1284
@@ -581,7 +567,7 @@ func retryLifecyclePurge(ctx context.Context, log *slog.Logger, op string, purge
 				"cleanup_action_required", true,
 				"error", err,
 			)
-			return
+			return err
 		}
 
 		delay := time.Duration(attempt) * lifecyclePurgeRetryBaseDelay
@@ -601,10 +587,11 @@ func retryLifecyclePurge(ctx context.Context, log *slog.Logger, op string, purge
 				}
 			}
 			log.Error(op+": retry canceled before next attempt", "error", ctx.Err())
-			return
+			return ctx.Err()
 		case <-timer.C:
 		}
 	}
+	return errors.New("lifecycle purge retry budget exhausted")
 }
 
 func lifecyclePurgeErrorIsNonRetryable(err error) bool {

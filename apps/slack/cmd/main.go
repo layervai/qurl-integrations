@@ -201,6 +201,11 @@ func run() error {
 	shutdownSignals := newShutdownSignalSource(syscall.SIGTERM, syscall.SIGINT)
 	defer shutdownSignals.stop()
 
+	lifecycleQueue, err := internal.NewLifecyclePurgeQueue(shutdownSignals.ctx, os.Getenv("SLACK_LIFECYCLE_QUEUE_URL"))
+	if err != nil {
+		return fmt.Errorf("lifecycle purge queue init: %w", err)
+	}
+
 	ddbProvider, err := auth.NewDDBProvider(shutdownSignals.ctx,
 		auth.WithTableName(os.Getenv("WORKSPACE_STATE_TABLE")),
 		auth.WithKMSKeyARN(os.Getenv("WORKSPACE_STATE_KMS_KEY_ARN")),
@@ -215,6 +220,9 @@ func run() error {
 	maxConcurrentFollowupAsync := readMaxConcurrentFollowupAsync()
 	maxConcurrentFollowupGateAsync := readMaxConcurrentFollowupGateAsync()
 	adminStore := buildAdminStore(shutdownSignals.ctx)
+	if adminStore == nil {
+		return errors.New("lifecycle cleanup requires the workspace mapping and channel policy stores")
+	}
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
 	if err := auth.ValidateSlackBotTokenShape(slackBotToken); err != nil {
 		return fmt.Errorf("invalid SLACK_BOT_TOKEN: %w", err)
@@ -323,6 +331,11 @@ func run() error {
 		agentLLM = buildAgentLLM()
 		agentStore = buildAgentStore(shutdownSignals.ctx)
 	}
+
+	agentStore, err = lifecycleCleanupAgentStore(adminStore, agentStore, agentDisabled)
+	if err != nil {
+		return err
+	}
 	logAgentSurfaceState(agentSurfaceState{
 		llmWired:              agentLLM != nil,
 		storeWired:            agentStore != nil,
@@ -350,6 +363,7 @@ func run() error {
 		SlackSigningSecret:             slackSigningSecret,
 		SlackBotTokenRotationEnabled:   slackBotTokenRotationEnabled,
 		BaseContext:                    handlerCtx,
+		LifecyclePurgeQueue:            lifecycleQueue,
 		MaxConcurrentAsync:             maxConcurrentAsync,
 		MaxConcurrentFollowupAsync:     maxConcurrentFollowupAsync,
 		MaxConcurrentFollowupGateAsync: maxConcurrentFollowupGateAsync,
@@ -456,6 +470,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("bind %s: %w", listenAddr, err)
 	}
+	handler.StartLifecyclePurgeWorkers()
 
 	shutdownDone := make(chan struct{})
 	var shutdownOnce sync.Once
@@ -1696,4 +1711,22 @@ func buildPostFeedback(userAgent string) internal.PostFeedbackFunc {
 		slog.Info("feedback delivery wired via Slack incoming webhook")
 		return newFeedbackWebhookPoster(feedbackWebhookURL, userAgent, nil)
 	}
+}
+
+func lifecycleCleanupAgentStore(adminStore *slackdata.Store, agentStore *slackdata.AgentStore, agentDisabled bool) (*slackdata.AgentStore, error) {
+	if agentStore != nil {
+		return agentStore, nil
+	}
+	if !agentDisabled {
+		return nil, fmt.Errorf("lifecycle cleanup requires %s", slackdata.EnvAgentStateTable)
+	}
+	table := strings.TrimSpace(os.Getenv(slackdata.EnvAgentStateTable))
+	if table == "" {
+		return nil, fmt.Errorf("lifecycle cleanup requires %s", slackdata.EnvAgentStateTable)
+	}
+	cleanupClient, ok := adminStore.Client.(slackdata.AgentDynamoDBClient)
+	if !ok {
+		return nil, errors.New("lifecycle cleanup DDB client cannot purge agent metadata")
+	}
+	return &slackdata.AgentStore{Client: cleanupClient, TableName: table}, nil
 }
