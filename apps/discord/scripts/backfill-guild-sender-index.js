@@ -20,34 +20,35 @@ async function backfillGuildSenderIndex(ddb, tableName, { apply = false } = {}) 
     }));
     for (const row of page.Items || []) {
       counts.scanned++;
-      if (row.guild_id == null || row.guild_id === '') {
-        counts.unscoped++;
-        continue;
-      }
-      if (![row.send_id, row.recipient_discord_id, row.guild_id, row.sender_discord_id, row.created_at]
-        .every(value => typeof value === 'string' && value.length > 0)) {
+      const legacy = row.guild_id == null || row.guild_id === '';
+      if (legacy) counts.unscoped++;
+      if ((!legacy && typeof row.guild_id !== 'string') ||
+          ![row.send_id, row.recipient_discord_id, row.sender_discord_id, row.created_at]
+            .every(value => typeof value === 'string' && value.length > 0)) {
         counts.invalid++;
         continue;
       }
-      const tuple = guildSenderKey(row.guild_id, row.sender_discord_id);
+      const tuple = guildSenderKey(legacy ? null : row.guild_id, row.sender_discord_id);
       if (Object.hasOwn(row, 'guild_sender_id')) {
         counts[row.guild_sender_id === tuple ? 'indexed' : 'conflicting']++;
         continue;
       }
       counts.candidates++;
       if (!apply) continue;
+      const hasGuild = row.guild_id !== undefined;
+      const guildCondition = hasGuild ? '#guild = :guild' : 'attribute_not_exists(#guild)';
       try {
         await ddb.send(new UpdateCommand({
           TableName: tableName,
           Key: { send_id: row.send_id, recipient_discord_id: row.recipient_discord_id },
           UpdateExpression: 'SET #tuple = :tuple',
-          ConditionExpression: 'attribute_exists(#pk) AND #guild = :guild AND #sender = :sender AND #created = :created AND attribute_not_exists(#tuple)',
+          ConditionExpression: `attribute_exists(#pk) AND ${guildCondition} AND #sender = :sender AND #created = :created AND attribute_not_exists(#tuple)`,
           ExpressionAttributeNames: {
             '#pk': 'send_id', '#guild': 'guild_id', '#sender': 'sender_discord_id',
             '#created': 'created_at', '#tuple': 'guild_sender_id',
           },
           ExpressionAttributeValues: {
-            ':guild': row.guild_id, ':sender': row.sender_discord_id,
+            ...(hasGuild ? { ':guild': row.guild_id } : {}), ':sender': row.sender_discord_id,
             ':created': row.created_at, ':tuple': tuple,
           },
         }));
@@ -76,7 +77,7 @@ async function main(args = process.argv.slice(2)) {
   try {
     const counts = await backfillGuildSenderIndex(DynamoDBDocumentClient.from(raw), tableArgs[0], { apply });
     console.log(JSON.stringify({ table: tableArgs[0], apply, ...counts }));
-    if (counts.unscoped || counts.invalid || counts.conflicting || counts.raced) process.exitCode = 2;
+    if (counts.invalid || counts.conflicting || counts.raced) process.exitCode = 2;
   } finally {
     raw.destroy();
   }

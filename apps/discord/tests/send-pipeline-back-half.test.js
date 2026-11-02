@@ -3826,7 +3826,7 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
 describe('guild history identity preflight', () => {
   test.each([undefined, null, '', 123])('initial send rejects invalid sender %p before minting', async (id) => {
     const interaction = makeInteraction({ guildId: 'guild', user: { id } });
-    await expect(executeSendPipeline(interaction, makePipelineParams())).rejects.toThrow('non-empty string guild and sender IDs');
+    await expect(executeSendPipeline(interaction, makePipelineParams())).rejects.toThrow('sender ID');
     expect(mockMintLinks).not.toHaveBeenCalled();
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
   });

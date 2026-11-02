@@ -40,14 +40,28 @@ test('apply changes only the tuple and guards deletion, identity changes and con
   expect(input.ExpressionAttributeValues).toEqual({ ':guild': 'guild', ':sender': 'sender', ':created': row.created_at, ':tuple': '["guild","sender"]' });
 });
 
-test('legacy, invalid and conflicting rows remain unchanged and are counted', async () => {
+test('invalid and conflicting rows remain unchanged and are counted', async () => {
   const ddb = client([{ Items: [
-    { ...row, guild_id: undefined }, { ...row, guild_id: null }, { ...row, guild_id: '' },
     { ...row, sender_discord_id: 123 }, { ...row, created_at: undefined },
     { ...row, guild_sender_id: '["other","sender"]' }, { ...row, guild_sender_id: null },
   ] }]);
-  await expect(backfillGuildSenderIndex(ddb, table, { apply: true })).resolves.toMatchObject({ unscoped: 3, invalid: 2, conflicting: 2, updated: 0 });
+  await expect(backfillGuildSenderIndex(ddb, table, { apply: true })).resolves.toMatchObject({ invalid: 2, conflicting: 2, updated: 0 });
   expect(ddb.send).toHaveBeenCalledTimes(1);
+});
+
+test.each([undefined, null, ''])('legacy guild %p gets a separate tuple without changing the stored guild', async (guild_id) => {
+  const ddb = client([{ Items: [{ ...row, guild_id }] }]);
+  await expect(backfillGuildSenderIndex(ddb, table, { apply: true })).resolves.toMatchObject({ unscoped: 1, updated: 1 });
+  const input = ddb.send.mock.calls[1][0].input;
+  expect(input.UpdateExpression).toBe('SET #tuple = :tuple');
+  expect(input.ExpressionAttributeValues[':tuple']).toBe('[null,"sender"]');
+  if (guild_id === undefined) {
+    expect(input.ConditionExpression).toContain('attribute_not_exists(#guild)');
+    expect(input.ExpressionAttributeValues).not.toHaveProperty(':guild');
+  } else {
+    expect(input.ConditionExpression).toContain('#guild = :guild');
+    expect(input.ExpressionAttributeValues[':guild']).toBe(guild_id);
+  }
 });
 
 test('conditional races are counted without retrying an unsafe overwrite', async () => {

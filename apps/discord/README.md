@@ -310,7 +310,8 @@ the offline backfill only needs rows that predate writer adoption and lack it.
 A paginated offline backfill must derive the tuple from each row's
 stored `guild_id` and `sender_discord_id`, and condition its update on both source
 fields still matching. It must neither overwrite a different existing tuple nor
-infer a guild for an unscoped historical row. Check remaining unindexed and
+infer a guild for an unscoped historical row. Missing, NULL or empty guilds
+use the separate `[null, senderId]` tuple without changing their stored guild. Check remaining unindexed and
 ambiguous rows before switching the reader. Preserve a deliberate recovery path
 for any legacy revocable records; do not use a bounded cross-guild scan as the
 normal guild-scoped query. Index creation, backfill, reader cutover and a two-guild
@@ -328,12 +329,13 @@ rows per page and projects identity/index fields, never links. It uses constant
 page memory but scans the whole table, so budget the offline read/write cost.
 Each update is conditional on the row, guild, sender and creation time still
 matching, with no existing tuple. Interrupted runs can be repeated. A concurrent
-writer, missing guild, invalid identity/timestamp or conflicting tuple is counted
-and left unchanged; these unresolved counts cause exit 2. Other failures stop the
+writer, invalid identity/timestamp or conflicting tuple is counted and left
+unchanged; these unresolved counts cause exit 2. The `unscoped` count reports
+legacy rows; these can be indexed in the explicit legacy bucket. Other failures stop the
 run with exit 1. A dry-run can exit 0 with `candidates > 0`: it does not establish
 migration completion. After all writers are adopted, rerun the audit until
-`candidates`, `unscoped`, `invalid`, `conflicting` and `raced` are zero, or retain
-an explicit legacy recovery plan before the reader cutover. An indexed-row count
+`candidates`, `invalid`, `conflicting` and `raced` are zero. Verify both the
+current-guild and explicit legacy recovery queries before the reader cutover. An indexed-row count
 does not verify that the GSI is ACTIVE, IAM is refreshed, or index reads work.
 
 ## License
