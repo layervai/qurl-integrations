@@ -132,14 +132,14 @@ func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *in
 	teamID, userID := payload.Team.ID, payload.User.ID
 
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		// Refusals use postResponse, so the card survives and the caller can hand
-		// the click to someone authorized. Only a teardown that actually ran
-		// consumes it below.
+		// Authorization refusals retain the card. Expired cards and completed
+		// teardowns consume it so a dead card cannot be clicked again.
 		if !h.requireUninstallAdminOrOwnerForClick(ctx, log, responseURL, teamID, userID) {
 			return
 		}
 		scope, fresh := uninstallConfirmationScope(action.Value, h.now())
 		if !fresh {
+			log.Info("uninstall confirm: expired or malformed confirmation")
 			_ = h.replaceOriginalResponse(log, responseURL, "This disconnect confirmation has expired. Run the uninstall command again to review and confirm the disconnect.")
 			return
 		}
