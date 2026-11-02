@@ -382,3 +382,8 @@ bash test/cachectl_test.sh                    # cache-control path/safety tests
 bash test/behavior_test.sh                    # run the host-arch image against a stub S3
 PLATFORM=linux/arm64 bash test/behavior_test.sh # run the t4g target image under QEMU
 ```
+
+The behavior test builds its local S3 stub from `test/stub-s3/Dockerfile`.
+The Python base stays pinned by digest, and Dependabot checks it weekly.
+A stub-image update must pass the behavior test before merge. The stub runs
+on the host architecture even when the origin image runs under QEMU.

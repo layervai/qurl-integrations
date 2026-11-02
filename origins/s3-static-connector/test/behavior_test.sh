@@ -17,8 +17,7 @@ S3_ORIGIN_SECURITY_WAIVER_IMAGE="${S3_ORIGIN_SECURITY_WAIVER_IMAGE:-}"
 NET="s3-static-connector-testnet"
 STUB="s3-static-connector-stub"
 ORIGIN="s3-static-connector-app"
-# python:3.12.13-slim-trixie multi-arch index, used only for the local stub.
-STUB_IMG="python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9"
+STUB_IMG="s3-static-connector-stub:test"
 arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) ;; esac
 PLATFORM="${PLATFORM:-linux/$arch}"
 # One waiver for every assertion set the pinned immutable origin predates —
@@ -111,6 +110,9 @@ fi
 docker run --rm --platform "$PLATFORM" --entrypoint sh \
   -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 \
   "$IMG" -c 'set -eu; envoy --version >/dev/null; RENDER_DIR=/tmp/rendered render.sh; envoy --mode validate -c /tmp/rendered/envoy.yaml >/dev/null'
+
+# Keep the stub native to the host, even when the origin runs under QEMU.
+docker build -t "$STUB_IMG" "$DIR/test/stub-s3"
 
 docker network create "$NET" >/dev/null
 
