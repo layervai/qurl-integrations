@@ -331,7 +331,7 @@ describe('logger', () => {
       logger.audit('upload_success', { send_id: 's1', auth_token: 'sk-abc123' });
 
       expect(consoleSpy.error).toHaveBeenCalled();
-      expect(consoleSpy.error.mock.calls[0][0]).toContain('secret-shaped key');  // singular OR plural, matches "secret-shaped key" prefix
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('sensitive metadata key');  // singular OR plural, matches "sensitive metadata key" prefix
       expect(consoleSpy.error.mock.calls[0][0]).toContain('auth_token');
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.auth_token).toBe('[REDACTED]');
@@ -665,7 +665,7 @@ describe('logger', () => {
       logger.audit('upload_success', { send_id: 's1', hash: FULL_MD5 });
 
       expect(consoleSpy.error).toHaveBeenCalledTimes(1);
-      expect(consoleSpy.error.mock.calls[0][0]).toContain('secret-shaped key');
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('sensitive metadata key');
       expect(consoleSpy.error.mock.calls[0][0]).toContain('hash');
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.hash).toBe('[REDACTED]');
