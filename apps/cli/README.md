@@ -856,6 +856,13 @@ a first publish whose response or local save was lost. Existing saved limits
 and approval lifetimes are kept; when they differ from the requested rule,
 JSON reports `"settings_differ": true`.
 
+If publication succeeds but a requested limited link cannot be created or
+verified, `-o json` emits the confirmed `crid`, `resource_id`, `private` and
+`found_existing` (when known), plus `settings_differ` and
+`"error":"link_creation_failed"`, and exits non-zero. The IDs name the confirmed resource; there is no usable
+link in this result. A local origin may have been stopped by failure cleanup.
+Keep checking the exit code; do not treat this document as a successful share.
+
 Supervising apps call `qurl rules capabilities -o json` (offline), read and edit
 with `rules list|save|delete|sync|resolve -o json` (`save` reads one rule from
 `--file -` and needs `--version <local_version>`), and pass a complete rule on

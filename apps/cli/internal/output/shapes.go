@@ -191,6 +191,22 @@ type downloadJSON struct {
 	Publisher         publisherJSON `json:"publisher"`
 }
 
+// PublishLinkFailure reports the resource that exists when its link failed.
+// Text/quiet diagnostics stay on stderr; a partial JSON document is not success.
+func (p *Printer) PublishLinkFailure(res *qurlapi.Published) error {
+	if p.format != FormatJSON {
+		return nil
+	}
+	return p.writeJSON(struct {
+		CRID           string `json:"crid"`
+		ResourceID     string `json:"resource_id"`
+		Error          string `json:"error"`
+		Private        *bool  `json:"private,omitempty"`
+		FoundExisting  *bool  `json:"found_existing,omitempty"`
+		SettingsDiffer bool   `json:"settings_differ"`
+	}{CRID: res.CRID, ResourceID: res.ResourceID, Error: "link_creation_failed", Private: res.Private, FoundExisting: res.FoundExisting, SettingsDiffer: res.OtherSettings})
+}
+
 // Publish renders a publish result. Text mode says in one row who can open
 // the resource and prints the CRID last, alone on its line, so it is the
 // easiest thing to select and copy; JSON carries the same fact as `private`,

@@ -121,8 +121,14 @@ func TestFailedMintNamesTheCRIDAndRepublishRecovers(t *testing.T) {
 	scriptPublish(t, srv, false, false, nil, nil)
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", apitest.HandlerRevoked400(t))
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: dir})
-	if result.code == 0 || !strings.Contains(result.stderr.String(), srv.Key.CRID) {
-		t.Fatalf("failed mint %d %s", result.code, result.stderr.String())
+	var partial struct {
+		CRID       string `json:"crid"`
+		ResourceID string `json:"resource_id"`
+		Error      string `json:"error"`
+		Link       any    `json:"link"`
+	}
+	if result.code == 0 || !strings.Contains(result.stderr.String(), srv.Key.CRID) || json.Unmarshal(result.stdout.Bytes(), &partial) != nil || partial.CRID != srv.Key.CRID || partial.ResourceID != srv.Key.ResourceID || partial.Error != "link_creation_failed" || partial.Link != nil {
+		t.Fatalf("failed mint lost confirmed resource: exit=%d stdout=%s stderr=%s", result.code, result.stdout.String(), result.stderr.String())
 	}
 	var mints []map[string]any
 	scriptPublish(t, srv, false, true, nil, nil)
