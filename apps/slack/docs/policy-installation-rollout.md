@@ -95,3 +95,17 @@ rows which cannot be attributed require a separate operator reconciliation based
 on current binding and upstream resource evidence.
 
 Mutating requests validate their captured workspace authority before and after API key lookup. This prevents a revoked caller or an old installation from selecting a replacement installation credential. Display-name changes carry the same captured scope as URL creation. Ordinary read contexts do not add these workspace reads. This check cannot cancel an upstream request that was already sent before a later revocation.
+
+## Statecrawl apply
+
+Dry runs remain read-only. Apply captures the current workspace owner before
+reading and changing a policy. It cannot repair an unbound workspace; use the
+durable lifecycle cleanup path for that residue. Applying to an active legacy
+binding can initialize its generation, installation and legacy marker in the
+workspace mapping. This preserves its policy ownership and binding cutoff.
+
+The operator role needs workspace mapping reads and `UpdateItem` for legacy
+initialization, plus transaction permissions for a workspace `ConditionCheckItem`
+and policy `UpdateItem`/`DeleteItem`. AWS authorizes each action in the
+transaction against its table. Verify the actual operator role as well as the
+bot task role before apply. Do not assume a bot IAM receipt covers statecrawl.

@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -288,6 +290,11 @@ func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, t
 	}
 	for _, channelID := range channels {
 		unbound, err := h.cfg.AdminStore.PurgeResourceFromChannel(ctx, teamID, channelID, resourceID)
+		var conflict *ddbtypes.ConditionalCheckFailedException
+		if errors.As(err, &conflict) {
+			// Re-read a changed alias once, retaining the original authority.
+			unbound, err = h.cfg.AdminStore.PurgeResourceFromChannel(ctx, teamID, channelID, resourceID)
+		}
 		if err != nil {
 			log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "revoke: failed to purge resource from a channel; an orphaned alias may remain",
 				"error", err, "team_id", teamID, "channel_id", channelID, "resource_id", resourceID)
