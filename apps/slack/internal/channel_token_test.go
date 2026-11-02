@@ -1,12 +1,20 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -62,7 +70,7 @@ func TestResolveChannelTokenPolicy(t *testing.T) {
 					}
 					return out, nil
 				},
-				candidates: func(via string) ([]client.Resource, error) {
+				candidates: func(via string, _ map[string]struct{}) ([]client.Resource, error) {
 					calls = append(calls, via)
 					if via == channelTokenSlug {
 						return tc.slugs, nil
@@ -75,7 +83,7 @@ func TestResolveChannelTokenPolicy(t *testing.T) {
 				wantErr = errChannelTokenNotFound
 			}
 			if !errors.Is(err, wantErr) {
-				t.Fatalf("error=%v want=%v", err, tc.wantErr)
+				t.Fatalf("error=%v want=%v", err, wantErr)
 			}
 			if tc.wantID == "" {
 				if got != nil {
@@ -112,7 +120,7 @@ func TestResolveChannelTokenFailuresDoNotFallThrough(t *testing.T) {
 					}
 					return map[string]struct{}{"a": {}}, nil
 				},
-				candidates: func(via string) ([]client.Resource, error) {
+				candidates: func(via string, _ map[string]struct{}) ([]client.Resource, error) {
 					calls++
 					if via == stage {
 						return nil, cause
@@ -158,4 +166,120 @@ func TestAgentResolveUsesSharedLegacyAndResourceAliasPolicy(t *testing.T) {
 			t.Fatalf("resource alias result=%q err=%v", got, err)
 		}
 	})
+}
+
+func TestAgentTokenAliasLookupHasOnePageBudget(t *testing.T) {
+	for _, complete := range []bool{false, true} {
+		t.Run(strconv.FormatBool(complete), func(t *testing.T) {
+			b, _ := newBackendUnderTest(t, false)
+			var pages atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Query().Get("slug") != "" {
+					_, _ = w.Write([]byte(`{"data":[]}`))
+					return
+				}
+				pages.Add(1)
+				if r.URL.Query().Get("cursor") != "" {
+					t.Error("alias lookup paginated")
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				rows := `{"resource_id":"r_1","type":"url","alias":"report"}`
+				if complete {
+					rows += `,{"resource_id":"r_2","type":"tunnel","slug":"other","status":"active"}`
+				}
+				_, _ = w.Write([]byte(`{"data":[` + rows + `],"meta":{"has_more":true,"next_cursor":"unread"}}`))
+			}))
+			t.Cleanup(server.Close)
+			b.authClient = func(context.Context, string) (*client.Client, error) { return client.New(server.URL, "key"), nil }
+			got, err := b.ResolveToken(context.Background(), backendTC(), "report")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if complete {
+				if !strings.Contains(got, "protected resource") {
+					t.Fatalf("complete channel page did not resolve: %q", got)
+				}
+			} else if got != channelTokenIncompleteMessage {
+				t.Fatalf("partial channel page claimed certainty: %q", got)
+			}
+			if pages.Load() != 1 {
+				t.Fatalf("alias reads=%d, want one", pages.Load())
+			}
+		})
+	}
+}
+
+func TestAgentTokenClientFailureIsLoggedOnce(t *testing.T) {
+	for _, cause := range []error{errors.New("credential store unavailable"), auth.ErrWorkspaceNotConfigured} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			b, _ := newBackendUnderTest(t, false)
+			var logs bytes.Buffer
+			b.log = slog.New(slog.NewTextHandler(&logs, nil))
+			b.authClient = func(context.Context, string) (*client.Client, error) { return nil, cause }
+			got, err := b.ResolveToken(context.Background(), backendTC(), "unbound")
+			count := bytes.Count(logs.Bytes(), []byte("agent backend read failed"))
+			if errors.Is(cause, auth.ErrWorkspaceNotConfigured) {
+				if err != nil || got != workspaceNotSetupMessage(commandUser) || count != 0 {
+					t.Fatalf("setup nudge changed: message=%q err=%v logs=%d", got, err, count)
+				}
+			} else if !errors.Is(err, cause) || count != 1 || strings.Count(err.Error(), "resolve token:") != 1 {
+				t.Fatalf("client failure duplicated or hidden: err=%v logs=%d", err, count)
+			}
+		})
+	}
+}
+
+func TestInspectPartialSnapshotCannotMintGuessedAlias(t *testing.T) {
+	for _, rows := range [][]client.Resource{nil, {{ResourceID: "r_1", Type: client.ResourceTypeURL, Alias: "report"}}} {
+		t.Run(strconv.Itoa(len(rows)), func(t *testing.T) {
+			b, _ := newBackendUnderTest(t, false)
+			b.resourcesOnce.Do(func() {
+				b.resources = rows
+				b.resourcesPartial = true
+			})
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			t.Cleanup(server.Close)
+			b.authClient = func(context.Context, string) (*client.Client, error) { return client.New(server.URL, "key"), nil }
+			got, summarized, err := b.InspectToken(context.Background(), backendTC(), "report")
+			if err != nil || summarized || got != channelTokenIncompleteMessage || requests.Load() != 0 {
+				t.Fatalf("partial alias was minted: message=%q summarized=%t err=%v HTTP=%d", got, summarized, err, requests.Load())
+			}
+		})
+	}
+	bound, msg := resolveInspectableResource("bound", []slackdata.PolicyEntry{{Alias: "bound", ResourceID: "r_bound"}}, nil, true)
+	if msg != "" || bound == nil || bound.ResourceID != "r_bound" {
+		t.Fatalf("authoritative binding was blocked by partial metadata: resolved=%+v message=%q", bound, msg)
+	}
+}
+
+func TestHandleGet_PartialResourceAliasesCannotMint(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_visible", "r_unseen")
+	var pages, mints atomic.Int32
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("slug") != "" {
+			writeResourceListFixture(t, w, nil, "", false)
+			return
+		}
+		pages.Add(1)
+		if r.URL.Query().Get("cursor") != "" {
+			t.Error("alias lookup exceeded one page")
+		}
+		writeResourceListFixture(t, w, []map[string]any{{testKeyResourceID: "r_visible", testKeyType: client.ResourceTypeURL, fAttrAlias: "docs", testKeyStatus: client.StatusActive}}, "unread", true)
+	})
+	ts.addCustomerPrefix("POST", "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
+		mints.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/unexpected", "r_visible")
+	})
+	h := newAdminTestHandler(t, ts)
+	_, _, reply := newAdminSlashInvoker(t, h).invokeAdminAsync("get $docs", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, channelTokenIncompleteMessage) || mints.Load() != 0 || pages.Load() != 1 {
+		t.Fatalf("partial alias was minted or misreported: message=%q mints=%d pages=%d", reply, mints.Load(), pages.Load())
+	}
 }

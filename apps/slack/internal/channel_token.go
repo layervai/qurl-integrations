@@ -1,21 +1,24 @@
 package internal
 
 import (
+	"context"
 	"errors"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 const (
-	channelTokenAlias         = "channel alias"
-	channelTokenSlug          = "connector slug"
-	channelTokenResourceAlias = "resource alias"
+	channelTokenIncompleteMessage = "Couldn't confirm a unique resource from the incomplete list. Ask your Slack admin to bind an alias in this channel, then use that alias."
+	channelTokenAlias             = "channel alias"
+	channelTokenSlug              = "connector slug"
+	channelTokenResourceAlias     = "resource alias"
 )
 
 var (
-	errChannelTokenNotFound  = errors.New("channel token not found")
-	errChannelTokenLegacy    = errors.New("legacy direct URL binding")
-	errChannelTokenAmbiguous = errors.New("ambiguous channel token")
+	errChannelTokenIncomplete = errors.New("channel token candidate set is incomplete")
+	errChannelTokenNotFound   = errors.New("channel token not found")
+	errChannelTokenLegacy     = errors.New("legacy direct URL binding")
+	errChannelTokenAmbiguous  = errors.New("ambiguous channel token")
 )
 
 type channelTokenResource struct {
@@ -29,7 +32,7 @@ type channelTokenResource struct {
 type channelTokenSource struct {
 	alias      func() (*channelTokenResource, error)
 	allowed    func() (map[string]struct{}, error)
-	candidates func(string) ([]client.Resource, error)
+	candidates func(string, map[string]struct{}) ([]client.Resource, error)
 }
 
 func resolveChannelToken(token string, source channelTokenSource) (*channelTokenResource, error) {
@@ -52,7 +55,7 @@ func resolveChannelToken(token string, source channelTokenSource) (*channelToken
 		return nil, errChannelTokenNotFound
 	}
 	for _, via := range []string{channelTokenSlug, channelTokenResourceAlias} {
-		resources, err := source.candidates(via)
+		resources, err := source.candidates(via, allowed)
 		if err != nil {
 			return nil, err
 		}
@@ -79,4 +82,25 @@ func resolveChannelToken(token string, source channelTokenSource) (*channelToken
 		}
 	}
 	return nil, errChannelTokenNotFound
+}
+
+// A bounded alias lookup cannot prove uniqueness if unseen allowed IDs remain.
+func lookupChannelResourceAliasCandidates(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
+	if err != nil {
+		return nil, err
+	}
+	if page.HasMore {
+		missing := make(map[string]struct{}, len(allowed))
+		for id := range allowed {
+			missing[id] = struct{}{}
+		}
+		for i := range page.Resources {
+			delete(missing, page.Resources[i].ResourceID)
+		}
+		if len(missing) != 0 {
+			return nil, errChannelTokenIncomplete
+		}
+	}
+	return page.Resources, nil
 }

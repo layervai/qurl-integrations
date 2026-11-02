@@ -692,6 +692,8 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 	case errors.Is(err, errChannelTokenLegacy):
 		log.Warn("get: channel alias bound to a non-resource-id target — refusing to mint", "team_id", teamID, "channel_id", channelID, "token", token)
 		return "", &userError{msg: legacyAliasBindingMessage(token)}
+	case errors.Is(err, errChannelTokenIncomplete):
+		return "", &userError{msg: channelTokenIncompleteMessage}
 	case errors.Is(err, errChannelTokenAmbiguous):
 		log.Debug("get: token matched multiple resources allowed in channel — refusing ambiguous mint", "team_id", teamID, "channel_id", channelID, "user_id", userID, "token", token)
 		return "", &userError{msg: ambiguousResourceAliasMessage(token)}
@@ -718,13 +720,16 @@ func (h *Handler) channelTokenSourceForGet(ctx context.Context, log *slog.Logger
 			return &channelTokenResource{ResourceID: id}, nil
 		},
 		allowed: func() (map[string]struct{}, error) { return h.allowedResourceIDsForGet(ctx, log, teamID, channelID) },
-		candidates: func(via string) ([]client.Resource, error) {
+		candidates: func(via string, allowed map[string]struct{}) ([]client.Resource, error) {
 			var resources []client.Resource
 			var err error
 			if via == channelTokenSlug {
 				resources, err = h.lookupTunnelSlugResources(ctx, teamID, token)
 			} else {
-				resources, err = h.lookupListedResourceCandidatesForGet(ctx, log, teamID)
+				resources, err = h.lookupListedResourceCandidatesForGet(ctx, teamID, allowed)
+			}
+			if errors.Is(err, errChannelTokenIncomplete) {
+				return nil, err
 			}
 			if err != nil {
 				message := "get: tunnel-slug fallback lookup failed"
@@ -739,7 +744,7 @@ func (h *Handler) channelTokenSourceForGet(ctx context.Context, log *slog.Logger
 	}
 }
 
-func (h *Handler) lookupListedResourceCandidatesForGet(ctx context.Context, log *slog.Logger, teamID string) ([]client.Resource, error) {
+func (h *Handler) lookupListedResourceCandidatesForGet(ctx context.Context, teamID string, allowed map[string]struct{}) ([]client.Resource, error) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		if !errors.Is(err, auth.ErrWorkspaceNotConfigured) {
@@ -747,14 +752,7 @@ func (h *Handler) lookupListedResourceCandidatesForGet(ctx context.Context, log 
 		}
 		return nil, err
 	}
-	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
-	if err != nil {
-		return nil, err
-	}
-	if page.HasMore {
-		log.Debug("get: resource lookup scanned first page only", "scan_limit", listResourcesScanLimit, "team_id", teamID)
-	}
-	return page.Resources, nil
+	return lookupChannelResourceAliasCandidates(ctx, c, allowed)
 }
 
 // allowedResourceIDsForGet returns the resource IDs mintable from channelID:

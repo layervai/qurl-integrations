@@ -361,11 +361,11 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 	disp := escapeMrkdwnCode(token)
 	switch {
 	case errors.Is(err, errChannelTokenLegacy):
-		return legacyAliasBindingMessage(disp), nil
+		return legacyAliasBindingMessage(token), nil
 	case errors.Is(err, errChannelTokenAmbiguous):
 		return ambiguousResourceAliasMessage(disp), nil
-	case errors.Is(err, errChannelTokenNotFound) && b.resourceScanPartial():
-		return channelResourcesIncompleteEmpty, nil
+	case errors.Is(err, errChannelTokenIncomplete):
+		return channelTokenIncompleteMessage, nil
 	case errors.Is(err, errChannelTokenNotFound):
 		return fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", disp), nil
 	case err != nil:
@@ -385,7 +385,6 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 
 func (b *agentBackend) channelTokenSourceForResolve(ctx context.Context, tc *agent.TurnContext, token string) channelTokenSource {
 	var c *client.Client
-	var allowed map[string]struct{}
 	return channelTokenSource{
 		alias: func() (*channelTokenResource, error) {
 			id, found, err := b.store.LookupChannelAlias(ctx, tc.TeamID, tc.ChannelID, token)
@@ -398,23 +397,21 @@ func (b *agentBackend) channelTokenSourceForResolve(ctx context.Context, tc *age
 			return &channelTokenResource{ResourceID: id}, nil
 		},
 		allowed: func() (map[string]struct{}, error) {
-			var err error
-			allowed, err = b.channelAllowed(ctx, tc)
+			allowed, err := b.channelAllowed(ctx, tc)
 			if err != nil {
 				return nil, fmt.Errorf("channel scope: %w", err)
 			}
 			return allowed, nil
 		},
-		candidates: func(via string) ([]client.Resource, error) {
+		candidates: func(via string, allowed map[string]struct{}) ([]client.Resource, error) {
 			if c == nil {
-				var nudge string
 				var err error
-				c, nudge, err = b.authClientForTurn(ctx, "resolve token: client", tc)
-				if err != nil {
-					return nil, err
+				c, err = b.authClient(ctx, tc.TeamID)
+				if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+					return nil, &userError{msg: workspaceNotSetupMessage(commandUser)}
 				}
-				if nudge != "" {
-					return nil, &userError{msg: nudge}
+				if err != nil {
+					return nil, fmt.Errorf("client: %w", err)
 				}
 			}
 			if via == channelTokenSlug {
@@ -424,11 +421,7 @@ func (b *agentBackend) channelTokenSourceForResolve(ctx context.Context, tc *age
 				}
 				return out.Resources, nil
 			}
-			resources, _, err := b.channelResources(ctx, c, allowed)
-			if err != nil {
-				return nil, err
-			}
-			return resources, nil
+			return lookupChannelResourceAliasCandidates(ctx, c, allowed)
 		},
 	}
 }

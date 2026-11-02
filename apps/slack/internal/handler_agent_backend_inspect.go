@@ -119,17 +119,8 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	if err != nil {
 		return b.failInspect("inspect token: aliases", err)
 	}
-	resolved, msg := resolveInspectableResource(token, entries, resources)
+	resolved, msg := resolveInspectableResource(token, entries, resources, partial)
 	if msg != "" {
-		// resolveInspectableResource returns a message only when nothing resolved.
-		if partial {
-			// Slug and resource-alias matching read from the scanned set, so an
-			// unfinished scan cannot support "doesn't resolve to anything reachable
-			// here" — that would be a definitive claim from an incomplete read. Say
-			// what we actually know instead. (A channel-alias hit resolves from
-			// channel_policies, which the scan doesn't gate, so it is unaffected.)
-			return channelResourcesIncompleteEmpty, false, nil
-		}
 		return msg, false, nil
 	}
 
@@ -170,7 +161,7 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	return formatInspectedSnapshot(token, resolved, snapshot), true, nil
 }
 
-func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource) (resolved *channelTokenResource, userMsg string) {
+func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource, partial bool) (resolved *channelTokenResource, userMsg string) {
 	byID := make(map[string]*client.Resource, len(resources))
 	allowed := make(map[string]struct{}, len(resources))
 	for i := range resources {
@@ -186,11 +177,18 @@ func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, r
 			}
 			return nil, errChannelTokenNotFound
 		},
-		allowed:    func() (map[string]struct{}, error) { return allowed, nil },
-		candidates: func(string) ([]client.Resource, error) { return resources, nil },
+		allowed: func() (map[string]struct{}, error) {
+			if partial {
+				return nil, errChannelTokenIncomplete
+			}
+			return allowed, nil
+		},
+		candidates: func(string, map[string]struct{}) ([]client.Resource, error) { return resources, nil },
 	})
 	disp := escapeMrkdwnCode(token)
 	switch {
+	case errors.Is(err, errChannelTokenIncomplete):
+		return nil, channelTokenIncompleteMessage
 	case errors.Is(err, errChannelTokenLegacy):
 		return nil, fmt.Sprintf("`$%s` is bound in this channel, but it still points at a legacy direct URL binding that can't be summarized automatically. Ask your Slack admin to rebind it to a protected resource.", disp)
 	case errors.Is(err, errChannelTokenAmbiguous):
