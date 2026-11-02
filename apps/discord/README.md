@@ -300,8 +300,10 @@ budget, revocation is unconfirmed. Check the grants before manual row cleanup.
 The send writer now adds `guild_sender_id = JSON.stringify([guildId, senderDiscordId])`
 using the shared `utils/guild-sender-key` encoder. New sends with no recorded
 guild use `[null, senderId]`, the same explicit legacy bucket as the backfill.
-This is an additive preparation step. The current
-revoke reader still uses the existing sender index, so old records remain visible.
+In multi-tenant mode `/qurl revoke` queries the current guild and authenticated
+sender. `/qurl revoke history:legacy` queries the explicit legacy bucket; use the
+original server and API key to revoke these older sends. The command does not
+guess their originating guild. Single-guild default history remains unchanged.
 
 The infrastructure change must add `guild_sender_id-created_at-index` with the
 same metadata projection as `sender_discord_id-created_at-index`. Deploy the

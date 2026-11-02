@@ -3703,12 +3703,22 @@ async function handleRevoke(interaction, apiKey) {
   if (!apiKey) {
     return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
   }
+  const legacy = interaction.options.getString('history') === 'legacy';
+  if (config.isMultiTenant && !interaction.guildId) {
+    return interaction.reply({ content: 'Run `/qurl revoke` in the server where you sent the links.', ephemeral: true });
+  }
   await interaction.deferReply({ ephemeral: true });
 
-  const recentSends = await db.getRecentSends(interaction.user.id, 5);
+  const recentSends = config.isMultiTenant || legacy
+    ? await db.getRecentSends(interaction.user.id, 5, { guildId: legacy ? null : interaction.guildId })
+    : await db.getRecentSends(interaction.user.id, 5);
 
   if (recentSends.length === 0) {
-    return interaction.editReply({ content: 'No recent sends to revoke.' });
+    return interaction.editReply({ content: legacy
+      ? 'No recent legacy sends to revoke.'
+      : config.isMultiTenant
+        ? 'No recent sends in this server. For older sends without a recorded server, run `/qurl revoke history:legacy` in the original server.'
+        : 'No recent sends to revoke.' });
   }
 
   // Open the flow row BEFORE rendering the menu. If the harness
@@ -3794,7 +3804,11 @@ async function handleRevoke(interaction, apiKey) {
 
   const row = new ActionRowBuilder().addComponents(select);
   await interaction.editReply({
-    content: 'Select a send to revoke all its links:',
+    content: legacy
+      ? 'Legacy sends have no recorded server. Use the original server and API key. Select a send to revoke all its links:'
+      : config.isMultiTenant
+        ? 'Select a send from this server to revoke all its links:'
+        : 'Select a send to revoke all its links:',
     components: [row],
   });
 }
@@ -9003,6 +9017,15 @@ const commands = [
       builder.addSubcommand(sub =>
         sub.setName('revoke')
           .setDescription('Revoke links from a previous send')
+          .addStringOption(opt =>
+            opt.setName('history')
+              .setDescription('Current server, or older sends with no recorded server')
+              .addChoices(
+                { name: 'Current server (default)', value: 'current' },
+                { name: 'Legacy (server unknown)', value: 'legacy' },
+              )
+              .setRequired(false)
+          )
       );
       builder.addSubcommand(sub =>
         sub.setName('help')
