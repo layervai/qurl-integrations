@@ -400,15 +400,8 @@ func validateIdempotencyKey(key string) error {
 //     does NOT accept resource_id in its body — a body-keyed call
 //     surfaces as 400 invalid_target_url because target_url is
 //     required for that endpoint.
-//
-// Note: Create takes a value receiver for backward-compat with the existing
-// callers in apps/slack; the new methods ([Client.CreateResource],
-// [Client.UpdateResource]) take *Input pointers, which is the going-forward
-// idiom. Pointer migration tracked at #146.
-//
-//nolint:gocritic // hugeParam: CreateInput is 120 bytes; *CreateInput migration tracked at #146.
-func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
-	if input.TargetURL == "" && input.ResourceID == "" {
+func (c *Client) Create(ctx context.Context, input *CreateInput) (*CreateOutput, error) {
+	if input == nil || (input.TargetURL == "" && input.ResourceID == "") {
 		return nil, ErrCreateRequiresTarget
 	}
 	if input.TargetURL != "" && input.ResourceID != "" {
