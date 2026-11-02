@@ -5,6 +5,8 @@ listens on `127.0.0.1:8080`; only the Connector provides the access path. Do
 not publish port 8080 or 9090, create an origin load balancer, or enable
 `ALLOW_NON_LOOPBACK_LISTEN`.
 
+<!-- TODO(upstream-contract): mirrors the qurl CLI image, daemon flags, qurl-image.txt asset and projected-secret/state socket contracts. -->
+
 ## Prepare one installation
 
 1. Put `index.html` and the site's other objects in a private S3 bucket. Keep
@@ -53,8 +55,8 @@ a fresh enrollment. None of the examples grants public inbound network access.
 
 ## Docker Compose on a Linux host
 
-This example uses an EC2 instance role with bucket access and IMDSv2 hop limit
-2. For a different credential provider, add the documented read-only credential
+This example uses an EC2 instance role with bucket access and an IMDSv2 hop
+limit of 2. For a different credential provider, add the documented read-only credential
 mount or workload identity to **origin**. Do not copy AWS credentials into the
 Compose file. Both containers must use the same CPU architecture.
 
@@ -117,7 +119,9 @@ docker compose logs --tail=50 origin qurl
 `service_started` orders launch, not readiness. The Connector may report local
 connection errors until the origin is listening. If the origin is recreated
 or auto-restarts, restart/recreate **qurl** too: it uses the origin's network
-namespace. After a Docker daemon restart, check both services. See
+namespace. After a Docker daemon restart, check both services. Compose mounts
+its already-private `0700` state directory directly; the ECS/Kubernetes volume
+roots instead use a nested owner-only state directory. See
 [Compose networking](https://docs.docker.com/compose/how-tos/networking/).
 
 After successful enrollment and the smoke below, remove the enrollment-token
@@ -205,7 +209,11 @@ Register the task definition with `aws ecs register-task-definition
 minimum healthy percent **0**, maximum percent **100**, and the prepared
 subnet/security-group settings. This stops the old task before a replacement
 uses the same durable identity. Do not manually run a second copy of the task.
-Both containers are essential; losing either replaces the task.
+Both containers are essential; losing either replaces the task. Keep the short
+`/var/lib/qurl-volume/state` path shown: the daemon puts its socket on that
+writable state volume. It needs the `/tmp` socket fallback only for an overlong
+state path. Unlike the optional working-space mounts in the other examples,
+Fargate has no writable `/tmp` in this read-only container.
 
 After successful enrollment and the smoke, register a warm-start revision
 without the enrollment-token flag/path, bootstrap mount and bootstrap volume.
@@ -221,6 +229,11 @@ The pod's containers [share localhost](https://kubernetes.io/docs/concepts/servi
 Do not create a Service or Ingress for the origin, use `hostNetwork`, or scale
 this single identity above one replica. The cluster needs a default StorageClass
 that supports the PVC and the `fsGroup` ownership used below.
+
+The headless runtime accepts the projected Secret as `root:65532` with mode
+`0440`: a dedicated readable process group is allowed, while world access or
+group write is rejected. Only qurl mounts this Secret. Keep the local source
+file owner-only.
 
 Create these objects from your local generated config and token. Set the
 intended namespace explicitly in your kubectl context first:
