@@ -4,8 +4,8 @@ jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test-api-key',
   QURL_ENDPOINT: 'https://api.test.local',
   CONNECTOR_URL: 'https://connector.test.local',
-  GOOGLE_MAPS_API_KEY: 'test-google-key',
-  MAP_COMMAND_ENABLED: false,
+  // Legacy task settings cannot restore Maps registration.
+  MAP_COMMAND_ENABLED: true,
   DETECT_COMMAND_ENABLED: false,
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
@@ -175,7 +175,6 @@ const mockUploadToConnector = jest.fn();
 const mockDownloadAndUpload = jest.fn();
 const mockReUploadBuffer = jest.fn();
 const mockMintLinks = jest.fn();
-const mockUploadJsonToConnector = jest.fn();
 const mockRevokeMintedLinks = jest.fn();
 jest.mock('../src/connector', () => ({
   revokeMintedLinks: mockRevokeMintedLinks,
@@ -183,7 +182,6 @@ jest.mock('../src/connector', () => ({
   downloadAndUpload: mockDownloadAndUpload,
   reUploadBuffer: mockReUploadBuffer,
   mintLinks: mockMintLinks,
-  uploadJsonToConnector: mockUploadJsonToConnector,
 }));
 
 const mockCreateOneTimeLink = jest.fn();
@@ -193,8 +191,8 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: mockGetResourceStatus,
 }));
 
-const { mockPlacesModule } = require('./helpers/places-mock');
-jest.mock('../src/places', () => mockPlacesModule);
+
+
 
 const mockCreateFlow = jest.fn().mockResolvedValue({ created: true, version: 1 });
 const mockLoadFlow = jest.fn();
@@ -1837,8 +1835,8 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
 });
 
-describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
-  const { mockSearchPlaces } = require('./helpers/places-mock');
+describe('Maps is retired even with the legacy flag enabled', () => {
+
 
   it('SETUP_SUCCESS_MSG omits /qurl map', () => {
     expect(_test.SETUP_SUCCESS_MSG).not.toContain('/qurl map');
@@ -1893,7 +1891,6 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
   });
 
   it('autocomplete for /qurl map location does NOT call searchPlaces (Places quota safety)', async () => {
-    mockSearchPlaces.mockClear();
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -1906,7 +1903,6 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     });
     await handleCommand(interaction);
     expect(interaction.respond).toHaveBeenCalledWith([]);
-    expect(mockSearchPlaces).not.toHaveBeenCalled();
   });
 
   it('dispatcher replies with rename hint for stale `/qurl file` submissions (post-rename to /qurl send)', async () => {

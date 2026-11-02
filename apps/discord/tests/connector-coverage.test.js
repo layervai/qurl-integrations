@@ -135,7 +135,6 @@ describe('Connector client — coverage boost', () => {
     const uploaders = [
       ['Connector upload', (c) => c.uploadToConnector('https://cdn.discordapp.com/f.png', 'f.png', 'image/png'), [cdnDownload]],
       ['Connector re-upload', (c) => c.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain'), []],
-      ['Connector JSON upload', (c) => c.uploadJsonToConnector({ type: 'google-map' }, 'loc.json'), []],
     ];
     function mockUploadReply(pre, body) {
       const f = jest.fn();
@@ -295,21 +294,7 @@ describe('Connector client — coverage boost', () => {
       expect(appended.find(f => f.name === 'viewer_ttl_seconds')).toBeDefined();
     });
 
-    it('uploadJsonToConnector appends viewer_ttl_seconds when provided', async () => {
-      globalThis.fetch = jest.fn().mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, hash: 'h', resource_id: 'r' }),
-      });
-      const originalAppend = globalThis.FormData.prototype.append;
-      const appended = [];
-      globalThis.FormData.prototype.append = function (...args) { appended.push({ name: args[0], value: args[1] }); return originalAppend.apply(this, args); };
-      try {
-        await connector.uploadJsonToConnector({ type: 'google-map' }, 'loc.json', undefined, 60);
-      } finally { globalThis.FormData.prototype.append = originalAppend; }
-      const ttlField = appended.find(f => f.name === 'viewer_ttl_seconds');
-      expect(ttlField).toBeDefined();
-      expect(ttlField.value).toBe('60');
-    });
+
 
     describe('mint admission retry', () => {
       let wait;
@@ -829,23 +814,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     assertNoFullHashLeaked();
   });
 
-  it('uploadJsonToConnector logs md5_prefix (8 chars), never the full hash', async () => {
-    globalThis.fetch = jest.fn().mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ success: true, hash: FULL_MD5, resource_id: 'r3' }),
-    });
 
-    await connector.uploadJsonToConnector(
-      { type: 'google-map', url: 'https://maps.app.goo.gl/x' },
-      'location.json',
-    );
-
-    expect(logger.info).toHaveBeenCalledWith('Uploaded JSON to connector', {
-      md5_prefix: MD5_PREFIX,
-      resource_id: 'r3',
-    });
-    assertNoFullHashLeaked();
-  });
 
   it('md5_prefix is undefined (not crash) when connector returns no hash', async () => {
     globalThis.fetch = jest.fn()

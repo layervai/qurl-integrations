@@ -39,12 +39,8 @@ const ORPHAN_DELETE_TIMEOUT_MS = 10000;
 
 const router = express.Router();
 
-const readyCommandsPlain = config.MAP_COMMAND_ENABLED
-  ? '/qurl send and /qurl map are ready.'
-  : '/qurl send is ready.';
-const readyCommandsMarkdown = config.MAP_COMMAND_ENABLED
-  ? '`/qurl send` and `/qurl map`'
-  : '`/qurl send`';
+const readyCommandsPlain = '/qurl send is ready.';
+const readyCommandsMarkdown = '`/qurl send`';
 
 // Browser-session cookie binding (parallel to /auth/github's qurl_oauth_session
 // pattern). /start sets a HttpOnly cookie holding a random 16-byte token;

@@ -91,7 +91,6 @@ jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test-key',
   QURL_ENDPOINT: 'https://api.test.local',
   CONNECTOR_URL: 'https://connector.test.local',
-  GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
@@ -116,7 +115,7 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: jest.fn(), deleteLink: jest.fn(),
 }));
 
-jest.mock('../src/connector', () => ({ uploadJsonToConnector: jest.fn() }));
+jest.mock('../src/connector', () => ({}));
 
 const { _test } = require('../src/commands');
 const {

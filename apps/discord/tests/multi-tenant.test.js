@@ -277,7 +277,7 @@ describe('handleCommand dispatch-time filter', () => {
       }));
       jest.doMock('../src/qurl', () => ({ mintLink: jest.fn() }));
       jest.doMock('../src/connector', () => ({ uploadAttachment: jest.fn() }));
-      jest.doMock('../src/places', () => ({ autocomplete: jest.fn() }));
+
 
       const { handleCommand } = require('../src/commands');
 

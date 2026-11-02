@@ -16,7 +16,7 @@ const COLORS = {
 // qURL resource types
 const RESOURCE_TYPES = {
   FILE: 'file',
-  MAPS: 'maps',
+  MAPS: 'maps', // Read old flow/send records for retirement replies and revoke only.
 };
 
 // Trust signals surfaced on the per-recipient DM embed (sender provenance

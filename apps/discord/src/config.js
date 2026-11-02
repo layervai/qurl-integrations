@@ -516,7 +516,7 @@ module.exports = {
   //
   // QURL_ENDPOINT can't be missing — the
   // ternary below always yields a value. QURL_API_KEY is only the
-  // global fallback for /qurl send + /qurl map; every deployment shape
+  // global fallback for /qurl send; every deployment shape
   // configures a per-guild key through /qurl setup, so it is
   // absent from prodRequired(). The separate production webhook gate requires
   // QURL_API_KEY when QURL_WEBHOOK_SECRET is set, for default-owner discovery.
@@ -546,36 +546,14 @@ module.exports = {
   CONNECTOR_URL: process.env.CONNECTOR_URL
     || (process.env.NODE_ENV === 'production' ? 'https://get.qurl.link:9808' : 'http://localhost:9808'),
 
-  // Google Maps (location autocomplete)
-  GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,
-
-  // /qurl map feature toggle. Default OFF — the bot ships without
-  // /qurl map registered as a slash subcommand. Operator opts in per
-  // deploy by setting MAP_COMMAND_ENABLED=true on the task definition
-  // (terraform var `map_command_enabled` plumbs this through). Must
-  // be the literal string "true"; any other value (unset, empty,
-  // "TRUE", "1", "yes") keeps the feature off, so an env-var typo
-  // can't silently re-enable a command that requires a working
-  // GOOGLE_MAPS_API_KEY in SSM. See the slash-command builder IIFE
-  // in commands.js for the full set of MAP_COMMAND_ENABLED gates.
-  //
-  // Snapshot semantics: this value is read ONCE at module load and
-  // baked into the slash registration (commands.js IIFE),
-  // SETUP_SUCCESS_MSG, and the OAuth success/DM copy.
-  // Flipping MAP_COMMAND_ENABLED at runtime is a no-op until the task
-  // restarts; the deploy model handles this
-  // (ECS rolls fresh tasks on every task-def revision).
-  MAP_COMMAND_ENABLED: process.env.MAP_COMMAND_ENABLED === 'true',
-
-  // DETECT_COMMAND_ENABLED gates /qurl detect (#1101) exactly as
-  // MAP_COMMAND_ENABLED gates /qurl map: default OFF, same snapshot/restart
-  // semantics. The connector /api/detect backend 503/404s until the watermark
+  // DETECT_COMMAND_ENABLED gates /qurl detect (#1101): default OFF.
+  // Its value is read once at module load and requires a restart. The connector /api/detect backend 503/404s until the watermark
   // stack is ACTIVATED (a separate gated step AFTER the connector deploys), so
   // detect stays DARK until an operator flips this at activation — no
   // visible-but-failing command in the interim.
   DETECT_COMMAND_ENABLED: process.env.DETECT_COMMAND_ENABLED === 'true',
 
-  // qURL send limits (/qurl send + /qurl map) — both must be > 0. A
+  // qURL send limits (/qurl send) — both must be > 0. A
   // cooldown of 0 would silently disable the rate limit; a recipients
   // cap of 0 would reject every send.
   //

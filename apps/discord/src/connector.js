@@ -1322,35 +1322,6 @@ async function detectWatermark(imageBytes, { guildId, contentType } = {}) {
  * Upload a JSON object to the connector as a file.
  * Used for structured payloads like location data.
  */
-async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSeconds) {
-  filename = sanitizeFilename(filename);
-  if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
 
-  const blob = new Blob([JSON.stringify(jsonPayload)], { type: 'application/json' });
-  const form = new FormData();
-  form.append('file', blob, filename);
-  appendViewerTtl(form, viewerTtlSeconds);
 
-  const uploadResponse = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
-    method: 'POST',
-    body: form,
-    headers: { ...connectorAuthHeaders(apiKey) },
-    signal: AbortSignal.timeout(60000),
-  });
-
-  if (!uploadResponse.ok) {
-    return throwConnectorError('Connector JSON upload', uploadResponse);
-  }
-
-  const result = await uploadResponse.json();
-  assertUploadResult('Connector JSON upload', result);
-
-  logger.info('Uploaded JSON to connector', {
-    md5_prefix: md5Prefix(result.hash),
-    resource_id: result.resource_id,
-  });
-
-  return result;
-}
-
-module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, revokeMintedLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
+module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, revokeMintedLinks, detectWatermark, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
