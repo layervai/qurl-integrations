@@ -529,12 +529,7 @@ func TestHandleListEditClick_OpensModal(t *testing.T) {
 		t.Fatalf("edit click ack = %d %q, want 200 {}", w.Code, w.Body.String())
 	}
 
-	var view []byte
-	select {
-	case view = <-views:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView was not called")
-	}
+	view := waitForTestValue(t, views, "OpenView was not called")
 	var modal map[string]any
 	if err := json.Unmarshal(view, &modal); err != nil {
 		t.Fatalf("modal JSON: %v", err)
@@ -1364,12 +1359,7 @@ func TestHandleListEditClick_PrefillsExposedChannels(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	var view []byte
-	select {
-	case view = <-views:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView not called")
-	}
+	view := waitForTestValue(t, views, "OpenView not called")
 	js := string(view)
 	for _, want := range []string{blockKitTypeMultiConvSelect, "initial_conversations", testEditChannel, otherChannel} {
 		if !strings.Contains(js, want) {
@@ -1405,12 +1395,7 @@ func TestHandleListEditClick_ChannelEnumerationDegrades(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	var view []byte
-	select {
-	case view = <-views:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView not called — the modal must still open when enumeration fails")
-	}
+	view := waitForTestValue(t, views, "OpenView not called — the modal must still open when enumeration fails")
 	js := string(view)
 	if !strings.Contains(js, blockKitTypeMultiConvSelect) || !strings.Contains(js, testEditChannel) {
 		t.Errorf("degraded modal missing channels field / current channel: %s", js)
