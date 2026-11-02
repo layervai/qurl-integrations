@@ -113,12 +113,18 @@ export async function mintConnectorView(
   uploadUrl: string,
   resourceId: string,
   apiKey: string,
-  opts: { expiresAt: string; oneTimeUse?: boolean },
+  opts: { expiresAt: string; oneTimeUse?: boolean; sessionDurationSeconds?: number },
 ): Promise<{ qurl_link: string; qurl_id: string; expires_at: string }> {
+  const seconds = opts.sessionDurationSeconds;
+  // TODO(upstream-contract): connector and qurl-service accept whole seconds, 1s–24h.
+  if (seconds !== undefined && (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400)) {
+    throw new RangeError('sessionDurationSeconds must be an integer from 1 to 86400');
+  }
   const res = await fetchWithTransientRetry(`${uploadUrl}/mint_link/${encodeURIComponent(resourceId)}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ n: 1, expires_at: opts.expiresAt, one_time_use: opts.oneTimeUse ?? true }),
+    body: JSON.stringify({ n: 1, expires_at: opts.expiresAt, one_time_use: opts.oneTimeUse ?? true,
+      ...(seconds !== undefined && { session_duration: `${seconds}s` }) }),
   });
   if (!res.ok) throw new Error(`mint_link failed: ${res.status} ${await res.text()}`);
   const data = (await res.json()) as {
@@ -245,6 +251,7 @@ export const REVOKE_CONFIRM_WAIT_MS = 35_000;
 /** Revoke the resource. A successful DELETE confirms the protection update.
  * Repeated DELETEs retry the same committed epoch (qurl-service RevokeQurl).
  * A management status of `revoked` alone does not confirm that update.
+ * A confirmation 404 succeeds only after the dedicated committed-revocation code.
  * Cleanup retries only a 429 within the sweep's shared wait budget.
  * cleanupRetryBudget is reserved for cleanup with confirmPending=false. */
 export async function revokeLink(
@@ -256,16 +263,31 @@ export async function revokeLink(
   const url = new URL(baseUrl);
   url.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
   const init = { method: 'DELETE', headers: { Authorization: `Bearer ${apiKey}` } };
+  let committed = false;
   const res = cleanupRetryBudget
     ? await fetchWithCleanupRetry(url, init, cleanupRetryBudget)
-    : await fetchWithTransientRetry(url, init, confirmPending
-      ? { maxAttempts: 2, maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS }
-      : { maxAttempts: 1 });
+    : await fetchWithTransientRetry(url, init, confirmPending ? {
+      maxAttempts: 2,
+      maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS,
+      shouldRetry: async (response) => {
+        if (response.status !== 503) return true;
+        const raw = response.headers.get('retry-after')?.trim() ?? '';
+        const waitMs = /^\d+$/.test(raw) ? Number(raw) * 1000 : NaN;
+        // Never shorten a server directive to fit this caller's wait budget.
+        if (waitMs > REVOKE_CONFIRM_WAIT_MS) return false;
+        // This caller needs only the status; the retry response body is discarded.
+        const problem = await response.json().catch(() => null) as { error?: { code?: unknown } } | null;
+        // TODO(upstream-contract): qurl-service#1998 reserves this code for a saved revoke.
+        committed = problem?.error?.code === 'revocation_pending';
+        return !committed || waitMs > 0;
+      },
+    } : { maxAttempts: 1 });
   await res.body?.cancel().catch(() => {});
-  if (!res.ok && confirmPending) {
+  const confirmed = res.status === 204 || (committed && res.status === 404);
+  if (!confirmed && confirmPending) {
     console.warn(`[revokeLink] DELETE returned ${res.status}; protection update not confirmed`);
   }
-  return res.ok;
+  return confirmed;
 }
 
 export interface LinkStatus {
@@ -381,7 +403,7 @@ function parseResourceStatus(value: unknown, id: string): ResourceStatus | null 
 }
 
 /** A typed HTTP failure from the qURL management lookup. */
-class StatusCheckError extends Error {
+export class StatusCheckError extends Error {
   constructor(readonly status: number) {
     super(`qURL lookup failed: ${status}`);
     this.name = 'StatusCheckError';

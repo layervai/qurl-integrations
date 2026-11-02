@@ -2,6 +2,9 @@ package state
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -260,7 +263,11 @@ func saveTestAgentState(t *testing.T, store *Store) qurl.AgentStateStore {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sdkStore.SaveAgentState(context.Background(), &qurl.AgentState{AgentID: "a"}); err != nil {
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sdkStore.SaveAgentState(context.Background(), &qurl.AgentState{AgentID: "a", PrivateKeyB64: base64.StdEncoding.EncodeToString(key.Bytes()), PublicKeyB64: base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())}); err != nil {
 		t.Fatal(err)
 	}
 	return sdkStore

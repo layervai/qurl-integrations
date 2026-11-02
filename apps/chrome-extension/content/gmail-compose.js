@@ -170,11 +170,25 @@
     }
   }
 
+  function notifyLateInsertion(requestId) {
+    try {
+      chrome.runtime.sendMessage({ type: 'INSERT_LINKS_LATE_SUCCESS', requestId }, function () {
+        // The popup can be closed; consume the expected no-listener error.
+        void chrome.runtime.lastError;
+      });
+    } catch {
+      // Extension teardown must not undo a completed insertion or its dedup cache.
+    }
+  }
+
   function finishTrackedInsertRequest(requestId, response) {
     const entry = insertRequestState.get(requestId);
     if (!entry) {
+      if (response.success === true) notifyLateInsertion(requestId);
       return;
     }
+
+    const lateSuccess = entry.status === 'done' && response.success === true;
 
     // Surface the documented race: the pending timeout already settled this entry with a
     // timeout error, and now the real insertion is completing late and overwriting it. The
@@ -224,6 +238,8 @@
     entry.cleanupTimerId = window.setTimeout(function () {
       insertRequestState.delete(requestId);
     }, INSERT_REQUEST_CACHE_TTL_MS);
+
+    if (lateSuccess) notifyLateInsertion(requestId);
   }
 
   // ==================== Gmail Compose Body Finder ====================

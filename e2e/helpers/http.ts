@@ -99,6 +99,7 @@ function isRetryableStatus(status: number, method: string): boolean {
  * @param maxAttempts total attempts including the first (default 3)
  * @param baseDelayMs linear backoff base — waits `baseDelayMs * attempt` between
  *   tries, i.e. 1s then 2s at the default (well under jest's 120s timeout)
+ * @param shouldRetry optional response filter before body cancellation; cannot enable an otherwise unsafe replay.
  * @param maxRetryAfterMs opt-in limit for a 503's Retry-After, per attempt.
  *   Default 0 keeps existing callers on local backoff. Directives above the
  *   limit are declined; valid shorter directives cannot shorten local backoff.
@@ -107,8 +108,8 @@ function isRetryableStatus(status: number, method: string): boolean {
 export async function fetchWithTransientRetry(
   input: string | URL,
   init?: RequestInit,
-  { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0, cleanupRetryBudget }:
-    { maxAttempts?: number; baseDelayMs?: number; maxRetryAfterMs?: number; cleanupRetryBudget?: CleanupRetryBudget } = {},
+  { maxAttempts = 3, baseDelayMs = 1000, maxRetryAfterMs = 0, cleanupRetryBudget, shouldRetry }:
+    { maxAttempts?: number; baseDelayMs?: number; maxRetryAfterMs?: number; cleanupRetryBudget?: CleanupRetryBudget; shouldRetry?: (response: Response) => Promise<boolean> } = {},
 ): Promise<Response> {
   // Clamp once here so the loop never has to defend against a negative ceiling.
   const retryAfterCeilingMs = Math.max(0, maxRetryAfterMs);
@@ -120,6 +121,7 @@ export async function fetchWithTransientRetry(
     attempt < maxAttempts && !res.ok && isRetryableStatus(res.status, method);
     attempt++
   ) {
+    if (shouldRetry && !await shouldRetry(res)) return res;
     if (res.status === 429 && cleanupRetryBudget) {
       if (retriedCleanupRateLimit) return res;
       const previous = res;
