@@ -1124,3 +1124,62 @@ func seedSerialize(item map[string]ddbtypes.AttributeValue) string {
 // keep seedSerialize referenced so it's available for tests that
 // surface fixture-mismatch errors.
 var _ = seedSerialize
+
+// Service cleanup uses an atomic absent-binding check plus a policy delete.
+func (f *fakeDDB) TransactWriteItems(_ context.Context, in *dynamodb.TransactWriteItemsInput, _ ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for index, operation := range in.TransactItems {
+		var tableName, condition string
+		var key, values map[string]ddbtypes.AttributeValue
+		var names map[string]string
+		switch {
+		case operation.ConditionCheck != nil:
+			check := operation.ConditionCheck
+			tableName, condition, key, values, names = aws.ToString(check.TableName), aws.ToString(check.ConditionExpression), check.Key, check.ExpressionAttributeValues, check.ExpressionAttributeNames
+		case operation.Delete != nil:
+			deletion := operation.Delete
+			tableName, condition, key, values, names = aws.ToString(deletion.TableName), aws.ToString(deletion.ConditionExpression), deletion.Key, deletion.ExpressionAttributeValues, deletion.ExpressionAttributeNames
+		default:
+			return nil, errors.New("unsupported fake policy transaction item")
+		}
+		table, schema, err := f.tableAndSchema(tableName)
+		if err != nil {
+			return nil, err
+		}
+		encoded, err := compositeKey(schema, key)
+		if err != nil {
+			return nil, err
+		}
+		if condition != "" {
+			item, present := table[encoded]
+			matched, err := evalCondition(condition, item, present, values, names)
+			if err != nil {
+				return nil, err
+			}
+			if !matched {
+				reasons := make([]ddbtypes.CancellationReason, len(in.TransactItems))
+				for i := range reasons {
+					reasons[i].Code = aws.String("None")
+				}
+				reasons[index].Code = aws.String("ConditionalCheckFailed")
+				return nil, &ddbtypes.TransactionCanceledException{CancellationReasons: reasons}
+			}
+		}
+	}
+	for _, operation := range in.TransactItems {
+		if operation.Delete == nil {
+			continue
+		}
+		table, schema, err := f.tableAndSchema(aws.ToString(operation.Delete.TableName))
+		if err != nil {
+			return nil, err
+		}
+		key, err := compositeKey(schema, operation.Delete.Key)
+		if err != nil {
+			return nil, err
+		}
+		delete(table, key)
+	}
+	return &dynamodb.TransactWriteItemsOutput{}, nil
+}

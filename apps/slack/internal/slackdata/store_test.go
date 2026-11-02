@@ -1619,6 +1619,9 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 	t.Run("guarded delete skips rows updated after cutoff", func(t *testing.T) {
 		var deleteCalls int
 		store := newStore(&stubDDB{
+			getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr("T1")}}, nil
+			},
 			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
 				return &dynamodb.QueryOutput{
 					Items: []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_new", []string{"r1"}, nil)},

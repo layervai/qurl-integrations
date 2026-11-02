@@ -498,18 +498,16 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 // rows have no TTL. Durable cleanup and reinstall-safe writer fencing remain
 // required (#931); a successful sweep alone does not establish that every row
 // is gone. Lifecycle callers must treat returned errors as cleanup failures.
-// Sequential DeleteItem
-// (not BatchWriteItem) keeps the [DynamoDBClient] surface unchanged; per-team
-// channel-policy rows are bounded by the channels a workspace used the bot in,
-// so the round-trips stay modest.
+// The unconditional variant uses sequential DeleteItem. Cutoff cleanup also
+// checks binding state atomically when the workspace is gone. Neither path
+// changes request-time reads.
 func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) error {
 	return s.purgeTeamChannelPolicies(ctx, teamID, time.Time{})
 }
 
-// PurgeTeamChannelPoliciesBefore deletes channel_policies rows for teamID only
-// when they have not been updated since cutoff. Rows created or changed by a
-// fast reinstall/setup after the teardown signal are retained rather than being
-// clobbered by a delayed async purge.
+// PurgeTeamChannelPoliciesBefore removes observed orphan policies regardless of
+// timestamp when the binding is absent. Its atomic check protects a concurrent
+// reinstall. A still-bound workspace retains the cutoff guard for newer rows.
 func (s *Store) PurgeTeamChannelPoliciesBefore(ctx context.Context, teamID string, cutoff time.Time) error {
 	return s.purgeTeamChannelPolicies(ctx, teamID, cutoff)
 }
@@ -517,6 +515,14 @@ func (s *Store) PurgeTeamChannelPoliciesBefore(ctx context.Context, teamID strin
 func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cutoff time.Time) error {
 	if teamID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeTeamChannelPolicies: team_id is required"}
+	}
+	unbound := false
+	if !cutoff.IsZero() {
+		binding, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(s.WorkspaceMappingsName), Key: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID)}, ConsistentRead: aws.Bool(true)})
+		if err != nil {
+			return ddbToError("PurgeTeamChannelPolicies.binding", err)
+		}
+		unbound = len(binding.Item) == 0
 	}
 	var startKey map[string]ddbtypes.AttributeValue
 	var deleteErrs []error
@@ -553,28 +559,13 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 				})
 				continue
 			}
-			deleteInput := &dynamodb.DeleteItemInput{
-				TableName: aws.String(s.ChannelPoliciesName),
-				Key: map[string]ddbtypes.AttributeValue{
-					attrSlackTeamID:    stringAttr(teamID),
-					attrSlackChannelID: stringAttr(channelID),
-				},
+			err := s.deletePolicyForPurge(ctx, teamID, channelID, cutoff, unbound)
+			var changed *Error
+			if errors.As(err, &changed) && changed.Code == errCodePolicyPurgeWorkspaceChanged {
+				return joinSweepErrors(deleteErrs, err)
 			}
-			if !cutoff.IsZero() {
-				deleteInput.ConditionExpression = aws.String(purgeCutoffCondition)
-				deleteInput.ExpressionAttributeNames = map[string]string{
-					exprUpdatedAtNano: attrUpdatedAtNano,
-				}
-				deleteInput.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
-					exprPurgeCutoffNano: unixNanoAttr(cutoff),
-				}
-			}
-			if _, err := s.Client.DeleteItem(ctx, deleteInput); err != nil {
-				var ccfe *ddbtypes.ConditionalCheckFailedException
-				if !cutoff.IsZero() && errors.As(err, &ccfe) {
-					continue
-				}
-				deleteErrs = append(deleteErrs, ddbToError("PurgeTeamChannelPolicies", err))
+			if err != nil {
+				deleteErrs = append(deleteErrs, err)
 			}
 		}
 		if len(out.LastEvaluatedKey) == 0 {
@@ -583,6 +574,27 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 		startKey = out.LastEvaluatedKey
 	}
 	return errors.Join(deleteErrs...)
+}
+
+func (s *Store) deletePolicyForPurge(ctx context.Context, teamID, channelID string, cutoff time.Time, unbound bool) error {
+	if unbound {
+		return s.deleteUnboundPolicy(ctx, teamID, channelID)
+	}
+	in := &dynamodb.DeleteItemInput{
+		TableName: aws.String(s.ChannelPoliciesName),
+		Key:       map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID), attrSlackChannelID: stringAttr(channelID)},
+	}
+	if !cutoff.IsZero() {
+		in.ConditionExpression = aws.String(purgeCutoffCondition)
+		in.ExpressionAttributeNames = map[string]string{exprUpdatedAtNano: attrUpdatedAtNano}
+		in.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{exprPurgeCutoffNano: unixNanoAttr(cutoff)}
+	}
+	_, err := s.Client.DeleteItem(ctx, in)
+	var condition *ddbtypes.ConditionalCheckFailedException
+	if !cutoff.IsZero() && errors.As(err, &condition) {
+		return nil
+	}
+	return ddbToError("PurgeTeamChannelPolicies", err)
 }
 
 // allowedResourceIDsFromItem returns the set of resource IDs a channel_policies

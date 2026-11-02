@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -98,7 +99,7 @@ func localPolicyStore(t *testing.T) (*Store, *dynamodb.Client) {
 func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 	store, client := localPolicyStore(t)
 	index := 0
-	for _, scenario := range []string{"current admin", "deleted binding", "reinstall at same clock time", "revoked admin", "owner transferred away and back", "legacy binding", "delete at commit boundary", "alias conflict"} {
+	for _, scenario := range []string{"current admin", "deleted binding", "reinstall at same clock time", "revoked admin", "owner transferred away and back", "legacy binding", "ownership keeps installation", "delete at commit boundary", "alias conflict"} {
 		t.Run(scenario, func(t *testing.T) {
 			index++
 			teamID := fmt.Sprintf("T%08d", index)
@@ -116,7 +117,7 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 			bind()
 			workspaceKey := map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(teamID)}
 			if scenario == "legacy binding" {
-				if _, err := client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(store.WorkspaceMappingsName), Key: workspaceKey, UpdateExpression: aws.String("REMOVE policy_generation")}); err != nil {
+				if _, err := client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(store.WorkspaceMappingsName), Key: workspaceKey, UpdateExpression: aws.String("REMOVE policy_generation, policy_installation")}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -146,8 +147,8 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if fresh.generation == authorization.generation {
-					t.Fatal("reinstall reused its generation")
+				if fresh.generation == authorization.generation || fresh.installation == authorization.installation {
+					t.Fatal("reinstall reused its policy identity")
 				}
 				newMutation := *mutation
 				newMutation.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{":resources": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_new"}}}
@@ -171,6 +172,24 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 				}
 				wantConflict = true
 				wantResources = nil
+			case "ownership keeps installation":
+				if err := store.updatePolicy(workerCtx, mutation); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.TransferOwnership(ctx, teamID, testOwnerSlackID, testOtherSlackID); err != nil {
+					t.Fatal(err)
+				}
+				fresh, err := store.AuthorizePolicyWrite(ctx, teamID, testCallerSlackID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fresh.installation != authorization.installation || fresh.generation == authorization.generation {
+					t.Fatal("ownership transfer must keep installation lineage and rotate pending authorization")
+				}
+				workerCtx = fresh.Context(ctx)
+				mutation.UpdateExpression = aws.String("SET updated_at = :now ADD allowed_resource_ids :resources")
+				mutation.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{":now": stringAttr("2026-11-02T12:00:00Z"), ":resources": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_new"}}}
+				wantResources = []string{"r_old", "r_new"}
 			case "legacy binding":
 				row, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(store.WorkspaceMappingsName), Key: workspaceKey, ConsistentRead: aws.Bool(true)})
 				if err != nil {
@@ -217,6 +236,8 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 				t.Fatal("refused write materialized an orphan policy row")
 			}
 			got := readStringSet(row.Item, attrAllowedResourceIDs)
+			slices.Sort(got)
+			slices.Sort(wantResources)
 			if !reflect.DeepEqual(got, wantResources) {
 				t.Fatalf("policy after %s = %v, want %v", scenario, got, wantResources)
 			}

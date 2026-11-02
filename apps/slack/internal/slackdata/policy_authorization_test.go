@@ -27,7 +27,7 @@ func (d *policyTestDDB) TransactWriteItems(_ context.Context, in *dynamodb.Trans
 
 func policyTestWorkspace() map[string]ddbtypes.AttributeValue {
 	return map[string]ddbtypes.AttributeValue{
-		attrOwnerID: stringAttr(testOwnerSlackID), attrPolicyGeneration: stringAttr("original-generation"),
+		attrOwnerID: stringAttr(testOwnerSlackID), attrPolicyGeneration: stringAttr("original-generation"), attrPolicyInstallation: stringAttr("original-installation"),
 		attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{testCallerSlackID}},
 	}
 }
@@ -50,6 +50,8 @@ func TestAuthorizePolicyWrite(t *testing.T) {
 		{name: "owner", caller: testOwnerSlackID},
 		{name: "admin", caller: testCallerSlackID},
 		{name: "stranger", caller: testOtherSlackID, status: http.StatusForbidden},
+		{name: "partial identity", caller: testCallerSlackID, mutate: func(m map[string]ddbtypes.AttributeValue) { delete(m, attrPolicyInstallation) }, status: http.StatusInternalServerError},
+		{name: "invalid migration flag", caller: testCallerSlackID, mutate: func(m map[string]ddbtypes.AttributeValue) { m[attrPolicyLegacy] = stringAttr("true") }, status: http.StatusInternalServerError},
 		{name: "missing binding", caller: testCallerSlackID, mutate: func(m map[string]ddbtypes.AttributeValue) { clear(m) }, status: http.StatusForbidden},
 		{name: "empty generation", caller: testCallerSlackID, mutate: func(m map[string]ddbtypes.AttributeValue) { m[attrPolicyGeneration] = stringAttr("") }, status: http.StatusInternalServerError},
 		{name: "wrong generation type", caller: testCallerSlackID, mutate: func(m map[string]ddbtypes.AttributeValue) {
@@ -78,7 +80,7 @@ func TestAuthorizePolicyWrite(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if authorization.store != store || authorization.teamID != "T1" || authorization.userID != tc.caller || authorization.ownerID != testOwnerSlackID || authorization.generation != "original-generation" {
+			if authorization.store != store || authorization.teamID != "T1" || authorization.userID != tc.caller || authorization.ownerID != testOwnerSlackID || authorization.generation != "original-generation" || authorization.installation != "original-installation" {
 				t.Fatalf("wrong authorization snapshot: %+v", authorization)
 			}
 		})
@@ -88,13 +90,14 @@ func TestAuthorizePolicyWrite(t *testing.T) {
 func TestAuthorizePolicyWriteInitializesLegacyBindingWithoutMovingPurgeCutoff(t *testing.T) {
 	item := policyTestWorkspace()
 	delete(item, attrPolicyGeneration)
+	delete(item, attrPolicyInstallation)
 	calls := 0
 	store := newStore(&stubDDB{getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 		return &dynamodb.GetItemOutput{Item: item}, nil
 	}, updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
 		calls++
-		if aws.ToString(in.UpdateExpression) != "SET #generation = :generation" || in.ReturnValues != ddbtypes.ReturnValueAllNew {
-			t.Fatal("legacy initialization must only set and return its generation")
+		if aws.ToString(in.UpdateExpression) != "SET #generation = :generation, #installation = :installation, #legacy = :legacy" || in.ReturnValues != ddbtypes.ReturnValueAllNew {
+			t.Fatal("legacy initialization must only set and return its policy identity")
 		}
 		if !strings.Contains(aws.ToString(in.ConditionExpression), "attribute_not_exists(#generation)") || !strings.Contains(aws.ToString(in.ConditionExpression), "contains(#admins, :caller)") || !strings.Contains(aws.ToString(in.ConditionExpression), "#owner = :owner") {
 			t.Fatal("legacy initialization must not overwrite a newer installation or bypass current authority")
@@ -103,10 +106,10 @@ func TestAuthorizePolicyWriteInitializesLegacyBindingWithoutMovingPurgeCutoff(t 
 		if generation == "" {
 			t.Fatal("missing new generation")
 		}
-		return &dynamodb.UpdateItemOutput{Attributes: map[string]ddbtypes.AttributeValue{attrPolicyGeneration: stringAttr(generation)}}, nil
+		return &dynamodb.UpdateItemOutput{Attributes: map[string]ddbtypes.AttributeValue{attrPolicyGeneration: stringAttr(generation), attrPolicyInstallation: in.ExpressionAttributeValues[":installation"], attrPolicyLegacy: &ddbtypes.AttributeValueMemberBOOL{Value: true}}}, nil
 	}})
 	authorization, err := store.AuthorizePolicyWrite(context.Background(), "T1", testCallerSlackID)
-	if err != nil || calls != 1 || authorization.generation == "" {
+	if err != nil || calls != 1 || authorization.generation == "" || authorization.installation == "" || !authorization.legacyPolicies {
 		t.Fatalf("legacy authorization: %+v calls=%d err=%v", authorization, calls, err)
 	}
 }
@@ -114,6 +117,7 @@ func TestAuthorizePolicyWriteInitializesLegacyBindingWithoutMovingPurgeCutoff(t 
 func TestAuthorizePolicyWriteDoesNotAdoptConcurrentReinstall(t *testing.T) {
 	item := policyTestWorkspace()
 	delete(item, attrPolicyGeneration)
+	delete(item, attrPolicyInstallation)
 	reads := 0
 	store := newStore(&stubDDB{getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 		reads++
@@ -152,7 +156,7 @@ func TestPolicyUpdateIsAtomicAndPreservesMutationCondition(t *testing.T) {
 	if check == nil || aws.ToString(check.TableName) != "ws" || readString(check.Key, attrSlackTeamID) != "T1" {
 		t.Fatal("wrong workspace condition")
 	}
-	for _, required := range []string{"#owner = :owner", "contains(#admins, :caller)", "#generation = :generation"} {
+	for _, required := range []string{"#owner = :owner", "contains(#admins, :caller)", "#generation = :generation", "#installation = :installation"} {
 		if !strings.Contains(aws.ToString(check.ConditionExpression), required) {
 			t.Fatalf("missing authority fence %q", required)
 		}
@@ -242,6 +246,7 @@ func TestPolicyUpdateFailsClosed(t *testing.T) {
 func TestAuthorizePolicyWriteRequiresConfirmedLegacyGeneration(t *testing.T) {
 	item := policyTestWorkspace()
 	delete(item, attrPolicyGeneration)
+	delete(item, attrPolicyInstallation)
 	store := newStore(&stubDDB{
 		getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 			return &dynamodb.GetItemOutput{Item: item}, nil

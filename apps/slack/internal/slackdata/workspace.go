@@ -23,9 +23,12 @@ const (
 	attrOwnerID           = "owner_id"
 	attrAdminSlackUserIDs = "admin_slack_user_ids"
 	attrCreatedAt         = "created_at"
-	// Identifies a binding independently of clock precision for policy-write fencing.
+	// Rotates on binding and ownership changes to fence pending authorization.
 	attrPolicyGeneration = "policy_generation"
-	attrUpdatedAt        = "updated_at"
+	// Installation identity survives ownership transfer, which preserves policies.
+	attrPolicyInstallation = "policy_installation"
+	attrPolicyLegacy       = "policy_legacy"
+	attrUpdatedAt          = "updated_at"
 	// Every guarded workspace_mappings/channel_policies write must refresh
 	// attrUpdatedAtNano, including TTL-backed rate-limit counters. Lifecycle
 	// purges use it as the reinstall-race guard; a writer that skips it can let a
@@ -477,6 +480,7 @@ func workspaceMappingItem(teamID, ownerID, seedAdmin string, created, now time.T
 	return map[string]ddbtypes.AttributeValue{
 		attrSlackTeamID:        stringAttr(teamID),
 		attrPolicyGeneration:   stringAttr(rand.Text()),
+		attrPolicyInstallation: stringAttr(rand.Text()),
 		attrOwnerID:            stringAttr(ownerID),
 		attrSeedAdminSlackUser: stringAttr(seedAdmin),
 		attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
