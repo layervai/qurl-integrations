@@ -540,11 +540,12 @@ func ruleInputError(d *accessrules.Definition) error {
 // applyRuleToShare runs once the resource exists. A new public share keeps
 // the rule's link limits for later links and gets a temporary link minted with
 // them in published.LimitedLink. A share that already existed keeps what it
-// was created with, with or without a rule, so publishing it again mints a
-// fresh link with its saved limits; published.OtherSettings says when the
-// chosen rule differs.
+// was created with when this device saved them. If none were saved, an
+// explicit public rule supplies limits without changing the resource policy.
+// published.OtherSettings says when the chosen rule differs from saved settings.
 func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, published *qurlapi.Published) error {
 	existing := published.FoundExisting != nil && *published.FoundExisting
+	remember := !existing
 	if rule == nil && !existing {
 		return nil
 	}
@@ -563,6 +564,10 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 		if err != nil {
 			return err
 		}
+		if kept == nil && limits != nil && published.Private != nil && !*published.Private {
+			// Recover a lost first-publish response/save; these limits are device-local.
+			kept, remember = limits, true
+		}
 		if rule != nil {
 			// Only approvals can differ here (Publish refuses any other policy
 			// change); SameDefinition compares them in the service's stored form.
@@ -575,7 +580,8 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 			published.OtherSettings = !accessrules.SameEffectiveLinkLimits(kept, limits) || !received.SameDefinition(policy)
 		}
 		limits = kept
-	} else if limits != nil {
+	}
+	if remember && limits != nil {
 		store, err := o.shareRuleStore()
 		if err == nil {
 			err = store.Set(ctx, id, limits)
@@ -584,6 +590,11 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 			return fmt.Errorf("%s was published, but its link limits could not be saved on this device: %w", id, err)
 		}
 	}
+	return o.mintRuleLink(ctx, client, rule, published, limits)
+}
+
+func (o *globalOpts) mintRuleLink(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, published *qurlapi.Published, limits *accessrules.LinkLimits) error {
+	id := published.CRID
 	if limits == nil {
 		return nil
 	}

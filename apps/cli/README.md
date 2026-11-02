@@ -850,8 +850,11 @@ A public rule with link limits makes `publish` mint a temporary link (`Link:`,
 JSON `link`) and keeps the limits for later `qurl share <CRID>` links on this
 device. Approvals last is part of the resource policy and the service enforces
 it. Publishing again to an existing item with a different access policy fails
-without changing it; different link limits or approval lifetime keep the
-existing settings and JSON reports `"settings_differ": true`.
+without changing it. If this device has no saved limits for an existing public
+item, an explicit rule saves its link limits and mints a link. This also recovers
+a first publish whose response or local save was lost. Existing saved limits
+and approval lifetimes are kept; when they differ from the requested rule,
+JSON reports `"settings_differ": true`.
 
 Supervising apps call `qurl rules capabilities -o json` (offline), read and edit
 with `rules list|save|delete|sync|resolve -o json` (`save` reads one rule from
