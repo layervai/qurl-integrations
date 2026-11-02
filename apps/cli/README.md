@@ -854,7 +854,8 @@ without changing it. If this device has no saved limits for an existing public
 item, an explicit rule saves its link limits and mints a link. This also recovers
 a first publish whose response or local save was lost. Existing saved limits
 and approval lifetimes are kept; when they differ from the requested rule,
-JSON reports `"settings_differ": true`.
+JSON reports `"settings_differ": true`. A successfully minted limited link
+explicitly reports `"settings_differ": false` when the requested settings apply.
 
 If publication succeeds but a requested limited link cannot be created or
 verified, `-o json` emits the confirmed `crid`, `resource_id`, `private` and

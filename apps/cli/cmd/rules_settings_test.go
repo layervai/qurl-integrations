@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"maps"
@@ -122,19 +123,29 @@ func TestFailedMintNamesTheCRIDAndRepublishRecovers(t *testing.T) {
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", apitest.HandlerRevoked400(t))
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: dir})
 	var partial struct {
-		CRID       string `json:"crid"`
-		ResourceID string `json:"resource_id"`
-		Error      string `json:"error"`
-		Link       any    `json:"link"`
+		CRID           string `json:"crid"`
+		ResourceID     string `json:"resource_id"`
+		Error          string `json:"error"`
+		Private        *bool  `json:"private"`
+		FoundExisting  *bool  `json:"found_existing"`
+		SettingsDiffer *bool  `json:"settings_differ"`
 	}
-	if result.code == 0 || !strings.Contains(result.stderr.String(), srv.Key.CRID) || json.Unmarshal(result.stdout.Bytes(), &partial) != nil || partial.CRID != srv.Key.CRID || partial.ResourceID != srv.Key.ResourceID || partial.Error != "link_creation_failed" || partial.Link != nil {
+	if result.code == 0 || !strings.Contains(result.stderr.String(), srv.Key.CRID) || json.Unmarshal(result.stdout.Bytes(), &partial) != nil || partial.CRID != srv.Key.CRID || partial.ResourceID != srv.Key.ResourceID || partial.Error != "link_creation_failed" || partial.Private == nil || *partial.Private || partial.FoundExisting == nil || *partial.FoundExisting || partial.SettingsDiffer == nil || *partial.SettingsDiffer {
 		t.Fatalf("failed mint lost confirmed resource: exit=%d stdout=%s stderr=%s", result.code, result.stdout.String(), result.stderr.String())
+	}
+	// Decode the complete stdout once: a second JSON document is a failure.
+	var document map[string]any
+	if err := json.Unmarshal(result.stdout.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := document["link"]; present {
+		t.Fatal("failure document contains a success link field")
 	}
 	var mints []map[string]any
 	scriptPublish(t, srv, false, true, nil, nil)
 	scriptMint(t, srv, &mints)
 	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: dir})
-	if result.code != 0 || len(mints) != 1 || mints[0]["one_time_use"] != true || strings.Contains(result.stdout.String(), "settings_differ") {
+	if result.code != 0 || len(mints) != 1 || mints[0]["one_time_use"] != true || strings.Contains(result.stdout.String(), `"settings_differ": true`) {
 		t.Fatalf("republish %d mints %v %s %s", result.code, mints, result.stdout.String(), result.stderr.String())
 	}
 }
@@ -322,7 +333,7 @@ func TestRepublishTreatsAnExplicitDefaultAsTheSameSettings(t *testing.T) {
 		`{"id":"22222222-2222-4222-8222-222222222222","name":"Also hour","mode":"public","link_limits":{"expires_in":"1h"}}`,
 	} {
 		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(rule), shareStateDir: dir})
-		if result.code != 0 || strings.Contains(result.stdout.String(), "settings_differ") || strings.Contains(result.stderr.String(), "other settings") {
+		if result.code != 0 || strings.Contains(result.stdout.String(), `"settings_differ": true`) || strings.Contains(result.stderr.String(), "other settings") {
 			t.Fatalf("publish %d %s %s", result.code, result.stdout.String(), result.stderr.String())
 		}
 	}
@@ -400,8 +411,15 @@ func TestRepublishWithNoSavedLimitsUsesExplicitPublicRule(t *testing.T) {
 	scriptPublish(t, srv, false, true, nil, nil)
 	scriptMint(t, srv, &mints)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(hourRule), shareStateDir: dir})
-	if result.code != 0 || len(mints) != 1 || mints[0]["expires_in"] != "1h" || strings.Contains(result.stdout.String(), "settings_differ") || !strings.Contains(result.stdout.String(), "at_limited") {
+	if result.code != 0 || len(mints) != 1 || mints[0]["expires_in"] != "1h" || strings.Contains(result.stdout.String(), `"settings_differ": true`) || !strings.Contains(result.stdout.String(), "at_limited") {
 		t.Fatalf("retry lost explicit rule: exit=%d mints=%v stdout=%s stderr=%s", result.code, mints, result.stdout.String(), result.stderr.String())
+	}
+	var document map[string]any
+	if err := json.Unmarshal(result.stdout.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if confirmed, present := document["settings_differ"]; !present || confirmed != false {
+		t.Fatal("recovered limits were not explicitly confirmed")
 	}
 	// A later plain share uses the recovered limits too.
 	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID, "-o", "json"}, shareStateDir: dir})
@@ -424,5 +442,38 @@ func TestRepublishKeepsSavedLimitsInsteadOfAnExplicitDifferentRule(t *testing.T)
 	again := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: dir})
 	if again.code != 0 || len(mints) != 2 || mints[1]["one_time_use"] != false || mints[1]["session_duration"] != "30m" || !strings.Contains(again.stdout.String(), `"settings_differ": true`) {
 		t.Fatalf("saved limits replaced: exit=%d mints=%v stdout=%s stderr=%s", again.code, mints, again.stdout.String(), again.stderr.String())
+	}
+}
+
+func TestLocalPublishLinkFailureReportsResourceAndCompensates(t *testing.T) {
+	srv := apitest.NewServer(t)
+	opts := servingLocalPublish(t, srv, false, "--rule", "once", "-o", "json")
+	sharingPath := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodPut, sharingPath, sharingResponse(t, srv, "off", 1, "stopped"))
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", apitest.HandlerRevoked400(t))
+	result := runCLI(t, opts)
+	var document map[string]any
+	if result.code == 0 || json.Unmarshal(result.stdout.Bytes(), &document) != nil || document["crid"] != srv.Key.CRID || document["resource_id"] != srv.Key.ResourceID || document["private"] != false || document["error"] != "link_creation_failed" {
+		t.Fatalf("local partial result: exit=%d stdout=%s stderr=%s", result.code, result.stdout.String(), result.stderr.String())
+	}
+	if _, present := document["link"]; present {
+		t.Fatal("failed local publish offered a link")
+	}
+	local, err := opts.shareRegistry.Get(context.Background(), srv.Key.CRID)
+	if err != nil || local.DesiredState != "off" {
+		t.Fatalf("failed publish did not retain compensating off: %+v %v", local, err)
+	}
+}
+
+func TestPublishLinkFailureKeepsTextAndQuietStdoutEmpty(t *testing.T) {
+	for _, flags := range [][]string{nil, {"-q"}} {
+		srv := apitest.NewServer(t)
+		scriptPublish(t, srv, false, false, nil, nil)
+		srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", apitest.HandlerRevoked400(t))
+		args := append([]string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once"}, flags...)
+		result := runCLI(t, &runOpts{args: args, shareStateDir: connectorStateTestDir(t)})
+		if result.code == 0 || result.stdout.Len() != 0 || !strings.Contains(result.stderr.String(), srv.Key.CRID) {
+			t.Fatalf("text/quiet partial: flags=%v exit=%d stdout=%s stderr=%s", flags, result.code, result.stdout.String(), result.stderr.String())
+		}
 	}
 }

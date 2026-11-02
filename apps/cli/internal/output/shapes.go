@@ -43,7 +43,7 @@ type publishJSON struct {
 	Link *limitedLinkJSON `json:"link,omitempty"`
 	// SettingsDiffer is true when an existing share keeps settings other
 	// than the chosen rule's.
-	SettingsDiffer bool `json:"settings_differ,omitempty"`
+	SettingsDiffer *bool `json:"settings_differ,omitempty"`
 }
 
 type limitedLinkJSON struct {
@@ -191,8 +191,16 @@ type downloadJSON struct {
 	Publisher         publisherJSON `json:"publisher"`
 }
 
+// Report whether a limited link used the requested settings, including an explicit false.
+func publishSettingsDiffer(res *qurlapi.Published) *bool {
+	if res.OtherSettings || res.LimitedLink != nil {
+		return new(res.OtherSettings)
+	}
+	return nil
+}
+
 // PublishLinkFailure reports the resource that exists when its link failed.
-// Text/quiet diagnostics stay on stderr; a partial JSON document is not success.
+// Outside JSON mode this writes nothing; stderr remains the failure diagnostic.
 func (p *Printer) PublishLinkFailure(res *qurlapi.Published) error {
 	if p.format != FormatJSON {
 		return nil
@@ -248,7 +256,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			FoundExisting:  res.FoundExisting,
 			Publisher:      publisherDocument(res.Publisher),
 			Link:           limitedLinkDocument(res.LimitedLink),
-			SettingsDiffer: res.OtherSettings,
+			SettingsDiffer: publishSettingsDiffer(res),
 		})
 	case p.quiet:
 		// A rule's temporary link follows the CRID; with once it is the only copy.
