@@ -318,12 +318,13 @@ const discordClientId = process.env.DISCORD_CLIENT_ID;
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
 const normalizedDiscordClientId = discordClientId?.trim();
 const normalizedDiscordClientSecret = discordClientSecret?.trim();
-// shortcut: old callbacks cannot read hashes; remove this rollout switch after fleet adoption.
-const installHashedState = (process.env.DISCORD_INSTALL_HASHED_STATE || 'false').trim().toLowerCase();
+// shortcut: old callbacks cannot read hashes, remove after fleet-wide hashed minting for 30 minutes.
+const installHashedState = (process.env.DISCORD_INSTALL_HASHED_STATE || 'false').trim();
 
 let discordInstallNotConfiguredReason = null;
 // Validate the rollout setting, then core config before optional pins.
 if (!['true', 'false'].includes(installHashedState)) {
+  console.warn('[config] DISCORD_INSTALL_HASHED_STATE must be true or false; customer install disabled, other bot operations remain available.');
   discordInstallNotConfiguredReason = 'DISCORD_INSTALL_HASHED_STATE must be true or false';
 } else if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'AUTH0_* unset';

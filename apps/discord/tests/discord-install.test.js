@@ -1213,6 +1213,28 @@ describe('hashed Discord install browser binding', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
 
+  it('rejects a hashed state paired with a different valid browser cookie', async () => {
+    config.DISCORD_INSTALL_HASHED_STATE = true;
+    const first = await request(app).get('/oauth/discord/install');
+    const second = await request(app).get('/oauth/discord/install');
+    const state = new URL(first.headers.location).searchParams.get('state');
+    const otherCookie = cookieValue(second.headers['set-cookie'], DISCORD_INSTALL_SESSION_COOKIE);
+    globalThis.fetch = jest.fn();
+    const res = await request(app).get(`/oauth/discord/callback?code=ok-code&state=${state}`)
+      .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${otherCookie}`);
+    expect(res.status).toBe(400);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('accepts hashed callbacks while hashed minting is off for fleet rollout', async () => {
+    config.DISCORD_INSTALL_HASHED_STATE = false;
+    mockSuccessfulDiscordIdentity();
+    const res = await request(app).get(`/oauth/discord/callback?code=ok-code&state=${hash(DISCORD_INSTALL_STATE)}`)
+      .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${DISCORD_INSTALL_STATE}`);
+    expect(res.status).toBe(302);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('does not accept the URL hash itself as the browser cookie', async () => {
     config.DISCORD_INSTALL_HASHED_STATE = true;
     const install = await request(app).get('/oauth/discord/install');

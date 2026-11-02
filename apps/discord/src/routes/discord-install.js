@@ -112,6 +112,7 @@ function inspectInstallState(req, state) {
   const cookieMatch = INSTALL_STATE_RE.exec(cookieState || '');
   const matches = Boolean(cookieMatch && state && (
     timingSafeStringEqual(installStateForCookie(cookieState), state)
+    // shortcut: active legacy installs need raw state, remove after fleet-wide hashed minting for 30 minutes.
     || timingSafeStringEqual(cookieState, state)
   ));
   const expirySec = matches ? Number(cookieMatch[1]) : NaN;

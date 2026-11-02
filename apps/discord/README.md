@@ -322,7 +322,8 @@ This follows [RFC 6749 section 10.12](https://www.rfc-editor.org/rfc/rfc6749#sec
 3. Test the browser flow across replicas and reject a copied URL without its
    original cookie. Never log the cookie. During rollback, retain hash-capable
    callbacks until 30 minutes after the last hashed install was minted. Setting
-   the switch back to false is safe; old binaries cannot read hashed states.
+   the switch back to false is safe on the current code. Older binaries cannot
+   verify hashed states, so do not deploy them until that window drains.
 
 The source change alone does not complete this rollout. Keep the related item
 in #1456 open until fleet adoption and the real browser install pass.
