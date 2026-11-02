@@ -857,6 +857,11 @@ and approval lifetimes are kept; when they differ from the requested rule,
 JSON reports `"settings_differ": true`. A successfully minted limited link
 explicitly reports `"settings_differ": false` when the requested settings apply.
 
+When get, share, or republish confirms that the resource is tombstoned, the CLI
+removes its saved link limits from this device. A missing or hidden resource
+(404), an expired link, or a failed request keeps them. Limits for active
+resources are never evicted to make room for another item.
+
 If publication succeeds but a requested limited link cannot be created or
 verified, `-o json` emits the confirmed `crid`, `resource_id`, `private` and
 `found_existing` (when known), plus `settings_differ` and

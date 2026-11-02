@@ -203,7 +203,9 @@ func (opts *globalOpts) shareResource(ctx context.Context, id string, options qu
 	if err != nil {
 		return nil, fmt.Errorf(msgShareNeedsDevice, err)
 	}
-	return client.Share(ctx, id, options)
+	link, err := client.Share(ctx, id, options)
+	opts.forgetTombstonedLinkLimits(ctx, id, err)
+	return link, err
 }
 
 // shareWithLimits mints a link with the limits the share was published with;
@@ -225,5 +227,7 @@ func (opts *globalOpts) shareWithLimits(cmd *cobra.Command, id string, limits ac
 	if err != nil {
 		return nil, fmt.Errorf(msgShareNeedsDevice, err)
 	}
-	return client.MintLimitedLink(cmd.Context(), id, limits)
+	link, err := client.MintLimitedLink(cmd.Context(), id, limits)
+	opts.forgetTombstonedLinkLimits(cmd.Context(), id, err)
+	return link, err
 }
