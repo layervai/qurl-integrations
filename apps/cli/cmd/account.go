@@ -20,7 +20,7 @@ func accountCmd(opts *globalOpts) *cobra.Command {
 		Args:    noArgs,
 		RunE:    func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 		Short:   "Manage optional account access",
-		Long:    "Publish without an account. Link this device only when you need account recovery or access from other devices.",
+		Long:    "Publish without an account. Link this device for account recovery, access from other devices, or paid CRID contracts.",
 		Example: "  qurl account setup\n  qurl account recover",
 	}
 	command.AddCommand(&cobra.Command{

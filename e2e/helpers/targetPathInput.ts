@@ -1,6 +1,6 @@
 import { closeSync, fsyncSync, openSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { getLinkStatus, getQurlResource, revokeChild } from './qurl-api';
+import { getLinkStatus, getQurlResource, getResourceStatus, revokeChild } from './qurl-api';
 const API = 'https://api.layerv.xyz';
 const MANAGEMENT = `${API}/v1/qurls`;
 const cases = [undefined, '/objects/owned-input-probe', '/?x=%2e/%2f', '/objects/%61', '/objects/../owned-input-probe', '/objects//owned-input-probe'];
@@ -25,7 +25,8 @@ export async function runTargetPathInput(seedChild: string, bearer: string, jour
     const parent = original.resource_id;
     if (!/^[A-Za-z0-9_-]{20,256}$/.test(parent)) throw new Error('Canonical parent missing');
     journal.parent = parent; save();
-    if (original.status !== 'active' || original.type !== 'tunnel') throw new Error('Owned parent is not active');
+    const ownedParent = await getResourceStatus(`${API}/v1/resources`, bearer, parent, AbortSignal.timeout(10_000));
+    if (ownedParent.status !== 'active' || ownedParent.type !== 'tunnel') throw new Error('Owned parent is not active');
     for (const route of [0, 1]) for (const [index, path] of cases.entries()) {
       const requestID = `targetpath-${randomUUID()}`;
       journal.pending = { route, index, request_id: requestID }; save();
