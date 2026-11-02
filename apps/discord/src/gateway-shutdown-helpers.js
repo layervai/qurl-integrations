@@ -233,9 +233,10 @@ function runGatewayFatalShutdown({
   exit = (code) => process.exit(code),
 }) {
   // Independent of gracefulShutdown's ownership gate: every path that owns
-  // shutdown today has its own 10/12-second backstop, but this fatal boundary
+  // fatal/handoff shutdown has its own 10/12-second backstop, but this boundary
   // must remain terminal if a future owner forgets one. Fifteen seconds stays
-  // inside ECS's 30-second SIGTERM window and trails both existing ceilings.
+  // inside ECS's 30-second SIGTERM window. Fatal graceful shutdown uses 10s;
+  // the longer normal shutdown ceiling does not apply to this path.
   scheduleHardExit(() => {
     try {
       logger.error('Gateway fatal shutdown timed out, forcing exit');

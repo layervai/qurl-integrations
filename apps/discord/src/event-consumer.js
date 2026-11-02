@@ -128,8 +128,9 @@
 // (fatal log + process.exit(1) so ECS surfaces the misconfig in
 // deploy-time monitoring), and transient (log + POLL_ERROR_BACKOFF_MS
 // backoff). Permanent codes are typo'd queue URL, missing IAM perm,
-// region drift, and bad creds — anything a retry won't fix. See
-// PERMANENT_AWS_ERROR_CODES for the full set.
+// region drift, bad creds, and an exhausted credential provider chain. See
+// PERMANENT_AWS_ERROR_CODES for the full set. Provider failures after a
+// successful poll retain backoff so a transient ECS refresh can recover.
 //
 // How tracking works without coupling to handler internals: the
 // consumer sets `isWorkerDispatch = true` synchronously around the
@@ -141,9 +142,11 @@
 // runs inside the synchronous emit window; the decrement fires
 // whenever the dispatch promise settles, however much later.
 
-const { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
+const { ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
+const { createSqsClient } = require('./utils/sqs');
 const config = require('./config');
 const logger = require('./logger');
+const { consumeProbe, getRuntimeProbeStore } = require('./dispatch-probe');
 const { GATEWAY_DISPATCH_TYPES, LOG_KINDS } = require('./constants');
 
 // AWS_REGION is required (matches src/flow-state.js + src/store/ddb-store.js
@@ -399,6 +402,23 @@ let DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 // `_resetStateForTest` or hot-reload can't drift the size — the
 // underflow guard the previous counter shape needed is gone.
 const inFlightPromises = new Set();
+let atCapDrainController = null;
+// Process-lifetime counters; never retain message, user, or shard IDs.
+let pollCount = 0;
+let atCapPollCount = 0;
+let handlerRejectionCount = 0;
+
+function getMetrics() {
+  return {
+    running,
+    qurl_bot_event_inflight: inFlightPromises.size,
+    qurl_bot_event_inflight_limit: MAX_INFLIGHT_HANDLERS,
+    qurl_bot_event_polls_total: pollCount,
+    qurl_bot_event_atcap_polls_total: atCapPollCount,
+    qurl_bot_event_dispatch_handler_rejections_total: handlerRejectionCount,
+  };
+}
+
 let isWorkerDispatch = false;
 
 // State-machine rate-limit on the at-cap log. The *transition* into
@@ -434,25 +454,6 @@ function _setSqsClientForTest(client) {
   sqsClient = client;
 }
 
-function createSqsClient() {
-  // Note: AWS credential resolution (IAM task role, env vars,
-  // credential-chain) happens lazily on first `.send()`, NOT at
-  // SQSClient construction. A missing/invalid task role will
-  // surface as a ReceiveMessageCommand failure inside pollLoop —
-  // landing in the error-backoff path rather than as a boot
-  // failure. Treated as acceptable because (a) the bot's task
-  // execution role is required for the rest of the AWS surface
-  // (DDB flow-state, etc.) and would fail those too, and (b) ops
-  // monitoring on the pollLoop error log catches the case. If we
-  // ever need explicit boot-time credential resolution, the
-  // pattern is `await sqsClient.config.credentials()` inside
-  // start() and propagate any throw.
-  const region = (process.env.AWS_REGION ?? '').trim();
-  if (!region) {
-    throw new Error('AWS_REGION is required to use the event consumer. Set it in the deployment template (e.g. `us-east-2`).');
-  }
-  return new SQSClient({ region });
-}
 
 // Every terminal path in processMessage deletes the message (success,
 // malformed body, unknown eventType, reconstruction throw — see the
@@ -540,6 +541,13 @@ async function processMessage(client, message) {
   }
 
   const { eventType, data, event_id: eventId, published_at_ms: publishedAtMs } = parsed;
+
+  if (eventType === 'GUILD_MEMBERS_CHUNK' && config.ENABLE_DISPATCH_PROBE) {
+    // A storage or SDK failure must retry; an expired/foreign probe is terminal.
+    await consumeProbe(client, parsed, getRuntimeProbeStore());
+    await deleteMessage(message.ReceiptHandle);
+    return;
+  }
 
   if (eventType !== GATEWAY_DISPATCH_TYPES.INTERACTION_CREATE) {
     // Single-event-type today; PR 12+ may add MESSAGE_CREATE,
@@ -745,8 +753,11 @@ function trackDispatch(maybePromise) {
   // hot-reload swaps modules) silently no-op rather than drifting
   // the size negative. No underflow guard needed.
   maybePromise.finally(() => {
-    inFlightPromises.delete(maybePromise);
+    if (inFlightPromises.delete(maybePromise) && inFlightPromises.size < MAX_INFLIGHT_HANDLERS) {
+      atCapDrainController?.abort();
+    }
   }).catch((err) => {
+    handlerRejectionCount++;
     // Attaching `.finally()` above counts as a handler for Node's
     // unhandled-rejection bookkeeping, so a rejection that pre-PR
     // would have surfaced at `process.on('unhandledRejection', ...)`
@@ -772,6 +783,7 @@ function trackDispatch(maybePromise) {
 }
 
 async function pollOnce(client) {
+  pollCount++;
   // Backpressure check: if too many handlers are in-flight, pause
   // receives until they drain. Returns from this iteration without
   // pulling messages; pollLoop will call us again, and the
@@ -798,25 +810,28 @@ async function pollOnce(client) {
   // is therefore (cap - 1) + RECEIVE_MAX_MESSAGES overshoot. Off-by-
   // one is intentional and matches the .env.example math.
   if (inFlightPromises.size >= MAX_INFLIGHT_HANDLERS) {
+    atCapPollCount++;
     if (!atCapPauseLogged) {
       logger.warn(AT_CAP_PAUSE_WARN_MSG, capPayload);
       atCapPauseLogged = true;
     }
     // Steady-state at-cap is intentionally silent — the entry warn
     // + the exit info already bookend the pause for operators.
-    await abortableSleep(currentBackoffMs);
+    const drainController = new AbortController();
+    atCapDrainController = drainController;
+    try {
+      await abortableSleep(currentBackoffMs, drainController.signal);
+    } finally {
+      if (atCapDrainController === drainController) atCapDrainController = null;
+    }
     // Exponential backoff: each consecutive at-cap iteration doubles
     // the wait up to MAX (cadence: 100→200→400→800→1600ms, then
     // clamped at 1600ms), so a sustained streak drops the wake rate
     // from 10/s to ~0.6/s at the ceiling without significantly
     // delaying recovery. The first 5 iterations average ~1.6/s
     // before settling at the 1.6s ceiling.
-    // Trade-off: a release that lands mid-sleep delays the next
-    // below-cap observation (and the paired pause-end log) by up to
-    // MAX (1.6s) worst-case, ~MAX/2 (~800ms) average since releases
-    // land uniformly within the sleep window. Operators pairing
-    // pause-start/pause-end durations in CloudWatch see this as
-    // inflated dwell time at the ceiling.
+    // A handler completion wakes this pause as soon as capacity returns;
+    // sustained at-cap traffic keeps the same bounded polling cadence.
     //
     // No jitter: the downstream wedge isn't sensitive to wake-time
     // alignment, so even if multiple worker processes hit the cap
@@ -857,11 +872,8 @@ async function pollOnce(client) {
 
   // Process messages in parallel. Each wrapper catches its own
   // failures so one rejection doesn't collapse the batch and strand
-  // siblings. The only escape from `processMessage` is a
-  // DeleteMessage throw — every other error path is internally
-  // caught + delete-eager. So this log is specifically the
-  // SQS-delete-failed signal: the message will redrive after the
-  // visibility timeout and re-dispatch.
+  // siblings. DeleteMessage and probe storage/SDK failures escape
+  // processMessage so their receipts redrive after the visibility timeout.
   //
   // Operational interpretation depends on the upstream code path:
   // - INTERACTION_CREATE that dispatched successfully → OCC at
@@ -885,7 +897,7 @@ async function pollOnce(client) {
     try {
       await processMessage(client, message);
     } catch (err) {
-      logger.error('Event consumer: DeleteMessage failed; message will redeliver after visibility timeout', {
+      logger.error('Event consumer: processing or deletion failed; message will redeliver after visibility timeout', {
         error: err.message,
         messageId: message.MessageId,
       });
@@ -951,6 +963,7 @@ function isAbortError(err) {
 // dominates over deploy-time IAM eventual-consistency gaps. If prod
 // telemetry ever shows AccessDenied spikes correlated with deploys
 // rather than config changes, demote it back to transient.
+const CREDENTIAL_PROVIDER_ERROR_CODES = new Set(['CredentialsProviderError', 'CredentialsError']);
 const PERMANENT_AWS_ERROR_CODES = new Set([
   // Queue doesn't exist (typo'd URL or wrong region in queue URL).
   'QueueDoesNotExist',
@@ -966,6 +979,8 @@ const PERMANENT_AWS_ERROR_CODES = new Set([
   // Bad/expired credentials.
   'UnrecognizedClientException',
   'InvalidClientTokenId',
+  // No credential provider could supply credentials.
+  ...CREDENTIAL_PROVIDER_ERROR_CODES,
 ]);
 
 // Returns the matched permanent-error code from anywhere in err's
@@ -978,14 +993,18 @@ const PERMANENT_AWS_ERROR_CODES = new Set([
 function permanentAwsErrorCode(err) {
   const visited = new Set();
   let current = err;
+  let providerCode = null;
   while (current && typeof current === 'object' && !visited.has(current)) {
     visited.add(current);
-    if (PERMANENT_AWS_ERROR_CODES.has(current.name)) return current.name;
-    if (PERMANENT_AWS_ERROR_CODES.has(current.code)) return current.code;
-    if (PERMANENT_AWS_ERROR_CODES.has(current.Code)) return current.Code;
+    for (const code of [current.name, current.code, current.Code]) {
+      if (!PERMANENT_AWS_ERROR_CODES.has(code)) continue;
+      // A retryable provider wrapper must not hide a fatal cause or alias.
+      if (!CREDENTIAL_PROVIDER_ERROR_CODES.has(code)) return code;
+      providerCode ??= code;
+    }
     current = current.cause;
   }
-  return null;
+  return providerCode;
 }
 
 // Sleep that resolves either when the timeout fires OR when
@@ -1002,33 +1021,33 @@ function permanentAwsErrorCode(err) {
 // cleared on the abort path so it doesn't fire spuriously after
 // resolution.
 //
-// Defensive: if start() hasn't run (stopController is null) the
-// sleep degrades to a pure setTimeout — abortableSleep is also
+// Defensive: without a shutdown or wake signal, the sleep
+// degrades to a pure setTimeout — abortableSleep is also
 // reachable from the at-cap backpressure pause, and we don't want
 // a missing controller to throw and crash the loop.
-function abortableSleep(ms) {
+function abortableSleep(ms, wakeSignal) {
   return new Promise((resolve) => {
-    // Capture once so addEventListener and removeEventListener target
-    // the same controller by identity, even if module-level
-    // stopController is swapped during the sleep.
-    const ctrl = stopController;
-    // Already-aborted fast path: a stop() that landed before this
+    // Capture once so listener cleanup uses the same signal after stop/reset.
+    const signal = wakeSignal && stopController
+      ? AbortSignal.any([stopController.signal, wakeSignal])
+      : wakeSignal || stopController?.signal;
+    // Already-aborted fast path: a stop or drain wake before this
     // sleep started returns immediately.
-    if (ctrl?.signal.aborted) {
+    if (signal?.aborted) {
       resolve();
       return;
     }
     let onAbort;
     const t = setTimeout(() => {
-      if (ctrl && onAbort) {
-        ctrl.signal.removeEventListener('abort', onAbort);
+      if (signal && onAbort) {
+        signal.removeEventListener('abort', onAbort);
       }
       resolve();
     }, ms);
     // .unref()ed so a stray timer can't pin the event loop if the
     // loop exits via a different path mid-sleep.
     t.unref?.();
-    if (ctrl) {
+    if (signal) {
       onAbort = () => {
         clearTimeout(t);
         resolve();
@@ -1038,7 +1057,7 @@ function abortableSleep(ms) {
       // at most once per spec. If timeout and abort fire near-
       // simultaneously, both resolve() calls may run; the second is
       // a Promise no-op (resolve is idempotent).
-      ctrl.signal.addEventListener('abort', onAbort, { once: true });
+      signal.addEventListener('abort', onAbort, { once: true });
     }
   });
 }
@@ -1073,9 +1092,11 @@ async function pollLoop(client) {
   // a real path: start() always assigns stopController before invoking
   // pollLoop, and stop() nulls it only after `await loopPromise`
   // resolves (by which point pollLoop has already exited).
+  let hasPolledSuccessfully = false;
   while (stopController && !stopController.signal.aborted) {
     try {
       await pollOnce(client);
+      hasPolledSuccessfully = true;
     } catch (err) {
       if (isAbortError(err)) {
         // stop() aborted the in-flight receive. The while-loop's
@@ -1084,7 +1105,10 @@ async function pollLoop(client) {
         continue;
       }
       const permanentCode = permanentAwsErrorCode(err);
-      if (permanentCode) {
+      // Provider errors also wrap transient ECS metadata refresh failures.
+      const credentialRefreshFailure = hasPolledSuccessfully
+        && CREDENTIAL_PROVIDER_ERROR_CODES.has(permanentCode);
+      if (permanentCode && !credentialRefreshFailure) {
         // Permanent AWS misconfig (typo'd queue URL, missing IAM
         // perm, region drift, bad creds). Surface to the caller so
         // ECS sees a high task-restart rate in deploy-time monitoring
@@ -1167,7 +1191,7 @@ function start(client, { onFatal } = {}) {
     throw new Error('Event consumer: QURL_BOT_EVENTS_QUEUE_URL is not set');
   }
   if (!sqsClient) {
-    sqsClient = createSqsClient();
+    sqsClient = createSqsClient('event consumer');
   }
   running = true;
   stopController = new AbortController();
@@ -1339,17 +1363,22 @@ function _resetStateForTest() {
   running = false;
   loopPromise = null;
   stopController = null;
+  atCapDrainController = null;
   sqsClient = null;
   onFatalCb = null;
   seenEventIds.clear();
   lastMissingEventIdWarnMs = 0;
   inFlightPromises.clear();
+  pollCount = 0;
+  atCapPollCount = 0;
+  handlerRejectionCount = 0;
   isWorkerDispatch = false;
   clearAtCapState();
   DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 }
 
 module.exports = {
+  getMetrics,
   start,
   stop,
   trackDispatch,

@@ -89,6 +89,7 @@ function maskResourceIdPath(message) {
 }
 
 module.exports = {
+  RESOURCE_ID_CHARACTER_CLASS,
   hasSafeResourceIdShape,
   maskResourceIdPath,
   QURL_ACCESS_TOKEN_PREFIX,

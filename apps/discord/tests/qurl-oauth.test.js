@@ -30,7 +30,7 @@ jest.mock('../src/store', () => ({
 }));
 
 jest.mock('../src/guild-webhook-link', () => ({
-  fireAndForgetLinkGuildWebhookSubscription: jest.fn(),
+  linkGuildWebhookSubscriptionForSetup: jest.fn().mockResolvedValue(true),
 }));
 
 // commands.js still requires verifyStateBinding for the GitHub OAuth route;
@@ -56,7 +56,7 @@ const db = require('../src/store');
 const discord = require('../src/discord');
 const logger = require('../src/logger');
 const guildWebhookLink = require('../src/guild-webhook-link');
-const { AUDIT_EVENTS } = require('../src/constants');
+const { AUDIT_EVENTS, GUILD_WEBHOOK_PENDING_NOTICE } = require('../src/constants');
 const { signQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 const {
   QURL_OAUTH_SESSION_COOKIE,
@@ -128,7 +128,7 @@ describe('qurl-oauth routes', () => {
       expect(loc.searchParams.get('scope')).toContain('qurl:read');
       expect(loc.searchParams.get('scope')).not.toContain('offline_access');
       // `login` asks Auth0 not to reuse its ambient session; `consent` is
-      // load-bearing for key rotation — re-running /qurl setup must actually
+      // load-bearing for key rotation — re-running /qurl-admin setup must actually
       // re-prompt. Pin both so a future refactor can't drop either.
       expect(loc.searchParams.get('prompt')).toBe('login consent');
       expect(loc.searchParams.get('connection')).toBe('email');
@@ -376,6 +376,66 @@ describe('qurl-oauth routes', () => {
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
+    it.each([
+      [403, 'email_verification_required', 'Verify your qURL account email'],
+      [403, 'account_frozen', 'Your qURL account is frozen'],
+      [403, 'scope_delegation_denied', 'does not permit the required qURL permissions'],
+      [401, 'invalid_audience', 'bot operator must correct the Auth0 audience'],
+      [401, 'insufficient_scope', 'Sign in again and grant qURL read and write access'],
+    ])('shows a safe next step for mint failure %s/%s', async (status, code, expected) => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'jwt-xyz' }) })
+        .mockResolvedValueOnce({ ok: false, status, text: async () => JSON.stringify({ error: { code, detail: 'PRIVATE upstream detail' } }) });
+      const res = await request(app).get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
+        .set('Cookie', cookieFor(state));
+      expect(res.status).toBe(status);
+      expect(res.text).toContain(expected);
+      expect(res.text).not.toContain('PRIVATE upstream detail');
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
+      expect(discord.sendDM).not.toHaveBeenCalled();
+    });
+
+    it('fresh grant on the same state cannot replay a key revoked after persistence failed', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      const cached = new Map();
+      const activeKeys = new Set();
+      globalThis.fetch = jest.fn(async (url, options) => {
+        if (String(url).endsWith('/oauth/token')) return { ok: true, json: async () => ({ access_token: 'jwt-xyz' }) };
+        if (options.method === 'DELETE') {
+          activeKeys.delete(String(url).split('/').at(-1));
+          return { ok: true };
+        }
+        const key = options.headers['Idempotency-Key'];
+        if (!cached.has(key)) {
+          const keyId = `key-${cached.size + 1}`;
+          cached.set(key, { data: { api_key: `secret-${keyId}`, key_id: keyId } });
+          activeKeys.add(keyId);
+        }
+        return { ok: true, json: async () => cached.get(key) };
+      });
+      db.setGuildApiKey.mockRejectedValueOnce(new Error('storage failed'));
+      const first = await request(app).get(`/oauth/qurl/callback?code=grant-one&state=${encodeURIComponent(state)}`).set('Cookie', cookieFor(state));
+      expect(first.status).toBe(500);
+      expect(activeKeys.size).toBe(0);
+      const second = await request(app).get(`/oauth/qurl/callback?code=grant-two&state=${encodeURIComponent(state)}`).set('Cookie', cookieFor(state));
+      expect(second.status).toBe(200);
+      expect(cached.size).toBe(2);
+      expect(db.setGuildApiKey.mock.calls.at(-1)[1]).toBe('secret-key-2');
+      expect(activeKeys.has('key-2')).toBe(true);
+    });
+
+    it('does not trust a known mint code with the wrong HTTP status', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'jwt-xyz' }) })
+        .mockResolvedValueOnce({ ok: false, status: 401, text: async () => JSON.stringify({ error: { code: 'email_verification_required' } }) });
+      const res = await request(app).get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`).set('Cookie', cookieFor(state));
+      expect(res.status).toBe(502);
+      expect(res.text).toContain('Could not provision qURL key');
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
+    });
+
     it('429s with key-limit-specific copy when qurl-service returns api_key_limit, does not persist or DM', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()
@@ -430,7 +490,8 @@ describe('qurl-oauth routes', () => {
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
-    it('200s on happy path: mints key, persists, DMs admin, renders success with binding readout', async () => {
+    it.each([true, false])('persists setup and reports confirmed or pending view counting (linked=%s)', async (webhookLinked) => {
+      guildWebhookLink.linkGuildWebhookSubscriptionForSetup.mockResolvedValueOnce(webhookLinked);
       const state = signQurlOAuthState('guild-1', 'admin-2');
       const idTokenPayload = Buffer.from(JSON.stringify({ email: 'alice@layerv.test', sub: 'auth0|abc' })).toString('base64')
         .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -455,6 +516,14 @@ describe('qurl-oauth routes', () => {
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
+      const dm = discord.sendDM.mock.calls[0][1];
+      if (webhookLinked) {
+        expect(res.text).not.toContain(GUILD_WEBHOOK_PENDING_NOTICE);
+        expect(dm).not.toContain(GUILD_WEBHOOK_PENDING_NOTICE);
+      } else {
+        expect(res.text).toContain(GUILD_WEBHOOK_PENDING_NOTICE);
+        expect(dm).toContain(GUILD_WEBHOOK_PENDING_NOTICE);
+      }
       expect(res.text).toContain('/qurl send is ready');
       expect(res.text).not.toContain('/qurl map');
       expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', 'oauth');
@@ -473,6 +542,10 @@ describe('qurl-oauth routes', () => {
 
       const mintCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/v1/api-keys'));
       const body = JSON.parse(mintCall[1].body);
+      const statePayload = JSON.parse(Buffer.from(state.split('.')[0], 'base64url').toString());
+      expect(mintCall[1].headers['Idempotency-Key']).toBe(crypto.createHmac('sha256', statePayload.n).update('auth0-code').digest('hex'));
+      expect(require('../src/utils/auth0-jwks').verifyAuth0IdToken).toHaveBeenCalledWith(expect.any(String), statePayload.n);
+      expect(mintCall[1].headers['Idempotency-Key']).toMatch(/^[a-f0-9]{64}$/);
       expect(body.kind).toBe('api_key');
       expect(body).not.toHaveProperty('key_type');
 
@@ -566,7 +639,7 @@ describe('qurl-oauth routes', () => {
       expect(discord.sendDM).toHaveBeenCalledWith(
         'admin-2', expect.stringContaining('qURL is connected'),
       );
-      expect(guildWebhookLink.fireAndForgetLinkGuildWebhookSubscription)
+      expect(guildWebhookLink.linkGuildWebhookSubscriptionForSetup)
         .toHaveBeenCalledWith({
           guildId: 'guild-1',
           apiKey: 'lv_live_abc',
@@ -613,9 +686,9 @@ describe('qurl-oauth routes', () => {
       );
     });
 
-    it('renders success without qURL-account-email line when id_token verification fails', async () => {
+    it.each(['ERR_JWS_SIGNATURE_VERIFICATION_FAILED', 'nonce_mismatch'])('omits unverified identity without blocking setup: %s', async reason => {
       const { verifyAuth0IdToken } = require('../src/utils/auth0-jwks');
-      verifyAuth0IdToken.mockResolvedValueOnce({ ok: false, reason: 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED' });
+      verifyAuth0IdToken.mockResolvedValueOnce({ ok: false, reason });
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
@@ -634,6 +707,7 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toMatch(/<dt>Discord guild<\/dt>\s*<dd>guild-1<\/dd>/);
       expect(res.text).toMatch(/<dt>API key prefix<\/dt>\s*<dd>lv_live_a<\/dd>/);
       expect(res.text).not.toMatch(/<dt>qURL account<\/dt>/);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('id_token verification failed'), expect.objectContaining({ reason }));
       expect(logger.audit).toHaveBeenCalledWith(
         AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
         expect.objectContaining({ qurl_account_subject_fingerprint: null }),

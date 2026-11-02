@@ -5,7 +5,7 @@ const path = require('node:path');
 
 jest.mock('../src/qurl', () => ({
   createOneTimeLink: jest.fn(),
-  deleteLink: jest.fn(),
+  revokeResource: jest.fn(),
 }));
 
 jest.mock('../src/connector', () => ({
@@ -13,7 +13,7 @@ jest.mock('../src/connector', () => ({
   reUploadBuffer: jest.fn(),
 }));
 
-const { deleteLink } = require('../src/qurl');
+const { revokeResource } = require('../src/qurl');
 const { ERROR_CODE_CLIENT_VALIDATION } = jest.requireActual('@layervai/qurl');
 const { CRID_RESOURCE_ID, PUBLIC_KEY_RESOURCE_ID } = require('./helpers/qurl-fixtures');
 const { resourcePath } = require('../src/utils/resource-id');
@@ -54,8 +54,8 @@ function bareLine(id) {
 beforeEach(() => {
   jest.spyOn(console, 'log').mockImplementation(() => {});
   jest.spyOn(console, 'error').mockImplementation(() => {});
-  deleteLink.mockReset();
-  deleteLink.mockResolvedValue(undefined);
+  revokeResource.mockReset();
+  revokeResource.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -162,7 +162,7 @@ describe('reclaimOnce', () => {
   it('shares one sweep between concurrent callers instead of racing them', async () => {
     const ledger = tempLedger(line('r_1'));
     const [first, second] = await Promise.all([reclaimOnce(ledger), reclaimOnce(ledger)]);
-    expect(deleteLink).toHaveBeenCalledTimes(1);
+    expect(revokeResource).toHaveBeenCalledTimes(1);
     expect(first).toBe(second);
   });
 
@@ -218,7 +218,7 @@ describe('runRound ledgering', () => {
     return mod;
   }
 
-  it('records every parent a round creates, re-uploads included', async () => {
+  it('records the single uploaded parent before minting each batch', async () => {
     const payload = path.join(os.tmpdir(), `loadtest-payload-${process.pid}.bin`);
     const ledger = path.join(os.tmpdir(), `loadtest-round-ledger-${process.pid}.jsonl`);
     fs.writeFileSync(payload, 'x');
@@ -235,11 +235,11 @@ describe('runRound ledgering', () => {
     const mod = loadWith(['--count', '30', '--file', payload, '--ledger', ledger]);
     await mod.runRound(1);
 
-    expect(reUploadBuffer).toHaveBeenCalledTimes(3);
-    expect(mod.readLedger(ledger)).toEqual(['res-1', 'res-2', 'res-3']);
+    expect(reUploadBuffer).toHaveBeenCalledTimes(1);
+    expect(mod.readLedger(ledger)).toEqual(['res-1']);
     // Preserve the resource kind for manual reconciliation.
     expect(fs.readFileSync(ledger, 'utf8').trim().split('\n').map(l => JSON.parse(l).kind))
-      .toEqual(['upload', 'upload', 'upload']);
+      .toEqual(['upload']);
   });
 
   it('records the CRID, not the public key, for a location link', async () => {
@@ -360,7 +360,7 @@ describe('resolveReclaimArg', () => {
 describe('reclaim', () => {
   it('revokes the rest when one resource fails', async () => {
     const ledger = tempLedger(['r_1', 'r_2', 'r_3', 'r_4', 'r_5'].map((id) => line(id)).join(''));
-    deleteLink.mockImplementation(async (id) => {
+    revokeResource.mockImplementation(async (id) => {
       if (id === 'r_2') {
         throw new Error(qurlApiErrorMessage('DELETE', resourcePath(id), 500));
       }
@@ -368,7 +368,7 @@ describe('reclaim', () => {
 
     const result = await reclaim(ledger);
 
-    expect(deleteLink).toHaveBeenCalledTimes(5);
+    expect(revokeResource).toHaveBeenCalledTimes(5);
     expect(result).toMatchObject({ missing: false, revoked: 4, failed: 1 });
     expect(readLedger(ledger)).toEqual(['r_2']);
     expect(console.error).toHaveBeenCalledWith(
@@ -378,7 +378,7 @@ describe('reclaim', () => {
 
   it('aggregates failures sharing a cause into one tally line', async () => {
     const ledger = tempLedger(['r_1', 'r_2', 'r_3'].map((id) => line(id)).join(''));
-    deleteLink.mockImplementation(async (id) => {
+    revokeResource.mockImplementation(async (id) => {
       throw new Error(qurlApiErrorMessage('DELETE', resourcePath(id), 401));
     });
 
@@ -394,7 +394,7 @@ describe('reclaim', () => {
 
   it('keeps an ambiguous resource-route 404 for another reclaim attempt', async () => {
     const ledger = tempLedger(line('r_1'));
-    deleteLink.mockRejectedValue(
+    revokeResource.mockRejectedValue(
       qurlApiError('DELETE', resourcePath('r_1'), 404),
     );
 
@@ -416,7 +416,7 @@ describe('reclaim', () => {
   ])('keeps an upload row after %s', async (_label, message) => {
     const id = message.endsWith('(503)') ? PUBLIC_KEY_RESOURCE_ID : CRID_RESOURCE_ID;
     const ledger = tempLedger(line(id, { kind: 'upload' }));
-    deleteLink.mockRejectedValue(new Error(message));
+    revokeResource.mockRejectedValue(new Error(message));
 
     const result = await reclaim(ledger);
 
@@ -426,7 +426,7 @@ describe('reclaim', () => {
 
   it('retains an upload rejected by the SDK while pruning a successfully revoked sibling', async () => {
     const ledger = tempLedger(`${line(PUBLIC_KEY_RESOURCE_ID, { kind: 'upload' })}${line(CRID_RESOURCE_ID, { kind: 'upload' })}`);
-    deleteLink.mockImplementation(async (id) => {
+    revokeResource.mockImplementation(async (id) => {
       if (id === PUBLIC_KEY_RESOURCE_ID) {
         throw new Error(qurlApiErrorMessage('DELETE', '/resources/:resourceId', ERROR_CODE_CLIENT_VALIDATION));
       }
@@ -445,7 +445,7 @@ describe('reclaim', () => {
     ['a retired r_ ID', 'r_legacy42'],
   ])('keeps %s the SDK rejects as a non-CRID for manual verification', async (_kind, id) => {
     const ledger = tempLedger(line(id));
-    deleteLink.mockRejectedValue(
+    revokeResource.mockRejectedValue(
       new Error(qurlApiErrorMessage('DELETE', '/resources/:resourceId', ERROR_CODE_CLIENT_VALIDATION)),
     );
 
@@ -463,13 +463,13 @@ describe('reclaim', () => {
 
   it('continues after an invalid non-string ledger ID and flags manual repair', async () => {
     const ledger = tempLedger(`${line(12345)}${line('valid-id')}`);
-    deleteLink.mockImplementation(async (id) => {
+    revokeResource.mockImplementation(async (id) => {
       if (typeof id !== 'string') throw new Error('Invalid resource ID format: <number>');
     });
 
     const result = await reclaim(ledger);
 
-    expect(deleteLink).toHaveBeenCalledTimes(2);
+    expect(revokeResource).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ revoked: 1, failed: 1 });
     expect(readLedger(ledger)).toEqual([12345]);
     expect(console.error).toHaveBeenCalledWith(
@@ -482,7 +482,7 @@ describe('reclaim', () => {
 
   it('does not read a 404 inside the resource ID as already gone', async () => {
     const ledger = tempLedger(line('abc404def'));
-    deleteLink.mockRejectedValue(
+    revokeResource.mockRejectedValue(
       new Error(qurlApiErrorMessage('DELETE', resourcePath('abc404def'), 500)),
     );
 
@@ -494,13 +494,13 @@ describe('reclaim', () => {
 
   it('continues reclaiming after a non-Error rejection', async () => {
     const ledger = tempLedger(['r_1', 'r_2', 'r_3'].map((id) => line(id)).join(''));
-    deleteLink.mockImplementation(async (id) => {
+    revokeResource.mockImplementation(async (id) => {
       if (id === 'r_1') return Promise.reject('network unavailable');
     });
 
     const result = await reclaim(ledger);
 
-    expect(deleteLink).toHaveBeenCalledTimes(3);
+    expect(revokeResource).toHaveBeenCalledTimes(3);
     expect(result).toMatchObject({ revoked: 2, failed: 1 });
     expect(readLedger(ledger)).toEqual(['r_1']);
   });
@@ -508,21 +508,21 @@ describe('reclaim', () => {
   it('revokes a repeated id once', async () => {
     const ledger = tempLedger(`${line('r_1')}${line('r_1')}${line('r_1')}`);
     await reclaim(ledger);
-    expect(deleteLink).toHaveBeenCalledTimes(1);
+    expect(revokeResource).toHaveBeenCalledTimes(1);
   });
 
   it('reports a missing ledger instead of a clean sweep', async () => {
     const missing = path.join(os.tmpdir(), `loadtest-ledger-absent-${process.pid}-2.jsonl`);
     const result = await reclaim(missing);
     expect(result).toMatchObject({ missing: true });
-    expect(deleteLink).not.toHaveBeenCalled();
+    expect(revokeResource).not.toHaveBeenCalled();
   });
 
   it('refuses to delete against a tenancy the ledger was not written against', async () => {
     const ledger = tempLedger(line('r_1', { endpoint: `${config.QURL_ENDPOINT}-somewhere-else` }));
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ refused: true });
-    expect(deleteLink).not.toHaveBeenCalled();
+    expect(revokeResource).not.toHaveBeenCalled();
   });
 
   it('refuses a ledger mixing two tenancies even when the current one is present', async () => {
@@ -532,25 +532,25 @@ describe('reclaim', () => {
     );
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ refused: true });
-    expect(deleteLink).not.toHaveBeenCalled();
+    expect(revokeResource).not.toHaveBeenCalled();
   });
 
   it('sweeps a ledger whose entries all name the current tenancy', async () => {
     const ledger = tempLedger(line('r_1', { endpoint: config.QURL_ENDPOINT }));
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ revoked: 1, failed: 0 });
-    expect(deleteLink).toHaveBeenCalledWith('r_1');
+    expect(revokeResource).toHaveBeenCalledWith('r_1');
   });
 
   it('drains an id appended after the first pass had already read the ledger', async () => {
     const ledger = tempLedger(line('r_1'));
-    deleteLink.mockImplementation(async (id) => {
+    revokeResource.mockImplementation(async (id) => {
       if (id === 'r_1') fs.appendFileSync(ledger, line('r_late'));
     });
 
     const result = await reclaim(ledger);
 
-    expect(deleteLink).toHaveBeenCalledWith('r_late');
+    expect(revokeResource).toHaveBeenCalledWith('r_late');
     expect(result).toMatchObject({ revoked: 2, failed: 0 });
     expect(readLedger(ledger)).toEqual([]);
   });
@@ -570,13 +570,13 @@ describe('reclaim', () => {
     await creating;
     const result = await sweep;
 
-    expect(deleteLink).toHaveBeenCalledWith('r_late');
+    expect(revokeResource).toHaveBeenCalledWith('r_late');
     expect(result).toMatchObject({ revoked: 2, failed: 0 });
   });
 
   it('counts a structural 410 as already gone', async () => {
     const ledger = tempLedger(line('r_1'));
-    deleteLink.mockRejectedValue(
+    revokeResource.mockRejectedValue(
       qurlApiError('DELETE', resourcePath('r_1'), 410),
     );
     const result = await reclaim(ledger);
@@ -586,7 +586,7 @@ describe('reclaim', () => {
 
   it('counts a serialized 410 without structural status as already gone', async () => {
     const ledger = tempLedger(line('r_1'));
-    deleteLink.mockRejectedValue(
+    revokeResource.mockRejectedValue(
       new Error(qurlApiErrorMessage('DELETE', resourcePath('r_1'), 410)),
     );
 
@@ -600,20 +600,20 @@ describe('reclaim', () => {
     const ledger = tempLedger(line('r_1', { endpoint: `${config.QURL_ENDPOINT}/` }));
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ revoked: 1, failed: 0 });
-    expect(deleteLink).toHaveBeenCalledWith('r_1');
+    expect(revokeResource).toHaveBeenCalledWith('r_1');
   });
 
   it('treats a ledger with content but no readable ids as corrupt, not clean', async () => {
     const ledger = tempLedger('{"resource_id":"r_1\n{"resou\n');
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ unreadable: true });
-    expect(deleteLink).not.toHaveBeenCalled();
+    expect(revokeResource).not.toHaveBeenCalled();
   });
 
   it('refuses an entry that records no endpoint at all', async () => {
     const ledger = tempLedger(bareLine('r_1'));
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ refused: true });
-    expect(deleteLink).not.toHaveBeenCalled();
+    expect(revokeResource).not.toHaveBeenCalled();
   });
 });

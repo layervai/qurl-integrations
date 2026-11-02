@@ -1,6 +1,6 @@
 'use strict';
 
-const { QURL_ACCESS_TOKEN_PREFIX } = require('./resource-id');
+const { QURL_ACCESS_TOKEN_PREFIX, RESOURCE_ID_CHARACTER_CLASS } = require('./resource-id');
 
 // TODO(upstream-contract): infra repo #1551's POST /api/revoke_links
 // rejects the whole request with 400 when any qurl_id exceeds 64 characters or
@@ -14,7 +14,7 @@ const MAX_QURL_ID_LENGTH = 64;
 // charset is required so a future id prefix cannot fail every send. Access
 // tokens (at_) share that charset and are bearer credentials, so they are
 // rejected explicitly and never reach the wire or the logs.
-const CLEANUP_QURL_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const CLEANUP_QURL_ID_PATTERN = new RegExp(`^${RESOURCE_ID_CHARACTER_CLASS}+$`);
 
 // Returns a bounded identity usable for best-effort child revoke, or null.
 function qurlIdForCleanup(value) {

@@ -6,7 +6,7 @@
 // Run AFTER deploying the BYOK view-counter change (the migration
 // that introduced setGuildApiKey-time subscription registration).
 // Already-linked guilds wouldn't otherwise pick up that linkage until they
-// manually re-link via `/qurl setup`; this script catches them in one pass.
+// manually re-link via `/qurl-admin setup`; this script catches them in one pass.
 //
 // Idempotent: rows that already have a `webhook_id` or any
 // `webhook_owner_id` are skipped. The latter normally means an owner-only

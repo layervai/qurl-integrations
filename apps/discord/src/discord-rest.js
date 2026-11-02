@@ -100,18 +100,13 @@ async function sendDM(userId, message) {
 // here, not in the predicate.
 // Codes plus human-readable descriptions. The description lands in the
 // info-level log when it matches, so a future log search for an
-// unexpected spike (e.g., 50007 on PATCH — not observed today) reads
+// unexpected spike in a known recipient-side code reads
 // the cause directly rather than requiring an external code lookup.
 const DM_EDIT_EXPECTED_API_CODE_DESCRIPTIONS = new Map([
   [10003, 'Unknown Channel — DM channel deleted'],
   [10008, 'Unknown Message — recipient deleted the DM'],
   [50001, 'Missing Access — bot kicked / lost shared guild'],
-  // 50007 is observed at POST /messages time (new DM rejected), not
-  // typically at PATCH on an existing message in an already-open DM
-  // channel. Kept defensively — if it ever fires on PATCH it's still
-  // a recipient-side state change, not an oncall surprise. The
-  // description tag in the log makes the spike greppable for #369.
-  [50007, 'Cannot send messages to this user — DMs disabled / blocked'],
+
 ]);
 
 /**
@@ -133,11 +128,13 @@ const DM_EDIT_EXPECTED_API_CODE_DESCRIPTIONS = new Map([
  * Accept as a known limitation; the revoke success/total counts are
  * not affected (those track the DELETE, not the edit).
  */
-async function editDM(channelId, messageId, message) {
+async function editDM(channelId, messageId, message, { signal } = {}) {
   try {
-    await client.rest.patch(Routes.channelMessage(channelId, messageId), { body: message });
+    signal?.throwIfAborted();
+    await client.rest.patch(Routes.channelMessage(channelId, messageId), { body: message, ...(signal ? { signal } : {}) });
     return { ok: true };
   } catch (error) {
+    if (signal?.aborted) return { ok: false, expected: true };
     // Map.get(undefined) returns undefined, which falls through to the
     // unexpected (warn-level) branch. Intentional: an error with no
     // API code (e.g., revoked-token 403 with no JSON body, synthetic
@@ -150,7 +147,7 @@ async function editDM(channelId, messageId, message) {
       errorMessage: error.message,
       // Present only on the expected branch — names which entry in
       // DM_EDIT_EXPECTED_API_CODE_DESCRIPTIONS matched. Keeps a future
-      // spike in any single expected code (e.g., 50007 on PATCH)
+      // spike in any single expected code
       // greppable from CloudWatch without an external lookup.
       ...(expected && { expectedReason: expectedDescription }),
     });

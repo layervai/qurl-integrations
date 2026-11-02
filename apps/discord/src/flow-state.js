@@ -17,9 +17,8 @@
 //      A worker advancing a flow MUST pass the version it loaded;
 //      a concurrent worker that already advanced the row will lose
 //      the conditional check and the caller can decide to retry,
-//      drop, or escalate. SQS at-least-once + the OCC gate gives
-//      the system exactly-once-application semantics without a
-//      FIFO queue.
+//      drop, or escalate. The condition protects that row version;
+//      external effects still need their own idempotency and recovery.
 //
 //   2. TTL-driven cleanup. Every row has an `expires_at` Number
 //      (epoch-seconds — DDB TTL is asynchronous and only reaps
@@ -54,6 +53,8 @@ const {
   PutCommand,
   DeleteCommand,
   UpdateCommand,
+  BatchGetCommand,
+  BatchWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
 // `ConditionalCheckFailedException.name` is the stable identifier the
@@ -70,6 +71,9 @@ const { encryptStrict, decrypt } = require('./utils/crypto');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
 const { parseFlowId } = require('./flow-id');
+const { randomUUID } = require('node:crypto');
+const { gzipSync, gunzipSync } = require('node:zlib');
+const { RECIPIENT_SET_FIELD, readFlowRecipients } = require('./flow-recipient-payload');
 
 // Module-load validations. Same fail-fast pattern as ddb-store.js
 // (DDB_TABLE_PREFIX + AWS_REGION). flow-state intentionally
@@ -165,17 +169,132 @@ function nowEpochSeconds() {
 // useful. Whole-blob encryption keeps the DDB attribute shape
 // predictable (always a single `payload` string column) regardless
 // of flow type.
-function encryptPayload(payload) {
-  // Load-bearing null guard: without it, payload=null would
-  // encryptStrict(JSON.stringify(null)) = ciphertext-of-"null"
-  // (the 4-byte string), storing a non-null DDB attribute that
-  // decrypts to the string "null", which JSON.parse correctly
-  // reverses but at the cost of a wasted encrypt call AND an
-  // inconsistent DDB attribute shape (string sometimes, null
-  // sometimes). Pass null through unchanged so the column is
-  // either a real ciphertext or a DDB null — never both.
+const RECIPIENT_CHUNK_SIZE = 256;
+const RECIPIENT_MAX_CHUNKS = 100; // Bounded storage budget; covers the default 20,000 recipients.
+const RECIPIENT_READ_KEYS = 4;
+const RECIPIENT_READ_CONCURRENCY = 4;
+const FLOW_INLINE_PAYLOAD_BYTES = 384 * 1024;
+const RECIPIENT_CHUNK_PLAIN_BYTES = 128 * 1024;
+
+function recipientChunkKey(id, part) {
+  return `__flow_recipients__${id}#${part}`;
+}
+
+async function writeRecipientChunks(items, signal) {
+  for (let offset = 0; offset < items.length; offset += 25) {
+    let pending = items.slice(offset, offset + 25).map(Item => ({ PutRequest: { Item } }));
+    for (let attempt = 0; pending.length; attempt++) {
+      signal.throwIfAborted();
+      const result = await ddb.send(new BatchWriteCommand({ RequestItems: { [TABLE_NAME]: pending } }), { abortSignal: signal });
+      pending = result.UnprocessedItems?.[TABLE_NAME] || [];
+      if (!pending.length) break;
+      if (attempt >= 3) throw new Error('Flow recipient chunk write incomplete');
+      await new Promise(resolve => setTimeout(resolve, 25 * 2 ** attempt));
+    }
+  }
+}
+
+async function encryptPayload(payload, expiresAt) {
   if (payload == null) return null;
-  return encryptStrict(JSON.stringify(payload));
+  if (Object.hasOwn(payload, RECIPIENT_SET_FIELD)) throw new TypeError('Flow recipients must be hydrated before writing');
+  if (Object.hasOwn(payload, 'recipients')) {
+    readFlowRecipients(payload);
+    payload = { ...payload };
+    delete payload.recipientIds;
+    delete payload.recipientAliases;
+  }
+  const ciphertext = encryptStrict(JSON.stringify(payload));
+  if (!Array.isArray(payload.recipients) || Buffer.byteLength(ciphertext) <= FLOW_INLINE_PAYLOAD_BYTES) return ciphertext;
+  if (!Number.isSafeInteger(expiresAt)) throw new Error('Flow recipient chunks require the parent expiry');
+  const id = randomUUID();
+  const items = [];
+  const slices = [];
+  for (let offset = 0; offset < payload.recipients.length; offset += RECIPIENT_CHUNK_SIZE) {
+    slices.push(payload.recipients.slice(offset, offset + RECIPIENT_CHUNK_SIZE));
+  }
+  for (let index = 0; index < slices.length; index++) {
+    const recipients = slices[index];
+    const plain = Buffer.from(JSON.stringify(recipients));
+    const encrypted = plain.length <= RECIPIENT_CHUNK_PLAIN_BYTES
+      ? encryptStrict(gzipSync(plain).toString('base64')) : null;
+    if (!encrypted || Buffer.byteLength(encrypted) > FLOW_INLINE_PAYLOAD_BYTES) {
+      if (recipients.length <= 1) throw new Error('Flow recipient exceeds chunk size limit');
+      const half = Math.ceil(recipients.length / 2);
+      slices.splice(index, 1, recipients.slice(0, half), recipients.slice(half));
+      index--;
+      continue;
+    }
+    if (items.length >= RECIPIENT_MAX_CHUNKS) throw new Error('Flow recipient set exceeds bounded chunk budget');
+    const part = items.length;
+    items.push({ flow_id: recipientChunkKey(id, part), recipient_set: id, recipient_part: part,
+      payload: encrypted, expires_at: expiresAt });
+  }
+  const inline = { ...payload };
+  delete inline.recipients;
+  inline[RECIPIENT_SET_FIELD] = { version: 1, id, parts: items.length, count: payload.recipients.length };
+  const encoded = encryptStrict(JSON.stringify(inline));
+  if (Buffer.byteLength(encoded) > FLOW_INLINE_PAYLOAD_BYTES) throw new Error('Flow metadata exceeds inline size limit');
+  // Immutable unpublished/superseded sets share the parent's TTL; no history scan or repair queue.
+  await writeRecipientChunks(items, AbortSignal.timeout(3000));
+  return encoded;
+}
+
+async function readRecipientChunkBatch(keys, signal) {
+  let pending = { Keys: keys, ConsistentRead: true };
+  const rows = [];
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted();
+    const result = await ddb.send(new BatchGetCommand({ RequestItems: { [TABLE_NAME]: pending } }), { abortSignal: signal });
+    rows.push(...result.Responses?.[TABLE_NAME] || []);
+    const remaining = result.UnprocessedKeys?.[TABLE_NAME];
+    if (!remaining?.Keys?.length) return rows;
+    if (attempt >= 3) throw new Error('Flow recipient chunk read incomplete');
+    pending = { ...remaining, ConsistentRead: true };
+    await new Promise(resolve => setTimeout(resolve, 25 * 2 ** attempt));
+  }
+}
+
+async function expandRecipientPayload(payload) {
+  if (!payload || !Object.hasOwn(payload, RECIPIENT_SET_FIELD)) return payload;
+  const ref = payload[RECIPIENT_SET_FIELD];
+  if (!ref || ref.version !== 1 || typeof ref.id !== 'string' || !/^[0-9a-f-]{36}$/.test(ref.id)
+      || !Number.isSafeInteger(ref.parts) || ref.parts < 1 || ref.parts > RECIPIENT_MAX_CHUNKS
+      || !Number.isSafeInteger(ref.count) || ref.count < 1 || ref.count > ref.parts * RECIPIENT_CHUNK_SIZE) {
+    throw new Error('Flow recipient set reference is invalid');
+  }
+  const keys = Array.from({ length: ref.parts }, (_, part) => ({ flow_id: recipientChunkKey(ref.id, part) }));
+  const rows = new Map();
+  const signal = AbortSignal.timeout(3000);
+  // Small batches leave room for the provider's 1MiB-per-partition limit and retries.
+  const window = RECIPIENT_READ_KEYS * RECIPIENT_READ_CONCURRENCY;
+  for (let offset = 0; offset < keys.length; offset += window) {
+    const groups = [];
+    for (let index = offset; index < Math.min(offset + window, keys.length); index += RECIPIENT_READ_KEYS) {
+      groups.push(keys.slice(index, index + RECIPIENT_READ_KEYS));
+    }
+    const results = await Promise.allSettled(groups.map(group => readRecipientChunkBatch(group, signal)));
+    for (const result of results) {
+      if (result.status === 'rejected') throw result.reason;
+      for (const row of result.value) rows.set(row.flow_id, row);
+    }
+  }
+  const recipients = [];
+  for (let part = 0; part < ref.parts; part++) {
+    const row = rows.get(recipientChunkKey(ref.id, part));
+    if (!row || row.recipient_set !== ref.id || row.recipient_part !== part) throw new Error('Flow recipient chunk missing or mismatched');
+    const encoded = decrypt(row.payload);
+    if (typeof encoded !== 'string') throw new Error('Flow recipient chunk encoding is invalid');
+    const compressed = Buffer.from(encoded, 'base64');
+    if (compressed.toString('base64') !== encoded) throw new Error('Flow recipient chunk encoding is invalid');
+    const values = JSON.parse(gunzipSync(compressed, { maxOutputLength: RECIPIENT_CHUNK_PLAIN_BYTES }).toString('utf8'));
+    if (!Array.isArray(values) || values.length > RECIPIENT_CHUNK_SIZE) throw new Error('Flow recipient chunk is invalid');
+    recipients.push(...values);
+  }
+  if (recipients.length !== ref.count) throw new Error('Flow recipient count mismatch');
+  const expanded = { ...payload, recipients };
+  delete expanded[RECIPIENT_SET_FIELD];
+  readFlowRecipients(expanded);
+  return expanded;
 }
 
 function decryptPayload(ciphertext) {
@@ -223,7 +342,7 @@ function decryptPayload(ciphertext) {
 //
 // Why caller-supplied `expires_at` rather than computing it here:
 // different flow types have different lifecycle bounds (a
-// `/qurl setup` modal has a 15-minute window; a `/qurl send` or
+// `/qurl-admin setup` modal has a 15-minute window; a `/qurl send` or
 // `/qurl map` confirm card has a 3-minute window). The caller knows;
 // this module just persists.
 //
@@ -260,7 +379,7 @@ async function createFlow({ flow_id, stage, payload, expires_at }) {
     flow_id,
     stage,
     version: 1,
-    payload: encryptPayload(payload),
+    payload: await encryptPayload(payload, expires_at),
     expires_at,
     created_at: now,
     updated_at: now,
@@ -341,7 +460,7 @@ async function createFlow({ flow_id, stage, payload, expires_at }) {
 // no orthogonal-read callers (admin tooling, audit forensics)
 // to justify a parameter. Add `consistent_read: false` here if
 // such a caller arrives.
-async function loadFlow(flow_id, { grace_seconds = 0, include_expired = false } = {}) {
+async function loadFlow(flow_id, { grace_seconds = 0, include_expired = false, defer_recipients = false } = {}) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.loadFlow: flow_id must be a non-empty string');
   }
@@ -354,6 +473,7 @@ async function loadFlow(flow_id, { grace_seconds = 0, include_expired = false } 
   if (typeof grace_seconds !== 'number' || !Number.isFinite(grace_seconds) || grace_seconds < 0) {
     throw new TypeError(`flow-state.loadFlow: grace_seconds must be a non-negative finite number (got ${typeof grace_seconds}: ${JSON.stringify(grace_seconds)})`);
   }
+  if (typeof defer_recipients !== 'boolean') throw new TypeError('flow-state.loadFlow: defer_recipients must be boolean');
   if (typeof include_expired !== 'boolean') {
     throw new TypeError(`flow-state.loadFlow: include_expired must be a boolean (got ${typeof include_expired})`);
   }
@@ -365,6 +485,7 @@ async function loadFlow(flow_id, { grace_seconds = 0, include_expired = false } 
   const item = res?.Item;
   if (!item) return null;
   const expires = item.expires_at;
+  const now = nowEpochSeconds();
   // Reader strictness must MATCH the writer's assertExpiresAt() —
   // a row whose expires_at is a non-integer float would otherwise
   // round-trip undetected (writer rejects, but a regression or
@@ -373,7 +494,7 @@ async function loadFlow(flow_id, { grace_seconds = 0, include_expired = false } 
   // branch below (even under include_expired — a corrupted row's
   // stage isn't a safe key to act on).
   if (typeof expires === 'number' && Number.isFinite(expires) && Math.floor(expires) === expires) {
-    if (!include_expired && nowEpochSeconds() > expires + grace_seconds) {
+    if (!include_expired && now > expires + grace_seconds) {
       // Logically expired but not yet reaped. Treat as absent.
       return null;
     }
@@ -391,15 +512,33 @@ async function loadFlow(flow_id, { grace_seconds = 0, include_expired = false } 
     });
     return null;
   }
-  return {
+  const rawPayload = decryptPayload(item.payload);
+  const deferred = rawPayload && Object.hasOwn(rawPayload, RECIPIENT_SET_FIELD)
+    && (defer_recipients || (include_expired && now > expires));
+  const payload = deferred ? rawPayload : await expandRecipientPayload(rawPayload);
+  if (!include_expired && nowEpochSeconds() > expires + grace_seconds) return null;
+  const row = {
     flow_id: item.flow_id,
     stage: item.stage,
     version: item.version,
-    payload: decryptPayload(item.payload),
+    payload,
     expires_at: item.expires_at,
     created_at: item.created_at,
     updated_at: item.updated_at,
+    ...(deferred && { recipient_payload_deferred: true }),
   };
+  // Bind mutations across delete/recreate without adding snapshot data to payload JSON.
+  return Object.defineProperty(row, 'payloadSnapshot', { value: item.payload });
+}
+
+// The dispatcher acknowledges the interaction before the bounded chunk fan-out.
+async function hydrateFlowRecipients(row) {
+  if (!row?.recipient_payload_deferred) return row;
+  if (nowEpochSeconds() > row.expires_at) return null;
+  const { recipient_payload_deferred: _deferred, ...hydrated } = row;
+  hydrated.payload = await expandRecipientPayload(row.payload);
+  if (nowEpochSeconds() > row.expires_at) return null;
+  return Object.defineProperty(hydrated, 'payloadSnapshot', { value: row.payloadSnapshot });
 }
 
 // Advance a flow's stage under OCC. The caller passes the version
@@ -473,7 +612,8 @@ async function loadFlow(flow_id, { grace_seconds = 0, include_expired = false } 
 // observed value; on `result: 'conflict'`, the caller's intent
 // is still the relevant correlator because the observed value
 // is what beat them.)
-async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, terminal, set_expires_at }) {
+// Chunk storage failures throw; conflict/not_found describe conditional parent outcomes.
+async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, terminal, set_expires_at, expectedPayload }) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.transitionFlow: flow_id must be a non-empty string');
   }
@@ -514,6 +654,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   // re-checking needs strong consistency. Same rationale as
   // loadFlow's ConsistentRead choice.
   let stage_from = null;
+  let priorItem = null;
   // `extended` is computed against the row's PRIOR `expires_at`, not
   // just "did the caller pass `set_expires_at`". The name reads as
   // "the deadline was extended", and a forensic `count_by(extended=
@@ -526,7 +667,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
     const got = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: { flow_id },
-      ProjectionExpression: 'stage, expires_at',
+      ProjectionExpression: (payload === undefined && set_expires_at !== undefined) || (payload && Object.hasOwn(payload, 'recipients')) ? 'stage, expires_at, payload' : 'stage, expires_at',
       ConsistentRead: true,
     }));
     if (!got?.Item) {
@@ -544,6 +685,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       });
       return { result: 'not_found', version: null };
     }
+    priorItem = got.Item;
     stage_from = got.Item.stage ?? null;
     if (set_expires_at !== undefined) {
       const priorExpires = got.Item.expires_at;
@@ -569,6 +711,16 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
     throw err;
   }
 
+  let nextPayload = payload;
+  if (nextPayload === undefined && set_expires_at !== undefined && priorItem?.payload) {
+    const priorPayload = decryptPayload(priorItem.payload);
+    if (priorPayload && Object.hasOwn(priorPayload, RECIPIENT_SET_FIELD)) {
+      nextPayload = await expandRecipientPayload(priorPayload);
+    }
+  }
+  const encodedPayload = nextPayload === undefined ? undefined
+    : await encryptPayload(nextPayload, set_expires_at ?? priorItem?.expires_at);
+
   // Cache `now` once: the same value gates the condition AND lands
   // in `:updated_at`. Reading `nowEpochSeconds()` separately for
   // each would let them straddle a second boundary.
@@ -591,16 +743,22 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
     ':expected': expectedVersion,
     ':now': updateNow,
   };
-  if (payload !== undefined) {
+  if (nextPayload !== undefined) {
     updateExprParts.push('#p = :payload');
     exprNames['#p'] = 'payload';
-    exprValues[':payload'] = encryptPayload(payload);
+    exprValues[':payload'] = encodedPayload;
   }
   if (set_expires_at !== undefined) {
     updateExprParts.push('#e = :expires_at');
     exprValues[':expires_at'] = set_expires_at;
   }
 
+  const snapshot = expectedPayload !== undefined ? expectedPayload
+    : (nextPayload && Object.hasOwn(nextPayload, 'recipients') ? priorItem?.payload : undefined);
+  if (snapshot !== undefined) {
+    exprNames['#p'] = 'payload';
+    exprValues[':expected_payload'] = snapshot;
+  }
   try {
     const res = await ddb.send(new UpdateCommand({
       TableName: TABLE_NAME,
@@ -617,7 +775,8 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       // with loadFlow's own expiry filter). A missing or non-
       // numeric `expires_at` (corrupted row) also fails the
       // comparison — fail-safe, matching loadFlow's treatment.
-      ConditionExpression: 'attribute_exists(flow_id) AND #v = :expected AND #e >= :now',
+      ConditionExpression: 'attribute_exists(flow_id) AND #v = :expected AND #e >= :now'
+        + (snapshot !== undefined ? ' AND #p = :expected_payload' : ''),
       ExpressionAttributeNames: exprNames,
       ExpressionAttributeValues: exprValues,
       ReturnValues: 'UPDATED_NEW',
@@ -725,7 +884,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
 // caller-supplied value. This prevents cross-flow contamination
 // across commands that share a `flow_id` shape: when /qurl revoke
 // supersedes its own `awaiting_revoke_select` row, it must not be
-// able to admin_cleanup an in-flight /qurl setup row keyed at the
+// able to admin_cleanup an in-flight /qurl-admin setup row keyed at the
 // same (user, channel). The stage gate enforces "delete the flow
 // I expect, not whatever flow happens to live at this key."
 //
@@ -744,7 +903,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
 // behavior is exactly the pre-existing stage-gate-only delete
 // (the only path used by terminal-flow callers, where there
 // is no concurrent advancement to race against).
-async function deleteFlow(flow_id, { stage, reason, expectedVersion } = {}) {
+async function deleteFlow(flow_id, { stage, reason, expectedVersion, expectedPayload } = {}) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.deleteFlow: flow_id must be a non-empty string');
   }
@@ -783,6 +942,11 @@ async function deleteFlow(flow_id, { stage, reason, expectedVersion } = {}) {
     exprValues[':expected'] = expectedVersion;
   }
 
+  if (expectedPayload !== undefined) {
+    conditionParts.push('#p = :expected_payload');
+    exprNames['#p'] = 'payload';
+    exprValues[':expected_payload'] = expectedPayload;
+  }
   try {
     await ddb.send(new DeleteCommand({
       TableName: TABLE_NAME,
@@ -841,7 +1005,7 @@ async function deleteFlow(flow_id, { stage, reason, expectedVersion } = {}) {
 
 // Open a fresh flow row, superseding a same-flow_id predecessor at
 // the SAME stage if one exists. The supersede-and-retry pattern was
-// duplicated across /qurl revoke and /qurl setup (and recurs in
+// duplicated across /qurl revoke and /qurl-admin setup (and recurs in
 // /qurl send + /qurl map); extracting it here closes #272 (OCC on
 // deleteFlow against the prior version), #273 (include_expired so
 // a stuck-orphan past its logical TTL is still observable), and
@@ -906,7 +1070,7 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
   // physical reap hasn't fired (#273). Without the opt-in, an
   // orphan at the supersede-mismatch stage would be invisible
   // here and the next deleteFlow would fail by stage gate.
-  let surviving = await loadFlow(flow_id, { include_expired: true });
+  let surviving = await loadFlow(flow_id, { include_expired: true, defer_recipients: true });
   if (!surviving) {
     // Row vanished between createFlow conflict and the peek (TTL
     // reap on a stuck-orphan, or a concurrent supersede won the
@@ -940,12 +1104,13 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
     stage: surviving.stage,
     reason: 'admin_cleanup',
     expectedVersion: surviving.version,
+    ...(surviving.payloadSnapshot !== undefined && { expectedPayload: surviving.payloadSnapshot }),
   });
   if (!claimed.deleted) {
     // Lost the OCC race or the row evaporated. Re-peek so the
     // caller sees the current state (could be a sibling flow's
     // fresh row, or another supersede's fresh same-stage row).
-    surviving = await loadFlow(flow_id, { include_expired: true });
+    surviving = await loadFlow(flow_id, { include_expired: true, defer_recipients: true });
     return { created: false, surviving };
   }
 
@@ -959,19 +1124,56 @@ async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
   // Lost the create race to a third caller that slipped in
   // between our delete and our retry. Same return shape — the
   // surviving peek tells the caller what to do.
-  surviving = await loadFlow(flow_id, { include_expired: true });
+  surviving = await loadFlow(flow_id, { include_expired: true, defer_recipients: true });
   return { created: false, surviving };
 }
 
+// Claim a renderer warning without changing the flow version, payload or TTL.
+// Only an existing marker is seen; missing or changed rows remain retryable.
+// The ciphertext condition fences replacements after the strong read.
+async function claimFlowWarning(flow_id, sendNonce, kind, value) {
+  const fields = { expiry: 'expiresIn', self_destruct: 'selfDestructSeconds' };
+  if (typeof flow_id !== 'string' || !flow_id || typeof kind !== 'string' || !Object.hasOwn(fields, kind)) {
+    throw new TypeError('flow-state.claimFlowWarning: invalid flow or warning kind');
+  }
+  const marker = `corruption_warned_${kind}`;
+  const options = { abortSignal: AbortSignal.timeout(3000) };
+  const result = await ddb.send(new GetCommand({
+    TableName: TABLE_NAME, Key: { flow_id }, ConsistentRead: true,
+  }), options);
+  const item = result?.Item;
+  const now = nowEpochSeconds();
+  if (!item || !Number.isInteger(item.expires_at) || item.expires_at < now) return 'retry';
+  const payload = decryptPayload(item.payload);
+  if (!payload || payload.sendNonce !== sendNonce
+      || JSON.stringify(payload[fields[kind]]) !== JSON.stringify(value)) return 'retry';
+  if (Object.hasOwn(item, marker)) return 'seen';
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLE_NAME, Key: { flow_id },
+      UpdateExpression: 'SET #warning = :yes',
+      ConditionExpression: '#payload = :payload AND #expiry >= :now AND attribute_not_exists(#warning)',
+      ExpressionAttributeNames: { '#warning': marker, '#payload': 'payload', '#expiry': 'expires_at' },
+      ExpressionAttributeValues: { ':yes': true, ':payload': item.payload, ':now': now },
+    }), options);
+    return 'claimed';
+  } catch (err) {
+    if (isConditionalCheckFailed(err)) return 'retry';
+    throw err;
+  }
+}
+
 module.exports = {
+  claimFlowWarning,
   createFlow,
   loadFlow,
+  hydrateFlowRecipients,
   transitionFlow,
   deleteFlow,
   supersedeOrCreate,
   // Test-only escape hatch (the `__` prefix signals: not part of
   // the public API). Production code paths must go through the
-  // five named functions above. A future admin CLI or third
+  // lifecycle methods and warning claim above. A future admin CLI or third
   // consumer should get its own real export when it arrives — the
   // shape of "what does the API surface to non-test callers look
   // like" is easier to design once that caller actually exists.

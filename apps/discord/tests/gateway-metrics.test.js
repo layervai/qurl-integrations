@@ -421,7 +421,7 @@ describe('startActiveGuildCount', () => {
   });
 
   test('skips emission when guilds cache is missing', () => {
-    const client = { ws: {} };
+    const client = { isReady: () => true, ws: {} };
     startActiveGuildCount(client, { intervalMs: 1_000 });
     jest.advanceTimersByTime(1_000);
     expect(logger.audit).not.toHaveBeenCalled();
@@ -435,6 +435,25 @@ describe('startActiveGuildCount', () => {
       AUDIT_EVENTS.ACTIVE_GUILD_COUNT,
       { count: 5 },
     );
+  });
+
+  test('skips the unhydrated boot cache and emits only after READY', () => {
+    const client = fakeClient({ guildCount: 0 });
+    client.isReady = jest.fn(() => false);
+    startActiveGuildCount(client, { intervalMs: 1_000 });
+    jest.advanceTimersByTime(2_000);
+    expect(logger.audit).not.toHaveBeenCalled();
+    client.guilds.cache.size = 7;
+    client.isReady.mockReturnValue(true);
+    jest.advanceTimersByTime(1_000);
+    expect(logger.audit.mock.calls).toEqual([[AUDIT_EVENTS.ACTIVE_GUILD_COUNT, { count: 7 }]]);
+    client.isReady.mockReturnValue(false);
+    client.guilds.cache.size = 0;
+    jest.advanceTimersByTime(1_000);
+    expect(logger.audit).toHaveBeenCalledTimes(1);
+    client.isReady.mockReturnValue(true);
+    jest.advanceTimersByTime(1_000);
+    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.ACTIVE_GUILD_COUNT, { count: 0 });
   });
 
   test('emits active_guild_count from an async gateway-shim sampler', async () => {
@@ -510,6 +529,7 @@ describe('startActiveGuildCount', () => {
 
   test('swallows errors and logs at warn level', () => {
     const client = {
+      isReady: () => true,
       get guilds() { throw new Error('cache exploded'); },
     };
     startActiveGuildCount(client, { intervalMs: 1_000 });

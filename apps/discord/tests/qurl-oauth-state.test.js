@@ -59,6 +59,16 @@ describe('qurl-oauth-state', () => {
     });
   });
 
+  it.each([undefined, null, 42, '', 'short', 'z'.repeat(32)])('rejects signed state with unusable mint nonce %s', nonce => {
+    const state = signQurlOAuthState('guild-1', 'user-2');
+    const payload = JSON.parse(Buffer.from(state.split('.')[0], 'base64url').toString());
+    payload.n = nonce;
+    const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const secret = process.env.QURL_OAUTH_STATE_SECRET || process.env.OAUTH_STATE_SECRET;
+    const sig = crypto.createHmac('sha256', secret).update(encoded).digest('hex');
+    expect(verifyQurlOAuthState(`${encoded}.${sig}`)).toEqual({ ok: false, reason: 'invalid_nonce' });
+  });
+
   describe('input validation', () => {
     it('throws on empty guildId', () => {
       expect(() => signQurlOAuthState('', 'user-2')).toThrow(/guildId/);

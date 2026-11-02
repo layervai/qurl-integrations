@@ -6,6 +6,7 @@ const config = require('./config');
 const { assertConfiguredWebhookSecret } = require('./utils/webhook-secret');
 const db = require('./store');
 const logger = require('./logger');
+const eventConsumer = require('./event-consumer');
 const { LOG_EVENTS } = require('./constants');
 const { renderPage } = require('./templates/page');
 const { isPositiveFinite } = require('./utils/time');
@@ -176,12 +177,17 @@ app.get('/metrics', metricsRateLimit, async (req, res) => {
   if (!crypto.timingSafeEqual(authHash, expectedHash)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  const stats = await db.getStats();
+  if (req.query.view !== undefined && req.query.view !== 'consumer') {
+    return res.status(400).json({ error: 'Unsupported metrics view' });
+  }
+  // Routine worker scrapes must not scan the aggregate tables.
+  const stats = req.query.view === 'consumer' ? undefined : await db.getStats();
   res.json({
     status: 'ok',
     uptime: process.uptime(),
     memory: process.memoryUsage(),
     stats,
+    eventConsumer: eventConsumer.getMetrics(),
   });
 });
 
@@ -221,7 +227,7 @@ function noStoreHeaders(req, res, next) {
 }
 
 // qURL OAuth routes (/oauth/qurl/start + /oauth/qurl/callback). These
-// always mount because /qurl setup is the canonical path for any guild
+// always mount because /qurl-admin setup is the canonical path for any guild
 // (multi-tenant or single-guild) to configure a qURL API key, and the
 // route gates internally on
 // config.isQurlSetupAvailable (returns 503 with a "not configured yet"
@@ -239,11 +245,11 @@ const auth0ConnectionPolicyMetadata = {
 };
 if (!config.isQurlSetupAvailable) {
   logger.info(config.isAuth0EmailConnectionRejected
-    ? 'qURL OAuth routes mounted in not-configured mode because AUTH0_EMAIL_CONNECTION was rejected. /qurl setup is blocked until the deployment value is corrected; other bot operations remain available.'
-    : 'qURL OAuth routes mounted in not-configured mode because AUTH0_* settings are incomplete/invalid. /qurl setup will fall back to the legacy modal-paste path.');
+    ? 'qURL OAuth routes mounted in not-configured mode because AUTH0_EMAIL_CONNECTION was rejected. /qurl-admin setup is blocked until the deployment value is corrected; other bot operations remain available.'
+    : 'qURL OAuth routes mounted in not-configured mode because AUTH0_* settings are incomplete/invalid. /qurl-admin setup will fall back to the legacy modal-paste path.');
   let inactiveConnectionMessage;
   if (config.isAuth0EmailConnectionRejected) {
-    inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION was rejected; every /qurl setup entry path is blocked until the deployment value is corrected.';
+    inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION was rejected; every /qurl-admin setup entry path is blocked until the deployment value is corrected.';
   } else if (config.auth0EmailConnectionState === 'rejected') {
     inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth AUTH0_* settings are incomplete; legacy setup remains available, but correct or unset it before enabling OAuth.';
   } else if (auth0Connection) {

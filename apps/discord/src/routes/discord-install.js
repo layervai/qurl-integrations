@@ -37,7 +37,7 @@ const crypto = require('crypto');
 const express = require('express');
 const config = require('../config');
 const logger = require('../logger');
-const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
+const { signQurlOAuthState, verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { createPkcePair } = require('../utils/oauth-pkce');
 const { buildAuth0AuthorizeUrl } = require('../utils/auth0-authorize-url');
 const { rateLimit, installRateLimit } = require('../utils/oauth-rate-limit');
@@ -86,7 +86,7 @@ function renderError(res, statusCode, headline, detail) {
     title: 'Discord Install Failed',
     icon: '❌',
     heading: headline,
-    message: `If the bot is already in your server, run /qurl setup there. If it is not, start again from Add to Discord. Details: ${detail}`,
+    message: `If the bot is already in your server, run /qurl-admin setup there. If it is not, start again from Add to Discord. Details: ${detail}`,
     type: 'error',
   }));
 }
@@ -231,7 +231,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
 
   // The shared Auth0 builder requests fresh login + consent on this path and
-  // /qurl setup alike. Neither parameter depends on prior guild config, so no
+  // /qurl-admin setup alike. Neither parameter depends on prior guild config, so no
   // DDB read is needed before exchanging the Discord code.
 
   // 1. Exchange code at Discord for an access_token and authoritative
@@ -288,7 +288,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     // 2. /users/@me — minimal-scope identity probe. The install request's
     //    explicit `identify` scope authorizes this call and gives us the
     //    admin's Discord user ID so the qURL OAuth
-    //    state can bind to it (matches the existing /qurl setup state).
+    //    state can bind to it (matches the existing /qurl-admin setup state).
     const userResp = await fetch('https://discord.com/api/users/@me', {
       headers: { 'Authorization': `Bearer ${accessToken}` },
       signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
@@ -316,10 +316,15 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
 
   // 3. Now we have (guildId, discordUserId) — the same shape as the
-  //    /qurl setup slash-command state. Mint a qURL OAuth state and
+  //    /qurl-admin setup slash-command state. Mint a qURL OAuth state and
   //    redirect to Auth0; the existing /oauth/qurl/callback will finish
   //    the flow (mint qurl-service API key, persist, DM admin).
   const qurlState = signQurlOAuthState(guildId, discordUserId);
+  const qurlStateVerified = verifyQurlOAuthState(qurlState);
+  if (!qurlStateVerified.ok) {
+    logger.error('Generated qURL setup state failed verification', { reason: qurlStateVerified.reason });
+    return renderError(res, 500, 'Could not start qURL setup', 'Please start again from Add to Discord.');
+  }
   const { codeVerifier, codeChallenge } = createPkcePair();
   // Same double-submit CSRF cookie /oauth/qurl/start sets — Stage-2
   // chain shares the cookie with the qurl-oauth callback. Together with
@@ -328,7 +333,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // Both setup cookies also use host prefixes to reject sibling-domain cookies.
   setQurlOAuthCookie(res, req, qurlState);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
-  const authorizeUrl = buildAuth0AuthorizeUrl({ state: qurlState, codeChallenge });
+  const authorizeUrl = buildAuth0AuthorizeUrl({ state: qurlState, codeChallenge, nonce: qurlStateVerified.payload.nonce });
   logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId });
   return res.redirect(302, authorizeUrl.toString());
 });

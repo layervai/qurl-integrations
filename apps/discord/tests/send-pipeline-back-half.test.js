@@ -93,6 +93,7 @@ jest.mock('discord.js', () => {
     TextInputBuilder: jest.fn().mockImplementation(() => makeChainable()),
     TextInputStyle: { Short: 1, Paragraph: 2 },
     AttachmentBuilder: jest.fn().mockImplementation((buf, opts) => ({ buf, name: opts?.name })),
+    MessageFlags: jest.requireActual('discord.js').MessageFlags,
     PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
   };
 });
@@ -110,10 +111,11 @@ const mockDb = {
   saveSendConfig: jest.fn(),
   saveSendConfirmState: jest.fn().mockResolvedValue(undefined),
   getQurlViews: jest.fn(async () => new Map()),
+  getSendViewedCount: jest.fn(),
   recordQurlView: jest.fn(),
   tryAdvanceRenderedCount: jest.fn().mockResolvedValue(true),
   getSendRenderedCount: jest.fn().mockResolvedValue(0),
-  markConfirmTerminal: jest.fn().mockResolvedValue(undefined),
+  markConfirmFastPathOff: jest.fn().mockResolvedValue(undefined),
 };
 jest.mock('../src/store', () => mockDb);
 
@@ -150,7 +152,9 @@ jest.mock('../src/connector', () => ({
 }));
 
 jest.mock('../src/qurl', () => ({
+  REVOKE_BATCH_MAX_IDS: jest.requireActual('../src/qurl').REVOKE_BATCH_MAX_IDS,
   createOneTimeLink: jest.fn(),
+  revokeResource: jest.fn(),
 }));
 
 jest.mock('../src/places', () => ({ searchPlaces: jest.fn().mockResolvedValue([]) }));
@@ -162,14 +166,7 @@ jest.mock('../src/flow-state', () => ({
   deleteFlow: jest.fn(),
 }));
 
-jest.mock('../src/utils/time', () => {
-  const actual = jest.requireActual('../src/utils/time');
-  return {
-    ...actual,
-    expiryToMs: jest.fn(actual.expiryToMs),
-  };
-});
-const mockTime = require('../src/utils/time');
+
 
 const { _test } = require('../src/commands');
 const logger = require('../src/logger');
@@ -183,10 +180,8 @@ const {
   renderViewCounter,
   REVOKE_TRUNC_LIMIT,
   handleAddRecipients,
-  buildDeliveryEmbed,
-  packBulkDeliveryComponents,
   mintLinksInBatches,
-  cleanupFreshAddRecipientResources,
+  cleanupFreshMintedLinks,
   activeMonitors,
   executeSendPipeline,
   persistDispatchResult,
@@ -196,6 +191,7 @@ const {
 
 function makeInteraction(overrides = {}) {
   return {
+    createdTimestamp: Date.now(),
     user: { id: 'sender-1', username: 'Sender' },
     channelId: 'ch-1',
     editReply: jest.fn().mockResolvedValue(undefined),
@@ -267,6 +263,7 @@ beforeEach(() => {
   mockDb.markSendRevoked.mockReset();
   mockDb.markSendRevoked.mockResolvedValue(true);
   revokingSendLocks.clear();
+  mockDb.getSendViewedCount.mockReset().mockRejectedValue(new Error('aggregate unavailable'));
   mockDb.getQurlViews.mockReset();
   mockDb.getQurlViews.mockResolvedValue(new Map());
   mockDb.tryAdvanceRenderedCount.mockReset();
@@ -403,11 +400,9 @@ describe('monitorLinkStatus — shared monotonic floor with the webhook fast-pat
     mockDb.getSendRenderedCount.mockResolvedValueOnce(2);
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
-    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining('👀 2 viewed / 1 pending'),
-    }));
-    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('send-1', 2);
-    expect(monitor.getFullMsg()).toBe('Sent to 3 users\n👀 1 viewed / 2 pending');
+    expect(interaction.editReply).not.toHaveBeenCalled();
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalled();
+    expect(monitor.getFullMsg()).toBe('Sent to 3 users\n👀 2 viewed / 1 pending');
     monitor.stop();
   });
 
@@ -748,15 +743,35 @@ describe('monitorLinkStatus — duration cap + activeMonitors LRU', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
 
-  it('stops + posts final after MAX_MONITOR_DURATION_MS (14min cap matches interaction-token TTL)', async () => {
+  it('keeps the 14min view window, then posts final and stops polling (#331, #465)', async () => {
+    const interaction = makeInteraction();
     const monitor = monitorLinkStatus(
-      'send-1', makeInteraction(),
+      'send-1', interaction,
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
       '7d', 'Sent', { components: [] }, 1,
     );
-    await jest.advanceTimersByTimeAsync(14 * 60 * 1000 + 60 * 1000);
-    monitor.stop();
+    try {
+      await jest.advanceTimersByTimeAsync(13 * 60 * 1000);
+      const beforeLastMinute = mockDb.getQurlViews.mock.calls.length;
+      expect(beforeLastMinute).toBeGreaterThan(0);
+      await jest.advanceTimersByTimeAsync(60 * 1000);
+      expect(mockDb.getQurlViews.mock.calls.length).toBeGreaterThan(beforeLastMinute);
+      expect(interaction.editReply).not.toHaveBeenCalled();
+      // Expiration is observed on the next scheduled tick, within one minute.
+      await jest.advanceTimersByTimeAsync(60 * 1000);
+      expect(interaction.editReply).toHaveBeenCalledTimes(1);
+      expect(interaction.editReply).toHaveBeenCalledWith({
+        content: expect.stringContaining('Use `/qurl revoke` to revoke later'),
+        components: [],
+      });
+      const reads = mockDb.getQurlViews.mock.calls.length;
+      await jest.advanceTimersByTimeAsync(60 * 60 * 1000);
+      expect(mockDb.getQurlViews).toHaveBeenCalledTimes(reads);
+      expect(interaction.editReply).toHaveBeenCalledTimes(1);
+    } finally {
+      monitor.stop();
+    }
   });
 
   it('LRU bookkeeping: activeMonitors grows by N when N monitors start under the cap', () => {
@@ -799,6 +814,62 @@ describe('revokeAllLinks', () => {
     recipient_discord_id: `user-${i + 1}`,
   }));
 
+  it('finalizes before DM updates and returns at the deadline even if the REST queue ignores abort', async () => {
+    jest.useFakeTimers();
+    mockDb.getSendItems.mockResolvedValueOnce([{ resource_id: 'res-1', qurl_id: 'q_one', recipient_discord_id: 'u-1', dm_channel_id: 'c-1', dm_message_id: 'm-1', dm_status: 'sent' }]);
+    mockEditDM.mockImplementationOnce(() => new Promise(() => {}));
+    try {
+      const revoking = revokeAllLinks('send-1', 'sender-1', 'apikey');
+      await waitForMicrotaskExpectation(() => expect(mockEditDM).toHaveBeenCalledTimes(1));
+      expect(mockDb.markSendRevoked.mock.invocationCallOrder[0]).toBeLessThan(mockEditDM.mock.invocationCallOrder[0]);
+      await jest.advanceTimersByTimeAsync(12 * 60 * 1000);
+      await expect(revoking).resolves.toMatchObject({ success: 1, total: 1, finalizationFailed: false });
+      expect(logger.info).toHaveBeenCalledWith('Revoke DM updates reached work deadline', { sendId: 'send-1' });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps confirmed deletes retryable when the deadline fires during finalization', async () => {
+    const budget = new AbortController();
+    const timeout = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(budget.signal);
+    mockDb.getSendItems.mockResolvedValueOnce(makeItems(1));
+    mockDb.markSendRevoked.mockImplementationOnce(async (_send, _owner, { signal }) => {
+      budget.abort();
+      signal.throwIfAborted();
+    });
+    try {
+      const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+      expect(result).toMatchObject({ success: 1, total: 1, finalizationFailed: true });
+      expect(logger.info).toHaveBeenCalledWith('Revoke finalization reached work deadline', { sendId: 'send-1' });
+      expect(logger.error).not.toHaveBeenCalledWith('Failed to finalize revoked send state', expect.anything());
+      expect(mockDb.markSendRevoking).toHaveBeenCalledTimes(1);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it('stops queued resources at the shared work deadline and keeps the send retryable', async () => {
+    const budget = new AbortController();
+    const timeout = jest.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+      expect(ms).toBe(12 * 60 * 1000);
+      return budget.signal;
+    });
+    mockDb.getSendItems.mockResolvedValueOnce(makeItems(8));
+    mockRevokeMintedLinks.mockImplementationOnce(async () => { budget.abort(); });
+    try {
+      const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+      expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_item_1'], 'apikey', { signal: budget.signal });
+      expect(mockDb.getSendItems).toHaveBeenCalledWith('send-1', 'sender-1', { consistentRead: true, signal: budget.signal });
+      expect(result).toMatchObject({ success: 1, total: 8, failureUserIds: expect.any(Array) });
+      expect(result.failureUserIds).toHaveLength(7);
+      expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
   it('revokes every recorded child of a shared resource in one call and never deletes the parent', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_aaa' },
@@ -808,10 +879,47 @@ describe('revokeAllLinks', () => {
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaa', 'q_bbb'], 'apikey');
-    expect(require('../src/qurl').deleteLink).toBeUndefined();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaa', 'q_bbb'], 'apikey', { signal: expect.any(AbortSignal) });
+    expect(require('../src/qurl').revokeResource).not.toHaveBeenCalled();
     expect(result.success).toBe(2);
-    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1', { signal: expect.any(AbortSignal) });
+  });
+
+  it('revokes 101 children under one parent through the real connector chunker', async () => {
+    const config = require('../src/config');
+    const previousUrl = config.CONNECTOR_URL;
+    const previousFetch = globalThis.fetch;
+    config.CONNECTOR_URL = 'https://connector.fixture.invalid';
+    const ids = Array.from({ length: 101 }, (_, i) => `q_bulk${i}`);
+    mockDb.getSendItems.mockResolvedValueOnce(ids.map((qurl_id, i) => ({
+      resource_id: 'res-1', recipient_discord_id: `bulk-user${i}`, qurl_id,
+    })));
+    const realRevoke = jest.requireActual('../src/connector').revokeMintedLinks;
+    mockRevokeMintedLinks.mockImplementationOnce(realRevoke);
+    const batches = [];
+    globalThis.fetch = jest.fn(async (url, options) => {
+      expect(url).toBe('https://connector.fixture.invalid/api/revoke_links');
+      expect(options.method).toBe('POST');
+      expect(options.signal.aborted).toBe(false);
+      const body = JSON.parse(options.body);
+      expect(body.resource_id).toBe('res-1');
+      batches.push(body.qurl_ids);
+      return { ok: true, status: 200, json: async () => ({
+        success: true, results: body.qurl_ids.map(qurl_id => ({ qurl_id, status: 'revoked' })),
+      }) };
+    });
+    try {
+      const result = await revokeAllLinks('send-bulk', 'sender-1', 'apikey');
+      expect(result).toMatchObject({ success: 101, total: 101, failureUserIds: [], finalizationFailed: false });
+      expect(batches).toHaveLength(11);
+      expect(batches.every(ids => ids.length > 0 && ids.length <= 10)).toBe(true);
+      expect(batches.flat()).toEqual(ids);
+      expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-bulk', 'sender-1', { signal: expect.any(AbortSignal) });
+      expect(require('../src/qurl').revokeResource).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = previousFetch;
+      config.CONNECTOR_URL = previousUrl;
+    }
   });
 
   it('leaves the send retryable when the connector cannot confirm a child revoke', async () => {
@@ -843,7 +951,7 @@ describe('revokeAllLinks', () => {
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey', { signal: expect.any(AbortSignal) });
     expect(result).toMatchObject({
       success: 1, total: 2, successUserIds: ['user-1'], failureUserIds: ['user-2'],
     });
@@ -861,7 +969,7 @@ describe('revokeAllLinks', () => {
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey', { signal: expect.any(AbortSignal) });
     expect(result.success).toBe(1);
   });
 
@@ -872,8 +980,8 @@ describe('revokeAllLinks', () => {
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
-    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1');
-    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1', { signal: expect.any(AbortSignal) });
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1', { signal: expect.any(AbortSignal) });
     expect(mockDb.markSendRevoking.mock.invocationCallOrder[0])
       .toBeLessThan(mockDb.getSendItems.mock.invocationCallOrder[0]);
     expect(mockDb.getSendItems.mock.invocationCallOrder[0])
@@ -920,7 +1028,7 @@ describe('revokeAllLinks', () => {
     expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
       send_id: 'send-1', success: 1, total: 2, unresolvable_recipients: 0,
     });
-    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1');
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1', { signal: expect.any(AbortSignal) });
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
 
@@ -1020,7 +1128,7 @@ describe('revokeAllLinks', () => {
     expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
       send_id: 'send-43', success: 0, total: 2, unresolvable_recipients: 0,
     });
-    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-43', 'sender-1');
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-43', 'sender-1', { signal: expect.any(AbortSignal) });
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
 
@@ -1088,8 +1196,8 @@ describe('revokeAllLinks', () => {
     });
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-finalize-fail', 'sender-1');
-    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-finalize-fail', 'sender-1');
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-finalize-fail', 'sender-1', { signal: expect.any(AbortSignal) });
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-finalize-fail', 'sender-1', { signal: expect.any(AbortSignal) });
     expect(logger.audit).toHaveBeenCalledWith('revoke_success', {
       send_id: 'send-finalize-fail', success: 1, total: 1, unresolvable_recipients: 0,
     });
@@ -1098,7 +1206,7 @@ describe('revokeAllLinks', () => {
       { sendId: 'send-finalize-fail', error: 'DDB finalize failed' },
     );
     expect(mockEditDM).toHaveBeenCalledWith(
-      'channel-1', 'message-1', expect.any(Object),
+      'channel-1', 'message-1', expect.any(Object), { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -1122,6 +1230,28 @@ describe('revokeAllLinks', () => {
       'Failed to finalize revoked send state',
       { sendId: 'send-finalize-rejected', error: 'finalization was not confirmed' },
     );
+  });
+
+  it('confirms children individually and keeps mixed-outcome recipients retryable', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-shared', recipient_discord_id: 'u-ok', qurl_id: 'q_ok' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-mixed', qurl_id: 'q_mixed_ok' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-mixed', qurl_id: 'q_failed' },
+      { resource_id: 'res-other', recipient_discord_id: 'u-foreign', qurl_id: 'q_foreign' },
+    ]);
+    mockRevokeMintedLinks
+      .mockRejectedValueOnce(Object.assign(new Error('one child failed'), {
+        confirmedQurlIds: ['q_ok', 'q_mixed_ok', 'q_foreign'],
+      }))
+      .mockRejectedValueOnce(new Error('other resource failed'));
+    const result = await revokeAllLinks('send-partial-children', 'sender-1', 'apikey');
+    expect(result).toMatchObject({ success: 1, total: 3, successUserIds: ['u-ok'] });
+    expect(result.failureUserIds.sort()).toEqual(['u-foreign', 'u-mixed']);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
+      send_id: 'send-partial-children', success: 0, total: 2, unresolvable_recipients: 0,
+    });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('q_mixed_ok');
   });
 
   it('groups items by resource_id — shared-resource recipients all land in successUserIds on a single DELETE', async () => {
@@ -1159,7 +1289,7 @@ describe('revokeAllLinks', () => {
       failureUserIds: [],
     });
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith(
-      'send-duplicate-recipient', 'sender-1',
+      'send-duplicate-recipient', 'sender-1', { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -1192,7 +1322,7 @@ describe('revokeAllLinks', () => {
     const result = await revokeAllLinks('send-malformed', 'sender-1', 'apikey');
 
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-ok', ['q_u_ok'], 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-ok', ['q_u_ok'], 'apikey', { signal: expect.any(AbortSignal) });
     expect(result).toMatchObject({
       success: 1,
       total: 2,
@@ -1770,11 +1900,11 @@ describe('buildRevokeHeader (slash-command revoke path)', () => {
   });
 
   it('plural: "Revoked 3/5 users." distinguishes failures from the existing-session caveat', () => {
-    expect(buildRevokeHeader(3, 5)).toBe('Revoked 3/5 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl setup` and reconnect. Revocation blocks new link access; sessions already opened may remain active.');
+    expect(buildRevokeHeader(3, 5)).toBe('Revoked 3/5 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl-admin setup` and reconnect. Revocation blocks new link access; sessions already opened may remain active.');
   });
 
   it('full failure reports unconfirmed revocation without claiming any existing sessions', () => {
-    expect(buildRevokeHeader(0, 2)).toBe('Revoked 0/2 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl setup` and reconnect.');
+    expect(buildRevokeHeader(0, 2)).toBe('Revoked 0/2 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl-admin setup` and reconnect.');
   });
 
   it.each([
@@ -1962,7 +2092,7 @@ describe('handleAddRecipients — file path failure modes', () => {
     );
   });
 
-  it('CDN re-download failure (no err.status) emits reason=unknown + shows the expired message', async () => {
+  it('an untyped 403 keeps reason=unknown and does not imply a CDN expiry', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
@@ -1975,7 +2105,7 @@ describe('handleAddRecipients — file path failure modes', () => {
       makeInteraction(), 'apikey',
     );
 
-    expect(result.msg).toMatch(/expired/i);
+    expect(result.msg).toMatch(/try again/i);
     expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
       send_id: 'send-cdn', kind: 'file', reason: 'unknown',
     }));
@@ -2026,7 +2156,7 @@ describe('handleAddRecipients — file path failure modes', () => {
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1' },  // only 1 minted, 2 recipients
+      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString() },  // only 1 minted, 2 recipients
     ]);
 
     const result = await handleAddRecipients(
@@ -2039,9 +2169,38 @@ describe('handleAddRecipients — file path failure modes', () => {
 
     expect(result.msg).toMatch(/Only 1 of 2/);
     expect(result.delivered).toBe(0);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_1'], 'apikey');
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
   });
 
-  it('surfaces "Link pool exhausted" on a 429 error from the location path (outer catch)', async () => {
+  test.each(['file', 'location'])('%s keeps quota copy after a later batch fails and revokes prior links', async kind => {
+    const isFile = kind === 'file';
+    mockDb.getSendConfig.mockResolvedValueOnce(isFile ? {
+      connector_resource_id: 'stored-resource', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    } : {
+      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower', expires_in: '30m',
+    });
+    if (isFile) mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'same-resource', fileBuffer: new ArrayBuffer(10) });
+    else mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'same-resource' });
+    const ids = Array.from({ length: 10 }, (_, i) => `q_quota${i}`);
+    mockMintLinks.mockResolvedValueOnce(ids.map(qurl_id => ({
+      qurl_id, qurl_link: `https://q.test/${qurl_id}`, expires_at: new Date(Date.now() + 86400000).toISOString(),
+    }))).mockRejectedValueOnce(Object.assign(new Error('account quota reached'), { apiCode: 'quota_exceeded', status: 403 }));
+    const users = Array.from({ length: 11 }, (_, i) => ({ id: `quota-user${i}`, username: `User${i}`, bot: false }));
+    const result = await handleAddRecipients('send-1', makeUsersCollection(users), makeInteraction(), 'apikey');
+    expect(result.msg).toBe('An account limit was reached. Check your qURL account usage before adding recipients.');
+    expect(result.delivered).toBe(0);
+    expect(mockMintLinks.mock.calls.map(call => call[0])).toEqual(['same-resource', 'same-resource']);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('same-resource', ids, 'apikey');
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('does not mislabel a 429 as an exhausted resource pool', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: 'https://maps.example.com/x',
       location_name: 'Eiffel Tower', expires_in: '30m',
@@ -2054,7 +2213,7 @@ describe('handleAddRecipients — file path failure modes', () => {
       makeInteraction(), 'apikey',
     );
 
-    expect(result.msg).toMatch(/pool exhausted/i);
+    expect(result.msg).toBe('Failed to create links for new recipients.');
   });
 });
 
@@ -2198,7 +2357,7 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
       logger.error.mockClear();
       mockDownloadAndUpload.mockRejectedValueOnce(Object.assign(new Error('upload failed'), fields));
       await executeSendPipeline(makeInteraction(), makePipelineParams());
-      const call = logger.error.mock.calls.find(c => c[0] === 'Failed to prepare QURL links');
+      const call = logger.error.mock.calls.find(c => c[0] === 'Failed to prepare qURL links');
       expect(call[1]).not.toHaveProperty('apiDetail');
       expect(JSON.stringify(logger.error.mock.calls)).not.toContain('RAW-UNREDACTED-BODY');
     }
@@ -2237,7 +2396,7 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
       api_code: 'qurl_creation_failed',
       status_code: 400,
     }));
-    expect(logger.error).toHaveBeenCalledWith('Failed to prepare QURL links', expect.objectContaining({
+    expect(logger.error).toHaveBeenCalledWith('Failed to prepare qURL links', expect.objectContaining({
       apiCode: 'qurl_creation_failed',
       status: 400,
       apiDetail: expect.stringContaining('unknown field'),
@@ -2271,7 +2430,7 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     await executeSendPipeline(interaction, makePipelineParams());
 
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to prepare QURL links',
+      'Failed to prepare qURL links',
       expect.objectContaining({
         status: 502,
         partial_link_count: 2,
@@ -2282,15 +2441,24 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
   });
 
-  it('file send: quota_exceeded does NOT emit at the primary site either', async () => {
+  it('file send uses the structured 403 quota code for account-limit copy without a failure alarm', async () => {
     const interaction = makeInteraction();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = jest.fn().mockResolvedValue({
+      ok: false, status: 403,
+      text: async () => JSON.stringify({ success: false, error: 'request rejected by upstream', code: 'quota_exceeded', links: [] }),
+    });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
-    mockMintLinks.mockRejectedValueOnce(Object.assign(new Error('upstream quota'), { apiCode: 'quota_exceeded' }));
-
-    await executeSendPipeline(interaction, makePipelineParams());
-
-    const failureCalls = logger.audit.mock.calls.filter(c => c[0] === 'qurl_send_create_link_failure');
-    expect(failureCalls).toHaveLength(0);
+    mockMintLinks.mockImplementationOnce((...args) => jest.requireActual('../src/connector').mintLinks(...args));
+    try {
+      await executeSendPipeline(interaction, makePipelineParams());
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('an account limit was reached') }));
+      const failureCalls = logger.audit.mock.calls.filter(c => c[0] === 'qurl_send_create_link_failure');
+      expect(failureCalls).toHaveLength(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('preserves empty-string apiCode as forensic dimension (?? null, not || null)', async () => {
@@ -2308,7 +2476,54 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
   });
 });
 
+describe('handleAddRecipients — attachment failure copy', () => {
+  it.each([
+    [Object.assign(new Error('Failed to download from Discord CDN: 403'), { cdnStatus: 403 }), true],
+    [Object.assign(new Error('Failed to download from Discord CDN: 404'), { cdnStatus: 404 }), true],
+    [Object.assign(new Error('Failed to download from Discord CDN: 410'), { cdnStatus: 410 }), true],
+    [new Error('network connection failed'), false],
+    [Object.assign(new Error('Connector upload failed (403)'), { status: 403 }), false],
+    [Object.assign(new Error('Failed to download from Discord CDN: 503'), { cdnStatus: 503 }), false],
+  ])('distinguishes a missing source from a retryable failure: %s', async (error, sourceUnavailable) => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockRejectedValueOnce(error);
+    const result = await handleAddRecipients('send-1', makeUsersCollection([
+      { id: 'u1', username: 'Alice', bot: false },
+    ]), makeInteraction(), 'apikey');
+    expect(result.msg).toBe(sourceUnavailable
+      ? 'Original attachment is no longer available. Please create a new send.'
+      : 'Failed to prepare links. Please try again, or create a new send if the issue persists.');
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(result.newLinks).toEqual([]);
+  });
+});
+
 describe('executeSendPipeline — orphaned qURL log safety', () => {
+  it.each(['file', 'location'])('revokes a short %s mint before the failure reply', async (resourceType) => {
+    const interaction = makeInteraction();
+    if (resourceType === 'file') {
+      mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-short', fileBuffer: new ArrayBuffer(8) });
+    } else {
+      mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-short' });
+    }
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
+    await executeSendPipeline(interaction, makePipelineParams({
+      resourceType, locationUrl: 'https://google.com/maps/search/x',
+      recipients: [{ id: 'u1', username: 'Alice' }, { id: 'u2', username: 'Bob' }],
+    }));
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-short', ['q_short'], 'apikey');
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Only 1 of 2 links could be created. Please try again.' });
+    expect(mockRevokeMintedLinks.mock.invocationCallOrder[0]).toBeLessThan(interaction.editReply.mock.invocationCallOrder.at(-1));
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
   it('logs cleanup identifiers without the live access link when DDB persistence fails', async () => {
     const interaction = makeInteraction();
     mockDownloadAndUpload.mockResolvedValueOnce({
@@ -2317,12 +2532,12 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     });
     mockMintLinks.mockResolvedValueOnce([
       {
-        qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+        qurl_link: 'https://qurl.link/#at_secret_bearer_one', expires_at: new Date(Date.now() + 86400000).toISOString(),
         resource_id: 'resource-public-id',
         qurl_id: 'q_orphaned_link_one',
       },
       {
-        qurl_link: 'https://qurl.site/#at_secret_bearer_two',
+        qurl_link: 'https://qurl.site/#at_secret_bearer_two', expires_at: new Date(Date.now() + 86400000).toISOString(),
         resource_id: 'resource-public-id',
         qurl_id: 'q_orphaned_link_two',
       },
@@ -2346,6 +2561,9 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
 
     const failureLog = logger.error.mock.calls.find(
       ([message]) => message === 'recordQURLSendBatch failed; aborting send to keep state consistent',
+    );
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith(
+      'resource-public-id', ['q_orphaned_link_one', 'q_orphaned_link_two'], 'apikey',
     );
     expect(failureLog).toBeDefined();
     expect(failureLog[1].orphanedResources).toEqual([
@@ -2381,7 +2599,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       fileBuffer: new ArrayBuffer(8),
     });
     mockMintLinks.mockResolvedValueOnce([{
-      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one', expires_at: new Date(Date.now() + 86400000).toISOString(),
       resource_id: 'resource-public-id',
       qurl_id: 'q_orphaned_link_one',
     }]);
@@ -2411,7 +2629,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       fileBuffer: new ArrayBuffer(8),
     });
     mockMintLinks.mockResolvedValueOnce([{
-      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one', expires_at: new Date(Date.now() + 86400000).toISOString(),
       resource_id: 'resource-public-id',
       qurl_id: 'q_orphaned_link_one',
     }]);
@@ -2439,7 +2657,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       fileBuffer: new ArrayBuffer(8),
     });
     mockMintLinks.mockResolvedValueOnce([{
-      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one', expires_at: new Date(Date.now() + 86400000).toISOString(),
       resource_id: 'resource-public-id',
       qurl_id: 'q_orphaned_link_one',
     }]);
@@ -2457,8 +2675,65 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
   });
 });
 
+test('real worker reconstruction preserves the original interaction deadline through a send', async () => {
+  const { Client, ClientUser, SnowflakeUtil } = jest.requireActual('discord.js');
+  const client = new Client({ intents: [] });
+  const now = 1800000000000;
+  const created = now - 300000;
+  const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+  const response = { createMessageComponentCollector: jest.fn(() => ({ on: jest.fn() })) };
+  try {
+    client.user = new ClientUser(client, { id: '111111111111111111', username: 'Bot', discriminator: '0', avatar: null, bot: true });
+    let interaction;
+    client.once('interactionCreate', rebuilt => { interaction = rebuilt; });
+    client.actions.InteractionCreate.handle({
+      id: SnowflakeUtil.generate({ timestamp: created }).toString(), type: 2,
+      application_id: '111111111111111111', token: 'fixture-token', version: 1,
+      channel_id: '222222222222222222',
+      user: { id: '333333333333333333', username: 'Sender', discriminator: '0', avatar: null },
+      data: { id: '444444444444444444', name: 'qurl', type: 1 },
+      locale: 'en-US', entitlements: [], authorizing_integration_owners: {},
+    });
+    expect(interaction.createdTimestamp).toBe(created);
+    interaction.editReply = jest.fn().mockResolvedValue(response);
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_one', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValueOnce({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    await executeSendPipeline(interaction, makePipelineParams());
+    expect(response.createMessageComponentCollector).toHaveBeenCalledWith(expect.objectContaining({ time: 590000 }));
+    expect(mockDb.saveSendConfirmState.mock.calls[0][1].confirmExpiresAt).toBe(1800000600);
+  } finally {
+    clock.mockRestore();
+    await client.destroy();
+  }
+});
+
+describe('management collector interaction-token deadline', () => {
+  it.each([
+    [0, 890000, 1800000900], [300000, 590000, 1800000600],
+    [899000, 1, 1800000001], [-5000, 890000, 1800000900], [null, 1, 900],
+  ])('reserves the close/read budget after an interaction age of %s ms', async (age, expectedTime, expectedExpiry) => {
+    const now = 1800000000000;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    const response = { createMessageComponentCollector: jest.fn(() => ({ on: jest.fn() })) };
+    const interaction = makeInteraction({
+      createdTimestamp: age === null ? undefined : now - age,
+      token: 'fixture-token', applicationId: 'fixture-app',
+      editReply: jest.fn().mockResolvedValue(response),
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_one', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValueOnce({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    try {
+      await executeSendPipeline(interaction, makePipelineParams());
+      expect(response.createMessageComponentCollector).toHaveBeenCalledWith(expect.objectContaining({ time: expectedTime }));
+      expect(mockDb.saveSendConfirmState.mock.calls[0][1].confirmExpiresAt).toBe(expectedExpiry);
+    } finally { clock.mockRestore(); }
+  });
+});
+
 describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)', () => {
-  async function setupRevocableSend(recipients = [{ id: 'u1', username: 'Alice' }]) {
+  async function setupRevocableSend(recipients = [{ id: 'u1', username: 'Alice' }], selfDestructSeconds = null) {
     const collectHandlers = {};
     const response = {
       createMessageComponentCollector: jest.fn(() => ({
@@ -2474,9 +2749,12 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     const finishRevoke = defer();
 
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-initial', fileBuffer: new ArrayBuffer(8) });
-    mockMintLinks.mockResolvedValueOnce([
-      { qurl_link: 'https://q.test/original', resource_id: 'res-initial', qurl_id: 'q_original' },
-    ]);
+    for (let offset = 0; offset < recipients.length; offset += 10) {
+      if (offset > 0) mockReUploadBuffer.mockResolvedValueOnce({ resource_id: 'res-initial' });
+      mockMintLinks.mockResolvedValueOnce(recipients.slice(offset, offset + 10).map((r) => ({
+        qurl_link: `https://q.test/${r.id}`, expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-initial', qurl_id: `q_${r.id}`,
+      })));
+    }
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
     mockDb.saveSendConfig.mockResolvedValue(undefined);
@@ -2493,7 +2771,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     });
 
     await executeSendPipeline(interaction, makePipelineParams({
-      recipients,
+      recipients, selfDestructSeconds,
     }));
     expect(collectHandlers.collect).toEqual(expect.any(Function));
     const sendId = mockDb.saveSendConfig.mock.calls[0][0].sendId;
@@ -2515,82 +2793,169 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     };
   }
 
-  it('keeps a frozen caller recipient snapshot unchanged after Add Recipients', async () => {
-    const recipients = Object.freeze([Object.freeze({ id: 'u1', username: 'Alice' })]);
-    const { collect, makeClick } = await setupRevocableSend(recipients);
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: null, actual_url: null, expires_in: '30m',
-    });
-    const selection = {
-      users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
-      deferUpdate: jest.fn().mockResolvedValue(undefined),
-      editReply: jest.fn().mockResolvedValue(undefined),
-    };
-    const click = makeClick('add');
-    click.reply.mockResolvedValueOnce({
-      awaitMessageComponent: jest.fn().mockResolvedValue(selection),
-    });
+  it('consumes a post-read synchronous rendering failure instead of rejecting the event listener', async () => {
+    const { end, interaction } = await setupRevocableSend();
+    mockDb.getSendConfig.mockResolvedValueOnce({});
+    interaction.editReply.mockImplementationOnce(() => { throw new Error('render failed'); });
     try {
-      await collect(click);
-      expect(selection.deferUpdate).toHaveBeenCalled();
-      expect(recipients).toEqual([{ id: 'u1', username: 'Alice' }]);
-      expect(logger.error).not.toHaveBeenCalledWith('Add recipients failed', expect.anything());
+      await expect(end(null, 'time')).resolves.toBeUndefined();
+      expect(logger.error).toHaveBeenCalledWith('Failed to close send management view', expect.objectContaining({ errorName: 'Error' }));
+    } finally { clearCooldown('sender-1'); }
+  });
+
+  it('skips the persisted read while a real local revoke is already running', async () => {
+    const { collect, end, revokeStarted, finishRevoke, makeClick } = await setupRevocableSend();
+    const revoking = collect(makeClick('revoke'));
+    try {
+      await revokeStarted.promise;
+      const readsBeforeClose = mockDb.getSendConfig.mock.calls.length;
+      await end(null, 'time');
+      expect(mockDb.getSendConfig).toHaveBeenCalledTimes(readsBeforeClose);
+    } finally {
+      finishRevoke.resolve();
+      await revoking;
+      clearCooldown('sender-1');
+    }
+  });
+
+  it('collector time expiry preserves the successful revoke result instead of restoring the management banner', async () => {
+    const { collect, end, finishRevoke, interaction, makeClick } = await setupRevocableSend();
+    try {
+      finishRevoke.resolve();
+      await collect(makeClick('revoke'));
+      const revoked = interaction.editReply.mock.calls.at(-1)[0];
+      expect(revoked.content).toContain('Revoked 1/1 user.');
+      expect(revoked.content).toContain('Alice');
+      interaction.editReply.mockClear();
+      const readsBeforeClose = mockDb.getSendConfig.mock.calls.length;
+      await end(null, 'time');
+      expect(mockDb.getSendConfig).toHaveBeenCalledTimes(readsBeforeClose);
+      const final = interaction.editReply.mock.calls.at(-1)[0];
+      expect(final.content).toBe(revoked.content);
+      expect(final.components).toEqual([]);
+      expect(final.content).not.toContain('Management window');
     } finally {
       clearCooldown('sender-1');
     }
   });
 
-  it('keeps the successful revoke result when the collector window ends (#200)', async () => {
-    const { collect, end, finishRevoke, interaction, makeClick, revokeStarted } = await setupRevocableSend();
-    const pending = collect(makeClick('revoke'));
-    await revokeStarted.promise;
-    finishRevoke.resolve();
-    await pending;
-    const result = interaction.editReply.mock.calls.at(-1)[0].content;
-    expect(result).toContain('Revoked 1/1 user.');
-    expect(result).toContain('Revoked for: Alice');
-
-    interaction.editReply.mockClear();
-    await end([], 'time');
-    expect(interaction.editReply).toHaveBeenCalledWith({ content: result, components: [] });
+  it.each([
+    [{ revoked_at: '2026-10-31T00:00:00Z' }, true],
+    [{ revoking_at: '2026-10-31T00:00:00Z' }, false],
+  ])('management expiry reflects confirmed persisted revoke only (%j)', async (state, revoked) => {
+    const { end, interaction, sendId } = await setupRevocableSend();
+    mockDb.getSendConfig.mockResolvedValueOnce(state);
+    try {
+      await end(null, 'time');
+      expect(mockDb.getSendConfig).toHaveBeenCalledWith(sendId, 'sender-1', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+      const final = interaction.editReply.mock.calls.at(-1)[0];
+      if (revoked) {
+        expect(final.content).toBe('Links for this send have already been revoked.');
+        expect(final.content).not.toContain('Management window closed');
+      } else expect(final.content).toContain('Management window closed');
+      expect(final.components).toEqual([]);
+    } finally { clearCooldown('sender-1'); }
   });
 
-  it('includes newly added recipients in the collector revoke result (#200)', async () => {
-    const { collect, finishRevoke, interaction, makeClick, revokeStarted } = await setupRevocableSend();
+  it('confirmed external revoke replaces an earlier local failure with authoritative state', async () => {
+    const { collect, end, interaction, makeClick } = await setupRevocableSend();
+    mockRevokeMintedLinks.mockReset();
+    mockRevokeMintedLinks.mockResolvedValue(undefined);
+    mockDb.getSendItems.mockReset().mockRejectedValueOnce(new Error('local revoke unavailable'));
+    const click = makeClick('revoke');
     try {
-      const selection = {
-        users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
-        deferUpdate: jest.fn().mockResolvedValue(undefined),
-        editReply: jest.fn().mockResolvedValue(undefined),
-      };
-      const addClick = makeClick('add');
-      addClick.reply.mockResolvedValueOnce({ awaitMessageComponent: jest.fn().mockResolvedValue(selection) });
-      mockDb.getSendConfig.mockResolvedValueOnce({
-        connector_resource_id: 'res-initial', expires_in: '30m',
-        attachment_url: 'https://cdn.discordapp.com/x.png',
-        attachment_name: 'x.png', attachment_content_type: 'image/png',
+      await collect(click);
+      expect(click.editReply.mock.calls.at(-1)[0].content).toContain('Failed to revoke');
+      mockDb.getSendConfig.mockResolvedValueOnce({ revoked_at: '2026-10-31T00:00:00Z' });
+      await end(null, 'time');
+      expect(interaction.editReply.mock.calls.at(-1)[0]).toEqual({
+        content: 'Links for this send have already been revoked.', components: [],
       });
-      mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
-      mockMintLinks.mockResolvedValueOnce([
-        { qurl_link: 'https://q.test/added', resource_id: 'res-added', qurl_id: 'q_added' },
-      ]);
-      await collect(addClick);
-      expect(selection.editReply).toHaveBeenCalledWith({ content: 'Added 1 recipient', components: [] });
+    } finally { clearCooldown('sender-1'); }
+  });
 
-      mockDb.getSendItems.mockReset();
-      // Counts come from DDB; names must include the collector's added recipient.
-      mockDb.getSendItems.mockResolvedValueOnce([
-        { recipient_discord_id: 'u1', resource_id: 'res-initial', qurl_id: 'q_original' },
-        { recipient_discord_id: 'u2', resource_id: 'res-added', qurl_id: 'q_added' },
-      ]);
-      const pending = collect(makeClick('revoke'));
-      await revokeStarted.promise;
+  it('management expiry keeps the safe closed view when the state read fails', async () => {
+    const { end, interaction } = await setupRevocableSend();
+    mockDb.getSendConfig.mockRejectedValueOnce(new Error('store unavailable'));
+    try {
+      await expect(end(null, 'time')).resolves.toBeUndefined();
+      expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain('Management window closed');
+      expect(logger.warn).toHaveBeenCalledWith('Could not check send revoked state when management closed', expect.objectContaining({ error: 'store unavailable' }));
+    } finally { clearCooldown('sender-1'); }
+  });
+
+  it('bounds the management-state read and closes safely on timeout', async () => {
+    const { end, interaction } = await setupRevocableSend();
+    const controller = new AbortController();
+    const timeout = jest.spyOn(AbortSignal, 'timeout').mockReturnValueOnce(controller.signal);
+    mockDb.getSendConfig.mockImplementationOnce((_sendId, _sender, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('read timeout')), { once: true });
+    }));
+    try {
+      const closing = end(null, 'time');
+      expect(timeout).toHaveBeenCalledWith(1000);
+      controller.abort();
+      await closing;
+      expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain('Management window closed');
+    } finally { controller.abort(); timeout.mockRestore(); clearCooldown('sender-1'); }
+  });
+
+  // Defensive ordering test: a real ended collector no longer emits new collects.
+  it('a local revoke completing during the persisted read keeps its full result', async () => {
+    const { collect, end, finishRevoke, interaction, makeClick } = await setupRevocableSend();
+    const read = defer();
+    mockDb.getSendConfig.mockReturnValueOnce(read.promise);
+    try {
+      const closing = end(null, 'time');
       finishRevoke.resolve();
-      await pending;
-      expect(interaction.editReply).toHaveBeenLastCalledWith(expect.objectContaining({
-        content: expect.stringContaining('Revoked 2/2 users.'),
-      }));
-      expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain('Revoked for: Alice, Bob');
+      await collect(makeClick('revoke'));
+      const revoked = interaction.editReply.mock.calls.at(-1)[0];
+      read.resolve({});
+      await closing;
+      expect(interaction.editReply.mock.calls.at(-1)[0].content).toBe(revoked.content);
+      expect(revoked.content).toContain('Revoked 1/1 user.');
+      expect(revoked.content).toContain('Alice');
+    } finally { read.resolve({}); clearCooldown('sender-1'); }
+  });
+
+  it('Add selection extends the later inline revoke names in original recipient order', async () => {
+    const { collect, end, interaction, makeClick } = await setupRevocableSend();
+    const selection = {
+      users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
+    };
+    const add = makeClick('add');
+    add.fetchReply = jest.fn().mockResolvedValueOnce({ awaitMessageComponent: jest.fn().mockResolvedValue(selection) });
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-initial', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/added', expires_at: new Date(Date.now() + 86400000).toISOString(), qurl_id: 'q_added', resource_id: 'res-added' }]);
+    try {
+      await collect(add);
+      expect(selection.editReply).toHaveBeenCalledWith({ content: 'Added 1 recipient', components: [] });
+      // Discard the original fixture response; the durable rows now include Add.
+      mockDb.getSendItems.mockReset();
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { recipient_discord_id: 'u2', resource_id: 'res-added', qurl_id: 'q_added' },
+        { recipient_discord_id: 'u1', resource_id: 'res-initial', qurl_id: 'q_u1' },
+      ]);
+      mockRevokeMintedLinks.mockReset();
+      mockRevokeMintedLinks.mockResolvedValue(undefined);
+      await collect(makeClick('revoke'));
+      const revoked = interaction.editReply.mock.calls.at(-1)[0];
+      expect(revoked.content).toContain('Revoked 2/2 users.');
+      expect(revoked.content).toContain('Alice');
+      expect(revoked.content).toContain('Bob');
+      expect(revoked.content.indexOf('Alice')).toBeLessThan(revoked.content.indexOf('Bob'));
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(2);
+      expect(mockRevokeMintedLinks.mock.calls.map(([resource, ids]) => [resource, ids])).toEqual(expect.arrayContaining([
+        ['res-initial', ['q_u1']], ['res-added', ['q_added']],
+      ]));
+      await end(null, 'time');
     } finally {
       clearCooldown('sender-1');
     }
@@ -2638,7 +3003,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'Already revoking links for this send.',
-      ephemeral: true,
+      flags: 64,
     });
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
@@ -2660,7 +3025,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
       expect(addClick.reply).toHaveBeenCalledWith({
         content: 'Already revoking links for this send.',
-        ephemeral: true,
+        flags: 64,
       });
       expect(mockMintLinks).toHaveBeenCalledTimes(1);
       expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
@@ -2680,7 +3045,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
       expect(revokeClick.reply).toHaveBeenCalledWith({
         content: 'Already revoking links for this send.',
-        ephemeral: true,
+        flags: 64,
       });
       expect(revokeClick.deferUpdate).not.toHaveBeenCalled();
       expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
@@ -2710,7 +3075,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'This send is no longer revocable. Add Recipients is disabled.',
-      ephemeral: true,
+      flags: 64,
     });
   });
 
@@ -2730,7 +3095,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     await collect(addClick);
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'This send is no longer revocable. Add Recipients is disabled.',
-      ephemeral: true,
+      flags: 64,
     });
   });
 
@@ -2750,7 +3115,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       { sendId, error: 'DDB read failed' },
     );
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockDb.markSendRevoked).toHaveBeenCalledWith(sendId, 'sender-1');
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith(sendId, 'sender-1', { signal: expect.any(AbortSignal) });
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('Revoked 1/1 user.'),
     }));
@@ -2781,7 +3146,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     await collect(addClick);
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'Links were revoked, but qURL could not save the final state. Add Recipients is disabled; retry `/qurl revoke`.',
-      ephemeral: true,
+      flags: 64,
     });
   });
 
@@ -2800,7 +3165,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'Links for this send have already been revoked.',
-      ephemeral: true,
+      flags: 64,
     });
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
@@ -2819,7 +3184,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'No live links remain for this send.',
-      ephemeral: true,
+      flags: 64,
     });
     expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
@@ -2844,10 +3209,207 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'Revocation is incomplete for this send. Add Recipients is disabled; retry `/qurl revoke`.',
-      ephemeral: true,
+      flags: 64,
     });
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([[false, 0.5], [true, 0.5], [false, 5], [true, 5]])('Add labels an original attachment before any revoke attempt (%s, %s)', async (attachmentMode, seconds) => {
+    const recipients = attachmentMode
+      ? Array.from({ length: 100 }, (_, i) => ({ id: `original${i}`, username: `original_recipient_${i}_${'x'.repeat(70)}` }))
+      : undefined;
+    const config = require('../src/config');
+    const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
+    try {
+      config.QURL_SEND_MAX_RECIPIENTS = 101;
+      const { collect, makeClick, interaction } = await setupRevocableSend(recipients, seconds);
+      expect(interaction.editReply.mock.calls.some(([payload]) => Boolean(payload.files))).toBe(attachmentMode);
+      const selectInteraction = {
+        users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
+        deferUpdate: jest.fn().mockResolvedValue(undefined),
+        editReply: jest.fn().mockResolvedValue(undefined),
+      };
+      const selectReply = {
+        awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
+      };
+      const addClick = makeClick('add');
+      addClick.fetchReply = jest.fn().mockResolvedValueOnce(selectReply);
+
+      mockDb.getSendConfig.mockResolvedValueOnce({
+        connector_resource_id: 'res-initial', expires_in: '30m',
+        attachment_url: 'https://cdn.discordapp.com/x.png',
+        attachment_name: 'x.png', attachment_content_type: 'image/png',
+      });
+      mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
+      mockMintLinks.mockResolvedValueOnce([
+        {
+          qurl_link: 'https://q.test/added', expires_at: new Date(Date.now() + 86400000).toISOString(),
+          qurl_id: 'q_added',
+          resource_id: 'res-added',
+        },
+      ]);
+
+      await collect(addClick);
+
+      expect(addClick.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: 'Select additional recipients:',
+        flags: 64,
+      }));
+      expect(addClick.reply.mock.calls[0][0]).not.toHaveProperty('fetchReply');
+      expect(addClick.fetchReply).toHaveBeenCalledTimes(1);
+      expect(addClick.reply.mock.invocationCallOrder[0]).toBeLessThan(addClick.fetchReply.mock.invocationCallOrder[0]);
+      expect(selectInteraction.deferUpdate).toHaveBeenCalled();
+      expect(mockMintLinks).toHaveBeenCalledTimes(attachmentMode ? 11 : 2);
+      expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(2);
+      const updated = interaction.editReply.mock.calls.find(([payload]) => payload.content?.startsWith(`Sent to ${attachmentMode ? 101 : 2} users`))?.[0];
+      expect(updated).toBeDefined();
+      if (attachmentMode) {
+        expect(updated.content).toContain('Attached recipients.txt lists only the original recipients; newly added recipients are not listed.');
+      } else {
+        expect(updated.content).not.toContain('Attached recipients.txt');
+      }
+      const note = seconds === 0.5
+        ? 'Access uses a one-second minimum; open content may briefly continue loading.'
+        : 'Access stops at the timer; open content may briefly continue loading.';
+      expect(updated.content.split('\n')).toContain(note);
+      expect(updated.content.length).toBeLessThanOrEqual(2000);
+      expect(updated.files).toBeUndefined();
+      expect(selectInteraction.editReply).toHaveBeenCalledWith({
+        content: 'Added 1 recipient',
+        components: [],
+      });
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = originalCap;
+      clearCooldown('sender-1');
+    }
+  });
+
+  it('rejects Revoke while Add Recipients is waiting on selection', async () => {
+    const {
+      collect, finishRevoke, makeClick, revokeStarted,
+    } = await setupRevocableSend();
+    const selectPending = defer();
+    const selectReply = {
+      awaitMessageComponent: jest.fn(() => selectPending.promise),
+    };
+    const addClick = makeClick('add');
+    addClick.fetchReply = jest.fn().mockResolvedValueOnce(selectReply);
+    const addPromise = collect(addClick);
+    await waitForMicrotaskExpectation(() => {
+      expect(selectReply.awaitMessageComponent).toHaveBeenCalled();
+    });
+
+    const revokeClick = makeClick('revoke');
+    await collect(revokeClick);
+
+    expect(revokeClick.reply).toHaveBeenCalledWith({
+      content: 'Already processing an "Add Recipients" action. Finish the current selection or try again in a moment.',
+      flags: 64,
+    });
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+
+    selectPending.reject(Object.assign(new Error('time'), { code: 'InteractionCollectorError' }));
+    await addPromise;
+
+    const retryClick = makeClick('revoke');
+    const retryPromise = collect(retryClick);
+    await revokeStarted.promise;
+    finishRevoke.resolve();
+    await retryPromise;
+
+    expect(retryClick.deferUpdate).toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a frozen caller recipient snapshot unchanged after Add Recipients', async () => {
+    clearCooldown('sender-1');
+    const recipients = Object.freeze([Object.freeze({ id: 'u1', username: 'Alice' })]);
+    const { collect, makeClick } = await setupRevocableSend(recipients);
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-initial', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added' });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_added', qurl_link: 'https://q.test/added', expires_at: new Date(Date.now() + 1800000).toISOString() }]);
+    mockDb.recordQURLSendBatch.mockResolvedValueOnce(undefined);
+    const selection = {
+      users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
+    };
+    const click = makeClick('add');
+    click.fetchReply = jest.fn().mockResolvedValueOnce({
+      awaitMessageComponent: jest.fn().mockResolvedValue(selection),
+    });
+    try {
+      await collect(click);
+      expect(selection.deferUpdate).toHaveBeenCalled();
+      expect(selection.editReply).toHaveBeenCalledWith({ content: 'Added 1 recipient', components: [] });
+      expect(mockSendDM).toHaveBeenCalledTimes(2);
+      expect(recipients).toEqual([{ id: 'u1', username: 'Alice' }]);
+      expect(logger.error).not.toHaveBeenCalledWith('Add recipients failed', expect.anything());
+    } finally {
+      clearCooldown('sender-1');
+    }
+  });
+
+  it('keeps the successful revoke result when the collector window ends (#200)', async () => {
+    const { collect, end, finishRevoke, interaction, makeClick, revokeStarted } = await setupRevocableSend();
+    const pending = collect(makeClick('revoke'));
+    await revokeStarted.promise;
+    finishRevoke.resolve();
+    await pending;
+    const result = interaction.editReply.mock.calls.at(-1)[0].content;
+    expect(result).toContain('Revoked 1/1 user.');
+    expect(result).toContain('Revoked for: Alice');
+
+    interaction.editReply.mockClear();
+    await end([], 'time');
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: result, components: [] });
+  });
+
+  it('includes newly added recipients in the collector revoke result (#200)', async () => {
+    clearCooldown('sender-1');
+    const { collect, finishRevoke, interaction, makeClick, revokeStarted } = await setupRevocableSend();
+    try {
+      const selection = {
+        users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
+        deferUpdate: jest.fn().mockResolvedValue(undefined),
+        editReply: jest.fn().mockResolvedValue(undefined),
+      };
+      const addClick = makeClick('add');
+      addClick.fetchReply = jest.fn().mockResolvedValueOnce({ awaitMessageComponent: jest.fn().mockResolvedValue(selection) });
+      mockDb.getSendConfig.mockResolvedValueOnce({
+        connector_resource_id: 'res-initial', expires_in: '30m',
+        attachment_url: 'https://cdn.discordapp.com/x.png',
+        attachment_name: 'x.png', attachment_content_type: 'image/png',
+      });
+      mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
+      mockMintLinks.mockResolvedValueOnce([
+        { qurl_link: 'https://q.test/added', resource_id: 'res-added', qurl_id: 'q_added', expires_at: new Date(Date.now() + 1800000).toISOString() },
+      ]);
+      await collect(addClick);
+      expect(selection.editReply).toHaveBeenCalledWith({ content: 'Added 1 recipient', components: [] });
+
+      mockDb.getSendItems.mockReset();
+      // Counts come from DDB; names must include the collector's added recipient.
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { recipient_discord_id: 'u1', resource_id: 'res-initial', qurl_id: 'q_original' },
+        { recipient_discord_id: 'u2', resource_id: 'res-added', qurl_id: 'q_added' },
+      ]);
+      const pending = collect(makeClick('revoke'));
+      await revokeStarted.promise;
+      finishRevoke.resolve();
+      await pending;
+      expect(interaction.editReply).toHaveBeenLastCalledWith(expect.objectContaining({
+        content: expect.stringContaining('Revoked 2/2 users.'),
+      }));
+      expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain('Revoked for: Alice, Bob');
+    } finally {
+      clearCooldown('sender-1');
+    }
   });
 
   it('rejects stale Add and expand actions after a failed revoke closes the card (#861)', async () => {
@@ -2864,7 +3426,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     await collect(addClick);
     expect(addClick.reply).toHaveBeenCalledWith({
       content: 'This management card is closed after a revoke attempt. Run `/qurl revoke` to check the result.',
-      ephemeral: true,
+      flags: 64,
     });
     const expandClick = makeClick('expand');
     await collect(expandClick);
@@ -2888,64 +3450,26 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     expect(interaction.editReply).not.toHaveBeenCalled();
   });
 
-  it('rejects Revoke while Add Recipients is waiting on selection', async () => {
-    const {
-      collect, finishRevoke, makeClick, revokeStarted,
-    } = await setupRevocableSend();
-    const selectPending = defer();
-    const selectReply = {
-      awaitMessageComponent: jest.fn(() => selectPending.promise),
-    };
-    const addClick = makeClick('add');
-    addClick.reply.mockResolvedValueOnce(selectReply);
-    const addPromise = collect(addClick);
-    await waitForMicrotaskExpectation(() => {
-      expect(selectReply.awaitMessageComponent).toHaveBeenCalled();
-    });
-
-    const revokeClick = makeClick('revoke');
-    await collect(revokeClick);
-
-    expect(revokeClick.reply).toHaveBeenCalledWith({
-      content: 'Already processing an "Add Recipients" action. Finish the current selection or try again in a moment.',
-      ephemeral: true,
-    });
-    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
-
-    selectPending.reject(Object.assign(new Error('time'), { code: 'InteractionCollectorError' }));
-    await addPromise;
-
-    const retryClick = makeClick('revoke');
-    const retryPromise = collect(retryClick);
-    await revokeStarted.promise;
-    finishRevoke.resolve();
-    await retryPromise;
-
-    expect(retryClick.deferUpdate).toHaveBeenCalled();
-    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-  });
 });
 
-describe('handleAddRecipients — validate expires_in BEFORE recordQURLSendBatch (#352)', () => {
-  afterEach(() => { mockTime.expiryToMs.mockImplementation(jest.requireActual('../src/utils/time').expiryToMs); });
-
-  it('does not write to DB if expiryToMs throws (no orphan rows, no audit-blackhole)', async () => {
+describe('handleAddRecipients — validate returned expiry before persistence (#352)', () => {
+  it('compensates an invalid mint before any row or DM is written', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
-    mockTime.expiryToMs.mockImplementationOnce(() => { throw new Error('synthetic expiryToMs failure'); });
-
-    await expect(handleAddRecipients(
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: 'not-a-time', resource_id: 'res-new' }]);
+    mockRevokeMintedLinks.mockReset().mockResolvedValue(undefined);
+    const result = await handleAddRecipients(
       'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
       makeInteraction(), 'apikey',
-    )).rejects.toThrow(/synthetic expiryToMs failure/);
-
+    );
+    expect(result.delivered).toBe(0);
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_aaaaaaaaaa1'], 'apikey');
   });
 });
 
@@ -2957,7 +3481,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('DB unavailable'));
 
     const result = await handleAddRecipients(
@@ -2970,7 +3494,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_aaaaaaaaaa1'], 'apikey');
     expect(logger.info).toHaveBeenCalledWith(
-      'Cleaned up freshly minted Add Recipients qURL resources',
+      'Cleaned up freshly minted qURL links',
       expect.objectContaining({
         sendId: 'send-1',
         reason: 'guarded_transaction_failed',
@@ -2987,8 +3511,8 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' },
-      { qurl_link: 'https://q.test/2', resource_id: 'res-new' },
+      { qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
+      { qurl_link: 'https://q.test/2', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
     ]);
 
     const result = await handleAddRecipients(
@@ -3006,7 +3530,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
   });
 
   it('still revokes identifiable fresh children when one cleanup row lacks an id', async () => {
-    await cleanupFreshAddRecipientResources([
+    await cleanupFreshMintedLinks([
       { resourceId: 'res-new', qurlId: 'q_aaaaaaaaaa1' },
       { resourceId: 'res-new', qurlId: undefined },
       { resourceId: '', qurlId: 'q_aaaaaaaaaa2' },
@@ -3015,7 +3539,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_aaaaaaaaaa1'], 'apikey');
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted Add Recipients qURL resources',
+      'Failed to clean up freshly minted qURL links',
       expect.objectContaining({ failed_count: 0, unidentified_count: 2 }),
     );
   });
@@ -3024,12 +3548,12 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     jest.useFakeTimers();
     try {
       mockRevokeMintedLinks.mockImplementationOnce(() => new Promise(() => {}));
-      const pending = cleanupFreshAddRecipientResources([
+      const pending = cleanupFreshMintedLinks([
         { resourceId: 'res-new', qurlId: 'q_aaaaaaaaaa1' },
       ], 'apikey', 'send-1', { rowsMayHavePersisted: false });
       await jest.advanceTimersByTimeAsync(120_000);
       await expect(pending).resolves.toBeUndefined();
-      expect(logger.warn).toHaveBeenCalledWith('Add Recipients cleanup still running at its wait budget', {
+      expect(logger.warn).toHaveBeenCalledWith('Send cleanup still running at its wait budget', {
         sendId: 'send-1',
         reason: 'pre_persistence',
         unidentified_count: 0,
@@ -3047,7 +3571,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     const err = new Error('revoked');
     err.code = 'SEND_CONFIG_REVOKED';
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(err);
@@ -3072,7 +3596,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: sensitiveResourceId, fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: sensitiveResourceId }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: sensitiveResourceId }]);
     const err = new Error('revoked');
     err.code = 'SEND_CONFIG_REVOKED';
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(err);
@@ -3086,13 +3610,13 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
     expect(result.newRecipients).toEqual([]);
     expect(logger.error).toHaveBeenCalledWith(
-      'Failed to clean up freshly minted Add Recipients qURL resources',
+      'Failed to clean up freshly minted qURL links',
       expect.objectContaining({
         sendId: 'send-1',
         reason: 'revoked_guard',
         failed_count: 1,
         total: 1,
-        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), error: 'delete failed' }],
+        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), qurl_ids: ['q_aaaaaaaaaa1'], error: 'delete failed' }],
       }),
     );
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);
@@ -3116,7 +3640,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     for (let batch = 0; batch < 10; batch++) {
       mockMintLinks.mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({
         qurl_id: `q_${batch}_${i}`,
-        qurl_link: `https://q.test/${batch}/${i}`,
+        qurl_link: `https://q.test/${batch}/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString(),
       })));
     }
     mockRevokeMintedLinks.mockResolvedValue(undefined);
@@ -3131,8 +3655,8 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(10);
-    expect(mockRevokeMintedLinks.mock.calls.map(call => call[0]).sort()).toEqual(
-      Array.from({ length: 10 }, (_, i) => `res-${i}`).sort(),
+    expect(mockRevokeMintedLinks.mock.calls.map(call => call[0])).toEqual(
+      Array(10).fill('res-0'),
     );
   });
 });
@@ -3147,8 +3671,8 @@ describe('handleAddRecipients — happy path (location)', () => {
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
-      { qurl_id: 'q_2', qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
+      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-new' },
+      { qurl_id: 'q_2', qurl_link: 'https://other.example/2', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-new' },
     ]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
@@ -3161,6 +3685,8 @@ describe('handleAddRecipients — happy path (location)', () => {
       makeInteraction(), 'apikey',
     );
 
+    expect(mockSendDM.mock.calls[0][1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens q.test' });
+    expect(mockSendDM.mock.calls[1][1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens other.example' });
     expect(result.delivered).toBe(2);
     expect(result.failed).toBe(0);
     expect(result.msg).toMatch(/Added 2 recipients/);
@@ -3182,7 +3708,7 @@ describe('handleAddRecipients — happy path (location)', () => {
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-pack' });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_pack', qurl_link: 'https://q.test/pack', resource_id: 'res-loc-pack' },
+      { qurl_id: 'q_pack', qurl_link: 'https://q.test/pack', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-pack' },
     ]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
@@ -3194,6 +3720,7 @@ describe('handleAddRecipients — happy path (location)', () => {
 
     expect(mockSendDM).toHaveBeenCalledTimes(1);
     const [, payload] = mockSendDM.mock.calls[0];
+    expect(payload.embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens q.test' });
     expect(payload.components).toHaveLength(1);
     const buttons = payload.components[0].components;
     expect(buttons).toHaveLength(2);
@@ -3208,7 +3735,7 @@ describe('handleAddRecipients — happy path (location)', () => {
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-qv2' });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_qv2', qurl_link: qv2Link, resource_id: 'res-loc-qv2' },
+      { qurl_id: 'q_qv2', qurl_link: qv2Link, expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-qv2' },
     ]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
@@ -3223,36 +3750,6 @@ describe('handleAddRecipients — happy path (location)', () => {
     const description = payload.embeds[0].setDescription.mock.calls[0][0];
     expect(description).toContain(`[🚪 Step Through](${qv2Link})`);
     expect(description).toContain('[🛡️ What is qURL?](https://layerv.ai/qurl/)');
-  });
-
-  it('shares one EmbedBuilder reference across N>1 embeds in the bulk payload primitives', () => {
-    const qurlLinks = ['https://q.test/share-file', 'https://q.test/share-loc'];
-    const embed = buildDeliveryEmbed({
-      senderAlias: 'Sender',
-      guildName: 'Guild',
-      guildIconUrl: null,
-      expiresAt: Math.floor(Date.now() / 1000) + 3600,
-      personalMessage: null,
-    });
-    const payload = {
-      embeds: Array(qurlLinks.length).fill(embed),
-      components: packBulkDeliveryComponents(qurlLinks),
-    };
-
-    expect(payload.embeds).toHaveLength(2);
-    expect(payload.embeds[0]).toBe(payload.embeds[1]);
-    if (typeof payload.embeds[0].toJSON === 'function') {
-      expect(payload.embeds[0].toJSON()).toEqual(payload.embeds[1].toJSON());
-    }
-    const urls = payload.components
-      .flatMap(row => row.components)
-      .map(b => b.setURL.mock.calls[0]?.[0])
-      .filter(Boolean);
-    expect(urls).toEqual([
-      'https://q.test/share-file',
-      'https://q.test/share-loc',
-      'https://layerv.ai/qurl/',
-    ]);
   });
 
   it('does not emit upload_success for unsupported mixed file + location configs', async () => {
@@ -3285,8 +3782,8 @@ describe('handleAddRecipients — happy path (location)', () => {
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
-      { qurl_id: 'q_2', qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
+      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-new' },
+      { qurl_id: 'q_2', qurl_link: 'https://q.test/2', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-loc-new' },
     ]);
     mockSendDM.mockResolvedValueOnce({ ok: false })
       .mockResolvedValueOnce({ ok: true, channelId: 'dm-c-2', messageId: 'dm-m-2' });
@@ -3307,15 +3804,28 @@ describe('handleAddRecipients — happy path (location)', () => {
 });
 
 describe('mintLinksInBatches', () => {
-  it('mints once for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
+  it('revokes all identified children and stops minting after a short later batch', async () => {
+    mockMintLinks
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
+      .mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
+    const result = await mintLinksInBatches({
+      sendId: 'short-send', initialResourceId: 'res-1',
+      expiresAt: new Date().toISOString(), recipientCount: 21, apiKey: 'apikey',
+    });
+    expect(result).toHaveLength(11);
+    expect(mockMintLinks).toHaveBeenCalledTimes(2);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', Array.from({ length: 10 }, (_, i) => `q_${i}`), 'apikey');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_short'], 'apikey');
+  });
+
+  it('mints once for recipientCount <= MINT_BATCH_SIZE (10)', async () => {
     mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1' },
-      { qurl_id: 'q_2', qurl_link: 'https://q.test/2' },
+      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString() },
+      { qurl_id: 'q_2', qurl_link: 'https://q.test/2', expires_at: new Date(Date.now() + 86400000).toISOString() },
     ]);
 
     const result = await mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn(),
       expiresAt: new Date().toISOString(),
       recipientCount: 2,
       apiKey: 'apikey',
@@ -3326,36 +3836,33 @@ describe('mintLinksInBatches', () => {
     expect(result[0].resourceId).toBe('res-1');
   });
 
-  it('re-uploads + mints again when recipientCount > TOKENS_PER_RESOURCE', async () => {
+  it('keeps one resource across bounded batches beyond ten recipients', async () => {
     mockMintLinks
-      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
-      .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10' }]);
-    const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
+      .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
 
     const result = await mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn,
       expiresAt: new Date().toISOString(),
       recipientCount: 11,
       apiKey: 'apikey',
     });
 
-    expect(reuploadFn).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     expect(result).toHaveLength(11);
-    expect(result[10].resourceId).toBe('res-2');
+    expect(result.every(link => link.resourceId === 'res-1')).toBe(true);
+    expect(mockMintLinks.mock.calls.map(call => call[0])).toEqual(['res-1', 'res-1']);
   });
 
   it('revokes earlier batches before rethrowing a later mint failure', async () => {
     const failure = new Error('Connector mint_link failed (502)');
     mockMintLinks
-      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
       .mockRejectedValueOnce(failure);
     mockRevokeMintedLinks.mockRejectedValueOnce(new Error('connector unavailable'));
 
     await expect(mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' }),
       expiresAt: new Date().toISOString(),
       recipientCount: 11,
       apiKey: 'apikey',
@@ -3377,11 +3884,10 @@ describe('mintLinksInBatches', () => {
   });
 
   it('surfaces the invalid-qurl_id error, not a TypeError, for a null mint entry', async () => {
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_ok', qurl_link: 'https://q.test/ok' }, null]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_ok', qurl_link: 'https://q.test/ok', expires_at: new Date(Date.now() + 86400000).toISOString() }, null]);
 
     await expect(mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn(),
       expiresAt: new Date().toISOString(),
       recipientCount: 2,
       apiKey: 'apikey',
@@ -3394,7 +3900,6 @@ describe('mintLinksInBatches', () => {
 
     await expect(mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn(),
       expiresAt: new Date().toISOString(),
       recipientCount: 1,
       apiKey: 'apikey',
@@ -3402,18 +3907,34 @@ describe('mintLinksInBatches', () => {
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_idonly'], 'apikey');
   });
 
+  it('attempts later mint-failure cleanup batches after one revoke job fails', async () => {
+    const failure = Object.assign(new Error('mint failed'), { apiCode: 'quota_exceeded' });
+    const ids = Array.from({ length: 30 }, (_, i) => `q_cleanup${i}`);
+    for (let i = 0; i < ids.length; i += 10) {
+      mockMintLinks.mockResolvedValueOnce(ids.slice(i, i + 10).map(qurl_id => ({
+        qurl_id, qurl_link: `https://q.test/${qurl_id}`, expires_at: new Date(Date.now() + 86400000).toISOString(),
+      })));
+    }
+    mockMintLinks.mockRejectedValueOnce(failure);
+    mockRevokeMintedLinks.mockRejectedValueOnce(new Error('first cleanup job failed'));
+    await expect(mintLinksInBatches({ initialResourceId: 'res-1', recipientCount: 31, apiKey: 'apikey', expiresAt: new Date().toISOString() })).rejects.toBe(failure);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(3);
+    expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toEqual(ids);
+    expect(mockRevokeMintedLinks.mock.calls.every(([resourceId, ids]) => resourceId === 'res-1' && ids.length <= 10)).toBe(true);
+    expect(logger.error).toHaveBeenCalledWith('Failed to revoke links after a mint failure', expect.objectContaining({ failed_count: 1, total: 3 }));
+  });
+
   it('stops waiting on compensation at its budget and still surfaces the mint error', async () => {
     jest.useFakeTimers();
     try {
       const failure = new Error('Connector mint_link failed (502)');
       mockMintLinks
-        .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
+        .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
         .mockRejectedValueOnce(failure);
       mockRevokeMintedLinks.mockImplementationOnce(() => new Promise(() => {}));
 
       const pending = mintLinksInBatches({
         initialResourceId: 'res-1',
-        reuploadFn: jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' }),
         expiresAt: new Date().toISOString(),
         recipientCount: 11,
         apiKey: 'apikey',
@@ -3431,18 +3952,18 @@ describe('mintLinksInBatches', () => {
   });
 
   it('revokes a bounded over-mint and logs only the unrevoked overflow', async () => {
-    const minted = Array.from({ length: 1 + 20 + 3 }, (_, i) => ({ qurl_id: `q_x${i}`, qurl_link: `https://q.test/x${i}` }));
+    const minted = Array.from({ length: 1 + 20 + 3 }, (_, i) => ({ qurl_id: `q_x${i}`, qurl_link: `https://q.test/x${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() }));
     mockMintLinks.mockResolvedValueOnce(minted);
 
     await expect(mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn(),
       expiresAt: new Date().toISOString(),
       recipientCount: 1,
       apiKey: 'apikey',
     })).rejects.toThrow('Connector mint_link returned 24 links for a 1-link batch');
     // Compensation covers the request plus 20 overflow ids, not the whole untrusted body.
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', minted.slice(0, 21).map(l => l.qurl_id), 'apikey');
+    expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toEqual(minted.slice(0, 21).map(l => l.qurl_id));
+    expect(mockRevokeMintedLinks.mock.calls.every(([parent, ids]) => parent === 'res-1' && ids.length <= 10)).toBe(true);
     expect(logger.error).toHaveBeenCalledWith('Connector mint_link over-minted', {
       resource_ref: resourceIdLogRef('res-1'), requested: 1, returned: 24,
       unrevoked_overflow_qurl_ids: ['q_x21', 'q_x22', 'q_x23'],
@@ -3453,7 +3974,6 @@ describe('mintLinksInBatches', () => {
   it('returns empty array when recipientCount = 0', async () => {
     const result = await mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn: jest.fn(),
       expiresAt: new Date().toISOString(),
       recipientCount: 0,
       apiKey: 'apikey',
@@ -3465,13 +3985,11 @@ describe('mintLinksInBatches', () => {
 
   it('forwards guildId to mintLinks on EVERY batch (#1101 attribution)', async () => {
     mockMintLinks
-      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}` })))
-      .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10' }]);
-    const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_id: `q_${i}`, qurl_link: `https://q.test/${i}`, expires_at: new Date(Date.now() + 86400000).toISOString() })))
+      .mockResolvedValueOnce([{ qurl_id: 'q_10', qurl_link: 'https://q.test/10', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
 
     await mintLinksInBatches({
       initialResourceId: 'res-1',
-      reuploadFn,
       expiresAt: new Date().toISOString(),
       recipientCount: 11,
       apiKey: 'apikey',
@@ -3489,12 +4007,13 @@ describe('executeSendPipeline — guild_id threading (#1101)', () => {
   it('threads interaction.guildId into BOTH mintLinks and recordQURLSendBatch (file send)', async () => {
     const interaction = makeInteraction({ guildId: 'guild-1' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://door.acme.com/#at_test', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
     await executeSendPipeline(interaction, makePipelineParams());
 
+    expect(mockSendDM.mock.calls[0][1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens door.acme.com' });
     expect(mockMintLinks).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ guildId: 'guild-1' }),
@@ -3511,7 +4030,7 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
       token: 'interaction-tok-live', applicationId: 'app-123', guildId: 'guild-1',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
@@ -3533,7 +4052,7 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
   it('refuses to persist, deliver, or arm the fast-path for a link missing qurl_id', async () => {
     const interaction = makeInteraction({ token: 'tok-live', applicationId: 'app-123', guildId: 'guild-1' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
 
     await executeSendPipeline(interaction, makePipelineParams());
 
@@ -3546,7 +4065,7 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
   it('skips the persist when no interaction token is present (legacy/worker w/o token)', async () => {
     const interaction = makeInteraction({ token: undefined, applicationId: 'app-123' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
@@ -3558,7 +4077,7 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
   it('a send-time persist failure is logged-swallowed, not thrown (DMs already delivered)', async () => {
     const interaction = makeInteraction({ token: 'tok', applicationId: 'app-123' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
     mockDb.saveSendConfirmState.mockRejectedValueOnce(new Error('ddb throttle'));
@@ -3579,7 +4098,7 @@ describe('handleAddRecipients — guild_id threading (#1101)', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_add', qurl_link: 'https://q.test/add', resource_id: 'res-file-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_add', qurl_link: 'https://q.test/add', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-file-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
@@ -3647,7 +4166,6 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
 });
 
 describe('executeSendPipeline — expiresIn allowed-set gate', () => {
-  afterEach(() => { mockTime.expiryToMs.mockImplementation(jest.requireActual('../src/utils/time').expiryToMs); });
 
   test.each([
     ['off-set numeric-style', '25h'],
@@ -3667,27 +4185,19 @@ describe('executeSendPipeline — expiresIn allowed-set gate', () => {
     );
   });
 
-  test.each(['30m', '1h', '6h', '24h', '7d'])('accepts the allowed value: %s', async (expiresIn) => {
+  test.each(['30m', '1h', '6h', '24h', '3d', '7d'])('accepts a current or saved legacy value: %s', async (expiresIn) => {
     await expectGateAccepts(makePipelineParams({ expiresIn }), /expiresIn must be one of/);
   });
 
-  test('hoists expiresAt above recordQURLSendBatch so a throw can\'t leave orphan rows (#352)', async () => {
-    const { expiryToMs } = require('../src/utils/time');
-    expiryToMs.mockImplementationOnce(() => { throw new Error('synthetic expiryToMs throw'); });
+  test('rejects an invalid returned expiry before persistence and compensates the minted child (#352)', async () => {
     mockDb.recordQURLSendBatch.mockClear();
-
-    mockDownloadAndUpload.mockResolvedValueOnce({
-      resource_id: 'res-new', fileBuffer: new ArrayBuffer(10),
-    });
-    mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-new' },
-    ]);
-
-    const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams({ expiresIn: '30m' })))
-      .rejects.toThrow(/synthetic expiryToMs throw/);
-
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: 'not-a-time', resource_id: 'res-new' }]);
+    mockRevokeMintedLinks.mockReset().mockResolvedValue(undefined);
+    await executeSendPipeline(makeInteraction(), makePipelineParams({ expiresIn: '30m' }));
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_1'], 'apikey');
   });
 });
 
@@ -3865,7 +4375,7 @@ describe('executeSendPipeline — truncForLog applies to value-rendering gates',
 describe('executeSendPipeline — channel notification on @everyone / voice mode', () => {
   beforeEach(() => {
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-1' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-1' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
   });
 
@@ -3876,7 +4386,7 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(mockSendChannelMessage).toHaveBeenCalledWith(
       'channel-everyone',
       expect.objectContaining({
-        content: expect.stringMatching(/shared something with everyone in this server.*qURL Bot/),
+        content: expect.stringMatching(/shared something with everyone in this server via \*\*qURL\*\*\. Check your DMs\./),
       }),
     );
   });
@@ -3888,7 +4398,7 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(mockSendChannelMessage).toHaveBeenCalledWith(
       'channel-voice',
       expect.objectContaining({
-        content: expect.stringMatching(/shared something with everyone in this voice channel.*qURL Bot/),
+        content: expect.stringMatching(/shared something with everyone in this voice channel via \*\*qURL\*\*\. Check your DMs\./),
       }),
     );
   });
@@ -3936,12 +4446,244 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
   });
 });
 
+test('slot-claim capacity rejection emits the count-only audit signal', async () => {
+  const originalActive = _test.getActiveFileSends();
+  try {
+    _test.setActiveFileSends(5);
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, makePipelineParams());
+    expect(interaction.editReply).toHaveBeenLastCalledWith({
+      content: 'The bot is processing too many file sends right now. Please try again in a moment.',
+      components: [],
+    });
+    expect(logger.audit).toHaveBeenCalledWith('upload_rejected_capacity', {
+      active_file_sends: 5, max_concurrent: 5,
+    });
+    expect(_test.getActiveFileSends()).toBe(5);
+  } finally {
+    _test.setActiveFileSends(originalActive);
+  }
+});
+
+describe('send-confirm audit correlation', () => {
+  test.each(['0123456789abcdef', 'legacy-or-secret'])('bounds the card reference for %s', async nonce => {
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
+      { qurl_id: 'q_aaaaaaaaaa2', qurl_link: 'https://q.test/2', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
+    ]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+    await executeSendPipeline(makeInteraction(), makePipelineParams({
+      sendNonce: nonce, recipients: [{ id: 'u1', username: 'u1' }, { id: 'u2', username: 'u2' }],
+    }));
+    const dispatches = logger.audit.mock.calls.filter(([event]) => event === 'dispatch_sent');
+    expect(dispatches).toHaveLength(2);
+    expect(new Set(dispatches.map(([, meta]) => meta.send_nonce))).toEqual(new Set([
+      nonce === '0123456789abcdef' ? nonce : undefined,
+    ]));
+  });
+});
+
+describe.each(['file', 'maps'])('self-destruct timing copy for %s', resourceType => {
+  test.each([
+    [0.5, 'Access uses a one-second minimum; open content may briefly continue loading.'],
+    [0.75, 'Access uses a one-second minimum; open content may briefly continue loading.'],
+    [1, 'Access stops at the timer; open content may briefly continue loading.'],
+    [2, 'Access stops at the timer; open content may briefly continue loading.'],
+    [5, 'Access stops at the timer; open content may briefly continue loading.'],
+    [30, 'Access stops at the timer; open content may briefly continue loading.'],
+    [60, null], [300, null], [null, null],
+  ])('preview and recap keep the note on its own line (%s seconds)', (seconds, note) => {
+    const preview = _test.renderConfirmCardContent({
+      resourceType, resourceLabel: 'shared content', validRecipients: [], expiresIn: '1h',
+      selfDestructSeconds: seconds,
+    });
+    const recap = renderSendConfirm({
+      delivered: 1, expiresIn: '1h', selfDestructSeconds: seconds,
+      failedNamesPlain: [], successNames: ['alice'], showAll: false,
+    }).content;
+    for (const content of [preview, recap]) {
+      if (note) expect(content.split('\n')).toContain(note);
+      else expect(content).not.toContain('open content may briefly continue loading');
+    }
+  });
+});
+
+describe('initial-send compensation boundaries', () => {
+  test('persistence failure attempts all 101 children even when one cleanup batch fails', async () => {
+    const config = require('../src/config');
+    const previousCap = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 101;
+    try {
+      const recipients = Array.from({ length: 101 }, (_, i) => ({ id: `large${i}`, username: `large${i}` }));
+      mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-large-0', fileBuffer: Buffer.from('x') });
+      for (let offset = 0; offset < 101; offset += 10) {
+        const resourceId = `res-large-${offset / 10}`;
+        if (offset) mockReUploadBuffer.mockResolvedValueOnce({ resource_id: resourceId });
+        mockMintLinks.mockResolvedValueOnce(recipients.slice(offset, offset + 10).map((_, i) => ({
+          qurl_id: `q_large${offset + i}`, qurl_link: `https://q.test/${offset + i}`, expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: resourceId,
+        })));
+      }
+      mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('partial BatchWrite failure'));
+      mockRevokeMintedLinks.mockRejectedValueOnce(new Error('first cleanup batch unavailable'));
+      await executeSendPipeline(makeInteraction(), makePipelineParams({ recipients }));
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(11);
+      expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).toHaveLength(101);
+      expect(mockSendDM).not.toHaveBeenCalled();
+      expect(mockRevokeMintedLinks.mock.calls.every(([, ids]) => ids.length <= 10)).toBe(true);
+      expect(new Set(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).size).toBe(101);
+      expect(logger.error).toHaveBeenCalledWith('Failed to clean up freshly minted qURL links', expect.objectContaining({
+        sendId: expect.any(String), reason: 'persistence_failure', failed_count: 1, total: 11,
+      }));
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = previousCap;
+    }
+  });
+  test.each(['failure', 'timeout'])('short-mint %s still returns the original failure copy once', async mode => {
+    if (mode === 'timeout') jest.useFakeTimers();
+    try {
+      mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-short', fileBuffer: Buffer.from('x') });
+      mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_short', qurl_link: 'https://q.test/short', expires_at: new Date(Date.now() + 86400000).toISOString() }]);
+      if (mode === 'timeout') mockRevokeMintedLinks.mockImplementationOnce(() => new Promise(() => {}));
+      else mockRevokeMintedLinks.mockRejectedValueOnce(new Error('revoke unavailable'));
+      const interaction = makeInteraction();
+      const pending = executeSendPipeline(interaction, makePipelineParams({
+        recipients: [{ id: 'u1', username: 'Alice' }, { id: 'u2', username: 'Bob' }],
+      }));
+      if (mode === 'timeout') await jest.advanceTimersByTimeAsync(120_000);
+      await pending;
+      expect(interaction.editReply.mock.calls.filter(([reply]) => reply.content === 'Only 1 of 2 links could be created. Please try again.')).toHaveLength(1);
+      expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Only 1 of 2 links could be created. Please try again.' });
+      expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+      if (mode === 'failure') {
+        expect(logger.error).toHaveBeenCalledWith('Failed to clean up freshly minted qURL links',
+          expect.objectContaining({ reason: 'short_mint', failed_count: 1 }));
+      }
+      expect(mockSendDM).not.toHaveBeenCalled();
+    } finally { if (mode === 'timeout') jest.useRealTimers(); }
+  });
+});
+
+describe('destination footer — per-recipient failure isolation', () => {
+  it.each(['initial', 'add'].flatMap(path => ['malformed', 'hostless', 'send-throws', 'send-null', 'send-undefined'].map(failure => [path, failure])))('persists a failed recipient while delivering its sibling (%s, %s)', async (path, failure) => {
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-new' });
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      resource_type: 'maps', actual_url: 'https://maps.example.com/x', expires_in: '30m',
+    });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_id: 'q_bad', qurl_link: failure === 'malformed' ? 'not a URL' : failure === 'hostless' ? 'mailto:x@example.com' : 'https://bad.example/#secret', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
+      { qurl_id: 'q_good', qurl_link: 'https://other.example/link', expires_at: new Date(Date.now() + 86400000).toISOString(), resource_id: 'res-new' },
+    ]);
+    mockSendDM.mockImplementation(async recipientId => {
+      if (failure === 'send-throws' && recipientId === 'u1') throw new Error('secret delivery failure');
+      if (failure === 'send-null' && recipientId === 'u1') return Promise.reject(null);
+      if (failure === 'send-undefined' && recipientId === 'u1') return Promise.reject(undefined);
+      return { ok: true, channelId: 'dm-c', messageId: 'dm-m' };
+    });
+    const recipients = [
+      { id: 'u1', username: 'Alice', bot: false },
+      { id: 'u2', username: 'Bob', bot: false },
+    ];
+    if (path === 'initial') {
+      await executeSendPipeline(makeInteraction(), { ...makePipelineParams(), recipients });
+    } else {
+      const result = await handleAddRecipients('send-1', makeUsersCollection(recipients), makeInteraction(), 'apikey');
+      expect(result).toMatchObject({ delivered: 1, failed: 1 });
+    }
+    expect(mockSendDM).toHaveBeenCalledTimes(failure.startsWith('send-') ? 2 : 1);
+    expect(mockSendDM.mock.calls.at(-1)[0]).toBe('u2');
+    expect(mockSendDM.mock.calls.at(-1)[1].embeds[0].setFooter).toHaveBeenCalledWith({ text: 'opens other.example' });
+    expect(logger.warn).toHaveBeenCalledWith('Recipient delivery failed before completion', {
+      sendId: expect.any(String), errorName: failure.startsWith('send-') ? (failure === 'send-throws' ? 'Error' : 'NonError') : 'TypeError',
+    });
+    expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith(expect.any(String), 'u1', 'failed');
+    expect(mockDb.markSendDMDelivered).toHaveBeenCalledWith(expect.any(String), 'u2', 'dm-c', 'dm-m');
+  });
+});
+
+
+describe('authoritative mint expiry — persisted and rendered', () => {
+  it.each([['initial', 'file', '24h'], ['initial', 'maps', '24h'], ['add', 'file', '24h'], ['add', 'maps', '24h'], ['add', 'file', '7d'], ['add', 'maps', '7d']])('%s %s (%s requested) uses the returned expiry when the resource clamps it', async (path, kind, requested = '24h') => {
+    const now = 1800000000000;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    const returnedExpiry = new Date(now + 900000).toISOString();
+    mockDownloadAndUpload.mockReset().mockResolvedValue({ resource_id: path === 'add' ? 'res-old' : 'res-new', fileBuffer: Buffer.from('x') });
+    mockUploadJsonToConnector.mockReset().mockResolvedValue({ resource_id: path === 'add' ? 'res-old' : 'res-new' });
+    mockMintLinks.mockReset().mockResolvedValue([{ qurl_id: 'q_expiry', qurl_link: 'https://q.test/expiry', expires_at: returnedExpiry }]);
+    mockSendDM.mockReset().mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockReset().mockResolvedValue(undefined);
+    mockDb.getSendConfig.mockReset();
+    try {
+      if (path === 'add') {
+        mockDb.getSendConfig.mockResolvedValueOnce({
+          resource_type: kind, expires_in: requested, connector_resource_id: 'res-old',
+          attachment_url: kind === 'file' ? DEFAULT_ATTACHMENT.url : null,
+          attachment_name: kind === 'file' ? 'x.png' : null, attachment_content_type: kind === 'file' ? 'image/png' : null,
+          actual_url: kind === 'maps' ? 'https://maps.example.com/x' : null,
+        });
+        await handleAddRecipients('send-expiry', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]), makeInteraction(), 'apikey');
+      } else {
+        await executeSendPipeline(makeInteraction(), makePipelineParams({
+          resourceType: kind, attachment: kind === 'file' ? DEFAULT_ATTACHMENT : null,
+          locationUrl: kind === 'maps' ? 'https://maps.example.com/x' : null,
+          locationName: kind === 'maps' ? 'Place' : null,
+        }));
+      }
+      expect(mockDb.recordQURLSendBatch.mock.calls[0][0][0].expiresIn).toBe(requested);
+      expect(mockDb.recordQURLSendBatch.mock.calls[0][0][0].resourceId).toBe(path === 'add' ? 'res-old' : 'res-new');
+      expect(mockDb.recordQURLSendBatch.mock.calls[0][0][0].expiresAt).toBe(1800000900);
+      expect(mockSendDM.mock.calls[0][1].embeds[0].setDescription).toHaveBeenCalledWith(expect.stringContaining('<t:1800000900:R>'));
+    } finally { clock.mockRestore(); clearCooldown('sender-1'); }
+  });
+});
+
+
+describe('authoritative mint expiry — rejection and delivery deadline', () => {
+  it.each([undefined, null, 0, '', 'not-a-time', '2000-01-01T00:00:00Z'])('compensates a mint with unusable expiry %s', async expires_at => {
+    mockMintLinks.mockReset().mockResolvedValueOnce([{ qurl_id: 'q_expiry_bad', qurl_link: 'https://q.test/bad', expires_at }]);
+    mockRevokeMintedLinks.mockReset().mockResolvedValue(undefined);
+    await expect(mintLinksInBatches({ initialResourceId: 'res-expiry', expiresAt: new Date(Date.now() + 86400000).toISOString(), recipientCount: 1, apiKey: 'apikey' })).rejects.toThrow(/valid future expiry/);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-expiry', ['q_expiry_bad'], 'apikey');
+  });
+
+  it.each(['initial', 'add'])('does not deliver a sibling that expires while fanout is running (%s)', async path => {
+    const now = 1800000000000;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    const expires_at = new Date(now + 1000).toISOString();
+    mockDownloadAndUpload.mockReset().mockResolvedValue({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockReset().mockResolvedValue([
+      { qurl_id: 'q_first', qurl_link: 'https://q.test/first', expires_at },
+      { qurl_id: 'q_second', qurl_link: 'https://q.test/second', expires_at },
+    ]);
+    mockDb.recordQURLSendBatch.mockReset().mockResolvedValue(undefined);
+    mockDb.getSendConfig.mockReset();
+    mockSendDM.mockReset().mockImplementation(async () => {
+      clock.mockReturnValue(now + 2000);
+      return { ok: true, channelId: 'dm-c', messageId: 'dm-m' };
+    });
+    const recipients = [{ id: 'u1', username: 'Alice', bot: false }, { id: 'u2', username: 'Bob', bot: false }];
+    try {
+      if (path === 'add') {
+        mockDb.getSendConfig.mockResolvedValueOnce({ expires_in: '24h', connector_resource_id: 'res-old', attachment_url: DEFAULT_ATTACHMENT.url, attachment_name: 'x.png', attachment_content_type: 'image/png' });
+        const result = await handleAddRecipients('send-expiry', makeUsersCollection(recipients), makeInteraction(), 'apikey');
+        expect(result).toMatchObject({ delivered: 1, failed: 1 });
+      } else {
+        await executeSendPipeline(makeInteraction(), makePipelineParams({ recipients }));
+      }
+      expect(mockSendDM).toHaveBeenCalledTimes(1);
+      expect(mockSendDM.mock.calls[0][0]).toBe('u1');
+      expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith(expect.any(String), 'u2', 'failed');
+    } finally { clock.mockRestore(); clearCooldown('sender-1'); }
+  });
+});
 
 describe('executeSendPipeline — direct contract coverage (#278)', () => {
   beforeEach(() => {
     mockDownloadAndUpload.mockReset().mockResolvedValue({ resource_id: 'res-direct', fileBuffer: new ArrayBuffer(8) });
     mockUploadJsonToConnector.mockReset().mockResolvedValue({ resource_id: 'res-direct' });
-    mockMintLinks.mockReset().mockResolvedValue([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/direct', resource_id: 'res-direct' }]);
+    mockMintLinks.mockReset().mockResolvedValue([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/direct', resource_id: 'res-direct', expires_at: new Date(Date.now() + 1800000).toISOString() }]);
     mockSendDM.mockReset().mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockReset().mockResolvedValue(undefined);
     mockDb.saveSendConfig.mockReset().mockResolvedValue(undefined);
@@ -3993,16 +4735,13 @@ describe('executeSendPipeline — direct contract coverage (#278)', () => {
     expect(_test.getActiveFileSends()).toBe(5);
   });
 
-  test.each([
-    ['file', 're-upload the file'],
-    ['location', 'edit the location query and resend'],
-  ])('quota failure uses the recovery action for %s', async (resourceType, action) => {
+  test.each(['file', 'location'])('quota failure gives account-usage guidance for %s', async (resourceType) => {
     mockMintLinks.mockRejectedValueOnce(Object.assign(new Error('quota reached'), { apiCode: 'quota_exceeded' }));
     const interaction = makeInteraction();
     await executeSendPipeline(interaction, makePipelineParams(resourceType === 'file' ? {} : {
       resourceType, attachment: null, locationUrl: 'https://www.google.com/maps?q=Paris', locationName: 'Paris',
     }));
-    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining(action) }));
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Check your qURL account usage') }));
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(_test.getActiveFileSends()).toBe(0);
@@ -4017,4 +4756,222 @@ describe('executeSendPipeline — direct contract coverage (#278)', () => {
     expect(logger.error).toHaveBeenCalledWith('saveSendConfig failed; Add Recipients will be unavailable for this send', expect.objectContaining({ error: 'config write failed' }));
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Sent to 1 user') }));
   });
+});
+
+describe('monitorLinkStatus — aggregate reads with source reconciliation', () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { for (const monitor of Array.from(activeMonitors)) monitor.stop(); jest.useRealTimers(); });
+
+  const firstView = () => new Map([[TWO_LINK_SET[0].qurlId, { accessCount: 1 }]]);
+  const bothViews = () => new Map(TWO_LINK_SET.map(link => [link.qurlId, { accessCount: 1 }]));
+  const largeLinks = [...TWO_LINK_SET, ...Array.from({ length: 99 }, (_, i) => ({ ...TWO_LINK_SET[0], qurlId: `extra_${i}`, recipientId: `extra_r${i}` }))];
+  function start(links = largeLinks, interaction = makeInteraction()) {
+    return { interaction, monitor: monitorLinkStatus('aggregate-send', interaction, links,
+      links.map((link, i) => ({ id: link.recipientId, username: `User${i}` })),
+      '1h', 'Sent', { components: [] }, links.length) };
+  }
+
+  it('max-fanout healthy ticks read the aggregate instead of all 20,000 source IDs', async () => {
+    const links = Array.from({ length: 20000 }, (_, i) => ({ ...TWO_LINK_SET[0], qurlId: `q_${i}`, recipientId: `r${i}` }));
+    mockDb.getQurlViews.mockResolvedValue(new Map([[links[0].qurlId, { accessCount: 1 }]]));
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(2);
+    const { monitor } = start(links);
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
+    expect(mockDb.getQurlViews.mock.calls[0][0]).toHaveLength(20000);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
+    expect(mockDb.getSendViewedCount).toHaveBeenCalledWith('aggregate-send', 20000);
+    expect(monitor.getFullMsg()).toContain('2 viewed / 19998 pending');
+  });
+
+  it('a source-only view left by a crash is recovered by the periodic source read', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(1);
+    const { monitor } = start();
+    await jest.advanceTimersByTimeAsync(3000);
+    mockDb.getQurlViews.mockResolvedValue(bothViews()); // Source committed; shard ADD never ran.
+    await jest.advanceTimersByTimeAsync(25000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
+    expect(monitor.getFullMsg()).toContain('1 viewed / 100 pending');
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(monitor.getFullMsg()).toContain('2 viewed / 99 pending');
+    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('aggregate-send', 2);
+  });
+
+  it.each(['missing', 'partial', 'below floor', 'above expected', 'invalid'])(
+    'immediately reads source for an %s aggregate', async scenario => {
+      mockDb.getQurlViews.mockResolvedValue(firstView());
+      mockDb.getSendRenderedCount.mockResolvedValue(1);
+      const { monitor } = start();
+      await jest.advanceTimersByTimeAsync(3000);
+      mockDb.getQurlViews.mockResolvedValue(bothViews());
+      if (scenario === 'missing' || scenario === 'partial') mockDb.getSendViewedCount.mockRejectedValue(new Error(scenario));
+      else mockDb.getSendViewedCount.mockResolvedValue(scenario === 'below floor' ? 0 : scenario === 'above expected' ? 102 : NaN);
+      await jest.advanceTimersByTimeAsync(5000);
+      expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+      expect(monitor.getFullMsg()).toContain('2 viewed / 99 pending');
+    },
+  );
+
+  it('legacy rows without a confirmed floor keep the source backstop', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(null);
+    mockDb.getSendViewedCount.mockResolvedValue(1);
+    start();
+    await jest.advanceTimersByTimeAsync(8000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(mockDb.getSendViewedCount).not.toHaveBeenCalled();
+  });
+
+  it('a failed final aggregate edit stays live and retries without advancing the floor', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(101);
+    const { monitor, interaction } = start();
+    await jest.advanceTimersByTimeAsync(3000);
+    mockDb.getQurlViews.mockResolvedValue(new Map(largeLinks.map(link => [link.qurlId, { accessCount: 1 }])));
+    interaction.editReply.mockRejectedValueOnce(new Error('temporary edit failure'));
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalledWith('aggregate-send', 101);
+    expect(mockDb.getQurlViews).toHaveBeenLastCalledWith(expect.any(Array), { consistentRead: true });
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('aggregate-send', 101);
+    expect(monitor.getFullMsg()).toContain('101 viewed / 0 pending');
+  });
+
+  it('adding recipients invalidates the previous source snapshot', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(1);
+    const { monitor } = start();
+    await jest.advanceTimersByTimeAsync(3000);
+    monitor.addRecipients(1, [{ ...TWO_LINK_SET[0], qurlId: 'q_new', recipientId: 'r3' }]);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(mockDb.getQurlViews.mock.calls.at(-1)[0]).toHaveLength(102);
+  });
+
+  it('a clock rollback forces source reconciliation', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(1);
+    start();
+    await jest.advanceTimersByTimeAsync(3000);
+    jest.setSystemTime(Date.now() - 60000);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+  });
+  it('a fast-path floor advance does not send a duplicate Discord edit', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(2);
+    const { interaction, monitor } = start();
+    await jest.advanceTimersByTimeAsync(3000);
+    mockDb.getSendRenderedCount.mockResolvedValue(2);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(interaction.editReply).not.toHaveBeenCalled();
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalled();
+    expect(monitor.getFullMsg()).toContain('2 viewed / 99 pending');
+  });
+
+  it('small unchanged sends make one source read per tick without extra floor or aggregate reads', async () => {
+    mockDb.getQurlViews.mockResolvedValue(new Map());
+    start(TWO_LINK_SET);
+    await jest.advanceTimersByTimeAsync(8000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(mockDb.getSendRenderedCount).not.toHaveBeenCalled();
+    expect(mockDb.getSendViewedCount).not.toHaveBeenCalled();
+  });
+
+  it('a known aggregate gap disables repeated aggregate reads', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(0);
+    start();
+    await jest.advanceTimersByTimeAsync(18000);
+    expect(mockDb.getSendViewedCount).toHaveBeenCalledTimes(1);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(4);
+  });
+
+  it('an aggregate completion cannot settle before all source facts exist', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(1);
+    mockDb.getSendViewedCount.mockResolvedValue(101);
+    const { monitor } = start();
+    await jest.advanceTimersByTimeAsync(8000);
+    expect(mockDb.getQurlViews).toHaveBeenLastCalledWith(expect.any(Array), { consistentRead: true });
+    expect(monitor.getFullMsg()).toContain('1 viewed / 100 pending');
+    mockDb.getQurlViews.mockResolvedValue(bothViews());
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(monitor.getFullMsg()).toContain('2 viewed / 99 pending');
+  });
+
+  it('an inflated complete floor gets one strong audit, then uses the normal source read cost', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(101);
+    const { monitor, interaction } = start();
+    await jest.advanceTimersByTimeAsync(13000);
+    expect(mockDb.getQurlViews.mock.calls.map(call => call[1].consistentRead)).toEqual([true, false, false]);
+    expect(mockDb.getSendViewedCount).not.toHaveBeenCalled();
+    expect(interaction.editReply).not.toHaveBeenCalled();
+    // A confirmed floor is preserved; reconciliation does not erase an old overcount.
+    expect(monitor.getFullMsg()).toContain('101 viewed / 0 pending');
+  });
+
+  it('an unavailable large-send floor falls back to source without reading the aggregate', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockRejectedValue(new Error('floor unavailable'));
+    start();
+    await jest.advanceTimersByTimeAsync(8000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(mockDb.getSendViewedCount).not.toHaveBeenCalled();
+  });
+
+  it('an incomplete source read never establishes freshness and retries on the next tick', async () => {
+    mockDb.getQurlViews.mockRejectedValueOnce(new Error('qurl view read incomplete after retries')).mockResolvedValue(firstView());
+    mockDb.getSendRenderedCount.mockResolvedValue(0);
+    mockDb.getSendViewedCount.mockResolvedValue(1);
+    const { interaction } = start();
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(interaction.editReply).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(2);
+    expect(mockDb.getSendViewedCount).not.toHaveBeenCalled();
+  });
+
+  it('recipient additions during a final edit repaint the new total and keep polling', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    let finishEdit;
+    const interaction = makeInteraction();
+    interaction.editReply.mockImplementationOnce(() => new Promise(resolve => { finishEdit = resolve; }));
+    const { monitor } = start(ONE_LINK_SET, interaction);
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(typeof finishEdit).toBe('function');
+    monitor.addRecipients(1, [TWO_LINK_SET[1]]);
+    finishEdit({});
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(interaction.editReply.mock.calls.at(-1)[0].content).toContain('1 viewed / 1 pending');
+    mockDb.getQurlViews.mockResolvedValue(bothViews());
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(monitor.getFullMsg()).toContain('2 viewed / 0 pending');
+  });
+
+  it('an edit confirmed after stop cannot write a new stored floor', async () => {
+    mockDb.getQurlViews.mockResolvedValue(firstView());
+    let finishEdit;
+    const interaction = makeInteraction();
+    interaction.editReply.mockImplementationOnce(() => new Promise(resolve => { finishEdit = resolve; }));
+    const { monitor } = start(ONE_LINK_SET, interaction);
+    await jest.advanceTimersByTimeAsync(3000);
+    monitor.stop();
+    finishEdit({});
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledTimes(1);
+  });
+
 });

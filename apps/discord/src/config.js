@@ -194,6 +194,13 @@ if (rawGuildId) {
   }
 }
 
+// TODO(upstream-contract): The infra runtime forwards the old guild during
+// a scope change; track this bounded cleanup contract in public issues #84/#94.
+const previousCommandScope = process.env.PREVIOUS_COMMAND_SCOPE?.trim() || null;
+if (previousCommandScope && previousCommandScope !== 'global' && !isDiscordSnowflake(previousCommandScope)) {
+  throw new Error('PREVIOUS_COMMAND_SCOPE must be global or a Discord snowflake when set');
+}
+
 // Multi-tenant mode: derived once here, consumed everywhere else. When
 // true, the bot treats itself as a public multi-server app (commands
 // register globally). When false, the bot runs in single-guild mode
@@ -206,7 +213,7 @@ if (rawGuildId) {
 // every callsite.
 //
 // Both modes run the same command surface (/qurl) and the same routes.
-// Per-guild qURL configuration flows through /qurl setup in either mode;
+// Per-guild qURL configuration flows through /qurl-admin setup in either mode;
 // the only behavioral difference is command registration scope.
 const isMultiTenant = !normalizedGuildId;
 
@@ -253,7 +260,7 @@ function parseAuth0EmailConnection(raw) {
     // Keep the rest of the bot available while failing only OAuth setup
     // closed. A malformed optional setting must not weaken account selection,
     // but it also must not take down /qurl send, webhooks, or the gateway.
-    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); blocking every /qurl setup entry path (including legacy modal paste) while qURL OAuth is configured, until corrected; other bot operations remain available.`);
+    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); blocking every /qurl-admin setup entry path (including legacy modal paste) while qURL OAuth is configured, until corrected; other bot operations remain available.`);
     return { value: '', state: 'rejected' };
   }
   return { value, state: 'pinned' };
@@ -275,6 +282,11 @@ const isQurlOAuthConfigured = Boolean(
   && process.env.AUTH0_CLIENT_SECRET
   && process.env.AUTH0_AUDIENCE,
 );
+// Optional endpoint-owned contract, matching Slack's startup drift guard.
+const expectedAuth0Audience = (process.env.AUTH0_EXPECTED_AUDIENCE || '').trim();
+if (isQurlOAuthConfigured && expectedAuth0Audience && process.env.AUTH0_AUDIENCE !== expectedAuth0Audience) {
+  throw new Error('AUTH0_AUDIENCE must exactly match AUTH0_EXPECTED_AUDIENCE for this qURL endpoint');
+}
 // A rejected pin blocks setup only while OAuth is configured, where it could
 // otherwise send an unpinned authorize redirect. Without AUTH0_* no redirect
 // is ever built, so the legacy paste path stays available.
@@ -426,6 +438,7 @@ module.exports = {
     ? null
     : normalizedDiscordClientSecret,
   GUILD_ID: normalizedGuildId,
+  PREVIOUS_COMMAND_SCOPE: previousCommandScope,
   isMultiTenant,
   isQurlOAuthConfigured,
   isQurlSetupAvailable,
@@ -454,9 +467,11 @@ module.exports = {
   // subscription. Without this flag, a missing shared secret makes guild
   // webhook linking fail closed instead of silently taking the rotation path.
   QURL_WEBHOOK_PURE_BYOK: process.env.QURL_WEBHOOK_PURE_BYOK === 'true',
+  // Bound setup response latency without canceling background subscription work.
+  QURL_WEBHOOK_SETUP_WAIT_MS: intEnv('QURL_WEBHOOK_SETUP_WAIT_MS', 3000, { strictInteger: true, min: 1, max: 5000 }),
 
-  // qURL OAuth (Auth0) — for /qurl setup admin consent flow.
-  // When unset, /qurl setup falls back to the legacy modal-paste path so the
+  // qURL OAuth (Auth0) — for /qurl-admin setup admin consent flow.
+  // When unset, /qurl-admin setup falls back to the legacy modal-paste path so the
   // bot stays usable until Justin registers the Auth0 application + drops
   // these into prod SSM. See project_qurl_bot_onboarding_model.md memory for
   // the OAuth-app shape (Regular Web Application, callback URL = BASE_URL +
@@ -517,7 +532,7 @@ module.exports = {
   // QURL_ENDPOINT can't be missing — the
   // ternary below always yields a value. QURL_API_KEY is only the
   // global fallback for /qurl send + /qurl map; every deployment shape
-  // configures a per-guild key through /qurl setup, so it is
+  // configures a per-guild key through /qurl-admin setup, so it is
   // absent from prodRequired(). The separate production webhook gate requires
   // QURL_API_KEY when QURL_WEBHOOK_SECRET is set, for default-owner discovery.
   QURL_API_KEY: process.env.QURL_API_KEY,
@@ -592,15 +607,11 @@ module.exports = {
   // to the desired bound in their env; the voice-everyone path will then
   // partial-resolve up to that bound rather than refusing.
   // Operational implications a max-size send carries:
-  //   - up to ceil(20000/TOKENS_PER_RESOURCE) = 2000 re-uploads to
+  //   - up to ceil(20000/MINT_BATCH_SIZE) = 2000 mint requests to
   //     qurl-service per send (`mintLinksInBatches`).
-  //   - DM delivery is bounded by Discord's per-bot DM rate limit
-  //     (~5/sec); a 20k send takes >1 hour to finish DM fan-out, and
-  //     `monitorLinkStatus`'s interval-based progress tracking must
-  //     survive that duration. A regression test pinning that
-  //     lifetime is tracked in issue #331 — open against any change
-  //     that touches `monitorLinkStatus`'s interval/cleanup logic
-  //     until it lands.
+  //   - Large DM fan-outs can outlast the ephemeral status edit window.
+  //     The sender's view monitor stays capped at 14 minutes (#465),
+  //     independently of the recipient cap; stored view tracking continues.
   // Per-guild operators can dial this down via the env override if
   // their qurl-service plan or DM-throughput posture demands it.
   QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 20000, { minPositive: true }),
@@ -642,6 +653,8 @@ module.exports = {
   // emergency redeploy. See `apps/discord/docs/zero-downtime-design.md`
   // → "Rollback cliff: ENABLE_EVENT_SHIPPER".
   ENABLE_EVENT_SHIPPER: process.env.ENABLE_EVENT_SHIPPER === 'true',
+  // Enable only after the short-lived probe table and alarm exist (#1383).
+  ENABLE_DISPATCH_PROBE: process.env.ENABLE_DISPATCH_PROBE === 'true',
 
   // Gateway RESUME (zero-downtime design, Pillar 2). When true and
   // PROCESS_ROLE=gateway, the gateway tier replaces the discord.js

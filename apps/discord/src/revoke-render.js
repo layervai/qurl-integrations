@@ -32,7 +32,7 @@ function buildRevokeHeader(success, total, { finalizationFailed = false } = {}) 
   }
   const failed = total - success;
   const failure = failed > 0
-    ? ` Could not confirm revocation for ${failed} user${failed !== 1 ? 's' : ''}. Retry with \`/qurl revoke\`; if this continues, run \`/qurl setup\` and reconnect.`
+    ? ` Could not confirm revocation for ${failed} user${failed !== 1 ? 's' : ''}. Retry with \`/qurl revoke\`; if this continues, run \`/qurl-admin setup\` and reconnect.`
     : '';
   const note = success > 0
     ? ' Revocation blocks new link access; sessions already opened may remain active.'

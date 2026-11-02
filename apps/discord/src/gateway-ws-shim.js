@@ -243,6 +243,9 @@ function createGatewayWsShim({
   const pendingGuildRemoves = new Set();
   let wsRecovering = false;
   let appId = null;
+  let probeUserId = null;
+  let probeGuildId = null;
+  const probeUnavailableGuildIds = new Set();
   let identifyAttempts = 0;
   let identifyBudgetFatalSignaled = false;
   let missingAbortSignalLogged = false;
@@ -593,6 +596,12 @@ function createGatewayWsShim({
           // RegisterCommands needs this to address the global-
           // commands or guild-commands endpoint.
           appId = data?.d?.application?.id ?? null;
+          probeUserId = data?.d?.user?.id ?? null;
+          probeGuildId = null;
+          probeUnavailableGuildIds.clear();
+          for (const guild of Array.isArray(data?.d?.guilds) ? data.d.guilds : []) {
+            if (guild?.unavailable === true) probeUnavailableGuildIds.add(guild.id);
+          }
           isReady = true;
           // wsConnected is mirrored on the shard-level Ready/Resumed
           // listeners installed below — not here.
@@ -635,6 +644,8 @@ function createGatewayWsShim({
           logger.info('gateway-ws-shim: RESUMED received', { shardId });
         } else if (eventType === 'GUILD_CREATE' && typeof data?.d?.id === 'string') {
           const guildId = data.d.id;
+          if (data.d.unavailable === true) probeUnavailableGuildIds.add(guildId);
+          else probeUnavailableGuildIds.delete(guildId);
           if (activeGuildIds) {
             activeGuildIds.add(guildId);
           } else {
@@ -655,6 +666,11 @@ function createGatewayWsShim({
             pendingGuildAdds.delete(guildId);
             pendingGuildRemoves.add(guildId);
           }
+        }
+        if (eventType === 'GUILD_DELETE' && typeof data?.d?.id === 'string') {
+          if (probeGuildId === data.d.id) probeGuildId = null;
+          if (data.d.unavailable === true) probeUnavailableGuildIds.add(data.d.id);
+          else probeUnavailableGuildIds.delete(data.d.id);
         }
         // Fan-out. Each handler runs synchronously; any thrown error
         // is caught and logged so one bad handler doesn't break the
@@ -710,6 +726,7 @@ function createGatewayWsShim({
       // minor adding it (some Discord 4xxx close frames carry one);
       // today it's always undefined, logged as null.
       manager.on(WebSocketShardEvents.Closed, ({ code, reason, shardId }) => {
+        probeGuildId = null;
         if (stopped) {
           logBestEffort('info', 'gateway-ws-shim: shard closed after stop', {
             shardId, code, reason: reason ?? null,
@@ -853,6 +870,33 @@ function createGatewayWsShim({
 
     isReady() {
       return isReady;
+    },
+
+    async getDispatchProbeTarget() {
+      if (stopped || !isReady || !wsConnected) return null;
+      // RESUMED has no READY user/guild snapshot; fetch only the bot and one guild.
+      if (!probeUserId) {
+        const user = await restInstance.get('/users/@me', { signal: AbortSignal.timeout(3000) });
+        probeUserId = user.id;
+      }
+      let guildId = activeGuildIds
+        ? [...activeGuildIds].find(id => !probeUnavailableGuildIds.has(id)) : probeGuildId;
+      if (!activeGuildIds && !guildId) {
+        const guilds = await restInstance.get('/users/@me/guilds', {
+          query: new URLSearchParams({ limit: '1' }), signal: AbortSignal.timeout(3000),
+        });
+        const candidate = guilds[0]?.id;
+        if (candidate && !pendingGuildRemoves.has(candidate) && !probeUnavailableGuildIds.has(candidate)) {
+          probeGuildId = candidate;
+          guildId = candidate;
+        }
+      }
+      return guildId ? { guildId, userId: probeUserId } : null;
+    },
+
+    requestDispatchProbe(_target, packet) {
+      // This shim's WebSocketManager owns one shard (shardCount: 1).
+      return manager.send(0, packet);
     },
 
     onDispatch(handler) {

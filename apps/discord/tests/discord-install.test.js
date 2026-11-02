@@ -265,7 +265,7 @@ describe('Discord install callback', () => {
       for (const res of [missing, mismatch, empty, duplicateState]) {
         expect(res.status).toBe(400);
         expect(res.text).toContain('Invalid install link');
-        expect(res.text.indexOf('/qurl setup')).toBeLessThan(
+        expect(res.text.indexOf('/qurl-admin setup')).toBeLessThan(
           res.text.indexOf('install session is invalid or expired'),
         );
         expect(clearedCookieHeader(
@@ -357,7 +357,7 @@ describe('Discord install callback', () => {
         expect(res.status).toBe(503);
         expect(res.text).toMatch(/not configured/i);
         expect(res.text).toContain('may already be in your server');
-        expect(res.text).toContain('/qurl setup');
+        expect(res.text).toContain('/qurl-admin setup');
         expect(res.text).not.toContain('KEY_ENCRYPTION_KEY');
         expect(clearedCookieHeader(
           res.headers['set-cookie'],
@@ -732,8 +732,12 @@ describe('Discord install callback', () => {
       expect(installRes.status).toBe(302);
       expect(setupRes.status).toBe(302);
       const stableParams = (location) => [...new URL(location).searchParams.entries()]
-        .filter(([key]) => !['state', 'code_challenge'].includes(key))
+        .filter(([key]) => !['state', 'nonce', 'code_challenge'].includes(key))
         .sort(([left], [right]) => left.localeCompare(right));
+      for (const location of [installRes.headers.location, setupRes.headers.location]) {
+        const params = new URL(location).searchParams;
+        expect(params.get('nonce')).toBe(verifyQurlOAuthState(params.get('state')).payload.nonce);
+      }
       expect(stableParams(installRes.headers.location))
         .toEqual(stableParams(setupRes.headers.location));
     });

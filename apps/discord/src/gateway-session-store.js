@@ -18,21 +18,18 @@
 //    changes made by an earlier `updateSessionInfo(null)`. Mirror
 //    is hydrated once at boot; subsequent reads are pure-local.
 //
-// 2. Null-clear respected. When @discordjs/ws calls
-//    `updateSessionInfo(shardId, null)` (Discord rejected the
-//    RESUME), the mirror MUST be set to null AND the DDB row MUST
-//    be deleted. Returning the stale session from the next
-//    `retrieveSessionInfo` produces an infinite RESUME-reject
-//    loop. The DDB delete is load-bearing across processes too:
-//    a crash between IDENTIFY and the next READY would otherwise
-//    leave the dead row visible to the next boot's hydrate().
+// 2. Null-clear respected locally. A rejected RESUME clears the mirror
+//    immediately, so the next retrieve cannot repeat that rejected session.
+//    The cross-process delete is best-effort: failure or write backpressure
+//    can leave stale resume data for Discord to reject on the next boot.
+//    Final flush drains admitted writes; a null mirror does not retry deletes.
 //
-// 3. Write throttling. `updateSessionInfo` fires on every gateway
-//    dispatch (high rate). We write immediately on session_id
-//    change (READY) or when the prior write is older than
-//    WRITE_THROTTLE_MS; other updates defer to a single scheduled
-//    flush. Mirror always reflects the latest dispatch; DDB lags
-//    by at most WRITE_THROTTLE_MS, well inside the resume window.
+// 3. Write throttling. READY or an expired write budget starts a checkpoint;
+//    other updates use one scheduled flush. Mirror always reflects the latest
+//    dispatch. With a healthy backend DDB follows at WRITE_THROTTLE_MS;
+//    failures or the in-flight cap can leave it stale until a later update
+//    or final flush. The cursor deliberately follows attempted writes to
+//    avoid a write storm during an outage.
 //
 // 4. Final flush on SIGTERM. `flushFinal()` cancels any pending
 //    timer and writes the mirror's current state synchronously
@@ -46,6 +43,8 @@ const { PutCommand, GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb
 // writes less often than 1/s anyway. The cap protects against the
 // busy case (interaction storm during a feature launch).
 const DEFAULT_WRITE_THROTTLE_MS = 1000;
+const MAX_IN_FLIGHT_WRITES = 100;
+const BACKPRESSURE_LOG_INTERVAL_MS = 60_000;
 
 function parseShardKey(value) {
   const match = /^(0|[1-9]\d*):([1-9]\d*)$/.exec(value);
@@ -107,6 +106,8 @@ function createGatewaySessionStore({
   // self-removes on settle; flushFinal awaits Promise.allSettled
   // across the live set so SIGTERM never exits mid-write.
   const inFlightWrites = new Set();
+  let lastBackpressureWarningAt = null;
+  let skippedWrites = 0;
 
   async function persistRow(info) {
     // Wall-clock epoch ms for `updated_at`. Matches the design
@@ -159,7 +160,8 @@ function createGatewaySessionStore({
   // within ~1s. Burst-retrying on every dispatch would amplify
   // a DDB outage into a hot loop without changing the eventual
   // outcome.
-  // Tracks a promise in `inFlightWrites` until it settles. Two
+  //
+  // Admit a write factory before it starts, then track it until settlement. Two
   // layers of catch by design: callers (firePersist, null-clear)
   // attach an inner .catch that LOGS the rejection — that's the
   // only place the failure surfaces to operators. The outer .catch
@@ -167,9 +169,29 @@ function createGatewaySessionStore({
   // never carries a rejected state, so a caller who forgot to
   // pre-catch can't leak an unhandled rejection. Don't drop the
   // outer catch and lean on the inner one: a future call site that
-  // passes a raw persistRow/deleteRow promise without wrapping
+  // passes a raw persistRow/deleteRow factory without wrapping
   // would silently break.
-  function fireWrite(promise) {
+  function fireWrite(write) {
+    if (inFlightWrites.size >= MAX_IN_FLIGHT_WRITES) {
+      // shortcut: Full queues can force IDENTIFY; coalesce the latest state
+      // if skipped checkpoints recur during sustained backend stalls.
+      skippedWrites++;
+      const now = clock();
+      if (lastBackpressureWarningAt === null || now - lastBackpressureWarningAt >= BACKPRESSURE_LOG_INTERVAL_MS || now < lastBackpressureWarningAt) {
+        logger.warn('gateway-session-store: write backpressure', {
+          in_flight_writes: inFlightWrites.size, skipped_writes: skippedWrites,
+        });
+        lastBackpressureWarningAt = now;
+        skippedWrites = 0;
+      }
+      return;
+    }
+    let promise;
+    try {
+      promise = write();
+    } catch (error) {
+      promise = Promise.reject(error);
+    }
     const wrapped = Promise.resolve(promise).catch(() => { /* shape guarantee */ });
     const p = wrapped.finally(() => inFlightWrites.delete(p));
     inFlightWrites.add(p);
@@ -177,7 +199,7 @@ function createGatewaySessionStore({
   function firePersist(info) {
     lastWrittenSessionId = info.sessionId;
     lastWriteAt = clock();
-    fireWrite(persistRow(info).catch((err) => {
+    fireWrite(() => persistRow(info).catch((err) => {
       logger.warn('gateway-session-store: write failed', { error: err.message });
     }));
   }
@@ -238,11 +260,10 @@ function createGatewaySessionStore({
         mirror = null;
         lastWrittenSessionId = null;
         cancelPendingFlush();
-        // Fire-and-forget delete. The next boot's hydrate() must
-        // not observe the dead session row, hence the cross-
-        // process clear — but waiting on DDB here would stall the
-        // WS dispatch loop.
-        fireWrite(deleteRow().catch((err) => {
+        // Best-effort delete. A backend failure or full write queue can leave
+        // stale resume data; Discord validates that session on the next boot.
+        // The local mirror clears without waiting on DDB.
+        fireWrite(() => deleteRow().catch((err) => {
           logger.warn('gateway-session-store: null-clear delete failed', { error: err.message });
         }));
         lastWriteAt = clock();
@@ -401,6 +422,8 @@ function createGatewaySessionStore({
       // Inner .catch handlers in firePersist/null-clear already
       // logged each error.
       await Promise.allSettled([...inFlightWrites]);
+      // Null also means a cold replica with no snapshot, not authority to delete
+      // the shared shard row. A retry needs explicit clear/ownership tracking.
       if (!mirror) return;
       try {
         await persistRow(mirror);
@@ -434,6 +457,9 @@ function createGatewaySessionStore({
     _getLastWriteAtForTest() {
       return lastWriteAt;
     },
+    _getInFlightCountForTest() {
+      return inFlightWrites.size;
+    },
     // Synchronizes a test on every in-flight fire-and-forget DDB
     // write. Production callers never await this (the WS dispatch
     // loop must remain non-blocking); flushFinal handles the
@@ -447,4 +473,5 @@ function createGatewaySessionStore({
 module.exports = {
   createGatewaySessionStore,
   DEFAULT_WRITE_THROTTLE_MS,
+  MAX_IN_FLIGHT_WRITES,
 };

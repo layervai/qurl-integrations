@@ -1,0 +1,113 @@
+[
+  {
+    "name": "qurl-sends",
+    "keySchema": [
+      {
+        "AttributeName": "send_id",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "recipient_discord_id",
+        "KeyType": "RANGE"
+      }
+    ],
+    "attributes": [
+      {
+        "AttributeName": "send_id",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "recipient_discord_id",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "sender_discord_id",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "created_at",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "qurl_id",
+        "AttributeType": "S"
+      }
+    ],
+    "gsis": [
+      {
+        "IndexName": "sender_discord_id-created_at-index",
+        "KeySchema": [
+          {
+            "AttributeName": "sender_discord_id",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "created_at",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "ALL"
+        }
+      },
+      {
+        "IndexName": "qurl_id-index",
+        "KeySchema": [
+          {
+            "AttributeName": "qurl_id",
+            "KeyType": "HASH"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "ALL"
+        }
+      }
+    ]
+  },
+  {
+    "name": "qurl-send-configs",
+    "keySchema": [
+      {
+        "AttributeName": "send_id",
+        "KeyType": "HASH"
+      }
+    ],
+    "attributes": [
+      {
+        "AttributeName": "send_id",
+        "AttributeType": "S"
+      }
+    ]
+  },
+  {
+    "name": "qurl-views",
+    "keySchema": [
+      {
+        "AttributeName": "qurl_id",
+        "KeyType": "HASH"
+      }
+    ],
+    "attributes": [
+      {
+        "AttributeName": "qurl_id",
+        "AttributeType": "S"
+      }
+    ],
+    "ttlAttribute": "expires_at"
+  },
+  {
+    "name": "guild-configs",
+    "keySchema": [
+      {
+        "AttributeName": "guild_id",
+        "KeyType": "HASH"
+      }
+    ],
+    "attributes": [
+      {
+        "AttributeName": "guild_id",
+        "AttributeType": "S"
+      }
+    ]
+  }
+]

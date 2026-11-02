@@ -54,7 +54,7 @@ const DISPLAY_NAME_FALLBACK = 'Someone';
 // surfaces (e.g. the per-DM guildName provenance row) pass `''`
 // to opt out — surfacing "Someone" on an all-strip hostile guild
 // name would degrade the trust signal the strip exists to defend.
-function stripControlAndBidi(s, maxCodepoints = 64, fallback = DISPLAY_NAME_FALLBACK) {
+function stripBidiAndControlsBounded(s, maxCodepoints = 64, fallback = DISPLAY_NAME_FALLBACK) {
   const cleaned = String(s ?? fallback).normalize('NFKC').replace(STRIP_RE, '');
   // Codepoint-aware slice. `String.prototype.slice` operates on UTF-16
   // code units, so a cap on a name like `'A'.repeat(63) + emoji`
@@ -105,7 +105,7 @@ function sanitizeContentLabel(s, maxCodepoints = 256) {
  * cannot be truncated mid-pair into a single backslash.
  */
 function sanitizeDisplayName(s) {
-  return escapeDiscordMarkdown(stripControlAndBidi(s)) || DISPLAY_NAME_FALLBACK;
+  return escapeDiscordMarkdown(stripBidiAndControlsBounded(s)) || DISPLAY_NAME_FALLBACK;
 }
 
 /**
@@ -124,7 +124,7 @@ function sanitizeDisplayName(s) {
  * `{ fallback: '' }` to opt out and handle the empty case themselves.
  */
 function sanitizeDisplayNamePlain(s, { fallback = DISPLAY_NAME_FALLBACK } = {}) {
-  return stripControlAndBidi(s, 64, fallback);
+  return stripBidiAndControlsBounded(s, 64, fallback);
 }
 
 /**

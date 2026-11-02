@@ -149,6 +149,21 @@ describe('POST /webhooks/qurl — qurl.expired happy path', () => {
     expect(embedJson.description).toContain(`<t:${EXPECTED_EXPIRES_AT_SECONDS}:R>`);
   });
 
+  it('uses the persisted mint expiry even when the requested duration differs', async () => {
+    const actualExpiry = EXPECTED_EXPIRES_AT_SECONDS - 3600;
+    mockFindSendsByQurlId.mockResolvedValue([{ ...READY_ROW, expires_at: actualExpiry }]);
+    const res = await signedRequest(VALID_PAYLOAD);
+    expect(res.body).toEqual({ status: 'edited' });
+    expect(mockEditDM.mock.calls[0][2].embeds[0].toJSON().description).toContain(`<t:${actualExpiry}:R>`);
+  });
+
+  it.each([null, 0, -1, 1.5, '1800000000'])('does not replace corrupt saved expiry %s with a requested duration', async expires_at => {
+    mockFindSendsByQurlId.mockResolvedValue([{ ...READY_ROW, expires_at }]);
+    const res = await signedRequest(VALID_PAYLOAD);
+    expect(res.body).toEqual({ status: 'cannot-reconstruct-expiry' });
+    expect(mockEditDM).not.toHaveBeenCalled();
+  });
+
   it('reconstructs expires_at from row.created_at + row.expires_in for the wire payload (no expires_at)', async () => {
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(200);

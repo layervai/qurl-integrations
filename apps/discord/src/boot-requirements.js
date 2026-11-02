@@ -36,7 +36,7 @@ function bootRequired() {
 
 // Additionally required when NODE_ENV=production. QURL_API_KEY is NOT
 // here: it is only the global fallback for /qurl send + /qurl map, and
-// every deployment shape relies on per-guild /qurl setup instead.
+// every deployment shape relies on per-guild /qurl-admin setup instead.
 //
 // KEY_ENCRYPTION_KEY appears here AND in missingKekRequiredKeys. The
 // two overlap on prod-with-OAuth (both fail closed there); the
@@ -79,7 +79,7 @@ function missingKekRequiredKeys(env, isQurlOAuthConfigured) {
 
 // Guild webhook linking fails closed without the shared default secret unless
 // the deployment explicitly opts into pure BYOK. Production refuses to boot on
-// that shape rather than let /qurl setup succeed while view counts stop.
+// that shape rather than let /qurl-admin setup succeed while view counts stop.
 // Takes the derived config object (not raw env): PURE_BYOK is a parsed boolean.
 // With the secret set, default-owner discovery also needs QURL_API_KEY (same
 // rule as scripts/provision-guild-subscriptions.js).
@@ -163,7 +163,7 @@ function baseUrlForError(rawBaseUrl) {
 // OAuth redirect from config.BASE_URL — the /oauth/qurl/start link
 // (commands.js) and the /oauth/qurl/callback redirect_uri
 // (routes/qurl-oauth.js). That router mounts UNCONDITIONALLY in server.js,
-// and /qurl setup can take the OAuth path whenever isQurlOAuthConfigured, so
+// and /qurl-admin setup can take the OAuth path whenever isQurlOAuthConfigured, so
 // a localhost BASE_URL would dead-end setup after any separate optional-policy
 // error is fixed — in plain single-guild and multi-tenant deploys alike (#619).
 // Both Stage-2 Discord
@@ -354,6 +354,7 @@ function unsupportedRoleHotStandbyCombo(role, hotStandbyEnabled, resumeEnabled) 
       'gateway task def, or leave ENABLE_GATEWAY_HOT_STANDBY unset on http/combined.'
     );
   }
+  // TODO(upstream-contract): bot_gateway precondition rule 2 requires resume for hot standby; see #424.
   if (!resumeEnabled) {
     return (
       'ENABLE_GATEWAY_HOT_STANDBY=true requires ENABLE_GATEWAY_RESUME=true. ' +
@@ -460,11 +461,11 @@ function invalidHotStandbyValues(cfg) {
 //   fail-loud when a separate optional connection policy blocks setup.
 //   Without the rule, a
 //   deploy with Auth0 configured and no state secret would boot and
-//   500 on the first /qurl setup.
+//   500 on the first /qurl-admin setup.
 //
 //   Shape — ANY set state secret must clear the signer's length floor,
 //   in EVERY mode, so a short value fails at deploy instead of
-//   deferred-500ing the first /qurl setup. The signer re-enforces the
+//   deferred-500ing the first /qurl-admin setup. The signer re-enforces the
 //   same floor lazily at sign/verify time; this is the loud-at-deploy
 //   copy. Deliberately fail-loud-on-any-set-value: set-but-wrong is a
 //   misconfig in its own right even where nothing would resolve it, and

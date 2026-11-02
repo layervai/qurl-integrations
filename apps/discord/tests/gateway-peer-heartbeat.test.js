@@ -23,7 +23,7 @@ function makeHeartbeat({
   const docClient = DynamoDBDocumentClient.from(rawClient);
   const ddbMock = mockClient(docClient);
   const logger = {
-    info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+    info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
   };
   const heartbeat = createPeerHeartbeat({
     ddbClient: docClient,
@@ -341,5 +341,81 @@ describe('default constants', () => {
     expect(DEFAULT_FRESHNESS_WINDOW_SECONDS).toBe(6);
     expect(DEFAULT_TTL_SECONDS).toBe(60);
     expect(DEFAULT_TTL_SECONDS).toBe(DEFAULT_FRESHNESS_WINDOW_SECONDS * 10);
+  });
+});
+
+describe('duplicate instance ID detection', () => {
+  it('detects alternating live writers atomically without a separate read', async () => {
+    const rows = new Map();
+    const first = makeHeartbeat({ clock: () => 1_700_000_000_000 });
+    const second = makeHeartbeat({ clock: () => 1_700_000_000_000 });
+    for (const replica of [first, second]) replica.ddbMock.on(PutCommand).callsFake(input => {
+      const previous = rows.get(input.Item.instance_id);
+      rows.set(input.Item.instance_id, input.Item);
+      return { Attributes: previous };
+    });
+    await first.heartbeat.writeHeartbeat();
+    await second.heartbeat.writeHeartbeat();
+    expect(first.logger.audit).not.toHaveBeenCalled();
+    expect(second.logger.audit).not.toHaveBeenCalled();
+    await first.heartbeat.writeHeartbeat();
+    expect(first.logger.audit).toHaveBeenCalledTimes(1);
+    expect(first.logger.audit).toHaveBeenCalledWith('gateway_instance_id_collision');
+    await second.heartbeat.writeHeartbeat();
+    expect(second.logger.audit).toHaveBeenCalledTimes(1);
+    for (const replica of [first, second]) {
+      expect(replica.ddbMock.calls()).toHaveLength(2);
+      for (const call of replica.ddbMock.commandCalls(PutCommand)) expect(call.args[0].input.ReturnValues).toBe('ALL_OLD');
+    }
+  });
+
+  it('allows overlapping ECS tasks with distinct instance IDs', async () => {
+    const rows = new Map();
+    const replicas = ['task-a', 'task-b'].map(instanceId => makeHeartbeat({ instanceId, clock: () => 1_700_000_000_000 }));
+    for (const replica of replicas) replica.ddbMock.on(PutCommand).callsFake(input => {
+      const previous = rows.get(input.Item.instance_id);
+      rows.set(input.Item.instance_id, input.Item);
+      return { Attributes: previous };
+    });
+    for (let tick = 0; tick < 2; tick += 1) for (const replica of replicas) await replica.heartbeat.writeHeartbeat();
+    for (const replica of replicas) expect(replica.logger.audit).not.toHaveBeenCalled();
+    expect(rows.size).toBe(2);
+  });
+
+  it('does not report an ordinary restart or repeated writes by one writer', async () => {
+    let row;
+    for (let i = 0; i < 2; i += 1) {
+      const replica = makeHeartbeat({ clock: () => 1_700_000_000_000 });
+      replica.ddbMock.on(PutCommand).callsFake(input => {
+        const previous = row; row = input.Item; return { Attributes: previous };
+      });
+      await replica.heartbeat.writeHeartbeat();
+      await replica.heartbeat.writeHeartbeat();
+      expect(replica.logger.audit).not.toHaveBeenCalled();
+    }
+  });
+
+  it('marks startup only after a successful write', async () => {
+    const replica = makeHeartbeat({ clock: () => 1_700_000_000_000 });
+    replica.ddbMock.on(PutCommand).rejectsOnce(new Error('temporary transport failure'))
+      .resolves({ Attributes: { writer_id: 'another-process', updated_at: 1_700_000_000, expires_at: 1_700_000_060 } });
+    await expect(replica.heartbeat.writeHeartbeat()).rejects.toThrow('temporary transport failure');
+    await replica.heartbeat.writeHeartbeat();
+    expect(replica.logger.audit).not.toHaveBeenCalled();
+    await replica.heartbeat.writeHeartbeat();
+    expect(replica.logger.audit).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {},
+    { writer_id: 'old', updated_at: 1_699_999_900, expires_at: 1_700_000_100 },
+    { writer_id: 'old', updated_at: 1_700_000_000, expires_at: 1_700_000_000 },
+    { writer_id: 'old', updated_at: '1700000000', expires_at: 1_700_000_100 },
+  ])('ignores legacy, stale or invalid previous metadata %j', async previous => {
+    const replica = makeHeartbeat({ clock: () => 1_700_000_000_000 });
+    replica.ddbMock.on(PutCommand).resolves({ Attributes: previous });
+    await replica.heartbeat.writeHeartbeat();
+    await replica.heartbeat.writeHeartbeat();
+    expect(replica.logger.audit).not.toHaveBeenCalled();
   });
 });
