@@ -1,0 +1,56 @@
+{
+  "source": "AWS CLI S3 GetObject signed requests to a loopback receiver; fixed synthetic test/test credentials",
+  "cli": "aws-cli/2.36.45 Python/3.14.7 Darwin/25.6.0 source/arm64",
+  "vectors": [
+    {
+      "target": "/example-bucket/a%20b.txt",
+      "headers": {
+        "host": "127.0.0.1:53501",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T223605Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=15bf8af94112ba0bf54e1500db578d3b35d258025cb6a0e7af674d80d5b7e2bd"
+      }
+    },
+    {
+      "target": "/example-bucket/a%2Bb.txt",
+      "headers": {
+        "host": "127.0.0.1:53501",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T223605Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=d686fdc1a576269f5dd025c9a482e622f6b2b90c3b1912f226628d21c82da0ac"
+      }
+    },
+    {
+      "target": "/example-bucket/a/b.txt",
+      "headers": {
+        "host": "127.0.0.1:53501",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T223605Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=4032a8064f8ad5b4931c47eba4aa3ac7a6956d466ce3b61b5f7fcd02b3270e33"
+      }
+    },
+    {
+      "target": "/example-bucket/a%252Fb.txt",
+      "headers": {
+        "host": "127.0.0.1:53501",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T223605Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=9cc64e551723a522f84f4b2725cf2bacb63333e5559bf70badaedde6962f26d8"
+      }
+    },
+    {
+      "target": "/example-bucket/dir//file.txt",
+      "headers": {
+        "host": "127.0.0.1:53501",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T223606Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=851d1d5d9da0dcaca23c070111761936ac5b79bd68585088ae24f75c228ba375"
+      }
+    }
+  ]
+}

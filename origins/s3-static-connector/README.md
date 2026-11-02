@@ -200,11 +200,35 @@ removal) before these rules — a strict superset of CloudFront for the static
 paths served here; it differs only on pathological inputs (e.g. `//a`, `/../a`)
 that the protected dashboards never emit.
 
-The CI-backed key contract is for simple static-site object paths using
-letters, numbers, dots, underscores, hyphens, and slashes. Object keys that
-need percent-encoding (spaces, non-ASCII bytes, literal `%2F`, etc.) stay in
-the staging-soak bucket before this image is reused for such keyspaces. Treat
-the SigV4 exotic-key soak as a hard reuse gate, tracked in GitHub issue #854.
+The key contract accepts ASCII letters, numbers, dots, underscores, hyphens, plus
+signs, and slashes. Spaces, literal percent signs, non-ASCII bytes and other
+characters are rejected with the same viewer 404 as a missing object, before
+any request reaches the signer. Supporting those keys needs a different
+nginx/Envoy escaping strategy; do not widen this alphabet without testing it.
+
+The local S3 fixture verifies SigV4 HMACs with synthetic credentials. Its
+canonical-request verifier is checked against AWS's published S3 signing
+example and independent AWS CLI signed requests. Requests traverse the real
+nginx and Envoy processes; tests also reject forged signatures and signed-wire
+mutations. This covers #854's canonicalization gate, not live AWS IAM, TLS,
+credential-provider or object-deployment readiness.
+
+| Viewer path | S3 key / result |
+|---|---|
+| `/a+b.txt`, `/a%2Bb.txt` | `a+b.txt`; signature verified |
+| `/a%2Fb.txt` | `a/b.txt`; encoded slash aliases a path separator |
+| `/a%252Fb.txt` | 404 before S3; a literal `%2F` key is unsupported |
+| `/a%20b.txt` | 404 before S3; spaces are unsupported |
+| `/dir//file.txt` | `dir/file.txt`; nginx merges repeated slashes |
+
+Objects whose names contain repeated slashes are not directly addressable:
+nginx normalization selects the single-slash path. Queries remain stripped
+before signing; Range and HEAD remain covered by the cryptographic fixture.
+See [the complete fixture matrix](test/sigv4_fixtures.txt). Use an image built
+from this contract before depending on exotic keys: the existing Slack-pinned
+image predates it and must be replaced after producer publication. Its existing
+exact-digest test exception excludes the new exotic-key contract, but never
+skips signature verification of the baseline static-key requests.
 
 Successful responses pass through the object's `Content-Type` and `Cache-Control`
 verbatim. These security headers are set on **every** response (200/404/405/5xx):

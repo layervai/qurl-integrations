@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """Minimal S3 stand-in for s3-static-connector behavior tests.
 
-It deliberately does NOT verify SigV4 (there is no shared secret): it asserts
-that the origin's Envoy signer attached an Authorization header and forwarded
-the expected canonical path/Host, which is what proves nginx's rewrite + query
-strip + signing-after-rewrite wiring. Cryptographic verification against real S3
-happens during the staging soak.
+It verifies the signature with fixed synthetic test credentials before serving
+any key. The verifier is checked against AWS's published signing vector.
 
 An unsigned request gets 403 like a private bucket does, whatever the key: that
 is what an empty AWS provider chain produces, and the origin's startup preflight
@@ -21,11 +18,17 @@ request line is echoed to stderr (docker logs) so the test can assert cache
 behavior by counting upstream hits.
 """
 import sys
+from sigv4 import verify_sigv4
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, unquote
 
 # key (no leading slash) -> (content_type, cache_control_or_None, body bytes)
 FIXTURES = {
+    "a b.txt": ("text/plain", None, b"space"),
+    "a+b.txt": ("text/plain", None, b"plus"),
+    "a/b.txt": ("text/plain", None, b"slash"),
+    "a%2Fb.txt": ("text/plain", None, b"literal-percent-slash"),
+    "dir/file.txt": ("text/plain", None, b"normalized-slashes"),
     "index.html": ("text/html", "public, max-age=300, must-revalidate", b"index"),
     "website/index.html": ("text/html", None, b"website"),
     "metrics.json": ("application/json", "max-age=300", b'{"ok":true}'),
@@ -91,6 +94,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self.headers.get("Authorization"):
             self.log_message("authorization absent %s", self.path)
             return self._send(403, b"<Error><Code>AccessDenied</Code></Error>",
+                              ctype="application/xml", head_only=head_only)
+        if not verify_sigv4(self.command, self.path, self.headers):
+            self.log_message("signature mismatch %s", self.path)
+            return self._send(403, b"<Error><Code>SignatureDoesNotMatch</Code></Error>",
                               ctype="application/xml", head_only=head_only)
         if key == "startup-denied/index.html":
             # Simulate IAM propagation completing after the startup HEAD.
