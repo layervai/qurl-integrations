@@ -108,3 +108,29 @@ func TestGolangciLintPinsMatchMakefile(t *testing.T) {
 		t.Fatal("missing golangci-lint pre-commit hook")
 	}
 }
+
+func TestSlackSharedLintVerifyExplicitConfig(t *testing.T) {
+	t.Parallel()
+	for _, filename := range []string{"slack.yml", "shared-test.yml"} {
+		workflow := readWorkflow(t, filename)
+		actions := 0
+		for jobID, job := range workflow.Jobs {
+			for _, step := range job.Steps {
+				if !strings.HasPrefix(step.Uses, "golangci/golangci-lint-action@") {
+					continue
+				}
+				actions++
+				if step.With["verify"] != true {
+					t.Errorf("%s job %s must verify the linter config", filename, jobID)
+				}
+				args, _ := step.With["args"].(string)
+				if !strings.Contains(" "+args+" ", " --config=.golangci.yml ") {
+					t.Errorf("%s job %s must use the explicit root linter config", filename, jobID)
+				}
+			}
+		}
+		if actions == 0 {
+			t.Errorf("%s has no linter action to verify the config", filename)
+		}
+	}
+}
