@@ -66,7 +66,7 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 				if err := store.BindWorkspace(ctx, &WorkspaceMapping{TeamID: teamID, OwnerID: testOwnerSlackID}, testOwnerSlackID); err != nil {
 					t.Fatal(err)
 				}
-				if err := store.AddAdmin(ctx, teamID, testCallerSlackID); err != nil {
+				if err := store.AddAdmin(nativeWorkspaceOwnerContext(ctx, t, store, teamID), teamID, testCallerSlackID); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -137,7 +137,7 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 				wantConflict = true
 				wantResources = []string{"r_new"}
 			case "revoked admin":
-				if err := store.RemoveAdmin(ctx, teamID, testCallerSlackID); err != nil {
+				if err := store.RemoveAdmin(nativeWorkspaceOwnerContext(ctx, t, store, teamID), teamID, testCallerSlackID); err != nil {
 					t.Fatal(err)
 				}
 				wantConflict = true
@@ -226,4 +226,17 @@ func TestPolicyAuthorizationDynamoDBLocal(t *testing.T) {
 			store.Client = client
 		})
 	}
+}
+
+func nativeWorkspaceOwnerContext(ctx context.Context, t *testing.T, store *Store, teamID string) context.Context {
+	t.Helper()
+	owner, _, err := store.ListAdmins(ctx, teamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, err := store.AuthorizePolicyWrite(ctx, teamID, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return authorization.Context(ctx)
 }

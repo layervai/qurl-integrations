@@ -9,6 +9,12 @@ binding before its first policy write, it initializes the legacy identity before
 rotating the generation. That bounded retry checks both initialized IDs, so it
 cannot follow a concurrent reinstall or ownership change.
 
+Admin membership writes also carry the first gate's snapshot. The membership
+condition and current caller/owner/generation/installation checks run in one
+workspace-row update. Revocation or reinstall during a command cannot authorize
+an old admin to change the new roster. Missing authorization has no direct-write
+fallback.
+
 Binding age is separate from edit time. Fresh binds and legacy reclaims set
 `policy_bound_at_unix_nano`. Admin changes, ownership transfer, and agent toggles
 preserve that value while updating the audit timestamps. Their first mutation

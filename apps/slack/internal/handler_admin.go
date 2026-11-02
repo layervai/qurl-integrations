@@ -249,7 +249,8 @@ func (h *Handler) requireAdminForClick(log *slog.Logger, responseURL, teamID, us
 //
 // Other store errors surface as the generic upstream-error reply.
 func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
-	if !h.requireAdminSync(w, teamID, callerUserID, AdminAdd) {
+	authorization, allowed := h.requirePolicyAdminSync(w, teamID, callerUserID, AdminAdd)
+	if !allowed {
 		return
 	}
 	target := cmd.UserID
@@ -264,7 +265,7 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 	}
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
-	if err := h.cfg.AdminStore.AddAdmin(ctx, teamID, target); err != nil {
+	if err := h.cfg.AdminStore.AddAdmin(authorization.Context(ctx), teamID, target); err != nil {
 		var se *slackdata.Error
 		if errors.As(err, &se) {
 			// Discriminate on (StatusCode, Code) — mirrors RemoveAdmin
@@ -314,7 +315,8 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 //
 // Other store errors surface as the generic upstream-error reply.
 func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
-	if !h.requireAdminSync(w, teamID, callerUserID, AdminRemove) {
+	authorization, allowed := h.requirePolicyAdminSync(w, teamID, callerUserID, AdminRemove)
+	if !allowed {
 		return
 	}
 	target := cmd.UserID
@@ -328,7 +330,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 	}
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
-	if err := h.cfg.AdminStore.RemoveAdmin(ctx, teamID, target); err != nil {
+	if err := h.cfg.AdminStore.RemoveAdmin(authorization.Context(ctx), teamID, target); err != nil {
 		var se *slackdata.Error
 		if errors.As(err, &se) {
 			switch {

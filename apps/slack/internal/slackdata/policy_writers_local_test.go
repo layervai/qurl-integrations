@@ -42,7 +42,7 @@ func TestPolicyWritersDynamoDBLocal(t *testing.T) {
 							t.Fatal(err)
 						}
 					case "admin removed":
-						if err := store.RemoveAdmin(ctx, team, testCallerSlackID); err != nil {
+						if err := store.RemoveAdmin(nativeWorkspaceOwnerContext(ctx, t, store, team), team, testCallerSlackID); err != nil {
 							t.Fatal(err)
 						}
 					case "missing authorization":

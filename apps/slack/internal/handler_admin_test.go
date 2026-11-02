@@ -62,7 +62,7 @@ func TestHandleAdminAdd_AlreadyAdmin(t *testing.T) {
 	// conditional `NOT contains(...)` fails immediately. AddAdmin's
 	// ADD-on-SS is set-union, so the caller stays admin.
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testTargetUserID); err != nil {
 		t.Fatalf("seed target as admin: %v", err)
 	}
 
@@ -90,11 +90,15 @@ func TestHandleAdminAdd_AlreadyAdmin(t *testing.T) {
 // interface just for this fence.
 func TestHandleAdminAdd_WorkspaceNotBound(t *testing.T) {
 	ts := newAdminTestServers(t)
-	// No seedAdmin — the workspace_mappings row doesn't exist.
-	// Direct-store dispatch bypasses the admin gate (which would
-	// also fail) so we can assert the 404 mapping in isolation.
+	// Capture authority, then delete the binding to exercise disappearance
+	// between authorization and the write.
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	err := store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID)
+	ts.seedAdmin(t)
+	fixturePolicyCtx := testPolicyFixtureContext(t, store, testAdminTeamID)
+	if err := store.DeleteWorkspaceMapping(context.Background(), testAdminTeamID); err != nil {
+		t.Fatal(err)
+	}
+	err := store.AddAdmin(fixturePolicyCtx, testAdminTeamID, testTargetUserID)
 	if err == nil {
 		t.Fatal("AddAdmin against missing workspace returned nil")
 	}
@@ -121,10 +125,11 @@ func TestHandleAdminAdd_WorkspaceNotBound(t *testing.T) {
 func TestAddAdmin_DisambiguationCantConfirmMembership(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t) // target NOT on admin_slack_user_ids
-	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("injected CCFE")})
 
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	err := store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID)
+	fixturePolicyCtx := testPolicyFixtureContext(t, store, testAdminTeamID)
+	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("injected CCFE")})
+	err := store.AddAdmin(fixturePolicyCtx, testAdminTeamID, testTargetUserID)
 	if err == nil {
 		t.Fatal("AddAdmin returned nil error; expected unverified surface")
 	}
@@ -152,6 +157,7 @@ func TestHandleAdminAdd_Unverified(t *testing.T) {
 	// Inject a CCFE on the workspace UpdateItem so the
 	// disambiguation read sees the row WITHOUT the target on the
 	// SS — surfaces as ErrCodeAdminAddUnverified.
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("injected CCFE")})
 
 	h := newAdminTestHandler(t, ts)
@@ -186,6 +192,7 @@ func TestHandleAdminAdd_NonAdminCaller(t *testing.T) {
 func TestHandleAdminAdd_SelfAdd(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "self-add should bail before AddAdmin")
 
 	h := newAdminTestHandler(t, ts)
@@ -228,7 +235,7 @@ func TestHandleAdminRemove_HappyPath(t *testing.T) {
 	// Add a second admin so removing them leaves the caller as the
 	// only admin (avoids tangling with the owner-check fence).
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testOtherAdminID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testOtherAdminID); err != nil {
 		t.Fatalf("seed other admin: %v", err)
 	}
 
@@ -267,6 +274,7 @@ func TestHandleAdminRemove_NotAdmin(t *testing.T) {
 func TestHandleAdminRemove_SelfRemoveRefused(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "self-remove should bail before RemoveAdmin")
 
 	h := newAdminTestHandler(t, ts)
@@ -289,6 +297,7 @@ func TestHandleAdminRemove_SelfRemoveRefused(t *testing.T) {
 func TestHandleAdminRemove_OwnerRemoveRefused(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	_ = testPolicyFixtureContext(t, newStoreFromFake(t, ts.ddb, ts.tableNames, nil), testAdminTeamID)
 	ts.failOnAdminMutation(t, "owner-remove should bail before the UpdateItem (only GetItem fires)")
 
 	h := newAdminTestHandler(t, ts)
@@ -711,7 +720,7 @@ func TestHandleAdminList_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testOtherAdminID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testOtherAdminID); err != nil {
 		t.Fatalf("seed other admin: %v", err)
 	}
 
@@ -752,10 +761,10 @@ func TestHandleAdminList_OwnerOnAdminSet(t *testing.T) {
 	// BindWorkspace shape), plus two additional admins.
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testAdminUserID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testAdminUserID); err != nil {
 		t.Fatalf("seed admin 1: %v", err)
 	}
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testOtherAdminID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testOtherAdminID); err != nil {
 		t.Fatalf("seed admin 2: %v", err)
 	}
 
@@ -899,6 +908,7 @@ func TestAddAdmin_Concurrent(t *testing.T) {
 	ts.seedAdmin(t)
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
 
+	fixturePolicyCtx := testPolicyFixtureContext(t, store, testAdminTeamID)
 	const racers = 8
 
 	results := make(chan error, racers)
@@ -906,7 +916,7 @@ func TestAddAdmin_Concurrent(t *testing.T) {
 	for range racers {
 		go func() {
 			<-start
-			results <- store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID)
+			results <- store.AddAdmin(fixturePolicyCtx, testAdminTeamID, testTargetUserID)
 		}()
 	}
 	close(start)
@@ -958,10 +968,11 @@ func TestRemoveAdmin_Concurrent(t *testing.T) {
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
 	// Seed the target onto the admin set so RemoveAdmin's
 	// `contains(admin_slack_user_ids, :uid)` finds them on first read.
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID); err != nil {
+	if err := store.AddAdmin(testPolicyFixtureContext(t, store, testAdminTeamID), testAdminTeamID, testTargetUserID); err != nil {
 		t.Fatalf("seed target as admin: %v", err)
 	}
 
+	fixturePolicyCtx := testPolicyFixtureContext(t, store, testAdminTeamID)
 	const racers = 8
 
 	results := make(chan error, racers)
@@ -969,7 +980,7 @@ func TestRemoveAdmin_Concurrent(t *testing.T) {
 	for range racers {
 		go func() {
 			<-start
-			results <- store.RemoveAdmin(context.Background(), testAdminTeamID, testTargetUserID)
+			results <- store.RemoveAdmin(fixturePolicyCtx, testAdminTeamID, testTargetUserID)
 		}()
 	}
 	close(start)

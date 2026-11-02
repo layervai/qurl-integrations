@@ -41,7 +41,7 @@ func TestPolicyReinstallWriteDynamoDBLocal(t *testing.T) {
 			}
 
 			revoke := func() {
-				if err := store.RemoveAdmin(ctx, team, testCallerSlackID); err != nil {
+				if err := store.RemoveAdmin(nativeWorkspaceOwnerContext(ctx, t, store, team), team, testCallerSlackID); err != nil {
 					t.Fatal(err)
 				}
 			}

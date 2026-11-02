@@ -40,7 +40,7 @@ func TestPolicySignedHandlerDynamoDBLocal(t *testing.T) {
 			mutate := func() error {
 				switch scenario {
 				case "admin removed during lookup":
-					return store.RemoveAdmin(ctx, team, testAdminUserID)
+					return store.RemoveAdmin(testPolicyContext(ctx, t, store, team, testAdminOwnerID), team, testAdminUserID)
 				case "workspace deleted during lookup":
 					return store.DeleteWorkspaceMapping(ctx, team)
 				case "reinstalled during lookup":

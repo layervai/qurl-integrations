@@ -331,3 +331,23 @@ func TestPolicyRetiredRowRecoveryStopsOnUnknownFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestMembershipWritesRequireCapturedAuthority(t *testing.T) {
+	for _, operation := range []string{"add", "remove"} {
+		t.Run(operation, func(t *testing.T) {
+			store := newStore(&stubDDB{getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{Item: policyTestWorkspace()}, nil
+			}, updateItemFn: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+				t.Fatal("membership write without captured authority")
+				return nil, errors.New("unexpected unauthorized membership write")
+			}})
+			var err error
+			if operation == "add" {
+				err = store.AddAdmin(context.Background(), "T1", testOtherSlackID)
+			} else {
+				err = store.RemoveAdmin(context.Background(), "T1", testOtherSlackID)
+			}
+			assertPolicyStatus(t, err, http.StatusConflict)
+		})
+	}
+}
