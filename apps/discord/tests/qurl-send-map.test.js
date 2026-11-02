@@ -4382,6 +4382,17 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/role\.mentionable: true/);
   });
 
+  test.each([false, true])('denied cold role skips confirm prewarm (everyone=%s)', async (everyone) => {
+    const int = makeSelectInteraction({ users: [], roles: [], canMentionEveryone: false });
+    const role = { id: everyone ? int.guild.id : 'role-denied', mentionable: false, members: new Map() };
+    int.roles.set(role.id, role);
+    int.guild.members = { cache: new Map(), list: jest.fn() };
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(int.guild.members.list).not.toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply.mock.calls.at(-1)[0].content).toMatch(/permission|Mention Everyone/i);
+  });
+
   test('mentionable picker: denied role with deleted-from-cache name → fallback "unknown-role" renders', async () => {
     const u1 = makeUser('100000000000000001');
     const denied = ['role-ghost', {

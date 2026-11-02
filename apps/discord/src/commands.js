@@ -2902,14 +2902,16 @@ async function executeSendPipeline(interaction, {
             let warnings = '';
             let emptySelection = false;
             const addResult = await handleAddRecipients(sendId, async () => {
-              if (selectInteraction.roles?.size > 0) {
+              const canMentionEveryone = !!selectInteraction.guild
+                && selectInteraction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
+              if ([...(selectInteraction.roles?.values() || [])].some(role =>
+                canMentionEveryone || (role.id !== selectInteraction.guild?.id && role.mentionable === true))) {
                 await prewarmGuildMembersCache(selectInteraction.guild, { caller: 'addRecipients' });
               }
               const selection = resolveMentionableSelection({
                 interaction: selectInteraction,
                 excludedUserIds: addRecipientExclusions,
-                canMentionEveryone: !!selectInteraction.guild
-                  && selectInteraction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true,
+                canMentionEveryone,
               });
               const { valid, droppedBots } = partitionRecipients(selection.users, interaction.user.id, { excludeSender: true });
               // One role can exceed the remaining send capacity even when only one picker value is selected.
@@ -6888,22 +6890,9 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // the text-path gate in #323.
   const canMentionEveryone = !!interaction.guild
     && interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
-  // Trigger on any role pick (not just @everyone): `role.members` for a
-  // non-@everyone role is a filtered view of `guild.members.cache`, so
-  // both hit the same empty-cache failure mode. Direct user picks skip
-  // the fetch — Discord ships the User object in `interaction.users`.
-  //
-  // DIVERGES from the text-path gate at handleQurlSlashSend, which
-  // additionally requires `canMentionEveryone || hasRoleMention` to
-  // skip the wasted fetch on bare `@everyone` typed without perm. The
-  // picker omits the @everyone role from its UI (Discord platform
-  // filter — out of scope here), so the only roles reaching this gate
-  // are user-deliberately-picked custom roles. A wasted fetch on a
-  // non-mentionable custom role pick (which the per-role
-  // `role.mentionable` gate inside `resolveMentionableSelection` will
-  // ultimately deny) is rare enough that the simpler trigger is worth
-  // the marginal optimization loss.
-  if (interaction.roles?.size > 0) {
+  // Denied roles do not need member data. Direct picks already include their User objects.
+  if ([...(interaction.roles?.values() || [])].some(role =>
+    canMentionEveryone || (role.id !== interaction.guild?.id && role.mentionable === true))) {
     await prewarmGuildMembersCache(interaction.guild, { caller: 'handleConfirmUserSelect', flow_id });
   }
   const {

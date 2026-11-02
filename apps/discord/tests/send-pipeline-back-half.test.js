@@ -2634,6 +2634,13 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     });
   });
 
+  test.each([false, true])('a denied cold role does not fetch members (everyone=%s)', async (everyone) => {
+    const { guild, selectInteraction } = await collectRolePick({ everyone, cold: true, mentionable: false });
+    expect(guild.members.list).not.toHaveBeenCalled();
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(selectInteraction.editReply.mock.calls[0][0].content).toMatch(/permission|Mention Everyone/i);
+  });
+
   test('a permitted cold @everyone pick warms members before adding recipients', async () => {
     const { guild, selectInteraction } = await collectRolePick({ everyone: true, permission: true, cold: true });
     expect(guild.members.list).toHaveBeenCalledTimes(1);
