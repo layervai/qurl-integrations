@@ -103,17 +103,32 @@ describe('guild configs', () => {
       updated_at: '2026-09-12T00:00:00Z',
       configured_at: '2026-09-10T00:00:00Z',
     } });
-    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'oauth');
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', 'oauth', 'key-setup-123');
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
       guild_id: 'g-1',
       old_admin_id: 'old-admin',
       new_admin_id: 'new-admin',
       prior_had_key: true,
       via: 'oauth',
+      setup_session_id: 'key-setup-123',
       prior_configured_at: '2026-09-10T00:00:00Z',
       prior_updated_at: '2026-09-12T00:00:00Z',
     });
   });
+
+  test.each([['paste', 'setup-modal-123'], ['oauth', 'key-setup-456'], ['paste', undefined], ['oauth', {}], ['paste', 123]])(
+    'setGuildApiKey: carries only a string session ID for %s (%p)', async (via, sessionId) => {
+      ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin' } });
+      await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', via, sessionId);
+      expect(logger.audit).toHaveBeenCalledTimes(1);
+      const fields = logger.audit.mock.calls[0][1];
+      expect(fields.setup_session_id).toBe(typeof sessionId === 'string' ? sessionId : null);
+      expect(JSON.stringify(fields)).not.toContain('plain-key');
+      const values = ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues;
+      expect(Object.keys(values).sort()).toEqual([':b', ':k', ':u']);
+      if (typeof sessionId === 'string') expect(Object.values(values)).not.toContain(sessionId);
+    },
+  );
 
   test('setGuildApiKey: does not audit first setup or same-admin re-key', async () => {
     ddbMock.on(UpdateCommand)
@@ -224,6 +239,7 @@ describe('guild configs', () => {
       new_admin_id: 'new-admin',
       prior_had_key: true,
       via: 'paste',
+      setup_session_id: null,
       prior_configured_at: null,
       prior_updated_at: null,
     });
@@ -238,6 +254,7 @@ describe('guild configs', () => {
       new_admin_id: 'new-admin',
       prior_had_key: false,
       via: 'paste',
+      setup_session_id: null,
       prior_configured_at: null,
       prior_updated_at: null,
     });
