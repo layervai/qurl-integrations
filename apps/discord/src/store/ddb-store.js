@@ -1559,7 +1559,7 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door, setupSessio
       // healthy rebind when old_admin_id or prior_configured_at is null.
       prior_had_key: priorHadKey,
       via: door,
-      // Paste flow_id or OAuth minted key_id; correlation only, never a metric dimension.
+      // Paste interaction ID or OAuth minted key_id; correlation only, never a metric dimension.
       setup_session_id: typeof setupSessionId === 'string' ? setupSessionId : null,
       // configured_at is the guild's stable first-setup time. updated_at is the
       // last write of any kind (webhook writes stamp it too), not the binding's
@@ -1575,7 +1575,7 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door, setupSessio
   }
 }
 
-// `via` names the setup door; setupSessionId is its flow_id or minted key ID.
+// `via` names the setup door; setupSessionId is the modal interaction ID or minted key ID.
 async function setGuildApiKey(guildId, apiKey, configuredBy, via, setupSessionId) {
   const door = normalizeSetupVia(via);
   // Validate on every call so caller drift (including a forgotten argument)

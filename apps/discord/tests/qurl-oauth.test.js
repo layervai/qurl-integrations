@@ -605,6 +605,8 @@ describe('qurl-oauth routes', () => {
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(500);
       expect(res.text).toContain('provisioned but not stored');
+      expect(logger.error).toHaveBeenCalledWith('Failed to persist guild API key after successful mint',
+        expect.objectContaining({ setup_session_id: 'key-orphan-1' }));
       await deleteFired;
       const deleteCall = fetchSpy.mock.calls.find((c) => typeof c[1]?.method === 'string' && c[1].method === 'DELETE');
       expect(deleteCall).toBeDefined();

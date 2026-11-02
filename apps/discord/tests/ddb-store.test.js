@@ -116,15 +116,17 @@ describe('guild configs', () => {
     });
   });
 
-  test.each([['paste', 'setup-flow-123'], ['oauth', 'key-setup-456'], ['paste', undefined], ['oauth', {}], ['paste', 123]])(
+  test.each([['paste', 'setup-modal-123'], ['oauth', 'key-setup-456'], ['paste', undefined], ['oauth', {}], ['paste', 123]])(
     'setGuildApiKey: carries only a string session ID for %s (%p)', async (via, sessionId) => {
       ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin' } });
       await store.setGuildApiKey('g-1', 'plain-key', 'new-admin', via, sessionId);
+      expect(logger.audit).toHaveBeenCalledTimes(1);
       const fields = logger.audit.mock.calls[0][1];
       expect(fields.setup_session_id).toBe(typeof sessionId === 'string' ? sessionId : null);
       expect(JSON.stringify(fields)).not.toContain('plain-key');
-      expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues)
-        .not.toHaveProperty(':setup_session_id');
+      const values = ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues;
+      expect(Object.keys(values).sort()).toEqual([':b', ':k', ':u']);
+      if (typeof sessionId === 'string') expect(Object.values(values)).not.toContain(sessionId);
     },
   );
 

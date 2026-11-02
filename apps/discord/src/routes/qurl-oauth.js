@@ -428,7 +428,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH, keyId);
   } catch (err) {
     logger.error('Failed to persist guild API key after successful mint', {
-      error: err?.message, guildId, discordUserId, keyId,
+      error: err?.message, guildId, discordUserId, keyId, setup_session_id: keyId,
     });
     // Key was minted but not stored. Best-effort delete on qurl-service
     // so retries don't pile up orphan keys under the admin's account.
