@@ -82,3 +82,23 @@ func TestFakePolicyConditionsPreserveGrouping(t *testing.T) {
 		t.Fatal("unbalanced condition accepted")
 	}
 }
+
+func TestFakeWorkspaceBindingTimeUsesOriginalImage(t *testing.T) {
+	names := defaultTestTableNames()
+	number := func(value string) ddbtypes.AttributeValue { return &ddbtypes.AttributeValueMemberN{Value: value} }
+	key := map[string]ddbtypes.AttributeValue{fAttrSlackTeamID: &ddbtypes.AttributeValueMemberS{Value: "T1"}}
+	fake := newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.workspace: {{fAttrSlackTeamID: key[fAttrSlackTeamID], "updated_at_unix_nano": number("41")}}})
+	for _, latest := range []string{"99", "100"} {
+		_, err := fake.UpdateItem(context.Background(), &dynamodb.UpdateItemInput{TableName: aws.String(names.workspace), Key: key, UpdateExpression: aws.String("SET policy_bound_at_unix_nano = if_not_exists(policy_bound_at_unix_nano, if_not_exists(updated_at_unix_nano, :zero)), updated_at_unix_nano = :latest"), ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":zero": number("0"), ":latest": number(latest)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		row, err := fake.GetItem(context.Background(), &dynamodb.GetItemInput{TableName: aws.String(names.workspace), Key: key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if row.Item["policy_bound_at_unix_nano"].(*ddbtypes.AttributeValueMemberN).Value != "41" || row.Item["updated_at_unix_nano"].(*ddbtypes.AttributeValueMemberN).Value != latest {
+			t.Fatal("settings update moved binding time or lost edit time")
+		}
+	}
+}

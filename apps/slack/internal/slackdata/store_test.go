@@ -632,7 +632,7 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 	if stamp, ok := got.ExpressionAttributeValues[exprNow].(*ddbtypes.AttributeValueMemberS); !ok || stamp.Value != "2026-10-31T18:34:56Z" {
 		t.Fatalf("ownership transfer display stamp = %#v", got.ExpressionAttributeValues[exprNow])
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, policy_generation = :policy_generation, updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :owner_set" {
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET "+preserveBindingTimeUpdate+"owner_id = :new_owner, policy_generation = :policy_generation, updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :owner_set" {
 		t.Errorf("UpdateExpression = %q", exp)
 	}
 	if cond := aws.ToString(got.ConditionExpression); cond != "attribute_exists(slack_team_id) AND owner_id = :current_owner AND attribute_exists(policy_installation)" {
@@ -1439,7 +1439,7 @@ func TestDeleteWorkspaceMapping(t *testing.T) {
 		if err := store.DeleteWorkspaceMappingBefore(context.Background(), "T1", cutoff); err != nil {
 			t.Fatalf("DeleteWorkspaceMappingBefore: %v", err)
 		}
-		if got := aws.ToString(captured.ConditionExpression); got != purgeCutoffCondition {
+		if got := aws.ToString(captured.ConditionExpression); got != bindingPurgeCutoffCondition {
 			t.Fatalf("ConditionExpression = %q", got)
 		}
 		if got := captured.ExpressionAttributeNames["#updated_at_nano"]; got != attrUpdatedAtNano {

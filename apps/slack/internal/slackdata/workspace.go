@@ -28,6 +28,7 @@ const (
 	// Installation identity survives ownership transfer, which preserves policies.
 	attrPolicyInstallation = "policy_installation"
 	attrPolicyLegacy       = "policy_legacy"
+	attrPolicyBoundAt      = "policy_bound_at_unix_nano"
 	attrUpdatedAt          = "updated_at"
 	// Every guarded workspace_mappings/channel_policies write must refresh
 	// attrUpdatedAtNano, including TTL-backed rate-limit counters. Lifecycle
@@ -98,6 +99,11 @@ const (
 )
 
 const purgeCutoffCondition = "attribute_not_exists(" + exprUpdatedAtNano + ") OR " + exprUpdatedAtNano + " <= " + exprPurgeCutoffNano
+
+const exprPolicyBoundAt = "#policy_bound_at"
+const exprBindingZero = ":binding_zero"
+const preserveBindingTimeUpdate = attrPolicyBoundAt + " = if_not_exists(" + attrPolicyBoundAt + ", if_not_exists(" + attrUpdatedAtNano + ", " + exprBindingZero + ")), "
+const bindingPurgeCutoffCondition = exprPolicyBoundAt + " <= " + exprPurgeCutoffNano + " OR (attribute_not_exists(" + exprPolicyBoundAt + ") AND (" + purgeCutoffCondition + "))"
 
 // bindDisambiguationBudget caps the post-CCFE GetItem that decides
 // between the caller-already-bound (idempotent-continue) and
@@ -240,12 +246,13 @@ func (s *Store) SetAgentEnabled(ctx context.Context, teamID string, enabled bool
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression:    aws.String("SET " + attrAgentEnabled + " = :v, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano),
+		UpdateExpression:    aws.String("SET " + preserveBindingTimeUpdate + attrAgentEnabled + " = :v, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano),
 		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ")"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":v":        boolAttr(enabled),
-			exprNow:     updatedAt,
-			exprNowNano: updatedAtNano,
+			exprBindingZero: &ddbtypes.AttributeValueMemberN{Value: "0"},
+			":v":            boolAttr(enabled),
+			exprNow:         updatedAt,
+			exprNowNano:     updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -481,6 +488,7 @@ func workspaceMappingItem(teamID, ownerID, seedAdmin string, created, now time.T
 		attrSlackTeamID:        stringAttr(teamID),
 		attrPolicyGeneration:   stringAttr(rand.Text()),
 		attrPolicyInstallation: stringAttr(rand.Text()),
+		attrPolicyBoundAt:      updatedAtNano,
 		attrOwnerID:            stringAttr(ownerID),
 		attrSeedAdminSlackUser: stringAttr(seedAdmin),
 		attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
@@ -570,7 +578,7 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression: aws.String("SET updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :uids"),
+		UpdateExpression: aws.String("SET " + preserveBindingTimeUpdate + "updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :uids"),
 		// Two clauses combined: refuse on a missing row (handler maps
 		// to "workspace_not_bound") AND on an already-member user
 		// (handler maps to "admin_already_exists"). DDB doesn't let
@@ -578,10 +586,11 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 		// the post-CCFE GetItem below makes the call.
 		ConditionExpression: aws.String("attribute_exists(slack_team_id) AND NOT contains(admin_slack_user_ids, :uid)"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":uids":     &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
-			":uid":      stringAttr(targetUserID),
-			exprNow:     updatedAt,
-			exprNowNano: updatedAtNano,
+			exprBindingZero: &ddbtypes.AttributeValueMemberN{Value: "0"},
+			":uids":         &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
+			":uid":          stringAttr(targetUserID),
+			exprNow:         updatedAt,
+			exprNowNano:     updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -738,7 +747,7 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression: aws.String("SET updated_at = :now, updated_at_unix_nano = :now_nano DELETE admin_slack_user_ids :uids"),
+		UpdateExpression: aws.String("SET " + preserveBindingTimeUpdate + "updated_at = :now, updated_at_unix_nano = :now_nano DELETE admin_slack_user_ids :uids"),
 		// `contains(...)` guarantees the user is in the set at
 		// mutation time — a CCFE here is the "nothing to remove"
 		// case (either the row vanished mid-flight, or the user
@@ -746,10 +755,11 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 		// a row delete-race in the same code path.
 		ConditionExpression: aws.String("contains(admin_slack_user_ids, :uid) AND attribute_exists(slack_team_id)"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":uids":     &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
-			":uid":      stringAttr(targetUserID),
-			exprNow:     updatedAt,
-			exprNowNano: updatedAtNano,
+			exprBindingZero: &ddbtypes.AttributeValueMemberN{Value: "0"},
+			":uids":         &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
+			":uid":          stringAttr(targetUserID),
+			exprNow:         updatedAt,
+			exprNowNano:     updatedAtNano,
 		},
 	})
 	if err == nil {
@@ -800,9 +810,10 @@ func (s *Store) transferOwnership(ctx context.Context, teamID, currentOwnerID, n
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrPolicyGeneration + " = :policy_generation, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
+		UpdateExpression:    aws.String("SET " + preserveBindingTimeUpdate + attrOwnerID + " = :new_owner, " + attrPolicyGeneration + " = :policy_generation, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
 		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ") AND " + attrOwnerID + " = :current_owner AND attribute_exists(" + attrPolicyInstallation + ")"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			exprBindingZero:      &ddbtypes.AttributeValueMemberN{Value: "0"},
 			":policy_generation": stringAttr(rand.Text()),
 			":current_owner":     stringAttr(currentOwnerID),
 			":new_owner":         stringAttr(newOwnerID),
@@ -939,8 +950,9 @@ func (s *Store) deleteWorkspaceMapping(ctx context.Context, teamID string, cutof
 		},
 	}
 	if !cutoff.IsZero() {
-		input.ConditionExpression = aws.String(purgeCutoffCondition)
+		input.ConditionExpression = aws.String(bindingPurgeCutoffCondition)
 		input.ExpressionAttributeNames = map[string]string{
+			exprPolicyBoundAt: attrPolicyBoundAt,
 			exprUpdatedAtNano: attrUpdatedAtNano,
 		}
 		input.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{

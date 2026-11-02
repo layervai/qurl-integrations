@@ -635,6 +635,7 @@ func splitUpdateClauses(expr string) []updateClause {
 // ExpressionAttributeValues).
 func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue, names map[string]string) error {
 	pairs := splitTopLevelCommas(body)
+	original := cloneItem(item)
 	for _, p := range pairs {
 		eq := strings.Index(p, "=")
 		if eq < 0 {
@@ -642,9 +643,9 @@ func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue, 
 		}
 		attr := strings.TrimSpace(p[:eq])
 		valTok := strings.TrimSpace(p[eq+1:])
-		v, ok := vals[valTok]
-		if !ok {
-			return fmt.Errorf("fakeDDB SET: unknown value %q", valTok)
+		v, err := evalSetValue(valTok, original, vals, names)
+		if err != nil {
+			return err
 		}
 		if err := setAttrPath(item, attr, names, v); err != nil {
 			return err
@@ -1223,4 +1224,25 @@ func (f *fakeDDB) TransactWriteItems(_ context.Context, in *dynamodb.TransactWri
 	}
 
 	return &dynamodb.TransactWriteItemsOutput{}, nil
+}
+
+func evalSetValue(expression string, item, values map[string]ddbtypes.AttributeValue, names map[string]string) (ddbtypes.AttributeValue, error) {
+	expression = strings.TrimSpace(expression)
+	if value, ok := values[expression]; ok {
+		return value, nil
+	}
+	if strings.HasPrefix(expression, "if_not_exists(") && strings.HasSuffix(expression, ")") {
+		parts := splitTopLevelCommas(strings.TrimSuffix(strings.TrimPrefix(expression, "if_not_exists("), ")"))
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("fakeDDB SET: malformed if_not_exists %q", expression)
+		}
+		if value, ok := getAttrPath(item, strings.TrimSpace(parts[0]), names); ok {
+			return value, nil
+		}
+		return evalSetValue(parts[1], item, values, names)
+	}
+	if value, ok := getAttrPath(item, expression, names); ok {
+		return value, nil
+	}
+	return nil, fmt.Errorf("fakeDDB SET: unknown value %q", expression)
 }

@@ -9,6 +9,14 @@ binding before its first policy write, it initializes the legacy identity before
 rotating the generation. That bounded retry checks both initialized IDs, so it
 cannot follow a concurrent reinstall or ownership change.
 
+Binding age is separate from edit time. Fresh binds and legacy reclaims set
+`policy_bound_at_unix_nano`. Admin changes, ownership transfer, and agent toggles
+preserve that value while updating the audit timestamps. Their first mutation
+of a legacy row preserves its prior binding cutoff before changing edit time.
+A late settings update must not make an old binding appear freshly installed.
+Bindings which still lack the new field use the existing legacy cutoff rule.
+Historical ambiguous rows still require the reconciliation described below.
+
 ## Default behavior
 
 `QURL_SLACK_LEGACY_POLICY_WRITERS_RETIRED` defaults to `false`. An invalid boolean
