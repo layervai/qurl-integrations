@@ -107,15 +107,18 @@ func ParseDuration(s string) (time.Duration, error) {
 	if n < 0 {
 		return 0, errors.New("invalid duration: negative value not allowed")
 	}
-	// Local guard (qurl-service#2054 adds it upstream): a huge count would overflow into range.
-	if n > int(math.MaxInt64/int64(7*day)) {
-		return 0, fmt.Errorf("invalid duration: %s", s)
-	}
+	// Local guard (qurl-service#2054 adds it upstream): a huge day or week
+	// count would overflow into range. Other units go to time.ParseDuration.
 	switch unit {
-	case "d":
-		return time.Duration(n) * day, nil
-	case "w":
-		return time.Duration(n) * 7 * day, nil
+	case "d", "w":
+		size := day
+		if unit == "w" {
+			size = 7 * day
+		}
+		if n > int(math.MaxInt64/int64(size)) {
+			return 0, fmt.Errorf("invalid duration: %s", s)
+		}
+		return time.Duration(n) * size, nil
 	default:
 		return time.ParseDuration(s)
 	}
@@ -391,10 +394,11 @@ func Merge(base, local, remote []Definition) (items []Definition, conflicts []st
 	b, l, r := index(base), index(local), index(remote)
 	result := make([]Definition, 0, len(local)+len(remote))
 	conflicts = []string{}
-	ids := []string{}
+	ids, seen := []string{}, map[string]bool{}
 	for _, side := range [][]Definition{remote, local, base} {
 		for i := range side {
-			if !slices.Contains(ids, side[i].ID) {
+			if !seen[side[i].ID] {
+				seen[side[i].ID] = true
 				ids = append(ids, side[i].ID)
 			}
 		}

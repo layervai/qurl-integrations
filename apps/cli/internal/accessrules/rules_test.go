@@ -273,7 +273,7 @@ func TestValidateItemsCountsRuleSettings(t *testing.T) {
 }
 
 func TestParseDurationMatchesServiceGrammar(t *testing.T) {
-	for value, want := range map[string]time.Duration{"1h": time.Hour, "7d": 7 * 24 * time.Hour, "1w": 7 * 24 * time.Hour, "90m": 90 * time.Minute, "30s": 30 * time.Second} {
+	for value, want := range map[string]time.Duration{"1h": time.Hour, "7d": 7 * 24 * time.Hour, "1w": 7 * 24 * time.Hour, "90m": 90 * time.Minute, "30s": 30 * time.Second, "86400s": 24 * time.Hour, "43200m": 30 * 24 * time.Hour} {
 		if got, err := ParseDuration(value); err != nil || got != want {
 			t.Errorf("ParseDuration(%q) = %v %v, want %v", value, got, err, want)
 		}

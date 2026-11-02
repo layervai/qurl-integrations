@@ -255,6 +255,8 @@ func ruleSyncNotice(snapshot *accessrules.Snapshot, err error) (notice string, d
 	switch {
 	case errors.Is(err, accessrules.ErrUnlinked):
 		return msgRulesUnlinked, true
+	// ErrRuleConflict wraps ErrConflict, but Sync reports rule conflicts in the
+	// snapshot, never as this error.
 	case errors.Is(err, accessrules.ErrConflict):
 		return msgRulesBusy, true
 	case err != nil:
@@ -342,8 +344,9 @@ func (o *globalOpts) reconcileRulesAfterLink(ctx context.Context) {
 			notice = msgRulesNotSynced
 		}
 	}
-	// A device with no saved rules has nothing waiting, so a deferred sync stays quiet.
-	if deferred && len(snapshot.Items) == 0 && len(snapshot.Conflicts) == 0 {
+	// A read journal with no saved rules has nothing waiting, so any sync
+	// failure stays quiet; an unreadable journal still warns.
+	if snapshot.SchemaVersion != 0 && len(snapshot.Items) == 0 && len(snapshot.Conflicts) == 0 {
 		notice = ""
 	}
 	if notice != "" && !o.quiet {

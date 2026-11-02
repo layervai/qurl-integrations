@@ -129,14 +129,17 @@ func TestAccountLoginsReconcileGuestRulesWithoutChangingLoginResult(t *testing.T
 	}
 }
 
-func TestLoginWithNoSavedRulesStaysQuietWhenSyncIsDeferred(t *testing.T) {
-	srv := apitest.NewServer(t)
-	srv.Script(http.MethodGet, "/v1/me/access-rules", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	})
-	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "login", "-o", "json"}, env: map[string]string{}, stdin: strings.NewReader(testAPIKey + "\n"), shareStateDir: connectorStateTestDir(t)})
-	if result.code != 0 || strings.Contains(result.stderr.String(), "Access rules") {
-		t.Fatalf("login %d stderr %q", result.code, result.stderr.String())
+func TestLoginWithNoSavedRulesStaysQuietWhenSyncFails(t *testing.T) {
+	// 503 defers the sync; 404 (a service without the route yet) fails it.
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusNotFound} {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodGet, "/v1/me/access-rules", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		})
+		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "login", "-o", "json"}, env: map[string]string{}, stdin: strings.NewReader(testAPIKey + "\n"), shareStateDir: connectorStateTestDir(t)})
+		if result.code != 0 || strings.Contains(result.stderr.String(), "access rules") || strings.Contains(result.stderr.String(), "Access rules") {
+			t.Fatalf("%d: login %d stderr %q", status, result.code, result.stderr.String())
+		}
 	}
 }
 
