@@ -20,6 +20,7 @@ import (
 	"github.com/layervai/qurl-integrations/internal/ttlcache"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacklog"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -1100,29 +1101,6 @@ func TestPrintableLogSnippetNormalizesUnicodeLineSeparators(t *testing.T) {
 	}
 }
 
-func TestSlackOwnerLogIDKeepsStructuredSlackOwnerIDs(t *testing.T) {
-	t.Parallel()
-
-	cases := []string{"T123ABCDEF", "E123ABCDEF", ""}
-	for _, tc := range cases {
-		if got := slackOwnerLogID(tc); got != tc {
-			t.Fatalf("slackOwnerLogID(%q) = %q, want %q", tc, got, tc)
-		}
-	}
-}
-
-func TestSlackOwnerLogIDRejectsMalformedOwnerIDs(t *testing.T) {
-	t.Parallel()
-
-	cases := []string{"T123\nINJECT", "T123-ABC", "T123_ABC", "T123abc", strings.Repeat("T", slackOwnerLogIDMaxBytes+1)}
-	for _, tc := range cases {
-		want := fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(tc))
-		if got := slackOwnerLogID(tc); got != want {
-			t.Fatalf("slackOwnerLogID(%q) = %q, want %q", tc, got, want)
-		}
-	}
-}
-
 func TestSlackWebAPIPosterGridFallbackWarningSanitizesOwnerIDs(t *testing.T) {
 	var logs bytes.Buffer
 	prev := slog.Default()
@@ -1150,8 +1128,8 @@ func TestSlackWebAPIPosterGridFallbackWarningSanitizesOwnerIDs(t *testing.T) {
 	if strings.Contains(got, "INJECT") || strings.Contains(got, enterpriseID) {
 		t.Fatalf("fallback warning logged raw owner IDs: %s", got)
 	}
-	if !strings.Contains(got, fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(teamID))) ||
-		!strings.Contains(got, fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(enterpriseID))) {
+	if !strings.Contains(got, slacklog.ID(teamID)) ||
+		!strings.Contains(got, slacklog.ID(enterpriseID)) {
 		t.Fatalf("fallback warning did not log sanitized owner markers: %s", got)
 	}
 }
