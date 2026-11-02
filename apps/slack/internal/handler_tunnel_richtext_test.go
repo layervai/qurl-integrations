@@ -214,3 +214,21 @@ func TestInstallMessageBlocks_FallbackPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestECSInstallMessageBlocks_MaximumConnectorID(t *testing.T) {
+	t.Parallel()
+	now := fixedNow
+	expiresAt := now.Add(time.Hour)
+	h := NewHandler(Config{TunnelImage: testTunnelImageRef})
+	freezeTunnelBootstrapNow(t, h, now)
+	args := testTunnelInstallArgs()
+	args.Slug = strings.Repeat("a", 64)
+	args.Environment = tunnelEnvECSFargate
+	msg, err := h.renderTunnelInstallMessage(args, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias is ready.")
+	if err != nil {
+		t.Fatalf("render maximum Connector ID: %v", err)
+	}
+	if _, ok := installMessageBlocks(msg); !ok {
+		t.Fatalf("maximum Connector ID lost copyable Block Kit output (message bytes=%d)", len(msg))
+	}
+}

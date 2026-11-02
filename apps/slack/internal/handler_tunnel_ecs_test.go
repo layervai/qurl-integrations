@@ -15,6 +15,10 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 
 	for _, want := range []string{
 		ecsFargateChecklistText,
+		"desiredCount: 1",
+		"default file system policy permits anonymous",
+		"Explicitly deny the task role mounts outside",
+		"separate provisioning role",
 		"non-essential qURL sidecar container",
 		"Fargate's awsvpc network mode",
 		ecsFargateRegionPlaceholderNote,
@@ -28,7 +32,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"Store the enrollment token from the separate DM",
 		"message intentionally does not contain the token",
 		testTunnelImageRef,
-		"Put share.yaml at `/etc/qurl/share.yaml`",
+		"Put share.yaml at the root of the qurl-config access point",
 		testTunnelLocalPort9090Line,
 		"crid: '" + testTunnelCRID + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
@@ -105,6 +109,11 @@ func TestECSFargateVolumesMatchSidecarMounts(t *testing.T) {
 	t.Parallel()
 	args := testTunnelInstallArgs()
 	instructions := mustRenderECSFargateTunnelInstructions(t, args, testTunnelImageRef)
+	storeAt := strings.Index(instructions, "Store the enrollment token")
+	if strings.Index(instructions, "Create three EFS access points") > storeAt ||
+		strings.Index(instructions, "Attach a file system policy") > storeAt {
+		t.Fatal("file creation precedes EFS access-point/policy provisioning")
+	}
 	// Parse the artifact actually delivered to Slack, not a separately built fixture.
 	blocks := strings.Split(instructions, "```")
 	var task struct {
@@ -124,11 +133,11 @@ func TestECSFargateVolumesMatchSidecarMounts(t *testing.T) {
 	if len(blocks) != 7 {
 		t.Fatalf("artifact blocks = %d, want 7", len(blocks))
 	}
-	if err := json.Unmarshal([]byte(blocks[5]), &task); err != nil {
+	if err := json.Unmarshal([]byte(blocks[1]), &task); err != nil {
 		t.Fatalf("task volumes JSON: %v", err)
 	}
 	var container ecsContainerDefinition
-	if err := json.Unmarshal([]byte(blocks[3]), &container); err != nil {
+	if err := json.Unmarshal([]byte(blocks[5]), &container); err != nil {
 		t.Fatalf("container JSON: %v", err)
 	}
 	if len(task.Volumes) != len(container.MountPoints) {
@@ -150,6 +159,9 @@ func TestECSFargateVolumesMatchSidecarMounts(t *testing.T) {
 	for _, mount := range container.MountPoints {
 		if !seenNames[mount.SourceVolume] {
 			t.Fatalf("mount has no task volume: %+v", mount)
+		}
+		if mount.SourceVolume == "qurl-agent-state" && mount.ReadOnly {
+			t.Fatalf("state mount is read-only: %+v", mount)
 		}
 		if mount.SourceVolume != "qurl-agent-state" && !mount.ReadOnly {
 			t.Fatalf("config/bootstrap mount is writable: %+v", mount)
