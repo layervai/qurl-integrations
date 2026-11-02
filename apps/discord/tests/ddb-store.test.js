@@ -81,6 +81,64 @@ afterAll(async () => {
 });
 
 describe('guild configs', () => {
+  test.each(['admin', undefined])('raw deletion audits only the removed configuration metadata (%s)', async (configuredBy) => {
+    ddbMock.on(DeleteCommand).resolves({ Attributes: {
+      guild_id: 'g-1', configured_by: configuredBy, qurl_api_key: 'private-key-fixture',
+      webhook_secret: 'private-webhook-fixture',
+    } });
+    await expect(store._removeGuildApiKeyRaw('g-1')).resolves.toBe(true);
+    expect(ddbMock.commandCalls(DeleteCommand)[0].args[0].input.ReturnValues).toBe('ALL_OLD');
+    expect(logger.audit).toHaveBeenCalledTimes(1);
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_CONFIG_DELETED, {
+      guild_id: 'g-1', configured_by: configuredBy ?? null,
+    });
+    expect(JSON.stringify(logger.audit.mock.calls)).not.toContain('private-');
+  });
+
+  test('raw deletion of an absent row emits no audit', async () => {
+    ddbMock.on(DeleteCommand).resolves({});
+    await expect(store._removeGuildApiKeyRaw('g-1')).resolves.toBe(false);
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('failed raw deletion emits no success audit', async () => {
+    ddbMock.on(DeleteCommand).rejects(new Error('ddb down'));
+    await expect(store._removeGuildApiKeyRaw('g-1')).rejects.toThrow('ddb down');
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('audit failure does not turn a landed deletion into a failure', async () => {
+    ddbMock.on(DeleteCommand).resolves({ Attributes: { configured_by: 'admin' } });
+    logger.audit.mockImplementationOnce(() => { throw new Error('audit unavailable'); });
+    await expect(store._removeGuildApiKeyRaw('g-1')).resolves.toBe(true);
+  });
+
+  test.each(['admin', 'new-admin'])('replacement records a non-paging history event for %s', async (configuredBy) => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: {
+      configured_by: 'admin', qurl_api_key: 'private-old-key',
+      configured_at: 'first-setup', updated_at: 'previous-write',
+    } });
+    await store.setGuildApiKey('g-1', 'private-new-key', configuredBy, SETUP_VIA.PASTE);
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_KEY_ROTATED, {
+      guild_id: 'g-1', configured_by: configuredBy, via: SETUP_VIA.PASTE,
+      prior_configured_at: 'first-setup', prior_updated_at: 'previous-write',
+    });
+    expect(JSON.stringify(logger.audit.mock.calls)).not.toContain('private-');
+  });
+
+  test('first setup emits no key replacement history', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('g-1', 'new-key', 'admin', SETUP_VIA.PASTE);
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('a failed admin-change audit does not suppress replacement history', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin', qurl_api_key: 'old-key' } });
+    logger.audit.mockImplementationOnce(() => { throw new Error('audit unavailable'); });
+    await expect(store.setGuildApiKey('g-1', 'new-key', 'new-admin', SETUP_VIA.PASTE)).resolves.toBeUndefined();
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_KEY_ROTATED, expect.objectContaining({ configured_by: 'new-admin' }));
+  });
+
   test('setGuildApiKey: encrypts apiKey before write, preserves configured_at on re-key', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'configurer');
