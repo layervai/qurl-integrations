@@ -330,13 +330,8 @@ func (s *Store) updateChannelResourceSet(ctx context.Context, operation, updateV
 // leak (resource IDs are unique and never reused, so a dangling id can't later
 // point at a different resource).
 //
-// The map REMOVE is UNCONDITIONAL — DynamoDB can't express a per-key
-// `alias_bindings.#a = :rid` guard across N keys in one expression. Alias NAMES,
-// unlike resource IDs, are reusable, so in the sub-second window between this
-// read and the write an admin who unbound then rebound the same name to a LIVE
-// resource would have that fresh binding clobbered. The purge runs synchronously
-// right after the upstream delete, so the window is tiny; the race is accepted
-// rather than guarded.
+// Each removed alias must still point to the deleted resource at commit time.
+// A concurrent rebind cancels the update rather than removing a live binding.
 func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID, resourceID string) ([]string, error) {
 	if teamID == "" || channelID == "" || resourceID == "" {
 		return nil, &Error{
@@ -358,7 +353,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	if err != nil {
 		return nil, ddbToError("PurgeResourceFromChannel", err)
 	}
-	// Row absent → nothing to purge. Returning here also keeps the unconditional
+	// Row absent → nothing to purge. Returning here also keeps the
 	// UpdateItem below from materializing an empty row for a channel that never
 	// referenced the resource.
 	if len(out.Item) == 0 {
@@ -380,6 +375,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	// keys are name-aliased.
 	updatedAt, updatedAtNano := updatedAtAttrs(s.nowOrDefault())
 	expr := "SET #updated_at = " + exprNow + ", " + exprUpdatedAtNano + " = " + exprNowNano
+	conditions := []string{"attribute_exists(" + attrSlackTeamID + ")"}
 	names := map[string]string{
 		"#updated_at":     attrUpdatedAt,
 		exprUpdatedAtNano: attrUpdatedAtNano,
@@ -391,6 +387,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 			nameRef := fmt.Sprintf("#a%d", i)
 			names[nameRef] = alias
 			removes[i] = exprAliasBindings + "." + nameRef
+			conditions = append(conditions, removes[i]+" = :removed_resource")
 		}
 		expr += " REMOVE " + strings.Join(removes, ", ")
 	}
@@ -409,6 +406,10 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 			exprNowNano: updatedAtNano,
 		},
 		ExpressionAttributeNames: names,
+		ConditionExpression:      aws.String(strings.Join(conditions, " AND ")),
+	}
+	if len(aliasKeys) > 0 {
+		in.ExpressionAttributeValues[":removed_resource"] = stringAttr(resourceID)
 	}
 	if _, err := s.Client.UpdateItem(ctx, in); err != nil {
 		return nil, ddbToError("PurgeResourceFromChannel", err)

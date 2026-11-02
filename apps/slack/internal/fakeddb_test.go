@@ -533,13 +533,15 @@ func (f *fakeDDB) tableAndSchema(name string) (table map[string]map[string]ddbty
 	return t, f.keySchemas[name], nil
 }
 
-// cloneItem returns a shallow copy of the item map. AttributeValue
-// pointers are shared — that's fine because the production code
-// never mutates them after construction.
+// cloneItem copies mutable nested maps so a staged update cannot change stored data.
 func cloneItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.AttributeValue {
 	out := make(map[string]ddbtypes.AttributeValue, len(item))
 	for k, v := range item {
-		out[k] = v
+		if nested, ok := v.(*ddbtypes.AttributeValueMemberM); ok {
+			out[k] = &ddbtypes.AttributeValueMemberM{Value: cloneItem(nested.Value)}
+		} else {
+			out[k] = v
+		}
 	}
 	return out
 }
@@ -798,47 +800,60 @@ func splitTopLevelCommas(s string) []string {
 	return out
 }
 
-// evalCondition supports the exact ConditionExpression shapes the
-// production code emits, joined by " AND " or " OR ". Each subexpression is
-// one of:
-//
-//	attribute_exists(<attr>)
-//	attribute_not_exists(<attr>)
-//	contains(<attr>, :val)
-//	NOT contains(<attr>, :val)
-//	<attr> = :val
-//	<attr> < :val
-//	<attr> > :val
-//
-// Returns (true, nil) when every subexpression is satisfied. OR is
-// NOT parsed — no production caller emits it post-scope-cut.
+// evalCondition evaluates the grouped AND/OR conditions emitted by the store.
 func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
 	expr = strings.TrimSpace(expr)
-	parts := strings.Split(expr, " AND ")
-	for _, p := range parts {
-		ok, err := evalConditionAnyTerm(strings.TrimSpace(p), item, present, vals, names)
+	for _, operator := range []string{" OR ", " AND "} {
+		parts, err := splitCondition(expr, operator)
 		if err != nil {
 			return false, err
 		}
-		if !ok {
-			return false, nil
+		if len(parts) == 1 {
+			continue
 		}
+		for _, part := range parts {
+			matched, err := evalCondition(part, item, present, vals, names)
+			if err != nil {
+				return false, err
+			}
+			if operator == " OR " && matched {
+				return true, nil
+			}
+			if operator == " AND " && !matched {
+				return false, nil
+			}
+		}
+		return operator == " AND ", nil
 	}
-	return true, nil
+	if strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")") {
+		return evalCondition(expr[1:len(expr)-1], item, present, vals, names)
+	}
+	return evalConditionTerm(expr, item, present, vals, names)
 }
 
-func evalConditionAnyTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
-	parts := strings.Split(term, " OR ")
-	for _, p := range parts {
-		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
-		if err != nil {
-			return false, err
+func splitCondition(expr, operator string) ([]string, error) {
+	var parts []string
+	depth, start := 0, 0
+	for i := 0; i < len(expr); i++ {
+		switch expr[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
 		}
-		if ok {
-			return true, nil
+		if depth < 0 {
+			return nil, fmt.Errorf("unbalanced fake condition: %q", expr)
+		}
+		if depth == 0 && strings.HasPrefix(expr[i:], operator) {
+			parts = append(parts, expr[start:i])
+			i += len(operator) - 1
+			start = i + 1
 		}
 	}
-	return false, nil
+	if depth != 0 {
+		return nil, fmt.Errorf("unbalanced fake condition: %q", expr)
+	}
+	return append(parts, expr[start:]), nil
 }
 
 func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
@@ -1125,10 +1140,16 @@ func seedSerialize(item map[string]ddbtypes.AttributeValue) string {
 // surface fixture-mismatch errors.
 var _ = seedSerialize
 
-// Service cleanup uses an atomic absent-binding check plus a policy delete.
+// Evaluate every condition and update before committing any transaction item.
 func (f *fakeDDB) TransactWriteItems(_ context.Context, in *dynamodb.TransactWriteItemsInput, _ ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	type pendingWrite struct {
+		table map[string]map[string]ddbtypes.AttributeValue
+		key   string
+		item  map[string]ddbtypes.AttributeValue
+	}
+	var writes []pendingWrite
 	for index, operation := range in.TransactItems {
 		var tableName, condition string
 		var key, values map[string]ddbtypes.AttributeValue
@@ -1137,6 +1158,9 @@ func (f *fakeDDB) TransactWriteItems(_ context.Context, in *dynamodb.TransactWri
 		case operation.ConditionCheck != nil:
 			check := operation.ConditionCheck
 			tableName, condition, key, values, names = aws.ToString(check.TableName), aws.ToString(check.ConditionExpression), check.Key, check.ExpressionAttributeValues, check.ExpressionAttributeNames
+		case operation.Update != nil:
+			update := operation.Update
+			tableName, condition, key, values, names = aws.ToString(update.TableName), aws.ToString(update.ConditionExpression), update.Key, update.ExpressionAttributeValues, update.ExpressionAttributeNames
 		case operation.Delete != nil:
 			deletion := operation.Delete
 			tableName, condition, key, values, names = aws.ToString(deletion.TableName), aws.ToString(deletion.ConditionExpression), deletion.Key, deletion.ExpressionAttributeValues, deletion.ExpressionAttributeNames
@@ -1163,23 +1187,40 @@ func (f *fakeDDB) TransactWriteItems(_ context.Context, in *dynamodb.TransactWri
 					reasons[i].Code = aws.String("None")
 				}
 				reasons[index].Code = aws.String("ConditionalCheckFailed")
+				if operation.Update != nil && operation.Update.ReturnValuesOnConditionCheckFailure == ddbtypes.ReturnValuesOnConditionCheckFailureAllOld {
+					reasons[index].Item = cloneItem(item)
+				}
 				return nil, &ddbtypes.TransactionCanceledException{CancellationReasons: reasons}
 			}
 		}
+		if operation.Delete != nil {
+			writes = append(writes, pendingWrite{table: table, key: encoded})
+		}
+		if operation.Update != nil {
+			update := operation.Update
+			if f.updateHook != nil {
+				f.updateHook(&dynamodb.UpdateItemInput{TableName: update.TableName, Key: update.Key, UpdateExpression: update.UpdateExpression, ConditionExpression: update.ConditionExpression, ExpressionAttributeNames: update.ExpressionAttributeNames, ExpressionAttributeValues: update.ExpressionAttributeValues})
+			}
+			if injected := f.updateItemErrs[tableName]; injected != nil {
+				return nil, injected
+			}
+			item := cloneItem(table[encoded])
+			for name, value := range key {
+				item[name] = value
+			}
+			if err := applyUpdateExpression(aws.ToString(update.UpdateExpression), item, values, names); err != nil {
+				return nil, err
+			}
+			writes = append(writes, pendingWrite{table: table, key: encoded, item: item})
+		}
 	}
-	for _, operation := range in.TransactItems {
-		if operation.Delete == nil {
-			continue
+	for _, write := range writes {
+		if write.item == nil {
+			delete(write.table, write.key)
+		} else {
+			write.table[write.key] = write.item
 		}
-		table, schema, err := f.tableAndSchema(aws.ToString(operation.Delete.TableName))
-		if err != nil {
-			return nil, err
-		}
-		key, err := compositeKey(schema, operation.Delete.Key)
-		if err != nil {
-			return nil, err
-		}
-		delete(table, key)
 	}
+
 	return &dynamodb.TransactWriteItemsOutput{}, nil
 }
