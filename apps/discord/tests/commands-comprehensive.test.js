@@ -2047,6 +2047,15 @@ describe('owner-only unconfirmed revoke recovery', () => {
     expect(selected.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('1/1') }));
   });
 
+  it.each([['inspect', null], [null, null]])('finishes the deferred reply when recent state reads fail (%s)', async (action, id) => {
+    mockDb.getRecentSends.mockRejectedValueOnce(new Error('config reads remain incomplete'));
+    const interaction = recovery(action, id);
+    await _test.handleRevoke(interaction, 'test-key');
+    expect(interaction.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Could not load recent sends. Please try `/qurl revoke` again.' });
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+  });
+
   it('retry still requires a key', async () => {
     const interaction = recovery('retry');
     await _test.handleRevoke(interaction, null);

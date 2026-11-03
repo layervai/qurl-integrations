@@ -3731,16 +3731,23 @@ async function handleRevoke(interaction, apiKey) {
   }
   await interaction.deferReply({ ephemeral: true });
 
+  let recentSends;
+  if (!sendId) {
+    try {
+      recentSends = await db.getRecentSends(interaction.user.id, 5, { acknowledgedOnly: history });
+    } catch (err) {
+      logger.warn('Could not read recent revocation state', { errorName: err?.name });
+      return interaction.editReply({ content: 'Could not load recent sends. Please try `/qurl revoke` again.' });
+    }
+  }
   if (history) {
-    const acknowledged = (await db.getRecentSends(interaction.user.id, 5, { acknowledgedOnly: true }))
-      .filter(row => REVOKE_SEND_ID_REGEX.test(row.send_id));
+    const acknowledged = recentSends.filter(row => REVOKE_SEND_ID_REGEX.test(row.send_id));
     return interaction.editReply({ content: acknowledged.length > 0
       ? 'Acknowledged sends in the recent search window:\n'
         + acknowledged.map(row => `- \`${row.send_id}\`: deletion ${row.revocation_confirmed ? 'confirmed' : 'not confirmed'}`).join('\n')
         + '\nUse `/qurl revoke` with a send-id and action inspect or retry.'
       : 'No acknowledged sends were found in the recent search window. You can still inspect an older saved send ID directly.' });
   }
-  let recentSends;
   if (sendId) {
     const state = await db.getSendRevocationState(sendId, interaction.user.id);
     if (!state) return interaction.editReply({ content: 'This send is unavailable to you.' });
@@ -3763,8 +3770,6 @@ async function handleRevoke(interaction, apiKey) {
       return interaction.editReply({ content: 'This send has no unconfirmed revocation to retry.' });
     }
     recentSends = [{ send_id: sendId }];
-  } else {
-    recentSends = await db.getRecentSends(interaction.user.id, 5);
   }
 
   if (recentSends.length === 0) {
