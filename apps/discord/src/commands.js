@@ -3714,8 +3714,10 @@ async function handleRevoke(interaction, apiKey) {
     if (action === 'inspect') {
       const status = state.revoked_at ? 'Deletion confirmed.'
         : state.revoke_acknowledged_at ? 'Deletion is not confirmed. Acknowledged and hidden from the retry menu.'
-          : state.revoking_at ? 'Deletion is not confirmed. A retry is pending.' : 'No revocation has been requested.';
-      const blocked = state.revoked_at || state.revoking_at || state.revoke_acknowledged_at;
+          : state.revoking_at ? 'Deletion is not confirmed. A retry is pending.'
+            : Object.hasOwn(state, 'initial_persistence_pending') ? 'Initial recipient preparation is incomplete.' : 'No revocation has been requested.';
+      const blocked = state.revoked_at || state.revoking_at || state.revoke_acknowledged_at
+        || Object.hasOwn(state, 'initial_persistence_pending');
       return interaction.editReply({ content: `Send ID: \`${sendId}\`\n${status}${blocked ? ' Add Recipients stays blocked.' : ''}` });
     }
     if (action === 'acknowledge') {

@@ -715,7 +715,7 @@ async function getRecentSends(senderDiscordId, limit = 10, { acknowledgedOnly = 
   const configBySendId = new Map();
   const sendIdOrder = [];
   let ExclusiveStartKey;
-  // At most1000 GSI rows and1000 unique config reads; no unbounded history scan.
+  // At most1000 GSI rows; config reads are batched by page with bounded retries.
   const MAX_GSI_PAGES = 10;
   const TARGET_UNIQUE_SENDS = acknowledgedOnly ? limit : limit * 2;
   // Per-page GSI Limit: caps RCU on the hot path. Without it, a
@@ -755,13 +755,23 @@ async function getRecentSends(senderDiscordId, limit = 10, { acknowledgedOnly = 
       }
     }
     // Hidden rows must not consume the search window and starve older sends.
-    const configs = await Promise.all(newIds.map(id => ddb.send(new GetCommand({
-      TableName: TABLES.qurl_send_configs,
-      Key: { send_id: id },
-      ConsistentRead: true,
-    }))));
-    newIds.forEach((id, index) => {
-      const cfg = configs[index].Item;
+    const configs = new Map();
+    const configRead = { ConsistentRead: true,
+      ProjectionExpression: 'send_id, sender_discord_id, revoking_at, revoked_at, revoke_acknowledged_at' };
+    let unread = { Keys: newIds.map(send_id => ({ send_id })), ...configRead };
+    for (let attempt = 0; unread.Keys.length; attempt++) {
+      const result = await ddb.send(new BatchGetCommand({
+        RequestItems: { [TABLES.qurl_send_configs]: unread },
+      }));
+      for (const row of result.Responses?.[TABLES.qurl_send_configs] || []) configs.set(row.send_id, row);
+      unread = result.UnprocessedKeys?.[TABLES.qurl_send_configs];
+      if (!unread?.Keys?.length) break;
+      if (attempt === 2) throw new Error('getRecentSends: config reads remain incomplete');
+      await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+      unread = { ...unread, ...configRead };
+    }
+    newIds.forEach(id => {
+      const cfg = configs.get(id);
       configBySendId.set(id, cfg);
       const eligible = acknowledgedOnly
         ? cfg?.sender_discord_id === senderDiscordId && Boolean(cfg.revoke_acknowledged_at)
@@ -959,7 +969,7 @@ async function getSendRevocationState(sendId, senderDiscordId) {
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
     ConsistentRead: true,
-    ProjectionExpression: 'send_id, sender_discord_id, revoking_at, revoked_at, revoke_acknowledged_at, revoke_acknowledged_by',
+    ProjectionExpression: 'send_id, sender_discord_id, revoking_at, revoked_at, revoke_acknowledged_at, revoke_acknowledged_by, initial_persistence_pending',
   }));
   return res.Item?.sender_discord_id === senderDiscordId ? res.Item : undefined;
 }

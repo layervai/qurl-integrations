@@ -2029,6 +2029,22 @@ describe('owner-only unconfirmed revoke recovery', () => {
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ components: expect.any(Array) }));
     expect(mockDb.getRecentSends).not.toHaveBeenCalled();
     expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+    mockDeleteFlow.mockResolvedValueOnce({ deleted: true });
+    mockDb.getGuildApiKey.mockResolvedValueOnce('current-guild-key');
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'retry-resource', recipient_discord_id: 'recipient', qurl_id: 'retry-qurl' },
+    ]);
+    mockRevokeMintedLinks.mockResolvedValueOnce(undefined);
+    const selected = {
+      values: [sendId], user: { id: 'user-1' }, guildId: 'guild-1', channelId: 'ch-1',
+      update: jest.fn().mockResolvedValue(undefined), editReply: jest.fn().mockResolvedValue(undefined),
+      reply: jest.fn().mockResolvedValue(undefined),
+    };
+    await require('../src/commands').handleRevokeSelect(selected, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith(sendId, 'user-1');
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith(sendId, 'user-1');
+    expect(selected.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('1/1') }));
   });
 
   it('retry still requires a key', async () => {
@@ -2062,6 +2078,8 @@ describe('owner-only unconfirmed revoke recovery', () => {
     [{ revoked_at: 'time' }, 'Deletion confirmed.'],
     [{ revoke_acknowledged_at: 'time' }, 'Acknowledged and hidden'],
     [{}, 'No revocation has been requested.'],
+    [{ initial_persistence_pending: true }, 'Initial recipient preparation is incomplete.'],
+    [{ initial_persistence_pending: false }, 'Initial recipient preparation is incomplete.'],
   ])('inspects stored state %p without mutations', async (state, expected) => {
     mockDb.getSendRevocationState.mockResolvedValueOnce(state);
     const interaction = recovery();

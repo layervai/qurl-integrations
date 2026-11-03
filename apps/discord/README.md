@@ -355,6 +355,12 @@ send ID shown on an unconfirmed result with `/qurl revoke`:
 - `send-id:<ID> action:retry` opens the normal revoke selection for that send.
   It still needs a configured API key and an explicit menu selection.
 
+Inspection also shows incomplete initial recipient preparation and keeps Add blocked.
+The recent menu reads config state in batches of at most 100 keys per page,
+with at most three attempts for unprocessed keys. An incomplete read fails
+without presenting a partial menu. The existing 1,000-row search bound and
+pending/live priority remain unchanged. Projection reduces payload, not read capacity.
+
 Only the original sender can inspect or acknowledge the send. Inspection and
 acknowledgement do not need a working qURL API key. Acknowledgement records its
 actor and time, emits `revoke_acknowledged`, and does not set `revoked_at` or
