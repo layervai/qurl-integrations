@@ -3887,7 +3887,7 @@ describe('initial send persistence fence', () => {
   });
 
 
-  test('a revoke winning initial persistence sends no DMs and is logged as an expected race', async () => {
+  test('a closed initial guard sends no DMs and remains visible as a warning', async () => {
     const interaction = makeInteraction();
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
     mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', qurl_id: 'q_aaaaaaaaaa1', resource_id: 'res-1' }]);
@@ -3897,7 +3897,7 @@ describe('initial send persistence fence', () => {
     await executeSendPipeline(interaction, makePipelineParams());
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(logger.error).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('aborting send'), expect.objectContaining({ errorCode: 'SEND_CONFIG_REVOKED' }));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('aborting send'), expect.objectContaining({ errorCode: 'SEND_CONFIG_REVOKED' }));
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaaaaaaaaa1'], 'apikey');
   });
 
