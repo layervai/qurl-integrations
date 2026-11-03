@@ -1026,7 +1026,7 @@ async function saveSendConfig({
   attachmentContentType, attachmentUrl, selfDestructSeconds, initialSend = false,
 }) {
   const encryptedUrl = attachmentUrl ? encrypt(attachmentUrl) : null;
-  await ddb.send(new PutCommand({
+  const write = {
     TableName: TABLES.qurl_send_configs,
     Item: {
       send_id: sendId,
@@ -1052,7 +1052,21 @@ async function saveSendConfig({
     // A late initial send must never replace the durable Add Recipients barrier.
     ConditionExpression: initialSend ? 'attribute_not_exists(send_id)'
       : 'attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at) AND attribute_not_exists(initial_persistence_pending)',
-  }));
+  };
+  if (initialSend) {
+    // SDK transport retries reuse this token rather than colliding with their own create.
+    try {
+      await ddb.send(new TransactWriteCommand({
+        TransactItems: [{ Put: write }], ClientRequestToken: crypto.randomUUID(),
+      }));
+    } catch (err) {
+      if (transactionGuardConditionFailed(err, 1)) err.code = 'INITIAL_SEND_CONFIG_EXISTS';
+      throw err;
+    }
+  } else {
+    await ddb.send(new PutCommand(write));
+  }
+
 }
 
 async function getSendConfig(sendId, senderDiscordId) {

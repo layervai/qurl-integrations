@@ -47,9 +47,21 @@ async function main() {
       created.push(name);
     }
     const sendId = randomUUID();
+    let replayedCreate = false;
+    DynamoDBDocumentClient.prototype.send = async function(command, ...args) {
+      if (!replayedCreate && command instanceof TransactWriteCommand
+          && command.input.TransactItems[0]?.Put?.TableName === process.env.DDB_TABLE_PREFIX + 'qurl-send-configs') {
+        replayedCreate = true;
+        await originalSend.call(this, command, ...args);
+        return originalSend.call(this, command, ...args);
+      }
+      return originalSend.call(this, command, ...args);
+    };
     await store.saveSendConfig({ sendId, senderDiscordId: sender, initialSend: true });
+    DynamoDBDocumentClient.prototype.send = originalSend;
+    assert(replayedCreate, 'Replay the exact committed config request to model a lost response');
     assert((await readConfig(sendId)).initial_persistence_pending);
-    await assert.rejects(store.saveSendConfig({ sendId, senderDiscordId: 'other-owner', initialSend: true }), { name: 'ConditionalCheckFailedException' });
+    await assert.rejects(store.saveSendConfig({ sendId, senderDiscordId: 'other-owner', initialSend: true }), { code: 'INITIAL_SEND_CONFIG_EXISTS' });
     await assert.rejects(store.saveSendConfig({ sendId, senderDiscordId: sender }), { name: 'ConditionalCheckFailedException' });
     await assert.rejects(store.recordQURLSendBatch(rows(sendId, 1)), { code: 'SEND_CONFIG_REVOKED' });
     let writes = 0;
@@ -93,7 +105,7 @@ async function main() {
     assert.equal((await readConfig(completeId)).initial_persistence_pending, undefined);
     await store.recordQURLSendBatch([{ ...rows(completeId, 1)[0], recipientDiscordId: 'added-recipient' }]);
     assert.equal((await store.getSendItems(completeId, sender, { consistentRead: true })).length, 200);
-    console.log('Revoke snapshot 99 stays 99; later initial chunk rejected. A complete 199-row send clears preparation and permits guarded Add.');
+    console.log('Committed config replay succeeds; revoke snapshot 99 stays 99; later initial chunk rejected. A complete 199-row send clears preparation and permits guarded Add.');
   } finally {
     resume();
     if (initial) await initial;

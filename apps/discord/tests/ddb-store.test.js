@@ -2481,9 +2481,18 @@ describe('initial send transaction fencing', () => {
   });
 
   test('initial config carries the preparation marker', async () => {
-    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
     await store.saveSendConfig({ sendId: 'initial-1', senderDiscordId: 'sender', initialSend: true });
-    expect(ddbMock.commandCalls(PutCommand)[0].args[0].input.Item.initial_persistence_pending).toBe(true);
-    expect(ddbMock.commandCalls(PutCommand)[0].args[0].input.ConditionExpression).toBe('attribute_not_exists(send_id)');
+    expect(ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems[0].Put.Item.initial_persistence_pending).toBe(true);
+    expect(ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.ClientRequestToken).toBeDefined();
+    expect(ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems[0].Put.ConditionExpression).toBe('attribute_not_exists(send_id)');
   });
+});
+
+
+test('initial config collision is classified without resuming another preparation', async () => {
+  ddbMock.on(TransactWriteCommand).rejects({ name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'ConditionalCheckFailed' }] });
+  await expect(store.saveSendConfig({ sendId: 'initial-1', senderDiscordId: 'sender', initialSend: true }))
+    .rejects.toMatchObject({ code: 'INITIAL_SEND_CONFIG_EXISTS' });
+  expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
 });

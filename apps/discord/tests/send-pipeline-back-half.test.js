@@ -3834,13 +3834,11 @@ describe('initial send persistence fence', () => {
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
   });
 
-  test('initial config barrier stops delivery before any DM or confirmation monitor', async () => {
+  test.each([{ name: 'ConditionalCheckFailedException' }, { name: 'TransactionCanceledException', code: 'INITIAL_SEND_CONFIG_EXISTS' }])('initial config barrier %p stops delivery before any DM or confirmation monitor', async failure => {
     const interaction = makeInteraction();
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
     mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', qurl_id: 'q_aaaaaaaaaa1', resource_id: 'res-1' }]);
-    mockSendDM.mockResolvedValueOnce({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
-    mockDb.recordQURLSendBatch.mockResolvedValueOnce(undefined);
-    mockDb.saveSendConfig.mockRejectedValueOnce(Object.assign(new Error('condition failed'), { name: 'ConditionalCheckFailedException' }));
+    mockDb.saveSendConfig.mockRejectedValueOnce(Object.assign(new Error('condition failed'), failure));
     await executeSendPipeline(interaction, makePipelineParams());
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(logger.error).not.toHaveBeenCalled();

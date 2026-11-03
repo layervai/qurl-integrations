@@ -344,18 +344,20 @@ The check creates and deletes its own disposable table.
 ### Initial persistence and concurrent revocation
 
 The send config is conditionally created before recipient rows, with
-`initial_persistence_pending: true`. Every recipient transaction checks the
+`initial_persistence_pending: true`. Its create transaction has an idempotency
+token so an SDK transport retry does not collide with its own committed row.
+Every recipient transaction checks the
 same owner and rejects revoking, revoked or acknowledged state. Initial sends
 use at most 99 recipient rows per transaction; Add Recipients stays one atomic
 transaction and cannot run while preparation is pending. The last initial
 transaction removes the preparation marker with its final recipient rows.
 Preparation remains until the final transaction commits. A lost final response
 can leave a ready row even though the caller receives an error; that caller
-sends no DMs or confirmation and still cleans up the fresh grants. Earlier
+sends no DMs or confirmation and still attempts bounded fresh-grant cleanup. Earlier
 recipient chunks can remain as reconciliation references after cleanup. This
 change adds no automatic reaping of failed config rows. No DM dispatch starts
-until every initial row is committed. Fresh minted grants are cleaned up on
-configuration or recipient-persistence failure.
+until every initial row is committed. Configuration or recipient-persistence failures attempt bounded fresh-grant
+cleanup. Unconfirmed results retain errors and identifiers for reconciliation.
 
 This reuses the existing config write; it adds no read or network round trip
 on the normal send path. Transactional writes cost more than BatchWriteItem;

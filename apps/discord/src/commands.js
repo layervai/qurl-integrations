@@ -2280,7 +2280,7 @@ async function executeSendPipeline(interaction, {
       selfDestructSeconds, initialSend: true,
     });
   } catch (err) {
-    if (err?.name === 'ConditionalCheckFailedException') {
+    if (err?.name === 'ConditionalCheckFailedException' || err?.code === 'INITIAL_SEND_CONFIG_EXISTS') {
       logger.info('Initial send configuration already exists; no DMs sent', { sendId });
     } else {
       logger.error('Failed to establish the initial send configuration; no DMs sent', { sendId, errorName: err?.name, errorCode: err?.code });
