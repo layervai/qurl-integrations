@@ -339,3 +339,31 @@ and drain in-flight old sends before adopting revoke acknowledgement.
 Check actual conditional writes with DynamoDB Local and synthetic credentials:
 `DDB_TEST_ENDPOINT=http://127.0.0.1:8000 node scripts/smoke-send-config-barrier.js`.
 The check creates and deletes its own disposable table.
+
+
+### Initial persistence and concurrent revocation
+
+The send config is conditionally created before recipient rows, with
+`initial_persistence_pending: true`. Every recipient transaction checks the
+same owner and rejects revoking, revoked or acknowledged state. Initial sends
+use at most 99 recipient rows per transaction; Add Recipients stays one atomic
+transaction and cannot run while preparation is pending. The last initial
+transaction removes the preparation marker with its final recipient rows.
+A failed or interrupted initial write leaves Add blocked. No DM dispatch starts
+until every initial row is committed. Fresh minted grants are cleaned up on
+configuration or recipient-persistence failure.
+
+This reuses the existing config write; it adds no read or network round trip
+on the normal send path. Transactional writes cost more than BatchWriteItem;
+no live cost or capacity result is claimed here. Old saved sends without the
+preparation marker remain compatible with guarded Add.
+
+Run the local interleaving smoke with synthetic credentials and disposable
+DynamoDB Local tables:
+`DDB_TEST_ENDPOINT=http://127.0.0.1:8000 node scripts/smoke-initial-send-fence.js`.
+It pauses after 99 committed rows, establishes a synthetic revocation marker,
+and verifies that later rows do not land. It also checks a complete 199-row
+send and Add after successful preparation. No real DELETE or DM is performed.
+Deploy the guarded producer to all send workers and drain old in-flight sends
+before adopting acknowledgement. Rollback must retain initial transaction guards and preparation checks; do not
+restore an unguarded initial writer while preparation or revocation state exists.
