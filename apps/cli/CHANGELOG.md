@@ -1,5 +1,28 @@
 # Changelog
 
+## [3.7.0](https://github.com/layervai/qurl-integrations/compare/v3.6.1...v3.7.0) (2026-11-03)
+
+
+### Features
+
+* add CRID Stripe payment commands and policy flags ([#1879](https://github.com/layervai/qurl-integrations/issues/1879)) ([3883553](https://github.com/layervai/qurl-integrations/commit/3883553341faa3af51b8f4a13c7980fc0008e08f))
+* **cli:** configure exact email-domain access policies ([#1970](https://github.com/layervai/qurl-integrations/issues/1970)) ([5310365](https://github.com/layervai/qurl-integrations/commit/531036524a1625753b3b6facb1352992abe4b693))
+* **cli:** let host apps name themselves in the User-Agent ([#1657](https://github.com/layervai/qurl-integrations/issues/1657)) ([80ca51a](https://github.com/layervai/qurl-integrations/commit/80ca51a1e5c69d84f6765a6b21c48e0cb637b955))
+* **cli:** show the first-use Terms notice without prompting ([#1730](https://github.com/layervai/qurl-integrations/issues/1730)) ([e05286a](https://github.com/layervai/qurl-integrations/commit/e05286aa7f5252f11b01688f19a84e6f74e2647d))
+
+
+### Bug Fixes
+
+* **cli:** bind daemon control to its state namespace ([#1747](https://github.com/layervai/qurl-integrations/issues/1747)) ([87a9dfe](https://github.com/layervai/qurl-integrations/commit/87a9dfecf60a0cd6fec90589ab2d935f86a633e7))
+* **cli:** confirm committed revocation after stopping local sharing ([#1708](https://github.com/layervai/qurl-integrations/issues/1708)) ([081f004](https://github.com/layervai/qurl-integrations/commit/081f004dcf7ff774ce3467f8057e1270e176c2c7))
+* **cli:** keep daemon diagnostic timestamps unambiguous ([#1852](https://github.com/layervai/qurl-integrations/issues/1852)) ([6989c7d](https://github.com/layervai/qurl-integrations/commit/6989c7ddfa86f929dd54b35b44d5e18d61641d99))
+* **cli:** preserve host product in native daemon jobs ([#1728](https://github.com/layervai/qurl-integrations/issues/1728)) ([7053bb9](https://github.com/layervai/qurl-integrations/commit/7053bb91277502226aa0ee1df2a85f6b867f3b7e)), closes [#1658](https://github.com/layervai/qurl-integrations/issues/1658)
+
+
+### Performance Improvements
+
+* **cli:** cross-compile images with a native compiler ([#1699](https://github.com/layervai/qurl-integrations/issues/1699)) ([4d172bc](https://github.com/layervai/qurl-integrations/commit/4d172bc69e376e0da27cbe5bd2f8a62bb900fd5d))
+
 ## [3.6.1](https://github.com/layervai/qurl-integrations/compare/v3.6.0...v3.6.1) (2026-10-24)
 
 
