@@ -234,6 +234,8 @@ const AUDIT_EVENTS = {
   // dashboard from counting all-failed revokes as successes.
   REVOKE_SUCCESS: 'revoke_success',
   REVOKE_FAILED: 'revoke_failed',
+  // Explicit owner acknowledgement; this event never means deletion succeeded.
+  REVOKE_ACKNOWLEDGED: 'revoke_acknowledged',
 
   // Emitted after an OAuth-minted guild key is persisted. This is a forensic
   // Logs Insights trail while #1366 is outstanding, not a metric; no Terraform

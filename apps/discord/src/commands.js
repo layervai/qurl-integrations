@@ -3161,6 +3161,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       newLinks: [], delivered: 0, failed: 0, newRecipients: [],
     };
   }
+  if (sendConfig.revoke_acknowledged_at) {
+    return {
+      msg: `Cannot add recipients — deletion was acknowledged without confirmation. Use \`/qurl revoke send-id:${sendId} action:retry\` to retry deletion. This does not reopen the send.`,
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
   if (sendConfig.revoking_at) {
     return {
       msg: 'Cannot add recipients — revocation is pending; retry `/qurl revoke`.',
@@ -3718,12 +3724,73 @@ const REVOKE_SELECT_CUSTOM_ID = 'qurl_revoke_select';
 const REVOKE_FLOW_TTL_SECONDS = 60;
 
 async function handleRevoke(interaction, apiKey) {
-  if (!apiKey) {
+  const sendId = interaction.options?.getString?.('send-id')?.toLowerCase();
+  const requestedAction = interaction.options?.getString?.('action');
+  const action = requestedAction || 'inspect';
+  const history = !sendId && requestedAction === 'inspect';
+  if ((sendId || requestedAction) && !history && (!REVOKE_SEND_ID_REGEX.test(sendId || '') || !['inspect', 'retry', 'acknowledge'].includes(action))) {
+    return interaction.reply({ content: 'Use a valid send ID with action inspect, retry, or acknowledge.', ephemeral: true });
+  }
+  if (!apiKey && !history && (!sendId || action === 'retry')) {
     return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
   }
   await interaction.deferReply({ ephemeral: true });
 
-  const recentSends = await db.getRecentSends(interaction.user.id, 5);
+  let recentSends;
+  if (!sendId) {
+    try {
+      recentSends = await db.getRecentSends(interaction.user.id, 5, { acknowledgedOnly: history });
+    } catch (err) {
+      logger.warn('Could not read recent revocation state', { errorName: err?.name });
+      return interaction.editReply({ content: 'Could not load recent sends. Please try `/qurl revoke` again.' });
+    }
+  }
+  if (history) {
+    const acknowledged = recentSends.filter(row => REVOKE_SEND_ID_REGEX.test(row.send_id));
+    return interaction.editReply({ content: acknowledged.length > 0
+      ? 'Acknowledged sends in the recent search window:\n'
+        + acknowledged.map(row => `- \`${row.send_id}\`: deletion ${row.revocation_confirmed ? 'confirmed' : 'not confirmed'}`).join('\n')
+        + '\nUse `/qurl revoke` with a send-id and action inspect or retry.'
+      : 'No acknowledged sends were found in the recent search window. You can still inspect an older saved send ID directly.' });
+  }
+  if (sendId) {
+    let state;
+    try {
+      state = await db.getSendRevocationState(sendId, interaction.user.id);
+    } catch (err) {
+      logger.warn('Could not inspect revocation state', { errorName: err?.name });
+      return interaction.editReply({ content: 'Could not read this send. Please try `/qurl revoke` again.' });
+    }
+    if (!state) return interaction.editReply({ content: 'This send is unavailable to you.' });
+    if (action === 'inspect') {
+      const status = state.revoked_at ? 'Deletion confirmed.'
+        : state.revoke_acknowledged_at ? 'Deletion is not confirmed. Acknowledged and hidden from the retry menu.'
+          : state.revoking_at ? 'Deletion is not confirmed. A retry is pending.'
+            : Object.hasOwn(state, 'initial_persistence_pending') ? 'Initial recipient preparation is incomplete.' : 'No revocation has been requested.';
+      const blocked = state.revoked_at || state.revoking_at || state.revoke_acknowledged_at
+        || Object.hasOwn(state, 'initial_persistence_pending');
+      return interaction.editReply({ content: `Send ID: \`${sendId}\`\n${status}${blocked ? ' Add Recipients stays blocked.' : ''}` });
+    }
+    if (action === 'acknowledge') {
+      if (state.revoke_acknowledged_at && !state.revoked_at) {
+        return interaction.editReply({ content: `Send ID: \`${sendId}\`\nThis send is already acknowledged. Deletion is not confirmed. Add Recipients stays blocked. Use action inspect or retry to check it later.` });
+      }
+      let acknowledged;
+      try {
+        acknowledged = await db.acknowledgeSendRevocation(sendId, interaction.user.id);
+      } catch (err) {
+        logger.warn('Could not acknowledge revocation', { errorName: err?.name });
+        return interaction.editReply({ content: 'Could not confirm acknowledgement. Inspect this send or try `/qurl revoke` again.' });
+      }
+      return interaction.editReply({ content: acknowledged
+        ? `Send ID: \`${sendId}\`\nDeletion is not confirmed. Links may still allow access. This send is hidden from the retry menu, and Add Recipients stays blocked. Use \`/qurl revoke\` with this send ID and action inspect or retry later.`
+        : 'No acknowledgement was recorded. This send may already be acknowledged or confirmed, or no revocation is pending. Inspect it to check its current state.' });
+    }
+    if (state.revoked_at || (!state.revoking_at && !state.revoke_acknowledged_at)) {
+      return interaction.editReply({ content: 'This send has no unconfirmed revocation to retry.' });
+    }
+    recentSends = [{ send_id: sendId }];
+  }
 
   if (recentSends.length === 0) {
     return interaction.editReply({ content: 'No recent sends to revoke.' });
@@ -3804,15 +3871,15 @@ async function handleRevoke(interaction, apiKey) {
         ? interaction.guild?.channels.cache.get(s.channel_id)?.name ?? null
         : null;
       return {
-        label: formatRevokeLabel(s, channelName),
-        description: formatRevokeDescription(s),
+        label: sendId ? 'Retry unconfirmed deletion' : formatRevokeLabel(s, channelName),
+        description: sendId ? 'Retry this send; Add Recipients stays blocked.' : formatRevokeDescription(s),
         value: s.send_id,
       };
     }));
 
   const row = new ActionRowBuilder().addComponents(select);
   await interaction.editReply({
-    content: 'Select a send to revoke all its links:',
+    content: sendId ? `Retry deletion for send \`${sendId}\`? Select it below to confirm. Links may still allow access.` : 'Select a send to revoke all its links:',
     components: [row],
   });
 }
@@ -8472,6 +8539,7 @@ async function handleConfirmCancelClick(interaction, { flow_id, row }) {
 const {
   REVOKE_TRUNC_LIMIT,
   REVOKE_CONTENT_SAFE_MAX,
+  REVOKE_SEND_ID_REGEX,
   buildRevokeHeader,
   renderRevokeContent,
 } = require('./revoke-render');
@@ -8499,7 +8567,7 @@ function revokeReplyPayload(rendered) {
 function renderRevokeMsg(sendId, names, total, showAll, success, finalizationFailed = false) {
   let data;
   try {
-    data = renderRevokeContent({ names, total, showAll, success, finalizationFailed });
+    data = renderRevokeContent({ sendId, names, total, showAll, success, finalizationFailed });
   } catch (err) {
     data = {
       content: revokeRenderFallback(sendId, success, total, err),
@@ -8532,7 +8600,7 @@ function revokeRenderFallback(sendId, success, total, err) {
 
 function safeRevokeHeader(sendId, success, total, finalizationFailed = false) {
   try {
-    return buildRevokeHeader(success, total, { finalizationFailed });
+    return buildRevokeHeader(success, total, { finalizationFailed, sendId });
   } catch (err) {
     return revokeRenderFallback(sendId, success, total, err);
   }
@@ -9021,6 +9089,16 @@ const commands = [
       builder.addSubcommand(sub =>
         sub.setName('revoke')
           .setDescription('Revoke links from a previous send')
+          .addStringOption(opt => opt.setName('send-id')
+            .setDescription('Inspect or manage an unconfirmed revoke by its send ID')
+            .setRequired(false).setMaxLength(36))
+          .addStringOption(opt => opt.setName('action')
+            .setDescription('Inspect acknowledged sends, or manage a send ID (default: inspect)')
+            .setRequired(false).addChoices(
+              { name: 'Inspect state (no deletion)', value: 'inspect' },
+              { name: 'Retry unconfirmed deletion', value: 'retry' },
+              { name: 'Acknowledge unconfirmed deletion and hide it', value: 'acknowledge' },
+            ))
       );
       builder.addSubcommand(sub =>
         sub.setName('help')
@@ -9407,6 +9485,12 @@ const commands = [
       // pass that "saves the redundant DDB read" would silently
       // re-introduce stale-key dispatches. The handleQurlSlashSend
       // docstring documents the contract explicitly.
+      // Local recovery never needs a working qURL key; retry still uses the key gate.
+      if (sub === 'revoke'
+          && (interaction.options.getString('send-id') || interaction.options.getString('action'))
+          && interaction.options.getString('action') !== 'retry') {
+        return handleRevoke(interaction, null);
+      }
       let resolvedApiKey = null;
       if (API_KEY_GATED_SUBCOMMANDS.has(sub)) {
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
@@ -10087,6 +10171,7 @@ module.exports = {
       revokeAllLinks,
       renderRevokeMsg,
       safeRevokeHeader,
+      handleRevoke,
       renderSendConfirm,
       // Pure view-counter render, re-exported (defined in
       // ./view-counter-render) so the wording/floor contract is pinned

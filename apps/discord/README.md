@@ -341,6 +341,44 @@ Check actual conditional writes with DynamoDB Local and synthetic credentials:
 The check creates and deletes its own disposable table.
 
 
+### Acknowledge an unconfirmed revoke
+
+A failed DELETE is not proof that a resource is gone. The sender can use the
+send ID shown on an unconfirmed result with `/qurl revoke`:
+
+- `action:inspect` without an ID lists up to five acknowledged sends from the
+  existing bounded recent-history window. Save the ID when you acknowledge a
+  send; an older ID can still be inspected directly beyond that window.
+- `send-id:<ID> action:inspect` shows the stored state without deletion.
+- `send-id:<ID> action:acknowledge` records that deletion is unconfirmed and
+  hides the send from the normal retry menu. Links may still allow access.
+- `send-id:<ID> action:retry` opens the normal revoke selection for that send.
+  It still needs a configured API key and an explicit menu selection.
+
+Inspection also shows incomplete initial recipient preparation and keeps Add blocked.
+The recent menu reads config state in batches of at most 100 keys per page,
+with at most three attempts for unprocessed keys. An incomplete read fails
+without presenting a partial menu. The existing 1,000-row search bound and
+pending/live priority remain unchanged. Projection reduces payload, not read capacity.
+
+Only the original sender can inspect or acknowledge the send. Inspection and
+acknowledgement do not need a working qURL API key. Acknowledgement records its
+actor and time, emits `revoke_acknowledged`, and does not set `revoked_at` or
+remove `revoking_at`. Add Recipients remains blocked. A later successful retry
+can confirm deletion; it cannot reopen the send for more recipients.
+
+Rollout order: deploy the guarded `saveSendConfig` writer to every worker and
+registrar that can run a send before adopting this acknowledgement change.
+Verify that no old writer or in-flight old send remains. Keep that guard on
+rollback too; never restore an unguarded writer while revocation markers exist. Keep this feature's
+main adoption on hold until that prerequisite is met. An old unguarded writer
+can replace the state after a concurrent revoke. No new table or index is
+required. Never clear either marker to make an acknowledged send reusable.
+
+Local state checks use synthetic credentials and disposable DynamoDB Local
+rows. Run the barrier smoke with a loopback `DDB_TEST_ENDPOINT`:
+`node scripts/smoke-send-config-barrier.js`.
+
 ### Initial persistence and concurrent revocation
 
 The send config is conditionally created before recipient rows, with

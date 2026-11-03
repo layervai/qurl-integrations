@@ -58,6 +58,17 @@ const { AUDIT_EVENTS, SETUP_VIA } = require('../src/constants');
 
 const DOOR_WARN = 'Unrecognized setup door; any admin-change audit for this write records via=unknown';
 
+function mockSendConfigReads(read) {
+  ddbMock.on(BatchGetCommand).callsFake(async input => {
+    const table = 'test-prefix-qurl-send-configs';
+    const rows = await Promise.all(input.RequestItems[table].Keys.map(async Key => {
+      const result = await read({ Key });
+      return result.Item ? { ...result.Item, send_id: Key.send_id } : undefined;
+    }));
+    return { Responses: { [table]: rows.filter(Boolean) } };
+  });
+}
+
 function defaultOwnerArgs(overrides = {}) {
   return {
     webhookOwnerId: 'usr_default',
@@ -1050,7 +1061,7 @@ describe('qurl sends', () => {
       }
       return Promise.resolve({ Items: Array.from({ length: 5 }, (_, i) => ({ send_id: 'sB', recipient_discord_id: `r${i}`, dm_status: 'sent' })) });
     });
-    ddbMock.on(GetCommand).resolves({});
+    ddbMock.on(BatchGetCommand).resolves({});
     const result = await store.getRecentSends('sender', 10);
     expect(result).toHaveLength(2);
     const sA = result.find(r => r.send_id === 'sA');
@@ -1088,7 +1099,7 @@ describe('qurl sends', () => {
         Items: Array.from({ length: 40 }, (_, i) => ({ send_id: 'big', recipient_discord_id: `r${60 + i}`, dm_status: 'sent' })),
       });
     });
-    ddbMock.on(GetCommand).resolves({}); // no revoke
+    ddbMock.on(BatchGetCommand).resolves({}); // no revoke
     const result = await store.getRecentSends('sender', 10);
     expect(result).toHaveLength(1);
     expect(result[0].send_id).toBe('big');
@@ -1098,7 +1109,7 @@ describe('qurl sends', () => {
 
   test('getRecentSends: GSI Query carries Limit so a fat send doesn\'t blow up RCU', async () => {
     ddbMock.on(QueryCommand).resolves({ Items: [] });
-    ddbMock.on(GetCommand).resolves({});
+    ddbMock.on(BatchGetCommand).resolves({});
     await store.getRecentSends('sender', 10);
     const gsiCall = ddbMock.commandCalls(QueryCommand).find(c =>
       c.args[0].input.IndexName === 'sender_discord_id-created_at-index'
@@ -1120,7 +1131,7 @@ describe('qurl sends', () => {
       }
       return Promise.resolve({ Items: [{ send_id: input.ExpressionAttributeValues[':sid'], recipient_discord_id: 'r1', dm_status: 'sent' }] });
     });
-    ddbMock.on(GetCommand).callsFake((input) => {
+    mockSendConfigReads((input) => {
       if (input.Key.send_id === 'sA') {
         return Promise.resolve({ Item: { send_id: 'sA', revoked_at: 'now' } });
       }
@@ -1155,7 +1166,7 @@ describe('qurl sends', () => {
       }
       return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
     });
-    ddbMock.on(GetCommand).callsFake((input) => Promise.resolve({
+    mockSendConfigReads((input) => Promise.resolve({
       Item: input.Key.send_id === 'pending' ? { revoking_at: 'now' } : {},
     }));
 
@@ -1183,7 +1194,7 @@ describe('qurl sends', () => {
       }
       return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
     });
-    ddbMock.on(GetCommand).callsFake((input) => Promise.resolve({
+    mockSendConfigReads((input) => Promise.resolve({
       Item: input.Key.send_id.startsWith('pending-') ? { revoking_at: 'now' } : {},
     }));
 
@@ -1207,7 +1218,7 @@ describe('qurl sends', () => {
       }
       return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
     });
-    ddbMock.on(GetCommand).callsFake((input) => Promise.resolve({
+    mockSendConfigReads((input) => Promise.resolve({
       Item: input.Key.send_id === 'pending' ? { revoking_at: 'now' } : {},
     }));
 
@@ -2501,4 +2512,148 @@ test('initial config collision is classified without resuming another preparatio
 test.each([[], null, undefined])('empty initial input %p remains a no-op', async sends => {
   await store.recordQURLSendBatch(sends, { initialSend: true });
   expect(ddbMock.calls()).toHaveLength(0);
+});
+
+
+describe('unconfirmed revocation acknowledgement', () => {
+  test('owner acknowledgement is conditional, durable and distinct from deletion', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    expect(await store.acknowledgeSendRevocation('send-1', 'sender')).toBe(true);
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ConditionExpression).toBe('sender_discord_id = :s AND attribute_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at)');
+    expect(input.UpdateExpression).toBe('SET revoke_acknowledged_at = :t, revoke_acknowledged_by = :s');
+    expect(input.UpdateExpression).not.toContain('REMOVE');
+    expect(input.ExpressionAttributeValues[':s']).toBe('sender');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.REVOKE_ACKNOWLEDGED, { send_id: 'send-1', sender_discord_id: 'sender' });
+  });
+
+  test('failed condition never reports or audits an acknowledgement', async () => {
+    ddbMock.on(UpdateCommand).rejects({ name: 'ConditionalCheckFailedException' });
+    expect(await store.acknowledgeSendRevocation('send-1', 'sender')).toBe(false);
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('storage failure propagates without an acknowledgement audit', async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error('storage unavailable'));
+    await expect(store.acknowledgeSendRevocation('send-1', 'sender')).rejects.toThrow('storage unavailable');
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('invalid sender cannot read or acknowledge state', async () => {
+    expect(await store.acknowledgeSendRevocation('send-1', '')).toBe(false);
+    expect(await store.getSendRevocationState('send-1', '')).toBeUndefined();
+    expect(ddbMock.calls()).toHaveLength(0);
+  });
+
+  test('state inspection is consistent, owner-scoped and does not request secrets', async () => {
+    const state = { send_id: 'send-1', sender_discord_id: 'sender', revoking_at: 'time' };
+    ddbMock.on(GetCommand).resolves({ Item: state });
+    expect(await store.getSendRevocationState('send-1', 'other')).toBeUndefined();
+    expect(await store.getSendRevocationState('send-1', 'sender')).toEqual(state);
+    const input = ddbMock.commandCalls(GetCommand)[0].args[0].input;
+    expect(input.ConsistentRead).toBe(true);
+    expect(input.ProjectionExpression).not.toMatch(/token|attachment|url|personal_message/);
+    expect(input.ProjectionExpression).toContain('initial_persistence_pending');
+  });
+
+  test('acknowledged sends do not consume the menu search window', async () => {
+    const hidden = Array.from({ length: 10 }, (_, i) => ({ send_id: `hidden-${i}`, created_at: 'newer' }));
+    ddbMock.on(QueryCommand).callsFake(input => {
+      if (!input.IndexName) return { Items: [] };
+      return input.ExclusiveStartKey
+        ? { Items: [{ send_id: 'live', created_at: 'older' }] }
+        : { Items: hidden, LastEvaluatedKey: { send_id: 'next' } };
+    });
+    mockSendConfigReads(input => ({ Item: input.Key.send_id === 'live' ? undefined : { revoke_acknowledged_at: 'time', revoking_at: 'time' } }));
+    expect((await store.getRecentSends('sender', 5)).map(row => row.send_id)).toEqual(['live']);
+    expect(ddbMock.commandCalls(QueryCommand).filter(call => call.args[0].input.IndexName)).toHaveLength(2);
+    expect(ddbMock.commandCalls(QueryCommand).filter(call => !call.args[0].input.IndexName)).toHaveLength(1);
+  });
+});
+
+
+test('acknowledged history is owner-scoped and skips recipient-count queries', async () => {
+  ddbMock.on(QueryCommand).resolves({ Items: [{ send_id: 'own', created_at: 'new' }, { send_id: 'other', created_at: 'old' }] });
+  mockSendConfigReads(input => ({ Item: {
+    sender_discord_id: input.Key.send_id === 'own' ? 'sender' : 'other-sender',
+    revoke_acknowledged_at: 'time', revoked_at: 'time',
+  } }));
+  expect(await store.getRecentSends('sender', 5, { acknowledgedOnly: true }))
+    .toEqual([{ send_id: 'own', revocation_confirmed: true }]);
+  expect(ddbMock.commandCalls(QueryCommand).filter(call => !call.args[0].input.IndexName)).toHaveLength(0);
+});
+
+
+describe('revoke menu batched config reads', () => {
+  const table = 'test-prefix-qurl-send-configs';
+  beforeEach(() => {
+    ddbMock.on(QueryCommand).callsFake(input => ({ Items: input.IndexName
+      ? Array.from({ length: 100 }, (_, i) => ({ send_id: `send-${i}`, created_at: 'time' })) : [] }));
+  });
+
+  test('one batch preserves GSI order and retry priority despite unordered results', async () => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { [table]: [
+      { send_id: 'send-99', revoking_at: 'time' },
+      { send_id: 'send-0' },
+    ] } });
+    const rows = await store.getRecentSends('sender', 5);
+    expect(rows.map(row => row.send_id)).toEqual(['send-99', 'send-0', 'send-1', 'send-2', 'send-3']);
+    const calls = ddbMock.commandCalls(BatchGetCommand);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args[0].input.RequestItems[table].Keys).toHaveLength(100);
+    expect(calls[0].args[0].input.RequestItems[table].ConsistentRead).toBe(true);
+    expect(calls[0].args[0].input.RequestItems[table].ProjectionExpression).not.toMatch(/token|attachment_url/);
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+  });
+
+  test('retries only unprocessed keys and does not expose a finalized send', async () => {
+    jest.useFakeTimers();
+    try {
+      ddbMock.on(BatchGetCommand).resolvesOnce({ UnprocessedKeys: { [table]: { Keys: [{ send_id: 'send-0' }] } } })
+        .resolves({ Responses: { [table]: [{ send_id: 'send-0', revoked_at: 'time' }] } });
+      const pending = store.getRecentSends('sender', 5);
+      await jest.runAllTimersAsync();
+      const rows = await pending;
+      expect(rows.some(row => row.send_id === 'send-0')).toBe(false);
+      const retry = ddbMock.commandCalls(BatchGetCommand)[1].args[0].input.RequestItems[table];
+      expect(retry.Keys).toEqual([{ send_id: 'send-0' }]);
+      expect(retry.ConsistentRead).toBe(true);
+      expect(retry.ProjectionExpression).toContain('revoke_acknowledged_at');
+    } finally { jest.useRealTimers(); }
+  });
+
+  test('persistent incomplete reads fail closed before recipient queries', async () => {
+    jest.useFakeTimers();
+    try {
+      ddbMock.on(BatchGetCommand).resolves({ UnprocessedKeys: { [table]: { Keys: [{ send_id: 'send-0' }] } } });
+      const failed = expect(store.getRecentSends('sender', 5)).rejects.toThrow('config reads remain incomplete');
+      await jest.runAllTimersAsync();
+      await failed;
+      expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(3);
+      expect(ddbMock.commandCalls(QueryCommand).every(call => call.args[0].input.IndexName)).toBe(true);
+    } finally { jest.useRealTimers(); }
+  });
+});
+
+
+test('batched menu config projection retains all existing display labels', async () => {
+  const table = 'test-prefix-qurl-send-configs';
+  ddbMock.on(QueryCommand).callsFake(input => ({ Items: input.IndexName ? [{ send_id: 'send-1' }] : [] }));
+  ddbMock.on(BatchGetCommand).callsFake(input => {
+    const projection = input.RequestItems[table].ProjectionExpression.split(', ');
+    const row = { send_id: 'send-1', attachment_name: 'file.txt', location_name: 'Place', personal_message: 'Note' };
+    return { Responses: { [table]: [Object.fromEntries(Object.entries(row).filter(([key]) => projection.includes(key)))] } };
+  });
+  expect((await store.getRecentSends('sender', 5))[0]).toMatchObject({
+    attachment_name: 'file.txt', location_name: 'Place', personal_message: 'Note',
+  });
+});
+
+test('keyless acknowledged history uses eventual reads and never requests recipient counts', async () => {
+  ddbMock.on(QueryCommand).resolves({ Items: [{ send_id: 'send-1' }] });
+  ddbMock.on(BatchGetCommand).resolves({});
+  expect(await store.getRecentSends('sender', 5, { acknowledgedOnly: true })).toEqual([]);
+  const request = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input.RequestItems['test-prefix-qurl-send-configs'];
+  expect(request.ConsistentRead).toBe(false);
+  expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(1);
 });

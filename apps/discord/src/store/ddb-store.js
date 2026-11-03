@@ -678,7 +678,7 @@ async function isSendRevoked(sendId) {
   return Boolean(res.Item?.revoked_at);
 }
 
-async function getRecentSends(senderDiscordId, limit = 10) {
+async function getRecentSends(senderDiscordId, limit = 10, { acknowledgedOnly = false } = {}) {
   if (!Number.isInteger(limit) || limit <= 0) {
     throw new TypeError('getRecentSends: limit must be a positive integer');
   }
@@ -689,12 +689,11 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   // produce one row per send with per-send metadata. DDB: query the
   // sender's recent send_ids via the GSI to build the UNIQUE set of
   // recent sends (limit*3 overfetch for revoked-filter headroom),
-  // then do a per-send Query to compute the accurate
-  // recipient_count / delivered_count (the GSI result may truncate
-  // if one send has many recipients). Then Promise.all the config
-  // fetches. Bounded fanout at ~10 queries + 10 gets.
-  // Paginate the GSI until we've collected `limit * 2` unique
-  // send_ids (2x for revoked-filter headroom) OR the GSI is
+  // then query eligible sends for accurate recipient/delivery counts.
+  // Config reads exclude confirmed or acknowledged sends before recipient
+  // queries, so hidden sends do not consume the visible search window.
+  // Paginate the GSI until we've collected `limit * 2` eligible unique
+  // send_ids (2x for menu headroom) OR the GSI is
   // exhausted. Fixed-Limit overfetch would starve older sends if a
   // single recent send has many recipients — their rows fill the
   // window and push older distinct sends past the limit. Paginating
@@ -713,10 +712,12 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   // mock returns full rows. Cross-repo invariant; flag both sides
   // if you change either.
   const metaBySendId = new Map();
+  const configBySendId = new Map();
   const sendIdOrder = [];
   let ExclusiveStartKey;
+  // At most 1000 GSI rows; config reads are batched by page with bounded retries.
   const MAX_GSI_PAGES = 10;
-  const TARGET_UNIQUE_SENDS = limit * 2;
+  const TARGET_UNIQUE_SENDS = acknowledgedOnly ? limit : limit * 2;
   // Per-page GSI Limit: caps RCU on the hot path. Without it, a
   // sender whose latest send fanned out to 1000 recipients reads
   // ALL 1000 rows (1MB / 8KB-ish per row → up to ~125 RCU
@@ -746,19 +747,49 @@ async function getRecentSends(senderDiscordId, limit = 10) {
     // code under that ordering. If a future change ever flips
     // ScanIndexForward to true, revisit this — first-seen would
     // become oldest-wins which isn't what we want.
+    const newIds = [];
     for (const row of sendsRes.Items || []) {
       if (!metaBySendId.has(row.send_id)) {
-        sendIdOrder.push(row.send_id);
+        newIds.push(row.send_id);
         metaBySendId.set(row.send_id, row);
       }
     }
+    // Hidden rows must not consume the search window and starve older sends.
+    const configs = new Map();
+    const configRead = { ConsistentRead: !acknowledgedOnly,
+      ProjectionExpression: 'send_id, sender_discord_id, revoking_at, revoked_at, revoke_acknowledged_at, attachment_name, location_name, personal_message' };
+    let unread = { Keys: newIds.map(send_id => ({ send_id })), ...configRead };
+    for (let attempt = 0; unread.Keys.length; attempt++) {
+      const result = await ddb.send(new BatchGetCommand({
+        RequestItems: { [TABLES.qurl_send_configs]: unread },
+      }));
+      for (const row of result.Responses?.[TABLES.qurl_send_configs] || []) configs.set(row.send_id, row);
+      unread = result.UnprocessedKeys?.[TABLES.qurl_send_configs];
+      if (!unread?.Keys?.length) break;
+      if (attempt === 2) throw new Error('getRecentSends: config reads remain incomplete');
+      await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+      unread = { ...unread, ...configRead };
+    }
+    newIds.forEach(id => {
+      const cfg = configs.get(id);
+      configBySendId.set(id, cfg);
+      const eligible = acknowledgedOnly
+        ? cfg?.sender_discord_id === senderDiscordId && Boolean(cfg.revoke_acknowledged_at)
+        : !cfg?.revoked_at && !cfg?.revoke_acknowledged_at;
+      if (eligible) sendIdOrder.push(id);
+    });
     ExclusiveStartKey = sendsRes.LastEvaluatedKey;
     if (!ExclusiveStartKey) break;
   }
 
-  // Parallel fetch: per-send recipient query + per-send config
-  // getItem. Query on the BASE table (pk=send_id) returns every
-  // recipient for that send, so counts are exact.
+  if (acknowledgedOnly) {
+    return sendIdOrder.slice(0, limit).map(id => ({
+      send_id: id,
+      revocation_confirmed: Boolean(configBySendId.get(id).revoked_at),
+    }));
+  }
+
+  // Query each eligible send's base-table partition for exact recipient counts.
   //
   // Pagination matters here: a single send fanning out to thousands
   // of recipients (or shorter rows but >1MB total) would silently
@@ -766,30 +797,18 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   // recipient_count / delivered_count would under-report. queryAll
   // threads LastEvaluatedKey across pages so the count is exact
   // regardless of fan-out size.
-  const [allRecipients, allConfigs] = await Promise.all([
-    Promise.all(sendIdOrder.map(id => queryAll({
-      TableName: TABLES.qurl_sends,
-      KeyConditionExpression: 'send_id = :sid',
-      ExpressionAttributeValues: { ':sid': id },
-    }))),
-    Promise.all(sendIdOrder.map(id => ddb.send(new GetCommand({
-      TableName: TABLES.qurl_send_configs,
-      Key: { send_id: id },
-    })))),
-  ]);
+  const allRecipients = await Promise.all(sendIdOrder.map(id => queryAll({
+    TableName: TABLES.qurl_sends,
+    KeyConditionExpression: 'send_id = :sid',
+    ExpressionAttributeValues: { ':sid': id },
+  })));
 
   const rows = [];
   for (let i = 0; i < sendIdOrder.length; i++) {
     const sendId = sendIdOrder[i];
     const meta = metaBySendId.get(sendId);
     const recipients = allRecipients[i] || [];
-    const cfg = allConfigs[i].Item;
-    // revoking_at intentionally remains selectable: it means at least one
-    // prior DELETE failed and the operator must be able to retry. Only the
-    // fully finalized revoked_at state removes the send from the menu.
-    // TODO(#1376): add an audited operator-dismissed state for permanently
-    // unrecoverable rows so they do not occupy the bounded menu forever.
-    if (cfg && cfg.revoked_at) continue;
+    const cfg = configBySendId.get(sendId);
     const recipientCount = recipients.length;
     const deliveredCount = recipients.filter(r => r.dm_status === 'sent').length;
     rows.push({
@@ -811,7 +830,7 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   // not dominate the bounded Discord menu. When both kinds exist, reserve at
   // least half the slots for live sends. A one-slot caller keeps the pending
   // send because it is the only path to retry the in-progress destructive
-  // operation. #1376 tracks an explicit audited dismissal path.
+  // operation. Explicitly acknowledged sends are excluded above.
   const newestFirst = (a, b) => (b.created_at || '').localeCompare(a.created_at || '');
   const pending = rows.filter(row => row.revocation_pending).sort(newestFirst);
   const live = rows.filter(row => !row.revocation_pending).sort(newestFirst);
@@ -942,6 +961,35 @@ async function markSendRevoking(sendId, senderDiscordId) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
     return flipRevokingAt(sendId, senderDiscordId);
   }
+}
+
+async function getSendRevocationState(sendId, senderDiscordId) {
+  if (!hasSenderIdentity(senderDiscordId)) return undefined;
+  const res = await ddb.send(new GetCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    ConsistentRead: true,
+    ProjectionExpression: 'send_id, sender_discord_id, revoking_at, revoked_at, revoke_acknowledged_at, revoke_acknowledged_by, initial_persistence_pending',
+  }));
+  return res.Item?.sender_discord_id === senderDiscordId ? res.Item : undefined;
+}
+
+async function acknowledgeSendRevocation(sendId, senderDiscordId) {
+  if (!hasSenderIdentity(senderDiscordId)) return false;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      UpdateExpression: 'SET revoke_acknowledged_at = :t, revoke_acknowledged_by = :s',
+      ConditionExpression: 'sender_discord_id = :s AND attribute_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at)',
+      ExpressionAttributeValues: { ':s': senderDiscordId, ':t': nowIso() },
+    }));
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+  logger.audit(AUDIT_EVENTS.REVOKE_ACKNOWLEDGED, { send_id: sendId, sender_discord_id: senderDiscordId });
+  return true;
 }
 
 async function markSendRevoked(sendId, senderDiscordId) {
@@ -2052,6 +2100,7 @@ module.exports = {
   // QURL sends
   recordQURLSend, recordQURLSendBatch, updateSendDMStatus, markSendDMDelivered,
   getRecentSends, markSendRevoking, markSendRevoked, isSendRevoked,
+  getSendRevocationState, acknowledgeSendRevocation,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   findSendsByQurlId, markExpiredDMEdited, clearExpiredDMEdited,
   markConsumedDMEdited, clearConsumedDMEdited,
