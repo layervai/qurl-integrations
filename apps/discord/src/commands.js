@@ -2280,7 +2280,7 @@ async function executeSendPipeline(interaction, {
       selfDestructSeconds, initialSend: true,
     });
   } catch (err) {
-    if (err?.name === 'ConditionalCheckFailedException' || err?.code === 'INITIAL_SEND_CONFIG_EXISTS') {
+    if (err?.code === 'INITIAL_SEND_CONFIG_EXISTS') {
       logger.info('Initial send configuration already exists; no DMs sent', { sendId });
     } else {
       logger.error('Failed to establish the initial send configuration; no DMs sent', { sendId, errorName: err?.name, errorCode: err?.code });
@@ -3123,14 +3123,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       newLinks: [], delivered: 0, failed: 0, newRecipients: [],
     };
   }
-  if (Object.hasOwn(sendConfig, 'initial_persistence_pending')) {
-    return { msg: 'Cannot add recipients — the original send has not finished saving.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
-  }
   if (sendConfig.revoking_at) {
     return {
       msg: 'Cannot add recipients — revocation is pending; retry `/qurl revoke`.',
       newLinks: [], delivered: 0, failed: 0, newRecipients: [],
     };
+  }
+  if (Object.hasOwn(sendConfig, 'initial_persistence_pending')) {
+    return { msg: 'Cannot add recipients — the original send has not finished saving.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
   // #352 entry gate. Shares the same `EXPIRY_LABELS` membership

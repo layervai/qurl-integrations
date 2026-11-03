@@ -3834,11 +3834,11 @@ describe('initial send persistence fence', () => {
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
   });
 
-  test.each([{ name: 'ConditionalCheckFailedException' }, { name: 'TransactionCanceledException', code: 'INITIAL_SEND_CONFIG_EXISTS' }])('initial config barrier %p stops delivery before any DM or confirmation monitor', async failure => {
+  test('initial config conflict stops delivery before any DM or confirmation monitor', async () => {
     const interaction = makeInteraction();
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
     mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', qurl_id: 'q_aaaaaaaaaa1', resource_id: 'res-1' }]);
-    mockDb.saveSendConfig.mockRejectedValueOnce(Object.assign(new Error('condition failed'), failure));
+    mockDb.saveSendConfig.mockRejectedValueOnce(Object.assign(new Error('condition failed'), { name: 'TransactionCanceledException', code: 'INITIAL_SEND_CONFIG_EXISTS' }));
     await executeSendPipeline(interaction, makePipelineParams());
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(logger.error).not.toHaveBeenCalled();
@@ -3909,6 +3909,24 @@ describe('initial send persistence fence', () => {
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaaaaaaaaa1'], 'apikey');
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('aborting send'), expect.objectContaining({ errorName: 'TransactionCanceledException' }));
+  });
+
+
+  test('revocation guidance takes priority over unfinished preparation', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({ revoking_at: 'time', initial_persistence_pending: true });
+    const result = await handleAddRecipients('initial-1', new Map(), makeInteraction(), 'apikey');
+    expect(result.msg).toContain('revocation is pending');
+    expect(result.msg).toContain('/qurl revoke');
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+  });
+
+  test('empty mint output stops before initial config creation', async () => {
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([]);
+    await executeSendPipeline(makeInteraction(), makePipelineParams());
+    expect(mockDb.saveSendConfig).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
   });
 
 });

@@ -337,6 +337,8 @@ async function recordQURLSendBatch(sends, options = {}) {
     const finishInitial = initialSend && offset + batch.length === sends.length;
     // The final guarded write clears preparation in the same transaction as
     // its recipient rows. Earlier failures leave Add Recipients blocked.
+    // Keep config guards before Puts: cancellation reasons are positional,
+    // including the final initial Update guard.
     const TransactItems = [
       ...sendIds.map(sendId => {
         const guard = {

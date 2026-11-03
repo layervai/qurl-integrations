@@ -2496,3 +2496,9 @@ test('initial config collision is classified without resuming another preparatio
     .rejects.toMatchObject({ code: 'INITIAL_SEND_CONFIG_EXISTS' });
   expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
 });
+
+
+test.each([[], null, undefined])('empty initial input %p remains a no-op', async sends => {
+  await store.recordQURLSendBatch(sends, { initialSend: true });
+  expect(ddbMock.calls()).toHaveLength(0);
+});
