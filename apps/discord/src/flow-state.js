@@ -28,10 +28,10 @@
 //      delay can be up to ~48h, so the reader contract treats
 //      `now > expires_at` as absent — see `loadFlow` below.
 //
-//   3. Mandatory app-layer payload encryption via `encryptStrict`.
+//   3. Mandatory app-layer payload encryption via `encrypt`.
 //      The payload map transitively carries `attachment_url` and
 //      recipient lists; both are unacceptable in plaintext-at-rest.
-//      `encryptStrict` fails closed if `KEY_ENCRYPTION_KEY` is
+//      `encrypt` fails closed if `KEY_ENCRYPTION_KEY` is
 //      unset, so a misconfigured deploy can't silently persist
 //      plaintext.
 //
@@ -66,7 +66,7 @@ function isConditionalCheckFailed(err) {
   return err?.name === 'ConditionalCheckFailedException';
 }
 
-const { encryptStrict, decrypt } = require('./utils/crypto');
+const { encrypt, decrypt } = require('./utils/crypto');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
 const { parseFlowId } = require('./flow-id');
@@ -167,7 +167,7 @@ function nowEpochSeconds() {
 // of flow type.
 function encryptPayload(payload) {
   // Load-bearing null guard: without it, payload=null would
-  // encryptStrict(JSON.stringify(null)) = ciphertext-of-"null"
+  // encrypt(JSON.stringify(null)) = ciphertext-of-"null"
   // (the 4-byte string), storing a non-null DDB attribute that
   // decrypts to the string "null", which JSON.parse correctly
   // reverses but at the cost of a wasted encrypt call AND an
@@ -175,7 +175,7 @@ function encryptPayload(payload) {
   // sometimes). Pass null through unchanged so the column is
   // either a real ciphertext or a DDB null — never both.
   if (payload == null) return null;
-  return encryptStrict(JSON.stringify(payload));
+  return encrypt(JSON.stringify(payload));
 }
 
 function decryptPayload(ciphertext) {

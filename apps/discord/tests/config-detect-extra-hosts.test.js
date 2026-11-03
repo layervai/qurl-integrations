@@ -38,4 +38,10 @@ describe('config — DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS / DETECT_EXTRA_NO
       expect(() => require('../src/config')).toThrow(/bad-suffix\.example/);
     });
   });
+
+  it('trims the detect tunnel slug before native resource lookup', () => {
+    withFreshConfig({ DETECT_TUNNEL_SLUG: '  detect-prod \t' }, () => {
+      expect(require('../src/config').DETECT_TUNNEL_SLUG).toBe('detect-prod');
+    });
+  });
 });

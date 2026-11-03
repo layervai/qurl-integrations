@@ -15,6 +15,7 @@ const {
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
+  missingDetectCommandKeys,
   missingWebhookSecretKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
@@ -719,4 +720,23 @@ describe('invalidStateSecretValues', () => {
     })).toEqual([]);
   });
 
+});
+
+describe('missingDetectCommandKeys', () => {
+  const ready = { DETECT_COMMAND_ENABLED: true, QURL_API_KEY: 'lv_live_synthetic_detect', DETECT_TUNNEL_SLUG: 'detect-fixture' };
+  test('disabled detect adds no requirement', () => {
+    expect(missingDetectCommandKeys({})).toEqual([]);
+    expect(missingDetectCommandKeys({ DETECT_COMMAND_ENABLED: false, QURL_API_KEY: 'PLACEHOLDER' })).toEqual([]);
+  });
+  test.each(['QURL_API_KEY', 'DETECT_TUNNEL_SLUG'].flatMap(name =>
+    [undefined, null, 0, '', ' \t', ...(name === 'QURL_API_KEY' ? ['PLACEHOLDER', ' placeholder ', ' lv_live_synthetic_detect', 'lv_live_synthetic_detect\n'] : [])].map(value => [name, value])
+  ))('enabled detect rejects %s = %p', (name, value) => {
+    expect(missingDetectCommandKeys({ ...ready, [name]: value })).toEqual([name]);
+  });
+  test('configured bot key and tunnel slug pass', () => {
+    expect(missingDetectCommandKeys(ready)).toEqual([]);
+  });
+  test('the secret sentinel is not a reserved resource slug', () => {
+    expect(missingDetectCommandKeys({ ...ready, DETECT_TUNNEL_SLUG: 'placeholder' })).toEqual([]);
+  });
 });

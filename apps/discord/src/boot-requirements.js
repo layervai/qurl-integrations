@@ -35,8 +35,8 @@ function bootRequired() {
 }
 
 // Additionally required when NODE_ENV=production. QURL_API_KEY is NOT
-// here: it is only the global fallback for /qurl send + /qurl map, and
-// every deployment shape relies on per-guild /qurl setup instead.
+// here: send/map can use per-guild setup. Detect and default-webhook
+// discovery enforce their conditional global-key requirements separately.
 //
 // KEY_ENCRYPTION_KEY appears here AND in missingKekRequiredKeys. The
 // two overlap on prod-with-OAuth (both fail closed there); the
@@ -451,9 +451,8 @@ function invalidHotStandbyValues(cfg) {
 }
 
 // State-signing secret checks for the shared OAuth state signer
-// (utils/oauth-state.js). Two rules, both production-only (the caller
-// in index.js sits inside the NODE_ENV=production block, keeping dev
-// localhost workflows convenient):
+// (utils/oauth-state.js). The caller applies both rules in every non-test
+// environment; a dormant OAuth flow needs no state secret:
 //
 //   Presence — when qURL OAuth is configured (required AUTH0_* set), SOME key
 //   in the signer's resolution chain must exist. This deliberately stays
@@ -515,6 +514,14 @@ function missingMapCommandKeys(cfg) {
     return ['GOOGLE_MAPS_API_KEY'];
   }
   return [];
+}
+
+function missingDetectCommandKeys(cfg) {
+  if (!cfg.DETECT_COMMAND_ENABLED) return [];
+  return ['QURL_API_KEY', 'DETECT_TUNNEL_SLUG'].filter(name => {
+    const value = cfg[name];
+    return typeof value !== 'string' || !value.trim() || (name === 'QURL_API_KEY' && (value !== value.trim() || isInfraSeedSentinel(value)));
+  });
 }
 
 // Process-role parsing for the gateway/HTTP split. Lifted out of
@@ -600,6 +607,7 @@ module.exports = {
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
+  missingDetectCommandKeys,
   missingWebhookSecretKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,

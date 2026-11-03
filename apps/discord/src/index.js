@@ -37,6 +37,7 @@ const {
   baseUrlHttpsProblem,
   missingEventShipperKeys,
   missingMapCommandKeys,
+  missingDetectCommandKeys,
   missingWebhookSecretKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
@@ -153,10 +154,9 @@ if (isMultiTenant) {
 // workflows stay convenient. Keep this list in sync with the production
 // comments in .env.example.
 if (process.env.NODE_ENV === 'production') {
-  // QURL_API_KEY is deliberately NOT required: it is only the global
-  // fallback for /qurl send + /qurl map, and every deployment shape
-  // relies on per-guild /qurl setup. List is in boot-requirements.js
-  // for testability.
+  // QURL_API_KEY is not unconditional: send/map can use per-guild setup.
+  // Detect and default-webhook discovery check their own key requirements.
+  // The unconditional list lives in boot-requirements.js for testability.
   const prodMissing = missingProdKeys(process.env);
   if (prodMissing.length > 0) {
     logger.error(`NODE_ENV=production but missing required env vars: ${prodMissing.join(', ')}`);
@@ -189,6 +189,12 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
+
+}
+
+// Active OAuth flows must fail at boot in preview/dev as well as production.
+// Only the explicit test environment may use the signer's test fallback.
+if (process.env.NODE_ENV !== 'test') {
   // Presence + length-floor policy for the OAuth state-signing secrets
   // lives in boot-requirements.js (invalidStateSecretValues) so it's
   // unit-testable; this is just the log-and-exit plumbing, same
@@ -202,10 +208,9 @@ if (process.env.NODE_ENV === 'production') {
 
 // Any deploy that runs the qURL OAuth setup flow must encrypt persisted
 // credentials at rest, in any NODE_ENV — guild_configs.qurl_api_key is
-// written straight out of that callback. setGuildApiKey uses
-// encryptStrict as a backstop, but failing closed at boot is the loud
-// signal. Smoke-test the key material so a malformed value is caught here
-// instead of on the first encrypt() call minutes into serving traffic.
+// written straight out of that callback. Operator-managed local config keeps
+// its explicit plaintext fallback; OAuth deployments require this boot gate.
+// Smoke-test key material here instead of failing on the first write.
 //
 // Role-agnostic by design: a `gateway`-role process doesn't mount the
 // OAuth callback, but env vars are uniform across roles in a single
@@ -217,17 +222,12 @@ if (kekMissing.length > 0) {
   logger.error('Generate KEY_ENCRYPTION_KEY with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
   process.exit(1);
 }
-if (process.env.KEY_ENCRYPTION_KEY) {
+if (process.env.KEY_ENCRYPTION_KEY || process.env.KEY_ENCRYPTION_KEY_PREV) {
   try {
-    // encryptStrict (not encrypt) so a future refactor that drops the
-    // outer env-var guard fails loudly here instead of silently falling
-    // through encrypt's plaintext-passthrough branch.
-    const { encryptStrict, decrypt } = require('./utils/crypto');
-    if (decrypt(encryptStrict('boot-smoke')) !== 'boot-smoke') {
-      throw new Error('round-trip mismatch');
-    }
+    const { smokeTestKeys } = require('./utils/crypto');
+    smokeTestKeys();
   } catch (err) {
-    logger.error('KEY_ENCRYPTION_KEY smoke test failed at boot — refusing to start', { error: err.message });
+    logger.error('Encryption key smoke test failed at boot — refusing to start', { error: err.message });
     process.exit(1);
   }
 }
@@ -356,6 +356,15 @@ if (mapCommandMissing.length > 0) {
     `MAP_COMMAND_ENABLED=true but ${mapCommandMissing.join(', ')} is missing or still the literal "PLACEHOLDER" sentinel. ` +
     'Seed a real Google Maps Platform API key (Places API enabled, no HTTP-referrer restriction) into the ' +
     '/qurl-bot-discord/GOOGLE_MAPS_API_KEY SSM parameter before re-flipping the toggle.'
+  );
+  process.exit(1);
+}
+
+const detectCommandMissing = missingDetectCommandKeys(config);
+if (detectCommandMissing.length > 0) {
+  logger.error(
+    `DETECT_COMMAND_ENABLED=true but required settings are invalid (missing/blank, or a padded/PLACEHOLDER QURL_API_KEY): ${detectCommandMissing.join(', ')}. ` +
+    'Seed the bot API key and detect tunnel slug before enabling detect.'
   );
   process.exit(1);
 }

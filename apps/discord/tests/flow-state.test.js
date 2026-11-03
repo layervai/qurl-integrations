@@ -8,7 +8,7 @@ jest.mock('../src/logger', () => ({
 }));
 
 jest.mock('../src/utils/crypto', () => ({
-  encryptStrict: jest.fn((v) => (v == null ? v : `enc:v1:IV:TAG:${Buffer.from(String(v)).toString('hex')}`)),
+  encrypt: jest.fn((v) => (v == null ? v : `enc:v1:IV:TAG:${Buffer.from(String(v)).toString('hex')}`)),
   decrypt: jest.fn((v) => {
     if (v == null || typeof v !== 'string') return v;
     if (!v.startsWith('enc:v1:')) return v;
@@ -33,7 +33,7 @@ process.env.AWS_REGION = 'us-east-2';
 
 const flowState = require('../src/flow-state');
 const logger = require('../src/logger');
-const { encryptStrict, decrypt } = require('../src/utils/crypto');
+const { encrypt, decrypt } = require('../src/utils/crypto');
 const { AUDIT_EVENTS } = require('../src/constants');
 
 const EXPECTED_TABLE = 'test-prefix-flow-state';
@@ -54,7 +54,7 @@ beforeEach(() => {
   logger.error.mockReset();
   logger.warn.mockReset();
   logger.debug.mockReset();
-  encryptStrict.mockClear();
+  encrypt.mockClear();
   decrypt.mockClear();
 });
 
@@ -115,7 +115,7 @@ describe('flow-state.createFlow', () => {
     });
     const call = ddbMock.commandCalls(PutCommand)[0];
     expect(call.args[0].input.Item.payload).toBeNull();
-    expect(encryptStrict).not.toHaveBeenCalled();
+    expect(encrypt).not.toHaveBeenCalled();
   });
 
   test('null payload persists as null (not encrypted, not silently coerced)', async () => {
@@ -128,7 +128,7 @@ describe('flow-state.createFlow', () => {
     });
     const call = ddbMock.commandCalls(PutCommand)[0];
     expect(call.args[0].input.Item.payload).toBeNull();
-    expect(encryptStrict).not.toHaveBeenCalled();
+    expect(encrypt).not.toHaveBeenCalled();
   });
 
   test('created_at and updated_at are equal on row birth (single now() call)', async () => {
