@@ -3754,7 +3754,13 @@ async function handleRevoke(interaction, apiKey) {
       : 'No acknowledged sends were found in the recent search window. You can still inspect an older saved send ID directly.' });
   }
   if (sendId) {
-    const state = await db.getSendRevocationState(sendId, interaction.user.id);
+    let state;
+    try {
+      state = await db.getSendRevocationState(sendId, interaction.user.id);
+    } catch (err) {
+      logger.warn('Could not inspect revocation state', { errorName: err?.name });
+      return interaction.editReply({ content: 'Could not read this send. Please try `/qurl revoke` again.' });
+    }
     if (!state) return interaction.editReply({ content: 'This send is unavailable to you.' });
     if (action === 'inspect') {
       const status = state.revoked_at ? 'Deletion confirmed.'
@@ -3766,7 +3772,16 @@ async function handleRevoke(interaction, apiKey) {
       return interaction.editReply({ content: `Send ID: \`${sendId}\`\n${status}${blocked ? ' Add Recipients stays blocked.' : ''}` });
     }
     if (action === 'acknowledge') {
-      const acknowledged = await db.acknowledgeSendRevocation(sendId, interaction.user.id);
+      if (state.revoke_acknowledged_at && !state.revoked_at) {
+        return interaction.editReply({ content: `Send ID: \`${sendId}\`\nThis send is already acknowledged. Deletion is not confirmed. Add Recipients stays blocked. Use action inspect or retry to check it later.` });
+      }
+      let acknowledged;
+      try {
+        acknowledged = await db.acknowledgeSendRevocation(sendId, interaction.user.id);
+      } catch (err) {
+        logger.warn('Could not acknowledge revocation', { errorName: err?.name });
+        return interaction.editReply({ content: 'Could not confirm acknowledgement. Inspect this send or try `/qurl revoke` again.' });
+      }
       return interaction.editReply({ content: acknowledged
         ? `Send ID: \`${sendId}\`\nDeletion is not confirmed. Links may still allow access. This send is hidden from the retry menu, and Add Recipients stays blocked. Use \`/qurl revoke\` with this send ID and action inspect or retry later.`
         : 'No acknowledgement was recorded. This send may already be acknowledged or confirmed, or no revocation is pending. Inspect it to check its current state.' });

@@ -2014,6 +2014,31 @@ describe('owner-only unconfirmed revoke recovery', () => {
     expect(interaction.editReply).toHaveBeenCalledWith({ content: 'This send is unavailable to you.' });
   });
 
+  it('reports an existing acknowledgement without another write or deletion claim', async () => {
+    mockDb.getSendRevocationState.mockResolvedValueOnce({ revoke_acknowledged_at: 'time', revoking_at: 'time' });
+    const interaction = recovery('acknowledge');
+    await _test.handleRevoke(interaction, null);
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining('already acknowledged. Deletion is not confirmed.') });
+    expect(mockDb.acknowledgeSendRevocation).not.toHaveBeenCalled();
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+  });
+
+  it('finishes the deferred reply when direct inspection fails', async () => {
+    mockDb.getSendRevocationState.mockRejectedValueOnce(new Error('storage unavailable'));
+    const interaction = recovery('inspect');
+    await _test.handleRevoke(interaction, null);
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Could not read this send. Please try `/qurl revoke` again.' });
+    expect(mockDb.acknowledgeSendRevocation).not.toHaveBeenCalled();
+  });
+
+  it('finishes the deferred reply without claiming success when acknowledgement storage fails', async () => {
+    mockDb.acknowledgeSendRevocation.mockRejectedValueOnce(new Error('response lost'));
+    const interaction = recovery('acknowledge');
+    await _test.handleRevoke(interaction, null);
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Could not confirm acknowledgement. Inspect this send or try `/qurl revoke` again.' });
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+  });
+
   it('reports a lost acknowledgement condition without success', async () => {
     mockDb.acknowledgeSendRevocation.mockResolvedValueOnce(false);
     const interaction = recovery('acknowledge');
