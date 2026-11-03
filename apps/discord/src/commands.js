@@ -2331,7 +2331,7 @@ async function executeSendPipeline(interaction, {
     // bot's child revoke (revokeMintedLinks) needs to reconcile each orphan.
     // Scrub err.message even for AWS service exceptions: validation messages
     // can echo offending request values, but contain useful failure details.
-    const level = err?.code === 'SEND_CONFIG_REVOKED' ? 'info' : 'error';
+    const level = err?.code === 'SEND_CONFIG_REVOKED' ? 'warn' : 'error';
     logger[level]('recordQURLSendBatch failed; aborting send to keep state consistent', {
       sendId,
       errorName: err?.name,
