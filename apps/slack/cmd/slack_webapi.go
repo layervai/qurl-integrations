@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	neturl "net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1109,9 +1110,27 @@ func fetchSlackAgentThreadHistoryPage(ctx context.Context, httpClient *http.Clie
 }
 
 type slackUserInfo struct {
-	ID      string
-	Deleted bool
-	IsBot   bool
+	TeamID          string
+	ID              string
+	Deleted         bool
+	IsBot           bool
+	Invited         bool
+	EnterpriseID    string
+	EnterpriseTeams []string
+}
+
+func (info *slackUserInfo) isActiveWorkspaceMember(userID, teamID, enterpriseID string, orgToken bool) bool {
+	if info.ID != userID || info.Deleted || info.IsBot || info.Invited {
+		return false
+	}
+	// TODO(upstream-contract): enterprise_user.teams lists membership, not org visibility.
+	// https://docs.slack.dev/enterprise/developing-for-enterprise-orgs/
+	enterpriseMember := enterpriseID != "" && info.EnterpriseID == enterpriseID && slices.Contains(info.EnterpriseTeams, teamID)
+	if orgToken {
+		return enterpriseMember
+	}
+	// Workspace tokens can also see external Slack Connect users.
+	return info.TeamID == teamID || enterpriseMember
 }
 
 var slackUsersInfoBenign = map[string]struct{}{"user_not_found": {}}
@@ -1139,9 +1158,15 @@ func fetchSlackUserInfo(ctx context.Context, httpClient *http.Client, baseURL, u
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 		User  struct {
-			ID      string `json:"id"`
-			Deleted bool   `json:"deleted"`
-			IsBot   bool   `json:"is_bot"`
+			TeamID     string `json:"team_id"`
+			ID         string `json:"id"`
+			Deleted    bool   `json:"deleted"`
+			IsBot      bool   `json:"is_bot"`
+			Invited    bool   `json:"is_invited_user"`
+			Enterprise struct {
+				ID    string   `json:"enterprise_id"`
+				Teams []string `json:"teams"`
+			} `json:"enterprise_user"`
 		} `json:"user"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -1157,7 +1182,7 @@ func fetchSlackUserInfo(ctx context.Context, httpClient *http.Client, baseURL, u
 		// slackUsersInfoBenign currently only allows user_not_found.
 		return slackUserInfo{}, false, nil
 	}
-	return slackUserInfo{ID: out.User.ID, Deleted: out.User.Deleted, IsBot: out.User.IsBot}, true, nil
+	return slackUserInfo{TeamID: out.User.TeamID, ID: out.User.ID, Deleted: out.User.Deleted, IsBot: out.User.IsBot, Invited: out.User.Invited, EnterpriseID: out.User.Enterprise.ID, EnterpriseTeams: out.User.Enterprise.Teams}, true, nil
 }
 
 // newSlackUserLookupFuncWithTokenLookup builds the [internal.SlackUserLookupFunc]
@@ -1172,8 +1197,18 @@ func newSlackUserLookupFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent
 	if userAgent == "" {
 		userAgent = defaultSlackAPIUserAgent
 	}
-	exists := func(ctx context.Context, ownerID, userID string) (bool, error) {
+	return func(ctx context.Context, teamID, enterpriseID, userID string) (bool, error) {
+		if strings.TrimSpace(teamID) == "" {
+			return false, errors.New("users.info: workspace ID is empty")
+		}
+		ownerID := teamID
 		token, err := lookup(ctx, ownerID)
+		orgToken := false
+		if errors.Is(err, auth.ErrSlackBotTokenNotConfigured) && enterpriseID != "" && enterpriseID != teamID {
+			ownerID = enterpriseID
+			token, err = lookup(ctx, ownerID)
+			orgToken = true
+		}
 		if err != nil {
 			return false, fmt.Errorf("users.info token lookup: %w", err)
 		}
@@ -1184,22 +1219,15 @@ func newSlackUserLookupFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent
 		if err != nil {
 			return false, err
 		}
-		ok := found && info.ID == userID && !info.Deleted && !info.IsBot
+		ok := found && info.isActiveWorkspaceMember(userID, teamID, enterpriseID, orgToken)
 		if !ok {
-			logRejectedSlackUserLookup(ownerID, userID, info, found)
+			logRejectedSlackUserLookup(ownerID, userID, &info, found)
 		}
 		return ok, nil
 	}
-	return func(ctx context.Context, teamID, _ string, userID string) (bool, error) {
-		// Ownership transfer needs workspace membership, not just Enterprise
-		// Grid org visibility. users.info has no workspace selector, so do not
-		// retry with the org-level token when the workspace token is missing;
-		// qurl-integrations#877 tracks safe Grid support.
-		return exists(ctx, teamID, userID)
-	}
 }
 
-func logRejectedSlackUserLookup(ownerID, requestedUserID string, info slackUserInfo, found bool) {
+func logRejectedSlackUserLookup(ownerID, requestedUserID string, info *slackUserInfo, found bool) {
 	reason := "user_not_found"
 	switch {
 	case !found:
@@ -1210,6 +1238,10 @@ func logRejectedSlackUserLookup(ownerID, requestedUserID string, info slackUserI
 		reason = "deleted"
 	case info.IsBot:
 		reason = "bot"
+	case info.Invited:
+		reason = "invited"
+	default:
+		reason = "workspace_membership_unverified"
 	}
 	attrs := []any{
 		"token_owner_id", slackOwnerLogID(ownerID),
