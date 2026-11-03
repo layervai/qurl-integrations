@@ -2648,6 +2648,7 @@ async function executeSendPipeline(interaction, {
     let revokeResultFinalizationFailed = false;
     let revokeShowAll = false;
     let revokeInFlight = false;
+    let revokeAttempted = false;
     let revokeSucceeded = false;
     let revokeResultKnown = false;
 
@@ -2715,6 +2716,8 @@ async function executeSendPipeline(interaction, {
         // collector-setup block; the guard above already proved truthy.
         let revoking;
         try {
+          // A stopped card must never reopen Add, even if the durable revoke write fails.
+          revokeAttempted = true;
           monitor.stop();
           await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
           let persistedSendConfig;
@@ -2830,10 +2833,12 @@ async function executeSendPipeline(interaction, {
         // FIRST (before any cap check), then verify remaining capacity and
         // release on rejection. That way a future refactor that adds an
         // `await` in the remaining check can't reopen a racy window.
-        if (revokingSendLocks.has(revokeLockKey) || revokeSucceeded) {
+        if (revokingSendLocks.has(revokeLockKey) || revokeSucceeded || revokeAttempted) {
           // Durable revoking_at/revoked_at state keeps stale Add clicks
           // disabled even after this collector-local lock is released.
-          let content = ALREADY_REVOKING_SEND_MSG;
+          let content = revokingSendLocks.has(revokeLockKey)
+            ? ALREADY_REVOKING_SEND_MSG
+            : 'This management card is closed after a revoke attempt. Add Recipients is disabled; retry `/qurl revoke`.';
           if (revokeSucceeded) {
             if (!revokeResultKnown) {
               content = 'This send is no longer revocable. Add Recipients is disabled.';
