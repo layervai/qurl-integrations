@@ -349,7 +349,11 @@ same owner and rejects revoking, revoked or acknowledged state. Initial sends
 use at most 99 recipient rows per transaction; Add Recipients stays one atomic
 transaction and cannot run while preparation is pending. The last initial
 transaction removes the preparation marker with its final recipient rows.
-A failed or interrupted initial write leaves Add blocked. No DM dispatch starts
+Preparation remains until the final transaction commits. A lost final response
+can leave a ready row even though the caller receives an error; that caller
+sends no DMs or confirmation and still cleans up the fresh grants. Earlier
+recipient chunks can remain as reconciliation references after cleanup. This
+change adds no automatic reaping of failed config rows. No DM dispatch starts
 until every initial row is committed. Fresh minted grants are cleaned up on
 configuration or recipient-persistence failure.
 

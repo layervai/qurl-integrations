@@ -2422,6 +2422,7 @@ describe('initial send transaction fencing', () => {
         expect(call.TransactItems[0].ConditionCheck.ConditionExpression).toContain('initial_persistence_pending = :pending');
       }
       expect(calls[2].TransactItems[0].Update.UpdateExpression).toBe('REMOVE initial_persistence_pending');
+      expect(calls[2].TransactItems[0].Update.ConditionExpression).toBe('sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at) AND initial_persistence_pending = :pending');
       const created = calls.flatMap(call => call.TransactItems.filter(item => item.Put).map(item => item.Put.Item.created_at));
       expect(created).toHaveLength(199);
       expect(new Set(created).size).toBe(1);
@@ -2454,6 +2455,29 @@ describe('initial send transaction fencing', () => {
     const sends = rows(199); sends[0].sendId = sendId;
     await expect(store.recordQURLSendBatch(sends, { initialSend: true })).rejects.toThrow('send ID');
     expect(ddbMock.calls()).toHaveLength(0);
+  });
+
+  test.each([99, 198])('exact initial boundary %p clears preparation only with its final rows', async count => {
+    ddbMock.on(TransactWriteCommand).resolves({});
+    await store.recordQURLSendBatch(rows(count), { initialSend: true });
+    const calls = ddbMock.commandCalls(TransactWriteCommand);
+    expect(calls).toHaveLength(count / 99);
+    expect(calls.at(-1).args[0].input.TransactItems[0].Update).toBeDefined();
+    expect(calls.every(call => call.args[0].input.TransactItems.length === 100)).toBe(true);
+  });
+
+  test('retry exhaustion after an initial chunk never clears preparation or writes later chunks', async () => {
+    jest.useFakeTimers();
+    try {
+      const conflict = Object.assign(new Error('transaction conflict'), { name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'TransactionConflict' }] });
+      ddbMock.on(TransactWriteCommand).resolvesOnce({}).rejects(conflict);
+      const failed = expect(store.recordQURLSendBatch(rows(199), { initialSend: true })).rejects.toBe(conflict);
+      await jest.runAllTimersAsync();
+      await failed;
+      const calls = ddbMock.commandCalls(TransactWriteCommand);
+      expect(calls).toHaveLength(7);
+      expect(calls.every(call => !call.args[0].input.TransactItems[0].Update)).toBe(true);
+    } finally { jest.useRealTimers(); }
   });
 
   test('initial config carries the preparation marker', async () => {

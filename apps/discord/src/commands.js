@@ -2281,12 +2281,12 @@ async function executeSendPipeline(interaction, {
     });
   } catch (err) {
     if (err?.name === 'ConditionalCheckFailedException') {
-      logger.info('Send configuration is already closed; no DMs sent', { sendId });
+      logger.info('Initial send configuration already exists; no DMs sent', { sendId });
     } else {
       logger.error('Failed to establish the initial send configuration; no DMs sent', { sendId, errorName: err?.name, errorCode: err?.code });
     }
     clearCooldown(interaction.user.id);
-    await cleanupFreshSendResources(qurlLinks, apiKey, sendId, { reason: 'initial_persistence' });
+    await cleanupFreshSendResources(qurlLinks, apiKey, sendId, { reason: 'initial_persistence', rowsMayHavePersisted: false });
     return interaction.editReply({ content: 'Could not prepare this send safely. No DMs were sent. Please try again.', components: [] });
   }
 
@@ -2344,6 +2344,8 @@ async function executeSendPipeline(interaction, {
       orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
     });
     clearCooldown(interaction.user.id);
+    // A lost final response may already have cleared preparation. No confirmation
+    // or Add control is published on this error path, even if rows committed.
     await cleanupFreshSendResources(qurlLinks, apiKey, sendId, { reason: 'initial_persistence' });
     return interaction.editReply({
       content: 'Failed to save link records. Links were not sent. Please try again.',
@@ -3033,23 +3035,8 @@ async function cleanupFreshSendResources(batchSends, apiKey, sendId, options = {
   const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
   const cleanupLabel = cleanupReason === 'initial_persistence' ? 'initial-send' : 'Add Recipients';
-  const txnActionCount = ddbSendConfigGuardActionCount(batchSends);
-  if (rowsMayHavePersisted && cleanupReason !== 'initial_persistence' && !ddbSendConfigGuardFitsTransaction(batchSends)) {
-    // Unreachable by construction for today's Add Recipients flow: oversized
-    // batches fail before DDB, and revoked errors only come from a single
-    // transaction. If a future caller violates that invariant, still revoke
-    // the freshly minted qURLs; rows may point at revoked links, but no DMs
-    // have been sent and the grants fail closed.
-    logger.error('Cleaning up oversized Add Recipients batch after possible persistence', {
-      sendId,
-      send_count: batchSends.length,
-      txn_actions: txnActionCount,
-    });
-  }
-
-  // Called when no recipient rows landed, or when a terminal guarded
-  // transaction failure is ambiguous enough that revoking freshly minted qURLs
-  // is the fail-closed outcome (no DMs have been sent yet).
+  // No fresh grants have been dispatched. Earlier recipient chunks can remain
+  // as audit references while this bounded cleanup revokes their fresh grants.
   const qurlIdsByResource = new Map();
   let unidentifiedCount = 0;
   for (const s of batchSends) {

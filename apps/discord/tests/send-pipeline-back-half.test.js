@@ -3844,7 +3844,7 @@ describe('initial send persistence fence', () => {
     await executeSendPipeline(interaction, makePipelineParams());
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(logger.error).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('already closed'), expect.objectContaining({ sendId: expect.any(String) }));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('already exists'), expect.objectContaining({ sendId: expect.any(String) }));
     expect(interaction.editReply).toHaveBeenLastCalledWith({
       content: expect.stringContaining('No DMs were sent.'), components: [],
     });
@@ -3880,8 +3880,8 @@ describe('initial send persistence fence', () => {
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret_initial');
   });
 
-  test('an incomplete initial persistence marker blocks Add before minting', async () => {
-    mockDb.getSendConfig.mockResolvedValueOnce({ initial_persistence_pending: true });
+  test.each([true, false, null, 0])('an incomplete initial persistence marker %p blocks Add before minting', async pending => {
+    mockDb.getSendConfig.mockResolvedValueOnce({ initial_persistence_pending: pending });
     const result = await handleAddRecipients('initial-1', new Map(), makeInteraction(), 'apikey');
     expect(result.msg).toContain('not finished saving');
     expect(mockDownloadAndUpload).not.toHaveBeenCalled();
@@ -3902,4 +3902,15 @@ describe('initial send persistence fence', () => {
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('aborting send'), expect.objectContaining({ errorCode: 'SEND_CONFIG_REVOKED' }));
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaaaaaaaaa1'], 'apikey');
   });
+
+  test('non-revoke partial persistence failure also cleans fresh grants without dispatch', async () => {
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', qurl_id: 'q_aaaaaaaaaa1', resource_id: 'res-1' }]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(Object.assign(new Error('retries exhausted'), { name: 'TransactionCanceledException' }));
+    await executeSendPipeline(makeInteraction(), makePipelineParams());
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaaaaaaaaa1'], 'apikey');
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('aborting send'), expect.objectContaining({ errorName: 'TransactionCanceledException' }));
+  });
+
 });
