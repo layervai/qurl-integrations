@@ -55,3 +55,27 @@ func TestPublishRejectsInvalidEmailDomainsBeforeAuthentication(t *testing.T) {
 		})
 	}
 }
+
+func TestPublishEmailDomain(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Private *bool                     `json:"private"`
+			Policy  qurl.ConsumerAccessPolicy `json:"consumer_access"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Private == nil || !*body.Private || body.Policy.Mode != "email_domain" || body.Policy.EmailDomain != "example.com" || body.Policy.Version != 1 {
+			t.Fatalf("publish request=%+v error=%v", body, err)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "consumer_access": body.Policy}, nil)
+	})
+	got := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/site", "--access", "email_domain", "--email-domain", "example.com", "-o", "json"}})
+	if got.code != 0 {
+		t.Fatalf("exit=%d: %s", got.code, got.stderr.String())
+	}
+	var output struct {
+		Policy qurl.ConsumerAccessPolicy `json:"consumer_access"`
+	}
+	if err := json.Unmarshal(got.stdout.Bytes(), &output); err != nil || output.Policy.EmailDomain != "example.com" {
+		t.Fatalf("output=%s error=%v", got.stdout.String(), err)
+	}
+}
