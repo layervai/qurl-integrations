@@ -34,7 +34,6 @@ const {
   QueryCommand,
   ScanCommand,
   BatchGetCommand,
-  BatchWriteCommand,
   TransactWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
@@ -308,54 +307,19 @@ async function recordQURLSendBatch(sends, options = {}) {
   // values, fragmenting the GSI ordering and making a single send
   // look like several distinct events to consumers.
   const now = nowIso();
-  const requireSendConfigUnrevoked = options.requireSendConfigUnrevoked === true;
+  const initialSend = options.initialSend === true;
 
-  if (!requireSendConfigUnrevoked) {
-    // Default path for initial sends: keep the cheaper BatchWriteItem flow.
-    // Add Recipients is the only caller with a persisted config row that can
-    // be revoked between read and write, so it opts into the guarded
-    // transaction path below.
-    const CHUNK = 25;
-    for (let i = 0; i < sends.length; i += CHUNK) {
-      const slice = sends.slice(i, i + CHUNK);
-      let requestItems = {
-        [TABLES.qurl_sends]: slice.map(s => ({ PutRequest: { Item: qurlSendBatchItem(s, now) } })),
-      };
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        const res = await ddb.send(new BatchWriteCommand({ RequestItems: requestItems }));
-        const unprocessed = res.UnprocessedItems || {};
-        const remaining = unprocessed[TABLES.qurl_sends];
-        if (!remaining || remaining.length === 0) break;
-        if (attempt === MAX_RETRIES) {
-          // All attempts exhausted — fail loud rather than silently
-          // dropping recipients. Caller's retry policy (workflow-level)
-          // decides whether to re-invoke the originating send command.
-          throw new Error(`recordQURLSendBatch: ${remaining.length} unprocessed items after ${MAX_RETRIES + 1} attempts`);
-        }
-        // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms.
-        // `.unref()`-equivalent for Promise sleep isn't needed; the
-        // await keeps the event loop moving.
-        await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
-        requestItems = unprocessed;
-      }
-    }
-    return;
-  }
-
-  // Add Recipients uses one TransactWriteItems call so recipient-row Put(s)
-  // are atomically guarded by the send config row's revoking/revoked state. This
-  // keeps the extra transaction cost scoped to the path that has the post-read
-  // revoke race: if a revoke wins and sets revoking_at before this transaction
-  // commits, none of the newly minted recipient rows land. The Add Recipients
-  // UI caps at Discord's 25-select limit today, so this should stay far below
-  // the 100-action transaction cap. If a future caller exceeds the cap, fail
-  // before any DDB write instead of partially committing earlier chunks.
-  if (!ddbSendConfigGuardFitsTransaction(sends)) {
+  // Add Recipients stays one atomic transaction. Large initial sends use
+  // bounded transactions; every chunk shares the same revoke barrier.
+  if (!initialSend && !ddbSendConfigGuardFitsTransaction(sends)) {
     throw new Error(`recordQURLSendBatch: guarded batch exceeds TransactWriteItems action limit (${ddbSendConfigGuardActionCount(sends)} > ${DDB_TRANSACTION_MAX_ACTIONS})`);
   }
 
   const senderMap = new Map();
   for (const send of sends) {
+    if (typeof send.sendId !== 'string' || !send.sendId.trim() || !hasSenderIdentity(send.senderDiscordId)) {
+      throw new TypeError('recordQURLSendBatch: send ID and sender identity must be nonempty strings');
+    }
     const existingSender = senderMap.get(send.sendId);
     if (existingSender !== undefined && existingSender !== send.senderDiscordId) {
       throw new Error(`recordQURLSendBatch: conflicting sender_discord_id for send_id ${send.sendId}`);
@@ -363,46 +327,54 @@ async function recordQURLSendBatch(sends, options = {}) {
     senderMap.set(send.sendId, send.senderDiscordId);
   }
 
-  const sendIds = [...senderMap.keys()];
-  // Keep ConditionChecks before Puts. The cancellation-reason parser above
-  // relies on this guard-first order to map ConditionalCheckFailed reasons
-  // back to the send ids that lost the revoke/delete/sender-mismatch race.
-  const TransactItems = [
-    ...sendIds.map(sendId => ({
-      ConditionCheck: {
-        TableName: TABLES.qurl_send_configs,
-        Key: { send_id: sendId },
-        // Missing config rows, revoking/revoked rows, and sender mismatches all
-        // fail closed here. Add Recipients already read the config row; if
-        // it disappears before persistence, do not create recipient rows.
-        ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at)',
-        ExpressionAttributeValues: { ':sender': senderMap.get(sendId) },
-      },
-    })),
-    ...sends.map(s => ({
-      Put: {
+  if (initialSend && senderMap.size !== 1) {
+    throw new Error('recordQURLSendBatch: an initial batch must belong to one send');
+  }
+  const chunkSize = initialSend ? DDB_TRANSACTION_MAX_ACTIONS - 1 : sends.length;
+  for (let offset = 0; offset < sends.length; offset += chunkSize) {
+    const batch = sends.slice(offset, offset + chunkSize);
+    const sendIds = [...new Set(batch.map(send => send.sendId))];
+    const finishInitial = initialSend && offset + batch.length === sends.length;
+    // The final guarded write clears preparation in the same transaction as
+    // its recipient rows. Earlier failures leave Add Recipients blocked.
+    // Keep config guards before Puts: cancellation reasons are positional,
+    // including the final initial Update guard.
+    const TransactItems = [
+      ...sendIds.map(sendId => {
+        const guard = {
+          TableName: TABLES.qurl_send_configs,
+          Key: { send_id: sendId },
+          ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at)'
+            + (initialSend ? ' AND initial_persistence_pending = :pending' : ' AND attribute_not_exists(initial_persistence_pending)'),
+          ExpressionAttributeValues: { ':sender': senderMap.get(sendId), ...(initialSend ? { ':pending': true } : {}) },
+        };
+        return finishInitial
+          ? { Update: { ...guard, UpdateExpression: 'REMOVE initial_persistence_pending' } }
+          : { ConditionCheck: guard };
+      }),
+      ...batch.map(send => ({ Put: {
         TableName: TABLES.qurl_sends,
-        Item: qurlSendBatchItem(s, now),
-      },
-    })),
-  ];
-  const ClientRequestToken = crypto.randomUUID();
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      await ddb.send(new TransactWriteCommand({ TransactItems, ClientRequestToken }));
-      break;
-    } catch (err) {
-      // Fail closed before considering retries: a ConditionCheck failure on
-      // the config guard means revoked/deleted/sender-mismatch state won the
-      // race, even if other transaction items also report transient reasons.
-      if (transactionGuardConditionFailed(err, sendIds.length)) {
-        throw new SendConfigRevokedError(transactionConditionFailedSendIds(err, sendIds));
+        Item: qurlSendBatchItem(send, now),
+      } })),
+    ];
+    const ClientRequestToken = crypto.randomUUID();
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        await ddb.send(new TransactWriteCommand({ TransactItems, ClientRequestToken }));
+        break;
+      } catch (err) {
+        // Fail closed before considering retries: a ConditionCheck failure on
+        // the config guard means revoked/deleted/sender-mismatch state won the
+        // race, even if other transaction items also report transient reasons.
+        if (transactionGuardConditionFailed(err, sendIds.length)) {
+          throw new SendConfigRevokedError(transactionConditionFailedSendIds(err, sendIds));
+        }
+        if (attempt < MAX_RETRIES && transactionWriteRetryable(err)) {
+          await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+          continue;
+        }
+        throw err;
       }
-      if (attempt < MAX_RETRIES && transactionWriteRetryable(err)) {
-        await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
-        continue;
-      }
-      throw err;
     }
   }
 }
@@ -1091,10 +1063,10 @@ async function markSendRevoked(sendId, senderDiscordId) {
 async function saveSendConfig({
   sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl,
   expiresIn, personalMessage, locationName, attachmentName,
-  attachmentContentType, attachmentUrl, selfDestructSeconds,
+  attachmentContentType, attachmentUrl, selfDestructSeconds, initialSend = false,
 }) {
   const encryptedUrl = attachmentUrl ? encrypt(attachmentUrl) : null;
-  await ddb.send(new PutCommand({
+  const write = {
     TableName: TABLES.qurl_send_configs,
     Item: {
       send_id: sendId,
@@ -1114,11 +1086,27 @@ async function saveSendConfig({
       // SEPARATELY by saveSendConfirmState AFTER the initial editReply —
       // saveSendConfig runs earlier (before the token / confirmMsg /
       // delivered exist), so it deliberately carries none of those fields.
+      ...(initialSend ? { initial_persistence_pending: true } : {}),
       created_at: nowIso(),
     },
     // A late initial send must never replace the durable Add Recipients barrier.
-    ConditionExpression: 'attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at)',
-  }));
+    ConditionExpression: initialSend ? 'attribute_not_exists(send_id)'
+      : 'attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at) AND attribute_not_exists(revoke_acknowledged_at) AND attribute_not_exists(initial_persistence_pending)',
+  };
+  if (initialSend) {
+    // SDK transport retries reuse this token rather than colliding with their own create.
+    try {
+      await ddb.send(new TransactWriteCommand({
+        TransactItems: [{ Put: write }], ClientRequestToken: crypto.randomUUID(),
+      }));
+    } catch (err) {
+      if (transactionGuardConditionFailed(err, 1)) err.code = 'INITIAL_SEND_CONFIG_EXISTS';
+      throw err;
+    }
+  } else {
+    await ddb.send(new PutCommand(write));
+  }
+
 }
 
 async function getSendConfig(sendId, senderDiscordId) {

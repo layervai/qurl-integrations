@@ -12,6 +12,8 @@ process.env.AWS_REGION = 'us-east-2';
 process.env.AWS_ACCESS_KEY_ID = 'synthetic';
 process.env.AWS_SECRET_ACCESS_KEY = 'synthetic';
 delete process.env.AWS_SESSION_TOKEN;
+delete process.env.AWS_PROFILE;
+delete process.env.AWS_DEFAULT_PROFILE;
 process.env.DDB_TABLE_PREFIX = `barrier-smoke-${randomUUID()}-`;
 process.env.KEY_ENCRYPTION_KEY = randomBytes(32).toString('base64');
 const store = require('../src/store/ddb-store');
