@@ -2381,9 +2381,9 @@ async function persistSendBatch(interaction, {
 }
 
 async function dispatchAndMonitor(interaction, {
-  apiKey, resourceType, attachment, locationUrl, locationName, recipients,
+  apiKey, resourceType, recipients,
   expiresIn, selfDestructSeconds, personalMessage, recipientMode,
-  sendId, qurlLinks, connectorResourceId, expiresAt,
+  sendId, qurlLinks, expiresAt,
 }) {
   // Send DMs. `expiresAt` is Unix seconds, computed above the DDB
   // write — see the #352 hoist comment near recordQURLSendBatch for
