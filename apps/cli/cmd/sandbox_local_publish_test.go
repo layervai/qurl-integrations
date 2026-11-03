@@ -422,6 +422,7 @@ func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map
 		shared.code,
 		shared.stdout.String(),
 		shared.stderr.String(),
+		pub.publisherVerified(t),
 	); err != nil {
 		t.Fatal(err)
 	}
