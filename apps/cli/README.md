@@ -842,7 +842,10 @@ immediate revocation. See
 #### Private consumer policies
 
 On a deployment that supports consumer policies, choose private access with
-`--access invite_only`, `email_capture`, `review`, `keys`, or `contract`.
+`--access invite_only`, `email_capture`, `email_domain`, `review`, `keys`, or `contract`.
+For a company mailbox domain, use `--access email_domain --email-domain example.com`.
+The domain must be lowercase and exact: it does not include subdomains or other domains.
+Consumers verify their mailbox before access.
 Contract mode also needs `--contract <identifier>`. These flags cannot be
 combined with `--public`, legacy access requests, or legacy device allowlists.
 The reply must confirm `private: true` and the requested `consumer_access` policy.
@@ -854,6 +857,22 @@ qurl publish http://127.0.0.1:3000 --access invite_only -o json
 qurl access invite <CRID> --email ana@example.com -o json
 qurl access list_invitations <CRID> -o json
 ```
+
+For everyone with a verified company mailbox:
+
+```bash
+qurl publish http://127.0.0.1:8080 --access email_domain --email-domain example.com -o json
+```
+
+To change an existing private resource, read its current policy version first:
+
+```bash
+qurl access configure <CRID> --mode email_domain --email-domain example.com --version <current-version>
+```
+
+Publishing the same origin again must confirm the same email domain; it never
+silently changes an existing policy. Publishing a URL also does not close its
+public origin. Keep the application private and remove alternate public routes.
 
 An accepted email delivery is not proof that the recipient has enrolled.
 The recipient must verify mailbox control and bind a credential. Invite-only

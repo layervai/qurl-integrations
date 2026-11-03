@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1195,14 +1196,23 @@ func validateConsumerPolicy(policy *qurl.ConsumerAccessPolicy) error {
 	if policy.Version != 1 {
 		return qurl.ErrInvalidResourceRequest
 	}
-	return ValidateConsumerPolicyFields(policy.Mode, policy.ContractID)
+	return ValidateConsumerPolicyFields(policy.Mode, policy.ContractID, policy.EmailDomain)
 }
+
+var consumerEmailDomain = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // ValidateConsumerPolicyFields checks the shared publish and configure inputs.
 // TODO(upstream-contract): Keep modes and contract limits in sync with qurl-service.
-func ValidateConsumerPolicyFields(mode, contract string) error {
+func ValidateConsumerPolicyFields(mode, contract, emailDomain string) error {
+	if mode == "email_domain" {
+		if len(emailDomain) > 253 || !consumerEmailDomain.MatchString(emailDomain) {
+			return qurl.ErrInvalidResourceRequest
+		}
+	} else if emailDomain != "" {
+		return qurl.ErrInvalidResourceRequest
+	}
 	switch mode {
-	case "keys", "invite_only", "email_capture", "review":
+	case "keys", "invite_only", "email_capture", "email_domain", "review":
 		if contract != "" {
 			return qurl.ErrInvalidResourceRequest
 		}
@@ -1230,7 +1240,7 @@ func consumerPolicyConfirmed(requested, received *qurl.ConsumerAccessPolicy, fou
 	if requested == nil {
 		return true
 	}
-	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID && samePaymentPolicy(received.Payment, requested.Payment) &&
+	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID && received.EmailDomain == requested.EmailDomain && samePaymentPolicy(received.Payment, requested.Payment) &&
 		(received.Version == requested.Version || (foundExisting != nil && *foundExisting && received.Version > requested.Version && received.Version < 1<<53))
 }
 

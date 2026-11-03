@@ -25,6 +25,7 @@ import (
 func publishCmd(opts *globalOpts) *cobra.Command {
 	var (
 		consumerMode         string
+		emailDomain          string
 		stripeAccount        string
 		stripePrice          string
 		paymentAccessSeconds int64
@@ -122,7 +123,7 @@ owns the share and turns it off when it exits.`,
 				Public: public, AllowedDeviceKeys: allowedDeviceKeys, AllowRequests: allowRequests,
 				KeepExistingPublic: len(named) == 0, NamedAccessFlags: named,
 			}
-			if err := setPublishConsumerPolicy(&access, consumerMode, contractID); err != nil {
+			if err := setPublishConsumerPolicy(&access, consumerMode, contractID, emailDomain); err != nil {
 				return err
 			}
 			if err := setStripePayment(access.ConsumerAccess, stripeAccount, stripePrice, paymentAccessSeconds); err != nil {
@@ -171,7 +172,8 @@ owns the share and turns it off when it exits.`,
 	cmd.Flags().StringVar(&stripeAccount, stripeAccountFlag, "", "connected publisher Stripe account")
 	cmd.Flags().StringVar(&stripePrice, stripePriceFlag, "", "Stripe price for paid contract access; LayerV collects 3%")
 	cmd.Flags().Int64Var(&paymentAccessSeconds, paymentAccessSecondsFlag, 0, "one-time access duration; zero lasts for the resource lifetime; subscriptions require zero")
-	cmd.Flags().StringVar(&consumerMode, "access", "", "private access mode: keys, invite_only, email_capture, review or contract")
+	cmd.Flags().StringVar(&emailDomain, consumerEmailDomainFlag, "", "exact lowercase email domain for email_domain access")
+	cmd.Flags().StringVar(&consumerMode, "access", "", "private access mode: keys, invite_only, email_capture, email_domain, review or contract")
 	cmd.Flags().StringVar(&contractID, "contract", "", "publisher contract identifier for contract access")
 	cmd.Flags().BoolVar(&public, "public", false, "let anyone who has the CRID open the resource (default: private, only you and the devices you allow)")
 	// --private was how a private resource was published while public was the
@@ -203,7 +205,7 @@ owns the share and turns it off when it exits.`,
 // resource.
 func publishAccessFlags(cmd *cobra.Command) []string {
 	var named []string
-	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", "access", consumerContract, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", "access", consumerEmailDomainFlag, consumerContract, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
 		flag := cmd.Flags().Lookup(name)
 		if flag == nil || !flag.Changed {
 			continue
@@ -848,19 +850,19 @@ func validateDeviceKeys(flag string, keys []string) error {
 	return nil
 }
 
-func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract string) error {
+func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract, emailDomain string) error {
 	if mode == "" {
-		if contract != "" {
-			return exitcode.UsageError(errors.New("--contract requires --access contract"))
+		if contract != "" || emailDomain != "" {
+			return exitcode.UsageError(errors.New("--contract or --email-domain requires a matching --access mode"))
 		}
 		return nil
 	}
 	if access.Public || access.AllowRequests || len(access.AllowedDeviceKeys) != 0 {
 		return exitcode.UsageError(errors.New("--access cannot be combined with --public, --allow-requests or --allow-device-key"))
 	}
-	if qurlapi.ValidateConsumerPolicyFields(mode, contract) != nil {
-		return exitcode.UsageError(errors.New("--access must be keys, invite_only, email_capture, review or contract; --contract is required only for contract mode and must have at most 128 characters"))
+	if qurlapi.ValidateConsumerPolicyFields(mode, contract, emailDomain) != nil {
+		return exitcode.UsageError(errors.New("--access must be keys, invite_only, email_capture, email_domain, review or contract; --email-domain requires email_domain mode and an exact lowercase DNS domain; --contract is required only for contract mode and must have at most 128 characters"))
 	}
-	access.ConsumerAccess = &qurl.ConsumerAccessPolicy{Mode: mode, Version: 1, ContractID: contract}
+	access.ConsumerAccess = &qurl.ConsumerAccessPolicy{Mode: mode, Version: 1, ContractID: contract, EmailDomain: emailDomain}
 	return nil
 }

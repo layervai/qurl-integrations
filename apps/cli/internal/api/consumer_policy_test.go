@@ -145,11 +145,11 @@ func TestExistingConsumerPolicyMismatchIsAConflict(t *testing.T) {
 
 func TestConsumerContractRejectsPadding(t *testing.T) {
 	for _, contract := range []string{" acme", "acme ", "\tacme", "acme\n"} {
-		if ValidateConsumerPolicyFields("contract", contract) == nil {
+		if ValidateConsumerPolicyFields("contract", contract, "") == nil {
 			t.Fatalf("accepted %q", contract)
 		}
 	}
-	if err := ValidateConsumerPolicyFields("contract", "acme"); err != nil {
+	if err := ValidateConsumerPolicyFields("contract", "acme", ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -237,5 +237,34 @@ func TestEveryConsumerManagementMethodMapsAPIErrors(t *testing.T) {
 		if err := call(); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
 			t.Errorf("%s error = %v (%T), want *Error with status 409", name, err, err)
 		}
+	}
+}
+
+func TestPublishEmailDomainRequiresExactConfirmation(t *testing.T) {
+	for _, domain := range []string{"example.com", "other.example", ""} {
+		t.Run(domain, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			wanted := &qurl.ConsumerAccessPolicy{Mode: "email_domain", Version: 1, EmailDomain: "example.com"}
+			srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+				var body publishRequest
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Private == nil || !*body.Private || body.AccessRequests || body.ConsumerAccess == nil || body.ConsumerAccess.EmailDomain != "example.com" {
+					t.Fatalf("unsafe publish=%+v error=%v", body, err)
+				}
+				actual := *wanted
+				actual.EmailDomain = domain
+				apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "consumer_access": actual}, nil)
+			})
+			got, err := newTestClient(t, srv, nil).Publish(t.Context(), existingTarget, PublishOptions{ConsumerAccess: wanted})
+			if domain == "example.com" {
+				if err != nil || got.ConsumerAccess.EmailDomain != domain {
+					t.Fatalf("result=%+v error=%v", got, err)
+				}
+			} else if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+				t.Fatalf("unconfirmed domain error=%v", err)
+			}
+			if len(sentRequests(srv)) != 1 {
+				t.Fatalf("unexpected fallback: %v", sentRequests(srv))
+			}
+		})
 	}
 }
