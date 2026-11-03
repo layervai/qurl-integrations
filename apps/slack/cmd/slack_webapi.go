@@ -1126,7 +1126,7 @@ func (info *slackUserInfo) isActiveWorkspaceMember(userID, teamID, enterpriseID 
 	}
 	// TODO(upstream-contract): enterprise_user.teams lists membership, not org visibility.
 	// https://docs.slack.dev/enterprise/developing-for-enterprise-orgs/
-	if info.HasEnterprise || orgToken {
+	if info.HasEnterprise || orgToken || enterpriseID != "" {
 		if info.EnterpriseID == "" || (enterpriseID != "" && info.EnterpriseID != enterpriseID) {
 			return false
 		}

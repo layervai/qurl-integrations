@@ -1255,6 +1255,7 @@ func TestSlackUserLookupWorkspaceTokenGridMetadata(t *testing.T) {
 		{name: "member in another home workspace", home: "T_OTHER", enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{testGridTeamID}}, want: true},
 		{name: "removed from home workspace", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{"T_OTHER"}}},
 		{name: "missing team list", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": testGridEnterpriseID}},
+		{name: "Grid context without metadata", home: testGridTeamID, enterprise: testGridEnterpriseID},
 		{name: "malformed Grid metadata", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{}},
 		{name: "wrong enterprise", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": "E_OTHER", "teams": []string{testGridTeamID}}},
 		{name: "workspace payload omits enterprise", home: "T_OTHER", metadata: map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{testGridTeamID}}, want: true},
