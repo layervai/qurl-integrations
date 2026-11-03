@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.7.1](https://github.com/layervai/qurl-integrations/compare/v3.7.0...v3.7.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **cli:** retain real user service paths in daemon journeys ([#1976](https://github.com/layervai/qurl-integrations/issues/1976)) ([f5079ce](https://github.com/layervai/qurl-integrations/commit/f5079ce6eadfb4cf97c95f82acc4f6069b862ddc))
+
 ## [3.7.0](https://github.com/layervai/qurl-integrations/compare/v3.6.1...v3.7.0) (2026-11-03)
 
 
