@@ -3,6 +3,7 @@ package output
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -55,7 +56,7 @@ func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResul
 		return err
 	}
 	if result.Policy != nil {
-		policy := result.Policy.Mode
+		policy := strings.TrimSpace(result.Policy.Mode + " " + result.Policy.EmailDomain)
 		if result.Policy.ContractID != "" {
 			policy += " " + result.Policy.ContractID
 		}
@@ -181,17 +182,18 @@ func consumerManagementDocument(result *qurlapi.ConsumerManagementResult) any {
 }
 
 type consumerAccessJSON struct {
-	Mode       string                  `json:"mode"`
-	Version    int64                   `json:"version"`
-	ContractID string                  `json:"contract_id,omitempty"`
-	Payment    *qurl.CRIDPaymentPolicy `json:"payment,omitempty"`
+	Mode        string                  `json:"mode"`
+	Version     int64                   `json:"version"`
+	EmailDomain string                  `json:"email_domain,omitempty"`
+	ContractID  string                  `json:"contract_id,omitempty"`
+	Payment     *qurl.CRIDPaymentPolicy `json:"payment,omitempty"`
 }
 
 func policyDocument(policy *qurl.ConsumerAccessPolicy) *consumerAccessJSON {
 	if policy == nil {
 		return nil
 	}
-	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID, Payment: policy.Payment}
+	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID, EmailDomain: policy.EmailDomain, Payment: policy.Payment}
 }
 
 func consumerTerminalText(value string) string {
