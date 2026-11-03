@@ -1115,6 +1115,7 @@ type slackUserInfo struct {
 	Deleted         bool
 	IsBot           bool
 	Invited         bool
+	HasEnterprise   bool
 	EnterpriseID    string
 	EnterpriseTeams []string
 }
@@ -1125,12 +1126,14 @@ func (info *slackUserInfo) isActiveWorkspaceMember(userID, teamID, enterpriseID 
 	}
 	// TODO(upstream-contract): enterprise_user.teams lists membership, not org visibility.
 	// https://docs.slack.dev/enterprise/developing-for-enterprise-orgs/
-	enterpriseMember := enterpriseID != "" && info.EnterpriseID == enterpriseID && slices.Contains(info.EnterpriseTeams, teamID)
-	if orgToken {
-		return enterpriseMember
+	if info.HasEnterprise || orgToken {
+		if info.EnterpriseID == "" || (enterpriseID != "" && info.EnterpriseID != enterpriseID) {
+			return false
+		}
+		return slices.Contains(info.EnterpriseTeams, teamID)
 	}
-	// Workspace tokens can also see external Slack Connect users.
-	return info.TeamID == teamID || enterpriseMember
+	// Non-Grid workspace tokens can also see external Slack Connect users.
+	return info.TeamID == teamID
 }
 
 var slackUsersInfoBenign = map[string]struct{}{"user_not_found": {}}
@@ -1163,7 +1166,7 @@ func fetchSlackUserInfo(ctx context.Context, httpClient *http.Client, baseURL, u
 			Deleted    bool   `json:"deleted"`
 			IsBot      bool   `json:"is_bot"`
 			Invited    bool   `json:"is_invited_user"`
-			Enterprise struct {
+			Enterprise *struct {
 				ID    string   `json:"enterprise_id"`
 				Teams []string `json:"teams"`
 			} `json:"enterprise_user"`
@@ -1182,7 +1185,16 @@ func fetchSlackUserInfo(ctx context.Context, httpClient *http.Client, baseURL, u
 		// slackUsersInfoBenign currently only allows user_not_found.
 		return slackUserInfo{}, false, nil
 	}
-	return slackUserInfo{TeamID: out.User.TeamID, ID: out.User.ID, Deleted: out.User.Deleted, IsBot: out.User.IsBot, Invited: out.User.Invited, EnterpriseID: out.User.Enterprise.ID, EnterpriseTeams: out.User.Enterprise.Teams}, true, nil
+	info := slackUserInfo{
+		TeamID: out.User.TeamID, ID: out.User.ID,
+		Deleted: out.User.Deleted, IsBot: out.User.IsBot, Invited: out.User.Invited,
+	}
+	if out.User.Enterprise != nil {
+		info.HasEnterprise = true
+		info.EnterpriseID = out.User.Enterprise.ID
+		info.EnterpriseTeams = out.User.Enterprise.Teams
+	}
+	return info, true, nil
 }
 
 // newSlackUserLookupFuncWithTokenLookup builds the [internal.SlackUserLookupFunc]
@@ -1204,6 +1216,7 @@ func newSlackUserLookupFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent
 		ownerID := teamID
 		token, err := lookup(ctx, ownerID)
 		orgToken := false
+		// Both IDs come from the signature-verified Slack command payload.
 		if errors.Is(err, auth.ErrSlackBotTokenNotConfigured) && enterpriseID != "" && enterpriseID != teamID {
 			ownerID = enterpriseID
 			token, err = lookup(ctx, ownerID)

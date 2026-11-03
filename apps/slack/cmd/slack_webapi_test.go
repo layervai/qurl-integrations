@@ -1243,3 +1243,79 @@ func TestSlackReadResponseLimits(t *testing.T) {
 		})
 	}
 }
+
+func TestSlackUserLookupWorkspaceTokenGridMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		home       string
+		enterprise string
+		metadata   map[string]any
+		want       bool
+	}{
+		{name: "member in another home workspace", home: "T_OTHER", enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{testGridTeamID}}, want: true},
+		{name: "removed from home workspace", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{"T_OTHER"}}},
+		{name: "missing team list", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": testGridEnterpriseID}},
+		{name: "malformed Grid metadata", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{}},
+		{name: "wrong enterprise", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": "E_OTHER", "teams": []string{testGridTeamID}}},
+		{name: "workspace payload omits enterprise", home: "T_OTHER", metadata: map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{testGridTeamID}}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "user": map[string]any{"id": "UGRIDUSER", "team_id": tc.home, "enterprise_user": tc.metadata}})
+			}))
+			t.Cleanup(srv.Close)
+			lookup := newSlackUserLookupFuncWithTokenLookup(func(_ context.Context, owner string) (string, error) {
+				if owner != testGridTeamID {
+					t.Fatalf("unexpected fallback to %s", owner)
+				}
+				return "xoxb-synthetic-workspace", nil
+			}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+			got, err := lookup(context.Background(), testGridTeamID, tc.enterprise, "UGRIDUSER")
+			if err != nil || got != tc.want {
+				t.Fatalf("lookup = %v, %v; want %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSlackUserLookupFallbackGuards(t *testing.T) {
+	orgErr := errors.New("synthetic org lookup unavailable")
+	for _, tc := range []struct {
+		name       string
+		team       string
+		enterprise string
+		orgErr     error
+		wantOwners []string
+		wantErr    error
+	}{
+		{name: "no enterprise", team: testGridTeamID, wantOwners: []string{testGridTeamID}, wantErr: auth.ErrSlackBotTokenNotConfigured},
+		{name: "enterprise equals team", team: testGridTeamID, enterprise: testGridTeamID, wantOwners: []string{testGridTeamID}, wantErr: auth.ErrSlackBotTokenNotConfigured},
+		{name: "empty workspace"},
+		{name: "whitespace workspace", team: " \t "},
+		{name: "org lookup failure", team: testGridTeamID, enterprise: testGridEnterpriseID, orgErr: orgErr, wantOwners: []string{testGridTeamID, testGridEnterpriseID}, wantErr: orgErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var owners []string
+			lookup := newSlackUserLookupFuncWithTokenLookup(func(_ context.Context, owner string) (string, error) {
+				owners = append(owners, owner)
+				if owner == testGridEnterpriseID {
+					return "", tc.orgErr
+				}
+				return "", auth.ErrSlackBotTokenNotConfigured
+			}, testSlackWebAPIUserAgent, "https://slack.test/users.info", &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				t.Fatal("failed token lookup must not call Slack")
+				return nil, errors.New("unexpected request")
+			})})
+			ok, err := lookup(context.Background(), tc.team, tc.enterprise, "UGRIDUSER")
+			if ok || err == nil {
+				t.Fatalf("lookup = %v, %v; want refusal", ok, err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error %v does not wrap %v", err, tc.wantErr)
+			}
+			if strings.Join(owners, ",") != strings.Join(tc.wantOwners, ",") {
+				t.Fatalf("owners=%v; want %v", owners, tc.wantOwners)
+			}
+		})
+	}
+}

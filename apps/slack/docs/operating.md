@@ -200,6 +200,10 @@ at the OAuth-callback bind layer.
   scope. A workspace token is preferred. If it is absent, an Enterprise Grid
   org token can verify the target only when Slack returns the matching
   enterprise and includes the invoking workspace in `enterprise_user.teams`.
+  For a Grid user this list is decisive even with a workspace token; a matching
+  home `team_id` cannot override removal from the workspace. A workspace token
+  can use verified membership metadata when the command omits `enterprise_id`,
+  but cannot fall back to an org token without that signed context.
   Org visibility alone is insufficient. Missing membership data, invited,
   deleted or bot users, mismatched IDs, and lookup failures stop the transfer
   before any owner change. A storage error does not trigger token fallback.
