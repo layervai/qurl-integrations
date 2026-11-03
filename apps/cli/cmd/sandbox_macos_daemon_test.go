@@ -531,12 +531,16 @@ func runExternalSandboxCLIInput(t *testing.T, binary string, env map[string]stri
 
 func externalSandboxEnvironment(overrides map[string]string) []string {
 	values := map[string]string{}
-	for _, key := range []string{"DBUS_SESSION_BUS_ADDRESS", "HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "USER", "XDG_RUNTIME_DIR"} {
+	for _, key := range []string{"DBUS_SESSION_BUS_ADDRESS", "HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "USER", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR"} {
 		if value, ok := os.LookupEnv(key); ok {
 			values[key] = value
 		}
 	}
 	for key, value := range overrides {
+		// Real OS service managers use the runner paths; device state is isolated separately.
+		if key == "HOME" || key == "XDG_CONFIG_HOME" {
+			continue
+		}
 		values[key] = value
 	}
 	// The protected harness reads the API key from QURL_API_KEY_FILE, then
@@ -550,6 +554,28 @@ func externalSandboxEnvironment(overrides map[string]string) []string {
 		result = append(result, key+"="+value)
 	}
 	return result
+}
+
+func TestExternalSandboxEnvironmentPreservesUserManagerPaths(t *testing.T) {
+	home, config, stateDir := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", config)
+	got := map[string]string{}
+	for _, entry := range externalSandboxEnvironment(map[string]string{
+		"HOME": t.TempDir(), "XDG_CONFIG_HOME": t.TempDir(),
+		connectorstate.EnvStateDirPrimary: stateDir,
+	}) {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["HOME"] != home || got["XDG_CONFIG_HOME"] != config {
+		t.Fatal("default daemon journey changed the real user manager's paths")
+	}
+	if got[connectorstate.EnvStateDirPrimary] != stateDir {
+		t.Fatal("default daemon journey lost its isolated device state")
+	}
 }
 
 func TestExternalSandboxEnvironmentUsesOneAPIKeySource(t *testing.T) {
