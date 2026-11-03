@@ -2492,6 +2492,23 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     };
   }
 
+  it('closes stale Add after revoke fails before the durable barrier is saved (#861)', async () => {
+    const { collect, makeClick, sendId } = await setupRevocableSend();
+    mockDb.markSendRevoking.mockRejectedValueOnce(new Error('DDB unavailable'));
+    await collect(makeClick('revoke'));
+    expect(revokingSendLocks.has(`sender-1:${sendId}`)).toBe(false);
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+    clearCooldown('sender-1');
+    const add = makeClick('add');
+    await collect(add);
+    expect(add.reply).toHaveBeenCalledWith({
+      content: 'This management card is closed after a revoke attempt. Add Recipients is disabled; retry `/qurl revoke`.',
+      ephemeral: true,
+    });
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
+    expect(activeMonitors.size).toBe(0);
+  });
+
   it('bounds button result waiting and keeps the lock until background revoke finishes', async () => {
     jest.useFakeTimers();
     try {
@@ -2746,62 +2763,24 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(2);
   });
 
-  it('allows Add Recipients after Revoke fails because links still exist', async () => {
+  it('keeps Add closed after the revoke recipient read fails', async () => {
     const { collect, makeClick, interaction } = await setupRevocableSend();
     mockDb.getSendItems.mockReset();
     mockDb.getSendItems.mockRejectedValueOnce(new Error('ddb unavailable'));
-
-    const revokeClick = makeClick('revoke');
-    await collect(revokeClick);
-
+    await collect(makeClick('revoke'));
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: 'Failed to revoke links. Try `/qurl revoke` instead.',
-      components: [],
+      content: 'Failed to revoke links. Try `/qurl revoke` instead.', components: [],
     }));
-    mockRevokeMintedLinks.mockReset();
-
-    const selectInteraction = {
-      users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
-      deferUpdate: jest.fn().mockResolvedValue(undefined),
-      editReply: jest.fn().mockResolvedValue(undefined),
-    };
-    const selectReply = {
-      awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
-    };
-    const addClick = makeClick('add');
-    addClick.reply.mockResolvedValueOnce(selectReply);
-
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-initial', expires_in: '30m',
-      attachment_url: 'https://cdn.discordapp.com/x.png',
-      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    clearCooldown('sender-1');
+    const add = makeClick('add');
+    await collect(add);
+    expect(add.reply).toHaveBeenCalledWith({
+      content: 'This management card is closed after a revoke attempt. Add Recipients is disabled; retry `/qurl revoke`.',
+      ephemeral: true,
     });
-    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
-    mockMintLinks.mockResolvedValueOnce([
-      {
-        qurl_link: 'https://q.test/added',
-        qurl_id: 'q_added',
-        resource_id: 'res-added',
-      },
-    ]);
-
-    try {
-      await collect(addClick);
-
-      expect(addClick.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: 'Select additional recipients:',
-        fetchReply: true,
-      }));
-      expect(selectInteraction.deferUpdate).toHaveBeenCalled();
-      expect(mockMintLinks).toHaveBeenCalledTimes(2);
-      expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(2);
-      expect(selectInteraction.editReply).toHaveBeenCalledWith({
-        content: 'Added 1 recipient',
-        components: [],
-      });
-    } finally {
-      clearCooldown('sender-1');
-    }
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
+    expect(activeMonitors.size).toBe(0);
   });
 
   it('rejects Revoke while Add Recipients is waiting on selection', async () => {
