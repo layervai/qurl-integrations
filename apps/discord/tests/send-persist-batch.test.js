@@ -11,7 +11,13 @@ test('persist writes recipient identities before dispatch and returns the shared
     expect(phase.db.recordQURLSendBatch).toHaveBeenCalledWith([expect.objectContaining({
       sendId: 'send-1', senderDiscordId: 'sender-1', recipientDiscordId: 'recipient-1',
       qurlId: 'q_aaaaaaaaaa1', guildId: 'guild-1', targetType: 'user',
-    })]);
+    })], { initialSend: true });
+    expect(phase.db.saveSendConfig).toHaveBeenCalledWith(expect.objectContaining({
+      sendId: 'send-1', initialSend: true, connectorResourceId: 'resource-1',
+      actualUrl: phase.params.locationUrl, locationName: 'Test',
+    }));
+    expect(phase.db.saveSendConfig.mock.invocationCallOrder[0])
+      .toBeLessThan(phase.db.recordQURLSendBatch.mock.invocationCallOrder[0]);
     expect(phase.sendDM).not.toHaveBeenCalled();
   } finally { Date.now.mockRestore(); }
 });
@@ -35,4 +41,16 @@ test('driver returns the persistence error reply without dispatching', async () 
   phase.db.recordQURLSendBatch.mockRejectedValueOnce(new Error('write unavailable'));
   expect(await phase.executeSendPipeline(phase.interaction, phase.params)).toBe(reply);
   expect(phase.sendDM).not.toHaveBeenCalled();
+});
+
+
+test('config failure cleans fresh grants and returns a pending reply without persistence or dispatch', async () => {
+  const reply = new Promise(() => {});
+  phase.interaction.editReply.mockReturnValueOnce(reply);
+  phase.db.saveSendConfig.mockRejectedValueOnce(new Error('config unavailable'));
+  const result = await phase.persistSendBatch(phase.interaction, { ...phase.params, ...phase.prepared });
+  expect(result.reply).toBe(reply);
+  expect(phase.db.recordQURLSendBatch).not.toHaveBeenCalled();
+  expect(phase.sendDM).not.toHaveBeenCalled();
+  expect(phase.connector.revokeMintedLinks).toHaveBeenCalled();
 });

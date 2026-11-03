@@ -2265,7 +2265,8 @@ async function prepareSendResources(interaction, {
 }
 
 async function persistSendBatch(interaction, {
-  sendId, qurlLinks, resourceType, expiresIn,
+  sendId, qurlLinks, resourceType, expiresIn, apiKey, connectorResourceId,
+  attachment, locationUrl, locationName, personalMessage, selfDestructSeconds,
 }) {
   // Compute the absolute expiry instant once for this dispatch (Unix
   // seconds — Discord's <t:N:R> format requires seconds, not millis).
@@ -2291,6 +2292,28 @@ async function persistSendBatch(interaction, {
   // single uncaught error at the function level, not as N
   // `DISPATCH_FAILED` audit emissions. Closes #352.
   const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+
+  // Establish the config fence before any recipient row becomes visible.
+  // Final initial persistence clears preparation atomically; failures keep Add blocked.
+  try {
+    await db.saveSendConfig({
+      sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
+      actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
+      attachmentName: attachment?.name || null,
+      attachmentContentType: attachment?.contentType || null,
+      attachmentUrl: attachment?.url || null,
+      selfDestructSeconds, initialSend: true,
+    });
+  } catch (err) {
+    if (err?.code === 'INITIAL_SEND_CONFIG_EXISTS') {
+      logger.info('Initial send configuration already exists; no DMs sent', { sendId });
+    } else {
+      logger.error('Failed to establish the initial send configuration; no DMs sent', { sendId, errorName: err?.name, errorCode: err?.code });
+    }
+    clearCooldown(interaction.user.id);
+    await cleanupFreshSendResources(qurlLinks, apiKey, sendId, { reason: 'initial_persistence', rowsMayHavePersisted: false });
+    return { reply: interaction.editReply({ content: 'Could not prepare this send safely. No DMs were sent. Please try again.', components: [] }) };
+  }
 
   // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
   // still exist on the QURL side but there's no local record to revoke them
@@ -2325,7 +2348,7 @@ async function persistSendBatch(interaction, {
       // guildId threaded into the mint above. Non-null here (entry points
       // DM-reject). Sparse write — see recordQURLSendBatch.
       guildId: interaction.guildId,
-    })));
+    })), { initialSend: true });
   } catch (err) {
     // Log only non-secret identifiers so an operator can manually revoke the
     // orphaned qURLs. qurlLink carries its live access token in the fragment
@@ -2333,7 +2356,8 @@ async function persistSendBatch(interaction, {
     // bot's child revoke (revokeMintedLinks) needs to reconcile each orphan.
     // Scrub err.message even for AWS service exceptions: validation messages
     // can echo offending request values, but contain useful failure details.
-    logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
+    const level = err?.code === 'SEND_CONFIG_REVOKED' ? 'warn' : 'error';
+    logger[level]('recordQURLSendBatch failed; aborting send to keep state consistent', {
       sendId,
       errorName: err?.name,
       errorCode: err?.code,
@@ -2345,6 +2369,9 @@ async function persistSendBatch(interaction, {
       orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
     });
     clearCooldown(interaction.user.id);
+    // A lost final response may already have cleared preparation. No confirmation
+    // or Add control is published on this error path, even if rows committed.
+    await cleanupFreshSendResources(qurlLinks, apiKey, sendId, { reason: 'initial_persistence' });
     return { reply: interaction.editReply({
       content: 'Failed to save link records. Links were not sent. Please try again.',
     }) };
@@ -2416,28 +2443,6 @@ async function dispatchAndMonitor(interaction, {
         failedUsers.push({ id: null, username: 'unknown' });
       }
     }
-  }
-
-  // Save send config for "Add Recipients" reuse. For file sends, also stash
-  // the Discord CDN URL + content type so we can re-download + re-upload when
-  // adding recipients (the original resource's 10-token pool may be drained).
-  // Logged-and-swallowed: a failure here doesn't block DM delivery (already
-  // done above) but it disables future Add Recipients / revoke-via-ui for
-  // this send. The per-link rows in qurl_sends persisted above, so /qurl
-  // revoke by sendId still works even if this row is missing.
-  try {
-    await db.saveSendConfig({
-      sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
-      actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
-      attachmentName: attachment?.name || null,
-      attachmentContentType: attachment?.contentType || null,
-      attachmentUrl: attachment?.url || null,
-      selfDestructSeconds,
-    });
-  } catch (err) {
-    logger.error('saveSendConfig failed; Add Recipients will be unavailable for this send', {
-      sendId, error: err.message,
-    });
   }
 
   // Ephemeral confirmation with Add Recipients + Revoke buttons.
@@ -3059,26 +3064,12 @@ async function dispatchAndMonitor(interaction, {
   }
 }
 
-async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, options = {}) {
+async function cleanupFreshSendResources(batchSends, apiKey, sendId, options = {}) {
   const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
-  const txnActionCount = ddbSendConfigGuardActionCount(batchSends);
-  if (rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
-    // Unreachable by construction for today's Add Recipients flow: oversized
-    // batches fail before DDB, and revoked errors only come from a single
-    // transaction. If a future caller violates that invariant, still revoke
-    // the freshly minted qURLs; rows may point at revoked links, but no DMs
-    // have been sent and the grants fail closed.
-    logger.error('Cleaning up oversized Add Recipients batch after possible persistence', {
-      sendId,
-      send_count: batchSends.length,
-      txn_actions: txnActionCount,
-    });
-  }
-
-  // Called when no recipient rows landed, or when a terminal guarded
-  // transaction failure is ambiguous enough that revoking freshly minted qURLs
-  // is the fail-closed outcome (no DMs have been sent yet).
+  const cleanupLabel = cleanupReason === 'initial_persistence' ? 'initial-send' : 'Add Recipients';
+  // No fresh grants have been dispatched. Earlier recipient chunks can remain
+  // as audit references while this bounded cleanup revokes their fresh grants.
   const qurlIdsByResource = new Map();
   let unidentifiedCount = 0;
   for (const s of batchSends) {
@@ -3126,7 +3117,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     }
   });
   if (failed.length > 0 || unidentifiedCount > 0) {
-    logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
+    logger.error(`Failed to clean up freshly minted ${cleanupLabel} qURL resources`, {
       sendId,
       reason: cleanupReason,
       failed_count: failed.length,
@@ -3135,7 +3126,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
       failures: failed,
     });
   } else {
-    logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
+    logger.info(`Cleaned up freshly minted ${cleanupLabel} qURL resources`, {
       sendId,
       reason: cleanupReason,
       total: resourceIds.length,
@@ -3170,6 +3161,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       msg: 'Cannot add recipients — revocation is pending; retry `/qurl revoke`.',
       newLinks: [], delivered: 0, failed: 0, newRecipients: [],
     };
+  }
+  if (Object.hasOwn(sendConfig, 'initial_persistence_pending')) {
+    return { msg: 'Cannot add recipients — the original send has not finished saving.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
   // #352 entry gate. Shares the same `EXPIRY_LABELS` membership
@@ -3495,7 +3489,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       send_count: batchSends.length,
       txn_actions: ddbSendConfigGuardActionCount(batchSends),
     });
-    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+    await cleanupFreshSendResources(batchSends, apiKey, sendId, {
       rowsMayHavePersisted: false,
       reason: 'pre_persistence_oversized_batch',
     });
@@ -3510,13 +3504,13 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // abort BEFORE any DMs go out. The revoked-race branch below also deletes
   // freshly minted resources because those rows deliberately never land.
   try {
-    await db.recordQURLSendBatch(batchSends, { requireSendConfigUnrevoked: true });
+    await db.recordQURLSendBatch(batchSends);
   } catch (err) {
     if (err?.code === 'SEND_CONFIG_REVOKED') {
       logger.warn('recordQURLSendBatch refused Add Recipients for revoked send', {
         sendId, error: err.message, linkCount: batchSends.length,
       });
-      await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId);
+      await cleanupFreshSendResources(batchSends, apiKey, sendId);
       return {
         msg: 'Cannot add recipients — this send has already been revoked.',
         newLinks: [], newRecipients: [],
@@ -3531,7 +3525,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // retry actually committed but its response was lost, this cleanup can
     // leave rows pointing at deleted resources; that is still fail-closed
     // because no DMs were sent and the qURLs no longer grant access.
-    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+    await cleanupFreshSendResources(batchSends, apiKey, sendId, {
       reason: 'guarded_transaction_failed',
     });
     return {
@@ -10100,7 +10094,7 @@ module.exports = {
       mintLinksInBatches,
       // Fresh-mint cleanup's defensive unidentified-id branch is unreachable
       // through validated mint output, so pin it directly.
-      cleanupFreshAddRecipientResources,
+      cleanupFreshAddRecipientResources: cleanupFreshSendResources,
       activeMonitors,
       // The top-level back-half driver. Exported here so PR 7b's
       // tests (and the follow-up direct unit spec in #278) can pin

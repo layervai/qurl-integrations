@@ -3417,6 +3417,7 @@ describe('executeSendPipeline — guild_id threading (#1101)', () => {
     );
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ guildId: 'guild-1' })]),
+      { initialSend: true },
     );
   });
 });
@@ -3510,7 +3511,6 @@ describe('handleAddRecipients — guild_id threading (#1101)', () => {
     );
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ guildId: 'guild-1' })]),
-      { requireSendConfigUnrevoked: true },
     );
   });
 });
@@ -3821,4 +3821,112 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     const [, message] = mockSendChannelMessage.mock.calls[0];
     expect(message.content).not.toMatch(/\u202E/u);
   });
+});
+
+
+describe('initial send persistence fence', () => {
+  beforeEach(() => {
+    for (const mock of [mockDownloadAndUpload, mockMintLinks, mockDb.saveSendConfig,
+      mockDb.recordQURLSendBatch, mockRevokeMintedLinks, mockSendDM]) mock.mockReset();
+    mockDb.saveSendConfig.mockResolvedValue(undefined);
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+    mockRevokeMintedLinks.mockResolvedValue(undefined);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+  });
+
+  test('initial config conflict stops delivery before any DM or confirmation monitor', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', qurl_id: 'q_aaaaaaaaaa1', resource_id: 'res-1' }]);
+    mockDb.saveSendConfig.mockRejectedValueOnce(Object.assign(new Error('condition failed'), { name: 'TransactionCanceledException', code: 'INITIAL_SEND_CONFIG_EXISTS' }));
+    await executeSendPipeline(interaction, makePipelineParams());
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('already exists'), expect.objectContaining({ sendId: expect.any(String) }));
+    expect(interaction.editReply).toHaveBeenLastCalledWith({
+      content: expect.stringContaining('No DMs were sent.'), components: [],
+    });
+    expect(activeMonitors.size).toBe(0);
+  });
+
+
+  test('initial config is established before guarded recipient persistence and dispatch', async () => {
+    const response = { createMessageComponentCollector: jest.fn(() => ({ on: jest.fn() })) };
+    const interaction = makeInteraction({ editReply: jest.fn().mockResolvedValue(response) });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', qurl_id: 'q_aaaaaaaaaa1', resource_id: 'res-1' }]);
+    mockDb.saveSendConfig.mockResolvedValueOnce(undefined);
+    mockDb.recordQURLSendBatch.mockResolvedValueOnce(undefined);
+    await executeSendPipeline(interaction, makePipelineParams());
+    expect(mockDb.saveSendConfig.mock.calls[0][0].initialSend).toBe(true);
+    expect(mockDb.recordQURLSendBatch.mock.calls[0][1]).toEqual({ initialSend: true });
+    expect(mockDb.saveSendConfig.mock.invocationCallOrder[0]).toBeLessThan(mockDb.recordQURLSendBatch.mock.invocationCallOrder[0]);
+    expect(mockDb.recordQURLSendBatch.mock.invocationCallOrder[0]).toBeLessThan(mockSendDM.mock.invocationCallOrder[0]);
+    for (const monitor of activeMonitors) monitor.stop();
+  });
+
+  test('an initial config transport failure sends no DMs and cleans fresh grants', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', qurl_id: 'q_aaaaaaaaaa1', resource_id: 'res-1' }]);
+    mockDb.saveSendConfig.mockRejectedValueOnce(new Error('transport failure https://qurl.link/#at_secret_initial'));
+    mockRevokeMintedLinks.mockResolvedValueOnce(undefined);
+    await executeSendPipeline(interaction, makePipelineParams());
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaaaaaaaaa1'], 'apikey');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret_initial');
+  });
+
+  test.each([true, false, null, 0])('an incomplete initial persistence marker %p blocks Add before minting', async pending => {
+    mockDb.getSendConfig.mockResolvedValueOnce({ initial_persistence_pending: pending });
+    const result = await handleAddRecipients('initial-1', new Map(), makeInteraction(), 'apikey');
+    expect(result.msg).toContain('not finished saving');
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+  });
+
+
+  test('a closed initial guard sends no DMs and remains visible as a warning', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', qurl_id: 'q_aaaaaaaaaa1', resource_id: 'res-1' }]);
+    mockDb.saveSendConfig.mockResolvedValueOnce(undefined);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(Object.assign(new Error('closed'), { code: 'SEND_CONFIG_REVOKED' }));
+    mockRevokeMintedLinks.mockResolvedValueOnce(undefined);
+    await executeSendPipeline(interaction, makePipelineParams());
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('aborting send'), expect.objectContaining({ errorCode: 'SEND_CONFIG_REVOKED' }));
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaaaaaaaaa1'], 'apikey');
+  });
+
+  test('non-revoke partial persistence failure also cleans fresh grants without dispatch', async () => {
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', qurl_id: 'q_aaaaaaaaaa1', resource_id: 'res-1' }]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(Object.assign(new Error('retries exhausted'), { name: 'TransactionCanceledException' }));
+    await executeSendPipeline(makeInteraction(), makePipelineParams());
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_aaaaaaaaaa1'], 'apikey');
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('aborting send'), expect.objectContaining({ errorName: 'TransactionCanceledException' }));
+  });
+
+
+  test('revocation guidance takes priority over unfinished preparation', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({ revoking_at: 'time', initial_persistence_pending: true });
+    const result = await handleAddRecipients('initial-1', new Map(), makeInteraction(), 'apikey');
+    expect(result.msg).toContain('revocation is pending');
+    expect(result.msg).toContain('/qurl revoke');
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+  });
+
+  test('empty mint output stops before initial config creation', async () => {
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([]);
+    await executeSendPipeline(makeInteraction(), makePipelineParams());
+    expect(mockDb.saveSendConfig).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
 });

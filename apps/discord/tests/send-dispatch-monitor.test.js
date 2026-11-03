@@ -11,7 +11,7 @@ test('dispatch records delivery and starts confirmation management without minti
   await phase.dispatchAndMonitor(phase.interaction, { ...phase.params, ...phase.prepared, expiresAt: 1700086400 });
   expect(phase.sendDM).toHaveBeenCalledWith('recipient-1', expect.any(Object));
   expect(phase.db.markSendDMDelivered).toHaveBeenCalled();
-  expect(phase.db.saveSendConfig).toHaveBeenCalledWith(expect.objectContaining({ sendId: 'send-1' }));
+  expect(phase.db.saveSendConfig).not.toHaveBeenCalled();
   expect(createMessageComponentCollector).toHaveBeenCalled();
   expect(collector.on.mock.calls.map(([event]) => event)).toEqual(['collect', 'end']);
   expect(phase.activeMonitors.size).toBe(1);
