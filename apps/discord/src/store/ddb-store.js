@@ -715,7 +715,7 @@ async function getRecentSends(senderDiscordId, limit = 10, { acknowledgedOnly = 
   const configBySendId = new Map();
   const sendIdOrder = [];
   let ExclusiveStartKey;
-  // At most1000 GSI rows; config reads are batched by page with bounded retries.
+  // At most 1000 GSI rows; config reads are batched by page with bounded retries.
   const MAX_GSI_PAGES = 10;
   const TARGET_UNIQUE_SENDS = acknowledgedOnly ? limit : limit * 2;
   // Per-page GSI Limit: caps RCU on the hot path. Without it, a
@@ -756,8 +756,8 @@ async function getRecentSends(senderDiscordId, limit = 10, { acknowledgedOnly = 
     }
     // Hidden rows must not consume the search window and starve older sends.
     const configs = new Map();
-    const configRead = { ConsistentRead: true,
-      ProjectionExpression: 'send_id, sender_discord_id, revoking_at, revoked_at, revoke_acknowledged_at' };
+    const configRead = { ConsistentRead: !acknowledgedOnly,
+      ProjectionExpression: 'send_id, sender_discord_id, revoking_at, revoked_at, revoke_acknowledged_at, attachment_name, location_name, personal_message' };
     let unread = { Keys: newIds.map(send_id => ({ send_id })), ...configRead };
     for (let attempt = 0; unread.Keys.length; attempt++) {
       const result = await ddb.send(new BatchGetCommand({

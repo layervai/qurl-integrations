@@ -2602,7 +2602,7 @@ describe('revoke menu batched config reads', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].args[0].input.RequestItems[table].Keys).toHaveLength(100);
     expect(calls[0].args[0].input.RequestItems[table].ConsistentRead).toBe(true);
-    expect(calls[0].args[0].input.RequestItems[table].ProjectionExpression).not.toMatch(/token|attachment/);
+    expect(calls[0].args[0].input.RequestItems[table].ProjectionExpression).not.toMatch(/token|attachment_url/);
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
   });
 
@@ -2633,4 +2633,27 @@ describe('revoke menu batched config reads', () => {
       expect(ddbMock.commandCalls(QueryCommand).every(call => call.args[0].input.IndexName)).toBe(true);
     } finally { jest.useRealTimers(); }
   });
+});
+
+
+test('batched menu config projection retains all existing display labels', async () => {
+  const table = 'test-prefix-qurl-send-configs';
+  ddbMock.on(QueryCommand).callsFake(input => ({ Items: input.IndexName ? [{ send_id: 'send-1' }] : [] }));
+  ddbMock.on(BatchGetCommand).callsFake(input => {
+    const projection = input.RequestItems[table].ProjectionExpression.split(', ');
+    const row = { send_id: 'send-1', attachment_name: 'file.txt', location_name: 'Place', personal_message: 'Note' };
+    return { Responses: { [table]: [Object.fromEntries(Object.entries(row).filter(([key]) => projection.includes(key)))] } };
+  });
+  expect((await store.getRecentSends('sender', 5))[0]).toMatchObject({
+    attachment_name: 'file.txt', location_name: 'Place', personal_message: 'Note',
+  });
+});
+
+test('keyless acknowledged history uses eventual reads and never requests recipient counts', async () => {
+  ddbMock.on(QueryCommand).resolves({ Items: [{ send_id: 'send-1' }] });
+  ddbMock.on(BatchGetCommand).resolves({});
+  expect(await store.getRecentSends('sender', 5, { acknowledgedOnly: true })).toEqual([]);
+  const request = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input.RequestItems['test-prefix-qurl-send-configs'];
+  expect(request.ConsistentRead).toBe(false);
+  expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(1);
 });
