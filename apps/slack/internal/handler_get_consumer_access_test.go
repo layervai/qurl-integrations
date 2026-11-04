@@ -59,6 +59,8 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 		{name: "a resource read without a CRID answers the refusal", version: 1, noCRID: true,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testLinkOrigin + "/"}},
+		{name: "a legacy 500 with a failed read is still a service failure", legacy: true, version: 1, readStatus: http.StatusNotFound,
+			want: []string{serviceUnreachableMessage}, wantAbsent: []string{consumerAccessRequiredMessage}},
 		{name: "a failed resource read answers the refusal", version: 1, readStatus: http.StatusNotFound,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 		{name: "no link origin answers the refusal", version: 1, noLinkOrigin: true,

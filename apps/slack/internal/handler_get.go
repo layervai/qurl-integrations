@@ -689,6 +689,9 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 		return ""
 	}
 	if res.ConsumerAccessVersion == 0 {
+		if refused {
+			log.Warn("get: consumer_access_required for a resource that never had a policy", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID))...)
+		}
 		return ""
 	}
 	if res.CRID == "" {
@@ -696,8 +699,13 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 		return ""
 	}
 	// The entry page must be this resource's: the CRID is a digest of its key.
-	if matched, err := crid.KeyMatches(res.CRID, der); err != nil || !matched {
-		log.Error("get: resource CRID does not match its key", "resource_id", sanitizeLogValue(resourceID), "error", err)
+	matched, err := crid.KeyMatches(res.CRID, der)
+	if err != nil {
+		log.Error("get: resource CRID is malformed", "resource_id", sanitizeLogValue(resourceID), "error", err)
+		return ""
+	}
+	if !matched {
+		log.Error("get: resource CRID does not match its key", "resource_id", sanitizeLogValue(resourceID))
 		return ""
 	}
 	// status shows which refusal shape still reaches the bot (#1980).

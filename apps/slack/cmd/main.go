@@ -568,16 +568,20 @@ func readLinkSiteConfig() (origin, accessURL string, err error) {
 	if origin == "" {
 		origin = defaultLinkOrigin
 	}
+	accessURL = strings.TrimSpace(os.Getenv("QURL_LINK_SITE_ACCESS_URL"))
+	// The fallback text carries both values raw, and Slack reads <, > and | as
+	// link syntax (url.Parse allows < and > in a host).
+	if strings.ContainsAny(origin+accessURL, "<>|") {
+		return "", "", errors.New("QURL_LINK_ORIGIN and QURL_LINK_SITE_ACCESS_URL must not contain <, > or |")
+	}
 	// Only a bare origin round-trips as https:// + host: credentials, a path, a
 	// query or a fragment (even an empty `?` or `#`) all break the equality.
 	if u, parseErr := url.Parse(origin); parseErr != nil || "https://"+u.Host != origin {
 		return "", "", errors.New("QURL_LINK_ORIGIN must be an https origin without a path, query or fragment")
 	}
-	accessURL = strings.TrimSpace(os.Getenv("QURL_LINK_SITE_ACCESS_URL"))
 	if accessURL != "" {
-		// The fallback text carries the URL raw, and Slack reads <, > and | as link syntax.
-		if u, parseErr := url.Parse(accessURL); parseErr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || strings.ContainsAny(accessURL, "<>|") {
-			return "", "", errors.New("QURL_LINK_SITE_ACCESS_URL must be an absolute https URL without credentials or <, > and |")
+		if u, parseErr := url.Parse(accessURL); parseErr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+			return "", "", errors.New("QURL_LINK_SITE_ACCESS_URL must be an absolute https URL without credentials")
 		}
 	}
 	return origin, accessURL, nil
