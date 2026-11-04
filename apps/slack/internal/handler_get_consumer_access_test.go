@@ -13,6 +13,7 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -295,5 +296,74 @@ func TestMapMintErrorConsumerAccessCarriesReference(t *testing.T) {
 	var ue *userError
 	if !errors.As(err, &ue) || ue.msg != consumerAccessRequiredMessage("req_ca") || !strings.Contains(ue.msg, "`req_ca`") {
 		t.Fatalf("mapMintError = %v, want the refusal with reference req_ca", err)
+	}
+}
+
+// The agent's inspect cannot summarize a resource that requires verified access:
+// it says so at Info and points to get, instead of a retry-inviting failure at
+// Error. A legacy 500 counts only when the resource reads with a policy.
+func TestAgentBackend_InspectToken_ConsumerAccessRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		code       string
+		version    int64
+		wantGated  bool
+		wantErrLog bool
+	}{
+		{name: "403 consumer_access_required", status: http.StatusForbidden, code: errCodeConsumerAccessRequired, wantGated: true},
+		{name: "legacy 500 with a policy", status: http.StatusInternalServerError, code: errCodeCreationFailed, version: 2, wantGated: true},
+		{name: "legacy 500 without a policy stays a failure", status: http.StatusInternalServerError, code: errCodeCreationFailed, wantErrLog: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			names := defaultTestTableNames()
+			row := map[string]ddbtypes.AttributeValue{
+				"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+				"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+				"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+					"dashboard": &ddbtypes.AttributeValueMemberS{Value: "r_dashboard"},
+				}},
+				"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
+			}
+			store := &slackdata.Store{
+				Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+				WorkspaceMappingsName: names.workspace,
+				ChannelPoliciesName:   names.channelPolicy,
+				Now:                   func() time.Time { return fixedNow },
+			}
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url"}]}`))
+				case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
+					writeAPIError(t, w, tc.status, tc.code, "refused")
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/resources/r_dashboard":
+					writeConsumerAccessResource(t, w, "r_dashboard", "", tc.version)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(api.Close)
+			logs := captureDefaultSlog(t)
+			b := &agentBackend{
+				authClient: func(context.Context, string) (*client.Client, error) {
+					return client.New(api.URL, "k", client.WithRetry(0)), nil
+				},
+				store: store,
+				log:   slog.Default(),
+			}
+
+			out, summarized, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+			if err != nil || summarized {
+				t.Fatalf("InspectToken = (%q, %v, %v), want a soft non-summary", out, summarized, err)
+			}
+			if gated := strings.Contains(out, "requires verified access") && strings.Contains(out, "get `$dashboard`"); gated != tc.wantGated {
+				t.Fatalf("out = %q, want gated=%v", out, tc.wantGated)
+			}
+			if gotErr := logs.contains(`"level":"ERROR"`); gotErr != tc.wantErrLog {
+				t.Fatalf("ERROR log = %v, want %v", gotErr, tc.wantErrLog)
+			}
+		})
 	}
 }

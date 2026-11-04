@@ -661,26 +661,37 @@ func (h *Handler) deliverGetRender(ctx context.Context, log *slog.Logger, args *
 	return getResult{text: fallbackText, blocks: blocks}
 }
 
+// consumerAccessRefusal reports whether mintErr may be qurl-service refusing a
+// mint because the resource requires verified recipient access. legacy marks the
+// 500 creation_failed that builds without the 403 answer the same refusal with;
+// that shape is also a real failure, so a caller confirms it with the resource's
+// consumer_access_version.
+func consumerAccessRefusal(mintErr error) (apiErr *client.APIError, legacy, ok bool) {
+	if !errors.As(mintErr, &apiErr) {
+		return nil, false, false
+	}
+	if apiErr.StatusCode == http.StatusForbidden && apiErr.Code == errCodeConsumerAccessRequired {
+		return apiErr, false, true
+	}
+	// shortcut: qurl-service without the 403 answers this refusal with 500
+	// creation_failed; drop this arm once every environment serves the 403 (#1980).
+	// qurl-service never mints for a resource that has or had a policy, so even a
+	// transient 500 for one is a refusal: a retry could not mint either.
+	legacy = apiErr.StatusCode == http.StatusInternalServerError && apiErr.Code == errCodeCreationFailed
+	return apiErr, legacy, legacy
+}
+
 // consumerAccessEntryURL returns the CRID entry page of a resource whose mint
 // was refused because it requires verified recipient access. Such a resource
 // issues no bearer link by design: recipients open its entry page and get
 // access there, so that page is what `/qurl get` delivers. It returns "" for
 // every other failure, which keeps its usual error mapping.
 func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, c *client.Client, args *getWorkArgs, resourceID string, mintErr error) string {
-	var apiErr *client.APIError
-	if h.cfg.LinkOrigin == "" || !errors.As(mintErr, &apiErr) {
+	apiErr, legacy, ok := consumerAccessRefusal(mintErr)
+	if h.cfg.LinkOrigin == "" || !ok {
 		return ""
 	}
-	refused := apiErr.StatusCode == http.StatusForbidden && apiErr.Code == errCodeConsumerAccessRequired
-	// shortcut: qurl-service without the 403 answers this refusal with 500
-	// creation_failed; drop this arm once every environment serves the 403 (#1980).
-	// qurl-service never mints for a resource that has or had a policy, so even a
-	// transient 500 for one is answered with the entry page: a retry could not
-	// mint either.
-	legacy := apiErr.StatusCode == http.StatusInternalServerError && apiErr.Code == errCodeCreationFailed
-	if !refused && !legacy {
-		return ""
-	}
+	refused := !legacy
 	// An id that does not even decode, such as a URL, is not a key: it has no CRID.
 	der, ok := client.ResourceKeyDER(resourceID)
 	if !ok {

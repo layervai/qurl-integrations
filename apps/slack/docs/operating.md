@@ -853,6 +853,10 @@ delivers the page. If the read fails, for example for an install without
 `qurl:read`, the bot answers the 403 with its refusal message and logs
 `get: resource read after a refused mint failed`.
 
+The agent's inspect (summary) action cannot open such a resource either: it
+answers that the resource requires verified access and points to a get of the
+same `$token`, logged at Info rather than as a failure.
+
 The bot mints nothing for these requests, so no mint audit event is written.
 Each answer logs `get: answering with the CRID entry page ...` at Info, with
 the team, channel, user and any `reason:`. That line is the bot's only record
