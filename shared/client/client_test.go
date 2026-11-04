@@ -2597,3 +2597,13 @@ func TestResourceKeyDER(t *testing.T) {
 		})
 	}
 }
+
+// validateSharingState rejects an id the base64 decoder would read past: Strict
+// decoding skips line breaks, so only the canonical round-trip catches them.
+func TestValidateSharingStateRejectsNonCanonicalID(t *testing.T) {
+	id := testSharingID[:20] + "\n" + testSharingID[20:]
+	sharing := &SharingState{ResourceID: id, CRID: testSharingCRID, DesiredState: desiredStateOff, ConnectionState: "stopped"}
+	if err := validateSharingState(id, sharing); err == nil || !strings.Contains(err.Error(), "resource identity is invalid") {
+		t.Fatalf("validateSharingState = %v, want the invalid-identity error", err)
+	}
+}
