@@ -80,6 +80,10 @@ func (s *stubDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ 
 	return s.deleteItemFn(in)
 }
 
+func (s *stubDDB) BatchWriteItem(context.Context, *dynamodb.BatchWriteItemInput, ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	return nil, errors.New("unexpected BatchWriteItem in stubDDB")
+}
+
 func (s *stubDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
 	if s.queryFn == nil {
 		return &dynamodb.QueryOutput{}, nil

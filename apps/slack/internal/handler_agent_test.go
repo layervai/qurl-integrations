@@ -1023,6 +1023,17 @@ func memNumberValue(av ddbtypes.AttributeValue) int64 {
 	return v
 }
 
+func (f *memAgentDDB) BatchWriteItem(ctx context.Context, in *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	for table, requests := range in.RequestItems {
+		for _, request := range requests {
+			if _, err := f.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: &table, Key: request.DeleteRequest.Key}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return &dynamodb.BatchWriteItemOutput{}, nil
+}
+
 func (f *memAgentDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
