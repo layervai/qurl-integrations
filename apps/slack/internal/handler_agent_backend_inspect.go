@@ -643,7 +643,8 @@ func writeResolvedInspectableResourceLines(b *strings.Builder, resolved *inspect
 }
 
 // consumerAccessGated reports whether mintErr is the consumer-access refusal. The
-// legacy 500 shape is confirmed by reading the resource's policy version.
+// legacy 500 shape is confirmed by reading the resource's policy version; the
+// explicit 403 is trusted as is, since inspect has no entry page to verify.
 func (b *agentBackend) consumerAccessGated(ctx context.Context, c *client.Client, resourceID string, mintErr error) bool {
 	_, legacy, ok := consumerAccessRefusal(mintErr)
 	if !ok || !legacy {
