@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -284,5 +285,14 @@ func TestRenderConsumerAccessEntry(t *testing.T) {
 	portal, _ := buttons[1].(map[string]any)
 	if unlock["url"] != testLinkSiteAccessURL || unlock["action_id"] != linkSiteAccessActionID || portal["url"] != entry || portal["action_id"] != enterPortalActionID {
 		t.Fatalf("buttons = %+v, want the link-site unlock then Enter Portal on %q", buttons, entry)
+	}
+}
+
+// The refusal names qurl-service's request id, so support can trace it.
+func TestMapMintErrorConsumerAccessCarriesReference(t *testing.T) {
+	err := mapMintError(context.Background(), slog.Default(), &client.APIError{StatusCode: http.StatusForbidden, Code: errCodeConsumerAccessRequired, RequestID: "req_ca"})
+	var ue *userError
+	if !errors.As(err, &ue) || ue.msg != consumerAccessRequiredMessage("req_ca") || !strings.Contains(ue.msg, "`req_ca`") {
+		t.Fatalf("mapMintError = %v, want the refusal with reference req_ca", err)
 	}
 }
