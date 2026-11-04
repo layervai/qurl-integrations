@@ -849,7 +849,9 @@ one domain") issues no one-time links: qurl-service refuses the mint with
 install's `qurl:read` scope) and, if it has a policy, deliver its CRID entry
 page instead, where the user verifies once and later opens it with a passkey.
 The bot checks that the CRID is the digest of the resource's key before it
-delivers the page.
+delivers the page. If the read fails, for example for an install without
+`qurl:read`, the bot answers the 403 with its refusal message and logs
+`get: resource read after a refused mint failed`.
 
 The bot mints nothing for these requests, so no mint audit event is written.
 Each answer logs `get: answering with the CRID entry page ...` at Info, with

@@ -592,13 +592,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 
 	out, err := c.Create(ctx, input)
 	if err != nil {
-		// The request log scope carries team and channel; the user and any reason
-		// complete "who asked, and why", since no mint audit is written here.
-		entryLog := log.With("user_id", sanitizeLogValue(args.userID))
-		if reason := strings.TrimSpace(args.cmd.Reason()); reason != "" {
-			entryLog = entryLog.With("reason", truncateRunes(reason, getReasonAuditMaxRunes))
-		}
-		if entryURL := h.consumerAccessEntryURL(ctx, entryLog, c, input.ResourceID, err); entryURL != "" {
+		if entryURL := h.consumerAccessEntryURL(ctx, log, c, args, input.ResourceID, err); entryURL != "" {
 			// Nothing was minted, so the minted-link checks and mint audits below do not
 			// apply. The bot grants nothing: qurl-service records access when the
 			// recipient verifies on the entry page.
@@ -672,7 +666,7 @@ func (h *Handler) deliverGetRender(ctx context.Context, log *slog.Logger, args *
 // issues no bearer link by design: recipients open its entry page and get
 // access there, so that page is what `/qurl get` delivers. It returns "" for
 // every other failure, which keeps its usual error mapping.
-func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, c *client.Client, resourceID string, mintErr error) string {
+func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, c *client.Client, args *getWorkArgs, resourceID string, mintErr error) string {
 	var apiErr *client.APIError
 	if h.cfg.LinkOrigin == "" || !errors.As(mintErr, &apiErr) {
 		return ""
@@ -686,6 +680,12 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 	legacy := apiErr.StatusCode == http.StatusInternalServerError && apiErr.Code == errCodeCreationFailed
 	if !refused && !legacy {
 		return ""
+	}
+	// The request log scope carries team and channel; the user and any reason
+	// complete "who asked, and why", since no mint audit is written here.
+	log = log.With("user_id", sanitizeLogValue(args.userID))
+	if reason := strings.TrimSpace(args.cmd.Reason()); reason != "" {
+		log = log.With("reason", truncateRunes(reason, getReasonAuditMaxRunes))
 	}
 	// An id that does not even decode, such as a URL, is not a key: it has no CRID.
 	der, ok := client.ResourceKeyDER(resourceID)

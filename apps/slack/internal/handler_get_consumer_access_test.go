@@ -34,6 +34,8 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		foreign bool
 		// notKey authorizes an id that is not base64url, so it cannot be a key.
 		notKey bool
+		// otherCode refuses the mint with another 403 code, which keeps its mapping.
+		otherCode bool
 		// noCRID reads the resource without a crid; badCRID with a malformed one.
 		noCRID, badCRID bool
 		version         int64
@@ -57,6 +59,8 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 		{name: "a 403 for a resource read without a policy answers the refusal", wantLog: "never had a policy",
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
+		{name: "another 403 code keeps its mapping without a read", otherCode: true, version: 1,
+			want: []string{connectorDisabledMessage}, wantAbsent: []string{consumerAccessRequiredMessage("")}},
 		{name: "an id that is not base64url answers the refusal without a read", notKey: true, version: 1,
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 		{name: "a resource read without a CRID answers the refusal", version: 1, noCRID: true, wantLog: "has no CRID",
@@ -85,14 +89,17 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			if tc.legacy {
 				mintStatus, mintCode = http.StatusInternalServerError, errCodeCreationFailed
 			}
+			if tc.otherCode {
+				mintCode = errCodeConnectorDisabled
+			}
 			ts := newAdminTestServers(t)
 			ts.seedPolicySet(t, testAdminTeamID, "C_test", "dashboard", []string{resourceID})
 			ts.addCustomer(http.MethodPost, "/v1/resources/"+resourceID+"/qurls", func(w http.ResponseWriter, _ *http.Request) {
 				writeAPIError(t, w, mintStatus, mintCode, "refused")
 			})
 			ts.addCustomer(http.MethodGet, "/v1/resources/"+resourceID, func(w http.ResponseWriter, _ *http.Request) {
-				if tc.notKey {
-					t.Error("an id that is not base64url must not be read")
+				if tc.notKey || tc.otherCode {
+					t.Error("this refusal must not read the resource")
 				}
 				if tc.readFails {
 					writeAPIError(t, w, http.StatusNotFound, "not_found", "gone")

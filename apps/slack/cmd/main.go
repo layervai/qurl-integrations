@@ -582,8 +582,8 @@ func readLinkSiteConfig() (origin, accessURL string, err error) {
 		return "", "", errors.New("QURL_LINK_ORIGIN must be an https:// origin without a path, query or fragment")
 	}
 	if accessURL != "" {
-		if u, parseErr := url.Parse(accessURL); parseErr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
-			return "", "", errors.New("QURL_LINK_SITE_ACCESS_URL must be an absolute https URL without credentials")
+		if u, parseErr := url.Parse(accessURL); parseErr != nil || u.Scheme != "https" || u.Host == "" || strings.HasSuffix(u.Host, ":") || u.User != nil {
+			return "", "", errors.New("QURL_LINK_SITE_ACCESS_URL must be an absolute https URL without credentials or an empty port")
 		}
 	}
 	return origin, accessURL, nil
