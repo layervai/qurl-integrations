@@ -19,6 +19,8 @@ import (
 const (
 	testLinkOrigin        = "https://link.example"
 	testLinkSiteAccessURL = "https://link.example/unlock"
+	// testEntryURL is the entry page the bot builds for testTunnelCRID.
+	testEntryURL = testLinkOrigin + "/" + testTunnelCRID
 )
 
 // A resource that requires verified recipient access issues no bearer link, so
@@ -26,7 +28,6 @@ const (
 // 403 of current qurl-service and the 500 of earlier builds lead there; every
 // other case keeps the usual error mapping.
 func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
-	entry := testLinkOrigin + "/" + testTunnelCRID
 	for _, tc := range []struct {
 		name string
 		// legacy answers the mint with qurl-service's earlier 500 instead of the 403.
@@ -49,13 +50,13 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		wantLog string
 	}{
 		{name: "403 consumer_access_required", version: 1, wantLog: "answering with the CRID entry page",
-			want: []string{"Verified access required", entry}, wantAbsent: []string{commonGetMintFailedMessage}},
+			want: []string{"Verified access required", testEntryURL}, wantAbsent: []string{commonGetMintFailedMessage}},
 		{name: "legacy 500 creation_failed", legacy: true, version: 3, wantLog: `"status":500`,
-			want: []string{"Verified access required", entry}},
+			want: []string{"Verified access required", testEntryURL}},
 		{name: "private link site gets the unlock step first", version: 1, privateLinkSite: true,
-			want: []string{"First open " + testLinkSiteAccessURL + ", then " + entry}},
+			want: []string{"First open " + testLinkSiteAccessURL + ", then " + testEntryURL}},
 		{name: "500 without a policy is still a service failure", legacy: true,
-			want: []string{serviceUnreachableMessage}, wantAbsent: []string{entry}},
+			want: []string{serviceUnreachableMessage}, wantAbsent: []string{testEntryURL}},
 		{name: "a CRID that is not the resource's is never delivered", foreign: true, version: 1, wantLog: "does not match its key",
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 		{name: "a 403 for a resource read without a policy answers the refusal", wantLog: "consumer_access_version absent or zero",
@@ -170,7 +171,6 @@ func TestHandleGet_SuccessfulMintMakesNoResourceRead(t *testing.T) {
 // `/qurl crid` shares the entry delivery, `dm:true` sends the entry page to the
 // DM, not the channel, and the answer's log line records who asked and why.
 func TestHandleCRID_ConsumerAccessEntryGoesToDM(t *testing.T) {
-	entry := testLinkOrigin + "/" + testTunnelCRID
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel", []string{testTunnelResourceID})
 	ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, _ *http.Request) {
@@ -196,10 +196,10 @@ func TestHandleCRID_ConsumerAccessEntryGoesToDM(t *testing.T) {
 	if !logs.contains("answering with the CRID entry page") || !logs.contains(`"reason":"quarterly review"`) || !logs.contains(`"user_id":"`+testAdminUserID+`"`) {
 		t.Errorf("entry log missing the user or reason")
 	}
-	if !strings.Contains(dmText, entry) {
-		t.Errorf("DM text = %q, want the entry page %q", dmText, entry)
+	if !strings.Contains(dmText, testEntryURL) {
+		t.Errorf("DM text = %q, want the entry page %q", dmText, testEntryURL)
 	}
-	if !strings.Contains(async, ":incoming_envelope:") || strings.Contains(async, entry) {
+	if !strings.Contains(async, ":incoming_envelope:") || strings.Contains(async, testEntryURL) {
 		t.Errorf("async = %q, want the DM confirmation without the entry page", async)
 	}
 }
@@ -207,7 +207,6 @@ func TestHandleCRID_ConsumerAccessEntryGoesToDM(t *testing.T) {
 // The agent's confirmed get delivers the entry page privately, in the thread
 // the user approved in, the same way it delivers a minted link.
 func TestConfirm_GetConsumerAccessDeliversEntryPrivately(t *testing.T) {
-	entry := testLinkOrigin + "/" + testTunnelCRID
 	names := defaultTestTableNames()
 	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
 		names.channelPolicy: {seedChannelPolicySet("T1", "D1", "dashboard", []string{testTunnelResourceID})},
@@ -234,28 +233,31 @@ func TestConfirm_GetConsumerAccessDeliversEntryPrivately(t *testing.T) {
 	if len(hc.blocks.calls) != 1 {
 		t.Fatalf("want one private delivery, got %d: %+v", len(hc.blocks.calls), hc.blocks.calls)
 	}
-	if got, _ := enterPortalButton(t, hc.blocks.calls[0].blocks)["url"].(string); got != entry {
-		t.Fatalf("Enter Portal url = %q, want the entry page %q", got, entry)
+	if got, _ := enterPortalButton(t, hc.blocks.calls[0].blocks)["url"].(string); got != testEntryURL {
+		t.Fatalf("Enter Portal url = %q, want the entry page %q", got, testEntryURL)
 	}
 	_, card := parseResponse(t, hc.waitForN(t, 1)[0])
-	if !strings.Contains(card, agentConfirmGetDeliveredReply) || strings.Contains(card, entry) {
+	if !strings.Contains(card, agentConfirmGetDeliveredReply) || strings.Contains(card, testEntryURL) {
 		t.Fatalf("public card = %q, want neutral delivery success without the entry page", card)
 	}
 }
 
 // writeConsumerAccessResource answers GET /v1/resources/{id} for a resource
-// with the given CRID (omitted when empty) whose consumer access policy is at
-// version.
+// with the given CRID whose consumer access policy is at version. A zero value
+// leaves its field out, as a resource without a policy (or an older
+// qurl-service) does.
 func writeConsumerAccessResource(t *testing.T, w http.ResponseWriter, resourceID, cridValue string, version int64) {
 	t.Helper()
 	resource := map[string]any{
-		testKeyResourceID:         resourceID,
-		testKeyType:               client.ResourceTypeTunnel,
-		testKeyStatus:             client.StatusActive,
-		"consumer_access_version": version,
+		testKeyResourceID: resourceID,
+		testKeyType:       client.ResourceTypeTunnel,
+		testKeyStatus:     client.StatusActive,
 	}
 	if cridValue != "" {
 		resource["crid"] = cridValue
+	}
+	if version != 0 {
+		resource["consumer_access_version"] = version
 	}
 	respondQURLEnvelope(t, w, map[string]any{"resource": resource})
 }
@@ -263,14 +265,13 @@ func writeConsumerAccessResource(t *testing.T, w http.ResponseWriter, resourceID
 // The entry render's fallback names each step, and the unlock button comes
 // before Enter Portal, which carries the entry page.
 func TestRenderConsumerAccessEntry(t *testing.T) {
-	entry := testLinkOrigin + "/" + testTunnelCRID
-	fallback, _ := renderConsumerAccessEntry(entry, "")
-	if want := ":lock: Verified access required: " + entry + " (get access there)"; fallback != want {
+	fallback, _ := renderConsumerAccessEntry(testEntryURL, "")
+	if want := ":lock: Verified access required: " + testEntryURL + " (get access there)"; fallback != want {
 		t.Fatalf("fallback = %q, want %q", fallback, want)
 	}
 
-	fallback, blocks := renderConsumerAccessEntry(entry, testLinkSiteAccessURL)
-	if want := ":lock: Verified access required. First open " + testLinkSiteAccessURL + ", then " + entry + " (get access there)"; fallback != want {
+	fallback, blocks := renderConsumerAccessEntry(testEntryURL, testLinkSiteAccessURL)
+	if want := ":lock: Verified access required. First open " + testLinkSiteAccessURL + ", then " + testEntryURL + " (get access there)"; fallback != want {
 		t.Fatalf("fallback = %q, want %q", fallback, want)
 	}
 	actions, ok := blocks[1].(map[string]any)
@@ -283,8 +284,8 @@ func TestRenderConsumerAccessEntry(t *testing.T) {
 	}
 	unlock, _ := buttons[0].(map[string]any)
 	portal, _ := buttons[1].(map[string]any)
-	if unlock["url"] != testLinkSiteAccessURL || unlock["action_id"] != linkSiteAccessActionID || portal["url"] != entry || portal["action_id"] != enterPortalActionID {
-		t.Fatalf("buttons = %+v, want the link-site unlock then Enter Portal on %q", buttons, entry)
+	if unlock["url"] != testLinkSiteAccessURL || unlock["action_id"] != linkSiteAccessActionID || portal["url"] != testEntryURL || portal["action_id"] != enterPortalActionID {
+		t.Fatalf("buttons = %+v, want the link-site unlock then Enter Portal on %q", buttons, testEntryURL)
 	}
 }
 
