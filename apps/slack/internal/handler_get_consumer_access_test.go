@@ -308,12 +308,14 @@ func TestAgentBackend_InspectToken_ConsumerAccessRefusal(t *testing.T) {
 		status     int
 		code       string
 		version    int64
+		readFails  bool
 		wantGated  bool
 		wantErrLog bool
 	}{
 		{name: "403 consumer_access_required", status: http.StatusForbidden, code: errCodeConsumerAccessRequired, wantGated: true},
 		{name: "legacy 500 with a policy", status: http.StatusInternalServerError, code: errCodeCreationFailed, version: 2, wantGated: true},
 		{name: "legacy 500 without a policy stays a failure", status: http.StatusInternalServerError, code: errCodeCreationFailed, wantErrLog: true},
+		{name: "legacy 500 with a failed read stays a failure", status: http.StatusInternalServerError, code: errCodeCreationFailed, readFails: true, wantErrLog: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			names := defaultTestTableNames()
@@ -339,6 +341,10 @@ func TestAgentBackend_InspectToken_ConsumerAccessRefusal(t *testing.T) {
 				case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
 					writeAPIError(t, w, tc.status, tc.code, "refused")
 				case r.Method == http.MethodGet && r.URL.Path == "/v1/resources/r_dashboard":
+					if tc.readFails {
+						writeAPIError(t, w, http.StatusNotFound, "not_found", "gone")
+						return
+					}
 					writeConsumerAccessResource(t, w, "r_dashboard", "", tc.version)
 				default:
 					w.WriteHeader(http.StatusNotFound)

@@ -650,5 +650,9 @@ func (b *agentBackend) consumerAccessGated(ctx context.Context, c *client.Client
 		return ok
 	}
 	res, err := c.GetResource(ctx, resourceID)
-	return err == nil && res.ConsumerAccessVersion > 0
+	if err != nil {
+		b.log.Info("agent inspect: resource read after a legacy 500 failed", "resource_id", resourceID, "error", err)
+		return false
+	}
+	return res.ConsumerAccessVersion > 0
 }
