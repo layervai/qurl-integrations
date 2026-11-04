@@ -592,12 +592,18 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 
 	out, err := c.Create(ctx, input)
 	if err != nil {
-		if entryURL := h.consumerAccessEntryURL(ctx, log, c, args, input.ResourceID, err); entryURL != "" {
+		entryURL, gated := h.consumerAccessEntryURL(ctx, log, c, args, input.ResourceID, err)
+		if entryURL != "" {
 			// Nothing was minted, so the minted-link checks and mint audits below do not
 			// apply. The bot grants nothing: qurl-service records access when the
 			// recipient verifies on the entry page.
 			fallbackText, blocks := renderConsumerAccessEntry(entryURL, h.cfg.LinkSiteAccessURL)
 			return h.deliverGetRender(ctx, log, args, fallbackText, blocks), nil
+		}
+		if gated {
+			// The policy is confirmed, so even a legacy 500 must not invite a retry.
+			apiErr, _, _ := consumerAccessRefusal(err)
+			return getResult{}, &userError{msg: consumerAccessRequiredMessage(apiErr.RequestID)}
 		}
 		return getResult{}, mapMintError(ctx, log, err)
 	}
@@ -675,8 +681,6 @@ func consumerAccessRefusal(mintErr error) (apiErr *client.APIError, legacy, ok b
 	}
 	// shortcut: qurl-service without the 403 answers this refusal with 500
 	// creation_failed; drop this arm once every environment serves the 403 (#1980).
-	// qurl-service never mints for a resource that has or had a policy, so even a
-	// transient 500 for one is a refusal: a retry could not mint either.
 	legacy = apiErr.StatusCode == http.StatusInternalServerError && apiErr.Code == errCodeCreationFailed
 	return apiErr, legacy, legacy
 }
@@ -684,18 +688,18 @@ func consumerAccessRefusal(mintErr error) (apiErr *client.APIError, legacy, ok b
 // consumerAccessEntryURL returns the CRID entry page of a resource whose mint
 // was refused because it requires verified recipient access. Such a resource
 // issues no bearer link by design: recipients open its entry page and get
-// access there, so that page is what `/qurl get` delivers. It returns "" for
-// every other failure, which keeps its usual error mapping.
-func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, c *client.Client, args *getWorkArgs, resourceID string, mintErr error) string {
+// access there, so that page is what `/qurl get` delivers. gated reports that the
+// resource has a policy even when the page cannot be delivered; with neither,
+// the failure keeps its usual error mapping.
+func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, c *client.Client, args *getWorkArgs, resourceID string, mintErr error) (entryURL string, gated bool) {
 	apiErr, legacy, ok := consumerAccessRefusal(mintErr)
 	if h.cfg.LinkOrigin == "" || !ok {
-		return ""
+		return "", false
 	}
-	refused := !legacy
 	// An id that does not even decode, such as a URL, is not a key: it has no CRID.
 	der, ok := client.ResourceKeyDER(resourceID)
 	if !ok {
-		return ""
+		return "", false
 	}
 	// The request log scope carries team and channel; the user and any reason
 	// complete "who asked, and why", since no mint audit is written here.
@@ -712,31 +716,33 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 			level = slog.LevelInfo
 		}
 		log.Log(ctx, level, "get: resource read after a refused mint failed", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID), "mint_status", apiErr.StatusCode, "error", err)...)
-		return ""
+		return "", false
 	}
+	// qurl-service never mints for a resource that has or had a policy, so from
+	// here even a transient legacy 500 is a refusal: a retry could not mint either.
 	if res.ConsumerAccessVersion <= 0 {
-		if refused {
+		if !legacy {
 			log.Warn("get: consumer_access_required for a resource read without a policy (consumer_access_version absent or zero)", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID))...)
 		}
-		return ""
+		return "", false
 	}
 	if res.CRID == "" {
 		log.Warn("get: resource read has no CRID", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID))...)
-		return ""
+		return "", true
 	}
 	// The entry page must be this resource's: the CRID is a digest of its key.
 	matched, err := crid.KeyMatches(res.CRID, der)
 	if err != nil {
 		log.Error("get: resource CRID is malformed", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID), "error", err)...)
-		return ""
+		return "", true
 	}
 	if !matched {
 		log.Error("get: resource CRID does not match its key", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID))...)
-		return ""
+		return "", true
 	}
 	// status shows which refusal shape still reaches the bot (#1980).
 	log.Info("get: answering with the CRID entry page of a resource that requires verified access", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID), "status", apiErr.StatusCode)...)
-	return h.cfg.LinkOrigin + "/" + url.PathEscape(res.CRID)
+	return h.cfg.LinkOrigin + "/" + url.PathEscape(res.CRID), true
 }
 
 // renderConsumerAccessEntry renders the CRID entry page of a resource that
