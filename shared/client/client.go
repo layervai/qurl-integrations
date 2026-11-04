@@ -556,6 +556,13 @@ type Resource struct {
 	// distinct from the public-key ResourceID and must be passed to connectors
 	// verbatim rather than derived client-side.
 	ConnectorRoutingID string `json:"connector_routing_id,omitempty"`
+	// CRID is the resource's permanent public identifier.
+	CRID string `json:"crid,omitempty"`
+	// ConsumerAccessVersion is the revision of the resource's consumer access
+	// policy; zero means it has none. A resource with one issues no bearer
+	// links: recipients enter by its CRID and verify there.
+	// TODO(upstream-contract): qurl-service `consumer_access_version`.
+	ConsumerAccessVersion int64 `json:"consumer_access_version,omitempty"`
 }
 
 // SharingState is the account-authorized lifecycle state for one tunnel.

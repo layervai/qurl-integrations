@@ -840,6 +840,21 @@ workspace, and for a non-`event_callback` envelope that merely carried a lifecyc
 inner type. `drift_field` names the first field that moved — every drifted field
 is zeroed, but only the first is reported, so treat it as a lead, not an inventory.
 
+## Resources that require verified access
+
+A resource with a consumer access policy (for example, "verify an email at
+one domain") issues no one-time links: qurl-service refuses the mint with
+`403 consumer_access_required` (older builds answered `500 creation_failed`).
+`/qurl get`, `/qurl crid` and the agent's get then read the resource and, if
+it has a policy, deliver its CRID entry page instead, where the user verifies
+once and later opens it with a passkey. The bot checks that the CRID is the
+digest of the resource's key before it delivers the page.
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `QURL_LINK_ORIGIN` | `https://qurl.link` | https origin of the link site that serves this environment's CRIDs. |
+| `QURL_LINK_SITE_ACCESS_URL` | unset | Page that unlocks a private link site. When set, the reply shows it as the first step. |
+
 ## Endpoints
 
 | Endpoint | Purpose |

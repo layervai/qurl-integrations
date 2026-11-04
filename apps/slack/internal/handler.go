@@ -329,6 +329,13 @@ type Config struct {
 	// tunnel setup writes it into every rendered runtime definition so sandbox
 	// installs never silently fall back to production.
 	ConnectorAPIURL string
+	// LinkOrigin is the https origin of this environment's qURL link site. A
+	// resource that requires verified recipient access is delivered as its
+	// CRID entry page on this origin. Empty disables that delivery.
+	LinkOrigin string
+	// LinkSiteAccessURL, when set, is the page that unlocks a private link
+	// site (sandbox). The CRID entry reply shows it as a first step.
+	LinkSiteAccessURL string
 
 	// BaseContext is the server-lifetime parent of every async work
 	// goroutine's context. SIGTERM cancels it, which propagates to

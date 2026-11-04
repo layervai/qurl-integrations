@@ -192,6 +192,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	linkOrigin, linkSiteAccessURL, err := readLinkSiteConfig()
+	if err != nil {
+		return err
+	}
 
 	// DDBProvider reads the workspace_state table populated by
 	// /oauth/qurl/callback. Missing WORKSPACE_STATE_TABLE fails
@@ -360,6 +364,8 @@ func run() error {
 		TunnelHub:                      tunnelHub,
 		S3OriginImage:                  s3OriginImage,
 		ConnectorAPIURL:                connectorAPIURL,
+		LinkOrigin:                     linkOrigin,
+		LinkSiteAccessURL:              linkSiteAccessURL,
 		PostFeedback:                   postFeedback,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
@@ -546,6 +552,33 @@ func registerOptionalSetupRoutes(ctx context.Context, rootMux *http.ServeMux, pr
 	}
 	slog.Info("registered /oauth/slack/{install,callback} routes")
 	return nil
+}
+
+// defaultLinkOrigin is production's qURL link site.
+const defaultLinkOrigin = "https://qurl.link"
+
+// schemeHTTPS is the only scheme a link-site value may use.
+const schemeHTTPS = "https"
+
+// readLinkSiteConfig reads QURL_LINK_ORIGIN (default: production's link site)
+// and the optional QURL_LINK_SITE_ACCESS_URL, which unlocks a private link site.
+// Both reach users as links, so each must be an absolute https URL without
+// credentials, and the origin has no path, query or fragment.
+func readLinkSiteConfig() (origin, accessURL string, err error) {
+	origin = strings.TrimRight(strings.TrimSpace(os.Getenv("QURL_LINK_ORIGIN")), "/")
+	if origin == "" {
+		origin = defaultLinkOrigin
+	}
+	if u, parseErr := url.Parse(origin); parseErr != nil || u.Scheme != schemeHTTPS || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", "", errors.New("QURL_LINK_ORIGIN must be an https origin without a path, query or fragment")
+	}
+	accessURL = strings.TrimSpace(os.Getenv("QURL_LINK_SITE_ACCESS_URL"))
+	if accessURL != "" {
+		if u, parseErr := url.Parse(accessURL); parseErr != nil || u.Scheme != schemeHTTPS || u.Host == "" || u.User != nil {
+			return "", "", errors.New("QURL_LINK_SITE_ACCESS_URL must be an absolute https URL without credentials")
+		}
+	}
+	return origin, accessURL, nil
 }
 
 func connectorAPIURLFromEndpoint(raw string) (endpoint, apiURL string, err error) {
