@@ -2575,3 +2575,24 @@ func TestMe(t *testing.T) {
 		})
 	}
 }
+
+func TestResourceKeyDER(t *testing.T) {
+	for _, tc := range []struct {
+		name, id string
+		wantOK   bool
+	}{
+		{name: "public key", id: testSharingID, wantOK: true},
+		{name: "empty", id: ""},
+		{name: "padded", id: testSharingID + "=="},
+		{name: "embedded newline", id: testSharingID[:20] + "\n" + testSharingID[20:]},
+		{name: "standard alphabet", id: strings.ReplaceAll(testSharingID, "_", "/")},
+		{name: "legacy id", id: "r_2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			der, ok := ResourceKeyDER(tc.id)
+			if ok != tc.wantOK || (ok && len(der) == 0) {
+				t.Fatalf("ResourceKeyDER(%q) = %d bytes, %v; want ok=%v", tc.id, len(der), ok, tc.wantOK)
+			}
+		})
+	}
+}

@@ -2,10 +2,16 @@ package internal
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -21,47 +27,61 @@ const (
 func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 	entry := testLinkOrigin + "/" + testTunnelCRID
 	for _, tc := range []struct {
-		name              string
-		resourceID        string
-		mintStatus        int
-		mintCode          string
+		name string
+		// legacy answers the mint with qurl-service's earlier 500 instead of the 403.
+		legacy bool
+		// foreign authorizes a resource whose key testTunnelCRID does not digest.
+		foreign           bool
 		version           int64
 		readStatus        int
-		linkOrigin        string
+		noLinkOrigin      bool
 		linkSiteAccessURL string
 		want              []string
 		wantAbsent        []string
 	}{
-		{name: "403 consumer_access_required", resourceID: testTunnelResourceID, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, version: 1, linkOrigin: testLinkOrigin,
-			want: []string{"Verified access required", entry}, wantAbsent: []string{"Failed to create qURL"}},
-		{name: "legacy 500 creation_failed", resourceID: testTunnelResourceID, mintStatus: http.StatusInternalServerError, mintCode: errCodeCreationFailed, version: 3, linkOrigin: testLinkOrigin,
+		{name: "403 consumer_access_required", version: 1,
+			want: []string{"Verified access required", entry}, wantAbsent: []string{commonGetMintFailedMessage}},
+		{name: "legacy 500 creation_failed", legacy: true, version: 3,
 			want: []string{"Verified access required", entry}},
-		{name: "private link site gets the unlock step first", resourceID: testTunnelResourceID, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, version: 1, linkOrigin: testLinkOrigin, linkSiteAccessURL: testLinkSiteAccessURL,
+		{name: "private link site gets the unlock step first", version: 1, linkSiteAccessURL: testLinkSiteAccessURL,
 			want: []string{"First open " + testLinkSiteAccessURL + ", then " + entry}},
-		{name: "500 without a policy is still a service failure", resourceID: testTunnelResourceID, mintStatus: http.StatusInternalServerError, mintCode: errCodeCreationFailed, version: 0, linkOrigin: testLinkOrigin,
+		{name: "500 without a policy is still a service failure", legacy: true,
 			want: []string{serviceUnreachableMessage}, wantAbsent: []string{entry}},
-		{name: "a CRID that is not the resource's is never delivered", resourceID: testResourceIDFix, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, version: 1, linkOrigin: testLinkOrigin,
+		{name: "a CRID that is not the resource's is never delivered", foreign: true, version: 1,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
-		{name: "a failed resource read answers the refusal", resourceID: testTunnelResourceID, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, version: 1, readStatus: http.StatusNotFound, linkOrigin: testLinkOrigin,
+		{name: "a failed resource read answers the refusal", version: 1, readStatus: http.StatusNotFound,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
-		{name: "no link origin answers the refusal", resourceID: testTunnelResourceID, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, version: 1,
+		{name: "no link origin answers the refusal", version: 1, noLinkOrigin: true,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			resourceID, mintStatus, mintCode := testTunnelResourceID, http.StatusForbidden, errCodeConsumerAccessRequired
+			if tc.foreign {
+				resourceID = testResourceIDFix
+				// A real key, so the case reaches crid.KeyMatches and not the decode guard.
+				if _, ok := client.ResourceKeyDER(resourceID); !ok {
+					t.Fatalf("foreign resource id %q must be a public key", resourceID)
+				}
+			}
+			if tc.legacy {
+				mintStatus, mintCode = http.StatusInternalServerError, errCodeCreationFailed
+			}
 			ts := newAdminTestServers(t)
-			ts.seedPolicySet(t, testAdminTeamID, "C_test", "dashboard", []string{tc.resourceID})
-			ts.addCustomer(http.MethodPost, "/v1/resources/"+tc.resourceID+"/qurls", func(w http.ResponseWriter, _ *http.Request) {
-				writeAPIError(t, w, tc.mintStatus, tc.mintCode, "refused")
+			ts.seedPolicySet(t, testAdminTeamID, "C_test", "dashboard", []string{resourceID})
+			ts.addCustomer(http.MethodPost, "/v1/resources/"+resourceID+"/qurls", func(w http.ResponseWriter, _ *http.Request) {
+				writeAPIError(t, w, mintStatus, mintCode, "refused")
 			})
-			ts.addCustomer(http.MethodGet, "/v1/resources/"+tc.resourceID, func(w http.ResponseWriter, _ *http.Request) {
+			ts.addCustomer(http.MethodGet, "/v1/resources/"+resourceID, func(w http.ResponseWriter, _ *http.Request) {
 				if tc.readStatus != 0 {
 					writeAPIError(t, w, tc.readStatus, "not_found", "gone")
 					return
 				}
-				writeConsumerAccessResource(t, w, tc.resourceID, tc.version)
+				writeConsumerAccessResource(t, w, resourceID, tc.version)
 			})
 			h := newAdminTestHandler(t, ts)
-			h.cfg.LinkOrigin = tc.linkOrigin
+			if !tc.noLinkOrigin {
+				h.cfg.LinkOrigin = testLinkOrigin
+			}
 			h.cfg.LinkSiteAccessURL = tc.linkSiteAccessURL
 
 			_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("get $dashboard", testAdminTeamID, testAdminUserID)
@@ -105,6 +125,45 @@ func TestHandleCRID_ConsumerAccessEntryGoesToDM(t *testing.T) {
 	}
 	if !strings.Contains(async, ":incoming_envelope:") || strings.Contains(async, entry) {
 		t.Errorf("async = %q, want the DM confirmation without the entry page", async)
+	}
+}
+
+// The agent's confirmed get delivers the entry page privately, in the thread
+// the user approved in, the same way it delivers a minted link.
+func TestConfirm_GetConsumerAccessDeliversEntryPrivately(t *testing.T) {
+	entry := testLinkOrigin + "/" + testTunnelCRID
+	names := defaultTestTableNames()
+	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
+		names.channelPolicy: {seedChannelPolicySet("T1", "D1", "dashboard", []string{testTunnelResourceID})},
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/"+testTunnelResourceID+"/qurls":
+			writeAPIError(t, w, http.StatusForbidden, errCodeConsumerAccessRequired, "refused")
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/resources/"+testTunnelResourceID:
+			writeConsumerAccessResource(t, w, testTunnelResourceID, 1)
+		default:
+			t.Errorf("unexpected qURL API call %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	hc.h.cfg.NewClient = func(apiKey string) *client.Client { return client.New(srv.URL, apiKey, client.WithRetry(0)) }
+	hc.h.cfg.LinkOrigin = testLinkOrigin
+
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "dashboard", Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+
+	if len(hc.blocks.calls) != 1 {
+		t.Fatalf("want one private delivery, got %d: %+v", len(hc.blocks.calls), hc.blocks.calls)
+	}
+	if got, _ := enterPortalButton(t, hc.blocks.calls[0].blocks)["url"].(string); got != entry {
+		t.Fatalf("Enter Portal url = %q, want the entry page %q", got, entry)
+	}
+	_, card := parseResponse(t, hc.waitForN(t, 1)[0])
+	if !strings.Contains(card, agentConfirmGetDeliveredReply) || strings.Contains(card, entry) {
+		t.Fatalf("public card = %q, want neutral delivery success without the entry page", card)
 	}
 }
 

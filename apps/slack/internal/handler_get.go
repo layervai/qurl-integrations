@@ -646,10 +646,8 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	return h.deliverGetRender(ctx, log, args, fallbackText, blocks), nil
 }
 
-// deliverGetRender returns a link render for in-channel delivery, or posts it
-// to the user's DM for `dm:true` and returns the plain-text ":incoming_envelope:
-// Sent to your DM." status. The link already went to the DM, so that result
-// carries no blocks.
+// deliverGetRender returns a link render for in-channel delivery, or hands it to
+// [Handler.deliverGetDM] for `dm:true`, whose plain-text status carries no blocks.
 func (h *Handler) deliverGetRender(ctx context.Context, log *slog.Logger, args *getWorkArgs, fallbackText string, blocks []any) getResult {
 	if args.cmd.DM() {
 		return getResult{text: h.deliverGetDM(ctx, log, args.teamID, args.enterpriseID, args.userID, fallbackText, blocks)}
@@ -676,28 +674,31 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 	if !refused && !legacy {
 		return ""
 	}
+	// Only a public-key resource has a CRID, so any other id has no entry page.
+	der, ok := client.ResourceKeyDER(resourceID)
+	if !ok {
+		return ""
+	}
 	res, err := c.GetResource(ctx, resourceID)
 	if err != nil {
-		log.Warn("get: resource read after refused mint failed", "resource_id", sanitizeLogValue(resourceID), "error", err)
+		log.Warn("get: resource read after a refused mint failed", "resource_id", sanitizeLogValue(resourceID), "mint_status", apiErr.StatusCode, "error", err)
 		return ""
 	}
 	if res.ConsumerAccessVersion == 0 {
 		return ""
 	}
-	// The entry page must be this resource's: the CRID is a digest of its key.
-	der, ok := client.ResourceKeyDER(resourceID)
-	if !ok || res.CRID == "" {
-		log.Warn("get: resource CRID cannot be checked against its key", "resource_id", sanitizeLogValue(resourceID), "has_crid", res.CRID != "")
+	if res.CRID == "" {
+		log.Warn("get: resource read has no CRID", "resource_id", sanitizeLogValue(resourceID))
 		return ""
 	}
+	// The entry page must be this resource's: the CRID is a digest of its key.
 	if matched, err := crid.KeyMatches(res.CRID, der); err != nil || !matched {
 		log.Error("get: resource CRID does not match its key", "resource_id", sanitizeLogValue(resourceID), "error", err)
 		return ""
 	}
 	// status shows which refusal shape still reaches the bot (#1980).
 	log.Info("get: delivering the CRID entry page of a resource that requires verified access", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID), "status", apiErr.StatusCode)...)
-	// KeyMatches parsed the CRID, so it is lowercase base32 and needs no escaping.
-	return h.cfg.LinkOrigin + "/" + res.CRID
+	return h.cfg.LinkOrigin + "/" + url.PathEscape(res.CRID)
 }
 
 // renderConsumerAccessEntry renders the CRID entry page of a resource that

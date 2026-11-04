@@ -568,7 +568,7 @@ func readLinkSiteConfig() (origin, accessURL string, err error) {
 	}
 	// Only a bare origin round-trips as https:// + host: credentials, a path, a
 	// query or a fragment (even an empty `?` or `#`) all break the equality.
-	if u, parseErr := url.Parse(origin); parseErr != nil || u.Host == "" || "https://"+u.Host != origin {
+	if u, parseErr := url.Parse(origin); parseErr != nil || "https://"+u.Host != origin {
 		return "", "", errors.New("QURL_LINK_ORIGIN must be an https origin without a path, query or fragment")
 	}
 	accessURL = strings.TrimSpace(os.Getenv("QURL_LINK_SITE_ACCESS_URL"))
