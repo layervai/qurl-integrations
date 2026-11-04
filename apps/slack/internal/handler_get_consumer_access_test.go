@@ -35,19 +35,19 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		// notKey authorizes an id that is not base64url, so it cannot be a key.
 		notKey bool
 		// noCRID reads the resource without a crid.
-		noCRID            bool
-		version           int64
-		readStatus        int
-		noLinkOrigin      bool
-		linkSiteAccessURL string
-		want              []string
-		wantAbsent        []string
+		noCRID          bool
+		version         int64
+		readFails       bool
+		noLinkOrigin    bool
+		privateLinkSite bool
+		want            []string
+		wantAbsent      []string
 	}{
 		{name: "403 consumer_access_required", version: 1,
 			want: []string{"Verified access required", entry}, wantAbsent: []string{commonGetMintFailedMessage}},
 		{name: "legacy 500 creation_failed", legacy: true, version: 3,
 			want: []string{"Verified access required", entry}},
-		{name: "private link site gets the unlock step first", version: 1, linkSiteAccessURL: testLinkSiteAccessURL,
+		{name: "private link site gets the unlock step first", version: 1, privateLinkSite: true,
 			want: []string{"First open " + testLinkSiteAccessURL + ", then " + entry}},
 		{name: "500 without a policy is still a service failure", legacy: true,
 			want: []string{serviceUnreachableMessage}, wantAbsent: []string{entry}},
@@ -59,9 +59,9 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 		{name: "a resource read without a CRID answers the refusal", version: 1, noCRID: true,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testLinkOrigin + "/"}},
-		{name: "a legacy 500 with a failed read is still a service failure", legacy: true, version: 1, readStatus: http.StatusNotFound,
+		{name: "a legacy 500 with a failed read is still a service failure", legacy: true, version: 1, readFails: true,
 			want: []string{serviceUnreachableMessage}, wantAbsent: []string{consumerAccessRequiredMessage}},
-		{name: "a failed resource read answers the refusal", version: 1, readStatus: http.StatusNotFound,
+		{name: "a failed resource read answers the refusal", version: 1, readFails: true,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 		{name: "no link origin answers the refusal", version: 1, noLinkOrigin: true,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
@@ -90,8 +90,8 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 				if tc.notKey {
 					t.Error("an id that is not base64url must not be read")
 				}
-				if tc.readStatus != 0 {
-					writeAPIError(t, w, tc.readStatus, "not_found", "gone")
+				if tc.readFails {
+					writeAPIError(t, w, http.StatusNotFound, "not_found", "gone")
 					return
 				}
 				cridValue := testTunnelCRID
@@ -104,7 +104,9 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			if !tc.noLinkOrigin {
 				h.cfg.LinkOrigin = testLinkOrigin
 			}
-			h.cfg.LinkSiteAccessURL = tc.linkSiteAccessURL
+			if tc.privateLinkSite {
+				h.cfg.LinkSiteAccessURL = testLinkSiteAccessURL
+			}
 
 			_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("get $dashboard", testAdminTeamID, testAdminUserID)
 			for _, s := range tc.want {

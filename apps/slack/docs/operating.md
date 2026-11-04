@@ -850,10 +850,17 @@ it has a policy, deliver its CRID entry page instead, where the user verifies
 once and later opens it with a passkey. The bot checks that the CRID is the
 digest of the resource's key before it delivers the page.
 
+The bot mints nothing for these requests, so no mint audit event is written.
+Each delivery logs `get: delivering the CRID entry page ...` at Info, and
+qurl-service records the access grant when the recipient verifies.
+
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `QURL_LINK_ORIGIN` | `https://qurl.link` | https origin of the link site that serves this environment's CRIDs. |
+| `QURL_LINK_ORIGIN` | `https://qurl.link` | https origin of the link site that serves this environment's CRIDs. Set it in every non-production environment: production's link site cannot open their CRIDs. The startup line `CRID entry pages configured` names the origin in use. |
 | `QURL_LINK_SITE_ACCESS_URL` | unset | Page that unlocks a private link site. When set, the reply shows it as the first step. |
+
+Neither value may contain `<`, `>`, `|` or `&`: the reply's plain-text fallback
+carries them as typed, and Slack reads those characters as markup.
 
 ## Endpoints
 

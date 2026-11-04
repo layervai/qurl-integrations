@@ -1529,9 +1529,12 @@ func TestReadLinkSiteConfig(t *testing.T) {
 		{name: "origin with an empty query", origin: "https://link.example?", wantErr: true},
 		{name: "origin with a fragment", origin: "https://link.example#x", wantErr: true},
 		{name: "origin with Slack link syntax", origin: "https://link<example", wantErr: true},
+		{name: "origin with an empty port", origin: "https://link.example:", wantErr: true},
+		{name: "origin with a port", origin: "https://link.example:8443", wantOrigin: "https://link.example:8443"},
 		{name: "http unlock", access: "http://other.example/abc", wantErr: true},
 		{name: "relative unlock", access: "/abc", wantErr: true},
 		{name: "unlock with Slack link syntax", access: "https://other.example/a|b", wantErr: true},
+		{name: "unlock with an ampersand", access: "https://other.example/?a=1&b=2", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("QURL_LINK_ORIGIN", tc.origin)

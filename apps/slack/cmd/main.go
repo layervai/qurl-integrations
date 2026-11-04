@@ -569,14 +569,15 @@ func readLinkSiteConfig() (origin, accessURL string, err error) {
 		origin = defaultLinkOrigin
 	}
 	accessURL = strings.TrimSpace(os.Getenv("QURL_LINK_SITE_ACCESS_URL"))
-	// The fallback text carries both values raw, and Slack reads <, > and | as
-	// link syntax (url.Parse allows < and > in a host).
-	if strings.ContainsAny(origin+accessURL, "<>|") {
-		return "", "", errors.New("QURL_LINK_ORIGIN and QURL_LINK_SITE_ACCESS_URL must not contain <, > or |")
+	// The fallback text carries both values raw, and Slack reads <, >, | and & as
+	// markup (url.Parse allows < and > in a host).
+	if strings.ContainsAny(origin+accessURL, "<>|&") {
+		return "", "", errors.New("QURL_LINK_ORIGIN and QURL_LINK_SITE_ACCESS_URL must not contain <, >, | or &")
 	}
 	// Only a bare origin round-trips as https:// + host: credentials, a path, a
-	// query or a fragment (even an empty `?` or `#`) all break the equality.
-	if u, parseErr := url.Parse(origin); parseErr != nil || "https://"+u.Host != origin {
+	// query or a fragment (even an empty `?` or `#`) all break the equality. An
+	// empty port survives it, so the trailing colon is checked on its own.
+	if u, parseErr := url.Parse(origin); parseErr != nil || "https://"+u.Host != origin || strings.HasSuffix(origin, ":") {
 		return "", "", errors.New("QURL_LINK_ORIGIN must be an https origin without a path, query or fragment")
 	}
 	if accessURL != "" {

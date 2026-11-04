@@ -688,7 +688,7 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 		log.Warn("get: resource read after a refused mint failed", "resource_id", sanitizeLogValue(resourceID), "mint_status", apiErr.StatusCode, "error", err)
 		return ""
 	}
-	if res.ConsumerAccessVersion == 0 {
+	if res.ConsumerAccessVersion <= 0 {
 		if refused {
 			log.Warn("get: consumer_access_required for a resource that never had a policy", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID))...)
 		}
@@ -718,16 +718,14 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 // the environment's link site is private. Every string is a static template or
 // operator config: no user or LLM input reaches the mrkdwn.
 func renderConsumerAccessEntry(entryURL, linkSiteAccessURL string) (fallbackText string, blocks []any) {
-	headline := ":lock: *Verified access required* — open its page to get access."
-	fallbackText = ":lock: Verified access required: " + entryURL + " (get access there)"
+	const headline = ":lock: *Verified access required* — open its page to get access."
 	entry := primaryURLButtonElement(enterPortalButtonLabel, enterPortalActionID, entryURL)
-	if linkSiteAccessURL == "" {
-		return fallbackText, []any{sectionBlock(headline), actionsBlock(entry)}
+	if linkSiteAccessURL != "" {
+		unlock := urlButtonElement(linkSiteAccessButtonLabel, linkSiteAccessActionID, linkSiteAccessURL)
+		return ":lock: Verified access required. First open " + linkSiteAccessURL + ", then " + entryURL + " (get access there)",
+			[]any{sectionBlock(headline + "\nThe link site is private: select *" + linkSiteAccessButtonLabel + "* first."), actionsBlock(unlock, entry)}
 	}
-	unlock := urlButtonElement(linkSiteAccessButtonLabel, linkSiteAccessActionID, linkSiteAccessURL)
-	headline += "\nThe link site is private: select *" + linkSiteAccessButtonLabel + "* first."
-	fallbackText = ":lock: Verified access required. First open " + linkSiteAccessURL + ", then " + entryURL + " (get access there)"
-	return fallbackText, []any{sectionBlock(headline), actionsBlock(unlock, entry)}
+	return ":lock: Verified access required: " + entryURL + " (get access there)", []any{sectionBlock(headline), actionsBlock(entry)}
 }
 
 // linkSiteAccessActionID and linkSiteAccessButtonLabel name the unlock button
