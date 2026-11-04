@@ -845,16 +845,17 @@ is zeroed, but only the first is reported, so treat it as a lead, not an invento
 A resource with a consumer access policy (for example, "verify an email at
 one domain") issues no one-time links: qurl-service refuses the mint with
 `403 consumer_access_required` (older builds answered `500 creation_failed`).
-`/qurl get`, `/qurl crid` and the agent's get then read the resource and, if
-it has a policy, deliver its CRID entry page instead, where the user verifies
-once and later opens it with a passkey. The bot checks that the CRID is the
-digest of the resource's key before it delivers the page.
+`/qurl get`, `/qurl crid` and the agent's get then read the resource (with the
+install's `qurl:read` scope) and, if it has a policy, deliver its CRID entry
+page instead, where the user verifies once and later opens it with a passkey.
+The bot checks that the CRID is the digest of the resource's key before it
+delivers the page.
 
 The bot mints nothing for these requests, so no mint audit event is written.
-Each answer logs `get: answering with the CRID entry page ...` at Info; that
-line is the bot's only record of it, and a failed `dm:true` post also logs
-`get: DM post failed`. qurl-service records the access grant when the
-recipient verifies.
+Each answer logs `get: answering with the CRID entry page ...` at Info, with
+the team, channel, user and any `reason:`. That line is the bot's only record
+of it; a failed `dm:true` post also logs `get: DM post failed`. qurl-service
+records the access grant when the recipient verifies.
 
 | Env var | Default | Purpose |
 |---------|---------|---------|

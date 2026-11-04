@@ -47,7 +47,7 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 	}{
 		{name: "403 consumer_access_required", version: 1, wantLog: "answering with the CRID entry page",
 			want: []string{"Verified access required", entry}, wantAbsent: []string{commonGetMintFailedMessage}},
-		{name: "legacy 500 creation_failed", legacy: true, version: 3,
+		{name: "legacy 500 creation_failed", legacy: true, version: 3, wantLog: "status=500",
 			want: []string{"Verified access required", entry}},
 		{name: "private link site gets the unlock step first", version: 1, privateLinkSite: true,
 			want: []string{"First open " + testLinkSiteAccessURL + ", then " + entry}},
@@ -139,8 +139,8 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 	}
 }
 
-// `/qurl crid` shares the entry delivery, and `dm:true` sends the entry page to
-// the DM, not the channel.
+// `/qurl crid` shares the entry delivery, `dm:true` sends the entry page to the
+// DM, not the channel, and the answer's log line records who asked and why.
 func TestHandleCRID_ConsumerAccessEntryGoesToDM(t *testing.T) {
 	entry := testLinkOrigin + "/" + testTunnelCRID
 	ts := newAdminTestServers(t)
@@ -159,8 +159,17 @@ func TestHandleCRID_ConsumerAccessEntryGoesToDM(t *testing.T) {
 		return nil
 	}
 
-	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID+" dm:true", testAdminTeamID, testAdminUserID)
+	logs := &capturedLogs{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { h.Wait(); slog.SetDefault(previous) })
+
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(`crid `+testTunnelCRID+` dm:true reason:"quarterly review"`, testAdminTeamID, testAdminUserID)
 	h.Wait()
+	// No mint audit is written, so the answer's log line carries who asked and why.
+	if !logs.contains("answering with the CRID entry page") || !logs.contains(`reason="quarterly review"`) || !logs.contains("user_id="+testAdminUserID) {
+		t.Errorf("entry log missing the user or reason")
+	}
 	if !strings.Contains(dmText, entry) {
 		t.Errorf("DM text = %q, want the entry page %q", dmText, entry)
 	}

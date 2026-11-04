@@ -592,8 +592,13 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 
 	out, err := c.Create(ctx, input)
 	if err != nil {
-		// The request log scope carries team and channel; the user completes "who asked".
-		if entryURL := h.consumerAccessEntryURL(ctx, log.With("user_id", sanitizeLogValue(args.userID)), c, input.ResourceID, err); entryURL != "" {
+		// The request log scope carries team and channel; the user and any reason
+		// complete "who asked, and why", since no mint audit is written here.
+		entryLog := log.With("user_id", sanitizeLogValue(args.userID))
+		if reason := strings.TrimSpace(args.cmd.Reason()); reason != "" {
+			entryLog = entryLog.With("reason", truncateRunes(reason, getReasonAuditMaxRunes))
+		}
+		if entryURL := h.consumerAccessEntryURL(ctx, entryLog, c, input.ResourceID, err); entryURL != "" {
 			// Nothing was minted, so the minted-link checks and mint audits below do not
 			// apply. The bot grants nothing: qurl-service records access when the
 			// recipient verifies on the entry page.
@@ -689,7 +694,13 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 	}
 	res, err := c.GetResource(ctx, resourceID)
 	if err != nil {
-		log.Warn("get: resource read after a refused mint failed", "resource_id", sanitizeLogValue(resourceID), "mint_status", apiErr.StatusCode, "error", err)
+		// After a legacy 500 the read often fails for the same outage, so only a
+		// failed read after the 403 is unexpected.
+		level := slog.LevelWarn
+		if legacy {
+			level = slog.LevelInfo
+		}
+		log.Log(ctx, level, "get: resource read after a refused mint failed", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID), "mint_status", apiErr.StatusCode, "error", err)...)
 		return ""
 	}
 	if res.ConsumerAccessVersion <= 0 {
