@@ -394,6 +394,12 @@ restart. A skipped null-clear can leave a rejected session row for Discord to
 validate on the next boot; final flush drains writes but does not retry a
 null-mirror delete. A non-null mirror is persisted after the drain.
 
+A gateway-only standby uses leader-tick progress for `/health`. Readiness fails
+if the loop does not enter a tick for more than 15 seconds, including a stuck
+database or handoff operation. Slow calls count too: the default two-second
+tick interval leaves about 13 seconds for each tick. The deadline uses a
+monotonic clock. Confirm the threshold with managed health checks in Sandbox.
+
 ## Troubleshooting
 
 **"qURL is not configured"** — an admin needs to run `/qurl-admin setup` on this
