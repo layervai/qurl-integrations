@@ -13,10 +13,10 @@
     {"id": "22222222-2222-4222-8222-222222222222", "name": "Customers", "mode": "contract", "contract_id": "customer-entitlement"}
   ],
   "defaults": [
-    {"id": "public", "label": "Anyone with the link", "summary": "Anyone who gets the link can open it.", "mode": "public"},
-    {"id": "once", "label": "Only the first person", "summary": "The first person to open it within 1 hour gets in. Then it’s used up.", "mode": "public", "link_limits": {"one_time_use": true, "expires_in": "1h", "session_duration": "1h"}},
+    {"id": "once", "label": "One-time link", "summary": "The first person to open it gets in. Then it’s used up.", "mode": "public", "link_limits": {"one_time_use": true, "expires_in": "30d", "session_duration": "24h"}},
     {"id": "invite_only", "label": "People you invite", "summary": "Only the email addresses you add can open it.", "mode": "invite_only"},
-    {"id": "review", "label": "People you approve", "summary": "They confirm their email and ask. You approve each person.", "mode": "review"}
+    {"id": "review", "label": "People you approve", "summary": "They confirm their email and ask. You approve each person.", "mode": "review"},
+    {"id": "paid", "label": "People who pay", "summary": "They pay your price, then it opens for them.", "mode": "contract", "payment": true}
   ],
   "presentation": {
     "public": {
@@ -42,6 +42,10 @@
     "keys": {
       "label": "Devices you approve", "summary": "No email needed. They send you their passkey’s details, and you approve it.", "level": 5, "level_name": "Strongest",
       "if_forwarded": "They can send their own passkey details. It stays closed until you approve.", "they_will": "Create a passkey and send you its approval details.", "you_will": "Approve each passkey or device.", "you_will_see": "Each approved device."
+    },
+    "paid": {
+      "label": "People who pay", "summary": "They pay your price, then it opens for them.", "level": 3, "level_name": "Moderate",
+      "if_forwarded": "They can pay too. It opens only for people who pay.", "they_will": "Pay with Stripe, then open it.", "you_will": "Connect Stripe and set a price once.", "you_will_see": "Each payment."
     },
     "contract": {
       "label": "Custom access", "summary": "Your app or service decides who gets in.", "level": null, "level_name": null

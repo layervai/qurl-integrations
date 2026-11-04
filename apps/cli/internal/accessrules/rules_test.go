@@ -80,6 +80,7 @@ func TestFrozenCatalogContract(t *testing.T) {
 			Summary    string      `json:"summary"`
 			Mode       string      `json:"mode"`
 			LinkLimits *LinkLimits `json:"link_limits"`
+			Payment    bool        `json:"payment"`
 		} `json:"defaults"`
 		// Display copy shared by every surface; output checks labels and levels.
 		Presentation map[string]struct {
@@ -112,11 +113,18 @@ func TestFrozenCatalogContract(t *testing.T) {
 		}
 	}
 	once := OnlyFirstPerson()
-	if len(catalog.Defaults) != 4 || catalog.Defaults[1].ID != once.ID || catalog.Defaults[1].Label != once.Name ||
-		catalog.Defaults[1].Mode != once.Mode || !sameLinkLimits(catalog.Defaults[1].LinkLimits, once.LinkLimits) {
-		t.Fatal("Only the first person drifted from the catalog's defaults")
+	if len(catalog.Defaults) != 4 || catalog.Defaults[0].ID != once.ID || catalog.Defaults[0].Label != once.Name ||
+		catalog.Defaults[0].Mode != once.Mode || !sameLinkLimits(catalog.Defaults[0].LinkLimits, once.LinkLimits) {
+		t.Fatal("One-time link drifted from the catalog's defaults")
 	}
 	for _, d := range catalog.Defaults {
+		// People who pay is a contract preset with its own presentation entry.
+		if d.Payment {
+			if d.Mode != ModeContract || d.Label != catalog.Presentation[d.ID].Label {
+				t.Errorf("payment default %s is %s %q", d.ID, d.Mode, d.Label)
+			}
+			continue
+		}
 		if d.Label != catalog.Presentation[d.Mode].Label && d.ID != once.ID {
 			t.Errorf("default %s is labeled %q, not its mode's label", d.ID, d.Label)
 		}

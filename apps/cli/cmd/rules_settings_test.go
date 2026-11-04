@@ -331,7 +331,7 @@ func TestPublishRuleOnceMintsAndRepublishMintsAgain(t *testing.T) {
 	dir := connectorStateTestDir(t)
 	var mints []map[string]any
 	scriptMint(t, srv, &mints)
-	for i, args := range [][]string{{"--rule", "once"}, {"--rule", "Only the first person"}, {"--public"}} {
+	for i, args := range [][]string{{"--rule", "once"}, {"--rule", "One-time link"}, {"--public"}} {
 		scriptPublish(t, srv, false, i > 0, nil, nil)
 		args = append([]string{"--endpoint", srv.URL, "publish", "https://api.example.com", "-o", "json"}, args...)
 		result := runCLI(t, &runOpts{args: args, shareStateDir: dir})
@@ -348,7 +348,7 @@ func TestPublishRuleOnceMintsAndRepublishMintsAgain(t *testing.T) {
 		t.Fatalf("mints = %d, want one per publish", len(mints))
 	}
 	for i, got := range mints {
-		if got["expires_in"] != "1h" || got["one_time_use"] != true || got["session_duration"] != "1h" {
+		if got["expires_in"] != "720h" || got["one_time_use"] != true || got["session_duration"] != "24h" {
 			t.Errorf("mint %d sent %v", i, got)
 		}
 	}
@@ -379,8 +379,8 @@ func TestQuietPublishWithOncePrintsItsLink(t *testing.T) {
 	}
 }
 
-func TestRuleNamedOnlyTheFirstPersonIsTaken(t *testing.T) {
-	for _, name := range []string{"only the first person", "once", "ONCE", "builtin.public", "Builtin.x"} {
+func TestRuleNamedOneTimeLinkIsTaken(t *testing.T) {
+	for _, name := range []string{"one-time link", "once", "ONCE", "builtin.public", "Builtin.x"} {
 		result := runCLI(t, &runOpts{args: []string{"rules", "create", name, "--mode", "invite_only"}, env: map[string]string{}, shareStateDir: connectorStateTestDir(t)})
 		if result.code == 0 || !strings.Contains(result.stderr.String(), "already exists") {
 			t.Fatalf("create %q %d %s", name, result.code, result.stderr.String())

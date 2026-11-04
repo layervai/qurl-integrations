@@ -217,17 +217,17 @@ func BuiltIns() []Definition {
 	}
 }
 
-// OnlyFirstPersonID selects the Only the first person preset wherever a rule is chosen.
+// OnlyFirstPersonID selects the One-time link preset wherever a rule is chosen.
 const OnlyFirstPersonID = "once"
 
 // OnlyFirstPersonLabel is the preset's name on every surface.
-const OnlyFirstPersonLabel = "Only the first person"
+const OnlyFirstPersonLabel = "One-time link"
 
 // OnlyFirstPerson is Anyone with the link on a single-use link that expires
 // like any temporary link. It is a preset, never saved as a rule; it matches
 // the catalog's defaults entry, which TestFrozenCatalogContract enforces.
 func OnlyFirstPerson() Definition {
-	return Definition{ID: OnlyFirstPersonID, Name: OnlyFirstPersonLabel, Mode: ModePublic, LinkLimits: &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true), SessionDuration: new("1h")}}
+	return Definition{ID: OnlyFirstPersonID, Name: OnlyFirstPersonLabel, Mode: ModePublic, LinkLimits: &LinkLimits{ExpiresIn: "30d", OneTimeUse: new(true), SessionDuration: new("24h")}}
 }
 
 // IsOnlyFirstPerson reports whether selector names the preset by its ID or exact name.
