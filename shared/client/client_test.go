@@ -2587,6 +2587,7 @@ func TestResourceKeyDER(t *testing.T) {
 		{name: "embedded newline", id: testSharingID[:20] + "\n" + testSharingID[20:]},
 		{name: "standard alphabet", id: "+" + testSharingID[1:]},
 		{name: "legacy id", id: "r_2"},
+		{name: "URL", id: "https://example.com/x"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			der, ok := ResourceKeyDER(tc.id)

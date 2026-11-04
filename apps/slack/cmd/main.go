@@ -569,10 +569,11 @@ func readLinkSiteConfig() (origin, accessURL string, err error) {
 		origin = defaultLinkOrigin
 	}
 	accessURL = strings.TrimSpace(os.Getenv("QURL_LINK_SITE_ACCESS_URL"))
-	// The fallback text carries both values raw, and Slack reads <, >, | and & as
-	// markup (url.Parse allows < and > in a host).
-	if strings.ContainsAny(origin+accessURL, "<>|&") {
-		return "", "", errors.New("QURL_LINK_ORIGIN and QURL_LINK_SITE_ACCESS_URL must not contain <, >, | or &")
+	// The fallback text carries both values raw: Slack reads <, >, | and & as
+	// markup, and a space ends the link (url.Parse allows < and > in a host and a
+	// space in a path).
+	if strings.ContainsAny(origin+accessURL, "<>|& ") {
+		return "", "", errors.New("QURL_LINK_ORIGIN and QURL_LINK_SITE_ACCESS_URL must not contain <, >, |, & or a space")
 	}
 	// Only a bare origin round-trips as https:// + host: credentials, a path, a
 	// query or a fragment (even an empty `?` or `#`) all break the equality. An

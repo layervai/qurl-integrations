@@ -1536,6 +1536,8 @@ func TestReadLinkSiteConfig(t *testing.T) {
 		{name: "relative unlock", access: "/abc", wantErr: true},
 		{name: "unlock with Slack link syntax", access: "https://other.example/a|b", wantErr: true},
 		{name: "unlock with an ampersand", access: "https://other.example/?a=1&b=2", wantErr: true},
+		{name: "unlock with a space", access: "https://other.example/a b", wantErr: true},
+		{name: "unlock with credentials", access: "https://u:p@other.example/x", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("QURL_LINK_ORIGIN", tc.origin)
