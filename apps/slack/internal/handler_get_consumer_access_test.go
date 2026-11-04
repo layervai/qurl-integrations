@@ -60,9 +60,9 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 		{name: "a 403 for a resource read without a policy answers the refusal", wantLog: "consumer_access_version absent or zero",
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
-		{name: "another 403 code keeps its mapping without a read", otherCode: true, version: 1,
+		{name: "another 403 code keeps its mapping without a read", otherCode: true,
 			want: []string{connectorDisabledMessage}, wantAbsent: []string{consumerAccessRequiredMessage("")}},
-		{name: "an id that is not base64url answers the refusal without a read", notKey: true, version: 1,
+		{name: "an id that is not base64url answers the refusal without a read", notKey: true,
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 		{name: "a resource read without a CRID answers the refusal", version: 1, noCRID: true, wantLog: "has no CRID",
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testLinkOrigin + "/"}},
@@ -72,7 +72,7 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			want: []string{serviceUnreachableMessage}, wantAbsent: []string{consumerAccessRequiredMessage("")}},
 		{name: "a failed resource read answers the refusal", version: 1, readFails: true, wantLog: "resource read after a refused mint failed",
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
-		{name: "no link origin answers the refusal", version: 1, noLinkOrigin: true,
+		{name: "no link origin answers the refusal", noLinkOrigin: true,
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
