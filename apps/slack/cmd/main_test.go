@@ -1524,6 +1524,7 @@ func TestReadLinkSiteConfig(t *testing.T) {
 		{name: "default is production", wantOrigin: defaultLinkOrigin},
 		{name: "sandbox origin and unlock", origin: "https://link.example/", access: "https://other.example/abc", wantOrigin: "https://link.example", wantAccess: "https://other.example/abc"},
 		{name: "http origin", origin: "http://link.example", wantErr: true},
+		{name: "uppercase scheme", origin: "HTTPS://link.example", wantErr: true},
 		{name: "origin with path", origin: "https://link.example/x", wantErr: true},
 		{name: "origin with credentials", origin: "https://u:p@link.example", wantErr: true},
 		{name: "origin with an empty query", origin: "https://link.example?", wantErr: true},

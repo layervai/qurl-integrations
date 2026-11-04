@@ -34,8 +34,8 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		foreign bool
 		// notKey authorizes an id that is not base64url, so it cannot be a key.
 		notKey bool
-		// noCRID reads the resource without a crid.
-		noCRID          bool
+		// noCRID reads the resource without a crid; badCRID with a malformed one.
+		noCRID, badCRID bool
 		version         int64
 		readFails       bool
 		noLinkOrigin    bool
@@ -45,7 +45,7 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		// wantLog is the operator signal the case must leave.
 		wantLog string
 	}{
-		{name: "403 consumer_access_required", version: 1, wantLog: "delivering the CRID entry page",
+		{name: "403 consumer_access_required", version: 1, wantLog: "answering with the CRID entry page",
 			want: []string{"Verified access required", entry}, wantAbsent: []string{commonGetMintFailedMessage}},
 		{name: "legacy 500 creation_failed", legacy: true, version: 3,
 			want: []string{"Verified access required", entry}},
@@ -60,6 +60,8 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		{name: "an id that is not base64url answers the refusal without a read", notKey: true, version: 1,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 		{name: "a resource read without a CRID answers the refusal", version: 1, noCRID: true, wantLog: "has no CRID",
+			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testLinkOrigin + "/"}},
+		{name: "a malformed CRID is never delivered", version: 1, badCRID: true, wantLog: "resource CRID is malformed",
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testLinkOrigin + "/"}},
 		{name: "a legacy 500 with a failed read is still a service failure", legacy: true, version: 1, readFails: true,
 			want: []string{serviceUnreachableMessage}, wantAbsent: []string{consumerAccessRequiredMessage}},
@@ -99,6 +101,9 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 				cridValue := testTunnelCRID
 				if tc.noCRID {
 					cridValue = ""
+				}
+				if tc.badCRID {
+					cridValue = "not-a-crid"
 				}
 				writeConsumerAccessResource(t, w, resourceID, cridValue, tc.version)
 			})
@@ -223,12 +228,18 @@ func writeConsumerAccessResource(t *testing.T, w http.ResponseWriter, resourceID
 // Portal carries the entry page.
 func TestRenderConsumerAccessEntry(t *testing.T) {
 	entry := testLinkOrigin + "/" + testTunnelCRID
-	_, blocks := renderConsumerAccessEntry(entry, "")
+	fallback, blocks := renderConsumerAccessEntry(entry, "")
 	if got := enterPortalButton(t, blocks)["url"]; got != entry {
 		t.Fatalf("Enter Portal url = %v, want %q", got, entry)
 	}
+	if want := ":lock: Verified access required: " + entry + " (get access there)"; fallback != want {
+		t.Fatalf("fallback = %q, want %q", fallback, want)
+	}
 
-	_, blocks = renderConsumerAccessEntry(entry, testLinkSiteAccessURL)
+	fallback, blocks = renderConsumerAccessEntry(entry, testLinkSiteAccessURL)
+	if want := ":lock: Verified access required. First open " + testLinkSiteAccessURL + ", then " + entry + " (get access there)"; fallback != want {
+		t.Fatalf("fallback = %q, want %q", fallback, want)
+	}
 	actions, ok := blocks[1].(map[string]any)
 	if !ok {
 		t.Fatalf("second block = %+v, want the actions block", blocks[1])

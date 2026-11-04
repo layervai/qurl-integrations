@@ -851,9 +851,10 @@ once and later opens it with a passkey. The bot checks that the CRID is the
 digest of the resource's key before it delivers the page.
 
 The bot mints nothing for these requests, so no mint audit event is written.
-Each delivery logs `get: delivering the CRID entry page ...` at Info; that
-line is the bot's only record of the delivery. qurl-service records the access
-grant when the recipient verifies.
+Each answer logs `get: answering with the CRID entry page ...` at Info; that
+line is the bot's only record of it, and a failed `dm:true` post also logs
+`get: DM post failed`. qurl-service records the access grant when the
+recipient verifies.
 
 | Env var | Default | Purpose |
 |---------|---------|---------|

@@ -579,7 +579,7 @@ func readLinkSiteConfig() (origin, accessURL string, err error) {
 	// query or a fragment (even an empty `?` or `#`) all break the equality. An
 	// empty port survives it, so the trailing colon is checked on its own.
 	if u, parseErr := url.Parse(origin); parseErr != nil || "https://"+u.Host != origin || strings.HasSuffix(origin, ":") {
-		return "", "", errors.New("QURL_LINK_ORIGIN must be an https origin without a path, query or fragment")
+		return "", "", errors.New("QURL_LINK_ORIGIN must be a lowercase https:// origin without a path, query or fragment")
 	}
 	if accessURL != "" {
 		if u, parseErr := url.Parse(accessURL); parseErr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {

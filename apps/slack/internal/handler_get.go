@@ -711,7 +711,7 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 		return ""
 	}
 	// status shows which refusal shape still reaches the bot (#1980).
-	log.Info("get: delivering the CRID entry page of a resource that requires verified access", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID), "status", apiErr.StatusCode)...)
+	log.Info("get: answering with the CRID entry page of a resource that requires verified access", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID), "status", apiErr.StatusCode)...)
 	return h.cfg.LinkOrigin + "/" + url.PathEscape(res.CRID)
 }
 
