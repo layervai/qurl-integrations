@@ -196,6 +196,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// An unset QURL_LINK_ORIGIN means production's link site, so name it here.
+	slog.Info("CRID entry pages configured", "link_origin", linkOrigin, "link_site_unlock", linkSiteAccessURL != "")
 
 	// DDBProvider reads the workspace_state table populated by
 	// /oauth/qurl/callback. Missing WORKSPACE_STATE_TABLE fails

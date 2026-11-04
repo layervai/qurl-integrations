@@ -1025,13 +1025,17 @@ func (c *Client) doSharing(ctx context.Context, method, resourceID string, input
 
 // ResourceKeyDER decodes a resource_id to the DER public key that its CRID
 // fingerprints, so a caller can check a CRID with crid.KeyMatches. ok is false
-// for any other identifier, such as a legacy id or a URL.
+// when the value is not canonical unpadded base64url, such as a URL; other bytes
+// that decode, such as some legacy ids, simply fail crid.KeyMatches.
 //
 // TODO(upstream-contract): qurl-service encodes resource_id as unpadded
 // base64url.
 func ResourceKeyDER(resourceID string) (der []byte, ok bool) {
 	der, err := base64.RawURLEncoding.Strict().DecodeString(resourceID)
-	return der, err == nil && len(der) > 0 && base64.RawURLEncoding.EncodeToString(der) == resourceID
+	if err != nil || len(der) == 0 || base64.RawURLEncoding.EncodeToString(der) != resourceID {
+		return nil, false
+	}
+	return der, true
 }
 
 func validateSharingState(requestResourceID string, sharing *SharingState) error {

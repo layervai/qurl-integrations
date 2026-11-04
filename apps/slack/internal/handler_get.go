@@ -674,7 +674,7 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 	if !refused && !legacy {
 		return ""
 	}
-	// Only a public-key resource has a CRID, so any other id has no entry page.
+	// An id that does not even decode, such as a URL, is not a key: it has no CRID.
 	der, ok := client.ResourceKeyDER(resourceID)
 	if !ok {
 		return ""

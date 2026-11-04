@@ -31,7 +31,9 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		// legacy answers the mint with qurl-service's earlier 500 instead of the 403.
 		legacy bool
 		// foreign authorizes a resource whose key testTunnelCRID does not digest.
-		foreign           bool
+		foreign bool
+		// notKey authorizes an id that is not base64url, so it cannot be a key.
+		notKey            bool
 		version           int64
 		readStatus        int
 		noLinkOrigin      bool
@@ -49,6 +51,10 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			want: []string{serviceUnreachableMessage}, wantAbsent: []string{entry}},
 		{name: "a CRID that is not the resource's is never delivered", foreign: true, version: 1,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
+		{name: "a 403 for a resource read without a policy answers the refusal",
+			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
+		{name: "an id that is not base64url answers the refusal without a read", notKey: true, version: 1,
+			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 		{name: "a failed resource read answers the refusal", version: 1, readStatus: http.StatusNotFound,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 		{name: "no link origin answers the refusal", version: 1, noLinkOrigin: true,
@@ -63,6 +69,9 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 					t.Fatalf("foreign resource id %q must be a public key", resourceID)
 				}
 			}
+			if tc.notKey {
+				resourceID = "r.legacy"
+			}
 			if tc.legacy {
 				mintStatus, mintCode = http.StatusInternalServerError, errCodeCreationFailed
 			}
@@ -72,6 +81,9 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 				writeAPIError(t, w, mintStatus, mintCode, "refused")
 			})
 			ts.addCustomer(http.MethodGet, "/v1/resources/"+resourceID, func(w http.ResponseWriter, _ *http.Request) {
+				if tc.notKey {
+					t.Error("an id that is not base64url must not be read")
+				}
 				if tc.readStatus != 0 {
 					writeAPIError(t, w, tc.readStatus, "not_found", "gone")
 					return
