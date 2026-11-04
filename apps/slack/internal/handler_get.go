@@ -681,16 +681,16 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 	if !refused && !legacy {
 		return ""
 	}
+	// An id that does not even decode, such as a URL, is not a key: it has no CRID.
+	der, ok := client.ResourceKeyDER(resourceID)
+	if !ok {
+		return ""
+	}
 	// The request log scope carries team and channel; the user and any reason
 	// complete "who asked, and why", since no mint audit is written here.
 	log = log.With("user_id", sanitizeLogValue(args.userID))
 	if reason := strings.TrimSpace(args.cmd.Reason()); reason != "" {
 		log = log.With("reason", sanitizeLogValue(truncateRunes(reason, getReasonAuditMaxRunes)))
-	}
-	// An id that does not even decode, such as a URL, is not a key: it has no CRID.
-	der, ok := client.ResourceKeyDER(resourceID)
-	if !ok {
-		return ""
 	}
 	res, err := c.GetResource(ctx, resourceID)
 	if err != nil {
