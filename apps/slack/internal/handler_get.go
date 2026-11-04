@@ -670,6 +670,8 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 	refused := apiErr.StatusCode == http.StatusForbidden && apiErr.Code == errCodeConsumerAccessRequired
 	// shortcut: qurl-service without the 403 answers this refusal with 500
 	// creation_failed; drop this arm once every environment serves the 403 (#1980).
+	// qurl-service never mints for a resource that has or had a policy, so the
+	// entry page is the right answer to any 500 for one.
 	legacy := apiErr.StatusCode == http.StatusInternalServerError && apiErr.Code == errCodeCreationFailed
 	if !refused && !legacy {
 		return ""
@@ -684,10 +686,17 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 	}
 	// The entry page must be this resource's: the CRID is a digest of its key.
 	der, ok := client.ResourceKeyDER(resourceID)
-	if matched, err := crid.KeyMatches(res.CRID, der); !ok || err != nil || !matched {
-		log.Error("get: resource CRID does not match its key", "resource_id", sanitizeLogValue(resourceID))
+	if !ok || res.CRID == "" {
+		log.Warn("get: resource CRID cannot be checked against its key", "resource_id", sanitizeLogValue(resourceID), "has_crid", res.CRID != "")
 		return ""
 	}
+	if matched, err := crid.KeyMatches(res.CRID, der); err != nil || !matched {
+		log.Error("get: resource CRID does not match its key", "resource_id", sanitizeLogValue(resourceID), "error", err)
+		return ""
+	}
+	// status shows which refusal shape still reaches the bot (#1980).
+	log.Info("get: delivering the CRID entry page of a resource that requires verified access", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID), "status", apiErr.StatusCode)...)
+	// KeyMatches parsed the CRID, so it is lowercase base32 and needs no escaping.
 	return h.cfg.LinkOrigin + "/" + res.CRID
 }
 
