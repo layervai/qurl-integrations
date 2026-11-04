@@ -33,7 +33,9 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		// foreign authorizes a resource whose key testTunnelCRID does not digest.
 		foreign bool
 		// notKey authorizes an id that is not base64url, so it cannot be a key.
-		notKey            bool
+		notKey bool
+		// noCRID reads the resource without a crid.
+		noCRID            bool
 		version           int64
 		readStatus        int
 		noLinkOrigin      bool
@@ -55,6 +57,8 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 		{name: "an id that is not base64url answers the refusal without a read", notKey: true, version: 1,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
+		{name: "a resource read without a CRID answers the refusal", version: 1, noCRID: true,
+			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testLinkOrigin + "/"}},
 		{name: "a failed resource read answers the refusal", version: 1, readStatus: http.StatusNotFound,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 		{name: "no link origin answers the refusal", version: 1, noLinkOrigin: true,
@@ -88,7 +92,11 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 					writeAPIError(t, w, tc.readStatus, "not_found", "gone")
 					return
 				}
-				writeConsumerAccessResource(t, w, resourceID, tc.version)
+				cridValue := testTunnelCRID
+				if tc.noCRID {
+					cridValue = ""
+				}
+				writeConsumerAccessResource(t, w, resourceID, cridValue, tc.version)
 			})
 			h := newAdminTestHandler(t, ts)
 			if !tc.noLinkOrigin {
@@ -121,7 +129,7 @@ func TestHandleCRID_ConsumerAccessEntryGoesToDM(t *testing.T) {
 		writeAPIError(t, w, http.StatusForbidden, errCodeConsumerAccessRequired, "refused")
 	})
 	ts.addCustomer(http.MethodGet, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, _ *http.Request) {
-		writeConsumerAccessResource(t, w, testTunnelResourceID, 1)
+		writeConsumerAccessResource(t, w, testTunnelResourceID, testTunnelCRID, 1)
 	})
 	h := newAdminTestHandler(t, ts)
 	h.cfg.LinkOrigin = testLinkOrigin
@@ -153,7 +161,7 @@ func TestConfirm_GetConsumerAccessDeliversEntryPrivately(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/"+testTunnelResourceID+"/qurls":
 			writeAPIError(t, w, http.StatusForbidden, errCodeConsumerAccessRequired, "refused")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/resources/"+testTunnelResourceID:
-			writeConsumerAccessResource(t, w, testTunnelResourceID, 1)
+			writeConsumerAccessResource(t, w, testTunnelResourceID, testTunnelCRID, 1)
 		default:
 			t.Errorf("unexpected qURL API call %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -180,16 +188,20 @@ func TestConfirm_GetConsumerAccessDeliversEntryPrivately(t *testing.T) {
 }
 
 // writeConsumerAccessResource answers GET /v1/resources/{id} for a resource
-// whose CRID is testTunnelCRID and whose consumer access policy is at version.
-func writeConsumerAccessResource(t *testing.T, w http.ResponseWriter, resourceID string, version int64) {
+// with the given CRID (omitted when empty) whose consumer access policy is at
+// version.
+func writeConsumerAccessResource(t *testing.T, w http.ResponseWriter, resourceID, cridValue string, version int64) {
 	t.Helper()
-	respondQURLEnvelope(t, w, map[string]any{"resource": map[string]any{
+	resource := map[string]any{
 		testKeyResourceID:         resourceID,
 		testKeyType:               client.ResourceTypeTunnel,
 		testKeyStatus:             client.StatusActive,
-		"crid":                    testTunnelCRID,
 		"consumer_access_version": version,
-	}})
+	}
+	if cridValue != "" {
+		resource["crid"] = cridValue
+	}
+	respondQURLEnvelope(t, w, map[string]any{"resource": resource})
 }
 
 // The entry render puts the unlock button before Enter Portal, and Enter

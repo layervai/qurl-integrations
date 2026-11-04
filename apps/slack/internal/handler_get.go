@@ -590,6 +590,9 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	out, err := c.Create(ctx, input)
 	if err != nil {
 		if entryURL := h.consumerAccessEntryURL(ctx, log, c, input.ResourceID, err); entryURL != "" {
+			// Nothing was minted, so the minted-link checks and mint audits below do not
+			// apply. The bot grants nothing: qurl-service records access when the
+			// recipient verifies on the entry page.
 			fallbackText, blocks := renderConsumerAccessEntry(entryURL, h.cfg.LinkSiteAccessURL)
 			return h.deliverGetRender(ctx, log, args, fallbackText, blocks), nil
 		}
@@ -668,8 +671,9 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 	refused := apiErr.StatusCode == http.StatusForbidden && apiErr.Code == errCodeConsumerAccessRequired
 	// shortcut: qurl-service without the 403 answers this refusal with 500
 	// creation_failed; drop this arm once every environment serves the 403 (#1980).
-	// qurl-service never mints for a resource that has or had a policy, so the
-	// entry page is the right answer to any 500 for one.
+	// qurl-service never mints for a resource that has or had a policy, so even a
+	// transient 500 for one is answered with the entry page: a retry could not
+	// mint either.
 	legacy := apiErr.StatusCode == http.StatusInternalServerError && apiErr.Code == errCodeCreationFailed
 	if !refused && !legacy {
 		return ""

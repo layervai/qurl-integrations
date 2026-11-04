@@ -575,8 +575,9 @@ func readLinkSiteConfig() (origin, accessURL string, err error) {
 	}
 	accessURL = strings.TrimSpace(os.Getenv("QURL_LINK_SITE_ACCESS_URL"))
 	if accessURL != "" {
-		if u, parseErr := url.Parse(accessURL); parseErr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
-			return "", "", errors.New("QURL_LINK_SITE_ACCESS_URL must be an absolute https URL without credentials")
+		// The fallback text carries the URL raw, and Slack reads <, > and | as link syntax.
+		if u, parseErr := url.Parse(accessURL); parseErr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || strings.ContainsAny(accessURL, "<>|") {
+			return "", "", errors.New("QURL_LINK_SITE_ACCESS_URL must be an absolute https URL without credentials or <, > and |")
 		}
 	}
 	return origin, accessURL, nil
