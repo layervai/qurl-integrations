@@ -42,8 +42,10 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		privateLinkSite bool
 		want            []string
 		wantAbsent      []string
+		// wantLog is the operator signal the case must leave.
+		wantLog string
 	}{
-		{name: "403 consumer_access_required", version: 1,
+		{name: "403 consumer_access_required", version: 1, wantLog: "delivering the CRID entry page",
 			want: []string{"Verified access required", entry}, wantAbsent: []string{commonGetMintFailedMessage}},
 		{name: "legacy 500 creation_failed", legacy: true, version: 3,
 			want: []string{"Verified access required", entry}},
@@ -51,17 +53,17 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			want: []string{"First open " + testLinkSiteAccessURL + ", then " + entry}},
 		{name: "500 without a policy is still a service failure", legacy: true,
 			want: []string{serviceUnreachableMessage}, wantAbsent: []string{entry}},
-		{name: "a CRID that is not the resource's is never delivered", foreign: true, version: 1,
+		{name: "a CRID that is not the resource's is never delivered", foreign: true, version: 1, wantLog: "does not match its key",
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
-		{name: "a 403 for a resource read without a policy answers the refusal",
+		{name: "a 403 for a resource read without a policy answers the refusal", wantLog: "never had a policy",
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 		{name: "an id that is not base64url answers the refusal without a read", notKey: true, version: 1,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
-		{name: "a resource read without a CRID answers the refusal", version: 1, noCRID: true,
+		{name: "a resource read without a CRID answers the refusal", version: 1, noCRID: true, wantLog: "has no CRID",
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testLinkOrigin + "/"}},
 		{name: "a legacy 500 with a failed read is still a service failure", legacy: true, version: 1, readFails: true,
 			want: []string{serviceUnreachableMessage}, wantAbsent: []string{consumerAccessRequiredMessage}},
-		{name: "a failed resource read answers the refusal", version: 1, readFails: true,
+		{name: "a failed resource read answers the refusal", version: 1, readFails: true, wantLog: "resource read after a refused mint failed",
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 		{name: "no link origin answers the refusal", version: 1, noLinkOrigin: true,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
@@ -108,7 +110,16 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 				h.cfg.LinkSiteAccessURL = testLinkSiteAccessURL
 			}
 
+			logs := &capturedLogs{}
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+			t.Cleanup(func() { h.Wait(); slog.SetDefault(previous) })
+
 			_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("get $dashboard", testAdminTeamID, testAdminUserID)
+			h.Wait()
+			if tc.wantLog != "" && !logs.contains(tc.wantLog) {
+				t.Errorf("logs missing %q", tc.wantLog)
+			}
 			for _, s := range tc.want {
 				if !strings.Contains(async, s) {
 					t.Errorf("async reply missing %q: %q", s, async)
@@ -218,7 +229,11 @@ func TestRenderConsumerAccessEntry(t *testing.T) {
 	}
 
 	_, blocks = renderConsumerAccessEntry(entry, testLinkSiteAccessURL)
-	buttons, _ := blocks[1].(map[string]any)[blockKitFieldElements].([]any)
+	actions, ok := blocks[1].(map[string]any)
+	if !ok {
+		t.Fatalf("second block = %+v, want the actions block", blocks[1])
+	}
+	buttons, _ := actions[blockKitFieldElements].([]any)
 	if len(buttons) != 2 {
 		t.Fatalf("buttons = %+v, want unlock then Enter Portal", buttons)
 	}

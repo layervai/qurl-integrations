@@ -131,6 +131,7 @@ const consumerAccessRequiredMessage = "This resource requires verified access an
 
 // errCodeCreationFailed is the 500 that qurl-service builds without the
 // consumer_access_required arm return for the same refusal.
+// TODO(#1980): remove with the legacy arm of consumerAccessEntryURL.
 const errCodeCreationFailed = "creation_failed"
 
 // connectorDisabledMessage is shown when qurl-service returns
@@ -589,7 +590,8 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 
 	out, err := c.Create(ctx, input)
 	if err != nil {
-		if entryURL := h.consumerAccessEntryURL(ctx, log, c, input.ResourceID, err); entryURL != "" {
+		// The request log scope carries team and channel; the user completes "who asked".
+		if entryURL := h.consumerAccessEntryURL(ctx, log.With("user_id", sanitizeLogValue(args.userID)), c, input.ResourceID, err); entryURL != "" {
 			// Nothing was minted, so the minted-link checks and mint audits below do not
 			// apply. The bot grants nothing: qurl-service records access when the
 			// recipient verifies on the entry page.
