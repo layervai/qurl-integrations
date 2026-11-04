@@ -57,7 +57,7 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			want: []string{serviceUnreachableMessage}, wantAbsent: []string{entry}},
 		{name: "a CRID that is not the resource's is never delivered", foreign: true, version: 1, wantLog: "does not match its key",
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
-		{name: "a 403 for a resource read without a policy answers the refusal", wantLog: "never had a policy",
+		{name: "a 403 for a resource read without a policy answers the refusal", wantLog: "consumer_access_version absent or zero",
 			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 		{name: "another 403 code keeps its mapping without a read", otherCode: true, version: 1,
 			want: []string{connectorDisabledMessage}, wantAbsent: []string{consumerAccessRequiredMessage("")}},
