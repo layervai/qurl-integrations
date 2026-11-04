@@ -127,7 +127,9 @@ const errCodeConsumerAccessRequired = "consumer_access_required"
 
 // consumerAccessRequiredMessage answers [errCodeConsumerAccessRequired] when
 // the entry page could not be delivered.
-const consumerAccessRequiredMessage = "This resource requires verified access and has no one-time links. Open it from its access page, or ask its owner for that page."
+func consumerAccessRequiredMessage(requestID string) string {
+	return appendSlackReference("This resource requires verified access and has no one-time links", requestID) + ". Open it from its access page, or ask its owner for that page."
+}
 
 // errCodeCreationFailed is the 500 that qurl-service builds without the
 // consumer_access_required arm return for the same refusal.
@@ -1019,7 +1021,7 @@ func mapMintError(ctx context.Context, log *slog.Logger, err error) error {
 			// failure, so it stays out of the dependency-auth alarm.
 			if apiErr.Code == errCodeConsumerAccessRequired {
 				log.Info("get: mint refused for a resource that requires verified access", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code)...)
-				return &userError{msg: consumerAccessRequiredMessage}
+				return &userError{msg: consumerAccessRequiredMessage(apiErr.RequestID)}
 			}
 			if isExpectedGetMintForbiddenCode(apiErr.Code) {
 				log.Info("get: mint rejected with expected quota-class 403", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code, "detail", apiErr.Detail)...)

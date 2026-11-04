@@ -54,21 +54,21 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		{name: "500 without a policy is still a service failure", legacy: true,
 			want: []string{serviceUnreachableMessage}, wantAbsent: []string{entry}},
 		{name: "a CRID that is not the resource's is never delivered", foreign: true, version: 1, wantLog: "does not match its key",
-			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
+			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 		{name: "a 403 for a resource read without a policy answers the refusal", wantLog: "never had a policy",
-			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
+			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 		{name: "an id that is not base64url answers the refusal without a read", notKey: true, version: 1,
-			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
+			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 		{name: "a resource read without a CRID answers the refusal", version: 1, noCRID: true, wantLog: "has no CRID",
-			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testLinkOrigin + "/"}},
+			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testLinkOrigin + "/"}},
 		{name: "a malformed CRID is never delivered", version: 1, badCRID: true, wantLog: "resource CRID is malformed",
-			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testLinkOrigin + "/"}},
+			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testLinkOrigin + "/"}},
 		{name: "a legacy 500 with a failed read is still a service failure", legacy: true, version: 1, readFails: true,
-			want: []string{serviceUnreachableMessage}, wantAbsent: []string{consumerAccessRequiredMessage}},
+			want: []string{serviceUnreachableMessage}, wantAbsent: []string{consumerAccessRequiredMessage("")}},
 		{name: "a failed resource read answers the refusal", version: 1, readFails: true, wantLog: "resource read after a refused mint failed",
-			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
+			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 		{name: "no link origin answers the refusal", version: 1, noLinkOrigin: true,
-			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
+			want: []string{consumerAccessRequiredMessage("")}, wantAbsent: []string{testTunnelCRID}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resourceID, mintStatus, mintCode := testTunnelResourceID, http.StatusForbidden, errCodeConsumerAccessRequired
@@ -160,6 +160,7 @@ func TestHandleCRID_ConsumerAccessEntryGoesToDM(t *testing.T) {
 	}
 
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID+" dm:true", testAdminTeamID, testAdminUserID)
+	h.Wait()
 	if !strings.Contains(dmText, entry) {
 		t.Errorf("DM text = %q, want the entry page %q", dmText, entry)
 	}
