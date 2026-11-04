@@ -1,8 +1,8 @@
 // Package main is the HTTP entrypoint for the Slack integration.
 //
 // Runs as a long-lived process behind an ALB on Fargate. Listens on
-// :8080, terminates gracefully on SIGTERM (Fargate's task-stop signal,
-// sent 30s before SIGKILL).
+// PORT (default 8080) and terminates gracefully on SIGTERM
+// (Fargate's task-stop signal, sent 30s before SIGKILL).
 package main
 
 import (
@@ -36,7 +36,6 @@ import (
 )
 
 const (
-	listenAddr                    = ":8080"
 	envQURLConnectorImage         = "QURL_IMAGE"
 	envQURLConnectorImageFallback = "QURL_IMAGE_FALLBACK"
 	envQURLS3OriginImage          = "QURL_S3_ORIGIN_IMAGE"
@@ -162,9 +161,24 @@ func runOperatorSubcommand(args []string, stdout, stderr io.Writer) (bool, error
 	return true, runSlackMarkdownRendererValidationCLI(args[2:], stdout)
 }
 
+func listenAddressFromPort(raw string) (string, error) {
+	if raw == "" {
+		return ":8080", nil
+	}
+	port, err := strconv.Atoi(raw)
+	if err != nil || port < 1 || port > 65535 {
+		return "", errors.New("PORT must be an integer from 1 through 65535")
+	}
+	return ":" + strconv.Itoa(port), nil
+}
+
 // run holds the full server lifecycle so `defer stop()` releases the
 // signal handler before main reaches os.Exit on the error path.
 func run() error {
+	listenAddr, err := listenAddressFromPort(os.Getenv("PORT"))
+	if err != nil {
+		return err
+	}
 	// Required env vars are explicit by design: a missing QURL_ENDPOINT
 	// previously fell back to the sandbox URL, which is the kind of silent
 	// misconfiguration that ships a prod deploy at sandbox.
