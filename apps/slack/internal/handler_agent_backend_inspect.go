@@ -158,6 +158,11 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 		SessionDuration: agentInspectSessionDuration,
 	})
 	if err != nil {
+		if b.consumerAccessGated(ctx, c, resolved.ResourceID, err) {
+			// The policy is intentional: no bearer link exists, so no summary can be fetched.
+			b.log.Info("agent inspect refused for a resource that requires verified access", "token", token, "resource_id", resolved.ResourceID)
+			return fmt.Sprintf("`$%[1]s` requires verified access (an email or passkey check), so I can't open it for a summary. Ask me to get `$%[1]s` for its access page.", escapeMrkdwnCode(token)), false, nil
+		}
 		b.log.Error("agent inspect mint failed", "token", token, "resource_id", resolved.ResourceID, "error", err)
 		return fmt.Sprintf("`$%s` resolves in this channel, but I couldn't open it for a summary right now.", escapeMrkdwnCode(token)), false, nil
 	}
@@ -635,4 +640,20 @@ func writeResolvedInspectableResourceLines(b *strings.Builder, resolved *inspect
 			b.WriteString("\n")
 		}
 	}
+}
+
+// consumerAccessGated reports whether mintErr is the consumer-access refusal. The
+// legacy 500 shape is confirmed by reading the resource's policy version; the
+// explicit 403 is trusted as is, since inspect has no entry page to verify.
+func (b *agentBackend) consumerAccessGated(ctx context.Context, c *client.Client, resourceID string, mintErr error) bool {
+	_, legacy, ok := consumerAccessRefusal(mintErr)
+	if !ok || !legacy {
+		return ok
+	}
+	res, err := c.GetResource(ctx, resourceID)
+	if err != nil {
+		b.log.Info("agent inspect: resource read after a legacy 500 failed", "resource_id", resourceID, "error", err)
+		return false
+	}
+	return res.ConsumerAccessVersion > 0
 }

@@ -1514,3 +1514,46 @@ func TestSlackInstallConfigRejectsBadBaseURL(t *testing.T) {
 		t.Fatalf("err=%v, want https error", err)
 	}
 }
+
+func TestReadLinkSiteConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name, origin, access   string
+		wantOrigin, wantAccess string
+		wantErr                bool
+	}{
+		{name: "default is production", wantOrigin: defaultLinkOrigin},
+		{name: "sandbox origin and unlock", origin: "https://link.example/", access: "https://other.example/abc", wantOrigin: "https://link.example", wantAccess: "https://other.example/abc"},
+		{name: "http origin", origin: "http://link.example", wantErr: true},
+		{name: "uppercase scheme", origin: "HTTPS://link.example", wantErr: true},
+		{name: "origin with path", origin: "https://link.example/x", wantErr: true},
+		{name: "origin with credentials", origin: "https://u:p@link.example", wantErr: true},
+		{name: "origin with an empty query", origin: "https://link.example?", wantErr: true},
+		{name: "origin with a fragment", origin: "https://link.example#x", wantErr: true},
+		{name: "origin with Slack link syntax", origin: "https://link<example", wantErr: true},
+		{name: "origin with an empty port", origin: "https://link.example:", wantErr: true},
+		{name: "origin with a port", origin: "https://link.example:8443", wantOrigin: "https://link.example:8443"},
+		{name: "IPv6 origin", origin: "https://[::1]:8443", wantOrigin: "https://[::1]:8443"},
+		{name: "http unlock", access: "http://other.example/abc", wantErr: true},
+		{name: "relative unlock", access: "/abc", wantErr: true},
+		{name: "unlock with Slack link syntax", access: "https://other.example/a|b", wantErr: true},
+		{name: "unlock with an ampersand", access: "https://other.example/?a=1&b=2", wantErr: true},
+		{name: "unlock with a space", access: "https://other.example/a b", wantErr: true},
+		{name: "unlock with credentials", access: "https://u:p@other.example/x", wantErr: true},
+		{name: "unlock with an empty port", access: "https://other.example:/x", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("QURL_LINK_ORIGIN", tc.origin)
+			t.Setenv("QURL_LINK_SITE_ACCESS_URL", tc.access)
+			origin, access, err := readLinkSiteConfig()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got origin=%q access=%q", origin, access)
+				}
+				return
+			}
+			if err != nil || origin != tc.wantOrigin || access != tc.wantAccess {
+				t.Fatalf("got (%q, %q, %v), want (%q, %q, nil)", origin, access, err, tc.wantOrigin, tc.wantAccess)
+			}
+		})
+	}
+}
