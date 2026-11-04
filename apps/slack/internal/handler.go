@@ -331,7 +331,9 @@ type Config struct {
 	ConnectorAPIURL string
 	// LinkOrigin is the https origin of this environment's qURL link site. A
 	// resource that requires verified recipient access is delivered as its
-	// CRID entry page on this origin. Empty disables that delivery.
+	// CRID entry page on this origin. main always sets it (production's link
+	// site unless QURL_LINK_ORIGIN says otherwise); only a Handler built
+	// without it, as in tests, skips that delivery.
 	LinkOrigin string
 	// LinkSiteAccessURL, when set, is the page that unlocks a private link
 	// site (sandbox). The CRID entry reply shows it as a first step.

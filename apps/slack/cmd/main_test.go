@@ -1526,6 +1526,8 @@ func TestReadLinkSiteConfig(t *testing.T) {
 		{name: "http origin", origin: "http://link.example", wantErr: true},
 		{name: "origin with path", origin: "https://link.example/x", wantErr: true},
 		{name: "origin with credentials", origin: "https://u:p@link.example", wantErr: true},
+		{name: "origin with an empty query", origin: "https://link.example?", wantErr: true},
+		{name: "origin with a fragment", origin: "https://link.example#x", wantErr: true},
 		{name: "http unlock", access: "http://other.example/abc", wantErr: true},
 		{name: "relative unlock", access: "/abc", wantErr: true},
 	} {

@@ -1,33 +1,18 @@
 package internal
 
 import (
-	"encoding/json"
+	"context"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 const (
 	testLinkOrigin        = "https://link.example"
 	testLinkSiteAccessURL = "https://link.example/unlock"
 )
-
-// writeGetResourceFixture writes a GET /v1/resources/{id} envelope for a
-// resource with a consumer access policy at the given revision.
-func writeGetResourceFixture(t *testing.T, w http.ResponseWriter, resourceID, cridValue string, consumerAccessVersion int64) {
-	t.Helper()
-	w.Header().Set("Content-Type", "application/json")
-	body := map[string]any{testKeyData: map[string]any{"resource": map[string]any{
-		testKeyResourceID:         resourceID,
-		"type":                    "tunnel",
-		"status":                  "active",
-		"crid":                    cridValue,
-		"consumer_access_version": consumerAccessVersion,
-	}}}
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-}
 
 // A resource that requires verified recipient access issues no bearer link, so
 // `/qurl get` delivers its CRID entry page instead of a mint failure. Both the
@@ -40,24 +25,26 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		resourceID        string
 		mintStatus        int
 		mintCode          string
-		cridValue         string
 		version           int64
+		readStatus        int
 		linkOrigin        string
 		linkSiteAccessURL string
 		want              []string
 		wantAbsent        []string
 	}{
-		{name: "403 consumer_access_required", resourceID: testTunnelResourceID, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, cridValue: testTunnelCRID, version: 1, linkOrigin: testLinkOrigin,
+		{name: "403 consumer_access_required", resourceID: testTunnelResourceID, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, version: 1, linkOrigin: testLinkOrigin,
 			want: []string{"Verified access required", entry}, wantAbsent: []string{"Failed to create qURL"}},
-		{name: "legacy 500 creation_failed", resourceID: testTunnelResourceID, mintStatus: http.StatusInternalServerError, mintCode: errCodeCreationFailed, cridValue: testTunnelCRID, version: 3, linkOrigin: testLinkOrigin,
+		{name: "legacy 500 creation_failed", resourceID: testTunnelResourceID, mintStatus: http.StatusInternalServerError, mintCode: errCodeCreationFailed, version: 3, linkOrigin: testLinkOrigin,
 			want: []string{"Verified access required", entry}},
-		{name: "private link site gets the unlock step first", resourceID: testTunnelResourceID, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, cridValue: testTunnelCRID, version: 1, linkOrigin: testLinkOrigin, linkSiteAccessURL: testLinkSiteAccessURL,
+		{name: "private link site gets the unlock step first", resourceID: testTunnelResourceID, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, version: 1, linkOrigin: testLinkOrigin, linkSiteAccessURL: testLinkSiteAccessURL,
 			want: []string{"First open " + testLinkSiteAccessURL + ", then " + entry}},
-		{name: "500 without a policy is still a service failure", resourceID: testTunnelResourceID, mintStatus: http.StatusInternalServerError, mintCode: errCodeCreationFailed, cridValue: testTunnelCRID, version: 0, linkOrigin: testLinkOrigin,
+		{name: "500 without a policy is still a service failure", resourceID: testTunnelResourceID, mintStatus: http.StatusInternalServerError, mintCode: errCodeCreationFailed, version: 0, linkOrigin: testLinkOrigin,
 			want: []string{serviceUnreachableMessage}, wantAbsent: []string{entry}},
-		{name: "a CRID that is not the resource's is never delivered", resourceID: testResourceIDFix, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, cridValue: testTunnelCRID, version: 1, linkOrigin: testLinkOrigin,
+		{name: "a CRID that is not the resource's is never delivered", resourceID: testResourceIDFix, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, version: 1, linkOrigin: testLinkOrigin,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
-		{name: "no link origin answers the refusal", resourceID: testTunnelResourceID, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, cridValue: testTunnelCRID, version: 1,
+		{name: "a failed resource read answers the refusal", resourceID: testTunnelResourceID, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, version: 1, readStatus: http.StatusNotFound, linkOrigin: testLinkOrigin,
+			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
+		{name: "no link origin answers the refusal", resourceID: testTunnelResourceID, mintStatus: http.StatusForbidden, mintCode: errCodeConsumerAccessRequired, version: 1,
 			want: []string{consumerAccessRequiredMessage}, wantAbsent: []string{testTunnelCRID}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,7 +54,11 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 				writeAPIError(t, w, tc.mintStatus, tc.mintCode, "refused")
 			})
 			ts.addCustomer(http.MethodGet, "/v1/resources/"+tc.resourceID, func(w http.ResponseWriter, _ *http.Request) {
-				writeGetResourceFixture(t, w, tc.resourceID, tc.cridValue, tc.version)
+				if tc.readStatus != 0 {
+					writeAPIError(t, w, tc.readStatus, "not_found", "gone")
+					return
+				}
+				writeConsumerAccessResource(t, w, tc.resourceID, tc.version)
 			})
 			h := newAdminTestHandler(t, ts)
 			h.cfg.LinkOrigin = tc.linkOrigin
@@ -88,6 +79,48 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 	}
 }
 
+// `/qurl crid` shares the entry delivery, and `dm:true` sends the entry page to
+// the DM, not the channel.
+func TestHandleCRID_ConsumerAccessEntryGoesToDM(t *testing.T) {
+	entry := testLinkOrigin + "/" + testTunnelCRID
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel", []string{testTunnelResourceID})
+	ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, _ *http.Request) {
+		writeAPIError(t, w, http.StatusForbidden, errCodeConsumerAccessRequired, "refused")
+	})
+	ts.addCustomer(http.MethodGet, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		writeConsumerAccessResource(t, w, testTunnelResourceID, 1)
+	})
+	h := newAdminTestHandler(t, ts)
+	h.cfg.LinkOrigin = testLinkOrigin
+	var dmText string
+	h.cfg.PostDMBlocks = func(_ context.Context, _, _, _ string, _ []any, fallbackText string) error {
+		dmText = fallbackText
+		return nil
+	}
+
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID+" dm:true", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(dmText, entry) {
+		t.Errorf("DM text = %q, want the entry page %q", dmText, entry)
+	}
+	if !strings.Contains(async, ":incoming_envelope:") || strings.Contains(async, entry) {
+		t.Errorf("async = %q, want the DM confirmation without the entry page", async)
+	}
+}
+
+// writeConsumerAccessResource answers GET /v1/resources/{id} for a resource
+// whose CRID is testTunnelCRID and whose consumer access policy is at version.
+func writeConsumerAccessResource(t *testing.T, w http.ResponseWriter, resourceID string, version int64) {
+	t.Helper()
+	respondQURLEnvelope(t, w, map[string]any{"resource": map[string]any{
+		testKeyResourceID:         resourceID,
+		testKeyType:               client.ResourceTypeTunnel,
+		testKeyStatus:             client.StatusActive,
+		"crid":                    testTunnelCRID,
+		"consumer_access_version": version,
+	}})
+}
+
 // The entry render puts the unlock button before Enter Portal, and Enter
 // Portal carries the entry page.
 func TestRenderConsumerAccessEntry(t *testing.T) {
@@ -98,8 +131,13 @@ func TestRenderConsumerAccessEntry(t *testing.T) {
 	}
 
 	_, blocks = renderConsumerAccessEntry(entry, testLinkSiteAccessURL)
-	first := enterPortalButton(t, blocks)
-	if first["url"] != testLinkSiteAccessURL || first["action_id"] != linkSiteAccessActionID {
-		t.Fatalf("first button = %+v, want the link-site unlock", first)
+	buttons, _ := blocks[1].(map[string]any)[blockKitFieldElements].([]any)
+	if len(buttons) != 2 {
+		t.Fatalf("buttons = %+v, want unlock then Enter Portal", buttons)
+	}
+	unlock, _ := buttons[0].(map[string]any)
+	portal, _ := buttons[1].(map[string]any)
+	if unlock["url"] != testLinkSiteAccessURL || unlock["action_id"] != linkSiteAccessActionID || portal["url"] != entry || portal["action_id"] != enterPortalActionID {
+		t.Fatalf("buttons = %+v, want the link-site unlock then Enter Portal on %q", buttons, entry)
 	}
 }

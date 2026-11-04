@@ -146,13 +146,11 @@ func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interaction
 	// Handled explicitly (not via the catch-all below) so a legitimate click — now
 	// the primary CTA of every successful get — doesn't fire the "no recognized
 	// action" breadcrumb, keeping that log reserved for a button genuinely rendered
-	// but never wired.
-	// The link-site unlock button of a CRID entry reply is the same kind of URL button.
-	if _, ok := findActionByID(payload.Actions, enterPortalActionID); ok {
-		respondJSON(w, http.StatusOK, map[string]any{})
-		return
-	}
-	if _, ok := findActionByID(payload.Actions, linkSiteAccessActionID); ok {
+	// but never wired. The link-site unlock button of a CRID entry reply is the
+	// same kind of URL button.
+	_, portal := findActionByID(payload.Actions, enterPortalActionID)
+	_, unlock := findActionByID(payload.Actions, linkSiteAccessActionID)
+	if portal || unlock {
 		respondJSON(w, http.StatusOK, map[string]any{})
 		return
 	}

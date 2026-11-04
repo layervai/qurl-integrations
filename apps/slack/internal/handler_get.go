@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -128,7 +127,7 @@ const errCodeConsumerAccessRequired = "consumer_access_required"
 
 // consumerAccessRequiredMessage answers [errCodeConsumerAccessRequired] when
 // the entry page could not be delivered.
-const consumerAccessRequiredMessage = "This resource requires verified access and has no one-time links. Open it from its CRID page, or ask its owner for that link."
+const consumerAccessRequiredMessage = "This resource requires verified access and has no one-time links. Open it from its access page, or ask its owner for that page."
 
 // errCodeCreationFailed is the 500 that qurl-service builds without the
 // consumer_access_required arm return for the same refusal.
@@ -590,7 +589,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 
 	out, err := c.Create(ctx, input)
 	if err != nil {
-		if entryURL, ok := h.consumerAccessEntryURL(ctx, log, c, input.ResourceID, err); ok {
+		if entryURL := h.consumerAccessEntryURL(ctx, log, c, input.ResourceID, err); entryURL != "" {
 			fallbackText, blocks := renderConsumerAccessEntry(entryURL, h.cfg.LinkSiteAccessURL)
 			return h.deliverGetRender(ctx, log, args, fallbackText, blocks), nil
 		}
@@ -661,38 +660,35 @@ func (h *Handler) deliverGetRender(ctx context.Context, log *slog.Logger, args *
 // consumerAccessEntryURL returns the CRID entry page of a resource whose mint
 // was refused because it requires verified recipient access. Such a resource
 // issues no bearer link by design: recipients open its entry page and get
-// access there, so that page is what `/qurl get` delivers. ok is false for
+// access there, so that page is what `/qurl get` delivers. It returns "" for
 // every other failure, which keeps its usual error mapping.
-func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, c *client.Client, resourceID string, mintErr error) (entryURL string, ok bool) {
+func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, c *client.Client, resourceID string, mintErr error) string {
 	var apiErr *client.APIError
 	if h.cfg.LinkOrigin == "" || !errors.As(mintErr, &apiErr) {
-		return "", false
+		return ""
 	}
 	refused := apiErr.StatusCode == http.StatusForbidden && apiErr.Code == errCodeConsumerAccessRequired
 	// shortcut: qurl-service without the 403 answers this refusal with 500
-	// creation_failed; drop this arm once every environment serves the 403.
+	// creation_failed; drop this arm once every environment serves the 403 (#1980).
 	legacy := apiErr.StatusCode == http.StatusInternalServerError && apiErr.Code == errCodeCreationFailed
 	if !refused && !legacy {
-		return "", false
+		return ""
 	}
 	res, err := c.GetResource(ctx, resourceID)
 	if err != nil {
 		log.Warn("get: resource read after refused mint failed", "resource_id", sanitizeLogValue(resourceID), "error", err)
-		return "", false
+		return ""
 	}
 	if res.ConsumerAccessVersion == 0 {
-		return "", false
+		return ""
 	}
 	// The entry page must be this resource's: the CRID is a digest of its key.
-	der, err := base64.RawURLEncoding.Strict().DecodeString(resourceID)
-	if err != nil {
-		return "", false
-	}
-	if matched, err := crid.KeyMatches(res.CRID, der); err != nil || !matched {
+	der, ok := client.ResourceKeyDER(resourceID)
+	if matched, err := crid.KeyMatches(res.CRID, der); !ok || err != nil || !matched {
 		log.Error("get: resource CRID does not match its key", "resource_id", sanitizeLogValue(resourceID))
-		return "", false
+		return ""
 	}
-	return h.cfg.LinkOrigin + "/" + res.CRID, true
+	return h.cfg.LinkOrigin + "/" + res.CRID
 }
 
 // renderConsumerAccessEntry renders the CRID entry page of a resource that

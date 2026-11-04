@@ -557,9 +557,6 @@ func registerOptionalSetupRoutes(ctx context.Context, rootMux *http.ServeMux, pr
 // defaultLinkOrigin is production's qURL link site.
 const defaultLinkOrigin = "https://qurl.link"
 
-// schemeHTTPS is the only scheme a link-site value may use.
-const schemeHTTPS = "https"
-
 // readLinkSiteConfig reads QURL_LINK_ORIGIN (default: production's link site)
 // and the optional QURL_LINK_SITE_ACCESS_URL, which unlocks a private link site.
 // Both reach users as links, so each must be an absolute https URL without
@@ -569,12 +566,14 @@ func readLinkSiteConfig() (origin, accessURL string, err error) {
 	if origin == "" {
 		origin = defaultLinkOrigin
 	}
-	if u, parseErr := url.Parse(origin); parseErr != nil || u.Scheme != schemeHTTPS || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+	// Only a bare origin round-trips as https:// + host: credentials, a path, a
+	// query or a fragment (even an empty `?` or `#`) all break the equality.
+	if u, parseErr := url.Parse(origin); parseErr != nil || u.Host == "" || "https://"+u.Host != origin {
 		return "", "", errors.New("QURL_LINK_ORIGIN must be an https origin without a path, query or fragment")
 	}
 	accessURL = strings.TrimSpace(os.Getenv("QURL_LINK_SITE_ACCESS_URL"))
 	if accessURL != "" {
-		if u, parseErr := url.Parse(accessURL); parseErr != nil || u.Scheme != schemeHTTPS || u.Host == "" || u.User != nil {
+		if u, parseErr := url.Parse(accessURL); parseErr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
 			return "", "", errors.New("QURL_LINK_SITE_ACCESS_URL must be an absolute https URL without credentials")
 		}
 	}
