@@ -866,7 +866,8 @@ records the access grant when the recipient verifies.
 
 Neither value may contain `<`, `>`, `|`, `&` or a space: the reply's plain-text
 fallback carries them as typed, and Slack reads those characters as markup or
-as the end of the link.
+as the end of the link. An unlock URL can therefore carry at most one query
+parameter.
 
 ## Endpoints
 

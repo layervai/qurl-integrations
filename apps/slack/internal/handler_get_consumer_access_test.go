@@ -49,7 +49,7 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 	}{
 		{name: "403 consumer_access_required", version: 1, wantLog: "answering with the CRID entry page",
 			want: []string{"Verified access required", entry}, wantAbsent: []string{commonGetMintFailedMessage}},
-		{name: "legacy 500 creation_failed", legacy: true, version: 3, wantLog: "status=500",
+		{name: "legacy 500 creation_failed", legacy: true, version: 3, wantLog: `"status":500`,
 			want: []string{"Verified access required", entry}},
 		{name: "private link site gets the unlock step first", version: 1, privateLinkSite: true,
 			want: []string{"First open " + testLinkSiteAccessURL + ", then " + entry}},
@@ -122,10 +122,8 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 				h.cfg.LinkSiteAccessURL = testLinkSiteAccessURL
 			}
 
-			logs := &capturedLogs{}
-			previous := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-			t.Cleanup(func() { h.Wait(); slog.SetDefault(previous) })
+			logs := captureDefaultSlog(t)
+			t.Cleanup(h.Wait) // Runs before the logger is restored.
 
 			_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("get $dashboard", testAdminTeamID, testAdminUserID)
 			h.Wait()
@@ -188,15 +186,13 @@ func TestHandleCRID_ConsumerAccessEntryGoesToDM(t *testing.T) {
 		return nil
 	}
 
-	logs := &capturedLogs{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { h.Wait(); slog.SetDefault(previous) })
+	logs := captureDefaultSlog(t)
+	t.Cleanup(h.Wait) // Runs before the logger is restored.
 
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(`crid `+testTunnelCRID+` dm:true reason:"quarterly review"`, testAdminTeamID, testAdminUserID)
 	h.Wait()
 	// No mint audit is written, so the answer's log line carries who asked and why.
-	if !logs.contains("answering with the CRID entry page") || !logs.contains(`reason="quarterly review"`) || !logs.contains("user_id="+testAdminUserID) {
+	if !logs.contains("answering with the CRID entry page") || !logs.contains(`"reason":"quarterly review"`) || !logs.contains(`"user_id":"`+testAdminUserID+`"`) {
 		t.Errorf("entry log missing the user or reason")
 	}
 	if !strings.Contains(dmText, entry) {
@@ -263,19 +259,16 @@ func writeConsumerAccessResource(t *testing.T, w http.ResponseWriter, resourceID
 	respondQURLEnvelope(t, w, map[string]any{"resource": resource})
 }
 
-// The entry render puts the unlock button before Enter Portal, and Enter
-// Portal carries the entry page.
+// The entry render's fallback names each step, and the unlock button comes
+// before Enter Portal, which carries the entry page.
 func TestRenderConsumerAccessEntry(t *testing.T) {
 	entry := testLinkOrigin + "/" + testTunnelCRID
-	fallback, blocks := renderConsumerAccessEntry(entry, "")
-	if got := enterPortalButton(t, blocks)["url"]; got != entry {
-		t.Fatalf("Enter Portal url = %v, want %q", got, entry)
-	}
+	fallback, _ := renderConsumerAccessEntry(entry, "")
 	if want := ":lock: Verified access required: " + entry + " (get access there)"; fallback != want {
 		t.Fatalf("fallback = %q, want %q", fallback, want)
 	}
 
-	fallback, blocks = renderConsumerAccessEntry(entry, testLinkSiteAccessURL)
+	fallback, blocks := renderConsumerAccessEntry(entry, testLinkSiteAccessURL)
 	if want := ":lock: Verified access required. First open " + testLinkSiteAccessURL + ", then " + entry + " (get access there)"; fallback != want {
 		t.Fatalf("fallback = %q, want %q", fallback, want)
 	}

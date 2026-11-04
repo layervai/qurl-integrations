@@ -705,7 +705,7 @@ func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, 
 	}
 	if res.ConsumerAccessVersion <= 0 {
 		if refused {
-			log.Warn("get: consumer_access_required for a resource that never had a policy", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID))...)
+			log.Warn("get: consumer_access_required for a resource read without a policy (consumer_access_version absent or zero)", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID))...)
 		}
 		return ""
 	}
