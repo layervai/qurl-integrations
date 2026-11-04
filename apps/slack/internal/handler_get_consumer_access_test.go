@@ -146,6 +146,28 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 	}
 }
 
+// A successful mint never reads the resource: the fallback runs only after a
+// refusal.
+func TestHandleGet_SuccessfulMintMakesNoResourceRead(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "dashboard", []string{testTunnelResourceID})
+	ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/minted", testTunnelResourceID)
+	})
+	ts.addCustomer(http.MethodGet, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("a successful mint must not read the resource")
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	h := newAdminTestHandler(t, ts)
+	h.cfg.LinkOrigin = testLinkOrigin
+
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("get $dashboard", testAdminTeamID, testAdminUserID)
+	h.Wait()
+	if !strings.Contains(async, "https://qurl.link/minted") {
+		t.Fatalf("async = %q, want the minted link", async)
+	}
+}
+
 // `/qurl crid` shares the entry delivery, `dm:true` sends the entry page to the
 // DM, not the channel, and the answer's log line records who asked and why.
 func TestHandleCRID_ConsumerAccessEntryGoesToDM(t *testing.T) {
