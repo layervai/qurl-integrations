@@ -561,7 +561,8 @@ type Resource struct {
 	// ConsumerAccessVersion is the revision of the resource's consumer access
 	// policy; zero means it never had one. A resource that has or had one
 	// issues no bearer links: recipients enter by its CRID and verify there.
-	// TODO(upstream-contract): qurl-service `consumer_access_version`.
+	// TODO(upstream-contract): qurl-service `consumer_access_version`, and its
+	// rule that a resource that has or had a policy never mints a bearer link.
 	ConsumerAccessVersion int64 `json:"consumer_access_version,omitempty"`
 }
 
