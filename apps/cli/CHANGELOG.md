@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.7.2](https://github.com/layervai/qurl-integrations/compare/v3.7.1...v3.7.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* **cli:** preserve publisher streams through session renewal ([#1984](https://github.com/layervai/qurl-integrations/issues/1984)) ([a0e0ba4](https://github.com/layervai/qurl-integrations/commit/a0e0ba4d07d7b03f4ab47243d146ae22d63d074d))
+
 ## [3.7.1](https://github.com/layervai/qurl-integrations/compare/v3.7.0...v3.7.1) (2026-11-03)
 
 
