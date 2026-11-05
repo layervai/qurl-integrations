@@ -205,6 +205,8 @@ func (d *journeyDaemon) Ensure(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// JobController.Ensure reloads an existing daemon after durable intent changes.
+	d.manager.Trigger()
 	return nil
 }
 
