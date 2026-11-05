@@ -13,7 +13,7 @@ require (
 	github.com/fatedier/frp v0.71.0
 	github.com/fatedier/golib v0.8.2
 	github.com/layervai/qurl-conformance v0.17.2
-	github.com/layervai/qurl-connector v0.14.4
+	github.com/layervai/qurl-connector v0.14.5
 	github.com/layervai/qurl-go v0.26.4-rc.2
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
@@ -55,6 +55,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.18.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.6 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
+	github.com/fatedier/yamux v0.2.0 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.6 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
@@ -66,7 +67,6 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.23 // indirect
 	github.com/googleapis/gax-go/v2 v2.27.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
-	github.com/hashicorp/yamux v0.1.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
@@ -136,13 +136,9 @@ require (
 
 tool golang.org/x/vuln/cmd/govulncheck
 
-// Go does not inherit replace directives from dependencies.
-// FRP's go.mod replaces yamux, so we must duplicate it here.
-replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-20250825093530-d0154be01cd6
-
-// TODO(upstream-contract): keep both replacements aligned with qurl-connector;
-// Go does not inherit dependency replacements. This reviewed FRP revision adds
-// system CA verification and retains the lifecycle fixes and InitialRunID.
-replace github.com/fatedier/frp => github.com/layervai/frp v1.0.5-0.20260926021043-5570a4205458
+// TODO(upstream-contract): keep this FRP replacement aligned with qurl-connector;
+// Go does not inherit dependency replacements. The signed fork keeps system CA
+// verification, InitialRunID binding, and stream-aware drain.
+replace github.com/fatedier/frp => github.com/layervai/frp v1.0.6-0.20261105061151-e091a7ca0123
 
 ignore node_modules

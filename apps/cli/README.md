@@ -825,9 +825,10 @@ reconcile. Stopping a share retains its headers until the next overlay
 replacement. Republishing the same Connector ID reuses them; replace or clear
 the entry before reusing that ID with different credentials. Changing a route's headers re-registers only that route on the
 live session; its siblings are untouched. Re-registration may interrupt
-in-flight requests. During session rotation the retiring session can retain
-old headers until replacement promotion and drain, so an update is not
-immediate revocation. See
+in-flight requests. During renewal, a retired session can keep active requests
+and their original headers until those requests finish or their original
+authorization expires. A header update is not immediate revocation; remove the
+route or stop the publisher to close its old work. See
 [docs/session-groups.md](../../docs/session-groups.md#runtime-request-headers).
 
 ### qurl publish
