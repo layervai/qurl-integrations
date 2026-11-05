@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.9](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.8...discord-v0.2.9) (2026-11-05)
+
+
+### Bug Fixes
+
+* **discord:** keep install browser secrets out of OAuth state URLs ([#1958](https://github.com/layervai/qurl-integrations/issues/1958)) ([cca253b](https://github.com/layervai/qurl-integrations/commit/cca253b22648bb6a6252a4ffcd627eaa149dc43f))
+* **discord:** retain fatal status during shutdown races ([#1961](https://github.com/layervai/qurl-integrations/issues/1961)) ([73db9e7](https://github.com/layervai/qurl-integrations/commit/73db9e7be6abaadb7552bba644ba62111247af77))
+* **discord:** suppress guild counts after gateway disconnect ([#1960](https://github.com/layervai/qurl-integrations/issues/1960)) ([985dfa9](https://github.com/layervai/qurl-integrations/commit/985dfa9aa3093945fbc37ced0733884a3ea0e299))
+* **slack:** prevent concurrent setup key overwrites ([#1881](https://github.com/layervai/qurl-integrations/issues/1881)) ([5e5efdb](https://github.com/layervai/qurl-integrations/commit/5e5efdb1f0a48da477a8f8bf112511f69c8592ef))
+
 ## [0.2.8](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.7...discord-v0.2.8) (2026-09-29)
 
 
