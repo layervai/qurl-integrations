@@ -1894,6 +1894,7 @@ func TestRegisterSandboxDeviceCredentialCleanup(t *testing.T) {
 	if err := store.SaveAgentState(context.Background(), &qurl.AgentState{
 		AgentID:        "agent-cleanup-test",
 		DeviceAPIKeyID: "key/test",
+		PrivateKeyB64:  base64.StdEncoding.EncodeToString(make([]byte, 32)),
 	}); err != nil {
 		_ = store.Close()
 		t.Fatalf("save test agent state: %v", err)
