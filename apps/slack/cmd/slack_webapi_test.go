@@ -180,7 +180,11 @@ func TestSlackUserLookupFuncWithTokenLookup(t *testing.T) {
 		gotUA = r.Header.Get("User-Agent")
 		switch r.URL.Query().Get("user") {
 		case "UFOUND001":
-			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UFOUND001","deleted":false}}`))
+			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UFOUND001","team_id":"T_lookup","deleted":false}}`))
+		case "UEXTERNAL":
+			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UEXTERNAL","team_id":"T_OTHER"}}`))
+		case "UNOSCOPE":
+			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UNOSCOPE"}}`))
 		case "UMISMAT1":
 			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UOTHER001","deleted":false}}`))
 		case "UDELETED1":
@@ -206,6 +210,8 @@ func TestSlackUserLookupFuncWithTokenLookup(t *testing.T) {
 		want bool
 	}{
 		{name: "active", user: "UFOUND001", want: true},
+		{name: "external Slack Connect user", user: "UEXTERNAL", want: false},
+		{name: "membership missing", user: "UNOSCOPE", want: false},
 		{name: "missing", user: "UMISSING1", want: false},
 		{name: "mismatched id", user: "UMISMAT1", want: false},
 		{name: "deleted", user: "UDELETED1", want: false},
@@ -270,38 +276,50 @@ func TestSlackUserLookupDrainsOversizedResponse(t *testing.T) {
 	}
 }
 
-func TestSlackUserLookupFuncWithTokenLookupRequiresWorkspaceToken(t *testing.T) {
-	var httpCalls atomic.Int64
-	var gotOwners []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		httpCalls.Add(1)
-		_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"UGRIDUSER","deleted":false}}`))
-	}))
-	t.Cleanup(srv.Close)
-
-	lookup := newSlackUserLookupFuncWithTokenLookup(func(_ context.Context, ownerID string) (string, error) {
-		gotOwners = append(gotOwners, ownerID)
-		if ownerID == testGridTeamID {
-			return "", auth.ErrSlackBotTokenNotConfigured
-		}
-		if ownerID == testGridEnterpriseID {
-			t.Fatalf("ownership transfer lookup must not fall back to the Enterprise Grid token")
-		}
-		return "", fmt.Errorf("unexpected token owner %q", ownerID)
-	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
-
-	ok, err := lookup(context.Background(), testGridTeamID, testGridEnterpriseID, "UGRIDUSER")
-	if !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-		t.Fatalf("SlackUserLookup error = %v, want missing workspace token", err)
-	}
-	if ok {
-		t.Fatal("SlackUserLookup returned true without a workspace token")
-	}
-	if strings.Join(gotOwners, ",") != testGridTeamID {
-		t.Fatalf("token lookup owners = %v, want only team", gotOwners)
-	}
-	if calls := httpCalls.Load(); calls != 0 {
-		t.Fatalf("users.info calls = %d, want 0", calls)
+func TestSlackUserLookupFuncWithOrgTokenRequiresWorkspaceMembership(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		user map[string]any
+		want bool
+	}{
+		{name: "member", user: map[string]any{"id": "UGRIDUSER", "enterprise_user": map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{testGridTeamID}}}, want: true},
+		{name: "org visible only", user: map[string]any{"id": "UGRIDUSER"}},
+		{name: "other workspace", user: map[string]any{"id": "UGRIDUSER", "enterprise_user": map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{"TOTHER"}}}},
+		{name: "other enterprise", user: map[string]any{"id": "UGRIDUSER", "enterprise_user": map[string]any{"enterprise_id": "EOTHER", "teams": []string{testGridTeamID}}}},
+		{name: "deleted", user: map[string]any{"id": "UGRIDUSER", "deleted": true, "enterprise_user": map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{testGridTeamID}}}},
+		{name: "bot", user: map[string]any{"id": "UGRIDUSER", "is_bot": true, "enterprise_user": map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{testGridTeamID}}}},
+		{name: "invited", user: map[string]any{"id": "UGRIDUSER", "is_invited_user": true, "enterprise_user": map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{testGridTeamID}}}},
+		{name: "wrong identity", user: map[string]any{"id": "UOTHER", "enterprise_user": map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{testGridTeamID}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var owners []string
+			var calls atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Header.Get("Authorization") != "Bearer xoxb-synthetic-org" || r.URL.Query().Get("user") != "UGRIDUSER" {
+					t.Error("unexpected user lookup scope")
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "user": tc.user})
+			}))
+			t.Cleanup(srv.Close)
+			lookup := newSlackUserLookupFuncWithTokenLookup(func(_ context.Context, owner string) (string, error) {
+				owners = append(owners, owner)
+				if owner == testGridTeamID {
+					return "", auth.ErrSlackBotTokenNotConfigured
+				}
+				if owner == testGridEnterpriseID {
+					return "xoxb-synthetic-org", nil
+				}
+				return "", errors.New("unexpected token owner")
+			}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+			got, err := lookup(context.Background(), testGridTeamID, testGridEnterpriseID, "UGRIDUSER")
+			if err != nil || got != tc.want {
+				t.Fatalf("lookup = %v, %v; want %v", got, err, tc.want)
+			}
+			if strings.Join(owners, ",") != testGridTeamID+","+testGridEnterpriseID || calls.Load() != 1 {
+				t.Fatalf("unexpected lookup count: owners=%v requests=%d", owners, calls.Load())
+			}
+		})
 	}
 }
 
@@ -1221,6 +1239,83 @@ func TestSlackReadResponseLimits(t *testing.T) {
 			want := fmt.Sprintf("%s response exceeded %d bytes", tc.method, tc.limit)
 			if err == nil || err.Error() != want {
 				t.Fatalf("oversized response = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
+func TestSlackUserLookupWorkspaceTokenGridMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		home       string
+		enterprise string
+		metadata   map[string]any
+		want       bool
+	}{
+		{name: "member in another home workspace", home: "T_OTHER", enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{testGridTeamID}}, want: true},
+		{name: "removed from home workspace", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{"T_OTHER"}}},
+		{name: "missing team list", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": testGridEnterpriseID}},
+		{name: "Grid context without metadata", home: testGridTeamID, enterprise: testGridEnterpriseID},
+		{name: "malformed Grid metadata", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{}},
+		{name: "wrong enterprise", home: testGridTeamID, enterprise: testGridEnterpriseID, metadata: map[string]any{"enterprise_id": "E_OTHER", "teams": []string{testGridTeamID}}},
+		{name: "workspace payload omits enterprise", home: "T_OTHER", metadata: map[string]any{"enterprise_id": testGridEnterpriseID, "teams": []string{testGridTeamID}}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "user": map[string]any{"id": "UGRIDUSER", "team_id": tc.home, "enterprise_user": tc.metadata}})
+			}))
+			t.Cleanup(srv.Close)
+			lookup := newSlackUserLookupFuncWithTokenLookup(func(_ context.Context, owner string) (string, error) {
+				if owner != testGridTeamID {
+					t.Fatalf("unexpected fallback to %s", owner)
+				}
+				return "xoxb-synthetic-workspace", nil
+			}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
+			got, err := lookup(context.Background(), testGridTeamID, tc.enterprise, "UGRIDUSER")
+			if err != nil || got != tc.want {
+				t.Fatalf("lookup = %v, %v; want %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSlackUserLookupFallbackGuards(t *testing.T) {
+	orgErr := errors.New("synthetic org lookup unavailable")
+	for _, tc := range []struct {
+		name       string
+		team       string
+		enterprise string
+		orgErr     error
+		wantOwners []string
+		wantErr    error
+	}{
+		{name: "no enterprise", team: testGridTeamID, wantOwners: []string{testGridTeamID}, wantErr: auth.ErrSlackBotTokenNotConfigured},
+		{name: "enterprise equals team", team: testGridTeamID, enterprise: testGridTeamID, wantOwners: []string{testGridTeamID}, wantErr: auth.ErrSlackBotTokenNotConfigured},
+		{name: "empty workspace"},
+		{name: "whitespace workspace", team: " \t "},
+		{name: "org lookup failure", team: testGridTeamID, enterprise: testGridEnterpriseID, orgErr: orgErr, wantOwners: []string{testGridTeamID, testGridEnterpriseID}, wantErr: orgErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var owners []string
+			lookup := newSlackUserLookupFuncWithTokenLookup(func(_ context.Context, owner string) (string, error) {
+				owners = append(owners, owner)
+				if owner == testGridEnterpriseID {
+					return "", tc.orgErr
+				}
+				return "", auth.ErrSlackBotTokenNotConfigured
+			}, testSlackWebAPIUserAgent, "https://slack.test/users.info", &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				t.Fatal("failed token lookup must not call Slack")
+				return nil, errors.New("unexpected request")
+			})})
+			ok, err := lookup(context.Background(), tc.team, tc.enterprise, "UGRIDUSER")
+			if ok || err == nil {
+				t.Fatalf("lookup = %v, %v; want refusal", ok, err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error %v does not wrap %v", err, tc.wantErr)
+			}
+			if strings.Join(owners, ",") != strings.Join(tc.wantOwners, ",") {
+				t.Fatalf("owners=%v; want %v", owners, tc.wantOwners)
 			}
 		})
 	}

@@ -197,11 +197,16 @@ at the OAuth-callback bind layer.
   same account or routes a cross-account move to operator assistance. Existing
   Slack installs must re-run the Slack install flow before this command can
   verify targets, because ownership transfer requires the `users:read` bot
-  scope on a workspace-level bot token. The command intentionally does not fall
-  back to an Enterprise Grid org-level token: Slack `users.info` has no
-  workspace selector, so the org token would prove org visibility rather than
-  membership in the invoking workspace. qurl-integrations#877 tracks safe
-  Grid support for ownership transfer.
+  scope. A workspace token is preferred. If it is absent, an Enterprise Grid
+  org token can verify the target only when Slack returns the matching
+  enterprise and includes the invoking workspace in `enterprise_user.teams`.
+  For a Grid user this list is decisive even with a workspace token; a matching
+  home `team_id` cannot override removal from the workspace. A workspace token
+  can use verified membership metadata when the command omits `enterprise_id`,
+  but cannot fall back to an org token without that signed context.
+  Org visibility alone is insufficient. Missing membership data, invited,
+  deleted or bot users, mismatched IDs, and lookup failures stop the transfer
+  before any owner change. A storage error does not trigger token fallback.
 - **Connector onboarding:** `/qurl-admin protect-connector` provisions a qURL
   Connector sidecar.
   - **Entry points** — a guided modal (opens with the bot token for the
@@ -1079,8 +1084,8 @@ The `Slack install` group is required for low-friction customer onboarding.
 Without it, a deployment can still use a manually supplied `SLACK_BOT_TOKEN`
 fallback, but customers cannot self-install the Secure Access Agent. That
 fallback token must include `users:read` for `/qurl-admin transfer-ownership`
-to verify target users; Enterprise Grid org-level fallback tokens are
-intentionally not used for ownership transfer.
+to verify target users. Enterprise Grid org tokens require an explicit matching
+workspace membership from Slack, as described under owner handoff above.
 
 The `OAuth` group is required only to serve the
 `/oauth/qurl/{start,callback}` surface. Without it the Secure Access Agent still serves
@@ -1103,9 +1108,9 @@ For customer Slack installs, configure the Slack app with:
   - Existing installs created before `users:read` was required must re-run this
     Slack install flow before `/qurl-admin transfer-ownership` can verify a
     target user.
-  - Enterprise Grid org-level tokens are not enough for ownership transfer until
-    qurl-integrations#877 adds workspace-member verification or an in-product
-    recovery path.
+  - Enterprise Grid org tokens can verify ownership-transfer targets only with
+    matching enterprise and workspace membership metadata. Org visibility alone
+    is rejected; retry after correcting workspace membership or missing scopes.
   - Conversation-mode installs should include `reactions:write` so the agent can
     add and clear the working-on-it reaction on admitted channel turns and DM
     turns that still use the reaction fallback before assistant-pane status is

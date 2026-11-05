@@ -89,13 +89,10 @@ func NewSlackRateLimitError(retryAfter string) error {
 // OpenViewFunc posts a Slack modal through `views.open`.
 type OpenViewFunc func(ctx context.Context, teamID, triggerID string, viewJSON []byte) error
 
-// SlackUserLookupFunc reports whether userID is an active Slack user visible to
-// the app token used for the team. Used by ownership transfer so a manually
-// pasted `<@U...>` shape cannot move owner_id to a malformed, deleted, bot, or
-// invisible account. The enterpriseID parameter is reserved for future
-// Enterprise Grid support; the production users.info adapter intentionally does
-// not fall back to an org token because that proves org visibility, not
-// workspace membership (qurl-integrations#877).
+// SlackUserLookupFunc verifies an active member of the invoking workspace.
+// Ownership transfer rejects malformed, deleted, invited, bot and external-only
+// identities. Enterprise Grid tokens require matching enterprise/workspace
+// membership metadata; org visibility alone is insufficient.
 type SlackUserLookupFunc func(ctx context.Context, teamID, enterpriseID, userID string) (bool, error)
 
 // PostFeedbackFunc delivers a `/qurl feedback` submission to the internal
