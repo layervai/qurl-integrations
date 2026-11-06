@@ -63,6 +63,30 @@ type Definition struct {
 	// ApprovalExpiresIn is how long a review or keys approval lasts; nil
 	// approvals never expire. It travels in the policy and the service enforces it.
 	ApprovalExpiresIn *string `json:"approval_expires_in,omitempty"`
+	// Payment makes a contract rule "People who pay". It holds no Stripe
+	// account: the connected one is read when the rule is applied.
+	Payment *Payment `json:"payment,omitempty"`
+}
+
+// Payment is a CRID payment policy without its account.
+type Payment struct {
+	PriceID       string `json:"price_id"`
+	AccessSeconds int64  `json:"access_seconds"`
+}
+
+// TODO(upstream-contract): copied from qurl-service internal/domain/crid_payment.go
+// validCRIDPaymentTerms; keep identical.
+var priceIDPattern = regexp.MustCompile(`^price_[A-Za-z0-9]{1,128}$`)
+
+// MaxPaymentAccessSeconds is ten years, the service's one-time access limit.
+const MaxPaymentAccessSeconds = 315360000
+
+// Validate checks the price and access duration the service accepts.
+func (p Payment) Validate() error {
+	if !priceIDPattern.MatchString(p.PriceID) || p.AccessSeconds < 0 || p.AccessSeconds > MaxPaymentAccessSeconds {
+		return errors.New("payment needs a Stripe price_id such as price_123 and access_seconds from 0 to 315360000")
+	}
+	return nil
 }
 
 // LinkLimits bounds one minted temporary link. Durations use the service's
@@ -152,6 +176,14 @@ func (d *Definition) validateSettings() error {
 			return errors.New("approval_expires_in must be from 1h to 365d")
 		}
 	}
+	if d.Payment != nil {
+		if d.Mode != ModeContract {
+			return errors.New("payment applies only to contract rules")
+		}
+		if err := d.Payment.Validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -166,7 +198,7 @@ func ValidSessionLength(s string) bool {
 }
 
 func (d *Definition) hasSettings() bool {
-	return d.LinkLimits != nil || d.ApprovalExpiresIn != nil
+	return d.LinkLimits != nil || d.ApprovalExpiresIn != nil || d.Payment != nil
 }
 
 func samePointer[T comparable](a, b *T) bool {
@@ -175,7 +207,7 @@ func samePointer[T comparable](a, b *T) bool {
 
 // sameSettings compares field presence too, since an explicit default round-trips.
 func sameSettings(a, b *Definition) bool {
-	return sameLinkLimits(a.LinkLimits, b.LinkLimits) && samePointer(a.ApprovalExpiresIn, b.ApprovalExpiresIn)
+	return sameLinkLimits(a.LinkLimits, b.LinkLimits) && samePointer(a.ApprovalExpiresIn, b.ApprovalExpiresIn) && samePointer(a.Payment, b.Payment)
 }
 
 // SameEffectiveLinkLimits compares what the limits do: an explicit
@@ -339,6 +371,9 @@ func settingsSize(d *Definition) int {
 		if l.SessionDuration != nil {
 			size += len("session_duration") + len(*l.SessionDuration)
 		}
+	}
+	if p := d.Payment; p != nil {
+		size += 3 + len("payment") + len("price_id") + len(p.PriceID) + len("access_seconds") + len(strconv.FormatInt(p.AccessSeconds, 10))
 	}
 	return size
 }
@@ -507,9 +542,10 @@ func (d *Definition) UnmarshalJSON(data []byte) error {
 			if parsed.Mode != ModeEmailDomain || bytes.Equal(value, []byte("null")) {
 				return errors.New("invalid access rule definition")
 			}
-		case "link_limits":
-			// A nested null would read as omitted; Validate checks the mode.
-			if !presentWithoutNulls(value, "expires_in") {
+		case "link_limits", "payment":
+			// A nested null or missing member would read as omitted or zero;
+			// Validate checks the mode.
+			if !presentWithoutNulls(value, requiredMembers[key]...) {
 				return errors.New("invalid access rule definition")
 			}
 		case "approval_expires_in":
@@ -524,11 +560,19 @@ func (d *Definition) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// presentWithoutNulls reports whether value is an object holding required and no null member.
-func presentWithoutNulls(value json.RawMessage, required string) bool {
+// requiredMembers are the members each nested setting must hold.
+var requiredMembers = map[string][]string{"link_limits": {"expires_in"}, "payment": {"price_id", "access_seconds"}}
+
+// presentWithoutNulls reports whether value is an object holding every required and no null member.
+func presentWithoutNulls(value json.RawMessage, required ...string) bool {
 	var members map[string]json.RawMessage
-	if json.Unmarshal(value, &members) != nil || members == nil || members[required] == nil {
+	if json.Unmarshal(value, &members) != nil || members == nil {
 		return false
+	}
+	for _, name := range required {
+		if members[name] == nil {
+			return false
+		}
 	}
 	for _, member := range members {
 		if bytes.Equal(member, []byte("null")) {

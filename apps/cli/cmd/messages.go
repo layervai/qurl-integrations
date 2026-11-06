@@ -247,7 +247,7 @@ func customerMessages() []string {
 		msgRulesFileDamaged, msgRulesRuleConflict, msgRulesChanged, msgRulesOtherAccount, msgRulesNotFound,
 		msgRulesAmbiguous, msgRulesDuplicateName, msgRulesLimit, msgRulesNotSynced, msgRulesLocalOnly,
 		msgRulesUnlinked, msgRulesSignIn, msgRulesUnavailable, msgRulesBusy, msgRulesConflict,
-		msgRulesLinkNotMade, msgRulesLimitsUnread,
+		msgRulesLinkNotMade, msgRulesLimitsUnread, msgRulesStripeNotConnected, msgRulesPaymentsUnavailable,
 		msgVerifyMismatch,
 		msgVerifyMissing,
 		msgSavedSkillOutdated,
@@ -323,4 +323,7 @@ const (
 	// %s is the published CRID in the two messages below.
 	msgRulesLinkNotMade  = "Published %s, but its link with the rule's limits was not made. Run the same publish again."
 	msgRulesLimitsUnread = "Published %s, but its saved link limits could not be read, so no link was made."
+	// A paid rule stores only its price; applying it needs the connected Stripe account.
+	msgRulesStripeNotConnected  = "This rule takes payments, but no Stripe account is connected. Run qurl payments connect, then try again."
+	msgRulesPaymentsUnavailable = "This rule takes payments, but payments are unavailable right now. Nothing was changed; try again later."
 )

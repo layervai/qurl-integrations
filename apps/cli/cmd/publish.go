@@ -171,6 +171,9 @@ owns the share and turns it off when it exits.`,
 			if err != nil {
 				return err
 			}
+			if err := applyRulePayment(cmd.Context(), client, access.Rule, access.ConsumerAccess); err != nil {
+				return err
+			}
 
 			access.Description, access.Tags, access.Alias = description, tags, alias
 			result, err := opts.publishRemote(cmd.Context(), client, args[0], &access)
@@ -307,6 +310,9 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	}
 	ownerID, client, err := localPublishOwner(ctx, opts, registry, stateDir)
 	if err != nil {
+		return err
+	}
+	if err := applyRulePayment(ctx, client, access.Rule, access.ConsumerAccess); err != nil {
 		return err
 	}
 	// Validate the owner-bound session authority before any Connector-resource

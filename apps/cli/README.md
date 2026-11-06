@@ -855,6 +855,21 @@ qurl publish http://127.0.0.1:8080 --rule once
 | `--once` (alias `--one-browser`) | public | only the first person to open the link gets in |
 | `--stays-open-for` (alias `--session-length`) | public | `1s` to `24h` |
 | `--approvals-last` | review, keys | `1d`, `7d`, `30d`, `90d` or `never` (default) |
+| `--stripe-price` | contract | a Stripe price ID such as `price_123`; makes the rule People who pay |
+| `--payment-access-seconds` | contract with `--stripe-price` | `0` (default, the resource lifetime) to `315360000`; subscriptions require `0` |
+
+A paid rule saves `"payment": {"price_id": "price_123", "access_seconds": 0}`
+(both members required, contract mode only) and never a Stripe account.
+Sharing with it reads the account connected now, like `qurl payments account`,
+and publishes the same payment policy as `--stripe-account`/`--stripe-price`.
+With no connected account it fails (exit 8) before changing anything; run
+`qurl payments connect`. While payments are unavailable it fails with exit 11.
+
+```sh
+qurl payments connect
+qurl rules create Buyers --mode contract --contract buyers --stripe-price price_123
+qurl publish http://127.0.0.1:3000 --rule Buyers
+```
 
 A public rule with link limits makes `publish` mint a temporary link (`Link:`,
 JSON `link`) and keeps the limits for later `qurl share <CRID>` links on this

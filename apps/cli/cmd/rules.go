@@ -13,6 +13,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/layervai/qurl-go/qurl"
+
 	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -426,7 +428,8 @@ func (f *ruleSettingFlags) apply(cmd *cobra.Command, d *accessrules.Definition) 
 }
 
 func ruleCreateCmd(opts *globalOpts) *cobra.Command {
-	var mode, domain, contract, emailsFile string
+	var mode, domain, contract, emailsFile, price string
+	var accessSeconds int64
 	var settings ruleSettingFlags
 	cmd := &cobra.Command{Use: "create <name>", Short: "Create a named access rule", Long: `Create a named access rule for future shares.
 
@@ -435,7 +438,10 @@ Who can open it (--mode):
 
 Public rules with --expires-in share a link that expires instead of the
 item's permanent address; qurl share makes later links with the same limits.
-Approvals last (review and keys rules) is how long each approval lasts.`, Example: `  qurl rules create "Acme team" --mode email_domain --email-domain acme.com
+Approvals last (review and keys rules) is how long each approval lasts.
+A contract rule with --stripe-price is People who pay: sharing with it uses
+the Stripe account connected then (qurl payments account).`, Example: `  qurl rules create "Acme team" --mode email_domain --email-domain acme.com
+  qurl rules create "Buyers" --mode contract --contract buyers --stripe-price price_123
   qurl rules create "Quick look" --mode public --expires-in 1h --stays-open-for 30m
   qurl rules create "Client review" --mode review --approvals-last 7d
   qurl rules create "Lab devices" --mode keys --approvals-last 30d`, Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -463,6 +469,12 @@ Approvals last (review and keys rules) is how long each approval lasts.`, Exampl
 		if err := settings.apply(cmd, &definition); err != nil {
 			return exitcode.UsageError(err)
 		}
+		if cmd.Flags().Changed(stripePriceFlag) || cmd.Flags().Changed(paymentAccessSecondsFlag) {
+			if mode != accessrules.ModeContract || !cmd.Flags().Changed(stripePriceFlag) {
+				return exitcode.UsageError(errors.New("payments need --mode contract and --stripe-price"))
+			}
+			definition.Payment = &accessrules.Payment{PriceID: price, AccessSeconds: accessSeconds}
+		}
 		if definition.Validate(false) != nil {
 			return exitcode.UsageError(ruleInputError(&definition))
 		}
@@ -479,6 +491,8 @@ Approvals last (review and keys rules) is how long each approval lasts.`, Exampl
 	cmd.Flags().StringVar(&domain, "email-domain", "", "email domain for domain access, such as acme.com")
 	cmd.Flags().StringVar(&contract, consumerContract, "", "integration reference for Custom access, where your service decides who gets in")
 	cmd.Flags().StringVar(&emailsFile, "emails-file", "", "use - to read optional additional email addresses as a JSON array")
+	cmd.Flags().StringVar(&price, stripePriceFlag, "", "contract rules: Stripe price people pay; LayerV collects 3%")
+	cmd.Flags().Int64Var(&accessSeconds, paymentAccessSecondsFlag, 0, "contract rules: one-time access duration; zero lasts for the resource lifetime; subscriptions require zero")
 	settings.register(cmd)
 	return cmd
 }
@@ -530,11 +544,36 @@ func ruleInputError(d *accessrules.Definition) error {
 		return errors.New("--email-domain must be a domain such as acme.com")
 	case d.Mode == accessrules.ModeEmailDomain:
 		return errors.New("--emails-file must list each email address once, such as name@acme.com")
+	case d.Payment != nil && d.Payment.Validate() != nil:
+		return errors.New("--stripe-price must be a Stripe price ID such as price_123, and --payment-access-seconds from 0 to 315360000")
 	case d.Mode == accessrules.ModeContract:
 		return errors.New("--contract must be 1 to 128 letters, digits, hyphens or underscores")
 	default:
 		return fmt.Errorf("invalid access rule: %w", d.Validate(false))
 	}
+}
+
+// applyRulePayment completes a paid rule's policy with the Stripe account
+// connected now, read like qurl payments account; the rule stores only the price.
+func applyRulePayment(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, policy *qurl.ConsumerAccessPolicy) error {
+	if rule == nil || rule.Payment == nil {
+		return nil
+	}
+	payments, ok := client.ConsumerManagement().(publisherStripeClient)
+	if !ok {
+		return errors.New("publisher payments are unavailable in this client")
+	}
+	account, err := payments.PublisherStripeAccount(ctx)
+	if exitcode.FromError(err) == exitcode.Unavailable {
+		return &accessRuleCommandError{message: msgRulesPaymentsUnavailable, cause: err}
+	}
+	if err != nil {
+		return err
+	}
+	if account == "" {
+		return exitcode.InvalidInputError(msgRulesStripeNotConnected, nil)
+	}
+	return setStripePayment(policy, account, rule.Payment.PriceID, rule.Payment.AccessSeconds)
 }
 
 // applyRuleToShare runs once the resource exists. A new public share keeps

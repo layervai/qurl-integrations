@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -84,5 +86,33 @@ func TestAccessRulesIgnoresEnvelopeAdditionsButNotRuleFields(t *testing.T) {
 		if ok != (err == nil) || (ok && (library.Version != 2 || len(library.Items) != 1)) {
 			t.Errorf("%s: %+v %v", body, library, err)
 		}
+	}
+}
+
+// quick_share_rule_id is a Desktop setting: the service keeps it when a save
+// omits it, so the CLI ignores it on read and never sends it, not even null.
+func TestAccessRulesKeepQuickShareOutOfSavesAndCarryPayment(t *testing.T) {
+	paid := `{"id":"11111111-1111-4111-8111-111111111111","name":"Buyers","mode":"contract","contract_id":"buyers","payment":{"price_id":"price_1","access_seconds":3600}}`
+	reply := `{"data":{"account_id":"one","version":%d,"items":[` + paid + `],"built_ins":[],"quick_share_rule_id":"11111111-1111-4111-8111-111111111111"}}`
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/me/access-rules", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, reply, 2)
+	})
+	srv.Script(http.MethodPut, "/v1/me/access-rules", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil || string(body) != `{"version":2,"items":[`+paid+`]}` {
+			t.Errorf("save body %s %v", body, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, reply, 3)
+	})
+	rules := newTestClient(t, srv, nil).AccessRules()
+	library, err := rules.Load(t.Context())
+	if err != nil || len(library.Items) != 1 || library.Items[0].Payment == nil || *library.Items[0].Payment != (accessrules.Payment{PriceID: "price_1", AccessSeconds: 3600}) {
+		t.Fatalf("load %+v %v", library, err)
+	}
+	if saved, err := rules.Replace(t.Context(), library.Version, library.Items); err != nil || saved.Version != 3 {
+		t.Fatalf("save %+v %v", saved, err)
 	}
 }

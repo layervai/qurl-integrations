@@ -90,6 +90,9 @@ Use --access when you publish to choose the initial policy.`,
 			if err != nil {
 				return err
 			}
+			if err := applyRulePayment(cmd.Context(), client, input.rule, input.policy); err != nil {
+				return err
+			}
 			result, err := executeConsumerAction(cmd.Context(), client.ConsumerManagement(), assessment.Input, &input)
 			if err != nil {
 				return err
@@ -150,6 +153,7 @@ type consumerAccessInput struct {
 	version                                                                                                    int64
 	expiresAt                                                                                                  *time.Time
 	policy                                                                                                     *qurl.ConsumerAccessPolicy
+	rule                                                                                                       *accessrules.Definition
 }
 
 func validateConsumerActionFlags(cmd *cobra.Command, action string, allowed map[string][]string) error {
@@ -298,6 +302,7 @@ func (o *globalOpts) applyConsumerRule(cmd *cobra.Command, input *consumerAccess
 	}
 	policy := definition.Policy(input.version + 1)
 	input.policy = &policy
+	input.rule = &definition
 	return nil
 }
 

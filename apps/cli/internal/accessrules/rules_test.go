@@ -201,12 +201,15 @@ func TestFindSelectsByIDOrExactName(t *testing.T) {
 
 func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
 	head := `{"id":"` + testID + `","name":"Team",`
+	paid := head + `"mode":"contract","contract_id":"buyers","payment":`
 	for _, raw := range []string{
 		head + `"mode":"public","link_limits":{"expires_in":"1h","one_time_use":true,"session_duration":"30m"}}`,
 		head + `"mode":"public","link_limits":{"expires_in":"30d","one_time_use":false}}`,
 		head + `"mode":"review","approval_expires_in":"7d"}`,
 		head + `"mode":"keys","approval_expires_in":"365d"}`,
 		head + `"mode":"email_domain","email_domain":"studio.com"}`,
+		head + `"mode":"contract","contract_id":"buyers","payment":{"price_id":"price_1PqA2b","access_seconds":0}}`,
+		head + `"mode":"contract","contract_id":"buyers","payment":{"price_id":"price_1","access_seconds":315360000}}`,
 	} {
 		var d Definition
 		if err := json.Unmarshal([]byte(raw), &d); err != nil || d.Validate(false) != nil {
@@ -236,6 +239,19 @@ func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
 		head + `"mode":"keys","approval_expires_in":"366d"}`,
 		head + `"mode":"public","link_limits":{"expires_in":"1h","session_duration":"1500ms"}}`,
 		head + `"mode":"review","approval_expires_in":""}`,
+		paid + `{"price_id":"price_1"}}`,
+		paid + `{"access_seconds":0}}`,
+		paid + `{"price_id":null,"access_seconds":0}}`,
+		paid + `{"price_id":"price_1","access_seconds":null}}`,
+		paid + `null}`,
+		paid + `{"price_id":"price_1","access_seconds":0,"account_id":"acct_1"}}`,
+		paid + `{"price_id":"prod_1","access_seconds":0}}`,
+		paid + `{"price_id":"price_","access_seconds":0}}`,
+		paid + `{"price_id":"price_1","access_seconds":-1}}`,
+		paid + `{"price_id":"price_1","access_seconds":315360001}}`,
+		paid + `{"price_id":"price_1","access_seconds":1.5}}`,
+		head + `"mode":"review","payment":{"price_id":"price_1","access_seconds":0}}`,
+		head + `"mode":"contract","payment":{"price_id":"price_1","access_seconds":0}}`,
 	} {
 		if decodeDefinition(raw) == nil {
 			t.Errorf("invalid settings accepted: %s", raw)
@@ -249,6 +265,14 @@ func TestRuleSettingsAreComparedAndBuiltInsCarryNone(t *testing.T) {
 	b.ApprovalExpiresIn = new("30d")
 	if EqualItems([]Definition{a}, []Definition{b}) {
 		t.Fatal("approval lifetime change not seen")
+	}
+	paid := Definition{ID: testID, Name: "Buyers", Mode: ModeContract, ContractID: "buyers", Payment: &Payment{PriceID: "price_1", AccessSeconds: 0}}
+	for _, other := range []*Payment{nil, {PriceID: "price_2"}, {PriceID: "price_1", AccessSeconds: 60}} {
+		changed := paid
+		changed.Payment = other
+		if EqualItems([]Definition{paid}, []Definition{changed}) {
+			t.Fatalf("payment change to %+v not seen", other)
+		}
 	}
 	if (&Definition{ID: "builtin.review", Name: "People you approve", Mode: "review", ApprovalExpiresIn: new("7d")}).Validate(true) == nil {
 		t.Fatal("built-in with settings accepted")
@@ -277,6 +301,10 @@ func TestValidateItemsCountsRuleSettings(t *testing.T) {
 	limits := Definition{LinkLimits: &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(false), SessionDuration: new("30m")}, ApprovalExpiresIn: new("7d")}
 	if got, want := settingsSize(&limits), 19+2+3+11+10+2+12+1+16+3; got != want {
 		t.Fatalf("settings size %d, want %d", got, want)
+	}
+	paid := Definition{Payment: &Payment{PriceID: "price_1", AccessSeconds: 3600}}
+	if got, want := settingsSize(&paid), 3+7+8+7+14+4; got != want {
+		t.Fatalf("payment size %d, want %d", got, want)
 	}
 }
 

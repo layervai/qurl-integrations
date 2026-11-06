@@ -386,3 +386,24 @@ func TestAccessRulesConflictsResolveByNameAtTheCurrentRevision(t *testing.T) {
 		t.Fatalf("resolve by the account name %+v %v", snapshot, err)
 	}
 }
+
+func TestAccessRulesPaidRuleSurvivesRestartAndSync(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenAccessRules(dir, "https://api.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paid := accessrules.Definition{ID: ruleID, Name: "Buyers", Mode: accessrules.ModeContract, ContractID: "buyers", Payment: &accessrules.Payment{PriceID: "price_1", AccessSeconds: 3600}}
+	if _, err = store.Save(t.Context(), 0, &paid); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenAccessRules(dir, "https://api.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "account-one", Items: []accessrules.Definition{}}}
+	got, err := reopened.Sync(t.Context(), remote)
+	if err != nil || got.Sync != "synced" || !accessrules.EqualItems(got.Items, []accessrules.Definition{paid}) || !accessrules.EqualItems(remote.library.Items, []accessrules.Definition{paid}) {
+		t.Fatalf("paid rule lost: %+v %+v %v", got.Items, remote.library.Items, err)
+	}
+}

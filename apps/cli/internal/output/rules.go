@@ -55,8 +55,8 @@ func (p *Printer) AccessRules(snapshot *accessrules.Snapshot) error {
 }
 
 // defaultRules mirrors the catalog's defaults, easiest to open first; selector
-// is what --rule takes (none for People who pay, set with --stripe-account and
-// --stripe-price instead). TestAccessModesMatchCatalog keeps them identical.
+// is what --rule takes (none for People who pay, which needs a price: save a
+// contract rule with --stripe-price). TestAccessModesMatchCatalog keeps them identical.
 var defaultRules = []struct{ id, selector, label, line string }{
 	{"once", accessrules.OnlyFirstPersonID, accessrules.OnlyFirstPersonLabel, "The first person to open it gets in. Then it’s used up."},
 	{"invite_only", "builtin.invite_only", "People you invite", "Only the email addresses you add can open it."},
@@ -98,6 +98,12 @@ func AccessRuleSummary(d *accessrules.Definition) string {
 		}
 		if l.SessionDuration != nil {
 			parts = append(parts, "stays open for "+ruleDuration(*l.SessionDuration))
+		}
+	}
+	if p := d.Payment; p != nil {
+		parts[0] = "People who pay"
+		if p.AccessSeconds > 0 {
+			parts = append(parts, "access lasts "+ruleDuration(fmt.Sprintf("%ds", p.AccessSeconds)))
 		}
 	}
 	switch {
