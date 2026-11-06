@@ -543,6 +543,7 @@ func ruleInputError(d *accessrules.Definition) error {
 		return errors.New("--email-domain must be a domain such as acme.com")
 	case d.Mode == accessrules.ModeEmailDomain:
 		return errors.New("--emails-file must list each email address once, such as name@acme.com")
+	// Valid without the payment, so the payment is what is wrong.
 	case d.Payment != nil && validWith(func(p *accessrules.Definition) { p.Payment = nil }):
 		return errors.New("--stripe-price must be a Stripe price ID such as price_123, and --payment-access-seconds from 0 to 315360000")
 	case d.Mode == accessrules.ModeContract:

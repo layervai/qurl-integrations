@@ -166,6 +166,10 @@ func (d *Definition) validateSettings() error {
 			return errors.New("approval_expires_in must be from 1h to 365d")
 		}
 	}
+	// The SDK checks the price and duration; public rules never reach it.
+	if d.Payment != nil && d.Mode != ModeContract {
+		return errors.New("payment applies only to contract rules")
+	}
 	return nil
 }
 

@@ -251,6 +251,7 @@ func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
 		paid + `{"price_id":"price_1","access_seconds":315360001}}`,
 		paid + `{"price_id":"price_1","access_seconds":1.5}}`,
 		head + `"mode":"review","payment":{"price_id":"price_1","access_seconds":0}}`,
+		head + `"mode":"public","payment":{"price_id":"price_1","access_seconds":0}}`,
 		head + `"mode":"contract","payment":{"price_id":"price_1","access_seconds":0}}`,
 	} {
 		if decodeDefinition(raw) == nil {
