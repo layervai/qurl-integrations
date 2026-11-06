@@ -451,14 +451,11 @@ the Stripe account connected then (qurl payments account).`, Example: `  qurl ru
 		if (cmd.Flags().Changed("email-domain") || cmd.Flags().Changed("emails-file")) && mode != accessrules.ModeEmailDomain {
 			return exitcode.UsageError(errors.New("--email-domain and --emails-file apply only to --mode email_domain"))
 		}
-		// A random (version 4, RFC 4122 variant) UUID; no UUID package is in the module graph.
-		var id [16]byte
-		if _, err := rand.Read(id[:]); err != nil {
+		id, err := newRuleID()
+		if err != nil {
 			return err
 		}
-		id[6] = (id[6] & 15) | 64
-		id[8] = (id[8] & 63) | 128
-		definition := accessrules.Definition{ID: fmt.Sprintf("%x-%x-%x-%x-%x", id[:4], id[4:6], id[6:8], id[8:10], id[10:]), Name: strings.TrimSpace(args[0]), Mode: mode, EmailDomain: strings.ToLower(strings.TrimSpace(domain)), ContractID: contract}
+		definition := accessrules.Definition{ID: id, Name: strings.TrimSpace(args[0]), Mode: mode, EmailDomain: strings.ToLower(strings.TrimSpace(domain)), ContractID: contract}
 		if cmd.Flags().Changed("emails-file") {
 			emails, err := readAllowedEmails(cmd, opts, emailsFile)
 			if err != nil {
@@ -494,6 +491,18 @@ the Stripe account connected then (qurl payments account).`, Example: `  qurl ru
 	cmd.Flags().Int64Var(&accessSeconds, paymentAccessSecondsFlag, 0, "contract rules: one-time access duration; zero lasts for the resource lifetime; subscriptions require zero")
 	settings.register(cmd)
 	return cmd
+}
+
+// newRuleID returns a random (version 4, RFC 4122 variant) UUID; no UUID
+// package is in the module graph.
+func newRuleID() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	id[6] = (id[6] & 15) | 64
+	id[8] = (id[8] & 63) | 128
+	return fmt.Sprintf("%x-%x-%x-%x-%x", id[:4], id[4:6], id[6:8], id[8:10], id[10:]), nil
 }
 
 // readAllowedEmails reads --emails-file - as a JSON array of normalized addresses.

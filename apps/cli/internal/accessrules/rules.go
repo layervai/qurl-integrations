@@ -196,20 +196,29 @@ func sameSettings(a, b *Definition) bool {
 	return sameLinkLimits(a.LinkLimits, b.LinkLimits) && samePointer(a.ApprovalExpiresIn, b.ApprovalExpiresIn)
 }
 
-// SameEffectiveLinkLimits compares what the limits do: an explicit
-// one_time_use false is the same as omitting it. session_duration has no
-// such default, since omitting it leaves the client's own.
+// SameEffectiveLinkLimits compares what the limits do: durations by length
+// ("60m" is "1h"), and an explicit one_time_use false is the same as omitting
+// it. session_duration has no such default, since omitting it leaves the
+// client's own.
 func SameEffectiveLinkLimits(a, b *LinkLimits) bool {
-	return sameLinkLimits(withoutDefaults(a), withoutDefaults(b))
+	if a == nil || b == nil {
+		return a == b
+	}
+	return sameDuration(&a.ExpiresIn, &b.ExpiresIn) && sameDuration(a.SessionDuration, b.SessionDuration) &&
+		(a.OneTimeUse != nil && *a.OneTimeUse) == (b.OneTimeUse != nil && *b.OneTimeUse)
 }
 
-func withoutDefaults(l *LinkLimits) *LinkLimits {
-	if l == nil || l.OneTimeUse == nil || *l.OneTimeUse {
-		return l
+// sameDuration compares presence, then length; unparsable values compare as text.
+func sameDuration(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
 	}
-	copied := *l
-	copied.OneTimeUse = nil
-	return &copied
+	x, errA := ParseDuration(*a)
+	y, errB := ParseDuration(*b)
+	if errA != nil || errB != nil {
+		return *a == *b
+	}
+	return x == y
 }
 
 // sameLinkLimits compares limits field by field, presence included.
@@ -374,7 +383,8 @@ func settingsSize(d *Definition) int {
 	return size
 }
 
-// Find returns the one rule whose ID or exact name is selector.
+// Find returns the one rule whose ID or exact name is selector. Names match
+// exactly here; NameTaken ignores case so no two names differ only by case.
 func Find(selector string, lists ...[]Definition) (Definition, error) {
 	var matches []Definition
 	for _, list := range lists {

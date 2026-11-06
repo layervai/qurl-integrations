@@ -208,7 +208,7 @@ func TestPublishSaysASingleUseLinkWorksOnce(t *testing.T) {
 	scriptMint(t, srv, &mints)
 	rule := `{"id":"11111111-1111-4111-8111-111111111111","name":"Once","mode":"public","link_limits":{"expires_in":"1h","one_time_use":true}}`
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--color", "never", "publish", "https://api.example.com", "--rule-file", "-"}, stdin: strings.NewReader(rule), shareStateDir: connectorStateTestDir(t), tty: true})
-	want := "Only the first person can open it. Run qurl share " + srv.Key.CRID + " for a new link."
+	want := "Only the first person can open this link. Run qurl share " + srv.Key.CRID + " for a new link."
 	if result.code != 0 || !strings.Contains(result.stdout.String(), want) || len(mints) != 1 || mints[0]["one_time_use"] != true {
 		t.Fatalf("publish %d mints %v\n%s%s", result.code, mints, result.stdout.String(), result.stderr.String())
 	}
@@ -323,6 +323,17 @@ func TestRepublishTreatsAnExplicitDefaultAsTheSameSettings(t *testing.T) {
 	}
 	if len(mints) != 2 {
 		t.Fatalf("mints = %d, want the first link and the existing share's link", len(mints))
+	}
+}
+
+// An item first shared without limits keeps that: --rule once mints nothing
+// and reports the different settings.
+func TestRuleOnceOnAnUnlimitedExistingShareKeepsItsSettings(t *testing.T) {
+	srv := apitest.NewServer(t)
+	scriptPublish(t, srv, false, true, nil, nil)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: connectorStateTestDir(t)})
+	if result.code != 0 || !strings.Contains(result.stdout.String(), `"settings_differ": true`) || strings.Contains(result.stdout.String(), `"link"`) {
+		t.Fatalf("publish %d %s %s", result.code, result.stdout.String(), result.stderr.String())
 	}
 }
 

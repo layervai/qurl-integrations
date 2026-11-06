@@ -336,11 +336,16 @@ func TestSameEffectiveLinkLimitsIgnoresExplicitDefaults(t *testing.T) {
 		{&LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}, false},
 		{&LinkLimits{ExpiresIn: "1h", SessionDuration: new("30m")}, false},
 		{&LinkLimits{ExpiresIn: "2h"}, false},
+		{&LinkLimits{ExpiresIn: "60m"}, true},
+		{&LinkLimits{ExpiresIn: "3600s", SessionDuration: new("30m")}, false},
 		{nil, false},
 	} {
 		if got := SameEffectiveLinkLimits(omitted, tc.other); got != tc.same {
 			t.Errorf("SameEffectiveLinkLimits(%+v, %+v) = %v", omitted, tc.other, got)
 		}
+	}
+	if !SameEffectiveLinkLimits(&LinkLimits{ExpiresIn: "1d", SessionDuration: new("24h")}, &LinkLimits{ExpiresIn: "24h", SessionDuration: new("1440m")}) {
+		t.Error("equal durations in other units must match")
 	}
 	if sameLinkLimits(omitted, &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(false)}) {
 		t.Error("library comparison must keep an explicit false")
