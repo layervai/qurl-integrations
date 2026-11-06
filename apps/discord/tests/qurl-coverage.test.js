@@ -122,7 +122,7 @@ describe('qURL client — getIdentity', () => {
       () => { throw new Error('expected rejection'); },
       err => err,
     );
-    expect(error.message).toBe('qURL API GET /me failed (unknown_error)');
+    expect(error.message).toBe('qURL API GET /me failed (identity_invalid_json)');
     expect(error.message).not.toContain('secret response fragment');
   });
 
@@ -131,7 +131,7 @@ describe('qURL client — getIdentity', () => {
     globalThis.fetch = jest.fn().mockRejectedValue(networkError);
 
     await expect(qurl.getIdentity('stored-guild-key'))
-      .rejects.toThrow('qURL API GET /me failed (unknown_error)');
+      .rejects.toThrow('qURL API GET /me failed (network_error)');
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -154,7 +154,7 @@ describe('qURL client — getIdentity', () => {
     }));
 
     await expect(qurl.getIdentity('stored-guild-key'))
-      .rejects.toThrow('qURL API GET /me failed (unknown_error)');
+      .rejects.toThrow('qURL API GET /me failed (identity_invalid_shape)');
   });
 
   it('rejects an array in place of the API-key identity block', async () => {
@@ -165,7 +165,7 @@ describe('qURL client — getIdentity', () => {
     }));
 
     await expect(qurl.getIdentity('stored-guild-key'))
-      .rejects.toThrow('qURL API GET /me failed (unknown_error)');
+      .rejects.toThrow('qURL API GET /me failed (identity_invalid_shape)');
   });
 
   it.each([null, ''])('rejects a missing guild key before making a request', async (apiKey) => {

@@ -55,7 +55,7 @@ const {
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { getIdentity } = require('./qurl');
 const { resourceIdLogRef } = require('./utils/resource-id');
-const { qurlApiErrorStatus } = require('./utils/qurl-errors');
+const { qurlApiErrorCode, qurlApiErrorStatus } = require('./utils/qurl-errors');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
@@ -9155,6 +9155,8 @@ const commands = [
       // buckets are kept separate by design (a status check must never lock
       // out a send).
       if (sub === 'status') {
+        const safeErrorIdentifier = value => (typeof value === 'string'
+          && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : null);
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({
             content: '❌ Only server administrators can view qURL configuration status.',
@@ -9165,9 +9167,14 @@ const commands = [
         let guildConfig;
         try {
           guildConfig = await db.getGuildConfig(interaction.guildId);
-        } catch {
+        } catch (error) {
           logger.warn('qURL status configuration read failed', {
             guild_id: interaction.guildId,
+            status: Number.isInteger(error?.$metadata?.httpStatusCode)
+              ? error.$metadata.httpStatusCode : (Number.isInteger(error?.status) ? error.status : null),
+            code: safeErrorIdentifier(error?.code),
+            error_name: safeErrorIdentifier(error?.name),
+            failure_stage: 'configuration_store',
           });
           return interaction.editReply({
             content: '⚠️ **The qURL status check could not be completed.**\n'
@@ -9254,8 +9261,10 @@ const commands = [
             logger.warn('qURL status identity check failed', {
               guild_id: interaction.guildId,
               status,
-              code: error?.code ?? null,
-              error_name: error?.name ?? null,
+              // Re-wrapped errors carry the code only in callQurl's redacted format.
+              code: safeErrorIdentifier(error?.code)
+                ?? (failureStage === 'qurl_service' ? safeErrorIdentifier(qurlApiErrorCode(error)) : null),
+              error_name: safeErrorIdentifier(error?.name),
               failure_stage: failureStage,
             });
             // Same 401/403 → "invalid key" policy the legacy setup validator
@@ -9265,17 +9274,9 @@ const commands = [
               : '⚠️ **Stored qURL configuration found, but the key check could not be completed.**\n'
                 + 'Please try `/qurl status` again later.\n\n';
           } else {
-            // Shows the service-issued `key_prefix` where this handler used to
-            // show a sha256 fingerprint of the stored key. That earlier decision
-            // rejected echoing key bytes; it is superseded because /v1/me
-            // designates `key_prefix` as the non-secret display identifier
-            // (the CLI identity model does the same), the OAuth setup success
-            // DM already shows this exact prefix to the same admin, and #1360
-            // asks for the prefix so the admin can match the two. The
-            // brute-force concern does not apply: the prefix is a namespace
-            // plus a few leading bytes of a >=28-char key, and it only reaches
-            // the ManageGuild-gated ephemeral reply. Trade-off: a fingerprint
-            // answered "same key as last setup?"; two keys can share a prefix.
+            // /v1/me and the setup DM expose key_prefix as a non-secret identifier.
+            // Show it only in this ManageGuild-gated ephemeral reply. Key IDs allow
+            // comparison between status reads even when two keys share the prefix.
             // TODO(upstream-contract): keep this aligned with /v1/me.
             //
             // Inline-code content renders backslashes literally, so strip
@@ -9287,6 +9288,13 @@ const commands = [
             // getIdentity enforces this shape; default anyway so a contract
             // drift lands in the verdict machinery, not the generic catch-all.
             const { key_prefix: rawKeyPrefix, scopes: allScopes = [] } = identity?.api_key ?? {};
+            // TODO(upstream-contract): /v1/me key_id is a non-secret opaque ID.
+            // Keep IDs whole for comparison between status reads; setup does not show this ID.
+            // Reject unsafe or oversized values instead of displaying a partial ID.
+            const rawKeyId = identity?.api_key?.key_id;
+            const keyId = typeof rawKeyId === 'string' && rawKeyId.length <= 128
+              && !/[^A-Za-z0-9_-]/.test(rawKeyId) ? rawKeyId : '';
+            const keyIdLine = keyId ? 'Key ID: `' + keyId + '`\n' : '';
             // TODO(upstream-contract): 12 mirrors qurl-service's
             // APIKeyDisplayPrefixLength (the issued prefix is exactly 12 bytes),
             // so a service prefix renders whole and matches the setup DM; a
@@ -9306,6 +9314,7 @@ const commands = [
               if (!scopes) scopes = '_none_';
               return `✅ **qURL is configured**\n` +
                 `Key prefix: \`${keyPrefix}\`\n` +
+                keyIdLine +
                 `Scopes: ${scopes}\n`;
             };
             verdict = renderHealthyVerdict(shownScopes.length);

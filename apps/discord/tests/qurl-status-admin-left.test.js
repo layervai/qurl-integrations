@@ -51,6 +51,8 @@ const db = require('../src/store');
 const logger = require('../src/logger');
 const { handleCommand } = require('../src/commands');
 const { PermissionFlagsBits } = require('discord.js');
+const { AUDIT_EVENTS } = require('../src/constants');
+const { qurlApiError } = require('../src/utils/qurl-errors');
 
 const STORED_KEY = 'lv_live_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
@@ -222,10 +224,10 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
   });
 
   it.each([
-    ['transport error', new Error('connect ECONNREFUSED 10.0.0.5:8080'), null, null, 'Error'],
-    ['timeout', new DOMException('operation timed out', 'TimeoutError'), null, 23, 'TimeoutError'],
-    ['service error', Object.assign(new Error('redacted'), { status: 503 }), 503, null, 'Error'],
-    ['serialized service error', new Error('qURL API GET /me failed (502)'), 502, null, 'Error'],
+    ['transport error', Object.assign(qurlApiError('GET', '/me', 'network_error'), { code: 'network_error' }), null, 'network_error', 'Error'],
+    ['timeout', Object.assign(qurlApiError('GET', '/me', 'timeout'), { code: 'timeout' }), null, 'timeout', 'Error'],
+    ['service error', qurlApiError('GET', '/me', 503), 503, '503', 'Error'],
+    ['serialized service error', new Error('qURL API GET /me failed (502)'), 502, '502', 'Error'],
   ])('does not report a %s as revoked', async (_case, error, expectedStatus, expectedCode, expectedName) => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
@@ -673,5 +675,98 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toContain('qURL is configured');
     expect(replyContent).not.toContain('has left this server');
+  });
+});
+
+describe('/qurl status through the real identity transport', () => {
+  const savedFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = savedFetch; });
+
+  it.each([
+    ['network', () => Promise.reject(new TypeError(`network detail ${STORED_KEY}`)), 'network_error', null],
+    ['timeout', () => Promise.reject(new DOMException(`timeout detail ${STORED_KEY}`, 'TimeoutError')), 'timeout', null],
+    ['abort', () => Promise.reject(new DOMException(`abort detail ${STORED_KEY}`, 'AbortError')), 'timeout', null],
+    ['invalid JSON', () => Promise.resolve({ ok: true, status: 200, json: async () => { throw new SyntaxError(STORED_KEY); } }), 'identity_invalid_json', null],
+    ['body timeout', () => Promise.resolve({ ok: true, status: 200, json: async () => { throw new DOMException(STORED_KEY, 'TimeoutError'); } }), 'timeout', null],
+    ['body abort', () => Promise.resolve({ ok: true, status: 200, json: async () => { throw new DOMException(STORED_KEY, 'AbortError'); } }), 'timeout', null],
+    ['invalid shape', () => Promise.resolve({ ok: true, status: 200, json: async () => ({ data: {} }) }), 'identity_invalid_shape', null],
+    ['HTTP failure', () => Promise.resolve({ ok: false, status: 503, body: { cancel: jest.fn() } }), '503', 503],
+  ])('records a safe %s code after transport redaction', async (_name, fetchResult, code, status) => {
+    db.getGuildConfig.mockResolvedValueOnce({ configured_by: 'admin-original', updated_at: '2026-01-01' });
+    mockGetIdentity.mockImplementationOnce(jest.requireActual('../src/qurl').getIdentity);
+    globalThis.fetch = jest.fn(fetchResult);
+    const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
+    await handleCommand(interaction);
+    await expect(mockGetIdentity.mock.results[0].value).rejects.toThrow(`qURL API GET /me failed (${code})`);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith('qURL status identity check failed', expect.objectContaining({
+      guild_id: 'guild-1', failure_stage: 'qurl_service', status, code,
+    }));
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(STORED_KEY);
+    expect(JSON.stringify(logger.debug.mock.calls)).not.toContain(STORED_KEY);
+    expect(interaction._editReply.mock.calls[0][0].content).not.toContain(STORED_KEY);
+    expect(logger.audit).not.toHaveBeenCalledWith(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, expect.anything());
+  });
+
+  it('keeps safe configuration-store diagnostics without error text', async () => {
+    const error = Object.assign(new Error(`secret detail ${STORED_KEY}`), {
+      name: 'AccessDeniedException', code: 'AccessDeniedException', $metadata: { httpStatusCode: 400 },
+    });
+    db.getGuildConfig.mockRejectedValueOnce(error);
+    const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
+    await handleCommand(interaction);
+    expect(logger.warn).toHaveBeenCalledWith('qURL status configuration read failed', {
+      guild_id: 'guild-1', status: 400, code: 'AccessDeniedException',
+      error_name: 'AccessDeniedException', failure_stage: 'configuration_store',
+    });
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(STORED_KEY);
+  });
+
+  it('distinguishes keys that share the same display prefix', async () => {
+    for (const keyId of ['key-first', 'key-second', 'a'.repeat(127) + '1', 'a'.repeat(127) + '2']) {
+      db.getGuildConfig.mockResolvedValueOnce({ configured_by: 'admin-original', updated_at: '2026-01-01' });
+      mockGetIdentity.mockResolvedValueOnce({ api_key: { key_id: keyId, key_prefix: 'same-prefix', scopes: [] } });
+      const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
+      // eslint-disable-next-line no-await-in-loop
+      await handleCommand(interaction);
+      expect(interaction._editReply.mock.calls[0][0].content).toContain('Key ID: `' + keyId + '`');
+    }
+  });
+});
+
+describe('/qurl status error metadata boundary', () => {
+  it.each(['configuration_store', 'key_store'].flatMap(stage => [
+    null, 42, { detail: STORED_KEY }, 'bad\nidentifier', 'x'.repeat(129),
+  ].map(value => [stage, value])))(
+    'omits malformed %s error metadata %p', async (stage, value) => {
+      const error = Object.assign(new Error('private detail'), { code: value, name: value });
+      if (stage === 'configuration_store') {
+        db.getGuildConfig.mockRejectedValueOnce(error);
+      } else {
+        db.getGuildConfig.mockResolvedValueOnce({ configured_by: 'admin-original' });
+        db.getGuildApiKey.mockRejectedValueOnce(error);
+      }
+      const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
+      await handleCommand(interaction);
+      expect(logger.warn).toHaveBeenCalledWith(
+        stage === 'configuration_store' ? 'qURL status configuration read failed' : 'qURL status identity check failed',
+        expect.objectContaining({ code: null, error_name: null, failure_stage: stage }),
+      );
+      expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(STORED_KEY);
+      expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('private detail');
+    },
+  );
+});
+
+describe('/qurl status key-ID display boundary', () => {
+  it.each(['`@everyone`', '@everyone', 'x'.repeat(129), 'key\nnew-line', undefined, null, 42, {}])('omits an unsafe or oversized key ID %s', async keyId => {
+    db.getGuildConfig.mockResolvedValueOnce({ configured_by: 'admin-original', updated_at: '2026-01-01' });
+    mockGetIdentity.mockResolvedValueOnce({ api_key: { key_id: keyId, key_prefix: 'same-prefix', scopes: [] } });
+    const interaction = makeStatusInteraction({ memberFetchBehavior: async () => ({ id: 'admin-original' }) });
+    await handleCommand(interaction);
+    const content = interaction._editReply.mock.calls[0][0].content;
+    expect(content).not.toContain('Key ID:');
+    expect(content).not.toContain('@everyone');
+    expect(content.length).toBeLessThanOrEqual(2000);
   });
 });
