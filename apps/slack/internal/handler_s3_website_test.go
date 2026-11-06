@@ -444,6 +444,9 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 		t.Fatalf("modal ack = %q, want empty JSON object", w.Body.String())
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	if resourceBody["name"] != testTunnelSlug {
+		t.Errorf("resource name = %v, want the Connector ID %q", resourceBody["name"], testTunnelSlug)
+	}
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want connector find-or-create slug", resourceBody)
 	}
