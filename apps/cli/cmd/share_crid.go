@@ -241,5 +241,14 @@ func (opts *globalOpts) shareWithLimits(cmd *cobra.Command, id string, limits ac
 	if err != nil {
 		return nil, fmt.Errorf(msgShareNeedsDevice, err)
 	}
-	return client.MintLimitedLink(cmd.Context(), id, limits)
+	link, err := client.MintLimitedLink(cmd.Context(), id, limits)
+	if err != nil {
+		return nil, err
+	}
+	// A minted link carries no publisher, so read it as a plain share shows
+	// it; the link is valid either way, so a failed read only loses the rows.
+	if resource, readErr := client.Resource(cmd.Context(), id); readErr == nil {
+		link.Publisher, link.ResourceCreatedAt = resource.Publisher, resource.CreatedAt
+	}
+	return link, nil
 }

@@ -442,3 +442,19 @@ func TestUnknownPublishOutcomeKeepsSavedLimits(t *testing.T) {
 		t.Fatalf("unknown outcome: %d mints %v %s %s", result.code, mints, result.stdout.String(), result.stderr.String())
 	}
 }
+
+// A link minted with saved limits shows the same publisher rows as any share.
+func TestShareWithSavedLimitsShowsThePublisher(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	var mints []map[string]any
+	scriptPublish(t, srv, false, false, nil, nil)
+	scriptMint(t, srv, &mints)
+	if result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(hourRule), shareStateDir: dir}); result.code != 0 {
+		t.Fatalf("publish %d %s", result.code, result.stderr.String())
+	}
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}, tty: true, shareStateDir: dir})
+	if result.code != 0 || len(mints) != 2 || !strings.Contains(result.stdout.String(), apitest.DefaultPublisherName) || !strings.Contains(result.stdout.String(), "Created") {
+		t.Fatalf("share %d %s %s", result.code, result.stdout.String(), result.stderr.String())
+	}
+}

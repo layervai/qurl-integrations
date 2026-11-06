@@ -877,7 +877,8 @@ qurl publish http://127.0.0.1:3000 --rule Buyers
 
 A public rule with link limits makes `publish` mint a temporary link (`Link:`,
 JSON `link`) and keeps the limits for later `qurl share <CRID>` links on this
-device. Approvals last is part of the resource policy and the service enforces
+device. Link limits shape the links this device makes; they are not access
+control, and the CRID still opens a public item. Approvals last is part of the resource policy and the service enforces
 it. Publishing again to an existing item with a different access policy fails
 without changing it; different link limits or approval lifetime keep the
 existing settings and JSON reports `"settings_differ": true`.

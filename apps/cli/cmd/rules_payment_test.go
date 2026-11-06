@@ -225,3 +225,26 @@ func TestChoosingADefaultRuleByNameCreatesNoProfile(t *testing.T) {
 		t.Fatalf("exit %d %s; profile: %v", result.code, result.stderr.String(), err)
 	}
 }
+
+// ruleSyncNotice checks the unlinked case before the generic conflict, and a
+// rule conflict comes back in the snapshot, never as the error.
+func TestRuleSyncNoticeOrder(t *testing.T) {
+	read := accessrules.Snapshot{SchemaVersion: 1, Sync: accessrules.SyncOffline}
+	for _, tc := range []struct {
+		snapshot accessrules.Snapshot
+		err      error
+		notice   string
+		deferred bool
+	}{
+		{read, errors.Join(accessrules.ErrUnlinked, accessrules.ErrConflict), msgRulesUnlinked, true},
+		{read, accessrules.ErrConflict, msgRulesBusy, true},
+		{accessrules.Snapshot{SchemaVersion: 1, Sync: accessrules.SyncConflict}, nil, msgRulesConflict, true},
+		{accessrules.Snapshot{SchemaVersion: 1, Sync: accessrules.SyncLocal}, nil, msgRulesLocalOnly, true},
+		{accessrules.Snapshot{SchemaVersion: 1, Sync: accessrules.SyncSynced}, nil, "", true},
+		{accessrules.Snapshot{}, accessrules.ErrUnlinked, "", false},
+	} {
+		if notice, deferred := ruleSyncNotice(&tc.snapshot, tc.err); notice != tc.notice || deferred != tc.deferred {
+			t.Errorf("ruleSyncNotice(%+v, %v) = %q, %v", tc.snapshot, tc.err, notice, deferred)
+		}
+	}
+}
