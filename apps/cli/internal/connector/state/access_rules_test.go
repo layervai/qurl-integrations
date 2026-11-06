@@ -388,7 +388,7 @@ func TestAccessRulesConflictsResolveByNameAtTheCurrentRevision(t *testing.T) {
 }
 
 func TestAccessRulesPaidRuleSurvivesRestartAndSync(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	store, err := OpenAccessRules(dir, "https://api.example.test")
 	if err != nil {
 		t.Fatal(err)
