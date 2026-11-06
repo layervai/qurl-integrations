@@ -58,7 +58,7 @@ func (a accountAccessRules) request(ctx context.Context, method string, body any
 		return accessrules.AccountLibrary{}, fixed
 	}
 	// Unknown envelope fields, including the service's built-ins, are ignored
-	// so the service can evolve; each rule still decodes strictly because the
+	// so the service can evolve; a rule keeps its unknown fields because the
 	// whole list is written back.
 	var envelope struct {
 		Data struct {

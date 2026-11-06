@@ -642,8 +642,14 @@ func sameJSON(a, b json.RawMessage) bool {
 	if bytes.Equal(a, b) {
 		return true
 	}
-	var x, y any
-	return a != nil && b != nil && json.Unmarshal(a, &x) == nil && json.Unmarshal(b, &y) == nil && reflect.DeepEqual(x, y)
+	decode := func(raw json.RawMessage) (value any, err error) {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber() // large integers stay exact
+		return value, decoder.Decode(&value)
+	}
+	x, errX := decode(a)
+	y, errY := decode(b)
+	return a != nil && b != nil && errX == nil && errY == nil && reflect.DeepEqual(x, y)
 }
 
 // Validate verifies a complete service response without guessing absent fields.

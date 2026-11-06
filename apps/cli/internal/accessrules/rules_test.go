@@ -31,7 +31,7 @@ func TestDefinitionRejectsUnsupportedOrContradictoryRules(t *testing.T) {
 	if err := valid.Validate(false); err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{`{"id":"` + testID + `","name":"x","mode":"public","contract_id":"plan"}`, `{"id":"` + testID + `","name":"x","mode":"future"}`} {
+	for _, raw := range []string{`{"id":"` + testID + `","name":"x","mode":"public","contract_id":"plan"}`, `{"id":"` + testID + `","name":"x","mode":"future"}`, `{"id":"` + testID + `","name":"x","mode":"review","Mode":"public"}`} {
 		if decodeDefinition(raw) == nil {
 			t.Fatal("unsafe definition accepted")
 		}
