@@ -246,7 +246,7 @@ func customerMessages() []string {
 		msgAccountOwnerDenied,
 		msgRulesFileDamaged, msgLinkLimitsFileDamaged, msgRulesRuleConflict, msgRulesChanged, msgRulesOtherAccount, msgRulesNotFound,
 		msgRulesAmbiguous, msgRulesDuplicateName, msgRulesLimit, msgRulesNotSynced, msgRulesLocalOnly,
-		msgRulesUnlinked, msgRulesSignIn, msgRulesUnavailable, msgRulesBusy, msgRulesConflict,
+		msgRulesUnlinked, msgRulesSignIn, msgRulesLoginNotSynced, msgRulesUnavailable, msgRulesBusy, msgRulesConflict,
 		msgRulesLinkNotMade, msgRulesLimitsUnread, msgRulesStripeNotConnected, msgRulesPaymentsUnavailable,
 		msgVerifyMismatch,
 		msgVerifyMissing,
@@ -319,6 +319,7 @@ const (
 	msgRulesLocalOnly        = "Access rules are saved on this device only. Run qurl account setup to sync them with an account."
 	msgRulesUnlinked         = "Access rules stay on this device: it is not linked to an active account."
 	msgRulesSignIn           = "Access rules stay on this device until you sign in again with qurl login."
+	msgRulesLoginNotSynced   = "Signed in, but this account could not sync access rules yet. They stay on this device; run qurl rules sync later."
 	msgRulesUnavailable      = "Could not reach your account. Access rules stay on this device; run qurl rules sync later."
 	msgRulesBusy             = "Your account's access rules kept changing. Run qurl rules sync again."
 	msgRulesConflict         = "Some access rules changed here and in your account. Keep one version with qurl rules resolve <rule> --use local or --use account."

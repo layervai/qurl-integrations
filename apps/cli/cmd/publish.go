@@ -102,8 +102,8 @@ CRID. A flag that asks for what the existing resource is not is refused:
 private one.
 
 To choose who can open it, pass --rule with a default access rule's name or
-a saved rule's ID or name (see "qurl rules list"). --rule once is Only the
-first person: a link that works for whoever opens it first and expires after
+a saved rule's ID or name (see "qurl rules list"). --rule once is the One-time
+link: a link that works for whoever opens it first and expires after
 30 days if nobody opens it. The resource itself is public; only that link is
 limited. Publishing
 an item again, with or without --rule, makes a new link with the limits it was
@@ -355,10 +355,7 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 		return compensate(err)
 	}
 	shared := &qurlapi.Published{CRID: local.CRID, FoundExisting: resolved.FoundExisting, ConsumerAccess: resolved.ConsumerAccess}
-	if err := opts.applyRuleToShare(ctx, client, access.Rule, shared); err != nil {
-		return compensate(err)
-	}
-	return finishLocalPublish(ctx, opts, client, registry, resolved, local, shared, stateDir, foreground, compensate)
+	return finishLocalPublish(ctx, opts, client, registry, resolved, local, shared, access.Rule, stateDir, foreground, compensate)
 }
 
 func validateLocalPublishRequest(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool) (string, error) {
@@ -668,12 +665,13 @@ func finishLocalPublish(
 	resolved *agent.ResolvedResource,
 	local *connectorstate.LocalShare,
 	applied *qurlapi.Published,
+	rule *accessrules.Definition,
 	stateDir string,
 	foreground bool,
 	compensate func(error) error,
 ) error {
 	if foreground {
-		return runForegroundLocalPublish(ctx, opts, client, registry, resolved, local, applied, stateDir)
+		return runForegroundLocalPublish(ctx, opts, client, registry, resolved, local, applied, rule, stateDir)
 	}
 	logDir, err := connectordaemon.DefaultLogDir(stateDir)
 	if err != nil {
@@ -690,6 +688,11 @@ func finishLocalPublish(
 	if err != nil {
 		return err
 	}
+	// Minted once serving, like a remote publish: a failed link leaves the
+	// share on, and its lifetime starts when the route works.
+	if err := opts.applyRuleToShare(ctx, client, rule, applied); err != nil {
+		return err
+	}
 	return printLocalPublishServing(opts, resolved, local, applied, sharing)
 }
 
@@ -701,6 +704,7 @@ func runForegroundLocalPublish(
 	resolved *agent.ResolvedResource,
 	local *connectorstate.LocalShare,
 	applied *qurlapi.Published,
+	rule *accessrules.Definition,
 	stateDir string,
 ) (retErr error) {
 	var (
@@ -765,6 +769,9 @@ func runForegroundLocalPublish(
 	}
 	sharing, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit)
 	if err != nil {
+		return err
+	}
+	if err := opts.applyRuleToShare(ctx, client, rule, applied); err != nil {
 		return err
 	}
 	if err := printLocalPublishServing(opts, resolved, local, applied, sharing); err != nil {

@@ -174,3 +174,24 @@ func TestLoginPointsConflictingRulesToResolve(t *testing.T) {
 		t.Fatalf("login conflict notice: %d %s", result.code, result.stderr.String())
 	}
 }
+
+// A 401 from the rules route right after a successful login must not say
+// to sign in again.
+func TestLoginRulesAuthFailureDoesNotAskToSignInAgain(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	store, err := connectorstate.OpenAccessRules(dir, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Save(t.Context(), 0, &accessrules.Definition{ID: "11111111-1111-4111-8111-111111111111", Name: "Guest rule", Mode: "keys"}); err != nil {
+		t.Fatal(err)
+	}
+	srv.Script(http.MethodGet, "/v1/me/access-rules", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusUnauthorized, "unauthorized", "Unauthorized", "")
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "login"}, env: map[string]string{}, stdin: strings.NewReader(testAPIKey + "\n"), shareStateDir: dir})
+	if result.code != 0 || !strings.Contains(result.stderr.String(), msgRulesLoginNotSynced) || strings.Contains(result.stderr.String(), msgRulesSignIn) {
+		t.Fatalf("login %d stderr %q", result.code, result.stderr.String())
+	}
+}

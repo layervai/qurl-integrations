@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -192,6 +193,14 @@ func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (ac
 // savedRuleNamed reports whether a readable saved rule is named name. An
 // unreadable rules file leaves the preset chosen, so it cannot block presets.
 func (o *globalOpts) savedRuleNamed(cmd *cobra.Command, name string) bool {
+	// No profile directory means nothing saved; do not create one here.
+	dir, err := o.resolveShareStateDir("")
+	if err != nil {
+		return false
+	}
+	if _, err = os.Stat(dir); err != nil {
+		return false
+	}
 	store, err := o.ruleStore()
 	var snapshot accessrules.Snapshot
 	if err == nil {
@@ -370,6 +379,19 @@ func (o *globalOpts) reconcileRulesAfterLink(ctx context.Context) {
 			notice = msgRulesNotSynced
 		}
 	}
+	if exitcode.FromError(err) == exitcode.Auth {
+		// "Sign in again" would be wrong right after signing in.
+		notice = msgRulesLoginNotSynced
+	}
+	if snapshot.SchemaVersion == 0 {
+		// Sync stopped before reading the journal; read it here so a device
+		// with nothing saved stays quiet.
+		if store, storeErr := o.ruleStore(); storeErr == nil {
+			if local, readErr := store.Snapshot(ctx); readErr == nil {
+				snapshot = local
+			}
+		}
+	}
 	// A never-linked journal with no saved rules has nothing waiting, so any
 	// sync failure stays quiet; a linked or unreadable journal still warns.
 	if snapshot.Sync == accessrules.SyncLocal && len(snapshot.Items) == 0 && len(snapshot.Conflicts) == 0 {
@@ -394,7 +416,7 @@ type ruleSettingFlags struct {
 
 func (f *ruleSettingFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.expiresIn, "expires-in", "", "public rules: each shared link expires after this long, such as 1h or 7d (1m to 30d)")
-	cmd.Flags().BoolVar(&f.oneBrowser, "once", false, "public rules: Only the first person. Anyone else sees that the link no longer works (alias --one-browser)")
+	cmd.Flags().BoolVar(&f.oneBrowser, "once", false, "public rules: one-time links; only the first person to open each link gets in, anyone else sees that it no longer works (alias --one-browser)")
 	cmd.Flags().StringVar(&f.sessionLength, "stays-open-for", "", "public rules: how long they can use it after opening the link, such as 30m (1s to 24h) (alias --session-length)")
 	cmd.Flags().StringVar(&f.approvals, "approvals-last", "", "review and keys rules: 1d, 7d, 30d, 90d or never (default: never)")
 	// The earlier names stay accepted, and named in help, for released clients.
@@ -602,7 +624,7 @@ func completeRulePayment(ctx context.Context, client qurlapi.Client, policy *qur
 		return err
 	}
 	account, err := payments.PublisherStripeAccount(ctx)
-	if exitcode.FromError(err) == exitcode.Unavailable {
+	if code := exitcode.FromError(err); code == exitcode.Unavailable || code == exitcode.RateLimited {
 		return &accessRuleCommandError{message: msgRulesPaymentsUnavailable, cause: err}
 	}
 	if err != nil {
