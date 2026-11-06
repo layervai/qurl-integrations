@@ -165,7 +165,7 @@ const (
 	msgPublishNameDefault  = "Name for a new resource: %s (change with --name)"
 	msgPublishNamePrompt   = "Public name recipients will see (a target already published keeps its name): "
 	msgPublishNameRequired = "a public name is required: pass --name \"<name>\" with the name recipients will see (up to 100 characters)"
-	msgPublishNameInvalid  = "--name must be one line of 1 to 100 characters with no control characters"
+	msgPublishNameInvalid  = "--name must be one line of 1 to 100 characters with no control or invisible formatting characters"
 
 	// Usage errors of the commands for access requests.
 	msgAllowRequestsWithPublic  = "--allow-requests cannot be used with --public: access requests are for a private resource, and a public one already opens for anyone who has the CRID"

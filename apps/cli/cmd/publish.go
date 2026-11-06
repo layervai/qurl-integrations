@@ -897,8 +897,7 @@ func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string,
 		}
 	}
 	if validPublicName(name) {
-		// A person at a terminal sees the default before it becomes public;
-		// scripts read it from the result.
+		// A person at a terminal sees the default before it becomes public.
 		if opts.streams.ErrIsTTY && !opts.quiet && opts.resolvedFormat != output.FormatJSON {
 			opts.printer().Notef(msgPublishNameDefault, name)
 		}
@@ -951,7 +950,8 @@ func directoryPublishName(getwd, home func() (string, error)) string {
 	if err != nil {
 		return ""
 	}
-	if h, err := home(); err == nil && filepath.Clean(h) == filepath.Clean(dir) {
+	// EqualFold: home paths are case-insensitive on Windows and macOS.
+	if h, err := home(); err == nil && strings.EqualFold(filepath.Clean(h), filepath.Clean(dir)) {
 		return ""
 	}
 	if name := strings.TrimSpace(filepath.Base(dir)); name != string(filepath.Separator) && name != "." {
