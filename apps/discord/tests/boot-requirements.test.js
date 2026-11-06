@@ -14,9 +14,7 @@ const {
   invalidHotStandbyValues,
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
-  missingMapCommandKeys,
   missingWebhookSecretKeys,
-  GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
@@ -369,49 +367,7 @@ describe('missingWebhookSecretKeys', () => {
   });
 });
 
-describe('missingMapCommandKeys', () => {
-  it('returns empty when the flag is off — Maps key state is irrelevant', () => {
-    expect(missingMapCommandKeys({})).toEqual([]);
-    expect(missingMapCommandKeys({ MAP_COMMAND_ENABLED: false })).toEqual([]);
-    expect(
-      missingMapCommandKeys({ MAP_COMMAND_ENABLED: false, GOOGLE_MAPS_API_KEY: '' }),
-    ).toEqual([]);
-    expect(
-      missingMapCommandKeys({
-        MAP_COMMAND_ENABLED: false,
-        GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
-      }),
-    ).toEqual([]);
-  });
 
-  it('flags GOOGLE_MAPS_API_KEY when toggle is on but the key is missing', () => {
-    expect(
-      missingMapCommandKeys({ MAP_COMMAND_ENABLED: true }),
-    ).toEqual(['GOOGLE_MAPS_API_KEY']);
-    expect(
-      missingMapCommandKeys({ MAP_COMMAND_ENABLED: true, GOOGLE_MAPS_API_KEY: '' }),
-    ).toEqual(['GOOGLE_MAPS_API_KEY']);
-  });
-
-  it.each([GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL, ' placeholder\n'])(
-    'rejects the Maps seed when enabled: %p', (key) => {
-    expect(
-      missingMapCommandKeys({
-        MAP_COMMAND_ENABLED: true,
-        GOOGLE_MAPS_API_KEY: key,
-      }),
-    ).toEqual(['GOOGLE_MAPS_API_KEY']);
-  });
-
-  it('returns empty when toggle is on AND the key is a real value', () => {
-    expect(
-      missingMapCommandKeys({
-        MAP_COMMAND_ENABLED: true,
-        GOOGLE_MAPS_API_KEY: 'AIzaSyA-real-looking-key-1234567890',
-      }),
-    ).toEqual([]);
-  });
-});
 
 describe('resolveProcessRole', () => {
   it('VALID_PROCESS_ROLES is the canonical set in stable order (combined first as the default)', () => {

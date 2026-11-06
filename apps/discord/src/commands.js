@@ -56,7 +56,7 @@ const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { getIdentity } = require('./qurl');
 const { resourceIdLogRef } = require('./utils/resource-id');
 const { qurlApiErrorStatus } = require('./utils/qurl-errors');
-const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
+const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
@@ -70,16 +70,6 @@ const {
   isUnsupportedQurlContext,
   UNSUPPORTED_CONTEXT_MSG,
 } = require('./interaction-context');
-const {
-  searchPlaces,
-  findPlaceFromText,
-  getPlaceDetails,
-  buildPlaceUrl,
-  encodePlaceIdSentinel,
-  decodePlaceIdSentinel,
-  PLACE_ID_SHAPE_RE,
-} = require('./places');
-
 // Absolute floor above which a single send earns a `WARN`-level
 // audit log at executeSendPipeline entry. 1000 chosen as the cliff
 // where DM fan-out at Discord's ~5/sec per-bot limit starts taking
@@ -257,27 +247,6 @@ async function deferUpdateOrStop(interaction, flowId) {
 const { renderViewCounter } = require('./view-counter-render');
 
 // --- QURL send helpers ---
-
-function isGoogleMapsURL(url) {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-    const host = parsed.hostname.toLowerCase();
-    // Match google.com, google.co.uk, google.com.au but not google.evil.com
-    const isGoogleHost = /^(www\.)?google\.[a-z]{2,3}(\.[a-z]{2})?$/.test(host) ||
-                         /^maps\.google\.[a-z]{2,3}(\.[a-z]{2})?$/.test(host) ||
-                         host === 'goo.gl' ||
-                         host === 'maps.app.goo.gl';
-    if (!isGoogleHost) return false;
-    if (host === 'goo.gl') return parsed.pathname.startsWith('/maps/');
-    if (host === 'maps.app.goo.gl') return true;
-    if (host.startsWith('maps.google.')) return true;
-    return parsed.pathname.startsWith('/maps');
-  } catch {
-    return false;
-  }
-}
-
 
 
 const { DISPLAY_NAME_FALLBACK, sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls } = require('./utils/sanitize');
@@ -872,108 +841,6 @@ const WARNING_NAME_CODEPOINT_CAP = 80;
 // USER_SELECT_PER_PICK_CAP or QURL_SEND_MAX_RECIPIENTS are configured.
 const DISCORD_SELECT_MAX_VALUES_HARD_CAP = 25;
 
-// Shared Google Maps URL patterns. `/qurl map`'s slash-option
-// `location:` consumes these — extracted to a single source so a
-// future "new URL shape" tweak only happens here.
-//
-// Each pattern bounds character-class repetition (`{1,500}`, `{1,32}`,
-// etc.) to keep ReDoS-resistant against pathological inputs.
-const MAPS_URL_PATTERNS = [
-  /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]{1,500}/,
-  /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]{1,100}/,
-  // Defense-in-depth: exclude `<>"'|\` from the embed-tail character
-  // class. `isGoogleMapsURL` re-validates host and downstream sanitizers
-  // escape rendering, so these chars aren't exploitable today — but
-  // narrowing the regex here makes the bound tighter against URL
-  // shapes that would never come from a legitimate maps embed link.
-  /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w{1,32}\?[^\s<>"'|\\`]{1,500}/,
-];
-
-// decodeURIComponent throws URIError on malformed %-encoding (e.g. %ZZ).
-// Swallow + return the raw string — a garbled label is preferable to a
-// crashed command handler.
-function safeDecodeURIComponent(s) {
-  try { return decodeURIComponent(s); } catch { return s; }
-}
-
-// Parse a free-form `location:` input into one of three shapes:
-//   - URL input → { locationUrl, locationName }
-//   - place_id sentinel from autocomplete → { placeId }
-//   - free text → { text }
-//
-// Callers pass the result to resolveLocation, which hits Places for the
-// sentinel + text branches. The URL branch synchronously short-circuits.
-function parseLocationInput(rawInput) {
-  const decodedPlaceId = decodePlaceIdSentinel(rawInput);
-  if (decodedPlaceId !== null) {
-    return { locationUrl: null, locationName: null, placeId: decodedPlaceId };
-  }
-  let detectedUrl = null;
-  for (const pattern of MAPS_URL_PATTERNS) {
-    const match = rawInput.match(pattern);
-    if (match) { detectedUrl = match[0]; break; }
-  }
-  if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
-    const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
-    // `?api=1&query=…` is the canonical "Maps URL" form (the one
-    // resolveLocation constructs). Match it too so a sender who
-    // re-shares a previously-constructed qURL map URL still gets a
-    // name extracted instead of falling back to "location" in the
-    // recipient embed.
-    const apiQueryMatch = detectedUrl.match(/[?&]query=([^&]+)/);
-    const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
-    let name = null;
-    if (queryMatch) name = safeDecodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
-    else if (apiQueryMatch) name = safeDecodeURIComponent(apiQueryMatch[1].replace(/\+/g, ' '));
-    else if (placeMatch) name = safeDecodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
-    return { locationUrl: detectedUrl, locationName: name };
-  }
-  return {
-    locationUrl: null,
-    locationName: null,
-    text: rawInput,
-  };
-}
-
-// Failure modes of resolveLocation. handleQurlMap maps each to a
-// distinct user-facing reply.
-const RESOLVE_REASON = Object.freeze({
-  NO_API_KEY: 'no_api_key',
-  NOT_FOUND: 'not_found',
-  ERROR: 'error',
-});
-
-// Discriminated result of resolveLocation. Callers check `.ok`:
-//   { ok: true,  locationUrl, locationName }            (success)
-//   { ok: false, reason: RESOLVE_REASON.<...> }         (failure)
-async function resolveLocation(parsed) {
-  if (parsed.locationUrl) {
-    return { ok: true, locationUrl: parsed.locationUrl, locationName: parsed.locationName };
-  }
-  if (!config.GOOGLE_MAPS_API_KEY) {
-    return { ok: false, reason: RESOLVE_REASON.NO_API_KEY };
-  }
-  try {
-    const place = parsed.placeId
-      ? await getPlaceDetails(parsed.placeId)
-      : await findPlaceFromText(parsed.text);
-    if (!place || !place.placeId) {
-      return { ok: false, reason: RESOLVE_REASON.NOT_FOUND };
-    }
-    return {
-      ok: true,
-      locationUrl: buildPlaceUrl(place.name, place.placeId),
-      locationName: place.name || place.address || null,
-    };
-  } catch (err) {
-    logger.warn('resolveLocation: Places API call failed', {
-      kind: parsed.placeId ? 'placeId' : 'text',
-      error: err && err.message,
-    });
-    return { ok: false, reason: RESOLVE_REASON.ERROR };
-  }
-}
-
 // Trust-signal Link button surfaced beside Step Through on every
 // delivery DM. Mirrors a browser address bar's "click the lock to
 // verify" affordance: a first-time recipient can hit qURL's public
@@ -1137,7 +1004,7 @@ function buildDeliveryEmbed({
   // copy ("Closes in 1 day").
   //
   // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl send`
-  // and `/qurl map` pipe raw input through `sanitizeMessage`
+  // pipes raw input through `sanitizeMessage`
   // (markdown escape + @-mention strip) before constructing this
   // payload, and the addRecipients path reads from
   // `sendConfig.personal_message` which was sanitized at write time.
@@ -1303,7 +1170,7 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
 }
 
 // --- Link status monitor ---
-// Track live monitors so a burst of `/qurl send` + `/qurl map` commands
+// Track live monitors so a burst of `/qurl send` commands
 // can't stack more than MAX_CONCURRENT_MONITORS poll loops. When we
 // cross the cap, the oldest monitor is stopped to make room (the user
 // can still `/qurl revoke`; they just stop seeing live status updates in
@@ -1312,7 +1179,7 @@ const activeMonitors = new Set();
 
 // Discord ephemeral messages can ONLY be edited via the interaction
 // webhook token (which expires 15 min after the interaction is created),
-// not via bot-token channel PATCH. Both /qurl send and /qurl map
+// not via bot-token channel PATCH. Both /qurl send
 // deferReply ephemeral, so the confirmation is unreachable once the
 // token expires. There's no cross-token fallback — we just cap the
 // monitor below the 15-min cliff so we don't waste poll loops
@@ -1429,7 +1296,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   const expiryMs = expiryToMs(expiresIn);
   // 14-min cap matches the practical edit window. The interaction
   // webhook token expires at ~15 min from interaction creation; both
-  // /qurl send + /qurl map deferReply ephemeral, and ephemeral
+  // /qurl send deferReply ephemeral, and ephemeral
   // messages can't be edited via any other token. Past the cap the
   // poll loop would only burn cycles against a dead token. Store-
   // side view recording (recordQurlView) is unaffected — webhooks
@@ -1657,7 +1524,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   return control;
 }
 
-// --- qurl send pipeline (back-half shared by /qurl send + /qurl map) ---
+// --- qurl send pipeline (back-half shared by /qurl send) ---
 // TODO(#55): Split commands.js into focused modules — see https://github.com/layervai/qurl-integrations/issues/55
 //
 // REVIEW NOTE: The size of commands.js is tracked as a follow-up in
@@ -1827,7 +1694,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 }
 
 // executeSendPipeline — back-half of the qurl send lifecycle, shared
-// by `/qurl send` and `/qurl map` after the user clicks the Send
+// by `/qurl send` after the user clicks the Send
 // button on the confirm card. The destructure signature is the
 // authoritative param surface; the notes below capture only non-obvious
 // contract guarantees that a reader couldn't infer from the call sites
@@ -1929,8 +1796,6 @@ async function executeSendPipeline(interaction, {
   apiKey,
   resourceType,
   attachment,
-  locationUrl,
-  locationName,
   // MUTATES: the Add Recipients post-send branch dedupe-pushes into
   // this array (see docstring's "transferred ownership" note). The
   // initial `recipients` is already deduped + bot-filtered by
@@ -1973,14 +1838,19 @@ async function executeSendPipeline(interaction, {
     throw new ErrorCtor(msg);
   }
 
+  if (resourceType === RESOURCE_TYPES.MAPS) {
+    clearCooldown(interaction.user.id);
+    return interaction.editReply({ content: QURL_MAP_DISABLED_REPLY, components: [] });
+  }
+
+  if (resourceType !== RESOURCE_TYPES.FILE) {
+    failGate(TypeError, `executeSendPipeline: unsupported resourceType ${String(resourceType)}`);
+  }
+
   // Defense-in-depth SSRF re-check. `/qurl send`'s front-half
   // validates attachment.url against isAllowedSourceUrl BEFORE
   // calling the pipeline; this gate catches a future caller that
   // forgets.
-  // FILE-only because location sends carry no attacker-controlled
-  // URL (locationUrl is built from sanitized user-text via
-  // google.com/maps/search). logger.warn fires before failGate so
-  // the breadcrumb lands even if cancelEdit later throws.
   if (resourceType === RESOURCE_TYPES.FILE) {
     if (!attachment || typeof attachment.url !== 'string' || !isAllowedSourceUrl(attachment.url)) {
       logger.warn('executeSendPipeline: attachment.url failed isAllowedSourceUrl gate', {
@@ -2015,7 +1885,7 @@ async function executeSendPipeline(interaction, {
 
   // `recipients` shape + cap gates. The docstring's "non-empty,
   // ≤ QURL_SEND_MAX_RECIPIENTS" contract is enforced by the `/qurl send`
-  // + `/qurl map` front-half today; this is defense-in-depth for a
+  // front-half today; this is defense-in-depth for a
   // future caller (deserialized payload, programmatic retry, admin tool)
   // that skips those checks. Trips here would otherwise surface deep
   // inside mintLinksInBatches as "Failed to create any links" with no
@@ -2078,7 +1948,7 @@ async function executeSendPipeline(interaction, {
     if (slotWatchdog) { clearTimeout(slotWatchdog); slotWatchdog = null; }
   };
   try {
-    if (resourceType === RESOURCE_TYPES.FILE) {
+
       // Atomic claim. The earlier cap-check at file acceptance is UX-only
       // (told the user upfront the system was busy); five users could each
       // pass that check while activeFileSends == 0, then all sit in the
@@ -2132,10 +2002,7 @@ async function executeSendPipeline(interaction, {
           recipientCount: recipients.length,
           apiKey,
           selfDestructSeconds,
-          // Guild-scope the mint so watermark attribution (/qurl detect,
-          // #1101) can resolve back to this guild. interaction.guildId is
-          // guaranteed non-null here — the /qurl send + /qurl map entry
-          // points both DM-reject before reaching the pipeline.
+          // Guild-scope watermark attribution; the send entry rejects DMs.
           guildId: interaction.guildId,
         });
       } finally {
@@ -2155,47 +2022,7 @@ async function executeSendPipeline(interaction, {
         resourceId: allLinks[i].resourceId,
       }));
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
-    } else {
-      // Location send — upload JSON payload to connector, then mint in batches
-      // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
-      const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
-      // Note: google-map JSON resources hit the connector's render
-      // carve-out (mapEmbedTmpl/mapFallbackTmpl don't honor
-      // expire_after at view time — infra repo #480).
-      // We still forward selfDestructSeconds so behavior matches the
-      // contract once the carve-out is removed; today it's a no-op.
-      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds);
-      connectorResourceId = firstUpload.resource_id;
 
-      const expiresAt = expiryToISO(expiresIn);
-      const allLinks = await mintLinksInBatches({
-        initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds),
-        expiresAt,
-        recipientCount: recipients.length,
-        apiKey,
-        selfDestructSeconds,
-        // Guild-scope the mint for watermark attribution (#1101) — see the
-        // file-send branch above. Maps payloads carry no image to watermark
-        // today, but threading guild_id keeps the two pipelines symmetric
-        // and future-proofs a watermarked map render.
-        guildId: interaction.guildId,
-      });
-
-      if (allLinks.length < recipients.length) {
-        logger.error('mintLinks returned fewer links than expected for location', { expected: recipients.length, got: allLinks.length });
-        clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
-      }
-
-      qurlLinks = recipients.map((r, i) => ({
-        recipientId: r.id,
-        qurlLink: allLinks[i].qurl_link,
-        qurlId: allLinks[i].qurl_id,
-        resourceId: allLinks[i].resourceId,
-      }));
-      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
-    }
   } catch (error) {
     // Audit for the CloudWatch metric filter + alarm at the infrastructure repository
     // qurl-bot-discord/terraform/monitoring.tf (qurl-integrations#276); the why
@@ -2282,7 +2109,7 @@ async function executeSendPipeline(interaction, {
       qurlId: link.qurlId,
       // CONTRACT: targetType is always 'user' for new rows post-PR
       // #313 (the only caller is executeSendPipeline via the confirm
-      // card on /qurl send + /qurl map, both of which DM individual
+      // card on /qurl send, both of which DM individual
       // recipients). The column is kept because the revoke-list
       // renderer's branch on `s.target_type` still has to handle
       // historical legacy /qurl send wizard rows ('channel') during the TTL drain
@@ -2396,7 +2223,7 @@ async function executeSendPipeline(interaction, {
   try {
     await db.saveSendConfig({
       sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
-      actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
+      expiresIn, personalMessage,
       attachmentName: attachment?.name || null,
       attachmentContentType: attachment?.contentType || null,
       attachmentUrl: attachment?.url || null,
@@ -3140,6 +2967,10 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     };
   }
 
+  if (sendConfig.actual_url || (sendConfig.resource_type === RESOURCE_TYPES.MAPS)) {
+    return { msg: 'Cannot add recipients — location/URL sharing through this bot has been retired. Existing links can still be revoked.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
+  }
+
   // #352 entry gate. Shares the same `EXPIRY_LABELS` membership
   // predicate as the executeSendPipeline failGate
   // (`grep "expiresIn must be one of"`), closing the unprotected
@@ -3181,22 +3012,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // Create new QURL links for each resource type in the send config
   // recipientLinks[recipientId] = [{ qurlLink, resourceId, resType, label }]
   const recipientLinks = {};
-  // connector_resource_id exists for file AND location sends because maps are
-  // uploaded as JSON resources before minting. Classify by the persisted
-  // payload shape instead, or a location send would look like a mixed send and
-  // produce duplicate (send_id, recipient_id) rows.
+  // Old file rows may lack resource_type, but retired location rows are rejected above.
   const hasFilePayload = Boolean(sendConfig.attachment_url);
-  const hasLocation = Boolean(sendConfig.actual_url);
-  if (hasFilePayload && hasLocation) {
-    // Normal saveSendConfig callers persist one payload shape. Seeing both
-    // means a stale/corrupt mixed row; reject it instead of minting duplicate
-    // (send_id, recipient_id) rows that qurl_sends cannot represent cleanly.
-    logger.warn('addRecipients refused mixed file/location send config', { sendId });
-    return {
-      msg: 'Cannot add recipients — mixed file and location sends are not supported. Create a new send instead.',
-      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
-    };
-  }
   if (hasFilePayload && sendConfig.resource_type && sendConfig.resource_type !== RESOURCE_TYPES.FILE) {
     logger.warn('addRecipients refused non-file send config with file payload', {
       sendId,
@@ -3208,31 +3025,18 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     };
   }
   const hasLegacyFileMarker = !sendConfig.resource_type
-    && Boolean(sendConfig.connector_resource_id)
-    && !hasLocation;
+    && Boolean(sendConfig.connector_resource_id);
   const hasFile = hasFilePayload
-    || ((sendConfig.resource_type === RESOURCE_TYPES.FILE || hasLegacyFileMarker) && !hasLocation);
+    || sendConfig.resource_type === RESOURCE_TYPES.FILE || hasLegacyFileMarker;
 
-  if (!hasFile && !hasLocation) {
+  if (!hasFile) {
     return { msg: 'Cannot add recipients — send configuration is incomplete.', newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
-  // Tracks which prep path completed so upload_success can name the kind
-  // after the shared try/catch. Mixed configs are rejected above because
-  // qurl_sends cannot represent two rows for one send/recipient pair.
-  const preparedKinds = [];
-  // Inherit the original send's self-destruct timer so additional
-  // recipients see the same vanish behavior. Persisted as a REAL/Number
-  // column; both stores return null when unset. Hoisted above the file/
-  // location branches because both pull the same value.
+  // New recipients inherit the original file's viewer timer.
   const inheritedDestruct = sendConfig.self_destruct_seconds ?? null;
-  // activeKind tracks which branch is in-flight when the outer catch
-  // fires. A future refactor that throws before either branch sets it
-  // lands kind=null, which is discoverable in CloudWatch.
-  let activeKind = null;
   try {
     if (hasFile) {
-      activeKind = 'file';
       // Re-download from the stored Discord CDN URL, then upload a fresh
       // resource so the 10-token pool is full. Re-upload again every
       // TOKENS_PER_RESOURCE recipients. The original resource is drained by
@@ -3341,39 +3145,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           label: `File (${sanitizeFilename(sendConfig.attachment_name || 'file')})`,
         });
       }
-      preparedKinds.push('file');
     }
-    if (hasLocation) {
-      activeKind = 'location';
-      const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
-      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct);
-      const expiresAt = expiryToISO(sendConfig.expires_in);
-      const allLinks = await mintLinksInBatches({
-        initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct),
-        expiresAt,
-        recipientCount: newRecipients.length,
-        apiKey,
-        selfDestructSeconds: inheritedDestruct,
-        // Guild-scope for attribution (#1101) — see the file branch above.
-        guildId: originalInteraction.guildId,
-      });
 
-      if (allLinks.length < newRecipients.length) {
-        logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { expected: newRecipients.length, got: allLinks.length });
-        return { msg: `Only ${allLinks.length} of ${newRecipients.length} location links created. Try again.`, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
-      }
-      newRecipients.forEach((r, i) => {
-        if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
-        recipientLinks[r.id].push({
-          qurlLink: allLinks[i].qurl_link,
-          qurlId: allLinks[i].qurl_id,
-          resourceId: allLinks[i].resourceId,
-          resType: RESOURCE_TYPES.MAPS, label: sendConfig.location_name || 'Google Maps',
-        });
-      });
-      preparedKinds.push('location');
-    }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', {
       sendId,
@@ -3390,19 +3163,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
       : 'Failed to create links for new recipients.';
-    // kind: activeKind — set on entry to each branch (see its decl above);
-    // a future refactor that throws before either branch lands kind=null,
-    // discoverable in CloudWatch. quota_exceeded skip lives in emitMintFailureAudit.
-    emitMintFailureAudit(error, { sendId, kind: activeKind });
+    emitMintFailureAudit(error, { sendId, kind: 'file' });
     return { msg, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
-  // Single emission per send. Values: 'file' | 'location'. The fallback is
-  // defensive only; mixed configs are rejected before any prep path runs.
-  if (preparedKinds.length > 0) {
-    const kind = preparedKinds.length === 1 ? preparedKinds[0] : 'mixed';
-    logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind });
-  }
+  logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
 
   const recipientIds = Object.keys(recipientLinks);
   if (recipientIds.length === 0) {
@@ -3965,9 +3730,7 @@ const SETUP_API_KEY_MAX_LENGTH = 64;
 // hardcoding a copy that drifts.
 const SETUP_SUCCESS_MSG =
   '✅ **qURL is now configured for this server!**\n\n'
-  + (config.MAP_COMMAND_ENABLED
-    ? 'Your team can use `/qurl send` and `/qurl map` to share files and locations securely.\n'
-    : 'Your team can use `/qurl send` to share files securely.\n')
+  + 'Your team can use `/qurl send` to share files securely.\n'
   + 'All qURL usage will be billed to your API key.';
 
 // Button-stage handler. Routed by flow-dispatch when the admin
@@ -4251,16 +4014,12 @@ async function handleSetupModal(interaction, { flow_id }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// /qurl send + /qurl map — slash-driven sends.
+// /qurl send — slash-driven sends.
 //
 // All-options-up-front slash commands that render an in-channel
 // ephemeral confirm card. The flow:
 //
 //   /qurl send recipients:<text> attachment:<file> [expires-in]
-//                                                  [self-destruct]
-//                                                  [personal-message]
-//   /qurl map  recipients:<text> location:<text>   [location-name]
-//                                                  [expires-in]
 //                                                  [self-destruct]
 //                                                  [personal-message]
 //
@@ -4302,7 +4061,7 @@ const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
 const CONFIRM_USER_SELECT_CUSTOM_ID = 'qurl_confirm_user_select';
 const CONFIRM_SEND_CUSTOM_ID = 'qurl_confirm_send';
 const CONFIRM_CANCEL_CUSTOM_ID = 'qurl_confirm_cancel';
-// Confirm-card menus / button — slash options on /qurl send + /qurl map
+// Confirm-card menus / button — slash options on /qurl send
 // remain as initial defaults (one-shot for power users), but a user who
 // didn't fill them in can still adjust expiry, self-destruct, and note
 // inline on the card.
@@ -4413,29 +4172,17 @@ const SEND_NOTE_MODAL_FIELD_ID = 'message_value';
 
 // 3-minute confirm-card window — the time-to-finish budget a user has
 // to review the confirm card and click Send/Cancel after invoking
-// /qurl send or /qurl map.
+// /qurl send.
 const SEND_FLOW_TTL_SECONDS = 180;
 
 // Subcommands that require the guild API key resolution + cooldown gate.
 // Single-source allowlist: adding a new send-style subcommand only
 // requires touching this set, not the dispatcher fall-through.
 //
-// `'map'` joins the set only when MAP_COMMAND_ENABLED is on. The
-// conditional removal is load-bearing — the gate runs BEFORE the
-// dispatch in execute() below, so if `'map'` stayed in the set with
-// the flag off, a stale-client /qurl map in an unconfigured guild
-// would hit "qURL is not configured for this server" instead of
-// QURL_MAP_DISABLED_REPLY.
-const API_KEY_GATED_SUBCOMMANDS = new Set(
-  config.MAP_COMMAND_ENABLED ? ['send', 'map', 'revoke'] : ['send', 'revoke'],
-);
+const API_KEY_GATED_SUBCOMMANDS = new Set(['send', 'revoke']);
 
-// User-facing reply for stale /qurl map submissions when the toggle
-// is off. Reached when a Discord client routes a cached `map`
-// submission after the registration has dropped it. Copy mirrors
-// the flag-off branch of SETUP_SUCCESS_MSG so both surfaces describe
-// the same remaining capability.
-const QURL_MAP_DISABLED_REPLY = '❌ `/qurl map` is currently disabled. Use `/qurl send` to share files securely.';
+// Cached Maps submissions get a clear retirement message.
+const QURL_MAP_DISABLED_REPLY = '❌ Maps sharing has been retired. Use `/qurl send` to share files. Existing links can still be revoked.';
 
 // User-facing reply for stale /qurl detect submissions when DETECT_COMMAND_ENABLED
 // is off — a Discord client routing a cached `detect` submission after the
@@ -5463,12 +5210,9 @@ function renderConfirmCardRows({
   return rows;
 }
 
-// Shared entry point — both `/qurl send` and `/qurl map` route here
-// after collecting their resource-specific options. `params` carries:
-//   resourceType: RESOURCE_TYPES.FILE | RESOURCE_TYPES.MAPS
+// File-send entry point after collecting slash options. `params` carries:
+//   resourceType: RESOURCE_TYPES.FILE
 //   attachment:   {url, name, contentType, size} | null  (file path)
-//   locationUrl:  string | null                          (map path)
-//   locationName: string | null                          (map path)
 //   resourceLabel: string                                (rendered on card)
 // apiKey is INTENTIONALLY not threaded through the front-half.
 // handleConfirmSendClick re-fetches the guild API key at Send time
@@ -5491,8 +5235,8 @@ async function handleQurlSlashSend(interaction, params) {
       ephemeral: true,
     });
   }
-  // Cooldown gate is owned by the front-half handlers (handleQurlSend /
-  // handleQurlMap) so invalid inputs are throttled too. By the time we
+  // Cooldown gate is owned by handleQurlSend
+  // so invalid inputs are throttled too. By the time we
   // get here the cooldown is already set; legitimate clearCooldown calls
   // on individual error branches below still unlock retry.
 
@@ -5511,9 +5255,7 @@ async function handleQurlSlashSend(interaction, params) {
   let flow_id;
   let orphanFlowCreated = false;
   try {
-    // /qurl map defers before resolveLocation; skip the redundant
-    // defer here so discord.js doesn't throw "Already replied or
-    // deferred".
+    // Do not defer twice if the interaction is already acknowledged.
     if (!interaction.deferred) {
       await interaction.deferReply({ ephemeral: true });
     }
@@ -5880,8 +5622,6 @@ async function handleQurlSlashSend(interaction, params) {
     const payload = {
       resourceType: params.resourceType,
       attachment: params.attachment,
-      locationUrl: params.locationUrl,
-      locationName: params.locationName,
       resourceLabel: params.resourceLabel,
       recipientIds,
       recipientAliases,
@@ -6134,8 +5874,6 @@ async function handleQurlSend(interaction) {
       contentType: attachment.contentType,
       size: attachment.size,
     },
-    locationUrl: null,
-    locationName: null,
     // sanitizeContentLabel: NFKC + strip bidi/zero-width/control +
     // codepoint-aware 256-cap + markdown-escape. The codepoint slice
     // prevents UTF-16 surrogate splits at the 256 boundary; the bidi
@@ -6143,158 +5881,6 @@ async function handleQurlSend(interaction) {
     // upload could otherwise visually fake a different filename in
     // the confirm card).
     resourceLabel: sanitizeContentLabel(attachment.name),
-  });
-}
-
-async function handleQurlMap(interaction) {
-  // DM rejection first — no cooldown burned on a DM invocation.
-  // Guild check uses `interaction.guildId` only — that's the
-  // authoritative "in a guild?" signal from the interaction payload.
-  // `interaction.guild` is a derived property (`client.guilds.cache.get
-  // (guildId)`) that returns null in http-only mode where there's no
-  // gateway connection to populate the cache. Downstream `interaction
-  // .guild.X` paths get the guild pre-fetched by the event-consumer
-  // (see src/event-consumer.js pre-handle hook).
-  if (!interaction.guildId) {
-    return interaction.reply({
-      content: 'This command can only be used in a server, not in DMs.',
-      ephemeral: true,
-    });
-  }
-  // NOTE: No `activeFileSends` capacity gate here (unlike handleQurlSend).
-  // The capacity gate guards the connector upload path that file sends
-  // hit during back-half dispatch; map sends never touch that resource.
-  // Sharing the gate would punish maps for file-pipeline saturation.
-  //
-  // Cooldown gate — cross-command bucket shared with /qurl send
-  // (sendCooldowns Map). Tests pin the contract.
-  if (isOnCooldown(interaction.user.id)) {
-    return interaction.reply({
-      content: 'Please wait before sending again.',
-      ephemeral: true,
-    });
-  }
-  setCooldown(interaction.user.id);
-
-  // `getString('location', true)` throws on a missing option. Discord
-  // enforces required server-side; the more likely cause in production
-  // is a client/schema desync (redeploy timing) than abuse. Clear
-  // cooldown on the throw catch so the user can retry once the deploy
-  // stabilizes — same rationale as handleQurlSend's required-option
-  // throw branch.
-  let locationValue;
-  try {
-    // Defensive .slice mirrors the modal path's pattern at commands.js:~2096.
-    // The slash option's setMaxLength(500) enforces this server-side, so
-    // legitimate clients can't exceed it — the slice is forged-interaction
-    // defense.
-    //
-    // Order: trim() FIRST so the 500-char slice measures CONTENT, not
-    // whitespace. Slicing first would let a payload like
-    // `<100 leading spaces> + <450 chars of content>` lose 50 content
-    // chars to the cap; trimming first preserves the full content.
-    locationValue = interaction.options.getString('location', true).trim().slice(0, 500);
-  } catch (err) {
-    logger.warn('handleQurlMap: required location option missing', {
-      user_id: interaction.user.id, error: err && err.message,
-    });
-    clearCooldown(interaction.user.id);
-    return interaction.reply({
-      content: '❌ The `location:` option is required. Re-run with a Google Maps URL or address.',
-      ephemeral: true,
-    });
-  }
-  const locationNameRaw = interaction.options.getString('location-name');
-  if (locationValue.length === 0) {
-    // Honest user error (pasted only whitespace, or empty string) —
-    // unlock retry. Same shape as the file-type / size cap branches
-    // in handleQurlSend.
-    clearCooldown(interaction.user.id);
-    return interaction.reply({
-      content: '❌ Location is empty.',
-      ephemeral: true,
-    });
-  }
-
-  // Shared parser: see `parseLocationInput` near the top of this file.
-  // Wrap in try/catch as a defensive symmetry with
-  // handleQurlSend's catches: a future regex change in parseLocationInput
-  // or a pathological input could throw synchronously before reaching
-  // handleQurlSlashSend's safety net, leaving cooldown set with no
-  // visible response.
-  let parsedLocation;
-  try {
-    parsedLocation = parseLocationInput(locationValue);
-  } catch (err) {
-    logger.error('handleQurlMap: parseLocationInput threw', {
-      user_id: interaction.user.id, error: err && err.message,
-    });
-    clearCooldown(interaction.user.id);
-    return interaction.reply({
-      content: '❌ Could not parse location — please re-run with a Google Maps URL or address.',
-      ephemeral: true,
-    });
-  }
-
-  // Defer before Places resolve to stay inside Discord's 3 s ACK window.
-  // handleQurlSlashSend below checks `interaction.deferred` and skips
-  // its own defer.
-  try {
-    await interaction.deferReply({ ephemeral: true });
-  } catch (err) {
-    // Token already expired or Discord transiently degraded — clear
-    // cooldown so the user can retry without waiting it out.
-    logger.warn('handleQurlMap: deferReply failed', {
-      user_id: interaction.user.id, error: err && err.message,
-    });
-    clearCooldown(interaction.user.id);
-    return undefined;
-  }
-  const resolved = await resolveLocation(parsedLocation);
-  if (!resolved.ok) {
-    clearCooldown(interaction.user.id);
-    let content;
-    switch (resolved.reason) {
-      case RESOLVE_REASON.NO_API_KEY:
-        content = '❌ Location search is unavailable on this server. Re-run with a full Google Maps URL.';
-        break;
-      case RESOLVE_REASON.NOT_FOUND:
-        // A stale-sentinel miss (sender picked a suggestion that's since
-        // been deleted upstream) gets a place-specific message. For
-        // free-text misses, echo the (sanitized) input so the sender
-        // can see what they typed.
-        content = parsedLocation.placeId
-          ? '❌ That place is no longer available. Pick another suggestion or paste a Google Maps URL.'
-          : `❌ Couldn't find a place matching "${sanitizeContentLabel(locationValue.slice(0, 80))}". Try a more specific name or paste a Google Maps URL.`;
-        break;
-      default:
-        content = '❌ Location lookup failed. Please try again, or paste a Google Maps URL.';
-    }
-    return interaction.editReply({ content });
-  }
-  let { locationUrl, locationName } = resolved;
-
-  // Explicit location-name override wins over the resolved name
-  // (whether that came from a URL, a place_id lookup, or a free-text
-  // resolve).
-  if (locationNameRaw && locationNameRaw.trim().length > 0) {
-    locationName = locationNameRaw.trim();
-  }
-  // sanitizeContentLabel: NFKC + strip bidi/zero-width/control +
-  // codepoint-aware 256-cap + markdown-escape. The bidi strip is
-  // load-bearing here — /qurl map's slash option is a new
-  // attack surface (no modal friction) and a crafted U+202E in
-  // `location-name` would otherwise let the sender visually spoof
-  // a Maps URL inside the rendered confirm card. Also handles the
-  // UTF-16 surrogate-split risk at the 256 boundary.
-  if (locationName) locationName = sanitizeContentLabel(locationName);
-
-  return handleQurlSlashSend(interaction, {
-    resourceType: RESOURCE_TYPES.MAPS,
-    attachment: null,
-    locationUrl,
-    locationName,
-    resourceLabel: locationName || 'location',
   });
 }
 
@@ -6756,7 +6342,7 @@ async function handleQurlDetect(interaction) {
   });
 }
 
-// --- Confirm-card handlers for `/qurl send` + `/qurl map` ---
+// --- Confirm-card handlers for `/qurl send` ---
 // Any future rename of the `qurl_confirm_*` wire literals (or these
 // handler names, since they're paired with them via registerFlow)
 // needs a SEND_FLOW_TTL_SECONDS (180s) drain on the prior deploy so
@@ -8325,8 +7911,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // signal that N != the count shown on the card. Distinct wording
   // for the two buckets — "left the server" is stable, "lookup
   // blipped" encourages a fresh rerun if they want to include the
-  // missed recipients. The rerun hint names the actual subcommand
-  // they invoked (resourceType drives /qurl send vs /qurl map).
+  // missed recipients. The retry hint names the supported file command.
   //
   // followUp (not edited into the "Preparing send…" editReply) is
   // INTENTIONAL: executeSendPipeline will rewrite editReply to
@@ -8335,7 +7920,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // message. followUp is a separate ephemeral that persists past
   // the back-half's editReply rewrites.
   if (partialLeftCount > 0 || partialTransientCount > 0) {
-    const rerunCommand = payload.resourceType === RESOURCE_TYPES.MAPS ? '/qurl map' : '/qurl send';
+    const rerunCommand = '/qurl send';
     const parts = [];
     if (partialLeftCount > 0) {
       parts.push(`${partialLeftCount} recipient${partialLeftCount === 1 ? '' : 's'} had left the server`);
@@ -8356,8 +7941,6 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
     apiKey,
     resourceType: payload.resourceType,
     attachment: payload.attachment,
-    locationUrl: payload.locationUrl,
-    locationName: payload.locationName,
     recipients: valid,
     expiresIn: payload.expiresIn,
     selfDestructSeconds: payload.selfDestructSeconds,
@@ -8878,11 +8461,7 @@ const commands = [
     // `e2e/tests/discord-commands.smoke.test.ts` too — the smoke test
     // pins the subcommand NAME set (not option types, requiredness, or
     // descriptions) to catch registration regressions at deploy time.
-    // IIFE so the `/qurl map` subcommand can be conditionally added
-    // based on config.MAP_COMMAND_ENABLED — a plain fluent chain
-    // can't host an `if`. The order of `addSubcommand` calls below
-    // matches the chain we'd write inline, with `map` inserted
-    // between `send` and `revoke` when the flag is on.
+    // Build optional detect registration before adding the remaining commands.
     data: (() => {
       const builder = new SlashCommandBuilder()
         .setName('qurl')
@@ -8938,55 +8517,7 @@ const commands = [
             )
         );
       }
-      if (config.MAP_COMMAND_ENABLED) {
-        builder.addSubcommand(sub =>
-          sub.setName('map')
-            .setDescription('Share a Google Maps location via one-time qURL links')
-            .addStringOption(opt =>
-              opt.setName('location')
-                .setDescription('Google Maps URL, or a place / address to search')
-                .setRequired(true)
-                // Picking a suggestion sends a `qurl_place:<id>` sentinel;
-                // free text is resolved server-side via resolveLocation.
-                .setAutocomplete(true)
-                // 500 chars covers full Google Maps URLs (which can be
-                // 200-400 chars after place params + coordinates) plus
-                // headroom; not tied to the recipients-parser cap because
-                // location is a single URL/address, not a token list.
-                .setMaxLength(500)
-            )
-            .addStringOption(opt =>
-              opt.setName('recipients')
-                .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
-                .setRequired(false)
-                .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
-            )
-            .addStringOption(opt =>
-              opt.setName('location-name')
-                .setDescription('Override the label shown to recipients (defaults to URL/address)')
-                .setRequired(false)
-                .setMaxLength(256)
-            )
-            .addStringOption(opt =>
-              opt.setName('expires-in')
-                .setDescription('How long the qURL links stay valid (default: 24 hours)')
-                .setRequired(false)
-                .addChoices(...EXPIRY_CHOICES)
-            )
-            .addStringOption(opt =>
-              opt.setName('self-destruct')
-                .setDescription('Optional countdown after first open (default: no timer)')
-                .setRequired(false)
-                .addChoices(...SELF_DESTRUCT_CHOICES)
-            )
-            .addStringOption(opt =>
-              opt.setName('personal-message')
-                .setDescription('Optional note included in each recipient\'s DM')
-                .setRequired(false)
-                .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
-            )
-        );
-      }
+
       builder.addSubcommand(sub =>
         sub.setName('revoke')
           .setDescription('Revoke links from a previous send')
@@ -9367,7 +8898,7 @@ const commands = [
       // Gate: require guild API key for send/map/revoke (the set
       // in API_KEY_GATED_SUBCOMMANDS, hoisted to module scope).
       //
-      // For /qurl send + /qurl map this read is a fail-fast presence
+      // For /qurl send this read is a fail-fast presence
       // check — the resolved value is intentionally NOT threaded
       // through to the back-half. handleConfirmSendClick re-fetches at
       // Send-click time so a key rotation during the 3-minute confirm-
@@ -9390,7 +8921,7 @@ const commands = [
         resolvedApiKey = guildApiKey || config.QURL_API_KEY;
       }
 
-      // /qurl send and /qurl map deliberately don't accept the
+      // /qurl send deliberately don't accept the
       // dispatcher-resolved apiKey — handleConfirmSendClick re-fetches
       // at Send time so a mid-flow rotation still uses the live key.
       // The dispatcher's API_KEY_GATED_SUBCOMMANDS gate above is the
@@ -9414,21 +8945,7 @@ const commands = [
         }
         return handleQurlDetect(interaction);
       }
-      if (sub === 'map') {
-        if (!config.MAP_COMMAND_ENABLED) {
-          // Debug (not warn) — expected post-deploy traffic from
-          // clients with cached command defs, not an error. Cache
-          // TTL depends on registration mode: up to 1h on global
-          // (multi-tenant) registration, near-instant on guild-
-          // scoped (single-GUILD_ID). Grep this line to see decay.
-          logger.debug('qurl_map_disabled_reply: stale-client /qurl map submission caught by toggle gate', {
-            user_id: interaction.user?.id,
-            guild_id: interaction.guildId,
-          });
-          return interaction.reply({ content: QURL_MAP_DISABLED_REPLY, ephemeral: true });
-        }
-        return handleQurlMap(interaction);
-      }
+      if (sub === 'map') return interaction.reply({ content: QURL_MAP_DISABLED_REPLY, ephemeral: true });
       if (sub === 'revoke') return handleRevoke(interaction, resolvedApiKey);
       if (sub === 'help') {
         // Section order: user-facing flow first (Getting started → How it
@@ -9458,15 +8975,7 @@ const commands = [
           : '';
         // `cmd` is used in two spots (Terms + Large servers); a
         // single token keeps them in lockstep across copy edits.
-        const mapCopy = config.MAP_COMMAND_ENABLED
-          ? {
-            sectionVerb: 'Share resources',
-            bullet: '  `/qurl map` — share a Google Maps location via one-time qURL links\n',
-            runLine: '\t1. Run `/qurl send` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n',
-            resource: 'the file or location',
-            cmd: '`/qurl send` or `/qurl map`',
-          }
-          : {
+        const mapCopy = {
             sectionVerb: 'Share files',
             bullet: '',
             runLine: '\t1. Run `/qurl send` (attach a file)\n',
@@ -9610,160 +9119,10 @@ function isAckTimeoutError(err) {
   return typeof err.message === 'string' && ACK_TIMEOUT_MSG_RE.test(err.message);
 }
 
-// Below this length, autocomplete suggestions are noise (single-letter
-// prefixes match thousands of places) and the per-keystroke Places
-// cost isn't justified.
-const AUTOCOMPLETE_MIN_QUERY_LENGTH = 2;
-
-// Sampled-warn cadence for autocomplete failures. The catch logs at
-// `debug` per-call to avoid keystroke-rate log spam during a Places
-// outage; this counter emits one `warn` per AUTOCOMPLETE_FAILURE_LOG_BURST
-// failures so SRE has a coarse signal that autocomplete is degraded
-// (vs. no traffic) without flooding logs. resolveLocation's send-time
-// `warn` carries the load-bearing signal — this is secondary visibility.
-const AUTOCOMPLETE_FAILURE_LOG_BURST = 50;
-let autocompleteFailureBurst = 0;
-
-// Discord caps each choice's `name` (label) and `value` (handler input)
-// at 100 chars. Labels (name + address) often need truncation; values
-// (`qurl_place:<placeId>`) almost never do, but we drop pathological
-// ones so one bad result doesn't fail the whole response.
-const AUTOCOMPLETE_CHOICE_NAME_MAX = 100;
-const AUTOCOMPLETE_CHOICE_VALUE_MAX = 100;
-const AUTOCOMPLETE_MAX_CHOICES = 25;
-
-// Per Discord's contract, MUST respond within 3 s. Two-layer error
-// handling: the inner try catches Places I/O failures (ticks the
-// sampled SRE counter; that's its intent — "Places is degraded"); the
-// outer try catches anything else (early-return respond([]) throws on
-// expired token, etc.) without ticking the counter, since those aren't
-// Places-degradation signals.
-async function handleAutocomplete(interaction) {
-  try {
-    // `return await` (not bare `return`) so a rejected `respond([])`
-    // promise is caught by the outer try/catch instead of leaking out
-    // of the async function unhandled. Each early-return is the
-    // contract handler — surface the rejection through the outer
-    // recovery path instead of propagating up to the dispatch caller.
-    if (interaction.commandName !== 'qurl') {
-      return await interaction.respond([]);
-    }
-    // Reject DM and user-install-only autocomplete — handleQurlMap
-    // rejects those contexts at submit time, but Discord could still
-    // deliver autocomplete while global registration changes propagate.
-    // Without this guard the invalid interaction would burn the operator's
-    // global GOOGLE_MAPS_API_KEY quota for a send that's about to fail.
-    if (isUnsupportedQurlContext(interaction)) {
-      return await interaction.respond([]);
-    }
-    const subcommand = interaction.options.getSubcommand(false);
-    const focused = interaction.options.getFocused(true);
-    if (subcommand !== 'map' || focused?.name !== 'location') {
-      return await interaction.respond([]);
-    }
-    // Feature-flag gate. When MAP_COMMAND_ENABLED is off the map
-    // subcommand isn't registered, so Discord shouldn't deliver an
-    // autocomplete for it — but a stale client racing the registration
-    // roll could. Short-circuit before searchPlaces so we don't burn
-    // operator GOOGLE_MAPS_API_KEY quota on a submit that will be
-    // rejected by the dispatcher anyway.
-    if (!config.MAP_COMMAND_ENABLED) {
-      return await interaction.respond([]);
-    }
-    const rawQuery = (focused.value || '').trim();
-    if (rawQuery.length < AUTOCOMPLETE_MIN_QUERY_LENGTH) {
-      return await interaction.respond([]);
-    }
-    // A pasted URL is already a stable identifier — parseLocationInput
-    // passes it through verbatim and suggestions would just clutter.
-    if (/^https?:\/\//i.test(rawQuery)) {
-      return await interaction.respond([]);
-    }
-
-    let results;
-    try {
-      results = await searchPlaces(rawQuery);
-    } catch (err) {
-      // Per-call log at debug so keystroke-rate failures don't spam.
-      logger.debug('autocomplete handler failed', {
-        command: interaction.commandName,
-        error: err && err.message,
-      });
-      // Sampled SRE signal: emit one warn per BURST failures so a
-      // Places outage is visible (vs. silent autocomplete-only degrade).
-      if (++autocompleteFailureBurst >= AUTOCOMPLETE_FAILURE_LOG_BURST) {
-        logger.warn('autocomplete handler failure burst', {
-          count: autocompleteFailureBurst,
-          error: err && err.message,
-        });
-        autocompleteFailureBurst = 0;
-      }
-      return await interaction.respond([]);
-    }
-
-    const choices = [];
-    for (const p of results) {
-      if (choices.length >= AUTOCOMPLETE_MAX_CHOICES) break;
-      // Skip dud entries early instead of relying on submit-time decode
-      // to reject them — saves the user a "place no longer available"
-      // error on a malformed Google response.
-      if (!PLACE_ID_SHAPE_RE.test(p.placeId)) {
-        // Debug, not warn: would fire per-keystroke during a Google
-        // place_id format drift, drowning logs. Operator can grep for
-        // this when investigating "why is my dropdown empty?" — that's
-        // the upstream-shape-drift signal.
-        logger.debug('autocomplete: dropped prediction (place_id failed shape check)', {
-          place_id: p.placeId,
-        });
-        continue;
-      }
-      // Places marks `main_text` and `description` as optional; if both
-      // are missing, searchPlaces returns `name: undefined` and the
-      // label would render as the literal string "undefined". Discord
-      // also rejects empty/whitespace names, so just skip.
-      if (!p.name) continue;
-      const value = encodePlaceIdSentinel(p.placeId);
-      if (value.length > AUTOCOMPLETE_CHOICE_VALUE_MAX) continue;
-      const label = p.address ? `${p.name} — ${p.address}` : p.name;
-      // Discord validates name length in UTF-16 code units, not code
-      // points, so we cap by `.length`. Back off by 1 if the boundary
-      // would leave a lone high surrogate so we don't ship a
-      // half-emoji (which Discord renders as tofu). Deliberately NOT
-      // `safeCodepointSlice` — that helper counts codepoints, which
-      // can ship a string whose `.length` > 100 for emoji-heavy
-      // labels (each surrogate pair is 2 UTF-16 units but 1 codepoint).
-      // Always-check (not just on truncation): a label that's exactly
-      // 100 UTF-16 units AND ends with a lone high surrogate would
-      // otherwise slip through the fast path.
-      let end = Math.min(label.length, AUTOCOMPLETE_CHOICE_NAME_MAX);
-      if (end > 0) {
-        const lastUnit = label.charCodeAt(end - 1);
-        if (lastUnit >= 0xD800 && lastUnit <= 0xDBFF) end -= 1;
-      }
-      const name = end === label.length ? label : label.slice(0, end);
-      choices.push({ name, value });
-    }
-    return await interaction.respond(choices);
-  } catch (err) {
-    // Non-Places-I/O failure (respond() on expired token, getSubcommand
-    // throw on malformed interaction, etc.). Doesn't advance the burst
-    // counter — those aren't Places-degradation signals.
-    logger.debug('autocomplete handler unhandled', {
-      command: interaction.commandName,
-      error: err && err.message,
-    });
-    try { await interaction.respond([]); } catch { /* ignore */ }
-    return undefined;
-  }
-}
-
 // Handle command interactions
 async function handleCommand(interaction) {
-  // Autocomplete fires per-keystroke and must respond within 3s. Route
-  // it off the chat-input path so the autocomplete handler doesn't drag
-  // in the metrics + mode-flip-defense overhead that handleQurlSlashSend
-  // and friends need.
-  if (interaction.isAutocomplete()) return handleAutocomplete(interaction);
+  // Retired Maps definitions may still send cached autocomplete requests.
+  if (interaction.isAutocomplete()) return interaction.respond([]).catch(logIgnoredDiscordErr);
 
   if (!interaction.isChatInputCommand()) return;
 
@@ -9919,7 +9278,7 @@ registerFlow(SETUP_MODAL_CUSTOM_ID, {
   siblingMessage: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
 });
 
-// /qurl send + /qurl map confirm-card components. All three customIds
+// /qurl send confirm-card components. All three customIds
 // share the same expectedStage — they're three component types
 // (button + user-select + button) attached to the same confirm-card
 // message, all routed by stage. siblingMessage is registered on the
@@ -9928,7 +9287,7 @@ registerFlow(SETUP_MODAL_CUSTOM_ID, {
 registerFlow(CONFIRM_USER_SELECT_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmUserSelect,
-  siblingMessage: 'You have a `/qurl send` or `/qurl map` confirm card open in this channel — finish or cancel it first.',
+  siblingMessage: 'You have a qURL send confirm card open in this channel — finish or cancel it first.',
 });
 // siblingMessage intentionally omitted on the SEND + CANCEL custom-
 // id registrations below — flow-dispatch's `siblingMessages` map is
@@ -10013,7 +9372,6 @@ module.exports = {
   ...(process.env.NODE_ENV !== 'production' && {
     _test: {
       logSafeApiDetail,
-      isGoogleMapsURL,
       sanitizeFilename,
       sanitizeMessage,
       isAllowedFileType,
@@ -10048,7 +9406,7 @@ module.exports = {
       safeUrlHost,
       // Back-half functions exposed for direct unit testing. Without these
       // hooks, coverage of the polling/revoke/add-recipients code paths
-      // can only be reached via full /qurl send + /qurl map integration
+      // can only be reached via full /qurl send integration
       // tests, which require mocking the entire state-machine front-half
       // before the back-half even runs. Direct exposure means each
       // function gets a focused spec without that setup overhead.
@@ -10073,7 +9431,7 @@ module.exports = {
       // The top-level back-half driver. Exported here so PR 7b's
       // tests (and the follow-up direct unit spec in #278) can pin
       // its contract against a constructed param object — without
-      // re-driving the full /qurl send + /qurl map confirm-card flow.
+      // re-driving the full /qurl send confirm-card flow.
       executeSendPipeline,
       // Test-only file-concurrency hooks. The slot counter is module-
       // private (live state) and exposing a setter lets the cap branch
@@ -10100,11 +9458,10 @@ module.exports = {
       SETUP_API_KEY_MIN_LENGTH,
       SETUP_API_KEY_MAX_LENGTH,
       SETUP_SUCCESS_MSG,
-      // /qurl send + /qurl map handlers + flow constants. Tests pin
+      // /qurl send handlers + flow constants. Tests pin
       // against production values via these exports rather than
       // re-stating the strings.
       handleQurlSend,
-      handleQurlMap,
       // /qurl detect handler + its per-(guild,user) cooldown surface
       // (#1101). The cooldown Map + predicates are exposed so tests pin
       // the abuse-guard contract (composite key, separate bucket from
@@ -10127,20 +9484,13 @@ module.exports = {
       selfDestructOptionToSeconds,
       renderRecipientWarnings,
       renderConfirmCardContent,
-      parseLocationInput,
-      resolveLocation,
-      RESOLVE_REASON,
       // Disabled-state reply for stale /qurl map submissions. Exported
       // so flag-off tests pin against the production string.
       QURL_MAP_DISABLED_REPLY,
       QURL_DETECT_DISABLED_REPLY,
-      handleAutocomplete,
       // Test-only reset: the autocomplete-failure burst counter is
       // module-level state that accumulates across tests within a
       // file unless explicitly cleared.
-      _resetAutocompleteFailureBurst: () => { autocompleteFailureBurst = 0; },
-      AUTOCOMPLETE_FAILURE_LOG_BURST,
-      safeDecodeURIComponent,
       SEND_STAGE_AWAITING_CONFIRM,
       // Every confirm-card customId is exported so the contract test
       // in qurl-send-map.test.js can pin every wire value — a typo

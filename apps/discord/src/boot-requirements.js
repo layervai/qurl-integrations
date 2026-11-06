@@ -5,7 +5,6 @@
 // boot in prod with missing secrets OR die on a spurious false-positive.
 
 const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
-const { INFRA_SEED_SENTINEL, isInfraSeedSentinel } = require('./utils/webhook-secret');
 const {
   IPV4_LITERAL_RE,
   parseIPv4Octets,
@@ -35,7 +34,7 @@ function bootRequired() {
 }
 
 // Additionally required when NODE_ENV=production. QURL_API_KEY is NOT
-// here: it is only the global fallback for /qurl send + /qurl map, and
+// here: it is only the global fallback for /qurl send, and
 // every deployment shape relies on per-guild /qurl setup instead.
 //
 // KEY_ENCRYPTION_KEY appears here AND in missingKekRequiredKeys. The
@@ -368,7 +367,7 @@ function unsupportedRoleHotStandbyCombo(role, hotStandbyEnabled, resumeEnabled) 
 
 // Required env vars when ENABLE_GATEWAY_HOT_STANDBY=true on a gateway
 // replica. Returns the array of missing keys (parallel shape to
-// missingMapCommandKeys / missingEventShipperKeys). Each value is
+// missingEventShipperKeys). Each value is
 // load-bearing: INSTANCE_ID keys the lock row + peer-heartbeat row;
 // INSTANCE_IP is the address peers reach this replica on; the HMAC
 // secret authenticates every control-channel envelope. A boot with
@@ -503,20 +502,6 @@ function invalidStateSecretValues(cfg) {
   return problems;
 }
 
-// PLACEHOLDER is treated as missing because the SSM parameter
-// ships with that literal sentinel value; remediation ("seed a
-// real key") is identical to the empty-key case. The literal and its
-// TODO(infra-sentinel-sync) lockstep marker live in utils/webhook-secret.js.
-const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = INFRA_SEED_SENTINEL;
-function missingMapCommandKeys(cfg) {
-  if (!cfg.MAP_COMMAND_ENABLED) return [];
-  const key = cfg.GOOGLE_MAPS_API_KEY;
-  if (!key || isInfraSeedSentinel(key)) {
-    return ['GOOGLE_MAPS_API_KEY'];
-  }
-  return [];
-}
-
 // Process-role parsing for the gateway/HTTP split. Lifted out of
 // index.js so the invalid-value path is testable without spawning a
 // child process — same shape as missingBootKeys above. See
@@ -599,9 +584,7 @@ module.exports = {
   invalidHotStandbyValues,
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
-  missingMapCommandKeys,
   missingWebhookSecretKeys,
-  GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 };
