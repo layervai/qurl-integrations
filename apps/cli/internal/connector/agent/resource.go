@@ -34,7 +34,9 @@ type ResolvedResource struct {
 	// KeptPublic reports that the publish command named no privacy and kept
 	// the public resource the target already had. Private is then false.
 	KeptPublic bool
-	Resource   *qurl.ConnectorResource
+	// Name is the public name the publish gave a resource it created.
+	Name     string
+	Resource *qurl.ConnectorResource
 	// FoundExisting is what the Connector resource request reported. The
 	// publish command replaces it with the create answer's value.
 	FoundExisting *bool

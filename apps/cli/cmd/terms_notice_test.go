@@ -36,6 +36,9 @@ func TestFirstPublishAndShareTermsNotice(t *testing.T) {
 					operand = srv.Key.CRID
 				}
 				args = append(args, command, operand)
+				if command == "publish" {
+					args = append(args, "--name", "Example")
+				}
 				for attempt := 0; attempt < 2; attempt++ {
 					result := runCLI(t, &runOpts{args: args, configDir: configDir, firstTermsNotice: true})
 					if result.code != 0 {
@@ -78,7 +81,7 @@ func TestFailedJSONPublishDoesNotConsumeTermsNotice(t *testing.T) {
 		apitest.WriteProblem(t, w, http.StatusForbidden, "forbidden", "Forbidden", "not allowed")
 	})
 	dir := t.TempDir()
-	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-o", "json", "publish", "https://example.com/app"}, configDir: dir, firstTermsNotice: true})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-o", "json", "publish", "https://example.com/app", "--name", "Example"}, configDir: dir, firstTermsNotice: true})
 	if result.code == 0 {
 		t.Fatal("failed API publish succeeded")
 	}
@@ -98,7 +101,7 @@ func TestTermsNoticeStateFailureDoesNotFailPublish(t *testing.T) {
 			if err := os.Mkdir(filepath.Join(dir, "terms-notice-version"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			args := []string{"--endpoint", srv.URL, "--quiet", "-o", format, "publish", "https://example.com/app"}
+			args := []string{"--endpoint", srv.URL, "--quiet", "-o", format, "publish", "https://example.com/app", "--name", "Example"}
 			result := runCLI(t, &runOpts{args: args, firstTermsNotice: true, shareStateDir: dir})
 			if result.code != 0 {
 				t.Fatalf("notice state blocked publish: %d %s", result.code, result.stderr.String())

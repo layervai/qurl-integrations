@@ -32,6 +32,7 @@ type publishJSON struct {
 	CRID           string     `json:"crid,omitempty"`
 	ResourceID     string     `json:"resource_id"`
 	TargetURL      string     `json:"target_url"`
+	Name           string     `json:"name,omitempty"`
 	Status         string     `json:"status,omitempty"`
 	CreatedAt      *time.Time `json:"created_at,omitempty"`
 	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
@@ -204,6 +205,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			CRID:           res.CRID,
 			ResourceID:     res.ResourceID,
 			TargetURL:      res.TargetURL,
+			Name:           res.Name,
 			Status:         res.Status,
 			CreatedAt:      res.CreatedAt,
 			ExpiresAt:      res.ExpiresAt,
@@ -404,6 +406,9 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
+	if res.Name != "" {
+		twe.printf("  %s\t%s\n", p.bold("Name:"), res.Name)
+	}
 	// A publish result always carries the privacy the service confirmed. The
 	// row is left out only for a value that has none, never guessed.
 	if res.Private != nil {

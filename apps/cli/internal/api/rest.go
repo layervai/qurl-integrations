@@ -220,14 +220,17 @@ type publishRequest struct {
 	// AccessRequests is sent only to turn access requests on. Off is the
 	// service's default and is not planned to change, and a service from
 	// before access requests is never sent a member it does not know.
-	AccessRequests bool     `json:"access_requests,omitempty"`
-	Slug           string   `json:"slug,omitempty"`
-	FindOrCreate   bool     `json:"find_or_create,omitempty"`
-	Type           string   `json:"type"`
-	TargetURL      string   `json:"target_url,omitempty"`
-	Description    string   `json:"description,omitempty"`
-	Tags           []string `json:"tags,omitempty"`
-	Alias          string   `json:"alias,omitempty"`
+	AccessRequests bool   `json:"access_requests,omitempty"`
+	Slug           string `json:"slug,omitempty"`
+	FindOrCreate   bool   `json:"find_or_create,omitempty"`
+	Type           string `json:"type"`
+	TargetURL      string `json:"target_url,omitempty"`
+	// Name is the public name recipients see. The service requires it to
+	// create a resource and ignores it when the target is already published.
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Alias       string   `json:"alias,omitempty"`
 }
 
 // Publish registers a URL or pre-creates a Connector resource, private unless
@@ -253,6 +256,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		AccessRequests:    opts.AllowRequests,
 		Type:              "url",
 		TargetURL:         targetURL,
+		Name:              opts.Name,
 		Description:       opts.Description,
 		Tags:              opts.Tags,
 		Alias:             opts.Alias,

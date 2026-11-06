@@ -152,6 +152,9 @@ type PublishOptions struct {
 	NamedAccessFlags []string
 	// ConnectorID selects a tunnel resource instead of a URL.
 	ConnectorID string
+	// Name is the public name recipients see; the service requires it to
+	// create a resource and ignores it when the target is already published.
+	Name        string
 	Description string
 	Tags        []string
 	Alias       string
@@ -205,6 +208,10 @@ type Published struct {
 	// that this publish, which named no privacy, kept using that resource.
 	// Private is then false, and the caller warns the publisher.
 	KeptPublic bool
+	// Name is the public name this publish gave the resource it created. It
+	// is empty when the resource already existed: its stored name is kept.
+	// Publish leaves it empty; the command sets it with SetCreatedName.
+	Name string
 	// LinkSiteURL is the resource's address on the link site, where a person
 	// with no CLI opens it. The service does not send it: the command sets it
 	// when this install knows that site for its deployment.
@@ -577,4 +584,12 @@ func mapError(err error) error {
 		}
 	}
 	return err
+}
+
+// SetCreatedName records name as the resource's public name when the answer
+// says this publish created it. An existing resource keeps its stored name.
+func (p *Published) SetCreatedName(name string) {
+	if p.FoundExisting != nil && !*p.FoundExisting {
+		p.Name = name
+	}
 }
