@@ -57,21 +57,24 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 			if !ok {
 				return errors.New("publisher payments are unavailable in this client")
 			}
-			status, err := account.PublisherStripeStatus(cmd.Context())
-			if err != nil {
-				return err
-			}
-			if operation == paymentsAccount {
-				return opts.printer().PublisherStripeAccount(status)
-			}
-			if status.AccountID != "" && !yes {
-				confirmed, e := confirmStripeDisconnect(opts, status)
+			// --yes needs no status, so it can finish a disconnect even when Stripe cannot be read.
+			if operation == paymentsAccount || !yes {
+				status, e := account.PublisherStripeStatus(cmd.Context())
 				if e != nil {
 					return e
 				}
-				if !confirmed {
-					opts.printer().Notef("Canceled — Stripe is still connected.")
-					return nil
+				if operation == paymentsAccount {
+					return opts.printer().PublisherStripeAccount(status)
+				}
+				if status.AccountID != "" && !status.Disconnecting {
+					confirmed, e := confirmStripeDisconnect(opts, status)
+					if e != nil {
+						return e
+					}
+					if !confirmed {
+						opts.printer().Notef("Canceled — Stripe is still connected.")
+						return nil
+					}
 				}
 			}
 			if err := account.DisconnectPublisherStripe(cmd.Context()); err != nil {

@@ -111,3 +111,32 @@ func TestPaymentsDisconnectReportsAnUnfinishedDisconnect(t *testing.T) {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", result.code, result.stdout.String(), result.stderr.String())
 	}
 }
+
+func TestPaymentsDisconnectYesNeedsNoStatusRead(t *testing.T) {
+	srv := apitest.NewServer(t)
+	var deletes int
+	srv.Script(http.MethodDelete, "/v1/payments/account", func(w http.ResponseWriter, _ *http.Request) {
+		deletes++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "--yes"}})
+	if result.code != 0 || deletes != 1 {
+		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
+	}
+}
+
+func TestPaymentsUnfinishedDisconnectFinishesWithoutAskingAgain(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["disconnecting"] = true
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
+	if !strings.Contains(result.stdout.String(), "Run qurl payments disconnect to finish disconnecting.") || strings.Contains(result.stdout.String(), "Charges:") {
+		t.Fatalf("stdout=%s", result.stdout.String())
+	}
+	srv = stripeAccountServer(t, data, &deletes)
+	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}})
+	if result.code != 0 || deletes != 1 {
+		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
+	}
+}

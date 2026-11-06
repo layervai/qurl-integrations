@@ -22,6 +22,8 @@ type PublisherStripeAccount struct {
 	RenewingSubscriptions int    `json:"renewing_subscriptions"`
 	ChargesEnabled        bool   `json:"charges_enabled"`
 	PayoutsEnabled        bool   `json:"payouts_enabled"`
+	// Disconnecting means sales stopped and a disconnect must be run again to finish.
+	Disconnecting bool `json:"disconnecting"`
 }
 
 // PublisherStripeStatus reads the connected account, whether Stripe lets it

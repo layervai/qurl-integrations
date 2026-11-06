@@ -37,6 +37,10 @@ func (p *Printer) PublisherStripeAccount(a *qurlapi.PublisherStripeAccount) erro
 	if a.AccountID == "" {
 		return p.PublisherPayments("", "")
 	}
+	if a.Disconnecting {
+		_, err := fmt.Fprintf(p.out, "%s\nNew purchases are stopped. Run qurl payments disconnect to finish disconnecting.\n", a.AccountID)
+		return err
+	}
 	enabled := map[bool]string{true: "enabled", false: "not enabled"}
 	_, err := fmt.Fprintf(p.out, "%s\nCharges: %s\nPayouts: %s\nRenewing subscriptions: %d\n", a.AccountID, enabled[a.ChargesEnabled], enabled[a.PayoutsEnabled], a.RenewingSubscriptions)
 	if err == nil && a.SetupURL != "" {
