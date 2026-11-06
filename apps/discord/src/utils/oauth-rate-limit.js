@@ -142,7 +142,7 @@ function rateLimitForBucket(bucket, req, res, next) {
           shedByBucketSinceLastWarning: hardCapShedCounts,
           sinceLastWarningMs,
         });
-        logger.audit(AUDIT_EVENTS.OAUTH_RATE_LIMIT_HARD_CAP, {
+        logger.audit(AUDIT_EVENTS.RATE_LIMIT_STORE_HARD_CAP, {
           size: rateLimitStore.size,
           shed_by_bucket: hardCapShedCounts,
           since_last_warning_ms: sinceLastWarningMs,

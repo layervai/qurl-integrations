@@ -16,7 +16,6 @@ type retainedSessionRoundTrip func(*http.Request) (*http.Response, error)
 func (f retainedSessionRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestProductionRetainedSessionUsesFreshConnectionWithOriginalGrant(t *testing.T) {
-	// Run sequentially: this test swaps http.DefaultTransport.
 	peers := make(chan string, 2)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("qurl_vsession")
@@ -31,14 +30,42 @@ func TestProductionRetainedSessionUsesFreshConnectionWithOriginalGrant(t *testin
 	server.EnableHTTP2 = true
 	server.StartTLS()
 	t.Cleanup(server.Close)
-	original := http.DefaultTransport
 	base := server.Client().Transport.(*http.Transport)
 	base.ForceAttemptHTTP2 = true
-	http.DefaultTransport = base
-	t.Cleanup(func() {
-		http.DefaultTransport = original
-		base.CloseIdleConnections()
-	})
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/content?retained=original", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	for range 2 {
+		fresh, err := productionRetainedSessionCloneTransport(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(fresh.CloseIdleConnections)
+		if err := productionRetainedSessionFetch(request, "marker", fresh); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first, second := <-peers, <-peers; first == second {
+		t.Fatal("retained grant proof reused a pooled connection")
+	}
+}
+
+// Exercise the nil-transport path without replacing process-wide transport state.
+func TestProductionRetainedSessionNilTransportUsesFreshConnection(t *testing.T) {
+	peers := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("qurl_vsession")
+		if r.URL.RequestURI() != "/content?retained=original" || err != nil || cookie.Value != "original-capability" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		peers <- r.RemoteAddr
+		http.SetCookie(w, &http.Cookie{Name: "qurl_vsession", Value: "replacement-capability", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+		_, _ = io.WriteString(w, "marker")
+	}))
+	t.Cleanup(server.Close)
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/content?retained=original", http.NoBody)
 	if err != nil {
 		t.Fatal(err)
@@ -50,23 +77,14 @@ func TestProductionRetainedSessionUsesFreshConnectionWithOriginalGrant(t *testin
 		}
 	}
 	if first, second := <-peers, <-peers; first == second {
-		t.Fatal("retained grant proof reused a pooled connection")
+		t.Fatal("nil transport reused a pooled connection")
 	}
 }
 
-func TestProductionRetainedSessionRefusesUnisolatedDefaultTransport(t *testing.T) {
-	// Run sequentially: this test swaps http.DefaultTransport.
-	original := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = original })
-	http.DefaultTransport = retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) {
-		t.Fatal("retained-session proof used an unisolated transport")
-		return nil, errors.New("unexpected shared transport")
-	})
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/private-token", http.NoBody)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = productionRetainedSessionFetch(request, "marker", nil)
+func TestProductionRetainedSessionCloneRefusesCustomRoundTripper(t *testing.T) {
+	_, err := productionRetainedSessionCloneTransport(retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("unused non-transport stub")
+	}))
 	if err == nil || err.Error() != "retained production session transport could not be isolated" {
 		t.Fatal("unisolated transport did not fail safely")
 	}
