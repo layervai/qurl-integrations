@@ -11,6 +11,8 @@ import (
 	"net/url"
 
 	"github.com/layervai/qurl-go/crid"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacklog"
 )
 
 // cridUsageMessage is separate from getUsageMessage because CRIDs are pasted
@@ -67,7 +69,7 @@ func (h *Handler) cridWork(ctx context.Context, log *slog.Logger, args *getWorkA
 		// real miss, and resource_id encoding drift (candidates == 0).
 		// Stable correlation handle, not anonymization of a known CRID.
 		attempt := sha256.Sum256([]byte(args.cmd.CRID))
-		log.Warn("crid: CRID not in channel allow-set", "team_id", sanitizeLogValue(args.teamID), "channel_id", sanitizeLogValue(args.channelID), "user_id", sanitizeLogValue(args.userID), "crid_fingerprint", hex.EncodeToString(attempt[:8]), "allow_set_size", len(allowed), "key_candidates", keyCandidates)
+		log.Warn("crid: CRID not in channel allow-set", "team_id", slacklog.ID(args.teamID), "channel_id", slacklog.ID(args.channelID), "user_id", slacklog.ID(args.userID), "crid_fingerprint", hex.EncodeToString(attempt[:8]), "allow_set_size", len(allowed), "key_candidates", keyCandidates)
 		return getResult{}, &userError{msg: cridNotInChannelMessage}
 	}
 	return h.mintForResource(ctx, log, args, resourceID)

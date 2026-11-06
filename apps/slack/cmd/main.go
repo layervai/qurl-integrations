@@ -30,6 +30,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackinstall"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacklog"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 	"github.com/layervai/qurl-integrations/shared/observability"
@@ -895,7 +896,7 @@ func (c *workspaceSlackTokenLookupCache) warnLegacySlackBotTokenFallback(ctx con
 		ctx,
 		slog.LevelWarn,
 		"legacy SLACK_BOT_TOKEN fallback is serving workspace without Slack install token",
-		slog.String("team_id", slackOwnerLogID(teamID)),
+		slog.String("team_id", slacklog.ID(teamID)),
 	)
 }
 
