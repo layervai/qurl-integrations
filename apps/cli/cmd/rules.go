@@ -133,6 +133,7 @@ func (o *globalOpts) ruleStore() (*connectorstate.AccessRuleStore, error) {
 	}
 	return connectorstate.OpenAccessRules(dir, o.resolvedEndpoint)
 }
+
 func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file, flag string) (accessrules.Definition, error) {
 	if file != "-" {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("use " + flag + " - and pipe one access rule as JSON"))
@@ -154,6 +155,7 @@ func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file, flag string)
 	}
 	return definition, nil
 }
+
 func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (accessrules.Definition, error) {
 	if cmd.Flags().Changed(ruleFileFlag) {
 		return readRuleDefinition(cmd, o, file, "--"+ruleFileFlag)
@@ -187,14 +189,21 @@ func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (ac
 	return rule, nil
 }
 
-// savedRuleNamed reports whether a readable saved rule is named name.
+// savedRuleNamed reports whether a readable saved rule is named name. An
+// unreadable rules file leaves the preset chosen, so it cannot block presets.
 func (o *globalOpts) savedRuleNamed(cmd *cobra.Command, name string) bool {
 	store, err := o.ruleStore()
+	var snapshot accessrules.Snapshot
+	if err == nil {
+		snapshot, err = store.Snapshot(cmd.Context())
+	}
 	if err != nil {
+		if log := o.verboseLogger(); log != nil {
+			log("saved access rules are unreadable; using the default rule named %q: %v", name, err)
+		}
 		return false
 	}
-	snapshot, err := store.Snapshot(cmd.Context())
-	return err == nil && slices.ContainsFunc(snapshot.Items, func(d accessrules.Definition) bool { return d.Name == name })
+	return slices.ContainsFunc(snapshot.Items, func(d accessrules.Definition) bool { return d.Name == name })
 }
 
 func (o *globalOpts) syncRules(ctx context.Context) (accessrules.Snapshot, error) {
@@ -389,14 +398,16 @@ func (f *ruleSettingFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.sessionLength, "stays-open-for", "", "public rules: how long they can use it after opening the link, such as 30m (1s to 24h) (alias --session-length)")
 	cmd.Flags().StringVar(&f.approvals, "approvals-last", "", "review and keys rules: 1d, 7d, 30d, 90d or never (default: never)")
 	// The earlier names stay accepted, and named in help, for released clients.
-	cmd.Flags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+	// Wrap, not replace, any normalizer the flag set already has.
+	previous := cmd.Flags().GetNormalizeFunc()
+	cmd.Flags().SetNormalizeFunc(func(set *pflag.FlagSet, name string) pflag.NormalizedName {
 		switch name {
 		case "one-browser":
 			name = "once"
 		case "session-length":
 			name = "stays-open-for"
 		}
-		return pflag.NormalizedName(name)
+		return previous(set, name)
 	})
 }
 
@@ -623,7 +634,7 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 		kept, err := o.savedLinkLimits(ctx, id)
 		if err != nil && rule == nil {
 			// A plain republish never asked for rules; it still succeeds.
-			o.printer().Warnf(msgRulesLimitsUnread+" %v", id, err)
+			o.printer().Warnf(msgRulesLimitsUnread, id, err)
 			return nil
 		}
 		if err != nil {

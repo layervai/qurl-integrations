@@ -196,3 +196,13 @@ func TestRepublishPaidRuleAfterStripeChangeConflicts(t *testing.T) {
 		t.Fatalf("exit %d %s", result.code, result.stderr.String())
 	}
 }
+
+func TestNewRuleIDIsAValidCustomRuleID(t *testing.T) {
+	id, err := newRuleID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := (accessrules.Definition{ID: id, Name: "Team", Mode: accessrules.ModeKeys}); d.Validate(false) != nil {
+		t.Fatalf("generated ID %q is not a valid rule ID", id)
+	}
+}

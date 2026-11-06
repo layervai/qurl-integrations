@@ -106,7 +106,8 @@ a saved rule's ID or name (see "qurl rules list"). --rule once is Only the
 first person: a link that works for whoever opens it first and expires after
 30 days if nobody opens it. The resource itself is public; only that link is
 limited. Publishing
-an item again makes a new link with the limits it was first shared with.
+an item again, with or without --rule, makes a new link with the limits it was
+first shared with.
 
 For paid contract access, use "qurl access configure" with the Stripe account
 and price to make an existing public CRID private. Removing payment keeps it
