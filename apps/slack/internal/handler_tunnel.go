@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
-	"github.com/layervai/qurl-integrations/apps/slack/internal/nethost"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -52,7 +51,6 @@ const (
 	tunnelScopeAgent           = "qurl:agent"
 	tunnelScopeWrite           = "qurl:write"
 	tunnelEnvAPIKey            = "QURL_API_KEY"
-	connectorAPIVersionPath    = "/v1"
 	connectorPIDsLimit         = 512
 	connectorTmpfsCompose      = "/tmp:rw,size=64m"
 	// Pinned multi-arch Docker Official Image used only to prepare exact PVC
@@ -67,9 +65,7 @@ const (
 )
 
 var (
-	errConnectorAPIURLMissing = errors.New("QURL_API_URL is missing")
-	errConnectorAPIURLInvalid = errors.New("QURL_API_URL is invalid")
-	tunnelSlugPattern         = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
+	tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
 	// TODO(upstream-contract): keep the unpadded base64url public-key charset
 	// in lockstep with qurl-service#1206/#1225. The validator below separately
 	// rejects the legacy r_ prefix during the producer-first rollout.
@@ -1620,38 +1616,6 @@ func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
 		return errors.New("tunnel install args are missing")
 	}
 	return requirePinnedConnectorResource(args.ResourceID, args.ConnectorRoutingID, args.KnockResourceID)
-}
-
-// ValidateConnectorAPIURL validates the API base rendered into customer
-// connector manifests. It is exported so the Slack process can reject an
-// invalid QURL_ENDPOINT at startup, before an admin attempts an install.
-// cmd/main.connectorAPIURLFromEndpoint deliberately overlaps these checks on
-// the raw origin to provide field-specific operator messages; keep both sides
-// in sync until the typed-reason consolidation tracked by issue #967.
-func ValidateConnectorAPIURL(raw string) error {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return errConnectorAPIURLMissing
-	}
-	parsed, err := url.ParseRequestURI(trimmed)
-	// ParseRequestURI retains a literal #fragment in Path; the /v1 suffix
-	// requirement below therefore rejects it even though Fragment stays empty.
-	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" {
-		return errConnectorAPIURLInvalid
-	}
-	if strings.TrimRight(parsed.Path, "/") != connectorAPIVersionPath {
-		return errConnectorAPIURLInvalid
-	}
-	if parsed.Scheme == resourceExposeSchemeHTTPS {
-		return nil
-	}
-	if parsed.Scheme != resourceExposeSchemeHTTP {
-		return errConnectorAPIURLInvalid
-	}
-	if !nethost.IsLoopback(parsed.Hostname()) {
-		return errConnectorAPIURLInvalid
-	}
-	return nil
 }
 
 func qurlEndpointFromConnectorAPIURL(raw string) (string, error) {
