@@ -398,3 +398,47 @@ func TestRuleNamedOneTimeLinkIsTaken(t *testing.T) {
 		}
 	}
 }
+
+// Desktop may pass the One-time link preset as a snapshot on standard input.
+func TestRuleFileAcceptsTheOneTimeLinkPresetOnly(t *testing.T) {
+	once := `{"id":"once","name":"One-time link","mode":"public","link_limits":{"expires_in":"30d","one_time_use":true,"session_duration":"24h"}}`
+	srv := apitest.NewServer(t)
+	var mints []map[string]any
+	scriptPublish(t, srv, false, false, nil, nil)
+	scriptMint(t, srv, &mints)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(once), shareStateDir: connectorStateTestDir(t)})
+	if result.code != 0 || len(mints) != 1 || mints[0]["one_time_use"] != true {
+		t.Fatalf("once snapshot: %d mints %v %s", result.code, mints, result.stderr.String())
+	}
+	for _, raw := range []string{
+		`{"id":"once","name":"One-time link","mode":"public","link_limits":{"expires_in":"1h","one_time_use":true}}`,
+		`{"id":"builtin.keys","name":"Devices\u001b[2J","mode":"keys"}`,
+	} {
+		result := runCLI(t, &runOpts{args: []string{"publish", "https://api.example.com", "--rule-file", "-"}, stdin: strings.NewReader(raw), shareStateDir: connectorStateTestDir(t)})
+		if result.code != 2 {
+			t.Errorf("%s accepted: %d %s", raw, result.code, result.stderr.String())
+		}
+	}
+	if result := runCLI(t, &runOpts{args: []string{"rules", "save", "--file", "-", "--version", "0"}, stdin: strings.NewReader(once), env: map[string]string{}, shareStateDir: connectorStateTestDir(t)}); result.code != 2 || !strings.Contains(result.stderr.String(), "ready-made rules cannot be edited") {
+		t.Fatalf("saving the preset: %d %s", result.code, result.stderr.String())
+	}
+}
+
+// A publish whose outcome is unknown never replaces limits the share already has.
+func TestUnknownPublishOutcomeKeepsSavedLimits(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	var mints []map[string]any
+	scriptMint(t, srv, &mints)
+	scriptPublish(t, srv, false, false, nil, nil)
+	if result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(hourRule), shareStateDir: dir}); result.code != 0 {
+		t.Fatalf("first publish %d %s", result.code, result.stderr.String())
+	}
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": false}, nil)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: dir})
+	if result.code != 0 || !strings.Contains(result.stdout.String(), `"settings_differ": true`) || len(mints) != 2 || mints[1]["expires_in"] != "1h" {
+		t.Fatalf("unknown outcome: %d mints %v %s %s", result.code, mints, result.stdout.String(), result.stderr.String())
+	}
+}

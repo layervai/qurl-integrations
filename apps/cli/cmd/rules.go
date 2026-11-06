@@ -28,6 +28,8 @@ const (
 	accessFlag   = "access"
 	ruleFlag     = "rule"
 	ruleFileFlag = "rule-file"
+	// emailsFileFlag reads a rule's additional email addresses.
+	emailsFileFlag = "emails-file"
 	// builtInPrefix marks the catalog's ready-made rule IDs, such as builtin.review.
 	builtInPrefix = "builtin."
 )
@@ -60,7 +62,7 @@ func ruleSaveCmd(opts *globalOpts) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if strings.HasPrefix(definition.ID, builtInPrefix) {
+		if strings.HasPrefix(definition.ID, builtInPrefix) || definition.ID == accessrules.OnlyFirstPersonID {
 			return exitcode.UsageError(errors.New("ready-made rules cannot be edited; save a custom rule with its own UUID"))
 		}
 		return opts.printRuleStore(func(store *connectorstate.AccessRuleStore) (accessrules.Snapshot, error) {
@@ -151,7 +153,7 @@ func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file, flag string)
 	if connectorstate.DecodeStrictJSON(body, &definition) != nil {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("invalid access rule definition"))
 	}
-	if err := definition.Validate(strings.HasPrefix(definition.ID, builtInPrefix)); err != nil {
+	if err := definition.Validate(strings.HasPrefix(definition.ID, builtInPrefix) || definition.ID == accessrules.OnlyFirstPersonID); err != nil {
 		return accessrules.Definition{}, exitcode.UsageError(fmt.Errorf("invalid access rule definition: %w", err))
 	}
 	return definition, nil
@@ -259,9 +261,22 @@ func (o *globalOpts) syncRules(ctx context.Context) (accessrules.Snapshot, error
 		defer func() { _ = closeStore() }()
 	}
 	if err != nil {
-		return accessrules.Snapshot{}, err
+		// Through Sync, so a client that cannot reach the account records
+		// the journal as offline like any other deferred sync.
+		return store.Sync(ctx, unreachableRules{err})
 	}
 	return store.Sync(ctx, client.AccessRules())
+}
+
+// unreachableRules is the account library when its client could not open.
+type unreachableRules struct{ err error }
+
+func (u unreachableRules) Load(context.Context) (accessrules.AccountLibrary, error) {
+	return accessrules.AccountLibrary{}, u.err
+}
+
+func (u unreachableRules) Replace(context.Context, int64, []accessrules.Definition) (accessrules.AccountLibrary, error) {
+	return accessrules.AccountLibrary{}, u.err
 }
 
 // runRulesSync keeps JSON output unchanged and adds one warning in text mode
@@ -500,7 +515,7 @@ the Stripe account connected then (qurl payments account).`, Example: `  qurl ru
 		if (cmd.Flags().Changed(consumerContract) || cmd.Flags().Changed(stripePriceFlag) || cmd.Flags().Changed(paymentAccessSecondsFlag)) && mode != accessrules.ModeContract {
 			return exitcode.UsageError(errors.New("--contract, --stripe-price and --payment-access-seconds apply only to --mode contract"))
 		}
-		if (cmd.Flags().Changed("email-domain") || cmd.Flags().Changed("emails-file")) && mode != accessrules.ModeEmailDomain {
+		if (cmd.Flags().Changed(consumerEmailDomainFlag) || cmd.Flags().Changed(emailsFileFlag)) && mode != accessrules.ModeEmailDomain {
 			return exitcode.UsageError(errors.New("--email-domain and --emails-file apply only to --mode email_domain"))
 		}
 		id, err := newRuleID()
@@ -508,7 +523,7 @@ the Stripe account connected then (qurl payments account).`, Example: `  qurl ru
 			return err
 		}
 		definition := accessrules.Definition{ID: id, Name: strings.TrimSpace(args[0]), Mode: mode, EmailDomain: strings.ToLower(strings.TrimSpace(domain)), ContractID: contract}
-		if cmd.Flags().Changed("emails-file") {
+		if cmd.Flags().Changed(emailsFileFlag) {
 			emails, err := readAllowedEmails(cmd, opts, emailsFile)
 			if err != nil {
 				return err
@@ -536,9 +551,9 @@ the Stripe account connected then (qurl payments account).`, Example: `  qurl ru
 		return opts.printer().AccessRule(&definition)
 	}}
 	cmd.Flags().StringVar(&mode, modeFlag, "", modeChoices)
-	cmd.Flags().StringVar(&domain, "email-domain", "", "email domain for domain access, such as acme.com")
+	cmd.Flags().StringVar(&domain, consumerEmailDomainFlag, "", "email domain for domain access, such as acme.com")
 	cmd.Flags().StringVar(&contract, consumerContract, "", "integration reference for Custom access, where your service decides who gets in")
-	cmd.Flags().StringVar(&emailsFile, "emails-file", "", "use - to read optional additional email addresses as a JSON array")
+	cmd.Flags().StringVar(&emailsFile, emailsFileFlag, "", "use - to read optional additional email addresses as a JSON array")
 	cmd.Flags().StringVar(&price, stripePriceFlag, "", "contract rules: Stripe price people pay; LayerV collects 3%")
 	cmd.Flags().Int64Var(&accessSeconds, paymentAccessSecondsFlag, 0, "contract rules: one-time access duration; zero lasts for the resource lifetime; subscriptions require zero")
 	settings.register(cmd)
@@ -659,6 +674,12 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 // before serving, so a failed save can still turn the new share back off.
 func (o *globalOpts) ruleLinkLimits(ctx context.Context, rule *accessrules.Definition, published *qurlapi.Published) (*accessrules.LinkLimits, error) {
 	existing := published.FoundExisting != nil && *published.FoundExisting
+	if published.FoundExisting == nil && rule != nil && rule.LinkLimits != nil {
+		// An unproven outcome never overwrites limits this share already has.
+		if kept, err := o.savedLinkLimits(ctx, published.CRID); err != nil || kept != nil {
+			existing = true
+		}
+	}
 	if rule == nil && !existing {
 		return nil, nil //nolint:nilnil // nothing to mint
 	}

@@ -219,13 +219,14 @@ func (opts *globalOpts) shareResource(ctx context.Context, id string, options qu
 // limits, within the bounds those limits allow.
 func applyShareFlagsToLimits(cmd *cobra.Command, limits *accessrules.LinkLimits, ttl, sessionDuration time.Duration) error {
 	if cmd.Flags().Changed("ttl") {
-		limits.ExpiresIn = ttl.String()
+		// Whole seconds in the service's own grammar, not Go's "1h0m0s".
+		limits.ExpiresIn = fmt.Sprintf("%ds", int64(ttl/time.Second))
 		if _, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn); !ok {
 			return exitcode.UsageError(errors.New("--ttl must be from 1m to 720h for this item's link limits"))
 		}
 	}
 	if cmd.Flags().Changed("session-duration") {
-		limits.SessionDuration = new(sessionDuration.String())
+		limits.SessionDuration = new(fmt.Sprintf("%ds", int64(sessionDuration/time.Second)))
 		if !accessrules.ValidSessionLength(*limits.SessionDuration) {
 			return exitcode.UsageError(errors.New("--session-duration must be from 1s to 24h for this item's link limits"))
 		}

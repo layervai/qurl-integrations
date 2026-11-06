@@ -279,7 +279,7 @@ func (d *Definition) approvalExpiresIn() string {
 // A built-in matches by ID and policy only, so its display name may change.
 func (d *Definition) Validate(builtin bool) error {
 	if builtin {
-		if !d.builtIn() {
+		if !validName(d.Name) || !d.builtIn() {
 			return errors.New("unsupported built-in access rule")
 		}
 		return nil
@@ -338,6 +338,10 @@ func validName(name string) bool {
 }
 
 func (d *Definition) builtIn() bool {
+	// The One-time link preset is the one ready-made choice with link limits.
+	if once := OnlyFirstPerson(); d.ID == once.ID {
+		return d.Mode == once.Mode && d.Policy(1).SameDefinition(once.Policy(1)) && d.ApprovalExpiresIn == nil && SameEffectiveLinkLimits(d.LinkLimits, once.LinkLimits)
+	}
 	builtIns := BuiltIns()
 	for i := range builtIns {
 		if b := &builtIns[i]; b.ID == d.ID && b.Policy(1).SameDefinition(d.Policy(1)) && !d.hasSettings() {
