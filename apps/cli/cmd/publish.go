@@ -891,15 +891,16 @@ func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string,
 		return checkPublicName(flag)
 	}
 	terminal := opts.streams.InIsTTY && opts.streams.ErrIsTTY
+	shown := terminal && !opts.quiet && opts.resolvedFormat != output.FormatJSON
 	name := ""
 	if target.kind == publishTargetLocal {
-		// The directory name only where a person sees it before it is public.
-		if name = resolveLocalConnectorID(opts, connectorID); name == "" && terminal {
+		// The directory name only where the note shows it before it is public.
+		if name = resolveLocalConnectorID(opts, connectorID); name == "" && shown {
 			name = directoryPublishName(os.Getwd, os.UserHomeDir)
 		}
 	}
 	if validPublicName(name) {
-		if terminal && !opts.quiet && opts.resolvedFormat != output.FormatJSON {
+		if shown {
 			opts.printer().Notef(msgPublishNameDefault, name)
 		}
 		return name, nil

@@ -218,3 +218,19 @@ func TestPublishScriptWithoutANameRepublishesOrIsToldToPassOne(t *testing.T) {
 		t.Fatalf("create: exit %d: %s", res.code, res.stderr.String())
 	}
 }
+
+func TestPublishNameSkipsTheDirectoryWhenTheNoteIsHidden(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cmd := &cobra.Command{}
+	cmd.Flags().String("name", "", "")
+	for _, opts := range []*globalOpts{
+		{quiet: true},
+		{resolvedFormat: output.FormatJSON},
+	} {
+		opts.lookupEnv = func(string) (string, bool) { return "", false }
+		opts.streams = &output.Streams{In: strings.NewReader("Typed\n"), Err: io.Discard, InIsTTY: true, ErrIsTTY: true}
+		if got, err := publishName(opts, cmd, "", "", &publishTarget{kind: publishTargetLocal}); got != "Typed" || err != nil {
+			t.Fatalf("quiet=%t json=%t: publishName = %q, %v; want the typed name, not the directory", opts.quiet, opts.resolvedFormat == output.FormatJSON, got, err)
+		}
+	}
+}
