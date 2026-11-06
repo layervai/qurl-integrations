@@ -842,16 +842,13 @@ route or stop the publisher to close its old work. See
 
 Every new resource needs a public name, set with `--name` (one line, up to
 100 characters). Recipients see it on the link page and in the passkey they
-save, so it is public. A local app defaults to its `--id`, else the name of
-the directory you run `qurl publish` in. A terminal shows
-`Name: <name> (change with --name)` before publishing, and the result shows it
-as `Name:` (or `name` in JSON). A directory name is public too: run from the
-project directory, or pass `--name`. A remote URL has no default, because its address
-may be private: an interactive terminal asks for the name, and a script must
-pass `--name` or the command fails before it sends anything. The name, the
-description and the target are never derived from one another. Publishing a
-target again still needs a name, but the resource keeps the one it has;
-change it with `qurl preview set <CRID> --name`.
+save, so it is public. A local app defaults to its Connector ID, else the name
+of the directory you run `qurl publish` in, and a terminal shows
+`Name for a new resource: <name> (change with --name)`. A remote URL has no
+default, because its address may be private: an interactive terminal asks for
+the name, and a script must pass `--name` or the command fails before it sends
+anything. Publishing a target again still needs a name, but the resource keeps
+the one it has; change it with `qurl preview set <CRID> --name`.
 
 #### Private consumer policies
 

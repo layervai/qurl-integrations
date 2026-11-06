@@ -49,10 +49,6 @@ func TestPublishRemoteSendsTheTrimmedName(t *testing.T) {
 	if got := sentPublishNames(t, srv); len(got) != 1 || got[0] != "Reports API" {
 		t.Fatalf("sent names = %q", got)
 	}
-	var doc map[string]any
-	if err := json.Unmarshal(res.stdout.Bytes(), &doc); err != nil || doc["name"] != "Reports API" {
-		t.Fatalf("document = %s (%v)", res.stdout.String(), err)
-	}
 }
 
 func TestPublishNameIsRequiredBeforeAnyRequest(t *testing.T) {
@@ -163,5 +159,35 @@ func TestValidPublicNameRefusesSurroundingSpace(t *testing.T) {
 		if validPublicName(name) {
 			t.Errorf("validPublicName(%q) = true", name)
 		}
+	}
+}
+
+func TestPublishNameWithNoDefaultFailsWithoutATerminal(t *testing.T) {
+	t.Chdir(string(filepath.Separator))
+	cmd := &cobra.Command{}
+	cmd.Flags().String("name", "", "")
+	var stderr bytes.Buffer
+	opts := &globalOpts{lookupEnv: func(string) (string, bool) { return "", false }, streams: &output.Streams{Err: &stderr}}
+	if _, err := publishName(opts, cmd, "", "", &publishTarget{kind: publishTargetLocal}); exitcode.FromError(err) != exitcode.Usage {
+		t.Fatalf("err = %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("a non-terminal was prompted or noted: %q", stderr.String())
+	}
+}
+
+func TestPublishNamePromptEndOfInputIsAUsageError(t *testing.T) {
+	srv := apitest.NewServer(t)
+	for _, in := range []string{"", "   \n"} {
+		res := runCLI(t, &runOpts{
+			args:  []string{"--endpoint", srv.URL, "publish", "https://example.com/data"},
+			stdin: strings.NewReader(in), inTTY: true, tty: true,
+		})
+		if res.code != exitcode.Usage || !strings.Contains(res.stderr.String(), msgPublishNameRequired) {
+			t.Fatalf("input %q: exit %d: %s", in, res.code, res.stderr.String())
+		}
+	}
+	if reqs := srv.Requests(); len(reqs) != 0 {
+		t.Fatalf("sent %d requests", len(reqs))
 	}
 }

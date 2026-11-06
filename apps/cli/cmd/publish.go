@@ -149,20 +149,16 @@ owns the share and turns it off when it exits.`,
 			if err != nil {
 				return err
 			}
-			if err := validatePublishTargetFlags(cmd, target, name); err != nil {
+			if err := validatePublishTargetFlags(cmd, target); err != nil {
 				return err
 			}
-			resolveName := func() (err error) {
-				access.Name, err = publishName(opts, cmd, name, connectorID, target)
+			if access.Name, err = publishName(opts, cmd, name, connectorID, target); err != nil {
 				return err
 			}
 			if target.kind == publishTargetLocal {
-				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access, resolveName)
+				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access)
 			}
 			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
-				return err
-			}
-			if err := resolveName(); err != nil {
 				return err
 			}
 			opts.beginTermsNotice()
@@ -176,7 +172,6 @@ owns the share and turns it off when it exits.`,
 			if err != nil {
 				return err
 			}
-			result.SetCreatedName(access.Name)
 			result.LinkSiteURL = opts.resourceAddress(result.CRID)
 
 			printer := opts.printer()
@@ -264,14 +259,9 @@ func validatePublishAccessFlags(cmd *cobra.Command, public, private, allowReques
 	return validateAllowedDeviceKeys(allowedDeviceKeys)
 }
 
-// resolveName sets access.Name. It runs after the local checks, so nobody is
-// asked for a name for a publish those checks refuse.
-func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool, access *qurlapi.PublishOptions, resolveName func() error) (retErr error) {
+func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool, access *qurlapi.PublishOptions) (retErr error) {
 	requestedID, err := validateLocalPublishRequest(ctx, opts, target, flagID, foreground)
 	if err != nil {
-		return err
-	}
-	if err := resolveName(); err != nil {
 		return err
 	}
 	opts.beginTermsNotice()
@@ -567,8 +557,6 @@ func prepareLocalPublishResource(
 	resolved.AccessRequests = precreated.AccessRequests
 	resolved.AccessRequestsTurnedOn = precreated.AccessRequestsTurnedOn
 	resolved.KeptPublic = precreated.KeptPublic
-	precreated.SetCreatedName(enrollment.access.Name)
-	resolved.Name = precreated.Name
 	// The Connector request always finds the resource created just above, so
 	// its own answer cannot tell a first publish from a repeated one. The
 	// create answer can.
@@ -799,7 +787,7 @@ func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
 		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private, ConsumerAccess: resolved.ConsumerAccess,
 		AccessRequests: resolved.AccessRequests, AccessRequestsTurnedOn: resolved.AccessRequestsTurnedOn,
-		KeptPublic: resolved.KeptPublic, Name: resolved.Name, LinkSiteURL: opts.resourceAddress(local.CRID),
+		KeptPublic: resolved.KeptPublic, LinkSiteURL: opts.resourceAddress(local.CRID),
 	}
 	if sharing != nil {
 		published.Publisher = sharing.Publisher
@@ -929,6 +917,9 @@ func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string,
 		}
 		return "", exitcode.UsageError(errors.New(msgPublishNameRequired))
 	}
+	if strings.TrimSpace(scanner.Text()) == "" {
+		return "", exitcode.UsageError(errors.New(msgPublishNameRequired))
+	}
 	return checkPublicName(scanner.Text())
 }
 
@@ -967,18 +958,13 @@ func validPublicName(name string) bool {
 		})
 }
 
-// validatePublishTargetFlags refuses an invalid --name and flags that do not
-// apply to the kind of target, before the command checks or asks for anything.
-func validatePublishTargetFlags(cmd *cobra.Command, target *publishTarget, name string) error {
-	if cmd.Flags().Changed("name") {
-		if _, err := checkPublicName(name); err != nil {
-			return err
-		}
-	}
+// validatePublishTargetFlags refuses flags that do not apply to the kind of
+// target, before the command asks for a name.
+func validatePublishTargetFlags(cmd *cobra.Command, target *publishTarget) error {
 	if target.kind == publishTargetLocal {
-		for _, name := range []string{"description", "tag", "alias"} {
-			if cmd.Flags().Changed(name) {
-				return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", name))
+		for _, flag := range []string{"description", "tag", "alias"} {
+			if cmd.Flags().Changed(flag) {
+				return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", flag))
 			}
 		}
 		return nil

@@ -162,7 +162,7 @@ const (
 
 	// The public name a publish gives a new resource.
 	maxPublicNameRunes     = 100
-	msgPublishNameDefault  = "Name: %s (change with --name)"
+	msgPublishNameDefault  = "Name for a new resource: %s (change with --name)"
 	msgPublishNamePrompt   = "Public name recipients will see (a target already published keeps its name): "
 	msgPublishNameRequired = "a public name is required: pass --name \"<name>\" with the name recipients will see (up to 100 characters)"
 	msgPublishNameInvalid  = "--name must be one line of 1 to 100 characters with no control characters"

@@ -121,6 +121,10 @@ func TestPublishIsPrivateUnlessPublic(t *testing.T) {
 				if len(creates) != 1 {
 					t.Fatalf("publish sent %d create requests, want one", len(creates))
 				}
+				// The local Connector pre-create carries the default name too.
+				if name, ok := creates[0]["name"]; !ok || len(name) <= len(`""`) {
+					t.Fatalf("create request has no public name: %q", name)
+				}
 				stated, present := creates[0]["private"]
 				if want := strconv.FormatBool(test.wantPrivate); !present || string(stated) != want {
 					t.Fatalf("create request stated private = %q (present %t), want %s", stated, present, want)
