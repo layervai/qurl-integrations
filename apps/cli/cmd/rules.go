@@ -190,8 +190,9 @@ func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (ac
 	return rule, nil
 }
 
-// savedRuleNamed reports whether a readable saved rule is named name. An
-// unreadable rules file leaves the preset chosen, so it cannot block presets.
+// savedRuleNamed reports whether a readable saved rule is named exactly name,
+// matching Find. An unreadable rules file leaves the preset chosen, so it
+// cannot block presets.
 func (o *globalOpts) savedRuleNamed(cmd *cobra.Command, name string) bool {
 	// No profile directory means nothing saved; do not create one here.
 	dir, err := o.resolveShareStateDir("")
@@ -386,11 +387,14 @@ func (o *globalOpts) reconcileRulesAfterLink(ctx context.Context) {
 	if snapshot.SchemaVersion == 0 {
 		// Sync stopped before reading the journal; read it here so a device
 		// with nothing saved stays quiet.
+		// A fresh budget: the sync may have spent the shared one.
+		readCtx, cancelRead := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 		if store, storeErr := o.ruleStore(); storeErr == nil {
-			if local, readErr := store.Snapshot(ctx); readErr == nil {
+			if local, readErr := store.Snapshot(readCtx); readErr == nil {
 				snapshot = local
 			}
 		}
+		cancelRead()
 	}
 	// A never-linked journal with no saved rules has nothing waiting, so any
 	// sync failure stays quiet; a linked or unreadable journal still warns.
@@ -643,9 +647,20 @@ func completeRulePayment(ctx context.Context, client qurlapi.Client, policy *qur
 // fresh link with its saved limits; published.OtherSettings says when the
 // chosen rule differs.
 func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, published *qurlapi.Published) error {
+	limits, err := o.ruleLinkLimits(ctx, rule, published)
+	if err != nil {
+		return err
+	}
+	return o.mintRuleLink(ctx, client, rule, published, limits)
+}
+
+// ruleLinkLimits saves a new share's limits, or reads an existing share's, and
+// returns the limits to mint with; nil mints nothing. Local publish calls it
+// before serving, so a failed save can still turn the new share back off.
+func (o *globalOpts) ruleLinkLimits(ctx context.Context, rule *accessrules.Definition, published *qurlapi.Published) (*accessrules.LinkLimits, error) {
 	existing := published.FoundExisting != nil && *published.FoundExisting
 	if rule == nil && !existing {
-		return nil
+		return nil, nil //nolint:nilnil // nothing to mint
 	}
 	id := published.CRID
 	var limits *accessrules.LinkLimits
@@ -657,10 +672,10 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 		if err != nil && rule == nil {
 			// A plain republish never asked for rules; it still succeeds.
 			o.printer().Warnf(msgRulesLimitsUnread, id, err)
-			return nil
+			return nil, nil //nolint:nilnil // nothing to mint
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if rule != nil {
 			// Only approvals can differ here (Publish refuses any other policy
@@ -680,12 +695,18 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 			err = store.Set(ctx, id, limits)
 		}
 		if err != nil {
-			return fmt.Errorf("%s was published, but its link limits could not be saved on this device: %w", id, err)
+			return nil, fmt.Errorf("%s was published, but its link limits could not be saved on this device: %w", id, err)
 		}
 	}
+	return limits, nil
+}
+
+// mintRuleLink mints and verifies the link with limits into published.LimitedLink.
+func (o *globalOpts) mintRuleLink(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, published *qurlapi.Published, limits *accessrules.LinkLimits) error {
 	if limits == nil {
 		return nil
 	}
+	id := published.CRID
 	// The same checks share applies before any link is printed.
 	link, err := client.MintLimitedLink(ctx, id, *limits)
 	if err = verifyShareLink(id, link, err); err == nil {

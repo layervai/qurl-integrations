@@ -355,7 +355,14 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 		return compensate(err)
 	}
 	shared := &qurlapi.Published{CRID: local.CRID, FoundExisting: resolved.FoundExisting, ConsumerAccess: resolved.ConsumerAccess}
-	return finishLocalPublish(ctx, opts, client, registry, resolved, local, shared, access.Rule, stateDir, foreground, compensate)
+	// Limits are saved before serving, so a failed save still turns a new
+	// share back off; the link is minted once the share serves.
+	limits, err := opts.ruleLinkLimits(ctx, access.Rule, shared)
+	if err != nil {
+		return compensate(err)
+	}
+	mintLink := func() error { return opts.mintRuleLink(ctx, client, access.Rule, shared, limits) }
+	return finishLocalPublish(ctx, opts, client, registry, resolved, local, shared, mintLink, stateDir, foreground, compensate)
 }
 
 func validateLocalPublishRequest(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool) (string, error) {
@@ -665,13 +672,13 @@ func finishLocalPublish(
 	resolved *agent.ResolvedResource,
 	local *connectorstate.LocalShare,
 	applied *qurlapi.Published,
-	rule *accessrules.Definition,
+	mintLink func() error,
 	stateDir string,
 	foreground bool,
 	compensate func(error) error,
 ) error {
 	if foreground {
-		return runForegroundLocalPublish(ctx, opts, client, registry, resolved, local, applied, rule, stateDir)
+		return runForegroundLocalPublish(ctx, opts, client, registry, resolved, local, applied, mintLink, stateDir)
 	}
 	logDir, err := connectordaemon.DefaultLogDir(stateDir)
 	if err != nil {
@@ -690,7 +697,7 @@ func finishLocalPublish(
 	}
 	// Minted once serving, like a remote publish: a failed link leaves the
 	// share on, and its lifetime starts when the route works.
-	if err := opts.applyRuleToShare(ctx, client, rule, applied); err != nil {
+	if err := mintLink(); err != nil {
 		return err
 	}
 	return printLocalPublishServing(opts, resolved, local, applied, sharing)
@@ -704,7 +711,7 @@ func runForegroundLocalPublish(
 	resolved *agent.ResolvedResource,
 	local *connectorstate.LocalShare,
 	applied *qurlapi.Published,
-	rule *accessrules.Definition,
+	mintLink func() error,
 	stateDir string,
 ) (retErr error) {
 	var (
@@ -771,7 +778,7 @@ func runForegroundLocalPublish(
 	if err != nil {
 		return err
 	}
-	if err := opts.applyRuleToShare(ctx, client, rule, applied); err != nil {
+	if err := mintLink(); err != nil {
 		return err
 	}
 	if err := printLocalPublishServing(opts, resolved, local, applied, sharing); err != nil {
