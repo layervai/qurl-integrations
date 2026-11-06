@@ -160,8 +160,8 @@ const (
 	// public keys are bounded: each is one request, sent one after another.
 	msgGrantsRemoveTooManyPeople = "--remove accepts at most 256 device ids"
 
-	// The public name a publish gives a new resource.
-	maxPublicNameRunes     = 100
+	// The public name a publish gives a new resource. The "100" in these
+	// messages must change together with maxPublicNameRunes.
 	msgPublishNameDefault  = "Name for a new resource: %s (change with --name)"
 	msgPublishNamePrompt   = "Public name recipients will see (a target already published keeps its name): "
 	msgPublishNameRequired = "a public name is required: pass --name \"<name>\" with the name recipients will see (up to 100 characters)"

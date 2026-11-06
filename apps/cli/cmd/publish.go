@@ -947,6 +947,9 @@ func directoryPublishName(getwd, home func() (string, error)) string {
 	return ""
 }
 
+// maxPublicNameRunes is the service's limit on a public name.
+const maxPublicNameRunes = 100
+
 // validPublicName applies the service's preview-name rules to a trimmed name:
 // valid UTF-8, 1 to 100 characters, no surrounding space, one line, no control
 // or format characters.
