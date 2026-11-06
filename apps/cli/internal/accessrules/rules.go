@@ -68,26 +68,16 @@ type Definition struct {
 	Payment *Payment `json:"payment,omitempty"`
 }
 
-// Payment is a CRID payment policy without its account.
+// Payment is a CRID payment policy without its account; the SDK's policy
+// validation checks it.
 type Payment struct {
 	PriceID       string `json:"price_id"`
 	AccessSeconds int64  `json:"access_seconds"`
 }
 
-// TODO(upstream-contract): copied from qurl-service internal/domain/crid_payment.go
-// validCRIDPaymentTerms; keep identical.
-var priceIDPattern = regexp.MustCompile(`^price_[A-Za-z0-9]{1,128}$`)
-
-// MaxPaymentAccessSeconds is ten years, the service's one-time access limit.
-const MaxPaymentAccessSeconds = 315360000
-
-// Validate checks the price and access duration the service accepts.
-func (p Payment) Validate() error {
-	if !priceIDPattern.MatchString(p.PriceID) || p.AccessSeconds < 0 || p.AccessSeconds > MaxPaymentAccessSeconds {
-		return errors.New("payment needs a Stripe price_id such as price_123 and access_seconds from 0 to 315360000")
-	}
-	return nil
-}
+// validationAccount stands in for the account a paid rule never stores, so
+// the SDK checks the rest of its payment.
+const validationAccount = "acct_rule"
 
 // LinkLimits bounds one minted temporary link. Durations use the service's
 // expires_in and session_duration grammar; nil one_time_use is false.
@@ -176,14 +166,6 @@ func (d *Definition) validateSettings() error {
 			return errors.New("approval_expires_in must be from 1h to 365d")
 		}
 	}
-	if d.Payment != nil {
-		if d.Mode != ModeContract {
-			return errors.New("payment applies only to contract rules")
-		}
-		if err := d.Payment.Validate(); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -198,7 +180,7 @@ func ValidSessionLength(s string) bool {
 }
 
 func (d *Definition) hasSettings() bool {
-	return d.LinkLimits != nil || d.ApprovalExpiresIn != nil || d.Payment != nil
+	return d.LinkLimits != nil || d.ApprovalExpiresIn != nil
 }
 
 func samePointer[T comparable](a, b *T) bool {
@@ -207,7 +189,7 @@ func samePointer[T comparable](a, b *T) bool {
 
 // sameSettings compares field presence too, since an explicit default round-trips.
 func sameSettings(a, b *Definition) bool {
-	return sameLinkLimits(a.LinkLimits, b.LinkLimits) && samePointer(a.ApprovalExpiresIn, b.ApprovalExpiresIn) && samePointer(a.Payment, b.Payment)
+	return sameLinkLimits(a.LinkLimits, b.LinkLimits) && samePointer(a.ApprovalExpiresIn, b.ApprovalExpiresIn)
 }
 
 // SameEffectiveLinkLimits compares what the limits do: an explicit
@@ -268,8 +250,14 @@ func IsOnlyFirstPerson(selector string) bool {
 }
 
 // Policy expands this preset into an independent resource policy snapshot.
+// A paid rule's payment has no account, so the policy fails validation until
+// the connected account is filled in.
 func (d *Definition) Policy(version int64) qurl.ConsumerAccessPolicy {
-	return qurl.ConsumerAccessPolicy{Mode: d.Mode, Version: version, ContractID: d.ContractID, EmailDomain: d.EmailDomain, AllowedEmails: slices.Clone(d.AllowedEmails), ApprovalExpiresIn: d.approvalExpiresIn()}
+	policy := qurl.ConsumerAccessPolicy{Mode: d.Mode, Version: version, ContractID: d.ContractID, EmailDomain: d.EmailDomain, AllowedEmails: slices.Clone(d.AllowedEmails), ApprovalExpiresIn: d.approvalExpiresIn()}
+	if d.Payment != nil {
+		policy.Payment = &qurl.CRIDPaymentPolicy{PriceID: d.Payment.PriceID, AccessSeconds: d.Payment.AccessSeconds}
+	}
+	return policy
 }
 
 func (d *Definition) approvalExpiresIn() string {
@@ -302,7 +290,11 @@ func (d *Definition) Validate(builtin bool) error {
 		}
 		return nil
 	}
-	if d.Policy(1).Validate() != nil {
+	policy := d.Policy(1)
+	if policy.Payment != nil {
+		policy.Payment.AccountID = validationAccount
+	}
+	if policy.Validate() != nil {
 		return errors.New("invalid access rule policy")
 	}
 	return nil

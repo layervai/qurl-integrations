@@ -861,9 +861,11 @@ qurl publish http://127.0.0.1:8080 --rule once
 A paid rule saves `"payment": {"price_id": "price_123", "access_seconds": 0}`
 (both members required, contract mode only) and never a Stripe account.
 Sharing with it reads the account connected now, like `qurl payments account`,
-and publishes the same payment policy as `--stripe-account`/`--stripe-price`.
-With no connected account it fails (exit 8) before changing anything; run
-`qurl payments connect`. While payments are unavailable it fails with exit 11.
+and publishes the same payment policy as `--stripe-account`/`--stripe-price`,
+including when you publish the same target again. With no connected account
+it fails (exit 8) before publishing or changing access; run
+`qurl payments connect`. If the account cannot be checked, such as while
+payments are unavailable, it fails with exit 11.
 
 ```sh
 qurl payments connect

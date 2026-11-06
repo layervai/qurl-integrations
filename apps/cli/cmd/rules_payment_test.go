@@ -1,32 +1,37 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	"github.com/layervai/qurl-go/qurl"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 const paidRule = `{"id":"11111111-1111-4111-8111-111111111111","name":"Buyers","mode":"contract","contract_id":"buyers","payment":{"price_id":"price_1","access_seconds":3600}}`
 
 // scriptStripeAccount answers qurl payments account's request with account,
-// or with status when it is not 200.
-func scriptStripeAccount(t *testing.T, srv *apitest.Server, status int, account string) {
+// or with 503, and every retry of it, when unavailable.
+func scriptStripeAccount(t *testing.T, srv *apitest.Server, unavailable bool, account string) {
 	t.Helper()
-	// Retries of a 503 are answered the same way.
-	srv.ScriptRepeat(http.MethodGet, "/v1/payments/account", 5, func(w http.ResponseWriter, _ *http.Request) {
-		if status != http.StatusOK {
+	if unavailable {
+		srv.ScriptRepeat(http.MethodGet, "/v1/payments/account", 5, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
+			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(`{"error":{"status":503,"code":"service_unavailable","title":"Service Unavailable"}}`))
-			return
-		}
+		})
+		return
+	}
+	srv.Script(http.MethodGet, "/v1/payments/account", func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"account_id": account, "layerv_fee_percent": 3}, nil)
 	})
 }
@@ -45,8 +50,8 @@ func TestRulesCreateSavesAPaidContractRule(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"--mode", "review", "--stripe-price", "price_1"}, "payments need --mode contract and --stripe-price"},
-		{[]string{"--mode", "contract", "--contract", "c", "--payment-access-seconds", "60"}, "payments need --mode contract and --stripe-price"},
+		{[]string{"--mode", "review", "--stripe-price", "price_1"}, "apply only to --mode contract"},
+		{[]string{"--mode", "contract", "--contract", "c", "--payment-access-seconds", "60"}, "--payment-access-seconds needs --stripe-price"},
 		{[]string{"--mode", "contract", "--contract", "c", "--stripe-price", "prod_1"}, "--stripe-price must be a Stripe price ID"},
 		{[]string{"--mode", "contract", "--contract", "c", "--stripe-price", "price_1", "--payment-access-seconds", "315360001"}, "--payment-access-seconds from 0 to 315360000"},
 	} {
@@ -67,7 +72,7 @@ func TestRulesSaveAcceptsAPaidRule(t *testing.T) {
 
 func TestPublishWithAPaidRuleUsesTheConnectedStripeAccount(t *testing.T) {
 	srv := apitest.NewServer(t)
-	scriptStripeAccount(t, srv, http.StatusOK, "acct_publisher")
+	scriptStripeAccount(t, srv, false, "acct_publisher")
 	sent := map[string]any{}
 	scriptPublish(t, srv, true, false, nil, sent)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(paidRule), shareStateDir: connectorStateTestDir(t)})
@@ -78,37 +83,57 @@ func TestPublishWithAPaidRuleUsesTheConnectedStripeAccount(t *testing.T) {
 }
 
 func TestPaidRuleNeedsConnectedPaymentsBeforeAnyChange(t *testing.T) {
+	commands := map[string]func(*apitest.Server) []string{
+		"publish": func(*apitest.Server) []string { return []string{"publish", "https://api.example.com"} },
+		"configure": func(srv *apitest.Server) []string {
+			return []string{"access", "configure", srv.Key.CRID, "--version", "0"}
+		},
+	}
 	for _, tc := range []struct {
-		name    string
-		status  int
-		account string
-		code    int
-		want    string
+		name        string
+		unavailable bool
+		code        int
+		want        string
 	}{
-		{"not connected", http.StatusOK, "", exitcode.InvalidInput, msgRulesStripeNotConnected},
-		{"payments off", http.StatusServiceUnavailable, "", exitcode.Unavailable, msgRulesPaymentsUnavailable},
+		{"not connected", false, exitcode.InvalidInput, msgRulesStripeNotConnected},
+		{"payments off", true, exitcode.Unavailable, msgRulesPaymentsUnavailable},
 	} {
-		for _, command := range [][]string{{"publish", "https://api.example.com"}, {"access", "configure", ""}} {
-			t.Run(tc.name+" "+command[0], func(t *testing.T) {
+		for name, command := range commands {
+			t.Run(tc.name+" "+name, func(t *testing.T) {
 				srv := apitest.NewServer(t)
-				scriptStripeAccount(t, srv, tc.status, tc.account)
-				if command[0] == "access" {
-					command = []string{"access", "configure", srv.Key.CRID, "--version", "0"}
-				}
-				args := append(append([]string{"--endpoint", srv.URL}, command...), "--rule-file", "-")
+				scriptStripeAccount(t, srv, tc.unavailable, "")
+				// Any publish or configure request is unscripted and would fail with another code.
+				args := append(append([]string{"--endpoint", srv.URL}, command(srv)...), "--rule-file", "-")
 				result := runCLI(t, &runOpts{args: args, stdin: strings.NewReader(paidRule), shareStateDir: connectorStateTestDir(t)})
 				if result.code != tc.code || !strings.Contains(result.stderr.String(), tc.want) {
 					t.Fatalf("exit %d %s", result.code, result.stderr.String())
 				}
-				// Unscripted publish or configure requests would fail the server.
 			})
 		}
 	}
 }
 
+func TestLocalPublishWithAPaidRuleChecksPaymentsBeforeTheResource(t *testing.T) {
+	srv := apitest.NewServer(t)
+	scriptStripeAccount(t, srv, false, "")
+	result := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000", "--rule-file", "-"},
+		stdin:         strings.NewReader(paidRule),
+		env:           map[string]string{"QURL_API_KEY": testAPIKey},
+		shareRegistry: &ownerOnlyTestShareRegistry{}, shareStateDir: connectorStateTestDir(t),
+		preflightTarget: func(context.Context, string, int) error { return nil },
+		localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+			return nil, errors.New("resource prepared without a connected Stripe account")
+		},
+	})
+	if result.code != exitcode.InvalidInput || !strings.Contains(result.stderr.String(), msgRulesStripeNotConnected) {
+		t.Fatalf("exit %d %s", result.code, result.stderr.String())
+	}
+}
+
 func TestConfigureWithAPaidRuleUsesTheConnectedStripeAccount(t *testing.T) {
 	srv := apitest.NewServer(t)
-	scriptStripeAccount(t, srv, http.StatusOK, "acct_publisher")
+	scriptStripeAccount(t, srv, false, "acct_publisher")
 	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Policy qurl.ConsumerAccessPolicy `json:"consumer_access"`

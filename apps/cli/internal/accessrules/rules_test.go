@@ -267,6 +267,10 @@ func TestRuleSettingsAreComparedAndBuiltInsCarryNone(t *testing.T) {
 		t.Fatal("approval lifetime change not seen")
 	}
 	paid := Definition{ID: testID, Name: "Buyers", Mode: ModeContract, ContractID: "buyers", Payment: &Payment{PriceID: "price_1", AccessSeconds: 0}}
+	// The account is filled in when the rule is shared; until then the policy is refused.
+	if policy := paid.Policy(1); paid.Validate(false) != nil || policy.Validate() == nil {
+		t.Fatal("a paid rule's policy must be valid only with an account")
+	}
 	for _, other := range []*Payment{nil, {PriceID: "price_2"}, {PriceID: "price_1", AccessSeconds: 60}} {
 		changed := paid
 		changed.Payment = other

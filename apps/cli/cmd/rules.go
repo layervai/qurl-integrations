@@ -445,8 +445,8 @@ the Stripe account connected then (qurl payments account).`, Example: `  qurl ru
   qurl rules create "Quick look" --mode public --expires-in 1h --stays-open-for 30m
   qurl rules create "Client review" --mode review --approvals-last 7d
   qurl rules create "Lab devices" --mode keys --approvals-last 30d`, Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if cmd.Flags().Changed(consumerContract) && mode != accessrules.ModeContract {
-			return exitcode.UsageError(errors.New("--contract applies only to --mode contract"))
+		if (cmd.Flags().Changed(consumerContract) || cmd.Flags().Changed(stripePriceFlag) || cmd.Flags().Changed(paymentAccessSecondsFlag)) && mode != accessrules.ModeContract {
+			return exitcode.UsageError(errors.New("--contract, --stripe-price and --payment-access-seconds apply only to --mode contract"))
 		}
 		if (cmd.Flags().Changed("email-domain") || cmd.Flags().Changed("emails-file")) && mode != accessrules.ModeEmailDomain {
 			return exitcode.UsageError(errors.New("--email-domain and --emails-file apply only to --mode email_domain"))
@@ -469,11 +469,10 @@ the Stripe account connected then (qurl payments account).`, Example: `  qurl ru
 		if err := settings.apply(cmd, &definition); err != nil {
 			return exitcode.UsageError(err)
 		}
-		if cmd.Flags().Changed(stripePriceFlag) || cmd.Flags().Changed(paymentAccessSecondsFlag) {
-			if mode != accessrules.ModeContract || !cmd.Flags().Changed(stripePriceFlag) {
-				return exitcode.UsageError(errors.New("payments need --mode contract and --stripe-price"))
-			}
+		if cmd.Flags().Changed(stripePriceFlag) {
 			definition.Payment = &accessrules.Payment{PriceID: price, AccessSeconds: accessSeconds}
+		} else if cmd.Flags().Changed(paymentAccessSecondsFlag) {
+			return exitcode.UsageError(errors.New("--payment-access-seconds needs --stripe-price"))
 		}
 		if definition.Validate(false) != nil {
 			return exitcode.UsageError(ruleInputError(&definition))
@@ -544,7 +543,7 @@ func ruleInputError(d *accessrules.Definition) error {
 		return errors.New("--email-domain must be a domain such as acme.com")
 	case d.Mode == accessrules.ModeEmailDomain:
 		return errors.New("--emails-file must list each email address once, such as name@acme.com")
-	case d.Payment != nil && d.Payment.Validate() != nil:
+	case d.Payment != nil && validWith(func(p *accessrules.Definition) { p.Payment = nil }):
 		return errors.New("--stripe-price must be a Stripe price ID such as price_123, and --payment-access-seconds from 0 to 315360000")
 	case d.Mode == accessrules.ModeContract:
 		return errors.New("--contract must be 1 to 128 letters, digits, hyphens or underscores")
@@ -553,15 +552,15 @@ func ruleInputError(d *accessrules.Definition) error {
 	}
 }
 
-// applyRulePayment completes a paid rule's policy with the Stripe account
-// connected now, read like qurl payments account; the rule stores only the price.
-func applyRulePayment(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, policy *qurl.ConsumerAccessPolicy) error {
-	if rule == nil || rule.Payment == nil {
+// completeRulePayment fills in a paid rule's Stripe account, read like qurl
+// payments account; a saved rule stores only the price.
+func completeRulePayment(ctx context.Context, client qurlapi.Client, policy *qurl.ConsumerAccessPolicy) error {
+	if policy == nil || policy.Payment == nil || policy.Payment.AccountID != "" {
 		return nil
 	}
-	payments, ok := client.ConsumerManagement().(publisherStripeClient)
-	if !ok {
-		return errors.New("publisher payments are unavailable in this client")
+	payments, err := publisherPayments(client)
+	if err != nil {
+		return err
 	}
 	account, err := payments.PublisherStripeAccount(ctx)
 	if exitcode.FromError(err) == exitcode.Unavailable {
@@ -573,7 +572,7 @@ func applyRulePayment(ctx context.Context, client qurlapi.Client, rule *accessru
 	if account == "" {
 		return exitcode.InvalidInputError(msgRulesStripeNotConnected, nil)
 	}
-	return setStripePayment(policy, account, rule.Payment.PriceID, rule.Payment.AccessSeconds)
+	return setStripePayment(policy, account, policy.Payment.PriceID, policy.Payment.AccessSeconds)
 }
 
 // applyRuleToShare runs once the resource exists. A new public share keeps
