@@ -250,6 +250,8 @@ func oauthClientIPWithFallbackLogLimiter(r *http.Request, fallbackLogLimiter *oa
 	return oauthUnknownClientIP
 }
 
+// TODO(upstream-contract): infra alarms pin this msg and the bounded reason/fallback
+// vocabulary. Never put request headers, addresses or OAuth values in this event.
 func warnOAuthClientIPFallback(limiter *oauthClientIPFallbackLogLimiter, r *http.Request, reason, fallback string) {
 	if !limiter.allow(reason + ":" + fallback) {
 		return
@@ -294,6 +296,8 @@ func (l *oauthClientIPFallbackLogLimiter) allow(key string) bool {
 	return false
 }
 
+// Keep new reasons aligned with TestOAuthFallbackMetricContract, the ingress
+// runbook and the paired infra allowlist before using them in alerts.
 func oauthForwardedForFallbackReason(headers []string) string {
 	candidate, ok := oauthRightmostForwardedForValue(headers)
 	if !ok {
