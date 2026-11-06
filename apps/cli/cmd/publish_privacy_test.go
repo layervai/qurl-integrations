@@ -111,7 +111,7 @@ func TestPublishIsPrivateUnlessPublic(t *testing.T) {
 				srv := apitest.NewServer(t)
 				opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}, test.flags...)}
 				if local {
-					opts = servingLocalPublish(t, srv, false, test.flags...)
+					opts = servingLocalPublish(t, srv, false, append([]string{"--name", "Example"}, test.flags...)...)
 				}
 				res := runCLI(t, opts)
 				if res.code != 0 {
@@ -121,9 +121,9 @@ func TestPublishIsPrivateUnlessPublic(t *testing.T) {
 				if len(creates) != 1 {
 					t.Fatalf("publish sent %d create requests, want one", len(creates))
 				}
-				// The local Connector pre-create carries the default name too.
-				if name, ok := creates[0]["name"]; !ok || len(name) <= len(`""`) {
-					t.Fatalf("create request has no public name: %q", name)
+				// The local Connector pre-create carries the name too.
+				if name := string(creates[0]["name"]); name != `"Example"` {
+					t.Fatalf("create request name = %s, want \"Example\"", name)
 				}
 				stated, present := creates[0]["private"]
 				if want := strconv.FormatBool(test.wantPrivate); !present || string(stated) != want {

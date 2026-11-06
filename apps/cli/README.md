@@ -842,9 +842,11 @@ route or stop the publisher to close its old work. See
 
 Every new resource needs a public name, set with `--name` (one line, up to
 100 characters). Recipients see it on the link page and in the passkey they
-save, so it is public. A local app defaults to its Connector ID, else the name
-of the directory you run `qurl publish` in, and a terminal shows
-`Name for a new resource: <name> (change with --name)`. A remote URL has no
+save, so it is public. A local app defaults to its Connector ID. In a terminal
+only, it otherwise defaults to the name of the directory you run `qurl publish`
+in, and the terminal shows `Name for a new resource: <name> (change with --name)`
+first. A script without `--name` or a Connector ID sends no name: publishing an
+existing app works, and creating one asks for `--name`. A remote URL has no
 default, because its address may be private: an interactive terminal asks for
 the name, and a script must pass `--name` to create a resource. Publishing a
 target again needs no name and keeps the one it has; change it with

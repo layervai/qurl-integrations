@@ -105,7 +105,7 @@ func TestPublishNameDefaultsForALocalApp(t *testing.T) {
 	var stderr bytes.Buffer
 	opts := &globalOpts{
 		lookupEnv: func(string) (string, bool) { return "", false },
-		streams:   &output.Streams{Out: io.Discard, Err: &stderr, ErrIsTTY: true},
+		streams:   &output.Streams{Out: io.Discard, Err: &stderr, InIsTTY: true, ErrIsTTY: true},
 	}
 	got, err := publishName(opts, newCmd(), "", "my-dashboard", local)
 	if err != nil || got != "my-dashboard" {
@@ -162,14 +162,18 @@ func TestValidPublicNameRefusesSurroundingSpace(t *testing.T) {
 	}
 }
 
-func TestPublishNameWithNoDefaultSendsNoneWithoutATerminal(t *testing.T) {
-	t.Chdir(string(filepath.Separator))
+func TestPublishNameWithoutATerminalUsesOnlyTheConnectorID(t *testing.T) {
+	t.Chdir(t.TempDir()) // a usable directory name, which a script must not publish
 	cmd := &cobra.Command{}
 	cmd.Flags().String("name", "", "")
 	var stderr bytes.Buffer
 	opts := &globalOpts{lookupEnv: func(string) (string, bool) { return "", false }, streams: &output.Streams{Err: &stderr}}
-	if got, err := publishName(opts, cmd, "", "", &publishTarget{kind: publishTargetLocal}); got != "" || err != nil {
+	local := &publishTarget{kind: publishTargetLocal}
+	if got, err := publishName(opts, cmd, "", "", local); got != "" || err != nil {
 		t.Fatalf("publishName = %q, %v", got, err)
+	}
+	if got, err := publishName(opts, cmd, "", "my-dashboard", local); got != "my-dashboard" || err != nil {
+		t.Fatalf("Connector ID default = %q, %v", got, err)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("a non-terminal was prompted or noted: %q", stderr.String())

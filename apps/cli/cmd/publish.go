@@ -73,8 +73,8 @@ For a remote URL, qURL registers it, prints the CRID, and exits:
 
 Every new resource needs a public name: recipients see it on the link page
 and in the passkey they save. Set it with --name. A local app defaults to its
---id, else the name of the directory you run the command in; qURL prints the
-name it uses. A remote URL has no default, because its address may be private:
+--id, else, in a terminal, the name of the directory you run the command in;
+qURL shows the name before it publishes. A remote URL has no default, because its address may be private:
 a terminal asks for the name, and a script must pass --name to create a
 resource. Publishing a target again needs no name and keeps the one it has;
 change it with "qurl preview set --name".
@@ -195,7 +195,7 @@ owns the share and turns it off when it exits.`,
 	}
 	cmd.Flags().StringArrayVar(&allowedDeviceKeys, "allow-device-key", nil, "recipient public key allowed to open the private resource (repeatable)")
 	cmd.Flags().BoolVar(&allowRequests, "allow-requests", false, "let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you")
-	cmd.Flags().StringVar(&name, "name", "", "public name recipients see, up to 100 characters; required to create a resource (default for a local app: --id, else the current directory's name)")
+	cmd.Flags().StringVar(&name, "name", "", "public name recipients see, up to 100 characters; required to create a resource (default for a local app: --id, else in a terminal the current directory's name)")
 	cmd.Flags().StringVar(&description, "description", "", "human-readable description stored with the resource")
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tag stored with the resource (repeatable)")
 	cmd.Flags().StringVar(&alias, "alias", "", "memorable handle stored with the resource")
@@ -880,9 +880,9 @@ func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract, em
 
 // publishName returns the public name a publish sends, checked against the
 // service's rules so the create is never refused for it. --name wins. A local
-// app defaults to the Connector ID chosen with --id, else the name of the
-// directory the command runs in (its project) unless that is the home or root
-// directory. Nothing is derived from the target URL or the description: the
+// app defaults to its configured Connector ID, else, in a terminal only, the
+// name of the directory the command runs in (its project) unless that is the
+// home or root directory. Nothing is derived from the target URL or the description: the
 // name is public, and they may name a hidden origin. With no such value an
 // interactive terminal asks for one; any other caller sends none, which the
 // service accepts only for a target that is already published.
@@ -890,20 +890,21 @@ func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string,
 	if cmd.Flags().Changed("name") {
 		return checkPublicName(flag)
 	}
+	terminal := opts.streams.InIsTTY && opts.streams.ErrIsTTY
 	name := ""
 	if target.kind == publishTargetLocal {
-		if name = resolveLocalConnectorID(opts, connectorID); name == "" {
+		// The directory name only where a person sees it before it is public.
+		if name = resolveLocalConnectorID(opts, connectorID); name == "" && terminal {
 			name = directoryPublishName(os.Getwd, os.UserHomeDir)
 		}
 	}
 	if validPublicName(name) {
-		// A person at a terminal sees the default before it becomes public.
-		if opts.streams.ErrIsTTY && !opts.quiet && opts.resolvedFormat != output.FormatJSON {
+		if terminal && !opts.quiet && opts.resolvedFormat != output.FormatJSON {
 			opts.printer().Notef(msgPublishNameDefault, name)
 		}
 		return name, nil
 	}
-	if !opts.streams.InIsTTY || !opts.streams.ErrIsTTY {
+	if !terminal {
 		// A script that republishes needs no name: the service asks for one
 		// only when it would create the resource; publishNameError explains it.
 		return "", nil
