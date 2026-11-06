@@ -89,6 +89,8 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 			if err != nil {
 				return err
 			}
+			opts.beginTermsNotice()
+			printer = opts.printer()
 			var link *qurlapi.ShareLink
 			if limits != nil {
 				link, err = opts.shareWithLimits(cmd, assessment.Input, *limits, ttl, sessionDuration)
@@ -108,7 +110,7 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 			if err := printer.ShareLink(link); err != nil {
 				return err
 			}
-			return printer.WorksOnce(link)
+			return opts.finishTermsNotice(printer.WorksOnce(link))
 		},
 	}
 

@@ -166,7 +166,7 @@ func TestPublishConsumerPolicyRejectsInvalidFlags(t *testing.T) {
 		{"", "receipt", false}, {"review", "", true}, {"contract", "   ", false}, {"contract", strings.Repeat("a", 129), false}, {"review", "   ", false},
 	} {
 		access := &qurlapi.PublishOptions{Public: input.public}
-		if err := setPublishConsumerPolicy(access, input.mode, input.contract); err == nil || access.ConsumerAccess != nil {
+		if err := setPublishConsumerPolicy(access, input.mode, input.contract, ""); err == nil || access.ConsumerAccess != nil {
 			t.Fatal("invalid publish policy accepted")
 		}
 	}

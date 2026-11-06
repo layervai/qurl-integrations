@@ -324,7 +324,7 @@ func validateRuleSelectionFlags(cmd *cobra.Command) error {
 	if cmd.Flags().Changed(ruleFlag) && cmd.Flags().Changed(ruleFileFlag) {
 		return exitcode.UsageError(errors.New("choose --rule or --rule-file, not both"))
 	}
-	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerContract, modeFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerEmailDomainFlag, consumerContract, modeFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
 		if cmd.Flags().Lookup(name) != nil && cmd.Flags().Changed(name) {
 			return exitcode.UsageError(errors.New("an access rule cannot be combined with other access settings"))
 		}

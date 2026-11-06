@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1198,11 +1199,20 @@ func validateConsumerPolicy(policy *qurl.ConsumerAccessPolicy) error {
 	return policy.Validate()
 }
 
+var consumerEmailDomain = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
 // ValidateConsumerPolicyFields checks the shared publish and configure inputs.
 // TODO(upstream-contract): Keep modes and contract limits in sync with qurl-service.
-func ValidateConsumerPolicyFields(mode, contract string) error {
+func ValidateConsumerPolicyFields(mode, contract, emailDomain string) error {
+	if mode == "email_domain" {
+		if len(emailDomain) > 253 || !consumerEmailDomain.MatchString(emailDomain) {
+			return qurl.ErrInvalidResourceRequest
+		}
+	} else if emailDomain != "" {
+		return qurl.ErrInvalidResourceRequest
+	}
 	switch mode {
-	case "keys", "invite_only", "email_capture", "review":
+	case "keys", "invite_only", "email_capture", "email_domain", "review":
 		if contract != "" {
 			return qurl.ErrInvalidResourceRequest
 		}

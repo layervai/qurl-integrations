@@ -43,6 +43,15 @@ Using another package format? See [Install](#install).
 
 ### 2. Start your app, then publish it
 
+The first `publish` or `share` shows the LayerV Terms notice on stderr.
+With `-o json`, the result carries `terms_notice` instead; agents must relay
+that notice to the user. It needs no prompt and keeps bare stdout unchanged,
+including under `--quiet`. The private user state records the shown Terms
+version (currently 2.0). A new version, or a reset state directory, shows it
+again. If notice state is unavailable, the command still runs and the notice
+can repeat. Text mode records the notice when stderr accepts it, even if a
+later API call fails. A failed JSON result does not mark an unseen notice as shown.
+
 No account, API key, or browser sign-in is required. The first command creates
 and registers a device identity automatically. Keep its local state to keep
 control of your resources. <!-- TODO(upstream-contract): qurl-service owns the anonymous resource and link caps. -->
@@ -817,9 +826,10 @@ reconcile. Stopping a share retains its headers until the next overlay
 replacement. Republishing the same Connector ID reuses them; replace or clear
 the entry before reusing that ID with different credentials. Changing a route's headers re-registers only that route on the
 live session; its siblings are untouched. Re-registration may interrupt
-in-flight requests. During session rotation the retiring session can retain
-old headers until replacement promotion and drain, so an update is not
-immediate revocation. See
+in-flight requests. During renewal, a retired session can keep active requests
+and their original headers until those requests finish or their original
+authorization expires. A header update is not immediate revocation; remove the
+route or stop the publisher to close its old work. See
 [docs/session-groups.md](../../docs/session-groups.md#runtime-request-headers).
 
 ### Saved access rules
@@ -871,7 +881,10 @@ standard input with `publish --rule-file -` or
 #### Private consumer policies
 
 On a deployment that supports consumer policies, choose private access with
-`--access invite_only`, `email_capture`, `review`, `keys`, or `contract`.
+`--access invite_only`, `email_capture`, `email_domain`, `review`, `keys`, or `contract`.
+For a company mailbox domain, use `--access email_domain --email-domain example.com`.
+The domain must be lowercase and exact: it does not include subdomains or other domains.
+Consumers verify their mailbox before access.
 Contract mode also needs `--contract <identifier>`. These flags cannot be
 combined with `--public`, legacy access requests, or legacy device allowlists.
 The reply must confirm `private: true` and the requested `consumer_access` policy.
@@ -883,6 +896,22 @@ qurl publish http://127.0.0.1:3000 --access invite_only -o json
 qurl access invite <CRID> --email ana@example.com -o json
 qurl access list_invitations <CRID> -o json
 ```
+
+For everyone with a verified company mailbox:
+
+```bash
+qurl publish http://127.0.0.1:8080 --access email_domain --email-domain example.com -o json
+```
+
+To change an existing private resource, read its current policy version first:
+
+```bash
+qurl access configure <CRID> --mode email_domain --email-domain example.com --version <current-version>
+```
+
+Publishing the same origin again must confirm the same email domain; it never
+silently changes an existing policy. Publishing a URL also does not close its
+public origin. Keep the application private and remove alternate public routes.
 
 An accepted email delivery is not proof that the recipient has enrolled.
 The recipient must verify mailbox control and bind a credential. Invite-only

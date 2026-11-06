@@ -720,6 +720,7 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 		windowsSandboxExitCode(shared.err),
 		shared.stdout,
 		shared.stderr,
+		resource.publisherVerified(t),
 	); err != nil {
 		t.Fatal(err)
 	}

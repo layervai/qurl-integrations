@@ -439,6 +439,19 @@ describe('startActiveGuildCount', () => {
     expect(logger.audit).not.toHaveBeenCalled();
   });
 
+  test('does not emit a resolved count after the gateway disconnects', async () => {
+    let resolveSample;
+    let connected = true;
+    const pending = new Promise(resolve => { resolveSample = resolve; });
+    const shim = { getActiveGuildCount: jest.fn().mockReturnValue(pending), isConnected: () => connected };
+    const timer = startActiveGuildCount(shim, { intervalMs: 60_000 });
+    connected = false;
+    resolveSample(7);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(logger.audit).not.toHaveBeenCalled();
+    clearInterval(timer);
+  });
+
   test('does not overlap async gateway-shim samples when a REST seed is still pending', async () => {
     let resolveSample;
     const pendingSample = new Promise((resolve) => { resolveSample = resolve; });
