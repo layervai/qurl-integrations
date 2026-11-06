@@ -37,6 +37,10 @@ func (p *Printer) PublisherStripeAccount(a *qurlapi.PublisherStripeAccount) erro
 	if a.AccountID == "" {
 		return p.PublisherPayments("", "")
 	}
+	if a.Revoked {
+		_, err := fmt.Fprintf(p.out, "%s\nLayerV's access was removed in Stripe, so buyers lost access and LayerV cannot stop their billing. Cancel or refund remaining subscriptions in Stripe, then run qurl payments disconnect to connect another account.\n", a.AccountID)
+		return err
+	}
 	if a.Disconnecting {
 		_, err := fmt.Fprintf(p.out, "%s\nNew purchases are stopped. Run qurl payments disconnect to finish disconnecting.\n", a.AccountID)
 		return err

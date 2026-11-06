@@ -140,3 +140,14 @@ func TestPaymentsUnfinishedDisconnectFinishesWithoutAskingAgain(t *testing.T) {
 		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
 	}
 }
+
+func TestPaymentsAccountTellsToCancelBillingAfterAStripeSideRevoke(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["revoked"] = true
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
+	if !strings.Contains(result.stdout.String(), "Cancel or refund remaining subscriptions in Stripe") {
+		t.Fatalf("stdout=%s", result.stdout.String())
+	}
+}

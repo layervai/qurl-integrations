@@ -66,7 +66,7 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 				if operation == paymentsAccount {
 					return opts.printer().PublisherStripeAccount(status)
 				}
-				if status.AccountID != "" && !status.Disconnecting {
+				if status.AccountID != "" && !status.Disconnecting && !status.Revoked {
 					confirmed, e := confirmStripeDisconnect(opts, status)
 					if e != nil {
 						return e
