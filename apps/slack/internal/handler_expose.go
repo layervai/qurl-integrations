@@ -519,8 +519,9 @@ func (h *Handler) createOrFindAndExposeURLResourceResult(ctx context.Context, lo
 	}
 	// Do not write the Slack channel alias into owner-level resource fields:
 	// Slack aliases are channel scoped and can differ across channels. The one
-	// exception is the public name a new resource requires: the alias is the
-	// name the admin chose for it, and the service ignores it on reuse.
+	// exception is the public name a new resource requires: the alias of the
+	// channel that creates the resource becomes its owner-level public name.
+	// The service ignores it on reuse, so other channels' aliases never change it.
 	resource, err := c.CreateResource(ctx, &client.CreateResourceInput{
 		Type:      client.ResourceTypeURL,
 		TargetURL: args.TargetURL,
