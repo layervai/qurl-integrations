@@ -445,8 +445,8 @@ func Find(selector string, lists ...[]Definition) (Definition, error) {
 	}
 }
 
-// NameTaken reports whether another custom rule, a built-in or Only the first
-// person already uses d's name, ignoring case and surrounding space.
+// NameTaken reports whether another custom rule, a built-in or the One-time
+// link preset already uses d's name, ignoring case and surrounding space.
 func NameTaken(items []Definition, d *Definition) bool {
 	name := strings.TrimSpace(d.Name)
 	// --rule reads these selectors as presets before saved names, so a rule named

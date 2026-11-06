@@ -29,7 +29,7 @@ type shareRulesState struct {
 	Shares        map[string]accessrules.LinkLimits `json:"shares"`
 }
 
-// OpenShareRules creates only the safe local directory.
+// OpenShareRules creates nothing; Set makes the safe local directory when it writes.
 func OpenShareRules(dir string) (*ShareRuleStore, error) {
 	if dir == "" {
 		return nil, errors.New("share rules require a profile")

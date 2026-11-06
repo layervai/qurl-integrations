@@ -241,7 +241,7 @@ func (s *AccessRuleStore) Save(ctx context.Context, version int64, d *accessrule
 	})
 }
 
-// Delete removes the preset with this ID or exact name; no resource is changed.
+// Delete removes the saved rule with this ID or exact name; no resource is changed.
 func (s *AccessRuleStore) Delete(ctx context.Context, version int64, selector string) (accessrules.Snapshot, error) {
 	return s.update(ctx, func(j *accessRuleJournal) error {
 		if version >= 0 && version != j.LocalVersion {

@@ -42,7 +42,7 @@ func rulesCmd(opts *globalOpts) *cobra.Command {
 		})
 	}})
 	command.AddCommand(ruleSaveCmd(opts), ruleDeleteCmd(opts))
-	command.AddCommand(&cobra.Command{Use: "sync", Short: "Synchronize saved rules with your linked account; read the JSON sync field, since a deferred sync exits 0", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	command.AddCommand(&cobra.Command{Use: "sync", Short: "Synchronize saved rules with your linked account; read the JSON sync field, since a deferred sync exits 0", Long: "Synchronize saved rules with your account; read the JSON sync field, since a deferred sync exits 0. Rules saved before linking upload to the first account that syncs: QURL_API_KEY's account when it is set, otherwise this device's linked account.", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		return opts.runRulesSync(cmd.Context())
 	}})
 	command.AddCommand(ruleResolveCmd(opts))
