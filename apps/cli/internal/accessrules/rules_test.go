@@ -61,6 +61,14 @@ func TestRuleNamesMatchTheServiceGrammar(t *testing.T) {
 		"a \u0301":                  false,
 		"\u2714\ufe0f Reviewers":    true,
 		"Team\u2028":                false,
+		// Names the service accepts must never fail a sync on read.
+		"Family \U0001F468\u200d\U0001F469\u200d\U0001F467":                              true,
+		"\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F England": true,
+		"\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645":                               true,
+		"\U0001F469\U0001F3FD\u200d\U0001F4BB Devs":                                      true,
+		"a\u200db":              false,
+		"Team \U0001F468\u200d": false,
+		"\U0001F3F4" + "\U000E0061\U000E0061\U000E0061\U000E0061\U000E0061\U000E0061\U000E0061" + "\U000E007F": false,
 	} {
 		d := Definition{ID: testID, Name: name, Mode: ModeKeys}
 		if got := d.Validate(false) == nil; got != ok {

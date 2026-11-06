@@ -319,14 +319,19 @@ func (d *Definition) Validate(builtin bool) error {
 const maxStackedMarks = 3
 
 // validName accepts 1-120 runes of single-line display text.
-// TODO(upstream-contract): copied from qurl-service internal/domain/access_rules.go
-// validAccessRuleName; keep identical.
+// TODO(upstream-contract): copied from qurl-service internal/domain/access_rule_name.go
+// validAccessRuleName; keep identical, since a stricter copy fails sync on read.
 func validName(name string) bool {
 	if !utf8.ValidString(name) || utf8.RuneCountInString(name) > 120 || strings.TrimSpace(name) == "" {
 		return false
 	}
+	runes := []rune(name)
 	marks, base := 0, false
-	for _, c := range name {
+	for i, c := range runes {
+		// Emoji ZWJ, tag sequences and in-word script joiners are the only format characters allowed.
+		if unicode.Is(unicode.Cf, c) && emojiFormatRune(runes, i) {
+			continue
+		}
 		if unicode.IsControl(c) || unicode.In(c, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return false
 		}
@@ -344,6 +349,65 @@ func validName(name string) bool {
 		}
 	}
 	return true
+}
+
+const cancelTag = '\U000E007F'
+
+func tagSpec(r rune) bool { return r >= '\U000E0020' && r < cancelTag }
+
+// emojiFormatRune accepts a zero width joiner between two emoji (after any
+// skin-tone modifier or variation selector), a script joiner, and the tag
+// characters of a subdivision flag.
+func emojiFormatRune(runes []rune, i int) bool {
+	if c := runes[i]; c == cancelTag || tagSpec(c) {
+		return subdivisionFlagTag(runes, i)
+	}
+	if scriptJoiner(runes, i) {
+		return true
+	}
+	if runes[i] != '\u200d' || i == 0 || i+1 == len(runes) || !unicode.Is(unicode.So, runes[i+1]) {
+		return false
+	}
+	prev := i - 1
+	if runes[prev] == '\ufe0f' && prev > 0 {
+		prev--
+	}
+	if runes[prev] >= '\U0001F3FB' && runes[prev] <= '\U0001F3FF' && prev > 0 {
+		prev-- // skin-tone modifier
+	}
+	return unicode.Is(unicode.So, runes[prev])
+}
+
+// joinerScripts are the scripts whose words use the zero width (non-)joiner.
+var joinerScripts = []*unicode.RangeTable{unicode.Arabic, unicode.Syriac, unicode.Devanagari, unicode.Bengali,
+	unicode.Gurmukhi, unicode.Gujarati, unicode.Oriya, unicode.Tamil, unicode.Telugu, unicode.Kannada,
+	unicode.Malayalam, unicode.Sinhala}
+
+// scriptJoiner accepts a ZWNJ or ZWJ between a letter or mark and a letter of one joiner script.
+func scriptJoiner(runes []rune, i int) bool {
+	if (runes[i] != '\u200c' && runes[i] != '\u200d') || i == 0 || i+1 == len(runes) {
+		return false
+	}
+	prev, next := runes[i-1], runes[i+1]
+	if !unicode.IsLetter(prev) && !unicode.In(prev, unicode.M) || !unicode.IsLetter(next) {
+		return false
+	}
+	return slices.ContainsFunc(joinerScripts, func(script *unicode.RangeTable) bool {
+		return unicode.Is(script, prev) && unicode.Is(script, next)
+	})
+}
+
+// subdivisionFlagTag accepts a tag in the black flag, one to six tag specs, then the cancel tag.
+func subdivisionFlagTag(runes []rune, i int) bool {
+	first, end := i, i
+	for first > 0 && tagSpec(runes[first-1]) {
+		first--
+	}
+	for end < len(runes) && tagSpec(runes[end]) {
+		end++
+	}
+	specs := end - first
+	return first > 0 && runes[first-1] == '\U0001F3F4' && specs >= 1 && specs <= 6 && end < len(runes) && runes[end] == cancelTag
 }
 
 func (d *Definition) builtIn() bool {
