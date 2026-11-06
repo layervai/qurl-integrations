@@ -406,7 +406,7 @@ func protectConnectorSummary(alias, env string) string {
 // protectURLSummary renders the confirm-card sentence for a URL proposal.
 func protectURLSummary(target, alias string) string {
 	if alias != "" {
-		return fmt.Sprintf("Protect %s as `$%s`. A new resource is shown to recipients as %q.", target, alias, alias)
+		return fmt.Sprintf("Protect %s as `$%s`.", target, alias)
 	}
 	return fmt.Sprintf("Protect %s.", target)
 }
