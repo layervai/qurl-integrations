@@ -642,10 +642,12 @@ func sameJSON(a, b json.RawMessage) bool {
 	if bytes.Equal(a, b) {
 		return true
 	}
-	decode := func(raw json.RawMessage) (value any, err error) {
+	decode := func(raw json.RawMessage) (any, error) {
+		var value any
 		decoder := json.NewDecoder(bytes.NewReader(raw))
 		decoder.UseNumber() // large integers stay exact
-		return value, decoder.Decode(&value)
+		err := decoder.Decode(&value)
+		return value, err
 	}
 	x, errX := decode(a)
 	y, errY := decode(b)

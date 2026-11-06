@@ -53,6 +53,9 @@ func TestDefinitionKeepsUnknownFields(t *testing.T) {
 	if json.Unmarshal([]byte(strings.Replace(raw, `"eu"`, `"us"`, 1)), &other) != nil || EqualItems([]Definition{d}, []Definition{other}) {
 		t.Fatal("a change to an unknown field went unseen")
 	}
+	if sameJSON(json.RawMessage(`{"n":9007199254740993}`), json.RawMessage(`{"n":9007199254740992}`)) || !sameJSON(json.RawMessage(`{"a":1,"b":2}`), json.RawMessage(`{"b":2, "a":1}`)) {
+		t.Fatal("kept fields compare by value, exactly")
+	}
 	if d.Name = "Edited"; d.Validate(false) == nil {
 		if _, err := json.Marshal(d); !errors.Is(err, ErrNewerRule) {
 			t.Fatalf("an edited newer rule was written: %v", err)
