@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -66,6 +67,27 @@ type Definition struct {
 	// Payment makes a contract rule "People who pay". It holds no Stripe
 	// account: the connected one is read when the rule is applied.
 	Payment *Payment `json:"payment,omitempty"`
+	// raw is the rule exactly as read when it holds fields this CLI does not
+	// model (qurl.AccessRule.HasUnknownFields), such as ones a newer service
+	// adds. Such a rule is listed, deleted and written back as raw, never
+	// edited or applied: dropping a setting could share more openly.
+	raw json.RawMessage
+}
+
+// HasUnknownFields reports whether the rule holds fields this CLI does not model.
+func (d *Definition) HasUnknownFields() bool { return d.raw != nil }
+
+// MarshalJSON writes a rule with unknown fields exactly as it was read.
+func (d Definition) MarshalJSON() ([]byte, error) { //nolint:gocritic // A value receiver marshals every copy, so none drops its unknown fields.
+	type plain Definition
+	if d.raw == nil {
+		return json.Marshal(plain(d))
+	}
+	var read Definition
+	if json.Unmarshal(d.raw, &read) != nil || !EqualItems([]Definition{read}, []Definition{d}) {
+		return nil, ErrNewerRule
+	}
+	return d.raw, nil
 }
 
 // Payment is a CRID payment policy without its account; the SDK's policy
@@ -575,6 +597,7 @@ var (
 	ErrAmbiguousRule   = errors.New("more than one access rule has this name; use its ID")
 	ErrDuplicateName   = errors.New("an access rule with this name already exists")
 	ErrLibraryLimit    = errors.New("access rules exceed the 100-rule or size limit")
+	ErrNewerRule       = errors.New("access rule has settings from a newer qURL app and cannot be changed or used here")
 )
 
 // AccountLibrary is the authenticated service snapshot, never printed directly.
@@ -607,11 +630,20 @@ func EqualItems(a, b []Definition) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].ID != b[i].ID || a[i].Name != b[i].Name || !a[i].Policy(1).Equal(b[i].Policy(1)) || !sameSettings(&a[i], &b[i]) {
+		if a[i].ID != b[i].ID || a[i].Name != b[i].Name || !a[i].Policy(1).Equal(b[i].Policy(1)) || !sameSettings(&a[i], &b[i]) || !sameJSON(a[i].raw, b[i].raw) {
 			return false
 		}
 	}
 	return true
+}
+
+// sameJSON compares two optional JSON values ignoring member order and spacing.
+func sameJSON(a, b json.RawMessage) bool {
+	if bytes.Equal(a, b) {
+		return true
+	}
+	var x, y any
+	return a != nil && b != nil && json.Unmarshal(a, &x) == nil && json.Unmarshal(b, &y) == nil && reflect.DeepEqual(x, y)
 }
 
 // Validate verifies a complete service response without guessing absent fields.
@@ -623,9 +655,7 @@ func (l AccountLibrary) Validate() error {
 }
 
 // UnmarshalJSON preserves field presence so irrelevant empty settings cannot pass.
-// It accepts exactly the contract's fields; a write-back therefore never drops one.
-// TODO(upstream-contract): a new rule field from qurl-service fails sync on
-// released CLIs until the catalog schema is versioned or older clients are served without it.
+// Fields the SDK does not model are kept in raw, so a write-back never drops one.
 func (d *Definition) UnmarshalJSON(data []byte) error {
 	type plain Definition
 	var fields map[string]json.RawMessage
@@ -633,10 +663,12 @@ func (d *Definition) UnmarshalJSON(data []byte) error {
 		return errors.New("invalid access rule definition")
 	}
 	var parsed plain
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&parsed) != nil {
+	var err error
+	if json.Unmarshal(data, &parsed) != nil {
 		return errors.New("invalid access rule definition")
+	}
+	if parsed.raw, err = unknownFieldsRaw(data); err != nil {
+		return err
 	}
 	for key, value := range fields {
 		switch key {
@@ -659,12 +691,24 @@ func (d *Definition) UnmarshalJSON(data []byte) error {
 			if bytes.Equal(value, []byte("null")) {
 				return errors.New("invalid access rule definition")
 			}
-		default:
-			return errors.New("invalid access rule definition")
 		}
 	}
 	*d = Definition(parsed)
 	return nil
+}
+
+// unknownFieldsRaw returns data compacted when it holds a field the SDK does
+// not model, or nil when it holds none.
+func unknownFieldsRaw(data []byte) (json.RawMessage, error) {
+	var probe qurl.AccessRule
+	var compact bytes.Buffer
+	if json.Unmarshal(data, &probe) != nil || json.Compact(&compact, data) != nil {
+		return nil, errors.New("invalid access rule definition")
+	}
+	if !probe.HasUnknownFields() {
+		return nil, nil
+	}
+	return compact.Bytes(), nil
 }
 
 // requiredMembers are the members each nested setting must hold.

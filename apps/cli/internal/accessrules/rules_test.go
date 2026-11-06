@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/layervai/qurl-go/qurl"
 )
 
 const testID = "11111111-1111-4111-8111-111111111111"
@@ -27,12 +31,58 @@ func TestDefinitionRejectsUnsupportedOrContradictoryRules(t *testing.T) {
 	if err := valid.Validate(false); err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{`{"id":"` + testID + `","name":"x","mode":"public","contract_id":"plan"}`, `{"id":"` + testID + `","name":"x","mode":"future"}`, `{"id":"` + testID + `","name":"x","mode":"keys","secret":"value"}`} {
+	for _, raw := range []string{`{"id":"` + testID + `","name":"x","mode":"public","contract_id":"plan"}`, `{"id":"` + testID + `","name":"x","mode":"future"}`} {
 		if decodeDefinition(raw) == nil {
 			t.Fatal("unsafe definition accepted")
 		}
 	}
 }
+
+// A rule field from a newer service, on the rule or inside a setting, is kept
+// and written back exactly as read; a change to it is still a change.
+func TestDefinitionKeepsUnknownFields(t *testing.T) {
+	raw := `{"id":"` + testID + `","name":"Quick","mode":"public","region":"eu","link_limits":{"expires_in":"1h","max_opens":3}}`
+	var d Definition
+	if err := json.Unmarshal([]byte(raw), &d); err != nil || d.Validate(false) != nil || !d.HasUnknownFields() || d.LinkLimits.ExpiresIn != "1h" {
+		t.Fatalf("decode %+v: %v", d, err)
+	}
+	if out, err := json.Marshal([]Definition{d}); err != nil || string(out) != "["+raw+"]" {
+		t.Fatalf("write-back %s %v", out, err)
+	}
+	var other Definition
+	if json.Unmarshal([]byte(strings.Replace(raw, `"eu"`, `"us"`, 1)), &other) != nil || EqualItems([]Definition{d}, []Definition{other}) {
+		t.Fatal("a change to an unknown field went unseen")
+	}
+	if d.Name = "Edited"; d.Validate(false) == nil {
+		if _, err := json.Marshal(d); !errors.Is(err, ErrNewerRule) {
+			t.Fatalf("an edited newer rule was written: %v", err)
+		}
+	}
+	var known Definition
+	if json.Unmarshal([]byte(`{"id":"`+testID+`","name":"x","mode":"keys"}`), &known) != nil || known.HasUnknownFields() {
+		t.Fatal("a rule of known fields reads as newer")
+	}
+}
+
+// The SDK decides which fields are unknown, so it must model exactly the
+// fields Definition does; otherwise one would be dropped or flagged wrongly.
+func TestDefinitionFieldsMatchTheSDK(t *testing.T) {
+	names := func(v any) []string {
+		var out []string
+		for f := range reflect.TypeOf(v).Fields() {
+			if tag, _, _ := strings.Cut(f.Tag.Get("json"), ","); tag != "" && tag != "-" {
+				out = append(out, tag)
+			}
+		}
+		return out
+	}
+	for _, pair := range [][2]any{{Definition{}, qurl.AccessRule{}}, {LinkLimits{}, qurl.AccessRuleLinkLimits{}}, {Payment{}, qurl.AccessRulePayment{}}} {
+		if a, b := names(pair[0]), names(pair[1]); !slices.Equal(a, b) {
+			t.Errorf("%T fields %v, SDK %v", pair[0], a, b)
+		}
+	}
+}
+
 func TestMergeKeepsUnrelatedChangesAndRequiresSameRuleResolution(t *testing.T) {
 	base := []Definition{{ID: testID, Name: "Base", Mode: "keys"}}
 	local := []Definition{{ID: testID, Name: "Local", Mode: "keys"}}
@@ -252,9 +302,6 @@ func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
 		head + `"mode":"public","approval_expires_in":"7d"}`,
 		head + `"mode":"public","link_limits":{"one_time_use":true}}`,
 		head + `"mode":"public","link_limits":{"expires_in":"1h","session_duration":null}}`,
-		head + `"mode":"public","link_limits":{"expires_in":"1h","max_sessions":1}}`,
-		head + `"mode":"review","allow_download":true}`,
-		head + `"mode":"public","link_limits":{"expires_in":"1h","extra":1}}`,
 		head + `"mode":"public","link_limits":null}`,
 		head + `"mode":"review","approval_expires_in":null}`,
 		head + `"mode":"public","link_limits":{"expires_in":"30s"}}`,
@@ -269,7 +316,6 @@ func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
 		paid + `{"price_id":null,"access_seconds":0}}`,
 		paid + `{"price_id":"price_1","access_seconds":null}}`,
 		paid + `null}`,
-		paid + `{"price_id":"price_1","access_seconds":0,"account_id":"acct_1"}}`,
 		paid + `{"price_id":"prod_1","access_seconds":0}}`,
 		paid + `{"price_id":"price_","access_seconds":0}}`,
 		paid + `{"price_id":"price_1","access_seconds":-1}}`,

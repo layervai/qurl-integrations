@@ -280,7 +280,7 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 		return NotFound, true
 	case errors.Is(err, accessrules.ErrAmbiguousRule):
 		return Usage, true
-	case errors.Is(err, accessrules.ErrDuplicateName), errors.Is(err, accessrules.ErrLibraryLimit):
+	case errors.Is(err, accessrules.ErrDuplicateName), errors.Is(err, accessrules.ErrLibraryLimit), errors.Is(err, accessrules.ErrNewerRule):
 		return InvalidInput, true
 
 	case errors.Is(err, qurlapi.ErrAccountPort), errors.Is(err, qurlapi.ErrAccountEndpoint):

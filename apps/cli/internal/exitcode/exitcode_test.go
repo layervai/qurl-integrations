@@ -50,6 +50,7 @@ var cliSentinels = map[string]struct {
 	"accessrules.ErrAmbiguousRule":       {accessrules.ErrAmbiguousRule, Usage},
 	"accessrules.ErrDuplicateName":       {accessrules.ErrDuplicateName, InvalidInput},
 	"accessrules.ErrLibraryLimit":        {accessrules.ErrLibraryLimit, InvalidInput},
+	"accessrules.ErrNewerRule":           {accessrules.ErrNewerRule, InvalidInput},
 	"state.ErrAccessRulesFile":           {state.ErrAccessRulesFile, Config},
 	"qurlapi.ErrAccountLoad":             {qurlapi.ErrAccountLoad, Unavailable},
 	"qurlapi.ErrAccountUnavailable":      {qurlapi.ErrAccountUnavailable, Unavailable},

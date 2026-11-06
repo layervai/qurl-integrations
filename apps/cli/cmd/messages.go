@@ -247,7 +247,7 @@ func customerMessages() []string {
 		msgRulesFileDamaged, msgLinkLimitsFileDamaged, msgRulesRuleConflict, msgRulesChanged, msgRulesOtherAccount, msgRulesNotFound,
 		msgRulesAmbiguous, msgRulesDuplicateName, msgRulesLimit, msgRulesNotSynced, msgRulesLocalOnly,
 		msgRulesUnlinked, msgRulesSignIn, msgRulesLoginNotSynced, msgRulesUnavailable, msgRulesBusy, msgRulesConflict,
-		msgRulesLinkNotMade, msgRulesLimitsUnread, msgRulesStripeNotConnected, msgRulesPaymentsUnavailable,
+		msgRulesLinkNotMade, msgRulesLimitsUnread, msgRulesStripeNotConnected, msgRulesPaymentsUnavailable, msgRulesNewer,
 		msgVerifyMismatch,
 		msgVerifyMissing,
 		msgSavedSkillOutdated,
@@ -315,6 +315,7 @@ const (
 	msgRulesAmbiguous        = "More than one access rule has that name. Use its ID from qurl rules list."
 	msgRulesDuplicateName    = "An access rule with that name already exists. Choose another name."
 	msgRulesLimit            = "Access rules are limited to 100 rules and 256 KB in total. Delete rules you no longer need, then try again."
+	msgRulesNewer            = "This rule has settings from a newer qURL app, so this version can't change or use it. Update qurl, or delete the rule."
 	msgRulesNotSynced        = "Could not sync access rules with your account. Your saved rules are preserved."
 	msgRulesLocalOnly        = "Access rules are saved on this device only. Run qurl account setup to sync them with an account."
 	msgRulesUnlinked         = "Access rules stay on this device: it is not linked to an active account."

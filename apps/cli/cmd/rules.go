@@ -148,7 +148,7 @@ func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file, flag string)
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("access rule JSON is too large"))
 	}
 	var definition accessrules.Definition
-	if connectorstate.DecodeStrictJSON(body, &definition) != nil {
+	if connectorstate.DecodeStrictJSON(body, &definition) != nil || definition.HasUnknownFields() {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("invalid access rule definition"))
 	}
 	if err := definition.Validate(accessrules.IsPresetID(definition.ID)); err != nil {
@@ -184,6 +184,9 @@ func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (ac
 		return accessrules.Definition{}, ruleCommandError(err)
 	}
 	rule, err := accessrules.Find(selector, snapshot.BuiltIns, snapshot.Items)
+	if err == nil && rule.HasUnknownFields() {
+		err = accessrules.ErrNewerRule
+	}
 	if err != nil {
 		return accessrules.Definition{}, ruleCommandError(err)
 	}
@@ -361,6 +364,8 @@ func ruleErrorMessage(err error) string {
 		return msgRulesDuplicateName
 	case errors.Is(err, accessrules.ErrLibraryLimit):
 		return msgRulesLimit
+	case errors.Is(err, accessrules.ErrNewerRule):
+		return msgRulesNewer
 	}
 	return ""
 }

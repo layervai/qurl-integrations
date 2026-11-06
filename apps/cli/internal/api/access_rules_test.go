@@ -70,11 +70,11 @@ func TestAccessRulesFrozenAccountIsNotUnlinked(t *testing.T) {
 	}
 }
 
-func TestAccessRulesIgnoresEnvelopeAdditionsButNotRuleFields(t *testing.T) {
+func TestAccessRulesIgnoresEnvelopeAdditionsAndKeepsRuleFields(t *testing.T) {
 	rule := `{"id":"11111111-1111-4111-8111-111111111111","name":"Team","mode":"keys"}`
 	for body, ok := range map[string]bool{
 		`{"data":{"account_id":"one","version":2,"items":[` + rule + `],"built_ins":[{"id":"builtin.new","name":"Renamed","mode":"keys","future":true}],"next":1},"meta":{"request_id":"r"},"links":{}}`: true,
-		`{"data":{"account_id":"one","version":2,"items":[{"id":"11111111-1111-4111-8111-111111111111","name":"Team","mode":"keys","future":1}]}}`:                                                       false,
+		`{"data":{"account_id":"one","version":2,"items":[{"id":"11111111-1111-4111-8111-111111111111","name":"Team","mode":"keys","future":1}]}}`:                                                       true,
 		`{"data":{"account_id":"one","version":null,"items":[]}}`: false,
 	} {
 		srv := apitest.NewServer(t)
@@ -86,6 +86,30 @@ func TestAccessRulesIgnoresEnvelopeAdditionsButNotRuleFields(t *testing.T) {
 		if ok != (err == nil) || (ok && (library.Version != 2 || len(library.Items) != 1)) {
 			t.Errorf("%s: %+v %v", body, library, err)
 		}
+	}
+}
+
+// A rule field this CLI doesn't model goes back to the service unchanged.
+func TestAccessRulesSaveUnknownRuleFieldsBack(t *testing.T) {
+	newer := `{"id":"11111111-1111-4111-8111-111111111111","name":"Buyers","mode":"contract","contract_id":"buyers","payment":{"price_id":"price_1","access_seconds":0,"trial_days":7},"region":"eu"}`
+	reply := `{"data":{"account_id":"one","version":%d,"items":[` + newer + `],"built_ins":[]}}`
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/me/access-rules", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintf(w, reply, 2)
+	})
+	srv.Script(http.MethodPut, "/v1/me/access-rules", func(w http.ResponseWriter, r *http.Request) {
+		if body, err := io.ReadAll(r.Body); err != nil || string(body) != `{"version":2,"items":[`+newer+`]}` {
+			t.Errorf("save body %s %v", body, err)
+		}
+		_, _ = fmt.Fprintf(w, reply, 3)
+	})
+	rules := newTestClient(t, srv, nil).AccessRules()
+	library, err := rules.Load(t.Context())
+	if err != nil || len(library.Items) != 1 || !library.Items[0].HasUnknownFields() {
+		t.Fatalf("load %+v %v", library, err)
+	}
+	if saved, err := rules.Replace(t.Context(), library.Version, library.Items); err != nil || saved.Version != 3 {
+		t.Fatalf("save %+v %v", saved, err)
 	}
 }
 
@@ -109,7 +133,7 @@ func TestAccessRulesKeepQuickShareOutOfSavesAndCarryPayment(t *testing.T) {
 	})
 	rules := newTestClient(t, srv, nil).AccessRules()
 	library, err := rules.Load(t.Context())
-	if err != nil || len(library.Items) != 1 || library.Items[0].Payment == nil || *library.Items[0].Payment != (accessrules.Payment{PriceID: "price_1", AccessSeconds: 3600}) {
+	if err != nil || len(library.Items) != 1 || library.Items[0].HasUnknownFields() || library.Items[0].Payment == nil || *library.Items[0].Payment != (accessrules.Payment{PriceID: "price_1", AccessSeconds: 3600}) {
 		t.Fatalf("load %+v %v", library, err)
 	}
 	if saved, err := rules.Replace(t.Context(), library.Version, library.Items); err != nil || saved.Version != 3 {
