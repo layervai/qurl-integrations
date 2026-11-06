@@ -4,25 +4,22 @@
 # 200/404/405/5xx), query-string-tolerant caching, the error mapping that masks
 # every upstream status but a 2xx object hit, the scrubbing of the x-amz-*/Envoy
 # headers that would fingerprint the origin, Content-Type/Cache-Control
-# passthrough, Range + HEAD, and that Envoy attaches a SigV4 Authorization
-# header over the correctly-canonicalized path.
-#
-# The stub does not verify signatures (no shared secret); real SigV4 crypto is
-# validated against S3 during the staging soak. See test/sigv4_fixtures.txt.
+# passthrough, Range + HEAD, and real SigV4 HMAC verification after rewriting.
+# The verifier uses synthetic credentials and independent AWS signing vectors.
+# See test/sigv4_fixtures.txt for supported and rejected object-key shapes.
 set -uo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 IMG="${IMG:-s3-static-connector:test}"
 REQUESTED_IMG="$IMG"
 S3_ORIGIN_SECURITY_WAIVER_IMAGE="${S3_ORIGIN_SECURITY_WAIVER_IMAGE:-}"
-NET="s3-static-connector-testnet"
-STUB="s3-static-connector-stub"
-ORIGIN="s3-static-connector-app"
-# python:3.12.13-slim-trixie multi-arch index, used only for the local stub.
-STUB_IMG="python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9"
+NET="s3-static-connector-testnet-$$"
+STUB="s3-static-connector-stub-$$"
+ORIGIN="s3-static-connector-app-$$"
+STUB_IMG="s3-static-connector-stub:test"
 arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) ;; esac
 PLATFORM="${PLATFORM:-linux/$arch}"
 # One waiver for every assertion set the pinned immutable origin predates —
-# control-char, upstream-response, and request-preflight. They share a digest
+# control-char, upstream-response, request-preflight, and exotic-key handling. They share a digest
 # and a lifecycle, so the single pin-rotation PR that bumps the digest retires
 # all of them at once.
 waive_security_contract=false
@@ -112,11 +109,16 @@ docker run --rm --platform "$PLATFORM" --entrypoint sh \
   -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 \
   "$IMG" -c 'set -eu; envoy --version >/dev/null; RENDER_DIR=/tmp/rendered render.sh; envoy --mode validate -c /tmp/rendered/envoy.yaml >/dev/null'
 
+# Keep the stub native to the host, even when the origin runs under QEMU.
+docker build -t "$STUB_IMG" "$DIR/test/stub-s3"
+docker run --rm -v "$DIR/test/stub-s3:/stub:ro" "$STUB_IMG" \
+  python -B -m unittest discover -s /stub -p 'test_*.py'
+
 docker network create "$NET" >/dev/null
 
 docker run -d --name "$STUB" --network "$NET" \
-  -v "$DIR/test/stub-s3/stub.py:/stub.py:ro" \
-  "$STUB_IMG" python /stub.py >/dev/null
+  -v "$DIR/test/stub-s3:/stub:ro" \
+  "$STUB_IMG" python /stub/stub.py >/dev/null
 
 docker run -d --platform "$PLATFORM" --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
   -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 \
@@ -511,6 +513,32 @@ if [ "$waive_security_contract" != "true" ]; then
   fi
 fi
 
+# The exact legacy Slack pin predates the exotic-key contract. Preserve its
+# existing explicit exception; current producer images always run these checks.
+# Cryptographic verification of every request is never waived.
+if [ "$waive_security_contract" != "true" ]; then
+  # Exotic-key requests cross both real proxies; the stub verifies their HMAC.
+  for key_case in '/a+b.txt|/a%2Bb.txt|plus' '/a%2Bb.txt|/a%2Bb.txt|plus' '/a%2Fb.txt|/a/b.txt|slash' '/dir//file.txt|/dir/file.txt|normalized-slashes' '/bundle@2x[slug]~(1)!,=;.js|/bundle%402x%5Bslug%5D~%281%29%21%2C%3D%3B.js|punctuation'; do
+    IFS='|' read -r viewer_path signed_path expected_body <<< "$key_case"
+    docker exec "$ORIGIN" qurl-origin-cachectl purge >/dev/null
+    mark="$(stub_log_mark)"
+    fetch --globoff --path-as-is "$base$viewer_path"
+    expect_eq "SigV4 exotic $viewer_path status" "$(status_code)" 200
+    expect_eq "SigV4 exotic $viewer_path signed path" "$(hval X-Stub-Path)" "$signed_path"
+    expect_eq "SigV4 exotic $viewer_path key" "$(cat "$B")" "$expected_body"
+    expect_stub_gets_since "SigV4 exotic $viewer_path verified on a cold request" "$mark" 'GET /' 1
+  done
+  # A residual percent escape would decode again at S3 and can select another key.
+  # Unsupported bytes must never reach S3, even when the eventual signature is valid.
+  for rejected_path in '/a%20b.txt' '/a%252Fb.txt' '/a%25252Fb.txt' '/a%25b.txt' '/a%3Fb.txt' '/a%23b.txt' '/caf%C3%A9.txt'; do
+    mark="$(stub_log_mark)"
+    fetch --path-as-is "$base$rejected_path"
+    expect_eq "unsupported key $rejected_path status" "$(status_code)" 404
+    expect_eq "unsupported key $rejected_path body" "$(cat "$B")" 'Not Found'
+    expect_stub_gets_since "unsupported key $rejected_path never reaches S3" "$mark" 'GET /' 0
+  done
+fi
+
 # 14. S3_PREFIX is joined with the clean-URL path at runtime.
 docker rm -f "$ORIGIN" >/dev/null 2>&1
 docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
@@ -543,8 +571,17 @@ mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/website"
 expect_stub_gets_since "CACHE_DEFAULT_TTL caches metadata-less object" "$mark" 'GET /site/website/index.html ' 0
 
+if [ "$waive_security_contract" != "true" ]; then
+  mark="$(stub_log_mark)"
+  fetch --path-as-is "$base/a%2Bb.txt"
+  expect_eq "S3_PREFIX encoded plus status" "$(status_code)" 200
+  expect_eq "S3_PREFIX encoded plus signed path" "$(hval X-Stub-Path)" '/site/a%2Bb.txt'
+  expect_eq "S3_PREFIX encoded plus body" "$(cat "$B")" 'prefixed-plus'
+  expect_stub_gets_since "S3_PREFIX encoded plus reaches S3 once" "$mark" 'GET /site/a%2Bb.txt ' 1
+fi
+
 if [ "$waive_security_contract" = "true" ]; then
-  message="Known pre-fix S3 origin digest remains pinned by Slack; the control-char, upstream-response, and request-preflight assertions are waived only for this exact immutable image. Rotate the pin after the producer changes publish, then remove S3_ORIGIN_SECURITY_WAIVER_IMAGE."
+  message="Known pre-fix S3 origin digest remains pinned by Slack; the control-char, upstream-response, request-preflight and exotic-key assertions are waived only for this exact immutable image. Rotate the pin after the producer changes publish, then remove S3_ORIGIN_SECURITY_WAIVER_IMAGE."
   if [ "${GITHUB_ACTIONS:-false}" = "true" ]; then
     printf '::warning title=S3 origin security pin pending rotation::%s\n' "$message"
   else
@@ -749,6 +786,15 @@ else
   expect_eq "runtime request rejection logged once, missing key logs none" "$auth_lines" 1
   expect_origin_log "runtime rejection status is a JSON number" '"status":403'
   expect_origin_log "runtime rejection includes the S3 key" '"key":"/not-synced-yet/forbidden.json"'
+fi
+
+# A viewer 404 can mask a signer failure on an error-path fixture. All signed
+# requests must verify, not only those whose object response happens to be 200.
+if signature_log=$(docker logs "$STUB" 2>&1); then
+  signature_mismatches=$(printf '%s\n' "$signature_log" | grep -c '^STUB signature mismatch' || true)
+  expect_eq "all signed upstream requests verify" "$signature_mismatches" 0
+else
+  no "could not read the S3 signature verification log"
 fi
 
 echo "-------------------------------------------"

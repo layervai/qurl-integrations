@@ -40,7 +40,9 @@ updates:
 
   # Docker — reusable private S3 static-site origin
   - package-ecosystem: "docker"
-    directory: "/origins/s3-static-connector"
+    directories:
+      - "/origins/s3-static-connector"
+      - "/origins/s3-static-connector/test/stub-s3"
     schedule:
       interval: "weekly"
       day: "monday"
