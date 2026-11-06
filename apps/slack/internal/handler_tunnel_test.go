@@ -775,7 +775,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if asyncEnvelope[respFieldResponseType] != respTypeEphemeral {
 		t.Fatalf("response_url response_type = %q, want ephemeral", asyncEnvelope[respFieldResponseType])
 	}
-	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
+	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true || resourceBody["name"] != testTunnelSlug {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}
 	// Install seeds the description (which doubles as the Display Name) with
@@ -1605,7 +1605,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		t.Fatalf("modal ack = %q, want empty JSON object", w.Body.String())
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
+	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true || resourceBody["name"] != testTunnelSlug {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}
 	// The modal path shares buildTunnelInstall with the slash path, but assert
