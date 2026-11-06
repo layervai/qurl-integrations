@@ -843,8 +843,10 @@ route or stop the publisher to close its old work. See
 Every new resource needs a public name, set with `--name` (one line, up to
 100 characters). Recipients see it on the link page and in the passkey they
 save, so it is public. A local app defaults to its `--id`, else the name of
-the directory you run `qurl publish` in, and the result shows the name as
-`Name:` (or `name` in JSON). A remote URL has no default, because its address
+the directory you run `qurl publish` in. A terminal shows
+`Name: <name> (change with --name)` before publishing, and the result shows it
+as `Name:` (or `name` in JSON). A directory name is public too: run from the
+project directory, or pass `--name`. A remote URL has no default, because its address
 may be private: an interactive terminal asks for the name, and a script must
 pass `--name` or the command fails before it sends anything. The name, the
 description and the target are never derived from one another. Publishing a
@@ -978,7 +980,7 @@ credential or making a network request.
 
 | Flag | Description |
 |------|-------------|
-| `--name` | Public name recipients see, up to 100 characters. Required for a new remote resource |
+| `--name` | Public name recipients see, up to 100 characters. Required for a remote URL; a local app defaults to its Connector ID or directory name |
 | `--public` | Let anyone who has the CRID open the resource. Without it the resource is private |
 | `--allow-device-key <public-key>` | Allow a recipient's device to open the private resource (repeatable) |
 | `--allow-requests` | Let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you |

@@ -24,6 +24,7 @@ import (
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func publishCmd(opts *globalOpts) *cobra.Command {
@@ -148,16 +149,20 @@ owns the share and turns it off when it exits.`,
 			if err != nil {
 				return err
 			}
-			if err := validatePublishTargetFlags(cmd, target); err != nil {
+			if err := validatePublishTargetFlags(cmd, target, name); err != nil {
 				return err
 			}
-			if access.Name, err = publishName(opts, cmd, name, connectorID, target); err != nil {
+			resolveName := func() (err error) {
+				access.Name, err = publishName(opts, cmd, name, connectorID, target)
 				return err
 			}
 			if target.kind == publishTargetLocal {
-				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access)
+				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access, resolveName)
 			}
 			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
+				return err
+			}
+			if err := resolveName(); err != nil {
 				return err
 			}
 			opts.beginTermsNotice()
@@ -259,9 +264,14 @@ func validatePublishAccessFlags(cmd *cobra.Command, public, private, allowReques
 	return validateAllowedDeviceKeys(allowedDeviceKeys)
 }
 
-func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool, access *qurlapi.PublishOptions) (retErr error) {
+// resolveName sets access.Name. It runs after the local checks, so nobody is
+// asked for a name for a publish those checks refuse.
+func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool, access *qurlapi.PublishOptions, resolveName func() error) (retErr error) {
 	requestedID, err := validateLocalPublishRequest(ctx, opts, target, flagID, foreground)
 	if err != nil {
+		return err
+	}
+	if err := resolveName(); err != nil {
 		return err
 	}
 	opts.beginTermsNotice()
@@ -898,6 +908,11 @@ func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string,
 		}
 	}
 	if validPublicName(name) {
+		// A person at a terminal sees the default before it becomes public;
+		// scripts read it from the result.
+		if opts.streams.ErrIsTTY && !opts.quiet && opts.resolvedFormat != output.FormatJSON {
+			opts.printer().Notef(msgPublishNameDefault, name)
+		}
 		return name, nil
 	}
 	if !opts.streams.InIsTTY || !opts.streams.ErrIsTTY {
@@ -906,9 +921,13 @@ func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string,
 	if _, err := fmt.Fprint(opts.streams.Err, msgPublishNamePrompt); err != nil {
 		return "", err
 	}
+	// The command reads nothing else from stdin, so buffering past the line is safe.
 	scanner := bufio.NewScanner(opts.streams.In)
 	if !scanner.Scan() {
-		return "", errors.Join(exitcode.UsageError(errors.New(msgPublishNameRequired)), scanner.Err())
+		if err := scanner.Err(); err != nil {
+			return "", fmt.Errorf("read the public name: %w", err)
+		}
+		return "", exitcode.UsageError(errors.New(msgPublishNameRequired))
 	}
 	return checkPublicName(scanner.Text())
 }
@@ -931,25 +950,31 @@ func directoryPublishName(getwd, home func() (string, error)) string {
 	if h, err := home(); err == nil && filepath.Clean(h) == filepath.Clean(dir) {
 		return ""
 	}
-	if name := filepath.Base(dir); name != string(filepath.Separator) && name != "." {
+	if name := strings.TrimSpace(filepath.Base(dir)); name != string(filepath.Separator) && name != "." {
 		return name
 	}
 	return ""
 }
 
 // validPublicName applies the service's preview-name rules to a trimmed name:
-// valid UTF-8, 1 to 100 characters, one line, no control or format characters.
+// valid UTF-8, 1 to 100 characters, no surrounding space, one line, no control
+// or format characters.
 // TODO(upstream-contract): mirrors qurl-service domain.ValidatePreviewName.
 func validPublicName(name string) bool {
-	return name != "" && utf8.ValidString(name) && utf8.RuneCountInString(name) <= maxPublicNameRunes &&
+	return name != "" && name == strings.TrimSpace(name) && utf8.ValidString(name) && utf8.RuneCountInString(name) <= maxPublicNameRunes &&
 		!strings.ContainsFunc(name, func(r rune) bool {
 			return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029'
 		})
 }
 
-// validatePublishTargetFlags refuses flags that do not apply to the kind of
-// target, before the command asks for anything.
-func validatePublishTargetFlags(cmd *cobra.Command, target *publishTarget) error {
+// validatePublishTargetFlags refuses an invalid --name and flags that do not
+// apply to the kind of target, before the command checks or asks for anything.
+func validatePublishTargetFlags(cmd *cobra.Command, target *publishTarget, name string) error {
+	if cmd.Flags().Changed("name") {
+		if _, err := checkPublicName(name); err != nil {
+			return err
+		}
+	}
 	if target.kind == publishTargetLocal {
 		for _, name := range []string{"description", "tag", "alias"} {
 			if cmd.Flags().Changed(name) {

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 // sentPublishNames returns the name member of every create request.
@@ -102,10 +106,17 @@ func TestPublishNameDefaultsForALocalApp(t *testing.T) {
 		}
 		return cmd
 	}
-	opts := &globalOpts{lookupEnv: func(string) (string, bool) { return "", false }}
+	var stderr bytes.Buffer
+	opts := &globalOpts{
+		lookupEnv: func(string) (string, bool) { return "", false },
+		streams:   &output.Streams{Out: io.Discard, Err: &stderr, ErrIsTTY: true},
+	}
 	got, err := publishName(opts, newCmd(), "", "my-dashboard", local)
 	if err != nil || got != "my-dashboard" {
 		t.Fatalf("--id default = %q, %v", got, err)
+	}
+	if want := fmt.Sprintf(msgPublishNameDefault, "my-dashboard"); !strings.Contains(stderr.String(), want) {
+		t.Fatalf("a terminal is not shown the default: %q", stderr.String())
 	}
 	t.Chdir(t.TempDir())
 	dir, _ := filepath.Abs(".")
@@ -122,6 +133,7 @@ func TestDirectoryPublishNameSkipsHomeAndRoot(t *testing.T) {
 	home := at(filepath.FromSlash("/Users/ana"))
 	for dir, want := range map[string]string{
 		filepath.FromSlash("/Users/ana/projects/tipsplit"): "tipsplit",
+		filepath.FromSlash("/Users/ana/projects/ spaced "): "spaced",
 		filepath.FromSlash("/Users/ana"):                   "",
 		string(filepath.Separator):                         "",
 	} {
@@ -143,5 +155,13 @@ func TestPublishFlagErrorsComeBeforeTheNamePrompt(t *testing.T) {
 	})
 	if res.code != exitcode.Usage || strings.Contains(res.stderr.String(), msgPublishNamePrompt) {
 		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+}
+
+func TestValidPublicNameRefusesSurroundingSpace(t *testing.T) {
+	for _, name := range []string{" a", "a ", "\ta"} {
+		if validPublicName(name) {
+			t.Errorf("validPublicName(%q) = true", name)
+		}
 	}
 }
