@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
@@ -28,9 +29,9 @@ func paymentsCmd(opts *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			payments, ok := client.ConsumerManagement().(publisherStripeClient)
-			if !ok {
-				return errors.New("publisher payments are unavailable in this client")
+			payments, err := publisherPayments(client)
+			if err != nil {
+				return err
 			}
 			if args[0] == "connect" {
 				link, e := payments.ConnectPublisherStripe(cmd.Context())
@@ -45,4 +46,12 @@ func paymentsCmd(opts *globalOpts) *cobra.Command {
 			}
 			return opts.printer().PublisherPayments(account, "")
 		}}
+}
+
+func publisherPayments(client qurlapi.Client) (publisherStripeClient, error) {
+	payments, ok := client.ConsumerManagement().(publisherStripeClient)
+	if !ok {
+		return nil, errors.New("publisher payments are unavailable in this client")
+	}
+	return payments, nil
 }

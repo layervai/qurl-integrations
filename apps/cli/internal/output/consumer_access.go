@@ -73,13 +73,7 @@ func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResul
 		return ew.flush(nil)
 	}
 	if result.Grant != nil {
-		value := result.Grant
-		ew := &errWriter{w: p.out}
-		ew.printf("Consumer: %s\nStatus: %s\nVersion: %d\n", consumerTerminalText(value.ID), consumerTerminalText(value.Status), value.Version)
-		if value.SessionCleanup != "" {
-			ew.printf("Connection cleanup: %s\n", consumerTerminalText(value.SessionCleanup))
-		}
-		return ew.flush(nil)
+		return p.consumerGrantText(result.Grant)
 	}
 	for _, invitation := range result.Invitations {
 		if _, err := fmt.Fprintf(p.out, "%s  %s  version %d  %q\n", consumerTerminalText(invitation.ID), consumerTerminalText(invitation.Status), invitation.Version, invitation.Email); err != nil {
@@ -91,6 +85,9 @@ func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResul
 		contact := ""
 		if grant.Email != "" {
 			contact = fmt.Sprintf("  %q", grant.Email)
+		}
+		if grant.ExpiresAt != nil {
+			contact += "  " + strings.ToLower(p.grantExpiryLabel(*grant.ExpiresAt)) + " " + grant.ExpiresAt.UTC().Format(time.RFC3339)
 		}
 		if _, err := fmt.Fprintf(p.out, "%s  %s  version %d%s\n", consumerTerminalText(grant.ID), consumerTerminalText(grant.Status), grant.Version, contact); err != nil {
 			return err
@@ -182,18 +179,42 @@ func consumerManagementDocument(result *qurlapi.ConsumerManagementResult) any {
 }
 
 type consumerAccessJSON struct {
-	Mode        string                  `json:"mode"`
-	Version     int64                   `json:"version"`
-	EmailDomain string                  `json:"email_domain,omitempty"`
-	ContractID  string                  `json:"contract_id,omitempty"`
-	Payment     *qurl.CRIDPaymentPolicy `json:"payment,omitempty"`
+	Mode          string                  `json:"mode"`
+	Version       int64                   `json:"version"`
+	EmailDomain   string                  `json:"email_domain,omitempty"`
+	ContractID    string                  `json:"contract_id,omitempty"`
+	Payment       *qurl.CRIDPaymentPolicy `json:"payment,omitempty"`
+	AllowedEmails []string                `json:"allowed_emails,omitempty"`
+	// ApprovalExpiresIn is how long each approval lasts; the service enforces it.
+	ApprovalExpiresIn string `json:"approval_expires_in,omitempty"`
 }
 
 func policyDocument(policy *qurl.ConsumerAccessPolicy) *consumerAccessJSON {
 	if policy == nil {
 		return nil
 	}
-	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID, EmailDomain: policy.EmailDomain, Payment: policy.Payment}
+	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID, Payment: policy.Payment, EmailDomain: policy.EmailDomain, AllowedEmails: policy.AllowedEmails, ApprovalExpiresIn: policy.ApprovalExpiresIn}
+}
+
+func (p *Printer) consumerGrantText(value *qurl.ConsumerGrant) error {
+	ew := &errWriter{w: p.out}
+	ew.printf("Consumer: %s\nStatus: %s\nVersion: %d\n", consumerTerminalText(value.ID), consumerTerminalText(value.Status), value.Version)
+	if value.ExpiresAt != nil {
+		ew.printf("%s: %s\n", p.grantExpiryLabel(*value.ExpiresAt), value.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	if value.SessionCleanup != "" {
+		ew.printf("Connection cleanup: %s\n", consumerTerminalText(value.SessionCleanup))
+	}
+	return ew.flush(nil)
+}
+
+// grantExpiryLabel tells a lapsed grant apart: the service keeps its status
+// "active" after expires_at, so only the time says it no longer admits.
+func (p *Printer) grantExpiryLabel(expiresAt time.Time) string {
+	if !expiresAt.After(p.now()) {
+		return "Expired"
+	}
+	return "Expires"
 }
 
 func consumerTerminalText(value string) string {

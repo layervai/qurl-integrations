@@ -13,6 +13,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/crid"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 )
 
 // RecordedRequest captures one request for header/shape assertions.
@@ -441,15 +443,12 @@ func (s *Server) writeUnauthorized(w http.ResponseWriter) {
 }
 
 func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
-	if s.handleResourceRoute(w, r) {
+	if s.handleResourceRoute(w, r) || s.handleIdentityRoute(w, r) {
 		return
 	}
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/resources":
 		s.handlePublish(w, r)
-
-	case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
-		s.handleMe(w, r)
 
 	case (r.Method == http.MethodGet || r.Method == http.MethodPatch) && r.URL.Path == publisherPath:
 		s.handlePublisher(w, r)
@@ -927,4 +926,19 @@ func (s *Server) cridFor(requestedID string) string {
 		return s.Key.CRID
 	}
 	return s.Key.CRID
+}
+
+func (s *Server) handleIdentityRoute(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	switch r.URL.Path {
+	case "/v1/me":
+		s.handleMe(w, r)
+	case "/v1/me/access-rules":
+		WriteEnvelope(s.t, w, http.StatusOK, map[string]any{"account_id": MeOwnerID, "version": 0, "items": []accessrules.Definition{}, "built_ins": accessrules.BuiltIns()}, nil)
+	default:
+		return false
+	}
+	return true
 }
