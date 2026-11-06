@@ -26,6 +26,8 @@ var ErrAccessRulesFile = errors.New("access rules file is damaged or unreadable"
 type AccessRulesFileError struct {
 	Path string
 	Err  error
+	// LinkLimits marks the per-share link limits file, not the rules journal.
+	LinkLimits bool
 }
 
 func (e *AccessRulesFileError) Error() string   { return ErrAccessRulesFile.Error() + ": " + e.Path }

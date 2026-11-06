@@ -221,7 +221,7 @@ func TestShareFailsClosedOnDamagedLinkLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}, shareStateDir: dir})
-	if result.code != 3 || !strings.Contains(result.stderr.String(), "share_rules.json") || len(srv.Requests()) != 0 {
+	if result.code != 3 || !strings.Contains(result.stderr.String(), "link limits saved for your shares") || !strings.Contains(result.stderr.String(), "share_rules.json") || len(srv.Requests()) != 0 {
 		t.Fatalf("share without its limits: %d %s", result.code, result.stderr.String())
 	}
 }

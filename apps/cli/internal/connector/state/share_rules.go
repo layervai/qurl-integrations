@@ -94,9 +94,9 @@ func (s *ShareRuleStore) update(ctx context.Context, change func(*shareRulesStat
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
-		return &AccessRulesFileError{Path: path, Err: err}
+		return &AccessRulesFileError{Path: path, Err: err, LinkLimits: true}
 	case DecodeStrictJSON(data, &state) != nil || !state.valid():
-		return &AccessRulesFileError{Path: path, Err: errors.New("invalid share rules")}
+		return &AccessRulesFileError{Path: path, Err: errors.New("invalid share rules"), LinkLimits: true}
 	}
 	if !change(&state) {
 		return nil

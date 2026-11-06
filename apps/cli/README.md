@@ -862,7 +862,9 @@ A paid rule saves `"payment": {"price_id": "price_123", "access_seconds": 0}`
 (both members required, contract mode only) and never a Stripe account.
 Sharing with it reads the account connected now, like `qurl payments account`,
 and publishes the same payment policy as `--stripe-account`/`--stripe-price`,
-including when you publish the same target again. With no connected account
+including when you publish the same target again; if a different Stripe
+account is connected by then, that publish fails as a conflict (exit 7)
+without changing the item. With no connected account
 it fails (exit 8) before publishing or changing access; run
 `qurl payments connect`. If the account cannot be checked, such as while
 payments are unavailable, it fails with exit 11.

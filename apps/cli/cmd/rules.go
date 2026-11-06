@@ -161,14 +161,16 @@ func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (ac
 	if strings.TrimSpace(selector) == "" {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("--rule requires an access rule ID or exact name"))
 	}
-	// Presets resolve before saved rules; NameTaken keeps saved names off them.
-	if accessrules.IsOnlyFirstPerson(selector) {
-		return accessrules.OnlyFirstPerson(), nil
-	}
-	// Built-ins need no saved state, so a damaged rules file cannot block them;
-	// saved rules cannot take their names (NameTaken).
-	if rule, err := accessrules.Find(selector, accessrules.BuiltIns()); err == nil {
-		return rule, nil
+	// Presets resolve before saved rules and need no saved state, so a damaged
+	// rules file cannot block them. NameTaken keeps local saves off their names,
+	// but a rule synced from another client can share one; that name is then
+	// ambiguous and the rule's ID or the preset's ID picks.
+	preset, err := accessrules.Find(selector, []accessrules.Definition{accessrules.OnlyFirstPerson()}, accessrules.BuiltIns())
+	if err == nil {
+		if selector != preset.ID && o.savedRuleNamed(cmd, selector) {
+			return accessrules.Definition{}, ruleCommandError(accessrules.ErrAmbiguousRule)
+		}
+		return preset, nil
 	}
 	store, err := o.ruleStore()
 	if err != nil {
@@ -183,6 +185,16 @@ func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (ac
 		return accessrules.Definition{}, ruleCommandError(err)
 	}
 	return rule, nil
+}
+
+// savedRuleNamed reports whether a readable saved rule is named name.
+func (o *globalOpts) savedRuleNamed(cmd *cobra.Command, name string) bool {
+	store, err := o.ruleStore()
+	if err != nil {
+		return false
+	}
+	snapshot, err := store.Snapshot(cmd.Context())
+	return err == nil && slices.ContainsFunc(snapshot.Items, func(d accessrules.Definition) bool { return d.Name == name })
 }
 
 func (o *globalOpts) syncRules(ctx context.Context) (accessrules.Snapshot, error) {
@@ -299,6 +311,9 @@ func ruleErrorMessage(err error) string {
 	var file *connectorstate.AccessRulesFileError
 	switch {
 	case errors.As(err, &file):
+		if file.LinkLimits {
+			return fmt.Sprintf(msgLinkLimitsFileDamaged, file.Path)
+		}
 		return fmt.Sprintf(msgRulesFileDamaged, file.Path)
 	case errors.Is(err, accessrules.ErrRuleConflict):
 		return msgRulesRuleConflict
@@ -513,6 +528,9 @@ func readAllowedEmails(cmd *cobra.Command, opts *globalOpts, file string) ([]str
 	body, err := readRequestBody(cmd.Context(), opts.streams, http.MethodPut)
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > accessrules.MaxBytes {
+		return nil, exitcode.UsageError(errors.New("the email address list is too large"))
 	}
 	var emails []string
 	if connectorstate.DecodeStrictJSON(body, &emails) != nil || emails == nil {

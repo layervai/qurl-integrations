@@ -52,6 +52,23 @@ func TestMergeKeepsUnrelatedChangesAndRequiresSameRuleResolution(t *testing.T) {
 	}
 }
 
+func TestRuleNamesMatchTheServiceGrammar(t *testing.T) {
+	for name, ok := range map[string]bool{
+		"Café":                      true,
+		"e\u0301\u0301\u0301":       true,
+		"e\u0301\u0301\u0301\u0301": false,
+		"\u0301team":                false,
+		"a \u0301":                  false,
+		"\u2714\ufe0f Reviewers":    true,
+		"Team\u2028":                false,
+	} {
+		d := Definition{ID: testID, Name: name, Mode: ModeKeys}
+		if got := d.Validate(false) == nil; got != ok {
+			t.Errorf("name %q valid = %v, want %v", name, got, ok)
+		}
+	}
+}
+
 func TestDefinitionRejectsEmptyIrrelevantFieldsAndInvalidUnicode(t *testing.T) {
 	for _, raw := range []string{
 		`{"id":"` + testID + `","name":"Team","mode":"keys","contract_id":""}`,

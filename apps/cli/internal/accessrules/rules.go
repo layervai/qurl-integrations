@@ -257,11 +257,6 @@ func OnlyFirstPerson() Definition {
 	return Definition{ID: OnlyFirstPersonID, Name: OnlyFirstPersonLabel, Mode: ModePublic, LinkLimits: &LinkLimits{ExpiresIn: "30d", OneTimeUse: new(true), SessionDuration: new("24h")}}
 }
 
-// IsOnlyFirstPerson reports whether selector names the preset by its ID or exact name.
-func IsOnlyFirstPerson(selector string) bool {
-	return selector == OnlyFirstPersonID || selector == OnlyFirstPersonLabel
-}
-
 // Policy expands this preset into an independent resource policy snapshot.
 // A paid rule's payment has no account, so the policy fails validation until
 // the connected account is filled in.
@@ -292,9 +287,7 @@ func (d *Definition) Validate(builtin bool) error {
 	if err := d.validateSettings(); err != nil {
 		return err
 	}
-	if !uuidPattern.MatchString(d.ID) || !utf8.ValidString(d.Name) || utf8.RuneCountInString(d.Name) < 1 || utf8.RuneCountInString(d.Name) > 120 || strings.TrimSpace(d.Name) == "" || strings.ContainsFunc(d.Name, func(r rune) bool {
-		return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
-	}) {
+	if !uuidPattern.MatchString(d.ID) || !validName(d.Name) {
 		return errors.New("invalid access rule identity or name")
 	}
 	if d.Mode == ModePublic {
@@ -311,6 +304,37 @@ func (d *Definition) Validate(builtin bool) error {
 		return errors.New("invalid access rule policy")
 	}
 	return nil
+}
+
+// maxStackedMarks is the most combining marks one base character may carry.
+const maxStackedMarks = 3
+
+// validName accepts 1-120 runes of single-line display text.
+// TODO(upstream-contract): copied from qurl-service internal/domain/access_rules.go
+// validAccessRuleName; keep identical.
+func validName(name string) bool {
+	if !utf8.ValidString(name) || utf8.RuneCountInString(name) > 120 || strings.TrimSpace(name) == "" {
+		return false
+	}
+	marks, base := 0, false
+	for _, c := range name {
+		if unicode.IsControl(c) || unicode.In(c, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return false
+		}
+		// Combining marks need a base and stack at most maxStackedMarks deep.
+		switch {
+		case unicode.In(c, unicode.M):
+			marks++
+			if !base || marks > maxStackedMarks {
+				return false
+			}
+		case unicode.IsSpace(c):
+			marks, base = 0, false
+		default:
+			marks, base = 0, true
+		}
+	}
+	return true
 }
 
 func (d *Definition) builtIn() bool {

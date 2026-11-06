@@ -407,3 +407,32 @@ func TestAccessRulesPaidRuleSurvivesRestartAndSync(t *testing.T) {
 		t.Fatalf("paid rule lost: %+v %+v %v", got.Items, remote.library.Items, err)
 	}
 }
+
+// While one rule conflicts, no pending edit is uploaded; choosing the local
+// edit then uploads it with the others.
+func TestAccessRulesConflictHoldsPendingEditsUntilResolvedLocally(t *testing.T) {
+	const otherID = "22222222-2222-4222-8222-222222222222"
+	store := openAccessRulesTestStore(t)
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{{ID: ruleID, Name: "A", Mode: "keys"}, {ID: otherID, Name: "B", Mode: "keys"}}}}
+	snapshot, err := store.Sync(t.Context(), remote)
+	if err != nil || snapshot.Sync != "synced" {
+		t.Fatalf("first sync %+v %v", snapshot, err)
+	}
+	if snapshot, err = store.Save(t.Context(), snapshot.LocalVersion, &accessrules.Definition{ID: ruleID, Name: "A here", Mode: "keys"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Save(t.Context(), snapshot.LocalVersion, &accessrules.Definition{ID: otherID, Name: "B here", Mode: "keys"}); err != nil {
+		t.Fatal(err)
+	}
+	remote.library.Items[0].Name = "A there"
+	if snapshot, err = store.Sync(t.Context(), remote); err != nil || snapshot.Sync != "conflict" || remote.putCount != 0 {
+		t.Fatalf("conflict %+v puts=%d %v", snapshot, remote.putCount, err)
+	}
+	if _, err = store.Resolve(t.Context(), -1, ruleID, "local"); err != nil {
+		t.Fatal(err)
+	}
+	want := []accessrules.Definition{{ID: ruleID, Name: "A here", Mode: "keys"}, {ID: otherID, Name: "B here", Mode: "keys"}}
+	if snapshot, err = store.Sync(t.Context(), remote); err != nil || snapshot.Sync != "synced" || !accessrules.EqualItems(remote.library.Items, want) {
+		t.Fatalf("after resolve %+v %+v %v", snapshot, remote.library.Items, err)
+	}
+}

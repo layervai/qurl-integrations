@@ -14,6 +14,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
@@ -146,5 +147,52 @@ func TestConfigureWithAPaidRuleUsesTheConnectedStripeAccount(t *testing.T) {
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "access", "configure", srv.Key.CRID, "--rule-file", "-", "--version", "0", "-o", "json"}, stdin: strings.NewReader(paidRule)})
 	if result.code != 0 || !strings.Contains(result.stdout.String(), `"account_id": "acct_publisher"`) {
 		t.Fatalf("exit %d %s %s", result.code, result.stdout.String(), result.stderr.String())
+	}
+}
+
+// accountRules is a fixed account library for seeding the local journal.
+type accountRules struct{ library accessrules.AccountLibrary }
+
+func (a *accountRules) Load(context.Context) (accessrules.AccountLibrary, error) {
+	return a.library, nil
+}
+func (a *accountRules) Replace(context.Context, int64, []accessrules.Definition) (accessrules.AccountLibrary, error) {
+	return a.library, nil
+}
+
+// Only local saves check NameTaken, so a rule synced from another client can
+// carry a default's name; that name then picks neither.
+func TestSyncedRuleNamedLikeADefaultIsAmbiguous(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	store, err := connectorstate.OpenAccessRules(dir, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	synced := accessrules.Definition{ID: "11111111-1111-4111-8111-111111111111", Name: "People you approve", Mode: accessrules.ModeKeys}
+	if _, err = store.Sync(t.Context(), &accountRules{accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{synced}}}); err != nil {
+		t.Fatal(err)
+	}
+	publish := func(selector string) *runResult {
+		return runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", selector, "-o", "json"}, shareStateDir: dir})
+	}
+	if result := publish(synced.Name); result.code != exitcode.Usage || !strings.Contains(result.stderr.String(), msgRulesAmbiguous) {
+		t.Fatalf("shadowed name: exit %d %s", result.code, result.stderr.String())
+	}
+	sent := map[string]any{}
+	scriptPublish(t, srv, true, false, nil, sent)
+	if result := publish(synced.ID); result.code != 0 || sent["mode"] != accessrules.ModeKeys {
+		t.Fatalf("by ID: exit %d sent %v %s", result.code, sent, result.stderr.String())
+	}
+}
+
+func TestRepublishPaidRuleAfterStripeChangeConflicts(t *testing.T) {
+	srv := apitest.NewServer(t)
+	scriptStripeAccount(t, srv, false, "acct_new")
+	existing := map[string]any{"mode": "contract", "version": 1, "contract_id": "buyers", "payment": map[string]any{"account_id": "acct_old", "price_id": "price_1", "access_seconds": 3600}}
+	scriptPublish(t, srv, true, true, existing, nil)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(paidRule), shareStateDir: connectorStateTestDir(t)})
+	if result.code != exitcode.Conflict {
+		t.Fatalf("exit %d %s", result.code, result.stderr.String())
 	}
 }
