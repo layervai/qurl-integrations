@@ -75,9 +75,9 @@ Every new resource needs a public name: recipients see it on the link page
 and in the passkey they save. Set it with --name. A local app defaults to its
 --id, else the name of the directory you run the command in; qURL prints the
 name it uses. A remote URL has no default, because its address may be private:
-a terminal asks for the name, and a script must pass --name. Publishing a
-target again still needs a name but keeps the one it has; change it with
-"qurl preview set --name".
+a terminal asks for the name, and a script must pass --name to create a
+resource. Publishing a target again needs no name and keeps the one it has;
+change it with "qurl preview set --name".
 
 A resource is private unless you publish it with --public. A private resource
 is limited to its owner and the devices you allow: with --allow-device-key
@@ -156,7 +156,7 @@ owns the share and turns it off when it exits.`,
 				return err
 			}
 			if target.kind == publishTargetLocal {
-				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access)
+				return publishNameError(runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access))
 			}
 			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
 				return err
@@ -170,7 +170,7 @@ owns the share and turns it off when it exits.`,
 			access.Description, access.Tags, access.Alias = description, tags, alias
 			result, err := client.Publish(cmd.Context(), args[0], access)
 			if err != nil {
-				return err
+				return publishNameError(err)
 			}
 			result.LinkSiteURL = opts.resourceAddress(result.CRID)
 
@@ -884,7 +884,8 @@ func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract, em
 // directory the command runs in (its project) unless that is the home or root
 // directory. Nothing is derived from the target URL or the description: the
 // name is public, and they may name a hidden origin. With no such value an
-// interactive terminal asks for one and any other caller must pass --name.
+// interactive terminal asks for one; any other caller sends none, which the
+// service accepts only for a target that is already published.
 func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string, target *publishTarget) (string, error) {
 	if cmd.Flags().Changed("name") {
 		return checkPublicName(flag)
@@ -904,7 +905,9 @@ func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string,
 		return name, nil
 	}
 	if !opts.streams.InIsTTY || !opts.streams.ErrIsTTY {
-		return "", exitcode.UsageError(errors.New(msgPublishNameRequired))
+		// A script that republishes needs no name: the service asks for one
+		// only when it would create the resource; publishNameError explains it.
+		return "", nil
 	}
 	if _, err := fmt.Fprint(opts.streams.Err, msgPublishNamePrompt); err != nil {
 		return "", err
@@ -921,6 +924,16 @@ func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string,
 		return "", exitcode.UsageError(errors.New(msgPublishNameRequired))
 	}
 	return checkPublicName(scanner.Text())
+}
+
+// publishNameError turns the service's name_required refusal, which comes only
+// for a create sent without a name, into the --name next step.
+func publishNameError(err error) error {
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) && apiErr.Code == "name_required" {
+		return exitcode.UsageError(errors.New(msgPublishNameRequired))
+	}
+	return err
 }
 
 // checkPublicName trims a name the person typed and refuses one the service

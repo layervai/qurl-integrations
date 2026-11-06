@@ -846,9 +846,9 @@ save, so it is public. A local app defaults to its Connector ID, else the name
 of the directory you run `qurl publish` in, and a terminal shows
 `Name for a new resource: <name> (change with --name)`. A remote URL has no
 default, because its address may be private: an interactive terminal asks for
-the name, and a script must pass `--name` or the command fails before it sends
-anything. Publishing a target again still needs a name, but the resource keeps
-the one it has; change it with `qurl preview set <CRID> --name`.
+the name, and a script must pass `--name` to create a resource. Publishing a
+target again needs no name and keeps the one it has; change it with
+`qurl preview set <CRID> --name`.
 
 #### Private consumer policies
 
@@ -977,7 +977,7 @@ credential or making a network request.
 
 | Flag | Description |
 |------|-------------|
-| `--name` | Public name recipients see, up to 100 characters. Required for a remote URL; a local app defaults to its Connector ID or directory name |
+| `--name` | Public name recipients see, up to 100 characters. Required to create a remote URL resource; a local app defaults to its Connector ID or directory name |
 | `--public` | Let anyone who has the CRID open the resource. Without it the resource is private |
 | `--allow-device-key <public-key>` | Allow a recipient's device to open the private resource (repeatable) |
 | `--allow-requests` | Let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you |

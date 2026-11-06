@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,14 +54,13 @@ func TestPublishRemoteSendsTheTrimmedName(t *testing.T) {
 
 func TestPublishNameIsRequiredBeforeAnyRequest(t *testing.T) {
 	for name, args := range map[string][]string{
-		"remote without --name": {"publish", "https://example.com/data"},
-		"empty --name":          {"publish", "https://example.com/data", "--name", " "},
-		"two lines":             {"publish", "https://example.com/data", "--name", "a\nb"},
-		"too long":              {"publish", "https://example.com/data", "--name", strings.Repeat("n", 101)},
-		"format character":      {"publish", "https://example.com/data", "--name", "a\u200bb"},
-		"line separator":        {"publish", "https://example.com/data", "--name", "a\u2028b"},
-		"invalid UTF-8":         {"publish", "https://example.com/data", "--name", "a\xffb"},
-		"empty local --name":    {"publish", "http://127.0.0.1:3000", "--name", ""},
+		"empty --name":       {"publish", "https://example.com/data", "--name", " "},
+		"two lines":          {"publish", "https://example.com/data", "--name", "a\nb"},
+		"too long":           {"publish", "https://example.com/data", "--name", strings.Repeat("n", 101)},
+		"format character":   {"publish", "https://example.com/data", "--name", "a\u200bb"},
+		"line separator":     {"publish", "https://example.com/data", "--name", "a\u2028b"},
+		"invalid UTF-8":      {"publish", "https://example.com/data", "--name", "a\xffb"},
+		"empty local --name": {"publish", "http://127.0.0.1:3000", "--name", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
@@ -162,14 +162,14 @@ func TestValidPublicNameRefusesSurroundingSpace(t *testing.T) {
 	}
 }
 
-func TestPublishNameWithNoDefaultFailsWithoutATerminal(t *testing.T) {
+func TestPublishNameWithNoDefaultSendsNoneWithoutATerminal(t *testing.T) {
 	t.Chdir(string(filepath.Separator))
 	cmd := &cobra.Command{}
 	cmd.Flags().String("name", "", "")
 	var stderr bytes.Buffer
 	opts := &globalOpts{lookupEnv: func(string) (string, bool) { return "", false }, streams: &output.Streams{Err: &stderr}}
-	if _, err := publishName(opts, cmd, "", "", &publishTarget{kind: publishTargetLocal}); exitcode.FromError(err) != exitcode.Usage {
-		t.Fatalf("err = %v", err)
+	if got, err := publishName(opts, cmd, "", "", &publishTarget{kind: publishTargetLocal}); got != "" || err != nil {
+		t.Fatalf("publishName = %q, %v", got, err)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("a non-terminal was prompted or noted: %q", stderr.String())
@@ -189,5 +189,28 @@ func TestPublishNamePromptEndOfInputIsAUsageError(t *testing.T) {
 	}
 	if reqs := srv.Requests(); len(reqs) != 0 {
 		t.Fatalf("sent %d requests", len(reqs))
+	}
+}
+
+func TestPublishScriptWithoutANameRepublishesOrIsToldToPassOne(t *testing.T) {
+	args := func(srv *apitest.Server) []string {
+		return []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}
+	}
+	srv := apitest.NewServer(t)
+	srv.SetPublishFoundExisting(true)
+	if res := runCLI(t, &runOpts{args: args(srv)}); res.code != 0 {
+		t.Fatalf("republish: exit %d: %s", res.code, res.stderr.String())
+	}
+	if got := sentPublishNames(t, srv); len(got) != 1 || got[0] != "<absent>" {
+		t.Fatalf("republish sent names %q", got)
+	}
+
+	srv = apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusBadRequest, "name_required", "Bad Request", "name is required: the public name recipients see for this resource")
+	})
+	res := runCLI(t, &runOpts{args: args(srv)})
+	if res.code != exitcode.Usage || !strings.Contains(res.stderr.String(), msgPublishNameRequired) {
+		t.Fatalf("create: exit %d: %s", res.code, res.stderr.String())
 	}
 }
