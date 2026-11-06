@@ -30,8 +30,6 @@ const (
 	ruleFileFlag = "rule-file"
 	// emailsFileFlag reads a rule's additional email addresses.
 	emailsFileFlag = "emails-file"
-	// builtInPrefix marks the catalog's ready-made rule IDs, such as builtin.review.
-	builtInPrefix = "builtin."
 )
 
 func rulesCmd(opts *globalOpts) *cobra.Command {
@@ -62,7 +60,7 @@ func ruleSaveCmd(opts *globalOpts) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if strings.HasPrefix(definition.ID, builtInPrefix) || definition.ID == accessrules.OnlyFirstPersonID {
+		if accessrules.IsPresetID(definition.ID) {
 			return exitcode.UsageError(errors.New("ready-made rules cannot be edited; save a custom rule with its own UUID"))
 		}
 		return opts.printRuleStore(func(store *connectorstate.AccessRuleStore) (accessrules.Snapshot, error) {
@@ -153,7 +151,7 @@ func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file, flag string)
 	if connectorstate.DecodeStrictJSON(body, &definition) != nil {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("invalid access rule definition"))
 	}
-	if err := definition.Validate(strings.HasPrefix(definition.ID, builtInPrefix) || definition.ID == accessrules.OnlyFirstPersonID); err != nil {
+	if err := definition.Validate(accessrules.IsPresetID(definition.ID)); err != nil {
 		return accessrules.Definition{}, exitcode.UsageError(fmt.Errorf("invalid access rule definition: %w", err))
 	}
 	return definition, nil
@@ -674,11 +672,13 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 // before serving, so a failed save can still turn the new share back off.
 func (o *globalOpts) ruleLinkLimits(ctx context.Context, rule *accessrules.Definition, published *qurlapi.Published) (*accessrules.LinkLimits, error) {
 	existing := published.FoundExisting != nil && *published.FoundExisting
+	var kept *accessrules.LinkLimits
+	var keptErr error
+	keptRead := false
 	if published.FoundExisting == nil && rule != nil && rule.LinkLimits != nil {
 		// An unproven outcome never overwrites limits this share already has.
-		if kept, err := o.savedLinkLimits(ctx, published.CRID); err != nil || kept != nil {
-			existing = true
-		}
+		kept, keptErr = o.savedLinkLimits(ctx, published.CRID)
+		keptRead, existing = true, keptErr != nil || kept != nil
 	}
 	if rule == nil && !existing {
 		return nil, nil //nolint:nilnil // nothing to mint
@@ -689,7 +689,10 @@ func (o *globalOpts) ruleLinkLimits(ctx context.Context, rule *accessrules.Defin
 		limits = rule.LinkLimits
 	}
 	if existing {
-		kept, err := o.savedLinkLimits(ctx, id)
+		if !keptRead {
+			kept, keptErr = o.savedLinkLimits(ctx, id)
+		}
+		err := keptErr
 		if err != nil && rule == nil {
 			// A plain republish never asked for rules; it still succeeds.
 			o.printer().Warnf(msgRulesLimitsUnread, id, err)

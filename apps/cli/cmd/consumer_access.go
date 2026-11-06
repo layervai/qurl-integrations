@@ -304,11 +304,16 @@ func (o *globalOpts) applyConsumerRule(cmd *cobra.Command, input *consumerAccess
 	return nil
 }
 
+var (
+	stripeAccountPattern = regexp.MustCompile(`^acct_[A-Za-z0-9]{1,128}$`)
+	stripePricePattern   = regexp.MustCompile(`^price_[A-Za-z0-9]{1,128}$`)
+)
+
 func setStripePayment(policy *qurl.ConsumerAccessPolicy, account, price string, seconds int64) error {
 	if account == "" && price == "" && seconds == 0 {
 		return nil
 	}
-	if policy == nil || policy.Mode != consumerContract || !regexp.MustCompile(`^acct_[A-Za-z0-9]{1,128}$`).MatchString(account) || !regexp.MustCompile(`^price_[A-Za-z0-9]{1,128}$`).MatchString(price) || seconds < 0 || seconds > 315360000 {
+	if policy == nil || policy.Mode != consumerContract || !stripeAccountPattern.MatchString(account) || !stripePricePattern.MatchString(price) || seconds < 0 || seconds > 315360000 {
 		return exitcode.UsageError(errors.New("stripe payments require contract access, --stripe-account, --stripe-price and a valid --payment-access-seconds"))
 	}
 	policy.Payment = &qurl.CRIDPaymentPolicy{AccountID: account, PriceID: price, AccessSeconds: seconds}

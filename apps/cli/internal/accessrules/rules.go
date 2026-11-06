@@ -247,6 +247,15 @@ func BuiltIns() []Definition {
 // OnlyFirstPersonID selects the One-time link preset wherever a rule is chosen.
 const OnlyFirstPersonID = "once"
 
+// IsPresetID reports whether id names a ready-made choice: a built-in or the
+// One-time link preset. Saved rules never carry one.
+func IsPresetID(id string) bool {
+	return strings.HasPrefix(id, BuiltInPrefix) || id == OnlyFirstPersonID
+}
+
+// BuiltInPrefix marks the catalog's built-in rule IDs, such as builtin.review.
+const BuiltInPrefix = "builtin."
+
 // OnlyFirstPersonLabel is the preset's name on every surface.
 const OnlyFirstPersonLabel = "One-time link"
 
@@ -442,7 +451,7 @@ func NameTaken(items []Definition, d *Definition) bool {
 	name := strings.TrimSpace(d.Name)
 	// --rule reads these selectors as presets before saved names, so a rule named
 	// "once" or "builtin.…" could never be chosen and would silently pick a preset.
-	if strings.EqualFold(name, OnlyFirstPersonID) || strings.HasPrefix(strings.ToLower(name), "builtin.") {
+	if strings.EqualFold(name, OnlyFirstPersonID) || strings.HasPrefix(strings.ToLower(name), BuiltInPrefix) {
 		return true
 	}
 	return slices.ContainsFunc(append(append(BuiltIns(), OnlyFirstPerson()), items...), func(other Definition) bool {
