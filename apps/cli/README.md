@@ -899,7 +899,9 @@ If its notification is pending, repeat the same receipt, expiry and version.
 For paid contracts, first run `qurl account setup` to link the device to your
 publisher account. Run `qurl payments connect -o json` and open the consent URL
 yourself. Finish setup in LayerV billing while signed in to that publisher account.
-Then read `qurl payments account -o json`. Use that account and an active
+Then read `qurl payments account -o json`: it also says whether Stripe has
+enabled charges and payouts, with a Stripe link to finish setup when not. Use
+that account and an active
 fixed Stripe price with `--stripe-account` and `--stripe-price` when publishing
 or configuring contract access. The service verifies payment; manual approval
 is unavailable. LayerV collects 3%, including subscription renewals. One-time
@@ -908,6 +910,12 @@ Recurring prices require zero and grant only the paid invoice period.
 Adding payment with `qurl access configure` makes an existing public CRID private.
 Removing payment keeps it private. Publishing the same target again does not
 change its payment policy.
+
+`qurl payments disconnect` stops every subscription from renewing, then removes
+LayerV from the Stripe account. Buyers keep access until their paid period ends
+and are not charged again. New purchases stop until you connect the same or a
+different account. It asks first; scripts pass `--yes`. If it reports that it
+did not finish, run it again: LayerV stays connected until every renewal stopped.
 
 `qurl access --help` lists all owner actions. Changes require the current
 version. If session removal is pending, retry the exact removal and version;

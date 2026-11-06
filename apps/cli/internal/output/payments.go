@@ -1,8 +1,12 @@
 package output
 
-import "fmt"
+import (
+	"fmt"
 
-// PublisherPayments prints connection details without payment credentials.
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+)
+
+// PublisherPayments prints the consent URL without payment credentials.
 func (p *Printer) PublisherPayments(account, link string) error {
 	if p.format == FormatJSON {
 		return p.writeJSON(struct {
@@ -22,5 +26,35 @@ func (p *Printer) PublisherPayments(account, link string) error {
 	if err == nil && !p.quiet {
 		p.Notef("LayerV collects 3%% of each CRID payment, including subscription renewals.")
 	}
+	return err
+}
+
+// PublisherStripeAccount prints the connection and whether it can take payments.
+func (p *Printer) PublisherStripeAccount(a *qurlapi.PublisherStripeAccount) error {
+	if p.format == FormatJSON {
+		return p.writeJSON(a)
+	}
+	if a.AccountID == "" {
+		return p.PublisherPayments("", "")
+	}
+	enabled := map[bool]string{true: "enabled", false: "not enabled"}
+	_, err := fmt.Fprintf(p.out, "%s\nCharges: %s\nPayouts: %s\nRenewing subscriptions: %d\n", a.AccountID, enabled[a.ChargesEnabled], enabled[a.PayoutsEnabled], a.RenewingSubscriptions)
+	if err == nil && a.SetupURL != "" {
+		_, err = fmt.Fprintf(p.out, "Finish setup in Stripe: %s\n", a.SetupURL)
+	}
+	if err == nil && !p.quiet {
+		p.Notef("LayerV collects 3%% of each CRID payment, including subscription renewals.")
+	}
+	return err
+}
+
+// PublisherStripeDisconnected confirms that sales stopped and LayerV left the account.
+func (p *Printer) PublisherStripeDisconnected() error {
+	if p.format == FormatJSON {
+		return p.writeJSON(struct {
+			Disconnected bool `json:"disconnected"`
+		}{true})
+	}
+	_, err := fmt.Fprintln(p.out, "Stripe is disconnected. Buyers keep access until their paid period ends and are not charged again. Run qurl payments connect to sell again.")
 	return err
 }
