@@ -85,15 +85,22 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 				return exitcode.UsageError(fmt.Errorf("--session-duration %s must be a positive whole number of seconds", sessionDuration))
 			}
 
+			// Fails closed even for a CRID without limits: an unreadable file
+			// could hold this one's, and a default link must not replace them.
 			limits, err := opts.savedLinkLimits(cmd.Context(), assessment.Input)
 			if err != nil {
 				return err
+			}
+			if limits != nil {
+				if err := applyShareFlagsToLimits(cmd, limits, ttl, sessionDuration); err != nil {
+					return err
+				}
 			}
 			opts.beginTermsNotice()
 			printer = opts.printer()
 			var link *qurlapi.ShareLink
 			if limits != nil {
-				link, err = opts.shareWithLimits(cmd, assessment.Input, *limits, ttl, sessionDuration)
+				link, err = opts.shareWithLimits(cmd, assessment.Input, *limits)
 			} else {
 				link, err = opts.shareResource(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
 					TTLSeconds: int(ttl.Seconds()), SessionDurationSeconds: int(sessionDuration / time.Second),
@@ -208,21 +215,27 @@ func (opts *globalOpts) shareResource(ctx context.Context, id string, options qu
 	return client.Share(ctx, id, options)
 }
 
-// shareWithLimits mints a link with the limits the share was published with;
-// --ttl and --session-duration replace their parts.
-func (opts *globalOpts) shareWithLimits(cmd *cobra.Command, id string, limits accessrules.LinkLimits, ttl, sessionDuration time.Duration) (*qurlapi.ShareLink, error) {
+// applyShareFlagsToLimits lets --ttl and --session-duration override saved
+// limits, within the bounds those limits allow.
+func applyShareFlagsToLimits(cmd *cobra.Command, limits *accessrules.LinkLimits, ttl, sessionDuration time.Duration) error {
 	if cmd.Flags().Changed("ttl") {
 		limits.ExpiresIn = ttl.String()
 		if _, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn); !ok {
-			return nil, exitcode.UsageError(errors.New("--ttl must be from 1m to 720h for this item's link limits"))
+			return exitcode.UsageError(errors.New("--ttl must be from 1m to 720h for this item's link limits"))
 		}
 	}
 	if cmd.Flags().Changed("session-duration") {
 		limits.SessionDuration = new(sessionDuration.String())
 		if !accessrules.ValidSessionLength(*limits.SessionDuration) {
-			return nil, exitcode.UsageError(errors.New("--session-duration must be from 1s to 24h for this item's link limits"))
+			return exitcode.UsageError(errors.New("--session-duration must be from 1s to 24h for this item's link limits"))
 		}
 	}
+	return nil
+}
+
+// shareWithLimits mints a link with the limits the share was published with;
+// --ttl and --session-duration replace their parts.
+func (opts *globalOpts) shareWithLimits(cmd *cobra.Command, id string, limits accessrules.LinkLimits) (*qurlapi.ShareLink, error) {
 	client, err := opts.newClient(cmd.Context())
 	if err != nil {
 		return nil, fmt.Errorf(msgShareNeedsDevice, err)

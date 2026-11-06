@@ -1010,7 +1010,8 @@ addresses. It intentionally rejects HTTPS, paths, queries, fragments,
 credentials, wildcard listeners, and localhost subdomains. These restrictions
 keep the one-command path unambiguous. `--foreground` runs the same production
 daemon engine in the current process for CI and debugging. Scripts can use
-`--quiet` to read only the full CRID.
+`--quiet` to read the full CRID on the first line; an item shared with link
+limits adds its new link on a second line.
 
 #### Remote URLs
 
@@ -1087,8 +1088,8 @@ The warning is part of the text output, and goes to stderr with `-o json` and
 stays as it is until you delete it. A publish never turns a public resource
 private, and it never makes a new public resource unless you pass `--public`.
 
-In either mode, the CRID is last and alone on its line; `--quiet` prints only
-the CRID. Publishing the same target again does not create a duplicate while
+In either mode, the CRID is last and alone on its line; `--quiet` prints the
+CRID first, then any link minted with saved or rule link limits. Publishing the same target again does not create a duplicate while
 its resource is active: the existing CRID is returned and the output says so.
 JSON reports a known outcome as `found_existing: true` or `false`; if recovery
 cannot prove which happened, it omits the field rather than guessing. Delete

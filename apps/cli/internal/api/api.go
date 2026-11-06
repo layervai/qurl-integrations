@@ -578,7 +578,7 @@ func (c *client) MintLimitedLink(ctx context.Context, crid string, limits access
 	}
 	portal, err := c.sdk.CreatePortal(ctx, &qurl.Resource{CRID: crid}, opts...)
 	if err != nil {
-		return nil, mapError(err)
+		return nil, mapShareError(err)
 	}
 	link := &ShareLink{QURL: portal.Link, CRID: portal.CRID, SingleUse: oneBrowser}
 	if portal.ExpiresAt != nil {

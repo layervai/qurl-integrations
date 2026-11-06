@@ -67,7 +67,7 @@ Use --access when you publish to choose the initial policy.`,
 			if err := validateConsumerDecision(&input); err != nil {
 				return err
 			}
-			// After the flag checks, so a rejected command reads no stdin or rule state.
+			// After the flag checks, so a rejected flag reads no stdin or rule state.
 			if err := opts.applyConsumerRule(cmd, &input, ruleSelector, ruleFile); err != nil {
 				return err
 			}
