@@ -221,9 +221,11 @@ func TestOwnerReadsOmitAZeroDate(t *testing.T) {
 	// How each format shows the mock's real date, a day before the test clock.
 	shown := map[string]string{"text": "1d ago", "json": `"created_at": "2026-03-01T00:00:00Z"`}
 	for name, command := range map[string]func(*apitest.Server) []string{
-		"status":  func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
-		"list":    func(*apitest.Server) []string { return []string{"list"} },
-		"publish": func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+		"status": func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
+		"list":   func(*apitest.Server) []string { return []string{"list"} },
+		"publish": func(*apitest.Server) []string {
+			return []string{"publish", "https://example.com/data", "--name", "Example"}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			for _, format := range []string{"text", "json"} {

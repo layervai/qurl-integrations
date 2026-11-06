@@ -110,7 +110,7 @@ instead, see [Private CRIDs](#private-crids).
 Your app still listens only on your machine. The CLI connects outward to qURL;
 you do not need public DNS, a public IP, or custom Connector configuration.
 
-Publishing a remote URL instead? `qurl publish https://api.example.com/reports`
+Publishing a remote URL instead? `qurl publish https://api.example.com/reports --name "Reports API"`
 prints its CRID and exits immediately.
 
 ### If the first run fails
@@ -840,6 +840,18 @@ route or stop the publisher to close its old work. See
 | `http://127.0.0.1:3000` | qURL starts the background share, waits for serving, prints its CRID, and exits |
 | `https://api.example.com/reports` | qURL registers the remote URL, prints its CRID, and exits |
 
+Every new resource needs a public name, set with `--name` (one line, up to
+100 characters). Recipients see it on the link page and in the passkey they
+save, so it is public. A local app defaults to its Connector ID. In a terminal
+only, it otherwise defaults to the name of the directory you run `qurl publish`
+in, and the terminal shows `Name for a new resource: <name> (change with --name)`
+first. A script without `--name` or a Connector ID sends no name: publishing an
+existing app works, and creating one asks for `--name`. A remote URL has no
+default, because its address may be private: an interactive terminal asks for
+the name, and a script must pass `--name` to create a resource. Publishing a
+target again needs no name and keeps the one it has; change it with
+`qurl preview set <CRID> --name`.
+
 #### Private consumer policies
 
 On a deployment that supports consumer policies, choose private access with
@@ -958,7 +970,7 @@ daemon engine in the current process for CI and debugging. Scripts can use
 #### Remote URLs
 
 ```bash
-qurl publish https://api.example.com/reports
+qurl publish https://api.example.com/reports --name "Reports API"
 ```
 
 Remote targets must use HTTP or HTTPS, include a host and valid port, and must
@@ -967,6 +979,7 @@ credential or making a network request.
 
 | Flag | Description |
 |------|-------------|
+| `--name` | Public name recipients see, up to 100 characters. Required to create a remote URL resource; a local app defaults to its Connector ID or directory name |
 | `--public` | Let anyone who has the CRID open the resource. Without it the resource is private |
 | `--allow-device-key <public-key>` | Allow a recipient's device to open the private resource (repeatable) |
 | `--allow-requests` | Let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you |
@@ -1262,7 +1275,7 @@ knows about a person is the name they typed. An agent that runs these commands
 for you must approve only codes you passed on to it.
 
 ```bash
-qurl publish https://wiki.example.com/team --allow-requests
+qurl publish https://wiki.example.com/team --name "Team wiki" --allow-requests
 qurl requests                    # pending requests of all your resources
 qurl requests <CRID>             # pending requests of one resource
 qurl requests <CRID> --on        # let people ask; prints what to send them
@@ -1948,9 +1961,10 @@ see [qurl requests, approve and deny](#qurl-requests-approve-and-deny).
 ### CRID preview metadata
 
 Each CRID has its own optional description and up to four media items. Description
-is public preview text, separate from private owner notes. The optional app
-name is public, with a limit of 100 characters. Omitted text fields stay
-unchanged; an empty string removes that field. Media needs a verified
+is public preview text, separate from private owner notes. The name is
+public and required, with a limit of 100 characters: `qurl publish` sets it,
+and `--name` changes it but cannot remove it. Omitted text fields stay
+unchanged; an empty `--description` removes the description. Media needs a verified
 publisher. Use the same registered device identity as other publisher commands:
 
 ```sh
@@ -1962,7 +1976,7 @@ qurl preview remove "$CRID" "$MEDIA_ID"
 qurl preview clear "$CRID"
 ```
 
-`clear` removes name, description and media and cancels pending uploads. Upload streams
+`clear` removes description and media and cancels pending uploads; the name stays. Upload streams
 directly to private storage without the API credential. Processing is asynchronous;
 read `preview get` again to check it. A failed replacement keeps the current item.
 
