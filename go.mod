@@ -14,7 +14,7 @@ require (
 	github.com/fatedier/golib v0.8.2
 	github.com/layervai/qurl-conformance v0.17.2
 	github.com/layervai/qurl-connector v0.14.5
-	github.com/layervai/qurl-go v0.26.5-0.20261106220531-7f750c31c03f
+	github.com/layervai/qurl-go v0.26.5-0.20261106222823-362cb36047bf
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10

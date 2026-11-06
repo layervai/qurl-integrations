@@ -387,10 +387,11 @@ func (s *AccessRuleStore) switchAccount(j *accessRuleJournal, accountID string) 
 }
 func (s *AccessRuleStore) syncFailure(ctx context.Context, cause error) (accessrules.Snapshot, error) {
 	snapshot, err := s.update(ctx, func(j *accessRuleJournal) error {
-		// A journal never linked to an account has nothing to be offline from.
-		j.Sync = accessrules.SyncOffline
-		if j.AccountID == "" {
-			j.Sync = accessrules.SyncLocal
+		// A journal never linked to an account has nothing to be offline from,
+		// and an unresolved conflict still needs resolving.
+		j.status()
+		if j.Sync != accessrules.SyncLocal && j.Sync != accessrules.SyncConflict {
+			j.Sync = accessrules.SyncOffline
 		}
 		return nil
 	})

@@ -186,6 +186,11 @@ func TestAccessRulesSyncMergeConflictAndAccountIsolation(t *testing.T) {
 	if err != nil || got.Sync != "conflict" || len(got.Conflicts) != 1 {
 		t.Fatalf("conflict %+v %v", got, err)
 	}
+	remote.fail = errors.New("offline")
+	if got, err = store.Sync(t.Context(), remote); err == nil || got.Sync != "conflict" {
+		t.Fatalf("a failed sync hid the conflict: %+v %v", got, err)
+	}
+	remote.fail = nil
 	got, err = store.Resolve(t.Context(), got.LocalVersion, ruleID, "account")
 	if err != nil || got.Items[slices.IndexFunc(got.Items, func(d accessrules.Definition) bool { return d.ID == ruleID })].Name != "Remote edit" {
 		t.Fatalf("resolve %+v %v", got, err)
