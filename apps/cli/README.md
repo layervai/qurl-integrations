@@ -915,7 +915,9 @@ change its payment policy.
 LayerV from the Stripe account. Buyers keep access until their paid period ends
 and are not charged again. New purchases stop until you connect the same or a
 different account. It asks first; scripts pass `--yes`. If it reports that it
-did not finish, run it again: LayerV stays connected until every renewal has stopped.
+did not finish, run it again: LayerV stays connected until every renewal has stopped. Scripts should read `outcome` in `-o json`: with `--yes` no status is read, so
+`disconnected: true` only means nothing is connected any more, and
+`released_revoked` means subscriptions must still be canceled in Stripe.
 
 `qurl access --help` lists all owner actions. Changes require the current
 version. If session removal is pending, retry the exact removal and version;
