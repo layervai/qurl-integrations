@@ -43,8 +43,8 @@ func (p *Printer) PublisherStripeAccount(a *qurlapi.PublisherStripeAccount) erro
 		}{a.AccountID, a.SetupURL, a.LayerVFeePercent, a.RenewingSubscriptions, a.ChargesEnabled, a.PayoutsEnabled, a.Disconnecting, a.Revoked, a.StatusUnavailable})
 	}
 	if a.AccountID == "" {
+		// No fee note: the fee is checked only for a connected, readable account.
 		_, err := fmt.Fprintln(p.out, "No Stripe account is connected. Run qurl payments connect.")
-		p.feeNote(err)
 		return err
 	}
 	// The fee note belongs to an account that can sell; the states below cannot.
@@ -86,12 +86,24 @@ const (
 
 // PublisherStripeDisconnected reports a disconnect outcome.
 func (p *Printer) PublisherStripeDisconnected(outcome StripeDisconnectOutcome) error {
-	if p.format == FormatJSON {
-		return p.writeJSON(struct {
-			Disconnected bool `json:"disconnected"`
-		}{outcome != StripeNothingConnected})
+	var text, name string
+	switch outcome {
+	case StripeNothingConnected:
+		name = "nothing_connected"
+	case StripeDisconnected:
+		name = "disconnected"
+	case StripeReleasedRevoked:
+		name = "released_revoked"
+	case StripeDisconnectedUnread:
+		name = "unread"
 	}
-	var text string
+	if p.format == FormatJSON && name != "" {
+		// outcome lets a script see the revoked case, which still needs action in Stripe.
+		return p.writeJSON(struct {
+			Disconnected bool   `json:"disconnected"`
+			Outcome      string `json:"outcome"`
+		}{outcome != StripeNothingConnected, name})
+	}
 	switch outcome {
 	case StripeNothingConnected:
 		text = "No Stripe account is connected."

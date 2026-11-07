@@ -288,7 +288,7 @@ func TestPaymentsAccountRefusesAChangedFeeButDisconnectDoesNot(t *testing.T) {
 	srv = stripeAccountServer(t, data, &disconnectDeletes)
 	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}, inTTY: true, stdin: strings.NewReader("y\n")})
 	if result.code != 0 || deletes != 0 || disconnectDeletes != 1 {
-		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
+		t.Fatalf("exit=%d account deletes=%d disconnect deletes=%d stderr=%s", result.code, deletes, disconnectDeletes, result.stderr.String())
 	}
 }
 
@@ -351,7 +351,7 @@ func TestPaymentsDisconnectOfARevokedAccountJSON(t *testing.T) {
 	data["revoked"] = true
 	srv := stripeAccountServer(t, data, &deletes)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "-o", "json"}})
-	if result.code != 0 || deletes != 1 || !strings.Contains(result.stdout.String(), `"disconnected": true`) {
+	if result.code != 0 || deletes != 1 || !strings.Contains(result.stdout.String(), `"disconnected": true`) || !strings.Contains(result.stdout.String(), `"outcome": "released_revoked"`) {
 		t.Fatalf("exit=%d deletes=%d stdout=%s", result.code, deletes, result.stdout.String())
 	}
 }
@@ -389,5 +389,18 @@ func TestStatusReadMayRecoverOnlyForTransientFailures(t *testing.T) {
 	}
 	if statusReadMayRecover(errors.New("refused")) {
 		t.Fatal("an unknown failure must not point to --yes")
+	}
+	tlsFailure := &url.Error{Op: "Get", URL: "https://api.example.test", Err: errors.New("x509: certificate signed by unknown authority")}
+	if statusReadMayRecover(tlsFailure) {
+		t.Fatal("a TLS failure would fail the DELETE too")
+	}
+}
+
+func TestPaymentsAccountWithNothingConnectedStatesNoFee(t *testing.T) {
+	var deletes int
+	srv := stripeAccountServer(t, map[string]any{"account_id": "", "layerv_fee_percent": 5, "charges_enabled": false, "payouts_enabled": false, "renewing_subscriptions": 0}, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
+	if result.code != 0 || strings.Contains(result.stderr.String(), "LayerV collects") {
+		t.Fatalf("exit=%d stderr=%s", result.code, result.stderr.String())
 	}
 }

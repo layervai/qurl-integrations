@@ -31,6 +31,7 @@ func TestPublisherStripeStatusRefusesAnIncompleteOrWrongAnswer(t *testing.T) {
 		"bad account":     func(d map[string]any) { d["account_id"] = "acct_bad/route" },
 		"foreign setup":   func(d map[string]any) { d["setup_url"] = "https://attacker.test/" },
 		"wrong data type": func(d map[string]any) { d["charges_enabled"] = "yes" },
+		"null member":     func(d map[string]any) { d["payouts_enabled"] = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			data := map[string]any{}

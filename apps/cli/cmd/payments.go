@@ -45,6 +45,8 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 			if err != nil {
 				return err
 			}
+			// connect goes through the SDK; account and disconnect use direct REST
+			// calls because the SDK has neither the status members nor a disconnect.
 			if operation == paymentsConnect {
 				payments, ok := client.ConsumerManagement().(publisherStripeClient)
 				if !ok {
@@ -56,8 +58,6 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 				}
 				return opts.printer().PublisherPayments(link)
 			}
-			// connect goes through the SDK; account and disconnect use direct REST
-			// calls because the SDK has neither the status members nor a disconnect.
 			if operation == paymentsAccount {
 				status, e := client.PublisherStripeStatus(cmd.Context())
 				if e != nil {
@@ -88,7 +88,7 @@ func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.Pub
 		status, err := account.PublisherStripeStatus(ctx)
 		if err != nil {
 			if statusReadMayRecover(err) {
-				opts.printer().Notef("To disconnect without reading the account status, re-run with --yes.")
+				opts.printer().Notef("To disconnect without reading the account status, re-run with --yes. That skips the confirmation: every LayerV subscription on the account stops renewing.")
 			}
 			return err
 		}
@@ -118,16 +118,16 @@ func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.Pub
 }
 
 // statusReadMayRecover reports a failure that --yes can get past: a 5xx or a
-// network failure, a timeout included. A refused credential, an incompatible
-// service and a canceled command (Ctrl-C) do not point to the flag that skips
-// confirmation.
+// network timeout. A refused credential, an incompatible service, a TLS or DNS
+// failure (the DELETE would fail the same way) and a canceled command (Ctrl-C)
+// do not point to the flag that skips confirmation.
 func statusReadMayRecover(err error) bool {
 	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) {
 		return apiErr.StatusCode >= 500
 	}
 	var netErr net.Error
-	return errors.As(err, &netErr) && !errors.Is(err, context.Canceled)
+	return errors.As(err, &netErr) && netErr.Timeout() && !errors.Is(err, context.Canceled)
 }
 
 // confirmStripeDisconnect states what a disconnect stops before asking.

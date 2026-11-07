@@ -74,7 +74,8 @@ func decodeStripeStatus(reply *restReply) (*PublisherStripeAccount, error) {
 		return nil, fmt.Errorf("%w: invalid Stripe account", qurl.ErrInvalidAPIResponse)
 	}
 	for _, name := range stripeStatusMembers {
-		if _, ok := members[name]; !ok {
+		// A null member would decode as false or 0, the misreading this check prevents.
+		if value, ok := members[name]; !ok || string(value) == "null" {
 			return nil, fmt.Errorf("%w: Stripe account has no %s; the service predates this CLI", qurl.ErrInvalidAPIResponse, name)
 		}
 	}
