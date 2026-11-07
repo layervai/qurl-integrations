@@ -39,17 +39,16 @@ func TestPublisherStripeStatusRefusesAnIncompleteOrWrongAnswer(t *testing.T) {
 			}
 			change(data)
 			body, _ := json.Marshal(map[string]any{"data": data})
-			c := &client{}
-			if _, err := c.decodeStripeStatus(&restReply{status: http.StatusOK, body: body}); err == nil {
+			if _, err := decodeStripeStatus(&restReply{status: http.StatusOK, body: body}); err == nil {
 				t.Fatal("accepted")
 			}
 		})
 	}
 	body, _ := json.Marshal(map[string]any{"data": valid})
-	if _, err := (&client{}).decodeStripeStatus(&restReply{status: http.StatusOK, body: body}); err != nil {
+	if _, err := decodeStripeStatus(&restReply{status: http.StatusOK, body: body}); err != nil {
 		t.Fatalf("valid answer refused: %v", err)
 	}
-	if _, err := (&client{}).decodeStripeStatus(&restReply{status: http.StatusOK, body: []byte(`{"data":null}`)}); err == nil {
+	if _, err := decodeStripeStatus(&restReply{status: http.StatusOK, body: []byte(`{"data":null}`)}); err == nil {
 		t.Fatal("null data accepted")
 	}
 }

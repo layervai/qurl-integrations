@@ -7,6 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/layervai/qurl-go/qurl"
+
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
@@ -54,6 +56,8 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 				}
 				return opts.printer().PublisherPayments(link)
 			}
+			// connect goes through the SDK; account and disconnect use direct REST
+			// calls because the SDK has neither the status members nor a disconnect.
 			account, ok := client.(qurlapi.PublisherStripe)
 			if !ok {
 				return errors.New("publisher payments are unavailable in this client")
@@ -64,7 +68,8 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 					return e
 				}
 				// This CLI prints the 3% fee, so a fee change must ship with a CLI release.
-				// Only the account view refuses; a disconnect never depends on the fee.
+				// Only the account view refuses, JSON included on purpose; a disconnect
+				// never depends on the fee.
 				if status.LayerVFeePercent != 3 {
 					return errors.New("LayerV's fee changed; upgrade the qurl CLI to see this account")
 				}
@@ -83,7 +88,9 @@ func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.Pub
 	if !yes {
 		status, err := account.PublisherStripeStatus(ctx)
 		if err != nil {
-			opts.printer().Notef("To disconnect without reading the account status, re-run with --yes.")
+			if statusReadMayRecover(err) {
+				opts.printer().Notef("To disconnect without reading the account status, re-run with --yes.")
+			}
 			return err
 		}
 		if status.AccountID == "" {
@@ -109,7 +116,21 @@ func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.Pub
 	if err := account.DisconnectPublisherStripe(ctx); err != nil {
 		return err
 	}
+	if yes {
+		// --yes read no status, so a revoked account cannot be told apart here.
+		opts.printer().Notef("If LayerV's access had been removed in Stripe, cancel or refund remaining subscriptions there.")
+	}
 	return opts.printer().PublisherStripeDisconnected(true, revoked)
+}
+
+// statusReadMayRecover reports a failure that --yes can get past: the service or
+// Stripe was unavailable, not a refused credential or an incompatible service.
+func statusReadMayRecover(err error) bool {
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode >= 500
+	}
+	return !errors.Is(err, qurl.ErrInvalidAPIResponse)
 }
 
 // confirmStripeDisconnect states what a disconnect stops before asking.

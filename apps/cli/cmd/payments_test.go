@@ -126,7 +126,9 @@ func TestPaymentsDisconnectYesNeedsNoStatusRead(t *testing.T) {
 	}
 }
 
-func TestPaymentsUnfinishedDisconnectFinishesWithoutAskingAgain(t *testing.T) {
+// No terminal and no --yes: finishing a disconnect that was confirmed when it
+// started still sends the DELETE.
+func TestPaymentsUnfinishedDisconnectFinishesWithoutAskingAgainEvenWithoutATerminal(t *testing.T) {
 	var deletes int
 	data := notReadyAccount()
 	data["disconnecting"] = true
@@ -185,7 +187,7 @@ func TestPaymentsDisconnectJSON(t *testing.T) {
 
 func TestPaymentsDisconnectPointsToYesWhenTheStatusCannotBeRead(t *testing.T) {
 	srv := apitest.NewServer(t)
-	srv.Script(http.MethodGet, "/v1/payments/account", func(w http.ResponseWriter, _ *http.Request) {
+	srv.ScriptRepeat(http.MethodGet, "/v1/payments/account", 10, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte(`{"error":{"code":"service_unavailable","detail":"retry later"}}`))
@@ -245,15 +247,17 @@ func TestPaymentsDisconnectExplainsAnUnexpectedAnswer(t *testing.T) {
 		status int
 		want   string
 	}{{http.StatusOK, "not 204"}, {http.StatusNotFound, "cannot disconnect Stripe yet"}, {http.StatusMethodNotAllowed, "cannot disconnect Stripe yet"}} {
-		srv := apitest.NewServer(t)
-		srv.Script(http.MethodDelete, "/v1/payments/account", func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(tc.status)
-			_, _ = w.Write([]byte(`{}`))
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodDelete, "/v1/payments/account", func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{}`))
+			})
+			result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "--yes"}})
+			if result.code == 0 || !strings.Contains(result.stderr.String(), tc.want) {
+				t.Fatalf("status %d: exit=%d stderr=%s", tc.status, result.code, result.stderr.String())
+			}
 		})
-		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "--yes"}})
-		if result.code == 0 || !strings.Contains(result.stderr.String(), tc.want) {
-			t.Fatalf("status %d: exit=%d stderr=%s", tc.status, result.code, result.stderr.String())
-		}
 	}
 }
 
@@ -270,5 +274,36 @@ func TestPaymentsAccountRefusesAChangedFeeButDisconnectDoesNot(t *testing.T) {
 	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}, inTTY: true, stdin: strings.NewReader("y\n")})
 	if result.code != 0 || deletes != 1 {
 		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
+	}
+}
+
+func TestPaymentsDisconnectYesCannotKnowARevokeSoItSaysWhatToCheck(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodDelete, "/v1/payments/account", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "--yes"}})
+	if result.code != 0 || !strings.Contains(result.stderr.String(), "If LayerV's access had been removed in Stripe") {
+		t.Fatalf("exit=%d stderr=%s", result.code, result.stderr.String())
+	}
+}
+
+func TestPaymentsDisconnectHintsYesOnlyWhenItCouldHelp(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		hint   bool
+	}{{http.StatusServiceUnavailable, true}, {http.StatusForbidden, false}} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.ScriptRepeat(http.MethodGet, "/v1/payments/account", 10, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"error":{"code":"refused","detail":"no"}}`))
+			})
+			result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}})
+			if result.code == 0 || strings.Contains(result.stderr.String(), "re-run with --yes") != tc.hint {
+				t.Fatalf("exit=%d stderr=%s", result.code, result.stderr.String())
+			}
+		})
 	}
 }

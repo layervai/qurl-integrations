@@ -25,7 +25,9 @@ var _ PublisherStripe = (*client)(nil)
 // payment credentials.
 // TODO(upstream-contract): qurl-service owns GET/DELETE /v1/payments/account:
 // these members, 204 on DELETE, and what disconnecting, revoked and
-// status_unavailable mean. Change this file with that contract.
+// status_unavailable mean. Change this file with that contract. DELETE names
+// no account, so the account a prompt showed is not a precondition; the
+// service has no such precondition today.
 type PublisherStripeAccount struct {
 	AccountID             string `json:"account_id"`
 	SetupURL              string `json:"setup_url,omitempty"`
@@ -52,10 +54,10 @@ func (c *client) PublisherStripeStatus(ctx context.Context) (*PublisherStripeAcc
 	if err != nil {
 		return nil, err
 	}
-	return c.decodeStripeStatus(reply)
+	return decodeStripeStatus(reply)
 }
 
-func (c *client) decodeStripeStatus(reply *restReply) (*PublisherStripeAccount, error) {
+func decodeStripeStatus(reply *restReply) (*PublisherStripeAccount, error) {
 	if reply.status != http.StatusOK {
 		return nil, reply.problem()
 	}
