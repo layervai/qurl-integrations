@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/spf13/cobra"
 
-	"github.com/layervai/qurl-go/qurl"
-
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 const (
@@ -84,8 +84,9 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 // disconnectStripe confirms unless --yes, which needs no status read so it can
 // finish a disconnect even when Stripe cannot be read.
 func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.PublisherStripe, yes bool) error {
-	revoked := false
+	outcome := output.StripeDisconnectedUnread
 	if !yes {
+		outcome = output.StripeDisconnected
 		status, err := account.PublisherStripeStatus(ctx)
 		if err != nil {
 			if statusReadMayRecover(err) {
@@ -94,10 +95,10 @@ func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.Pub
 			return err
 		}
 		if status.AccountID == "" {
-			return opts.printer().PublisherStripeDisconnected(false, false)
+			return opts.printer().PublisherStripeDisconnected(output.StripeNothingConnected)
 		}
-		revoked = status.Revoked
 		if status.Revoked {
+			outcome = output.StripeReleasedRevoked
 			// Nothing LayerV can stop is left; finishing only releases the account.
 			opts.printer().Notef("LayerV's access was already removed in Stripe. Cancel or refund remaining subscriptions there.")
 		}
@@ -116,21 +117,19 @@ func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.Pub
 	if err := account.DisconnectPublisherStripe(ctx); err != nil {
 		return err
 	}
-	if yes {
-		// --yes read no status, so a revoked account cannot be told apart here.
-		opts.printer().Notef("If LayerV's access had been removed in Stripe, cancel or refund remaining subscriptions there.")
-	}
-	return opts.printer().PublisherStripeDisconnected(true, revoked)
+	return opts.printer().PublisherStripeDisconnected(outcome)
 }
 
-// statusReadMayRecover reports a failure that --yes can get past: the service or
-// Stripe was unavailable, not a refused credential or an incompatible service.
+// statusReadMayRecover reports a failure that --yes can get past: a 5xx or a
+// network failure. A refused credential, an incompatible service and a
+// canceled command (Ctrl-C) do not point to the flag that skips confirmation.
 func statusReadMayRecover(err error) bool {
 	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) {
 		return apiErr.StatusCode >= 500
 	}
-	return !errors.Is(err, qurl.ErrInvalidAPIResponse)
+	var netErr net.Error
+	return errors.As(err, &netErr) && !errors.Is(err, context.Canceled)
 }
 
 // confirmStripeDisconnect states what a disconnect stops before asking.

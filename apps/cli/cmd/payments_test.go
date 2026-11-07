@@ -81,8 +81,9 @@ func TestPaymentsDisconnectConfirmsFirst(t *testing.T) {
 			if tc.run.inTTY && !strings.Contains(result.stderr.String(), "2 subscriptions will stop renewing") {
 				t.Fatalf("prompt does not say what stops: %s", result.stderr.String())
 			}
-			if tc.deletes == 1 && !strings.Contains(result.stdout.String(), "Stripe is disconnected.") {
-				t.Fatalf("stdout=%s", result.stdout.String())
+			// --yes reads no status, so it reports only that nothing is connected any more.
+			if want := map[bool]string{false: "Stripe is disconnected.", true: "Nothing is connected to LayerV any more."}[len(tc.run.args) > 0]; tc.deletes == 1 && !strings.Contains(result.stdout.String(), want) {
+				t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
 			}
 		})
 	}
@@ -134,8 +135,8 @@ func TestPaymentsUnfinishedDisconnectFinishesWithoutAskingAgainEvenWithoutATermi
 	data["disconnecting"] = true
 	srv := stripeAccountServer(t, data, &deletes)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
-	if !strings.Contains(result.stdout.String(), "Run qurl payments disconnect to finish disconnecting.") || strings.Contains(result.stdout.String(), "Charges:") {
-		t.Fatalf("stdout=%s", result.stdout.String())
+	if result.code != 0 || !strings.Contains(result.stdout.String(), "Run qurl payments disconnect to finish disconnecting.") || strings.Contains(result.stdout.String(), "Charges:") {
+		t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
 	}
 	srv = stripeAccountServer(t, data, &deletes)
 	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}})
@@ -150,8 +151,8 @@ func TestPaymentsAccountTellsToCancelBillingAfterAStripeSideRevoke(t *testing.T)
 	data["revoked"] = true
 	srv := stripeAccountServer(t, data, &deletes)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
-	if !strings.Contains(result.stdout.String(), "Cancel or refund remaining subscriptions in Stripe") {
-		t.Fatalf("stdout=%s", result.stdout.String())
+	if result.code != 0 || !strings.Contains(result.stdout.String(), "Cancel or refund remaining subscriptions in Stripe") {
+		t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
 	}
 }
 
@@ -172,7 +173,7 @@ func TestPaymentsDisconnectOfARevokedAccountSaysToCancelBillingInStripe(t *testi
 	srv := stripeAccountServer(t, data, &deletes)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}})
 	if result.code != 0 || deletes != 1 || !strings.Contains(result.stderr.String(), "Cancel or refund remaining subscriptions there.") || !strings.Contains(result.stdout.String(), "LayerV is released") || strings.Contains(result.stdout.String(), "Buyers keep access") {
-		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
+		t.Fatalf("exit=%d deletes=%d stdout=%s stderr=%s", result.code, deletes, result.stdout.String(), result.stderr.String())
 	}
 }
 
@@ -204,8 +205,8 @@ func TestPaymentsAccountWhenStripeCannotBeReached(t *testing.T) {
 	data["status_unavailable"] = true
 	srv := stripeAccountServer(t, data, &deletes)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
-	if !strings.Contains(result.stdout.String(), "could not be reached") || strings.Contains(result.stdout.String(), "Charges:") {
-		t.Fatalf("stdout=%s", result.stdout.String())
+	if result.code != 0 || !strings.Contains(result.stdout.String(), "could not be reached") || strings.Contains(result.stdout.String(), "Charges:") {
+		t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
 	}
 }
 
@@ -283,8 +284,8 @@ func TestPaymentsDisconnectYesCannotKnowARevokeSoItSaysWhatToCheck(t *testing.T)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "--yes"}})
-	if result.code != 0 || !strings.Contains(result.stderr.String(), "If LayerV's access had been removed in Stripe") {
-		t.Fatalf("exit=%d stderr=%s", result.code, result.stderr.String())
+	if result.code != 0 || !strings.Contains(result.stdout.String(), "Nothing is connected to LayerV any more.") || !strings.Contains(result.stdout.String(), "If LayerV's access had been removed in Stripe") || strings.Contains(result.stdout.String(), "Buyers keep access") {
+		t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
 	}
 }
 
@@ -305,5 +306,16 @@ func TestPaymentsDisconnectHintsYesOnlyWhenItCouldHelp(t *testing.T) {
 				t.Fatalf("exit=%d stderr=%s", result.code, result.stderr.String())
 			}
 		})
+	}
+}
+
+func TestPaymentsDisconnectYesWithNothingConnectedSaysSoHonestly(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodDelete, "/v1/payments/account", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "--yes"}})
+	if result.code != 0 || strings.Contains(result.stdout.String(), "Stripe is disconnected.") {
+		t.Fatalf("--yes cannot claim it disconnected something: exit=%d stdout=%s", result.code, result.stdout.String())
 	}
 }

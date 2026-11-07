@@ -56,21 +56,36 @@ func (p *Printer) PublisherStripeAccount(a *qurlapi.PublisherStripeAccount) erro
 	return err
 }
 
-// PublisherStripeDisconnected reports a disconnect, or that nothing was connected.
-// A revoked account was released only: its billing must still be stopped in Stripe.
-func (p *Printer) PublisherStripeDisconnected(disconnected, revoked bool) error {
+// StripeDisconnectOutcome is what a disconnect did, as far as the CLI knows.
+type StripeDisconnectOutcome int
+
+const (
+	// StripeNothingConnected means no account was connected, so nothing was sent.
+	StripeNothingConnected StripeDisconnectOutcome = iota
+	// StripeDisconnected means renewals stopped and LayerV left the account.
+	StripeDisconnected
+	// StripeReleasedRevoked means LayerV's access was already removed in Stripe, so
+	// the account was only released; its billing must still be stopped there.
+	StripeReleasedRevoked
+	// StripeDisconnectedUnread means --yes read no status, so which of the above
+	// happened is unknown; only that nothing is connected any more.
+	StripeDisconnectedUnread
+)
+
+// PublisherStripeDisconnected reports a disconnect outcome.
+func (p *Printer) PublisherStripeDisconnected(outcome StripeDisconnectOutcome) error {
 	if p.format == FormatJSON {
 		return p.writeJSON(struct {
 			Disconnected bool `json:"disconnected"`
-		}{disconnected})
+		}{outcome != StripeNothingConnected})
 	}
-	text := "Stripe is disconnected. Buyers keep access until their paid period ends and are not charged again. Run qurl payments connect to sell again."
-	switch {
-	case !disconnected:
-		text = "No Stripe account is connected."
-	case revoked:
-		text = "LayerV is released from the Stripe account. Cancel or refund any remaining subscriptions in Stripe. Run qurl payments connect to sell again."
-	}
+	text := map[StripeDisconnectOutcome]string{
+		StripeNothingConnected: "No Stripe account is connected.",
+		StripeDisconnected:     "Stripe is disconnected. Buyers keep access until their paid period ends and are not charged again. Run qurl payments connect to sell again.",
+		StripeReleasedRevoked:  "LayerV is released from the Stripe account. Cancel or refund any remaining subscriptions in Stripe. Run qurl payments connect to sell again.",
+		StripeDisconnectedUnread: "Nothing is connected to LayerV any more. If LayerV's access had been removed in Stripe, cancel or refund remaining subscriptions there. " +
+			"Run qurl payments connect to sell again.",
+	}[outcome]
 	_, err := fmt.Fprintln(p.out, text)
 	return err
 }
