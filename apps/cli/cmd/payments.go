@@ -57,33 +57,42 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 			if !ok {
 				return errors.New("publisher payments are unavailable in this client")
 			}
-			// --yes needs no status, so it can finish a disconnect even when Stripe cannot be read.
-			if operation == paymentsAccount || !yes {
+			if operation == paymentsAccount {
 				status, e := account.PublisherStripeStatus(cmd.Context())
 				if e != nil {
 					return e
 				}
-				if operation == paymentsAccount {
-					return opts.printer().PublisherStripeAccount(status)
-				}
-				if status.AccountID != "" && !status.Disconnecting && !status.Revoked {
-					confirmed, e := confirmStripeDisconnect(opts, status)
-					if e != nil {
-						return e
-					}
-					if !confirmed {
-						opts.printer().Notef("Canceled — Stripe is still connected.")
-						return nil
-					}
-				}
+				return opts.printer().PublisherStripeAccount(status)
 			}
-			if err := account.DisconnectPublisherStripe(cmd.Context()); err != nil {
-				return err
-			}
-			return opts.printer().PublisherStripeDisconnected()
+			return disconnectStripe(cmd.Context(), opts, account, yes)
 		}}
 	cmd.Flags().BoolVar(&yes, "yes", false, "disconnect without confirmation")
 	return cmd
+}
+
+// disconnectStripe confirms unless --yes, which needs no status read so it can
+// finish a disconnect even when Stripe cannot be read.
+func disconnectStripe(ctx context.Context, opts *globalOpts, account publisherStripeAccountClient, yes bool) error {
+	if !yes {
+		status, err := account.PublisherStripeStatus(ctx)
+		if err != nil {
+			return err
+		}
+		if status.AccountID != "" && !status.Disconnecting && !status.Revoked {
+			confirmed, err := confirmStripeDisconnect(opts, status)
+			if err != nil {
+				return err
+			}
+			if !confirmed {
+				opts.printer().Notef("Canceled — Stripe is still connected.")
+				return nil
+			}
+		}
+	}
+	if err := account.DisconnectPublisherStripe(ctx); err != nil {
+		return err
+	}
+	return opts.printer().PublisherStripeDisconnected()
 }
 
 // confirmStripeDisconnect states what a disconnect stops before asking.
