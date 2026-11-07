@@ -19,7 +19,8 @@ type PublisherStripe interface {
 	DisconnectPublisherStripe(context.Context) error
 }
 
-var _ PublisherStripe = (*client)(nil)
+// LayerVFeePercent is LayerV's share of each CRID payment, as this CLI states it.
+const LayerVFeePercent = 3
 
 // PublisherStripeAccount is the publisher's Stripe connection. It holds no
 // payment credentials.

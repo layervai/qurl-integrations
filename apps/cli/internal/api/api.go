@@ -30,6 +30,8 @@ const schemeHTTPS = "https"
 // Client is what commands program against.
 type Client interface {
 	ConsumerManagement() ConsumerManagementClient
+	// PublisherStripe is part of Client so the registered wrapper keeps it.
+	PublisherStripe
 	Preview(ctx context.Context, id string) (*Preview, error)
 	UpdatePreview(ctx context.Context, id string, patch PreviewPatch) (*Preview, error)
 	UploadPreview(ctx context.Context, id, path, alt, replaceID string) (*Preview, error)

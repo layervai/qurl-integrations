@@ -12,7 +12,7 @@ func (p *Printer) PublisherPayments(link string) error {
 		return p.writeJSON(struct {
 			ConnectURL       string `json:"connect_url"`
 			LayerVFeePercent int    `json:"layerv_fee_percent"`
-		}{link, 3})
+		}{link, qurlapi.LayerVFeePercent})
 	}
 	_, err := fmt.Fprintln(p.out, link)
 	p.feeNote(err)
@@ -22,14 +22,25 @@ func (p *Printer) PublisherPayments(link string) error {
 // feeNote states LayerV's fee after a successful payments answer.
 func (p *Printer) feeNote(err error) {
 	if err == nil && !p.quiet {
-		p.Notef("LayerV collects 3%% of each CRID payment, including subscription renewals.")
+		p.Notef("LayerV collects %d%% of each CRID payment, including subscription renewals.", qurlapi.LayerVFeePercent)
 	}
 }
 
 // PublisherStripeAccount prints the connection and whether it can take payments.
 func (p *Printer) PublisherStripeAccount(a *qurlapi.PublisherStripeAccount) error {
 	if p.format == FormatJSON {
-		return p.writeJSON(a)
+		// Field by field, so a member added to the API type is not printed unreviewed.
+		return p.writeJSON(struct {
+			AccountID             string `json:"account_id"`
+			SetupURL              string `json:"setup_url,omitempty"`
+			LayerVFeePercent      int    `json:"layerv_fee_percent"`
+			RenewingSubscriptions int    `json:"renewing_subscriptions"`
+			ChargesEnabled        bool   `json:"charges_enabled"`
+			PayoutsEnabled        bool   `json:"payouts_enabled"`
+			Disconnecting         bool   `json:"disconnecting"`
+			Revoked               bool   `json:"revoked"`
+			StatusUnavailable     bool   `json:"status_unavailable"`
+		}{a.AccountID, a.SetupURL, a.LayerVFeePercent, a.RenewingSubscriptions, a.ChargesEnabled, a.PayoutsEnabled, a.Disconnecting, a.Revoked, a.StatusUnavailable})
 	}
 	if a.AccountID == "" {
 		_, err := fmt.Fprintln(p.out, "No Stripe account is connected. Run qurl payments connect.")

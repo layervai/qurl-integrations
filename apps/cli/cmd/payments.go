@@ -58,10 +58,7 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 			}
 			// connect goes through the SDK; account and disconnect use direct REST
 			// calls because the SDK has neither the status members nor a disconnect.
-			account, ok := client.(qurlapi.PublisherStripe)
-			if !ok {
-				return errors.New("publisher payments are unavailable in this client")
-			}
+			account := qurlapi.PublisherStripe(client)
 			if operation == paymentsAccount {
 				status, e := account.PublisherStripeStatus(cmd.Context())
 				if e != nil {
@@ -70,7 +67,7 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 				// This CLI prints the 3% fee, so a fee change must ship with a CLI release.
 				// Only the account view refuses, JSON included on purpose; a disconnect
 				// never depends on the fee.
-				if status.LayerVFeePercent != 3 {
+				if status.LayerVFeePercent != qurlapi.LayerVFeePercent {
 					return errors.New("LayerV's fee changed; upgrade the qurl CLI to see this account")
 				}
 				return opts.printer().PublisherStripeAccount(status)
@@ -98,9 +95,8 @@ func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.Pub
 			return opts.printer().PublisherStripeDisconnected(output.StripeNothingConnected)
 		}
 		if status.Revoked {
-			outcome = output.StripeReleasedRevoked
 			// Nothing LayerV can stop is left; finishing only releases the account.
-			opts.printer().Notef("LayerV's access was already removed in Stripe. Cancel or refund remaining subscriptions there.")
+			outcome = output.StripeReleasedRevoked
 		}
 		// An unfinished disconnect was confirmed when it started.
 		if !status.Disconnecting && !status.Revoked {
@@ -134,13 +130,15 @@ func statusReadMayRecover(err error) bool {
 
 // confirmStripeDisconnect states what a disconnect stops before asking.
 func confirmStripeDisconnect(opts *globalOpts, status *qurlapi.PublisherStripeAccount) (bool, error) {
-	renewals := fmt.Sprintf("%d subscriptions", status.RenewingSubscriptions)
+	renewals := fmt.Sprintf("%d subscriptions will stop renewing", status.RenewingSubscriptions)
 	switch {
 	case status.StatusUnavailable:
 		// The count is unknown; never state one before an action that cannot be undone.
-		renewals = "Every renewing subscription"
+		renewals = "Every renewing subscription will stop renewing"
+	case status.RenewingSubscriptions == 0:
+		renewals = "No subscriptions are renewing"
 	case status.RenewingSubscriptions == 1:
-		renewals = "1 subscription"
+		renewals = "1 subscription will stop renewing"
 	}
-	return confirmOnTerminal(opts, "disconnect", fmt.Sprintf("Disconnect Stripe account %s? %s will stop renewing; buyers keep access until their paid period ends. [y/N] ", status.AccountID, renewals))
+	return confirmOnTerminal(opts, "disconnect", fmt.Sprintf("Disconnect Stripe account %s? %s; buyers keep access until their paid period ends. [y/N] ", status.AccountID, renewals))
 }

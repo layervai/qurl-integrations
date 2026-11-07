@@ -59,15 +59,17 @@ func TestPaymentsAccountRefusesASetupLinkOutsideStripe(t *testing.T) {
 
 func TestPaymentsDisconnectConfirmsFirst(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		run     runOpts
-		code    int
-		deletes int
+		name       string
+		run        runOpts
+		code       int
+		deletes    int
+		wantStdout string
 	}{
-		{"pipeline without --yes", runOpts{}, 2, 0},
-		{"answered no", runOpts{inTTY: true, stdin: strings.NewReader("n\n")}, 0, 0},
-		{"answered yes", runOpts{inTTY: true, stdin: strings.NewReader("y\n")}, 0, 1},
-		{"--yes", runOpts{args: []string{"--yes"}}, 0, 1},
+		{"pipeline without --yes", runOpts{}, 2, 0, ""},
+		{"answered no", runOpts{inTTY: true, stdin: strings.NewReader("n\n")}, 0, 0, ""},
+		{"answered yes", runOpts{inTTY: true, stdin: strings.NewReader("y\n")}, 0, 1, "Stripe is disconnected."},
+		// --yes reads no status, so it reports only that nothing is connected any more.
+		{"--yes", runOpts{args: []string{"--yes"}}, 0, 1, "Nothing is connected to LayerV any more."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var deletes int
@@ -81,8 +83,7 @@ func TestPaymentsDisconnectConfirmsFirst(t *testing.T) {
 			if tc.run.inTTY && !strings.Contains(result.stderr.String(), "2 subscriptions will stop renewing") {
 				t.Fatalf("prompt does not say what stops: %s", result.stderr.String())
 			}
-			// --yes reads no status, so it reports only that nothing is connected any more.
-			if want := map[bool]string{false: "Stripe is disconnected.", true: "Nothing is connected to LayerV any more."}[len(tc.run.args) > 0]; tc.deletes == 1 && !strings.Contains(result.stdout.String(), want) {
+			if !strings.Contains(result.stdout.String(), tc.wantStdout) {
 				t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
 			}
 		})
@@ -172,7 +173,7 @@ func TestPaymentsDisconnectOfARevokedAccountSaysToCancelBillingInStripe(t *testi
 	data["revoked"] = true
 	srv := stripeAccountServer(t, data, &deletes)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}})
-	if result.code != 0 || deletes != 1 || !strings.Contains(result.stderr.String(), "Cancel or refund remaining subscriptions there.") || !strings.Contains(result.stdout.String(), "LayerV is released") || strings.Contains(result.stdout.String(), "Buyers keep access") {
+	if result.code != 0 || deletes != 1 || !strings.Contains(result.stdout.String(), "Cancel or refund any remaining subscriptions in Stripe.") || !strings.Contains(result.stdout.String(), "LayerV is released") || strings.Contains(result.stdout.String(), "Buyers keep access") {
 		t.Fatalf("exit=%d deletes=%d stdout=%s stderr=%s", result.code, deletes, result.stdout.String(), result.stderr.String())
 	}
 }
@@ -309,13 +310,24 @@ func TestPaymentsDisconnectHintsYesOnlyWhenItCouldHelp(t *testing.T) {
 	}
 }
 
-func TestPaymentsDisconnectYesWithNothingConnectedSaysSoHonestly(t *testing.T) {
-	srv := apitest.NewServer(t)
-	srv.Script(http.MethodDelete, "/v1/payments/account", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
-	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "--yes"}})
-	if result.code != 0 || strings.Contains(result.stdout.String(), "Stripe is disconnected.") {
-		t.Fatalf("--yes cannot claim it disconnected something: exit=%d stdout=%s", result.code, result.stdout.String())
+func TestPaymentsAccountJSONWhenStripeCannotBeReached(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["status_unavailable"] = true
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account", "-o", "json"}})
+	if result.code != 0 || !strings.Contains(result.stdout.String(), `"status_unavailable": true`) {
+		t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
+	}
+}
+
+func TestPaymentsDisconnectPromptWithNoRenewals(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["renewing_subscriptions"] = 0
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}, inTTY: true, stdin: strings.NewReader("n\n")})
+	if !strings.Contains(result.stderr.String(), "No subscriptions are renewing;") {
+		t.Fatalf("stderr=%s", result.stderr.String())
 	}
 }
