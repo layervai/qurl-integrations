@@ -900,8 +900,8 @@ For paid contracts, first run `qurl account setup` to link the device to your
 publisher account. Run `qurl payments connect -o json` and open the consent URL
 yourself. Finish setup in LayerV billing while signed in to that publisher account.
 Then read `qurl payments account -o json`: it also says whether Stripe has
-enabled charges and payouts, with a Stripe link to finish setup when not. Use
-that account and an active
+enabled charges and payouts, with a Stripe link (`setup_url`, present only
+while setup is unfinished) to finish setup. Use that account and an active
 fixed Stripe price with `--stripe-account` and `--stripe-price` when publishing
 or configuring contract access. The service verifies payment; manual approval
 is unavailable. LayerV collects 3%, including subscription renewals. One-time

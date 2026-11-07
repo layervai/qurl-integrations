@@ -75,8 +75,7 @@ func (c *client) decodeStripeStatus(reply *restReply) (*PublisherStripeAccount, 
 			return nil, fmt.Errorf("%w: Stripe account has no %s; the service predates this CLI", qurl.ErrInvalidAPIResponse, name)
 		}
 	}
-	// The 3% fee is printed by this CLI, so a fee change must ship with a CLI release.
-	if a.LayerVFeePercent != 3 || a.RenewingSubscriptions < 0 || (a.AccountID != "" && !stripeAccountID.MatchString(a.AccountID)) || !stripeSetupURL(a.SetupURL) {
+	if a.RenewingSubscriptions < 0 || (a.AccountID != "" && !stripeAccountID.MatchString(a.AccountID)) || !stripeSetupURL(a.SetupURL) {
 		return nil, fmt.Errorf("%w: invalid Stripe account", qurl.ErrInvalidAPIResponse)
 	}
 	return &a, nil

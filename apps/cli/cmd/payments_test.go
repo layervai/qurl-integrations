@@ -8,7 +8,8 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
-// stripeAccountServer answers one account read and one disconnect.
+// stripeAccountServer answers one account read and one disconnect; a second
+// read is unscripted and does not get this account.
 func stripeAccountServer(t *testing.T, data map[string]any, deletes *int) *apitest.Server {
 	t.Helper()
 	srv := apitest.NewServer(t)
@@ -51,7 +52,7 @@ func TestPaymentsAccountRefusesASetupLinkOutsideStripe(t *testing.T) {
 	data["setup_url"] = "https://attacker.test/"
 	srv := stripeAccountServer(t, data, &deletes)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
-	if result.code == 0 || strings.Contains(result.stdout.String(), "attacker.test") {
+	if result.code == 0 || strings.Contains(result.stdout.String(), "attacker.test") || !strings.Contains(result.stderr.String(), "invalid Stripe account") {
 		t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
 	}
 }
@@ -168,7 +169,7 @@ func TestPaymentsDisconnectOfARevokedAccountSaysToCancelBillingInStripe(t *testi
 	data["revoked"] = true
 	srv := stripeAccountServer(t, data, &deletes)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}})
-	if result.code != 0 || deletes != 1 || !strings.Contains(result.stderr.String(), "Cancel or refund remaining subscriptions there.") {
+	if result.code != 0 || deletes != 1 || !strings.Contains(result.stderr.String(), "Cancel or refund remaining subscriptions there.") || !strings.Contains(result.stdout.String(), "LayerV is released") || strings.Contains(result.stdout.String(), "Buyers keep access") {
 		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
 	}
 }
@@ -243,7 +244,7 @@ func TestPaymentsDisconnectExplainsAnUnexpectedAnswer(t *testing.T) {
 	for _, tc := range []struct {
 		status int
 		want   string
-	}{{http.StatusOK, "not 204"}, {http.StatusMethodNotAllowed, "cannot disconnect Stripe yet"}} {
+	}{{http.StatusOK, "not 204"}, {http.StatusNotFound, "cannot disconnect Stripe yet"}, {http.StatusMethodNotAllowed, "cannot disconnect Stripe yet"}} {
 		srv := apitest.NewServer(t)
 		srv.Script(http.MethodDelete, "/v1/payments/account", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(tc.status)
@@ -253,5 +254,21 @@ func TestPaymentsDisconnectExplainsAnUnexpectedAnswer(t *testing.T) {
 		if result.code == 0 || !strings.Contains(result.stderr.String(), tc.want) {
 			t.Fatalf("status %d: exit=%d stderr=%s", tc.status, result.code, result.stderr.String())
 		}
+	}
+}
+
+func TestPaymentsAccountRefusesAChangedFeeButDisconnectDoesNot(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["layerv_fee_percent"] = 5
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
+	if result.code == 0 || !strings.Contains(result.stderr.String(), "upgrade the qurl CLI") {
+		t.Fatalf("exit=%d stderr=%s", result.code, result.stderr.String())
+	}
+	srv = stripeAccountServer(t, data, &deletes)
+	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}, inTTY: true, stdin: strings.NewReader("y\n")})
+	if result.code != 0 || deletes != 1 {
+		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
 	}
 }

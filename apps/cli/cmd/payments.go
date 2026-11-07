@@ -28,7 +28,7 @@ func paymentsCmd(opts *globalOpts) *cobra.Command {
 		Short: "Connect Stripe to receive CRID payments; LayerV collects 3%",
 		Long: `Connect Stripe to receive CRID payments; LayerV collects 3%. First run qurl account setup to link this device. Open the consent URL yourself, then finish setup in LayerV billing while signed in to that publisher account. Run qurl payments account after completion to see whether Stripe lets the account take payments.
 
-qurl payments disconnect stops every subscription from renewing, then removes LayerV from the Stripe account. Buyers keep access until their paid period ends and are not charged again or refunded. New purchases stop until you connect the same or another account. Interactive runs confirm first; scripts and pipelines must pass --yes. Finishing a disconnect that already started, or releasing an account whose LayerV access was removed in Stripe, asks nothing more.`,
+qurl payments disconnect stops every subscription from renewing, then removes LayerV from the Stripe account. Buyers keep access until their paid period ends and are not charged again or refunded. New purchases stop until you connect the same or another account. Interactive runs confirm first; scripts and pipelines must pass --yes. Finishing a disconnect that already started, or releasing an account whose LayerV access was removed in Stripe, asks nothing more. With --yes no status is read, so "disconnected": true then means that nothing is connected any more, whether or not something was.`,
 		Example: "  qurl payments account\n  qurl payments disconnect --yes",
 		Args:    exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -63,6 +63,11 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 				if e != nil {
 					return e
 				}
+				// This CLI prints the 3% fee, so a fee change must ship with a CLI release.
+				// Only the account view refuses; a disconnect never depends on the fee.
+				if status.LayerVFeePercent != 3 {
+					return errors.New("LayerV's fee changed; upgrade the qurl CLI to see this account")
+				}
 				return opts.printer().PublisherStripeAccount(status)
 			}
 			return disconnectStripe(cmd.Context(), opts, account, yes)
@@ -74,6 +79,7 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 // disconnectStripe confirms unless --yes, which needs no status read so it can
 // finish a disconnect even when Stripe cannot be read.
 func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.PublisherStripe, yes bool) error {
+	revoked := false
 	if !yes {
 		status, err := account.PublisherStripeStatus(ctx)
 		if err != nil {
@@ -81,8 +87,9 @@ func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.Pub
 			return err
 		}
 		if status.AccountID == "" {
-			return opts.printer().PublisherStripeDisconnected(false)
+			return opts.printer().PublisherStripeDisconnected(false, false)
 		}
+		revoked = status.Revoked
 		if status.Revoked {
 			// Nothing LayerV can stop is left; finishing only releases the account.
 			opts.printer().Notef("LayerV's access was already removed in Stripe. Cancel or refund remaining subscriptions there.")
@@ -102,7 +109,7 @@ func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.Pub
 	if err := account.DisconnectPublisherStripe(ctx); err != nil {
 		return err
 	}
-	return opts.printer().PublisherStripeDisconnected(true)
+	return opts.printer().PublisherStripeDisconnected(true, revoked)
 }
 
 // confirmStripeDisconnect states what a disconnect stops before asking.

@@ -27,7 +27,6 @@ func TestPublisherStripeStatusRefusesAnIncompleteOrWrongAnswer(t *testing.T) {
 	valid := map[string]any{"account_id": "acct_publisher", "layerv_fee_percent": 3, "charges_enabled": true, "payouts_enabled": true, "renewing_subscriptions": 1}
 	for name, change := range map[string]func(map[string]any){
 		"older service":   func(d map[string]any) { delete(d, "charges_enabled") },
-		"another fee":     func(d map[string]any) { d["layerv_fee_percent"] = 5 },
 		"negative count":  func(d map[string]any) { d["renewing_subscriptions"] = -1 },
 		"bad account":     func(d map[string]any) { d["account_id"] = "acct_bad/route" },
 		"foreign setup":   func(d map[string]any) { d["setup_url"] = "https://attacker.test/" },
