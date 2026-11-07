@@ -6,27 +6,24 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
 
-// PublisherPayments prints the consent URL without payment credentials.
-func (p *Printer) PublisherPayments(account, link string) error {
+// PublisherPayments prints the Stripe consent URL.
+func (p *Printer) PublisherPayments(link string) error {
 	if p.format == FormatJSON {
 		return p.writeJSON(struct {
-			AccountID        string `json:"account_id,omitempty"`
-			ConnectURL       string `json:"connect_url,omitempty"`
+			ConnectURL       string `json:"connect_url"`
 			LayerVFeePercent int    `json:"layerv_fee_percent"`
-		}{account, link, 3})
+		}{link, 3})
 	}
-	value := account
-	if link != "" {
-		value = link
-	}
-	if value == "" {
-		value = "No Stripe account is connected. Run qurl payments connect."
-	}
-	_, err := fmt.Fprintln(p.out, value)
+	_, err := fmt.Fprintln(p.out, link)
+	p.feeNote(err)
+	return err
+}
+
+// feeNote states LayerV's fee after a successful payments answer.
+func (p *Printer) feeNote(err error) {
 	if err == nil && !p.quiet {
 		p.Notef("LayerV collects 3%% of each CRID payment, including subscription renewals.")
 	}
-	return err
 }
 
 // PublisherStripeAccount prints the connection and whether it can take payments.
@@ -35,7 +32,9 @@ func (p *Printer) PublisherStripeAccount(a *qurlapi.PublisherStripeAccount) erro
 		return p.writeJSON(a)
 	}
 	if a.AccountID == "" {
-		return p.PublisherPayments("", "")
+		_, err := fmt.Fprintln(p.out, "No Stripe account is connected. Run qurl payments connect.")
+		p.feeNote(err)
+		return err
 	}
 	if a.Revoked {
 		_, err := fmt.Fprintf(p.out, "%s\nLayerV's access was removed in Stripe, so buyers lost access and LayerV cannot stop their billing. Cancel or refund remaining subscriptions in Stripe, then run qurl payments disconnect to connect another account.\n", a.AccountID)
@@ -50,9 +49,7 @@ func (p *Printer) PublisherStripeAccount(a *qurlapi.PublisherStripeAccount) erro
 	if err == nil && a.SetupURL != "" {
 		_, err = fmt.Fprintf(p.out, "Finish setup in Stripe: %s\n", a.SetupURL)
 	}
-	if err == nil && !p.quiet {
-		p.Notef("LayerV collects 3%% of each CRID payment, including subscription renewals.")
-	}
+	p.feeNote(err)
 	return err
 }
 

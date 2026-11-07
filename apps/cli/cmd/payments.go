@@ -51,7 +51,7 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 				if e != nil {
 					return e
 				}
-				return opts.printer().PublisherPayments("", link)
+				return opts.printer().PublisherPayments(link)
 			}
 			account, ok := client.(publisherStripeAccountClient)
 			if !ok {
