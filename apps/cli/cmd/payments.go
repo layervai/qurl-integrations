@@ -58,9 +58,8 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 			}
 			// connect goes through the SDK; account and disconnect use direct REST
 			// calls because the SDK has neither the status members nor a disconnect.
-			account := qurlapi.PublisherStripe(client)
 			if operation == paymentsAccount {
-				status, e := account.PublisherStripeStatus(cmd.Context())
+				status, e := client.PublisherStripeStatus(cmd.Context())
 				if e != nil {
 					return e
 				}
@@ -72,7 +71,7 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 				}
 				return opts.printer().PublisherStripeAccount(status)
 			}
-			return disconnectStripe(cmd.Context(), opts, account, yes)
+			return disconnectStripe(cmd.Context(), opts, client, yes)
 		}}
 	cmd.Flags().BoolVar(&yes, "yes", false, "disconnect without confirmation")
 	return cmd
