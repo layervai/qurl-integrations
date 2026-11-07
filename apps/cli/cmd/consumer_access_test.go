@@ -265,12 +265,12 @@ func TestStripePaymentFlagsRefusePartialOrWrongPolicy(t *testing.T) {
 	}
 }
 
-func TestPublisherPaymentsCommandsUseSDKAndShowThreePercent(t *testing.T) {
+func TestPublisherPaymentsCommandsShowThreePercent(t *testing.T) {
 	for _, operation := range []string{"connect", "account"} {
 		t.Run(operation, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			method, path := http.MethodGet, "/v1/payments/account"
-			data := map[string]any{"account_id": "acct_publisher", "layerv_fee_percent": 3}
+			data := map[string]any{"account_id": "acct_publisher", "layerv_fee_percent": 3, "charges_enabled": true, "payouts_enabled": true, "renewing_subscriptions": 0}
 			if operation == "connect" {
 				method, path = http.MethodPost, "/v1/payments/connect"
 				data = map[string]any{"url": "https://connect.stripe.com/oauth/authorize?state=fixture"}
