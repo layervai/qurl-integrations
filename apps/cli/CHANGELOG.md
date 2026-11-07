@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.0.0](https://github.com/layervai/qurl-integrations/compare/v3.7.1...v4.0.0) (2026-11-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** require a public name when publishing ([#1992](https://github.com/layervai/qurl-integrations/issues/1992))
+
+### Features
+
+* **cli:** require a public name when publishing ([#1992](https://github.com/layervai/qurl-integrations/issues/1992)) ([ba6d4a7](https://github.com/layervai/qurl-integrations/commit/ba6d4a72449fd77a60d35c264a25baa4f385e70f))
+
+
+### Bug Fixes
+
+* **cli:** preserve publisher streams through session renewal ([#1984](https://github.com/layervai/qurl-integrations/issues/1984)) ([a0e0ba4](https://github.com/layervai/qurl-integrations/commit/a0e0ba4d07d7b03f4ab47243d146ae22d63d074d))
+
 ## [3.7.1](https://github.com/layervai/qurl-integrations/compare/v3.7.0...v3.7.1) (2026-11-03)
 
 
