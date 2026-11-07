@@ -63,10 +63,12 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 				if e != nil {
 					return e
 				}
-				// This CLI prints the 3% fee, so a fee change must ship with a CLI release.
-				// Only the account view refuses, JSON included on purpose; a disconnect
-				// never depends on the fee.
-				if status.LayerVFeePercent != qurlapi.LayerVFeePercent {
+				// This CLI prints the 3% fee for a connected, readable account, so a fee
+				// change must ship with a CLI release. Only that view refuses (JSON
+				// included on purpose); revoked or unfinished states and a disconnect
+				// never depend on the fee.
+				readable := status.AccountID != "" && !status.Revoked && !status.Disconnecting && !status.StatusUnavailable
+				if readable && status.LayerVFeePercent != qurlapi.LayerVFeePercent {
 					return errors.New("LayerV's fee changed; upgrade the qurl CLI to see this account")
 				}
 				return opts.printer().PublisherStripeAccount(status)
@@ -116,8 +118,9 @@ func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.Pub
 }
 
 // statusReadMayRecover reports a failure that --yes can get past: a 5xx or a
-// network failure. A refused credential, an incompatible service and a
-// canceled command (Ctrl-C) do not point to the flag that skips confirmation.
+// network failure, a timeout included. A refused credential, an incompatible
+// service and a canceled command (Ctrl-C) do not point to the flag that skips
+// confirmation.
 func statusReadMayRecover(err error) bool {
 	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) {

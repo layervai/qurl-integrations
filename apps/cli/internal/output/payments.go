@@ -47,6 +47,7 @@ func (p *Printer) PublisherStripeAccount(a *qurlapi.PublisherStripeAccount) erro
 		p.feeNote(err)
 		return err
 	}
+	// The fee note belongs to an account that can sell; the states below cannot.
 	if a.Revoked {
 		_, err := fmt.Fprintf(p.out, "%s\nLayerV's access was removed in Stripe, so buyers lost access and LayerV cannot stop their billing. Cancel or refund remaining subscriptions in Stripe, then run qurl payments disconnect, and qurl payments connect to use another account.\n", a.AccountID)
 		return err
@@ -90,13 +91,19 @@ func (p *Printer) PublisherStripeDisconnected(outcome StripeDisconnectOutcome) e
 			Disconnected bool `json:"disconnected"`
 		}{outcome != StripeNothingConnected})
 	}
-	text := map[StripeDisconnectOutcome]string{
-		StripeNothingConnected: "No Stripe account is connected.",
-		StripeDisconnected:     "Stripe is disconnected. Buyers keep access until their paid period ends and are not charged again. Run qurl payments connect to sell again.",
-		StripeReleasedRevoked:  "LayerV is released from the Stripe account. Cancel or refund any remaining subscriptions in Stripe. Run qurl payments connect to sell again.",
-		StripeDisconnectedUnread: "Nothing is connected to LayerV any more. If LayerV's access had been removed in Stripe, cancel or refund remaining subscriptions there. " +
-			"Run qurl payments connect to sell again.",
-	}[outcome]
+	var text string
+	switch outcome {
+	case StripeNothingConnected:
+		text = "No Stripe account is connected."
+	case StripeDisconnected:
+		text = "Stripe is disconnected. Buyers keep access until their paid period ends and are not charged again. Run qurl payments connect to sell again."
+	case StripeReleasedRevoked:
+		text = "LayerV is released from the Stripe account. Cancel or refund any remaining subscriptions in Stripe. Run qurl payments connect to sell again."
+	case StripeDisconnectedUnread:
+		text = "Nothing is connected to LayerV any more. If LayerV's access had been removed in Stripe, cancel or refund remaining subscriptions there. Run qurl payments connect to sell again."
+	default:
+		return fmt.Errorf("unknown Stripe disconnect outcome %d", outcome)
+	}
 	_, err := fmt.Fprintln(p.out, text)
 	return err
 }

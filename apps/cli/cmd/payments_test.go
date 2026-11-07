@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -86,6 +89,9 @@ func TestPaymentsDisconnectConfirmsFirst(t *testing.T) {
 			if !strings.Contains(result.stdout.String(), tc.wantStdout) {
 				t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
 			}
+			if tc.name == "answered no" && !strings.Contains(result.stderr.String(), "Canceled — Stripe is still connected.") {
+				t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
+			}
 		})
 	}
 }
@@ -128,9 +134,7 @@ func TestPaymentsDisconnectYesNeedsNoStatusRead(t *testing.T) {
 	}
 }
 
-// No terminal and no --yes: finishing a disconnect that was confirmed when it
-// started still sends the DELETE.
-func TestPaymentsUnfinishedDisconnectFinishesWithoutAskingAgainEvenWithoutATerminal(t *testing.T) {
+func TestPaymentsAccountShowsAnUnfinishedDisconnect(t *testing.T) {
 	var deletes int
 	data := notReadyAccount()
 	data["disconnecting"] = true
@@ -139,8 +143,16 @@ func TestPaymentsUnfinishedDisconnectFinishesWithoutAskingAgainEvenWithoutATermi
 	if result.code != 0 || !strings.Contains(result.stdout.String(), "Run qurl payments disconnect to finish disconnecting.") || strings.Contains(result.stdout.String(), "Charges:") {
 		t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
 	}
-	srv = stripeAccountServer(t, data, &deletes)
-	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}})
+}
+
+// No terminal and no --yes: finishing a disconnect that was confirmed when it
+// started still sends the DELETE.
+func TestPaymentsUnfinishedDisconnectFinishesWithoutAskingAgainEvenWithoutATerminal(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["disconnecting"] = true
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}})
 	if result.code != 0 || deletes != 1 {
 		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
 	}
@@ -272,9 +284,10 @@ func TestPaymentsAccountRefusesAChangedFeeButDisconnectDoesNot(t *testing.T) {
 	if result.code == 0 || !strings.Contains(result.stderr.String(), "upgrade the qurl CLI") {
 		t.Fatalf("exit=%d stderr=%s", result.code, result.stderr.String())
 	}
-	srv = stripeAccountServer(t, data, &deletes)
+	var disconnectDeletes int
+	srv = stripeAccountServer(t, data, &disconnectDeletes)
 	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}, inTTY: true, stdin: strings.NewReader("y\n")})
-	if result.code != 0 || deletes != 1 {
+	if result.code != 0 || deletes != 0 || disconnectDeletes != 1 {
 		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
 	}
 }
@@ -329,5 +342,52 @@ func TestPaymentsDisconnectPromptWithNoRenewals(t *testing.T) {
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}, inTTY: true, stdin: strings.NewReader("n\n")})
 	if !strings.Contains(result.stderr.String(), "No subscriptions are renewing;") {
 		t.Fatalf("stderr=%s", result.stderr.String())
+	}
+}
+
+func TestPaymentsDisconnectOfARevokedAccountJSON(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["revoked"] = true
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "-o", "json"}})
+	if result.code != 0 || deletes != 1 || !strings.Contains(result.stdout.String(), `"disconnected": true`) {
+		t.Fatalf("exit=%d deletes=%d stdout=%s", result.code, deletes, result.stdout.String())
+	}
+}
+
+func TestPaymentsAccountRevokedWinsOverDisconnecting(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["revoked"], data["disconnecting"] = true, true
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
+	if result.code != 0 || !strings.Contains(result.stdout.String(), "Cancel or refund remaining subscriptions in Stripe") || strings.Contains(result.stdout.String(), "finish disconnecting.") {
+		t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
+	}
+}
+
+func TestPaymentsAccountOfARevokedAccountIgnoresAChangedFee(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["revoked"], data["layerv_fee_percent"] = true, 5
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
+	if result.code != 0 || !strings.Contains(result.stdout.String(), "Cancel or refund remaining subscriptions in Stripe") {
+		t.Fatalf("the cancel instructions reach the publisher whatever the fee: exit=%d stdout=%s", result.code, result.stdout.String())
+	}
+}
+
+func TestStatusReadMayRecoverOnlyForTransientFailures(t *testing.T) {
+	timeout := &url.Error{Op: "Get", URL: "https://api.example.test", Err: context.DeadlineExceeded}
+	canceled := &url.Error{Op: "Get", URL: "https://api.example.test", Err: context.Canceled}
+	if !statusReadMayRecover(timeout) {
+		t.Fatal("a timeout is transient")
+	}
+	if statusReadMayRecover(canceled) {
+		t.Fatal("Ctrl-C must not point to --yes")
+	}
+	if statusReadMayRecover(errors.New("refused")) {
+		t.Fatal("an unknown failure must not point to --yes")
 	}
 }
