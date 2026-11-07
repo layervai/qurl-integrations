@@ -56,14 +56,18 @@ func (p *Printer) PublisherStripeAccount(a *qurlapi.PublisherStripeAccount) erro
 	return err
 }
 
-// PublisherStripeDisconnected confirms that sales stopped and LayerV left the account.
-func (p *Printer) PublisherStripeDisconnected() error {
+// PublisherStripeDisconnected reports a disconnect, or that nothing was connected.
+func (p *Printer) PublisherStripeDisconnected(disconnected bool) error {
 	if p.format == FormatJSON {
 		return p.writeJSON(struct {
 			Disconnected bool `json:"disconnected"`
-		}{true})
+		}{disconnected})
 	}
-	_, err := fmt.Fprintln(p.out, "Stripe is disconnected. Buyers keep access until their paid period ends and are not charged again. Run qurl payments connect to sell again.")
+	text := "Stripe is disconnected. Buyers keep access until their paid period ends and are not charged again. Run qurl payments connect to sell again."
+	if !disconnected {
+		text = "No Stripe account is connected."
+	}
+	_, err := fmt.Fprintln(p.out, text)
 	return err
 }
 

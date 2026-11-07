@@ -101,8 +101,15 @@ func (c *client) DisconnectPublisherStripe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if reply.status != http.StatusNoContent {
+	switch reply.status {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusNotFound, http.StatusMethodNotAllowed:
+		return fmt.Errorf("%w: this qURL service cannot disconnect Stripe yet (HTTP %d)", qurl.ErrInvalidAPIResponse, reply.status)
+	default:
+		if reply.status < 300 {
+			return fmt.Errorf("%w: Stripe disconnect answered %d, not 204", qurl.ErrInvalidAPIResponse, reply.status)
+		}
 		return reply.problem()
 	}
-	return nil
 }

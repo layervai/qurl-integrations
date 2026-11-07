@@ -205,3 +205,53 @@ func TestPaymentsAccountWhenStripeCannotBeReached(t *testing.T) {
 		t.Fatalf("stdout=%s", result.stdout.String())
 	}
 }
+
+func TestPaymentsDisconnectWhenStripeCannotBeReachedStatesNoCount(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["status_unavailable"], data["renewing_subscriptions"] = true, 0
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}, inTTY: true, stdin: strings.NewReader("n\n")})
+	if !strings.Contains(result.stderr.String(), "Every renewing subscription will stop renewing") || strings.Contains(result.stderr.String(), "0 subscriptions") {
+		t.Fatalf("stderr=%s", result.stderr.String())
+	}
+}
+
+func TestPaymentsDisconnectWithNothingConnectedJSON(t *testing.T) {
+	var deletes int
+	srv := stripeAccountServer(t, map[string]any{"account_id": "", "layerv_fee_percent": 3, "charges_enabled": false, "payouts_enabled": false, "renewing_subscriptions": 0}, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "-o", "json"}})
+	if result.code != 0 || deletes != 0 || !strings.Contains(result.stdout.String(), `"disconnected": false`) {
+		t.Fatalf("exit=%d deletes=%d stdout=%s", result.code, deletes, result.stdout.String())
+	}
+}
+
+func TestPaymentsAccountJSONAlwaysCarriesTheDisconnectStates(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["revoked"] = true
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account", "-o", "json"}})
+	for _, want := range []string{`"revoked": true`, `"disconnecting": false`, `"status_unavailable": false`} {
+		if !strings.Contains(result.stdout.String(), want) {
+			t.Fatalf("missing %s in %s", want, result.stdout.String())
+		}
+	}
+}
+
+func TestPaymentsDisconnectExplainsAnUnexpectedAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   string
+	}{{http.StatusOK, "not 204"}, {http.StatusMethodNotAllowed, "cannot disconnect Stripe yet"}} {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodDelete, "/v1/payments/account", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(`{}`))
+		})
+		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "--yes"}})
+		if result.code == 0 || !strings.Contains(result.stderr.String(), tc.want) {
+			t.Fatalf("status %d: exit=%d stderr=%s", tc.status, result.code, result.stderr.String())
+		}
+	}
+}
