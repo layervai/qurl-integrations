@@ -915,7 +915,7 @@ change its payment policy.
 LayerV from the Stripe account. Buyers keep access until their paid period ends
 and are not charged again. New purchases stop until you connect the same or a
 different account. It asks first; scripts pass `--yes`. If it reports that it
-did not finish, run it again: LayerV stays connected until every renewal stopped.
+did not finish, run it again: LayerV stays connected until every renewal has stopped.
 
 `qurl access --help` lists all owner actions. Changes require the current
 version. If session removal is pending, retry the exact removal and version;

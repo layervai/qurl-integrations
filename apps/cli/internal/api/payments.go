@@ -13,8 +13,19 @@ import (
 
 var stripeAccountID = regexp.MustCompile(`^acct_[A-Za-z0-9]{1,128}$`)
 
+// PublisherStripe reads and ends the publisher's Stripe connection.
+type PublisherStripe interface {
+	PublisherStripeStatus(context.Context) (*PublisherStripeAccount, error)
+	DisconnectPublisherStripe(context.Context) error
+}
+
+var _ PublisherStripe = (*client)(nil)
+
 // PublisherStripeAccount is the publisher's Stripe connection. It holds no
 // payment credentials.
+// TODO(upstream-contract): qurl-service owns GET/DELETE /v1/payments/account:
+// these members, 204 on DELETE, and what disconnecting, revoked and
+// status_unavailable mean. Change this file with that contract.
 type PublisherStripeAccount struct {
 	AccountID             string `json:"account_id"`
 	SetupURL              string `json:"setup_url,omitempty"`
@@ -26,7 +37,13 @@ type PublisherStripeAccount struct {
 	Disconnecting bool `json:"disconnecting"`
 	// Revoked means LayerV's access was removed in Stripe; billing must be canceled there.
 	Revoked bool `json:"revoked"`
+	// StatusUnavailable means Stripe could not be read; the status members are unknown.
+	StatusUnavailable bool `json:"status_unavailable"`
 }
+
+// stripeStatusMembers must all be present: a service that predates them would
+// otherwise read as "not enabled" and "0 subscriptions".
+var stripeStatusMembers = []string{"account_id", "layerv_fee_percent", "charges_enabled", "payouts_enabled", "renewing_subscriptions"}
 
 // PublisherStripeStatus reads the connected account, whether Stripe lets it
 // take payments, and how many subscriptions a disconnect would stop renewing.
@@ -35,24 +52,40 @@ func (c *client) PublisherStripeStatus(ctx context.Context) (*PublisherStripeAcc
 	if err != nil {
 		return nil, err
 	}
+	return c.decodeStripeStatus(reply)
+}
+
+func (c *client) decodeStripeStatus(reply *restReply) (*PublisherStripeAccount, error) {
 	if reply.status != http.StatusOK {
 		return nil, reply.problem()
 	}
 	var env struct {
-		Data *PublisherStripeAccount `json:"data"`
+		Data json.RawMessage `json:"data"`
 	}
+	var members map[string]json.RawMessage
+	var a PublisherStripeAccount
 	if err := json.Unmarshal(reply.body, &env); err != nil {
 		return nil, fmt.Errorf("%w: decode Stripe account: %w", qurl.ErrInvalidAPIResponse, err)
 	}
-	a := env.Data
-	if a == nil || a.LayerVFeePercent != 3 || a.RenewingSubscriptions < 0 || (a.AccountID != "" && !stripeAccountID.MatchString(a.AccountID)) || !stripeSetupURL(a.SetupURL) {
+	if json.Unmarshal(env.Data, &members) != nil || json.Unmarshal(env.Data, &a) != nil {
 		return nil, fmt.Errorf("%w: invalid Stripe account", qurl.ErrInvalidAPIResponse)
 	}
-	return a, nil
+	for _, name := range stripeStatusMembers {
+		if _, ok := members[name]; !ok {
+			return nil, fmt.Errorf("%w: Stripe account has no %s; the service predates this CLI", qurl.ErrInvalidAPIResponse, name)
+		}
+	}
+	// The 3% fee is printed by this CLI, so a fee change must ship with a CLI release.
+	if a.LayerVFeePercent != 3 || a.RenewingSubscriptions < 0 || (a.AccountID != "" && !stripeAccountID.MatchString(a.AccountID)) || !stripeSetupURL(a.SetupURL) {
+		return nil, fmt.Errorf("%w: invalid Stripe account", qurl.ErrInvalidAPIResponse)
+	}
+	return &a, nil
 }
 
 // stripeSetupURL accepts only an absent link or a Stripe dashboard page, so the
 // CLI never tells a publisher to open another site.
+// TODO(upstream-contract): qurl-service links OAuth-connected Standard accounts
+// to dashboard.stripe.com; an Account Link would live on connect.stripe.com.
 func stripeSetupURL(value string) bool {
 	if value == "" {
 		return true

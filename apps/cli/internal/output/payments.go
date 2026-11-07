@@ -37,15 +37,18 @@ func (p *Printer) PublisherStripeAccount(a *qurlapi.PublisherStripeAccount) erro
 		return err
 	}
 	if a.Revoked {
-		_, err := fmt.Fprintf(p.out, "%s\nLayerV's access was removed in Stripe, so buyers lost access and LayerV cannot stop their billing. Cancel or refund remaining subscriptions in Stripe, then run qurl payments disconnect to connect another account.\n", a.AccountID)
+		_, err := fmt.Fprintf(p.out, "%s\nLayerV's access was removed in Stripe, so buyers lost access and LayerV cannot stop their billing. Cancel or refund remaining subscriptions in Stripe, then run qurl payments disconnect, and qurl payments connect to use another account.\n", a.AccountID)
 		return err
 	}
 	if a.Disconnecting {
 		_, err := fmt.Fprintf(p.out, "%s\nNew purchases are stopped. Run qurl payments disconnect to finish disconnecting.\n", a.AccountID)
 		return err
 	}
-	enabled := map[bool]string{true: "enabled", false: "not enabled"}
-	_, err := fmt.Fprintf(p.out, "%s\nCharges: %s\nPayouts: %s\nRenewing subscriptions: %d\n", a.AccountID, enabled[a.ChargesEnabled], enabled[a.PayoutsEnabled], a.RenewingSubscriptions)
+	if a.StatusUnavailable {
+		_, err := fmt.Fprintf(p.out, "%s\nStripe could not be reached to check this account. Try again later.\n", a.AccountID)
+		return err
+	}
+	_, err := fmt.Fprintf(p.out, "%s\nCharges: %s\nPayouts: %s\nRenewing subscriptions: %d\n", a.AccountID, enabledText(a.ChargesEnabled), enabledText(a.PayoutsEnabled), a.RenewingSubscriptions)
 	if err == nil && a.SetupURL != "" {
 		_, err = fmt.Fprintf(p.out, "Finish setup in Stripe: %s\n", a.SetupURL)
 	}
@@ -62,4 +65,11 @@ func (p *Printer) PublisherStripeDisconnected() error {
 	}
 	_, err := fmt.Fprintln(p.out, "Stripe is disconnected. Buyers keep access until their paid period ends and are not charged again. Run qurl payments connect to sell again.")
 	return err
+}
+
+func enabledText(on bool) string {
+	if on {
+		return "enabled"
+	}
+	return "not enabled"
 }

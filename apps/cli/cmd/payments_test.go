@@ -40,7 +40,7 @@ func TestPaymentsAccountPrintsStatusAndSetupLink(t *testing.T) {
 	}
 	srv = stripeAccountServer(t, notReadyAccount(), &deletes)
 	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account", "-o", "json"}})
-	if !strings.Contains(result.stdout.String(), `"payouts_enabled": false`) || !strings.Contains(result.stdout.String(), `"renewing_subscriptions": 2`) {
+	if result.code != 0 || !strings.Contains(result.stdout.String(), `"payouts_enabled": false`) || !strings.Contains(result.stdout.String(), `"renewing_subscriptions": 2`) {
 		t.Fatalf("missing status fields: %s", result.stdout.String())
 	}
 }
@@ -87,12 +87,12 @@ func TestPaymentsDisconnectConfirmsFirst(t *testing.T) {
 	}
 }
 
-func TestPaymentsDisconnectWithNothingConnectedNeedsNoConfirmation(t *testing.T) {
+func TestPaymentsDisconnectWithNothingConnectedSaysSo(t *testing.T) {
 	var deletes int
 	srv := stripeAccountServer(t, map[string]any{"account_id": "", "layerv_fee_percent": 3, "charges_enabled": false, "payouts_enabled": false, "renewing_subscriptions": 0}, &deletes)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}})
-	if result.code != 0 || deletes != 1 {
-		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
+	if result.code != 0 || deletes != 0 || !strings.Contains(result.stdout.String(), "No Stripe account is connected.") {
+		t.Fatalf("exit=%d deletes=%d stdout=%s", result.code, deletes, result.stdout.String())
 	}
 }
 
@@ -148,6 +148,60 @@ func TestPaymentsAccountTellsToCancelBillingAfterAStripeSideRevoke(t *testing.T)
 	srv := stripeAccountServer(t, data, &deletes)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
 	if !strings.Contains(result.stdout.String(), "Cancel or refund remaining subscriptions in Stripe") {
+		t.Fatalf("stdout=%s", result.stdout.String())
+	}
+}
+
+func TestPaymentsYesIsOnlyForDisconnect(t *testing.T) {
+	srv := apitest.NewServer(t)
+	for _, operation := range []string{"account", "connect"} {
+		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", operation, "--yes"}})
+		if result.code != 2 {
+			t.Fatalf("%s --yes: exit=%d", operation, result.code)
+		}
+	}
+}
+
+func TestPaymentsDisconnectOfARevokedAccountSaysToCancelBillingInStripe(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["revoked"] = true
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}})
+	if result.code != 0 || deletes != 1 || !strings.Contains(result.stderr.String(), "Cancel or refund remaining subscriptions there.") {
+		t.Fatalf("exit=%d deletes=%d stderr=%s", result.code, deletes, result.stderr.String())
+	}
+}
+
+func TestPaymentsDisconnectJSON(t *testing.T) {
+	var deletes int
+	srv := stripeAccountServer(t, notReadyAccount(), &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect", "--yes", "-o", "json"}})
+	if result.code != 0 || !strings.Contains(result.stdout.String(), `"disconnected": true`) {
+		t.Fatalf("exit=%d stdout=%s", result.code, result.stdout.String())
+	}
+}
+
+func TestPaymentsDisconnectPointsToYesWhenTheStatusCannotBeRead(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/payments/account", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"code":"service_unavailable","detail":"retry later"}}`))
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "disconnect"}})
+	if result.code == 0 || !strings.Contains(result.stderr.String(), "re-run with --yes") {
+		t.Fatalf("exit=%d stderr=%s", result.code, result.stderr.String())
+	}
+}
+
+func TestPaymentsAccountWhenStripeCannotBeReached(t *testing.T) {
+	var deletes int
+	data := notReadyAccount()
+	data["status_unavailable"] = true
+	srv := stripeAccountServer(t, data, &deletes)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", "account"}})
+	if !strings.Contains(result.stdout.String(), "could not be reached") || strings.Contains(result.stdout.String(), "Charges:") {
 		t.Fatalf("stdout=%s", result.stdout.String())
 	}
 }

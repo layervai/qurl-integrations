@@ -265,7 +265,7 @@ func TestStripePaymentFlagsRefusePartialOrWrongPolicy(t *testing.T) {
 	}
 }
 
-func TestPublisherPaymentsCommandsUseSDKAndShowThreePercent(t *testing.T) {
+func TestPublisherPaymentsCommandsShowThreePercent(t *testing.T) {
 	for _, operation := range []string{"connect", "account"} {
 		t.Run(operation, func(t *testing.T) {
 			srv := apitest.NewServer(t)

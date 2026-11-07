@@ -11,16 +11,14 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
-const paymentsAccount = "account"
+const (
+	paymentsConnect    = "connect"
+	paymentsAccount    = "account"
+	paymentsDisconnect = "disconnect"
+)
 
 type publisherStripeClient interface {
 	ConnectPublisherStripe(context.Context) (string, error)
-}
-
-// publisherStripeAccountClient reads and ends the connection with direct API calls.
-type publisherStripeAccountClient interface {
-	PublisherStripeStatus(context.Context) (*qurlapi.PublisherStripeAccount, error)
-	DisconnectPublisherStripe(context.Context) error
 }
 
 func paymentsCmd(opts *globalOpts) *cobra.Command {
@@ -35,14 +33,17 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 		Args:    exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			operation := args[0]
-			if operation != "connect" && operation != paymentsAccount && operation != "disconnect" {
+			if operation != paymentsConnect && operation != paymentsAccount && operation != paymentsDisconnect {
 				return exitcode.UsageError(errors.New("choose payments connect, payments account or payments disconnect"))
+			}
+			if yes && operation != paymentsDisconnect {
+				return exitcode.UsageError(errors.New("--yes applies only to payments disconnect"))
 			}
 			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
 			}
-			if operation == "connect" {
+			if operation == paymentsConnect {
 				payments, ok := client.ConsumerManagement().(publisherStripeClient)
 				if !ok {
 					return errors.New("publisher payments are unavailable in this client")
@@ -53,7 +54,7 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 				}
 				return opts.printer().PublisherPayments(link)
 			}
-			account, ok := client.(publisherStripeAccountClient)
+			account, ok := client.(qurlapi.PublisherStripe)
 			if !ok {
 				return errors.New("publisher payments are unavailable in this client")
 			}
@@ -72,13 +73,22 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 
 // disconnectStripe confirms unless --yes, which needs no status read so it can
 // finish a disconnect even when Stripe cannot be read.
-func disconnectStripe(ctx context.Context, opts *globalOpts, account publisherStripeAccountClient, yes bool) error {
+func disconnectStripe(ctx context.Context, opts *globalOpts, account qurlapi.PublisherStripe, yes bool) error {
 	if !yes {
 		status, err := account.PublisherStripeStatus(ctx)
 		if err != nil {
+			opts.printer().Notef("To disconnect without reading the account status, re-run with --yes.")
 			return err
 		}
-		if status.AccountID != "" && !status.Disconnecting && !status.Revoked {
+		if status.AccountID == "" {
+			return opts.printer().PublisherStripeAccount(status)
+		}
+		if status.Revoked {
+			// Nothing LayerV can stop is left; finishing only releases the account.
+			opts.printer().Notef("LayerV's access was already removed in Stripe. Cancel or refund remaining subscriptions there.")
+		}
+		// An unfinished disconnect was confirmed when it started.
+		if !status.Disconnecting && !status.Revoked {
 			confirmed, err := confirmStripeDisconnect(opts, status)
 			if err != nil {
 				return err
