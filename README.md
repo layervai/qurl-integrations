@@ -144,8 +144,9 @@ and a copy a visitor sends is replaced.
    the `vercel.app` hostname are refused by Vercel.
 
 The secret is write-only: the API shows `origin_header_name`, never the value.
-Rotate it by sending a new `origin_header` to `PATCH /v1/resources/{id}` (and
-regenerating it in Vercel), or remove it with `"origin_header": null`. The same
+To rotate it, add the new secret in Vercel first, send it as `origin_header` to
+`PATCH /v1/resources/{id}`, then remove the old secret in Vercel after a few
+minutes. Remove the header with `"origin_header": null`. The same
 works for any origin that admits requests by a secret header, such as a
 Cloudflare Access service token.
 
