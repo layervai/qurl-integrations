@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -225,7 +228,7 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		if errors.Is(err, errSandboxGrantedRouteAuthorization) {
 			return 0, errSandboxGrantedRouteAuthorization
 		}
-		return 0, errSandboxGrantedRouteTransport
+		return 0, fmt.Errorf("%w: %s", errSandboxGrantedRouteTransport, sandboxGrantedRouteTransportCategory(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, int64(len(r.marker)+1)))
@@ -242,6 +245,23 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		return sandboxGrantedRouteServed, nil
 	}
 	return 0, errSandboxGrantedRouteUnexpectedSuccess
+}
+
+// Report only fixed categories. Transport errors may include a grant URL.
+func sandboxGrantedRouteTransportCategory(err error) string {
+	var dnsError *net.DNSError
+	switch {
+	case errors.As(err, &dnsError):
+		return "DNS lookup failed"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection reset"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "peer closed the connection"
+	default:
+		return "other transport failure"
+	}
 }
 
 // newSandboxGrantedRouteHTTPClient matches the hermetic customer process used
@@ -369,6 +389,8 @@ func assertSandboxGrantedRouteFenced(t *testing.T, route *sandboxGrantedRoute) {
 		settle:     sandboxDeletedRouteRequiredQuiet,
 		stableHits: baseline,
 	}
+	failedProbes := make(map[string]int)
+	refusals := 0
 	for {
 		probeStartedAt := time.Now()
 		hitsBefore := route.backendHits()
@@ -381,6 +403,11 @@ func assertSandboxGrantedRouteFenced(t *testing.T, route *sandboxGrantedRoute) {
 			outerErr = context.DeadlineExceeded
 		}
 		state, probeFailed, unexpectedSuccess := classifySandboxGrantedRouteProbe(state, probeErr, outerErr)
+		if probeFailed {
+			failedProbes[probeErr.Error()]++
+		} else if state == sandboxGrantedRouteRefused {
+			refusals++
+		}
 		if unexpectedSuccess {
 			// Before deletion, a transient non-matching 2xx is a readiness state.
 			// After the convergence grace, any 2xx on this protected content route
@@ -397,11 +424,11 @@ func assertSandboxGrantedRouteFenced(t *testing.T, route *sandboxGrantedRoute) {
 			return
 		}
 		if outerErr != nil {
-			t.Fatalf("deleted Connector route did not stay fenced for %s within the %s bound", sandboxDeletedRouteRequiredQuiet, sandboxDeletedRouteProbeWindow)
+			t.Fatalf("deleted Connector route did not stay fenced for %s within the %s bound (refusals: %d; probe failures: %v)", sandboxDeletedRouteRequiredQuiet, sandboxDeletedRouteProbeWindow, refusals, failedProbes)
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("deleted Connector route did not stay fenced for %s within the %s bound", sandboxDeletedRouteRequiredQuiet, sandboxDeletedRouteProbeWindow)
+			t.Fatalf("deleted Connector route did not stay fenced for %s within the %s bound (refusals: %d; probe failures: %v)", sandboxDeletedRouteRequiredQuiet, sandboxDeletedRouteProbeWindow, refusals, failedProbes)
 		case <-ticker.C:
 		}
 	}
@@ -633,6 +660,13 @@ func TestSandboxGrantedRouteAccessFailureCategories(t *testing.T) {
 	const secret = "https://access.invalid/#qv3.unknown-secret"
 	if got := sandboxGrantedRouteAccessFailureCategory(errors.New(secret)); got != "unclassified access failure" || strings.Contains(got, secret) {
 		t.Fatalf("unknown category = %q", got)
+	}
+}
+
+func TestSandboxGrantedRouteTransportCategoryDoesNotExposeURL(t *testing.T) {
+	err := &url.Error{Op: "Get", URL: "https://example.test/private-grant", Err: syscall.ECONNRESET}
+	if got := sandboxGrantedRouteTransportCategory(err); got != "connection reset" {
+		t.Fatalf("transport category = %q", got)
 	}
 }
 
