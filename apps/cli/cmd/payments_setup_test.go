@@ -24,10 +24,10 @@ type stripeConsentFixture struct {
 	completedCode string
 }
 
-func (f *stripeConsentFixture) ConnectPublisherStripeForDevice(_ context.Context, port int) (string, error) {
+func (f *stripeConsentFixture) ConnectPublisherStripeForDevice(_ context.Context, port int) (link, state string, err error) {
 	f.port = port
 	f.state = strings.Repeat("a", 43) + "." + strconv.Itoa(port)
-	return "https://connect.stripe.com/oauth/authorize?state=" + url.QueryEscape(f.state), nil
+	return "https://connect.stripe.com/oauth/authorize?state=" + url.QueryEscape(f.state), f.state, nil
 }
 
 func (f *stripeConsentFixture) CompletePublisherStripe(_ context.Context, state, code string) error {

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -25,7 +24,7 @@ const paidAccessContract = "paid-access"
 
 type deviceStripePayments interface {
 	PublisherStripeAccount(context.Context) (string, error)
-	ConnectPublisherStripeForDevice(context.Context, int) (string, error)
+	ConnectPublisherStripeForDevice(context.Context, int) (link, state string, err error)
 	CompletePublisherStripe(context.Context, string, string) error
 	CreatePublisherStripePrice(context.Context, string, int64, string) (*qurl.CRIDPaymentPolicy, error)
 }
@@ -186,16 +185,10 @@ func connectStripeOnDevice(ctx context.Context, payments deviceStripePayments, o
 	}
 	defer func() { _ = listener.Close() }()
 	address := listener.Addr().(*net.TCPAddr)
-	link, err := payments.ConnectPublisherStripeForDevice(ctx, address.Port)
+	link, state, err := payments.ConnectPublisherStripeForDevice(ctx, address.Port)
 	if err != nil {
 		return err
 	}
-	parsed, err := url.Parse(link)
-	if err != nil || parsed.Scheme != "https" || parsed.Host != "connect.stripe.com" ||
-		parsed.User != nil || parsed.Path != "/oauth/authorize" || parsed.Query().Get("state") == "" {
-		return errors.New("the API returned an invalid Stripe consent link")
-	}
-	state := parsed.Query().Get("state")
 	result := make(chan error, 1)
 	var received atomic.Bool
 	mux := http.NewServeMux()
@@ -210,7 +203,8 @@ func connectStripeOnDevice(ctx context.Context, payments deviceStripePayments, o
 		}
 		query := r.URL.Query()
 		code := query.Get("code")
-		if r.Host != address.String() || subtle.ConstantTimeCompare([]byte(query.Get("state")), []byte(state)) != 1 ||
+		if r.Host != address.String() || len(query["state"]) != 1 || len(query["code"]) > 1 ||
+			subtle.ConstantTimeCompare([]byte(query.Get("state")), []byte(state)) != 1 ||
 			len(code) > 1024 || !received.CompareAndSwap(false, true) {
 			http.Error(w, "This Stripe return is invalid or already used.", http.StatusBadRequest)
 			return

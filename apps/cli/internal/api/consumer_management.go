@@ -110,9 +110,9 @@ func (m consumerManagement) PublisherStripeAccount(ctx context.Context) (string,
 }
 
 // ConnectPublisherStripeForDevice starts Stripe consent with a local return.
-func (m consumerManagement) ConnectPublisherStripeForDevice(ctx context.Context, port int) (string, error) {
-	link, err := m.sdk.ConnectPublisherStripeForDevice(ctx, port)
-	return link, mapError(err)
+func (m consumerManagement) ConnectPublisherStripeForDevice(ctx context.Context, port int) (link, state string, err error) {
+	link, state, err = m.sdk.ConnectPublisherStripeForDevice(ctx, port)
+	return link, state, mapError(err)
 }
 
 // CompletePublisherStripe completes the consent started by this publisher.
