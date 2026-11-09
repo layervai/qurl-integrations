@@ -51,6 +51,9 @@ jobs:
             curl --silent --show-error --max-time 20 --proto '=https' \
               --header "@$auth" --output "$response" --write-out '%{http_code}' "$@"
           }
+          [[ $(request "$QURL_ENDPOINT/v1/me") == 200 ]]
+          jq -e --arg owner "$QURL_JOURNEY_OWNER_ID" \
+            '.data.owner_id == $owner and .data.auth_type == "api_key"' "$response" >/dev/null
           domain=connector-domain-ci-proof.layerv.xyz
           endpoint="$QURL_ENDPOINT/v1/domains"
           status=$(request "$endpoint/$domain")
