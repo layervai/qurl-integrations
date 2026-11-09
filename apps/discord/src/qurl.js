@@ -329,6 +329,7 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
   const result = await callQurl('POST', '/qurls', () =>
     client.create({
       target_url: targetUrl,
+      // The load-test label is safe to show to recipients.
       name: label,
       one_time_use: true,
       expires_in: expiresIn,
@@ -352,7 +353,7 @@ async function deleteLink(resourceId, apiKey) {
   // Revoke at the resource level: every link minted on the resource stops
   // resolving. Repeats against an existing revoked row are idempotent 204;
   // a never-existent CRID remains 404, so a corrupt send-row ID cannot report
-  // false success. SDK 2.x deleteResource() accepts only a CRID and rejects a
+  // false success. The SDK deleteResource() accepts only a CRID and rejects a
   // public-key resource_id before any request (surfaced as client_validation).
   await callQurl(
     'DELETE',
@@ -449,7 +450,7 @@ async function revokeOrdinaryLinks(resourceId, rawQurlIds, apiKey) {
 async function getResourceStatus(resourceId, apiKey) {
   qurlPath(resourceId);
   const client = makeClient(apiKey);
-  // SDK 2.x get() accepts a CRID or `q_` display ID and rejects a public-key
+  // The SDK get() accepts a CRID or `q_` display ID and rejects a public-key
   // resource_id before making this request.
   // Returns the SDK's QURL shape — access tokens are under `access_tokens`
   // (the SDK renames the API's wire-format `qurls` field).
