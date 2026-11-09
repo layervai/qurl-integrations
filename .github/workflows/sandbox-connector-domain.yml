@@ -1,0 +1,153 @@
+name: Sandbox Connector custom domain
+
+# Hold the shared Sandbox rollout lock for the prove operation.
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Prepare, verify, prove, or clean up the Sandbox domain fixture
+        type: choice
+        options: [prepare, verify, prove, cleanup]
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-connector-domain
+  cancel-in-progress: false
+
+jobs:
+  proof:
+    if: github.repository == 'layervai/qurl-integrations' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: cli-customer-journey
+    env:
+      QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
+      QURL_JOURNEY_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
+      QURL_SHARING_RUN_ID: ${{ github.run_id }}
+      QURL_SHARING_RUN_ATTEMPT: ${{ github.run_attempt }}
+      QURL_SHARING_RUNTIME: host
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Manage the Sandbox DNS fixture
+        env:
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
+          OPERATION: ${{ inputs.operation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$QURL_ENDPOINT" == 'https://api.layerv.xyz' ]]
+          umask 077
+          auth=$(mktemp "$RUNNER_TEMP/domain-auth.XXXXXX")
+          response=$(mktemp "$RUNNER_TEMP/domain-response.XXXXXX")
+          trap 'rm -f "$auth" "$response"' EXIT
+          printf 'Authorization: Bearer %s\n' "$AUTOMATION_API_KEY" > "$auth"
+          unset AUTOMATION_API_KEY
+          request() {
+            curl --silent --show-error --max-time 20 --proto '=https' \
+              --header "@$auth" --output "$response" --write-out '%{http_code}' "$@"
+          }
+          [[ $(request "$QURL_ENDPOINT/v1/me") == 200 ]]
+          jq -e --arg owner "$QURL_JOURNEY_OWNER_ID" \
+            '.data.owner_id == $owner and .data.auth_type == "api_key"' "$response" >/dev/null
+          domain=connector-domain-ci-proof.layerv.xyz
+          endpoint="$QURL_ENDPOINT/v1/domains"
+          status=$(request "$endpoint/$domain")
+          case "$OPERATION:$status" in
+            prepare:404)
+              status=$(request --json "$(jq -nc --arg domain "$domain" '{domain:$domain}')" "$endpoint")
+              [[ "$status" == 201 ]]
+              echo 'Registered the Sandbox hostname. Publish the DNS records before verify.'
+              ;;
+            prepare:200)
+              echo 'The Sandbox hostname is already registered.'
+              ;;
+            verify:200)
+              if ! jq -e '.data.ready_for_qurls == true' "$response" >/dev/null; then
+                status=$(request --request POST "$endpoint/$domain/verify")
+                [[ "$status" == 200 ]]
+                jq -e '.data.checks.txt.verified and .data.checks.acme_cname.verified and .data.checks.traffic_routing.verified' "$response" >/dev/null
+                echo 'DNS verification passed. Wait for certificate activation before prove.'
+              fi
+              ;;
+            prove:200)
+              jq -e '.data.ready_for_qurls == true' "$response" >/dev/null
+              ;;
+            cleanup:200)
+              status=$(request --request DELETE "$endpoint/$domain")
+              [[ "$status" == 204 ]]
+              ;;
+            cleanup:404) ;;
+            *) echo "Unexpected Sandbox domain API status: $status" >&2; exit 1 ;;
+          esac
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: inputs.operation == 'prove'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build the exact CLI and test harness
+        if: inputs.operation == 'prove'
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          go build -trimpath -buildvcs=true -o "$RUNNER_TEMP/qurl" ./apps/cli/cmd
+          go test -c -tags=clisandbox -o "$RUNNER_TEMP/connector-domain.test" ./apps/cli/cmd
+
+      - name: Mint disposable journey credentials
+        if: inputs.operation == 'prove'
+        id: credentials
+        env:
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          auth=$(mktemp "$RUNNER_TEMP/domain-auth.XXXXXX")
+          trap 'rm -f "$auth"' EXIT
+          printf %s "$AUTOMATION_API_KEY" > "$auth"
+          unset AUTOMATION_API_KEY
+          python3 scripts/qurl-cli-ci-credentials.py create-pair \
+            --qurl-endpoint "$QURL_ENDPOINT" --api-key-file "$auth" --owner-id "$QURL_JOURNEY_OWNER_ID" \
+            --primary-output-dir "$RUNNER_TEMP/domain-primary" --failure-output-dir "$RUNNER_TEMP/domain-failure" \
+            --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" --lane linux
+
+      - name: Prove the private Connector custom domain
+        if: inputs.operation == 'prove'
+        env:
+          QURL_CLI_SANDBOX_CONNECTOR_DOMAIN: enabled
+          QURL_CLI_SANDBOX_BINARY: ${{ runner.temp }}/qurl
+          QURL_API_KEY_FILE: ${{ runner.temp }}/domain-primary/api-key
+          QURL_SANDBOX_QV2_ISSUER_KEY: ${{ secrets.QURL_JOURNEY_QV2_ISSUER_KEY }}
+          QURL_SANDBOX_QV2_RELAY_URL: ${{ secrets.QURL_JOURNEY_QV2_RELAY_URL }}
+          QURL_CONNECTOR_HUB_HOST: ${{ secrets.QURL_JOURNEY_HUB_HOST }}
+          QURL_CONNECTOR_HUB_PORT: ${{ secrets.QURL_JOURNEY_HUB_PORT }}
+          QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${{ secrets.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/connector-domain.test" -test.v -test.timeout=8m -test.run '^TestSandboxConnectorCustomDomain$' | tee "$RUNNER_TEMP/domain-proof.out"
+          grep -q '^--- PASS: TestSandboxConnectorCustomDomain ' "$RUNNER_TEMP/domain-proof.out"
+
+      - name: Reconcile exact run resources and credentials
+        if: always() && steps.credentials.outcome != 'skipped'
+        env:
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          auth=$(mktemp "$RUNNER_TEMP/domain-auth.XXXXXX")
+          trap 'rm -f "$auth"; scripts/remove-sensitive-tree.sh "$RUNNER_TEMP/domain-primary" "$RUNNER_TEMP/domain-failure"' EXIT
+          printf %s "$AUTOMATION_API_KEY" > "$auth"
+          unset AUTOMATION_API_KEY
+          python3 scripts/qurl-cli-ci-credentials.py reconcile-batch \
+            --qurl-endpoint "$QURL_ENDPOINT" --api-key-file "$auth" --owner-id "$QURL_JOURNEY_OWNER_ID" \
+            --operation-budget-seconds 300 \
+            --run-spec "$QURL_SHARING_RUN_ID:$QURL_SHARING_RUN_ATTEMPT:linux:host:full"

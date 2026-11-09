@@ -475,9 +475,10 @@ type sandboxLocalFixture struct {
 	key        string
 	cleanupJWT string
 
-	backendHits atomic.Uint64
-	process     *sandboxPublishProcess
-	stopOnce    sync.Once
+	backendHits      atomic.Uint64
+	customDomainHits atomic.Uint64
+	process          *sandboxPublishProcess
+	stopOnce         sync.Once
 }
 
 func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
@@ -575,8 +576,11 @@ func startSandboxLocalPublishInState(t *testing.T, label, requestedStateDir stri
 		binary: binary, env: cliEnv, stateDir: stateDir, cleanupJWT: cleanupJWT,
 		key: bootstrapKey, marker: fmt.Sprintf("sandbox-local-publish-%s-%d", namespace.ConnectorID, time.Now().UnixNano()),
 	}
-	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fixture.backendHits.Add(1)
+		if r.Host == sandboxConnectorProofDomain || r.Host == sandboxConnectorProofDomain+":443" {
+			fixture.customDomainHits.Add(1)
+		}
 		_, _ = io.WriteString(w, fixture.marker)
 	}))
 	t.Cleanup(echo.Close)
