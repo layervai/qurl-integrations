@@ -329,6 +329,7 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
   const result = await callQurl('POST', '/qurls', () =>
     client.create({
       target_url: targetUrl,
+      name: label,
       one_time_use: true,
       expires_in: expiresIn,
       // The create endpoint uses `label`, not `description` (qurl-service
