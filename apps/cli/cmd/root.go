@@ -299,7 +299,7 @@ automatically. Use "qurl account setup" to enable recovery and other devices.
 Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		Example: "  qurl publish http://127.0.0.1:3000\n" +
 			"  qurl get " + exampleCRID + "\n" +
-			"  qurl publish https://api.example.com/reports",
+			"  qurl publish https://api.example.com/reports --name \"Reports API\"",
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,

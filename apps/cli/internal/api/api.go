@@ -152,6 +152,9 @@ type PublishOptions struct {
 	NamedAccessFlags []string
 	// ConnectorID selects a tunnel resource instead of a URL.
 	ConnectorID string
+	// Name is the public name recipients see; the service requires it to
+	// create a resource and ignores it when the target is already published.
+	Name        string
 	Description string
 	Tags        []string
 	Alias       string

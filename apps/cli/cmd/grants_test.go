@@ -331,7 +331,7 @@ func TestDeviceGrantLimit(t *testing.T) {
 func TestPublishWithADeviceListConfirmsOutput(t *testing.T) {
 	srv := apitest.NewServer(t)
 	key := grantKey(1)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com", "--allow-device-key", key, "-o", "json"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com", "--name", "Example", "--allow-device-key", key, "-o", "json"}})
 	if res.code != 0 || !strings.Contains(res.stdout.String(), `"private": true`) {
 		t.Fatalf("publish with a device list failed: %s", res.stderr.String())
 	}
