@@ -108,3 +108,17 @@ func (m consumerManagement) PublisherStripeAccount(ctx context.Context) (string,
 	account, err := m.sdk.PublisherStripeAccount(ctx)
 	return account, mapError(err)
 }
+
+func (m consumerManagement) ConnectPublisherStripeForDevice(ctx context.Context, port int) (string, error) {
+	link, err := m.sdk.ConnectPublisherStripeForDevice(ctx, port)
+	return link, mapError(err)
+}
+
+func (m consumerManagement) CompletePublisherStripe(ctx context.Context, state, code string) error {
+	return mapError(m.sdk.CompletePublisherStripe(ctx, state, code))
+}
+
+func (m consumerManagement) CreatePublisherStripePrice(ctx context.Context, name string, amount int64, interval string) (*qurl.CRIDPaymentPolicy, error) {
+	price, err := m.sdk.CreatePublisherStripePrice(ctx, name, amount, interval)
+	return price, mapError(err)
+}

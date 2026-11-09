@@ -909,15 +909,21 @@ backend receipt and expiration; these commands do not verify payment.
 The publisher backend can subscribe to `consumer.subscribed` webhooks.
 If its notification is pending, repeat the same receipt, expiry and version.
 
-For paid contracts, first run `qurl account setup` to link the device to your
-publisher account. Run `qurl payments connect -o json` and open the consent URL
-yourself. Finish setup in LayerV billing while signed in to that publisher account.
-Then read `qurl payments account -o json`. Use that account and an active
-fixed Stripe price with `--stripe-account` and `--stripe-price` when publishing
-or configuring contract access. The service verifies payment; manual approval
-is unavailable. LayerV collects 3%, including subscription renewals. One-time
-prices accept `--payment-access-seconds`; zero lasts for the resource lifetime.
-Recurring prices require zero and grant only the paid invoice period.
+Publish your app, then set a price on the returned CRID:
+
+```bash
+qurl payments setup <CRID> --name "Reports API" --price 5.00
+```
+
+Complete Stripe setup in your browser when prompted. qURL creates the price on
+your Stripe account and prints the paid link. This setup makes the CRID private.
+Add `--interval month` or `--interval year` for a subscription. For a one-time
+payment, `--payment-access-seconds` sets the access duration. Zero lasts for the
+resource lifetime. Subscription access lasts for the paid invoice period.
+LayerV verifies the payment and collects 3%, including on renewals.
+
+If you already have a fixed Stripe price, you can use `--stripe-account` and
+`--stripe-price` when publishing or configuring contract access.
 Adding payment with `qurl access configure` makes an existing public CRID private.
 Removing payment keeps it private. Publishing the same target again does not
 change its payment policy.
