@@ -35,7 +35,7 @@ var (
 	errSandboxGrantedRouteMissingAuthorization = errors.New("granted route omitted application authorization")
 	errSandboxGrantedRouteAuthorization        = errors.New("granted route authorization failed")
 	errSandboxGrantedRouteConfiguration        = errors.New("granted route probe configuration is invalid")
-	errSandboxGrantedRouteTransport            = errors.New("granted route transport failed")
+	errSandboxGrantedRouteTransport            = sandboxGrantedRouteTransportFailure("other transport failure")
 )
 
 type sandboxGrantedRouteProbeState uint8
@@ -228,7 +228,7 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		if errors.Is(err, errSandboxGrantedRouteAuthorization) {
 			return 0, errSandboxGrantedRouteAuthorization
 		}
-		return 0, fmt.Errorf("%w: %s", errSandboxGrantedRouteTransport, sandboxGrantedRouteTransportCategory(err))
+		return 0, sandboxGrantedRouteTransportCategory(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, int64(len(r.marker)+1)))
@@ -247,8 +247,12 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 	return 0, errSandboxGrantedRouteUnexpectedSuccess
 }
 
+type sandboxGrantedRouteTransportFailure string
+
+func (failure sandboxGrantedRouteTransportFailure) Error() string { return string(failure) }
+
 // Report only fixed categories. Transport errors may include a grant URL.
-func sandboxGrantedRouteTransportCategory(err error) string {
+func sandboxGrantedRouteTransportCategory(err error) sandboxGrantedRouteTransportFailure {
 	var dnsError *net.DNSError
 	switch {
 	case errors.As(err, &dnsError):
@@ -260,7 +264,7 @@ func sandboxGrantedRouteTransportCategory(err error) string {
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return "peer closed the connection"
 	default:
-		return "other transport failure"
+		return errSandboxGrantedRouteTransport
 	}
 }
 
@@ -404,7 +408,17 @@ func assertSandboxGrantedRouteFenced(t *testing.T, route *sandboxGrantedRoute) {
 		}
 		state, probeFailed, unexpectedSuccess := classifySandboxGrantedRouteProbe(state, probeErr, outerErr)
 		if probeFailed {
-			failedProbes[probeErr.Error()]++
+			category := "other probe failure"
+			var transportFailure sandboxGrantedRouteTransportFailure
+			switch {
+			case errors.As(probeErr, &transportFailure):
+				category = string(transportFailure)
+			case errors.Is(probeErr, context.DeadlineExceeded):
+				category = "probe deadline exceeded"
+			case errors.Is(probeErr, errSandboxGrantedRouteAuthorization):
+				category = "probe authorization failed"
+			}
+			failedProbes[category]++
 		} else if state == sandboxGrantedRouteRefused {
 			refusals++
 		}
@@ -663,7 +677,7 @@ func TestSandboxGrantedRouteAccessFailureCategories(t *testing.T) {
 	}
 }
 
-func TestSandboxGrantedRouteTransportCategoryDoesNotExposeURL(t *testing.T) {
+func TestSandboxGrantedRouteTransportCategoryUnwrapsURLError(t *testing.T) {
 	err := &url.Error{Op: "Get", URL: "https://example.test/private-grant", Err: syscall.ECONNRESET}
 	if got := sandboxGrantedRouteTransportCategory(err); got != "connection reset" {
 		t.Fatalf("transport category = %q", got)
