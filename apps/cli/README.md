@@ -912,11 +912,12 @@ If its notification is pending, repeat the same receipt, expiry and version.
 Publish your app, then set a price on the returned CRID:
 
 ```bash
-qurl payments setup <CRID> --name "Reports API" --price 5.00
+qurl payments setup <CRID> --price 5.00
 ```
 
 Complete Stripe setup in your browser when prompted. qURL creates the price on
-your Stripe account and prints the paid link. This setup makes the CRID private.
+your Stripe account and prints the paid link. It uses the public CRID name for
+checkout. Use `--name` to set a different name. This setup makes the CRID private.
 Add `--interval month` or `--interval year` for a subscription. For a one-time
 payment, `--payment-access-seconds` sets the access duration. Zero lasts for the
 resource lifetime. Subscription access lasts for the paid invoice period.

@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
@@ -38,16 +36,14 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 		Short: "Set a price, connect Stripe if needed, and turn on paid access",
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name = strings.TrimSpace(name)
 			cents, err := paidAccessCents(amount)
 			if err != nil {
 				return exitcode.UsageError(err)
 			}
-			if name == "" || utf8.RuneCountInString(name) > 100 || strings.ContainsFunc(name, unicode.IsControl) ||
-				version < 0 || version >= 9007199254740991 ||
+			if version < 0 || version >= 9007199254740991 ||
 				(interval != "" && interval != "month" && interval != "year") ||
 				accessSeconds < 0 || accessSeconds > 315360000 || (interval != "" && accessSeconds != 0) {
-				return exitcode.UsageError(errors.New("set --name; use month or year for subscriptions and set an access duration only for one-time payments"))
+				return exitcode.UsageError(errors.New("check the policy version. Use month or year for subscriptions. Set an access duration only for a one-time payment"))
 			}
 			assessment, err := cridux.Assess(args[0])
 			if err != nil {
@@ -69,9 +65,24 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 				return errors.New("the service did not return the full CRID")
 			}
 			current := resource.ConsumerAccess
+			currentVersion := resource.ConsumerAccessVersion
+			if current != nil {
+				currentVersion = current.Version
+			}
 			retry := current != nil && current.Version == version+1 && current.Mode == "contract" && current.ContractID == "paid-access" && current.Payment != nil
-			if current != nil && current.Version != version && !retry {
-				return exitcode.UsageError(fmt.Errorf("the current policy version is %d. Review it and retry with --version %d to replace it", current.Version, current.Version))
+			if currentVersion != version && !retry {
+				return exitcode.UsageError(fmt.Errorf("the current policy version is %d. Review it and retry with --version %d to replace it", currentVersion, currentVersion))
+			}
+			checkoutName := strings.TrimSpace(name)
+			if !cmd.Flags().Changed("name") {
+				preview, previewErr := client.Preview(ctx, resource.CRID)
+				if previewErr != nil {
+					return previewErr
+				}
+				checkoutName = preview.Name
+			}
+			if !validPublicName(checkoutName) {
+				return exitcode.UsageError(errors.New("set --name to the app name buyers should see at checkout"))
 			}
 			management := client.ConsumerManagement()
 			payments, ok := management.(deviceStripePayments)
@@ -88,7 +99,7 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 					return err
 				}
 			}
-			price, err := payments.CreatePublisherStripePrice(ctx, name, cents, interval)
+			price, err := payments.CreatePublisherStripePrice(ctx, checkoutName, cents, interval)
 			if err != nil {
 				return err
 			}
@@ -109,7 +120,7 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 			return opts.printer().PaidAccessReady(resource.CRID, link, policy.Version)
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "", "app name on Stripe Checkout")
+	cmd.Flags().StringVar(&name, "name", "", "app name on Stripe Checkout (defaults to the public CRID name)")
 	cmd.Flags().StringVar(&amount, "price", "", "price in US dollars (for example, 5.00)")
 	cmd.Flags().StringVar(&interval, "interval", "", "subscription interval: month or year (empty means pay once)")
 	cmd.Flags().Int64Var(&version, consumerVersion, 0, "current policy version; replacing a policy can revoke access")

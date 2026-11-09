@@ -102,6 +102,10 @@ func TestPaymentsSetupAttachesTheCreatedPrice(t *testing.T) {
 	srv.ScriptRepeat(http.MethodGet, path, 2, func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource": resource}, nil)
 	})
+	srv.ScriptRepeat(http.MethodGet, path+"/preview", 2, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"name": "An app", "revision": 1}))
+	})
 	srv.ScriptRepeat(http.MethodGet, "/v1/payments/account", 2, func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"account_id": "acct_owner", "layerv_fee_percent": 3}, nil)
 	})
@@ -131,7 +135,7 @@ func TestPaymentsSetupAttachesTheCreatedPrice(t *testing.T) {
 		resource["private"] = true
 		apitest.WriteEnvelope(t, w, http.StatusOK, resource, nil)
 	})
-	args := []string{"--endpoint", srv.URL, "payments", "setup", srv.Key.CRID, "--name", "An app", "--price", "5.01", "--interval", "month", "-o", "json"}
+	args := []string{"--endpoint", srv.URL, "payments", "setup", srv.Key.CRID, "--price", "5.01", "--interval", "month", "-o", "json"}
 	for range 2 {
 		result := runCLI(t, &runOpts{args: args})
 		require.Zero(t, result.code, result.stderr.String())
