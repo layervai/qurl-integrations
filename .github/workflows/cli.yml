@@ -174,7 +174,8 @@ jobs:
           # The daily run revalidates the three cross-platform customer paths
           # with the long soak. This is intentional: the green message means
           # the whole packaged CLI journey is current, not only one Linux test.
-          matrix='{"include":[{"lane":"linux","lane_id":1,"os":"ubuntu-latest","test_name":"TestSandboxLinuxDefaultDaemonLifecycle","timeout_minutes":35,"soak":false},{"lane":"macos","lane_id":2,"os":"macos-latest","test_name":"TestSandboxMacOSDefaultDaemonLifecycle","timeout_minutes":35,"soak":false},{"lane":"windows","lane_id":3,"os":"windows-latest","test_name":"TestSandboxWindowsDefaultDaemonFullCustomerLifecycle","timeout_minutes":35,"soak":false}]}'
+          # Keep the Linux lifecycle gate on the qualified runner image.
+          matrix='{"include":[{"lane":"linux","lane_id":1,"os":"ubuntu-24.04","test_name":"TestSandboxLinuxDefaultDaemonLifecycle","timeout_minutes":35,"soak":false},{"lane":"macos","lane_id":2,"os":"macos-latest","test_name":"TestSandboxMacOSDefaultDaemonLifecycle","timeout_minutes":35,"soak":false},{"lane":"windows","lane_id":3,"os":"windows-latest","test_name":"TestSandboxWindowsDefaultDaemonFullCustomerLifecycle","timeout_minutes":35,"soak":false}]}'
           if [[ "$GITHUB_EVENT_NAME" == schedule || ( "$GITHUB_EVENT_NAME" == workflow_dispatch && "$RELEASE_GATE" != true ) ]]; then
             matrix="$(jq -c '.include += [{"lane":"linux","lane_id":4,"os":"ubuntu-latest","test_name":"TestSandboxLocalPublishSoak","timeout_minutes":110,"soak":true}]' <<<"$matrix")"
           fi
