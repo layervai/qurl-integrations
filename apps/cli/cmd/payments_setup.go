@@ -16,9 +16,12 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
+
+const paidAccessContract = "paid-access"
 
 type deviceStripePayments interface {
 	PublisherStripeAccount(context.Context) (string, error)
@@ -36,20 +39,15 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 		Short: "Set a price, connect Stripe if needed, and turn on paid access",
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cents, err := paidAccessCents(amount)
+			cents, err := validatePaidAccessSetup(amount, interval, version, accessSeconds)
 			if err != nil {
 				return exitcode.UsageError(err)
-			}
-			if version < 0 || version >= 9007199254740991 ||
-				(interval != "" && interval != "month" && interval != "year") ||
-				accessSeconds < 0 || accessSeconds > 315360000 || (interval != "" && accessSeconds != 0) {
-				return exitcode.UsageError(errors.New("check the policy version. Use month or year for subscriptions. Set an access duration only for a one-time payment"))
 			}
 			assessment, err := cridux.Assess(args[0])
 			if err != nil {
 				return err
 			}
-			if err = applyCRIDGuards(opts.printer(), assessment, opts.productionEndpoint(), yes); err != nil {
+			if err := applyCRIDGuards(opts.printer(), assessment, opts.productionEndpoint(), yes); err != nil {
 				return err
 			}
 			ctx := cmd.Context()
@@ -61,54 +59,32 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if len(resource.CRID) != 60 {
-				return errors.New("the service did not return the full CRID")
+			retry, err := isPaidAccessRetry(resource, version)
+			if err != nil {
+				return err
 			}
-			current := resource.ConsumerAccess
-			currentVersion := resource.ConsumerAccessVersion
-			if current != nil {
-				currentVersion = current.Version
-			}
-			retry := current != nil && current.Version == version+1 && current.Mode == "contract" && current.ContractID == "paid-access" && current.Payment != nil
-			if currentVersion != version && !retry {
-				return exitcode.UsageError(fmt.Errorf("the current policy version is %d. Review it and retry with --version %d to replace it", currentVersion, currentVersion))
-			}
-			checkoutName := strings.TrimSpace(name)
-			if !cmd.Flags().Changed("name") {
-				preview, previewErr := client.Preview(ctx, resource.CRID)
-				if previewErr != nil {
-					return previewErr
-				}
-				checkoutName = preview.Name
-			}
-			if !validPublicName(checkoutName) {
-				return exitcode.UsageError(errors.New("set --name to the app name buyers should see at checkout"))
+			checkoutName, err := paidAccessCheckoutName(ctx, client, resource.CRID, name, cmd.Flags().Changed("name"))
+			if err != nil {
+				return err
 			}
 			management := client.ConsumerManagement()
 			payments, ok := management.(deviceStripePayments)
 			if !ok {
 				return errors.New("publisher payments are unavailable in this client")
 			}
-			account, err := payments.PublisherStripeAccount(ctx)
-			if err != nil {
+			if err := ensurePublisherStripe(ctx, opts, payments); err != nil {
 				return err
-			}
-			if account == "" {
-				opts.printer().Notef("Complete Stripe setup in your browser.")
-				if err = connectStripeOnDevice(ctx, payments, opts.openBrowser); err != nil {
-					return err
-				}
 			}
 			price, err := payments.CreatePublisherStripePrice(ctx, checkoutName, cents, interval)
 			if err != nil {
 				return err
 			}
 			price.AccessSeconds = accessSeconds
-			if retry && *current.Payment != *price {
-				return exitcode.UsageError(fmt.Errorf("this CRID has a different paid offer at version %d. Review it before replacing it with --version %d", current.Version, current.Version))
+			if retry && *resource.ConsumerAccess.Payment != *price {
+				return exitcode.UsageError(fmt.Errorf("this CRID has a different paid offer at version %d. Review it before replacing it with --version %d", version+1, version+1))
 			}
-			policy := qurl.ConsumerAccessPolicy{Mode: "contract", Version: version + 1, ContractID: "paid-access", Payment: price}
-			if err = management.UpdateConsumerAccess(ctx, assessment.Input, version, policy); err != nil {
+			policy := qurl.ConsumerAccessPolicy{Mode: consumerContract, Version: version + 1, ContractID: paidAccessContract, Payment: price}
+			if err := management.UpdateConsumerAccess(ctx, assessment.Input, version, policy); err != nil {
 				return err
 			}
 			link := ""
@@ -128,6 +104,60 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 	cmd.Flags().BoolVar(&yes, "yes", false, "allow changes to a test CRID on a production endpoint")
 	cmd.Long = "Set a price and connect Stripe if needed. Turning on paid access makes the CRID private."
 	return cmd
+}
+
+func validatePaidAccessSetup(amount, interval string, version, accessSeconds int64) (int64, error) {
+	if version < 0 || version >= 9007199254740991 {
+		return 0, errors.New("invalid policy version")
+	}
+	if interval != "" && interval != "month" && interval != "year" {
+		return 0, errors.New("use month or year for subscriptions")
+	}
+	if accessSeconds < 0 || accessSeconds > 315360000 || (interval != "" && accessSeconds != 0) {
+		return 0, errors.New("set an access duration between 0 and 315360000 seconds only for a one-time payment")
+	}
+	return paidAccessCents(amount)
+}
+
+func isPaidAccessRetry(resource *qurlapi.ResourceSummary, version int64) (bool, error) {
+	if len(resource.CRID) != 60 {
+		return false, errors.New("the service did not return the full CRID")
+	}
+	currentVersion := resource.ConsumerAccessVersion
+	if current := resource.ConsumerAccess; current != nil {
+		currentVersion = current.Version
+		if current.Version == version+1 && current.Mode == consumerContract && current.ContractID == paidAccessContract && current.Payment != nil {
+			return true, nil
+		}
+	}
+	if currentVersion != version {
+		return false, exitcode.UsageError(fmt.Errorf("the current policy version is %d. Review it and retry with --version %d to replace it", currentVersion, currentVersion))
+	}
+	return false, nil
+}
+
+func paidAccessCheckoutName(ctx context.Context, client qurlapi.Client, crid, name string, override bool) (string, error) {
+	name = strings.TrimSpace(name)
+	if !override {
+		preview, err := client.Preview(ctx, crid)
+		if err != nil {
+			return "", err
+		}
+		name = preview.Name
+	}
+	if !validPublicName(name) {
+		return "", exitcode.UsageError(errors.New("set --name to the app name buyers should see at checkout"))
+	}
+	return name, nil
+}
+
+func ensurePublisherStripe(ctx context.Context, opts *globalOpts, payments deviceStripePayments) error {
+	account, err := payments.PublisherStripeAccount(ctx)
+	if err != nil || account != "" {
+		return err
+	}
+	opts.printer().Notef("Complete Stripe setup in your browser.")
+	return connectStripeOnDevice(ctx, payments, opts.openBrowser)
 }
 
 func paidAccessCents(price string) (int64, error) {
@@ -187,7 +217,7 @@ func connectStripeOnDevice(ctx context.Context, payments deviceStripePayments, o
 		}
 		var completionErr error
 		if code == "" {
-			completionErr = errors.New("Stripe setup was canceled. Run the command again when ready.")
+			completionErr = errors.New("setup was canceled in Stripe. Run the command again when ready")
 		} else {
 			completionErr = payments.CompletePublisherStripe(ctx, state, code)
 		}
