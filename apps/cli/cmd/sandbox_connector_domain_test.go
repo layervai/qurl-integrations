@@ -45,7 +45,7 @@ func TestSandboxConnectorCustomDomain(t *testing.T) {
 	}
 	assertSandboxLocalRoute(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.marker, 2*time.Minute)
 	if fixture.customDomainHits.Load() == 0 {
-		t.Fatal("the private origin did not receive the verified custom hostname")
+		t.Fatal("the private origin did not receive the verified custom hostname in X-Forwarded-Host")
 	}
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+sandboxConnectorProofDomain+"/", http.NoBody)
 	if err != nil {
