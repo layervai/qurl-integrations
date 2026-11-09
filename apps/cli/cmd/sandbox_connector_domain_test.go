@@ -5,9 +5,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -48,8 +52,22 @@ func TestSandboxConnectorCustomDomain(t *testing.T) {
 		t.Fatal("build Sandbox request without admission")
 	}
 	response, err := sandboxCleanupHTTPClient.Do(request)
-	if err == nil {
+	if err != nil {
+		var dnsError *net.DNSError
+		var networkError net.Error
+		// The edge can deny access before HTTP. A DNS or certificate error is a failed fixture.
+		edgeClosed := errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) ||
+			(errors.As(err, &networkError) && networkError.Timeout())
+		if errors.As(err, &dnsError) || !edgeClosed {
+			t.Fatalf("Sandbox denial probe failed before a valid edge denial (%T)", err)
+		}
+		t.Log("Sandbox denied the request without an HTTP response")
+	} else {
+		payload, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 		_ = response.Body.Close()
+		if readErr != nil || bytes.Contains(payload, []byte(fixture.marker)) {
+			t.Fatal("Sandbox denial response did not prove the private payload was withheld")
+		}
 		if response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusNotFound {
 			t.Fatalf("Sandbox request without admission returned HTTP %d", response.StatusCode)
 		}

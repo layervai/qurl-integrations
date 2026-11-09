@@ -1,5 +1,6 @@
 name: Sandbox Connector custom domain
 
+# Hold the shared Sandbox rollout lock for the prove operation.
 on:
   workflow_dispatch:
     inputs:
@@ -59,7 +60,7 @@ jobs:
           status=$(request "$endpoint/$domain")
           case "$OPERATION:$status" in
             prepare:404)
-              status=$(request --json '{"domain":"connector-domain-ci-proof.layerv.xyz"}' "$endpoint")
+              status=$(request --json "$(jq -nc --arg domain "$domain" '{domain:$domain}')" "$endpoint")
               [[ "$status" == 201 ]]
               echo 'Registered the Sandbox hostname. Publish the DNS records before verify.'
               ;;

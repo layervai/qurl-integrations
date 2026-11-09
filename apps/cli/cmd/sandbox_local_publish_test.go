@@ -578,7 +578,7 @@ func startSandboxLocalPublishInState(t *testing.T, label, requestedStateDir stri
 	}
 	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fixture.backendHits.Add(1)
-		if r.Host == sandboxConnectorProofDomain {
+		if r.Host == sandboxConnectorProofDomain || r.Host == sandboxConnectorProofDomain+":443" {
 			fixture.customDomainHits.Add(1)
 		}
 		_, _ = io.WriteString(w, fixture.marker)
