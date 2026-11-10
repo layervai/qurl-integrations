@@ -49,15 +49,11 @@ func TestSandboxConnectorCustomDomain(t *testing.T) {
 		if shared.code != 0 {
 			t.Fatalf("Sandbox Connector share returned exit %d", shared.code)
 		}
-		route := prepareSandboxGrantedRoute(t, fixture.env, shared.stdout.String(), fixture.marker, fixture.backendHits.Load)
-		target, parseErr := url.Parse(route.url)
-		if parseErr != nil || target.Scheme != "https" || target.Hostname() != sandboxConnectorProofDomain {
-			t.Fatal("Sandbox admission did not return the exact HTTPS custom hostname")
-		}
-		return route
+		return prepareSandboxGrantedRoute(t, fixture.env, shared.stdout.String(), fixture.marker, fixture.backendHits.Load, sandboxConnectorProofDomain)
 	}
 	shortGrant := grantFor("30s")
 	t.Log("The exact custom hostname returned the private origin bytes")
+	// The runner already has network access from the grant. This checks application access without its cookie.
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+sandboxConnectorProofDomain+"/", http.NoBody)
 	if err != nil {
 		t.Fatal("build Sandbox request without admission")
@@ -83,17 +79,25 @@ func TestSandboxConnectorCustomDomain(t *testing.T) {
 			t.Fatalf("Sandbox request without admission returned HTTP %d", response.StatusCode)
 		}
 	}
+	// The server reports the network lease, which includes 10 seconds for first arrival.
 	untilExpired := time.Until(shortGrant.expiresAt.Add(5 * time.Second))
-	if untilExpired > 35*time.Second {
-		t.Fatal("Sandbox grant exceeded its requested 30-second lifetime")
+	if untilExpired > 45*time.Second {
+		t.Fatal("Sandbox grant exceeded the 30-second session and 10-second arrival window")
 	}
-	time.Sleep(untilExpired)
+	select {
+	case <-time.After(untilExpired):
+	case <-t.Context().Done():
+		t.Fatal("Sandbox expiry check was canceled")
+	}
 	beforeExpiryProbe := fixture.backendHits.Load()
-	probeCtx, cancelProbe := context.WithTimeout(t.Context(), sandboxDeletedRouteProbeTimeout)
-	expired, _ := shortGrant.probe(probeCtx)
-	cancelProbe()
-	if expired == sandboxGrantedRouteServed || fixture.backendHits.Load() != beforeExpiryProbe {
-		t.Fatal("expired custom-domain access still reached the private origin")
+	for range 2 {
+		probeCtx, cancelProbe := context.WithTimeout(t.Context(), sandboxDeletedRouteProbeTimeout)
+		state, probeErr := shortGrant.probe(probeCtx)
+		cancelProbe()
+		state, failed, unexpectedSuccess := classifySandboxGrantedRouteProbe(state, probeErr, t.Context().Err())
+		if failed || unexpectedSuccess || state != sandboxGrantedRouteRefused || fixture.backendHits.Load() != beforeExpiryProbe {
+			t.Fatal("Sandbox did not deny expired custom-domain access without reaching the private origin")
+		}
 	}
 	retainedGrant := grantFor("2m")
 	removed := runSandboxLocalCLI(t, fixture.binary, fixture.env, fixture.stateDir, "delete", fixture.local.CRID, "--yes")
