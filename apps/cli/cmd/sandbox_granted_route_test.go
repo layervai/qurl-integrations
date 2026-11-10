@@ -237,7 +237,7 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return 0, ctxErr
 		}
-		return 0, errors.New("read granted-route response")
+		return 0, "response body: " + sandboxGrantedRouteTransportCategory(err)
 	}
 	if resp.StatusCode/100 != 2 {
 		return sandboxGrantedRouteRefused, nil
@@ -258,11 +258,10 @@ func sandboxGrantedRouteTransportCategory(err error) sandboxGrantedRouteTranspor
 	var requestError *url.Error
 	if errors.As(err, &requestError) && requestError != nil && requestError.Err != nil {
 		err = requestError.Err
-		if isSandboxGrantedRouteHTTP2Reset(err) {
-			return "HTTP/2 peer reset"
-		}
 	}
 	switch {
+	case isSandboxGrantedRouteHTTP2Reset(err):
+		return "HTTP/2 peer reset"
 	case errors.As(err, &dnsError):
 		return "DNS lookup failed"
 	case errors.Is(err, syscall.ECONNREFUSED):
@@ -277,9 +276,12 @@ func sandboxGrantedRouteTransportCategory(err error) sandboxGrantedRouteTranspor
 	}
 }
 
-// shortcut: Go's HTTP/2 error type is private. Keep this shape in sync with
-// qurl-service's denial smoke when the pinned Go toolchain changes.
+// TODO(upstream-contract): shortcut: Go's HTTP/2 error type is private. Check
+// this shape against qurl-service's denial smoke when the Go toolchain changes.
 func isSandboxGrantedRouteHTTP2Reset(err error) bool {
+	if err == nil {
+		return false
+	}
 	const prefix, suffix = "stream error: stream ID ", "; INTERNAL_ERROR; received from peer"
 	id, ok := strings.CutPrefix(err.Error(), prefix)
 	if !ok {
