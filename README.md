@@ -124,7 +124,16 @@ and a copy a visitor sends is replaced.
 
 1. In the Vercel project, turn on Deployment Protection and create a
    *Protection Bypass for Automation* secret.
-2. Protect the deployment URL with that secret, using the
+2. Protect the deployment URL with that secret. With the CLI (4.1.0 or later),
+   which reads the secret from stdin or a hidden prompt:
+
+   ```bash
+   printf '%s' "$VERCEL_AUTOMATION_BYPASS_SECRET" | qurl publish https://my-app.vercel.app --name "Preview app" --origin-header x-vercel-protection-bypass
+   qurl share <CRID>
+   ```
+
+   Rotate with `qurl origin-header set <CRID> x-vercel-protection-bypass` and
+   remove with `qurl origin-header clear <CRID>`. Or use the
    [TypeScript SDK](https://github.com/layervai/qurl-typescript#protect-a-vercel-app):
 
    ```typescript
@@ -140,7 +149,8 @@ and a copy a visitor sends is replaced.
 
    or the REST API: `POST /v1/resources` with
    `"origin_header": {"name": "x-vercel-protection-bypass", "value": "<secret>"}`.
-3. Share `portal.link`. Requests through it reach the app; direct requests to
+3. Share the link (`qurl share` prints it; in the SDK it is `portal.link`).
+   Requests through it reach the app; direct requests to
    the `vercel.app` hostname are refused by Vercel.
 
 The secret is write-only: the API shows `origin_header_name`, never the value.
