@@ -34,7 +34,7 @@ lists its own setup requirements. Teams deployment is managed outside this
 repository; the presence of its source does not establish a public rollout.
 
 [Localhost quickstart](#share-a-localhost-web-app) ·
-[File sharing](#share-files-and-documents) · [Sharing comparison](#choose-how-to-share-an-app-or-file) ·
+[File sharing](#share-files-and-documents) · [Vercel deployments](#protect-a-vercel-deployment) · [Sharing comparison](#choose-how-to-share-an-app-or-file) ·
 [Sharing questions](#localhost-and-file-sharing-questions) ·
 [Product overview](https://layerv.ai/qurl/) · [Private links](https://qurl.link/)
 
@@ -126,7 +126,7 @@ and if a visitor sends that header themselves, qURL replaces it.
    [**All Deployments**](https://vercel.com/docs/deployment-protection#all-deployments)
    scope, which Vercel offers on every plan: *Standard Protection* leaves
    production domains, such as `my-app.vercel.app`, open to everyone.
-   <!-- TODO(upstream-contract): Vercel plan availability of All Deployments and Protection Bypass for Automation. --> Then
+   Then
    create a *Protection Bypass for Automation* secret, and check that a direct
    request is refused: `curl -sI https://my-app.vercel.app` should answer
    `401` or redirect to Vercel's login page.
@@ -136,12 +136,12 @@ and if a visitor sends that header themselves, qURL replaces it.
    your own shell):
 
    ```bash
-   CRID=$(printf '%s' "$VERCEL_AUTOMATION_BYPASS_SECRET" | qurl publish https://my-app.vercel.app --name "Preview app" --origin-header x-vercel-protection-bypass --quiet)
-   qurl share "$CRID"
+   CRID=$(printf '%s' "$VERCEL_AUTOMATION_BYPASS_SECRET" | qurl publish https://my-app.vercel.app --name "Preview app" --origin-header x-vercel-protection-bypass --quiet) &&
+     qurl share "$CRID"
    ```
 
-   If the URL is already published, publishing it again does not add or
-   change the header: use `qurl origin-header set <CRID> x-vercel-protection-bypass`.
+   If the URL is already published, publishing it again with
+   `--origin-header` is refused and changes nothing: use `qurl origin-header set <CRID> x-vercel-protection-bypass`.
 
    Or use the
    [TypeScript SDK](https://github.com/layervai/qurl-typescript#protect-a-vercel-app):
@@ -166,6 +166,8 @@ and if a visitor sends that header themselves, qURL replaces it.
 The secret is write-only: qURL shows only the header name
 (`origin_header_name` in the API), never the value.
 
+<!-- TODO(upstream-contract): Vercel plan availability of All Deployments and Protection Bypass for Automation; the qurl-router route cache TTL (60 s in production). -->
+
 **Rotate or remove the secret.** qURL's gateways keep a resource's settings for
 up to 60 seconds, so rotate in this order: add the new secret in Vercel, give
 it to qURL, then remove the old secret in Vercel a few minutes later.
@@ -174,6 +176,8 @@ it to qURL, then remove the old secret in Vercel a few minutes later.
 | --- | --- | --- |
 | Rotate | `qurl origin-header set <CRID> x-vercel-protection-bypass` (reads the new secret like `publish`) | `PATCH /v1/resources/{id}` with a new `origin_header` |
 | Remove | `qurl origin-header clear <CRID>` | `PATCH /v1/resources/{id}` with `"origin_header": null` |
+
+In the REST paths, `{id}` is the CRID or the resource ID.
 
 The same works for any origin that admits requests by one secret header, such
 as an `Authorization` header for HTTP basic auth. An origin that needs two
