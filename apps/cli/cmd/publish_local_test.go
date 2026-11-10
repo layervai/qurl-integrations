@@ -127,10 +127,10 @@ func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) 
 		{name: "empty description still explicit", args: []string{"publish", "http://127.0.0.1:3000", "--description="}, want: "--description is not supported"},
 		{name: "tag", args: []string{"publish", "http://localhost:3000", "--tag", "dev"}, want: "--tag is not supported"},
 		{name: "alias", args: []string{"publish", "http://[::1]:3000", "--alias", "dev"}, want: "--alias is not supported"},
-		{name: "https", args: []string{"publish", "https://localhost:3000"}, want: "cleartext http"},
+		{name: "https", args: []string{"publish", "https://localhost:3000", "--name", "Example"}, want: "cleartext http"},
 		{name: "path", args: []string{"publish", "http://127.0.0.1:3000/api"}, want: "without a path"},
-		{name: "remote id", args: []string{"publish", "https://example.com", "--id", "local-test"}, want: "--id applies only"},
-		{name: "remote foreground", args: []string{"publish", "https://example.com", "--foreground"}, want: "--foreground applies only"},
+		{name: "remote id", args: []string{"publish", "https://example.com", "--name", "Example", "--id", "local-test"}, want: "--id applies only"},
+		{name: "remote foreground", args: []string{"publish", "https://example.com", "--name", "Example", "--foreground"}, want: "--foreground applies only"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

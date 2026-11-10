@@ -115,6 +115,10 @@ type Client interface {
 	// SetPublisherName sets that owner's self-declared publisher name; an
 	// empty name removes it.
 	SetPublisherName(ctx context.Context, name string) (*Publisher, error)
+	// SetOriginHeader sets or rotates the origin header of one URL resource,
+	// or removes it when header is nil, and returns the resource as the
+	// service confirmed it. The answer names the header, never its value.
+	SetOriginHeader(ctx context.Context, id string, header *OriginHeader) (*ResourceSummary, error)
 }
 
 // AccountClient adds the one account-authorized bootstrap operation. The CLI
@@ -162,9 +166,17 @@ type PublishOptions struct {
 	Rule *accessrules.Definition
 	// ConnectorID selects a tunnel resource instead of a URL.
 	ConnectorID string
+	// Name is the public name recipients see; the service requires it to
+	// create a resource and ignores it when the target is already published.
+	Name        string
 	Description string
 	Tags        []string
 	Alias       string
+	// OriginHeader is the header the gateway adds to every request it
+	// forwards to the target URL, for a URL resource only. Publish requires
+	// the answer to name it. A target that is already published with
+	// another header, or with none, is refused, and nothing changes.
+	OriginHeader *OriginHeader
 }
 
 // ShareOptions carries the optional share parameters.
@@ -215,6 +227,10 @@ type Published struct {
 	// that this publish, which named no privacy, kept using that resource.
 	// Private is then false, and the caller warns the publisher.
 	KeptPublic bool
+	// OriginHeaderName is the canonical name of the header the gateway adds
+	// to requests to the target, as the service's answer said; empty for
+	// none. The value is never returned.
+	OriginHeaderName string
 	// LinkSiteURL is the resource's address on the link site, where a person
 	// with no CLI opens it. The service does not send it: the command sets it
 	// when this install knows that site for its deployment.
@@ -337,6 +353,9 @@ type ResourceSummary struct {
 	// AllowedPasskeys are the people the publisher approved. An empty list
 	// means the service said nobody is; nil means it did not say.
 	AllowedPasskeys []AllowedPasskey
+	// OriginHeaderName is the canonical name of the resource's origin
+	// header; empty for none. The value is never returned.
+	OriginHeaderName string
 }
 
 // DesiredState is the durable customer intent for a tunnel resource.

@@ -402,6 +402,7 @@ func CustomerMessages() []string {
 		hintKeyInvalid,
 		labelCRID,
 		labelWarning,
+		labelOriginHeader, msgOriginHeaderNone, msgOriginHeaderSaved, msgOriginHeaderRemoved,
 		placeholderCRID,
 		msgDeviceEnrolled,
 		msgSavedTo,

@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
@@ -21,6 +25,7 @@ import (
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func publishCmd(opts *globalOpts) *cobra.Command {
@@ -33,6 +38,7 @@ func publishCmd(opts *globalOpts) *cobra.Command {
 		stripePrice          string
 		paymentAccessSeconds int64
 		contractID           string
+		name                 string
 		description          string
 		tags                 []string
 		alias                string
@@ -42,6 +48,7 @@ func publishCmd(opts *globalOpts) *cobra.Command {
 		allowRequests        bool
 		allowedDeviceKeys    []string
 		foreground           bool
+		originHeaderName     string
 	)
 
 	cmd := &cobra.Command{
@@ -66,7 +73,15 @@ Old links remain invalid.
 
 For a remote URL, qURL registers it, prints the CRID, and exits:
 
-  qurl publish https://api.example.com/reports
+  qurl publish https://api.example.com/reports --name "Reports API"
+
+Every new resource needs a public name: recipients see it on the link page
+and in the passkey they save. Set it with --name. A local app defaults to its
+--id, else, in a terminal, the name of the directory you run the command in;
+qURL shows the name before it publishes. A remote URL has no default, because its address may be private:
+a terminal asks for the name, and a script must pass --name to create a
+resource. Publishing a target again needs no name and keeps the one it has;
+change it with "qurl preview set --name".
 
 A resource is private unless you publish it with --public. A private resource
 is limited to its owner and the devices you allow: with --allow-device-key
@@ -109,6 +124,16 @@ limited. Publishing
 an item again, with or without --rule, makes a new link with the limits it was
 first shared with.
 
+For a remote URL whose origin admits only requests that carry a secret
+header, such as a Vercel deployment with Deployment Protection, pass
+--origin-header with the header name. qURL then adds that header to every
+request it forwards to the target. The value is never an argument: pipe it on
+standard input, or type it at the hidden prompt. Publishing a target again
+without --origin-header keeps the header it has. Publishing it again with
+another header name or value, or with a header for a target that has none, is
+refused and changes nothing: rotate or change it with
+"qurl origin-header set".
+
 For paid contract access, use "qurl access configure" with the Stripe account
 and price to make an existing public CRID private. Removing payment keeps it
 private. Publishing the same target again does not change its payment policy.
@@ -119,12 +144,14 @@ including the limits saved for an item published again. Use --foreground for CI 
 owns the share and turns it off when it exits.`,
 		Example: `  qurl publish http://127.0.0.1:3000
   qurl publish http://localhost:8080 --id local-dashboard
-  qurl publish https://api.example.com/reports
-  qurl publish https://docs.example.com/handbook --public
-  qurl publish https://wiki.example.com/team --allow-requests
-  qurl publish https://app.acme.com --rule once
-  qurl publish https://app.acme.com --rule "People you approve"
-  qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
+  qurl publish http://127.0.0.1:3000 --name "Design review"
+  qurl publish https://api.example.com/reports --name "Reports API"
+  qurl publish https://docs.example.com/handbook --name Handbook --public
+  qurl publish https://wiki.example.com/team --name "Team wiki" --allow-requests
+  qurl publish https://grafana.internal.example.com --name Dashboards --description "Team dashboard" --quiet
+  qurl publish https://app.example.com --name App --rule once
+  qurl publish https://app.example.com --name App --rule "People you approve"
+  printf '%s' "$VERCEL_BYPASS_SECRET" | qurl publish https://app.example.vercel.app --name App --origin-header x-vercel-protection-bypass`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateRuleSelectionFlags(cmd); err != nil {
@@ -154,17 +181,23 @@ owns the share and turns it off when it exits.`,
 			if err != nil {
 				return err
 			}
-			if target.kind == publishTargetLocal {
-				if err := rejectLocalPublishMetadata(cmd); err != nil {
+			if err := validatePublishTargetFlags(cmd, target); err != nil {
+				return err
+			}
+			// The secret is read before the name prompt. Piped, it is the
+			// first line of stdin, and the name is never prompted for (that
+			// needs a terminal). In a terminal, the hidden read takes one
+			// line and leaves the next for the name.
+			if cmd.Flags().Changed("origin-header") {
+				if access.OriginHeader, err = readOriginHeader(opts, originHeaderName); err != nil {
 					return err
 				}
-				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access)
 			}
-			if cmd.Flags().Changed("id") {
-				return exitcode.UsageError(errors.New("--id applies only when publishing a local origin"))
+			if access.Name, err = publishName(opts, cmd, name, connectorID, target); err != nil {
+				return err
 			}
-			if cmd.Flags().Changed("foreground") {
-				return exitcode.UsageError(errors.New("--foreground applies only when publishing a local origin"))
+			if target.kind == publishTargetLocal {
+				return publishNameError(runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access))
 			}
 			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
 				return err
@@ -181,7 +214,7 @@ owns the share and turns it off when it exits.`,
 			access.Description, access.Tags, access.Alias = description, tags, alias
 			result, err := opts.publishRemote(cmd.Context(), client, args[0], &access)
 			if err != nil {
-				return err
+				return publishNameError(err)
 			}
 
 			printer := opts.printer()
@@ -207,10 +240,12 @@ owns the share and turns it off when it exits.`,
 	}
 	cmd.Flags().StringArrayVar(&allowedDeviceKeys, "allow-device-key", nil, "recipient public key allowed to open the private resource (repeatable)")
 	cmd.Flags().BoolVar(&allowRequests, "allow-requests", false, "let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you")
+	cmd.Flags().StringVar(&name, "name", "", "public name recipients see, up to 100 characters; required to create a resource (default for a local app: --id, else in a terminal the current directory's name)")
 	cmd.Flags().StringVar(&description, "description", "", "human-readable description stored with the resource")
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tag stored with the resource (repeatable)")
 	cmd.Flags().StringVar(&alias, "alias", "", "memorable handle stored with the resource")
 	cmd.Flags().StringVar(&connectorID, "id", "", "Connector ID for a local publish (default: stable ID for this machine and origin)")
+	cmd.Flags().StringVar(&originHeaderName, "origin-header", "", "header name qURL adds, with a secret value read from stdin or a hidden prompt, to every request it forwards to a remote URL")
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "serve in this process for debugging or CI and stop sharing when it exits")
 
 	return cmd
@@ -911,15 +946,6 @@ func validateDeviceKeys(flag string, keys []string) error {
 	return nil
 }
 
-func rejectLocalPublishMetadata(cmd *cobra.Command) error {
-	for _, name := range []string{"description", "tag", "alias"} {
-		if cmd.Flags().Changed(name) {
-			return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", name))
-		}
-	}
-	return nil
-}
-
 func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract, emailDomain string) error {
 	if mode == "" {
 		if contract != "" || emailDomain != "" {
@@ -950,6 +976,127 @@ func (o *globalOpts) applyPublishRule(cmd *cobra.Command, access *qurlapi.Publis
 	if !access.Public {
 		policy := definition.Policy(1)
 		access.ConsumerAccess = &policy
+	}
+	return nil
+}
+
+// publishName returns the public name a publish sends, checked against the
+// service's rules so the create is never refused for it. --name wins. A local
+// app defaults to its configured Connector ID, else, in a terminal only, the
+// name of the directory the command runs in (its project) unless that is the
+// home or root directory. Nothing is derived from the target URL or the description: the
+// name is public, and they may name a hidden origin. With no such value an
+// interactive terminal asks for one; any other caller sends none, which the
+// service accepts only for a target that is already published.
+func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string, target *publishTarget) (string, error) {
+	if cmd.Flags().Changed("name") {
+		return checkPublicName(flag)
+	}
+	terminal := opts.streams.InIsTTY && opts.streams.ErrIsTTY
+	shown := terminal && !opts.quiet && opts.resolvedFormat != output.FormatJSON
+	name := ""
+	if target.kind == publishTargetLocal {
+		// The directory name only where the note shows it before it is public.
+		if name = resolveLocalConnectorID(opts, connectorID); name == "" && shown {
+			name = directoryPublishName(os.Getwd, os.UserHomeDir)
+		}
+	}
+	if validPublicName(name) {
+		if shown {
+			opts.printer().Notef(msgPublishNameDefault, name)
+		}
+		return name, nil
+	}
+	if !terminal {
+		// A script that republishes needs no name: the service asks for one
+		// only when it would create the resource; publishNameError explains it.
+		return "", nil
+	}
+	if _, err := fmt.Fprint(opts.streams.Err, msgPublishNamePrompt); err != nil {
+		return "", err
+	}
+	// The command reads nothing else from stdin, so buffering past the line is safe.
+	scanner := bufio.NewScanner(opts.streams.In)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return "", fmt.Errorf("read the public name: %w", err)
+		}
+		return "", exitcode.UsageError(errors.New(msgPublishNameRequired))
+	}
+	if strings.TrimSpace(scanner.Text()) == "" {
+		return "", exitcode.UsageError(errors.New(msgPublishNameRequired))
+	}
+	return checkPublicName(scanner.Text())
+}
+
+// publishNameError turns the service's name_required refusal, which comes only
+// for a create sent without a name, into the --name next step.
+func publishNameError(err error) error {
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) && apiErr.Code == "name_required" {
+		return exitcode.UsageError(errors.New(msgPublishNameRequired))
+	}
+	return err
+}
+
+// checkPublicName trims a name the person typed and refuses one the service
+// would refuse.
+func checkPublicName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if !validPublicName(name) {
+		return "", exitcode.UsageError(errors.New(msgPublishNameInvalid))
+	}
+	return name, nil
+}
+
+func directoryPublishName(getwd, home func() (string, error)) string {
+	dir, err := getwd()
+	if err != nil {
+		return ""
+	}
+	// EqualFold: home paths are case-insensitive on Windows and macOS.
+	if h, err := home(); err == nil && strings.EqualFold(filepath.Clean(h), filepath.Clean(dir)) {
+		return ""
+	}
+	if name := strings.TrimSpace(filepath.Base(dir)); name != string(filepath.Separator) && name != "." {
+		return name
+	}
+	return ""
+}
+
+// maxPublicNameRunes is the service's limit on a public name.
+const maxPublicNameRunes = 100
+
+// validPublicName applies the service's preview-name rules to a trimmed name:
+// valid UTF-8, 1 to 100 characters, no surrounding space, one line, no control
+// or format characters.
+// TODO(upstream-contract): mirrors qurl-service domain.ValidatePreviewName.
+func validPublicName(name string) bool {
+	return name != "" && name == strings.TrimSpace(name) && utf8.ValidString(name) && utf8.RuneCountInString(name) <= maxPublicNameRunes &&
+		!strings.ContainsFunc(name, func(r rune) bool {
+			return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029'
+		})
+}
+
+// validatePublishTargetFlags refuses flags that do not apply to the kind of
+// target, before the command asks for a name.
+func validatePublishTargetFlags(cmd *cobra.Command, target *publishTarget) error {
+	if target.kind == publishTargetLocal {
+		if cmd.Flags().Changed("origin-header") {
+			return exitcode.UsageError(errOriginHeaderLocal)
+		}
+		for _, flag := range []string{"description", "tag", "alias"} {
+			if cmd.Flags().Changed(flag) {
+				return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", flag))
+			}
+		}
+		return nil
+	}
+	if cmd.Flags().Changed("id") {
+		return exitcode.UsageError(errors.New("--id applies only when publishing a local origin"))
+	}
+	if cmd.Flags().Changed("foreground") {
+		return exitcode.UsageError(errors.New("--foreground applies only when publishing a local origin"))
 	}
 	return nil
 }

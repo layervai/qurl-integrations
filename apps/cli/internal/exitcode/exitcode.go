@@ -309,6 +309,10 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 		// change after creation. A request that conflicts with state which
 		// already exists is the Conflict row, as for ErrFileExists above.
 		return Conflict, true
+	case errors.Is(err, qurlapi.ErrOriginHeaderMismatch):
+		// The same 400 shape: publishing again does not change the origin
+		// header of a resource that exists.
+		return Conflict, true
 	case errors.Is(err, qurlapi.ErrApprovedPersonNotFound):
 		// A removal named a device id that no approved person has. The read
 		// of the list that showed it answered 200, so no status says it: the

@@ -175,7 +175,7 @@ func TestPublishConsumerPolicyRejectsInvalidFlags(t *testing.T) {
 func TestPublishRejectsExplicitEmptyAccessBeforeRequest(t *testing.T) {
 	srv := apitest.NewServer(t)
 	for _, mode := range []string{"", "   "} {
-		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/report", "--access=" + mode}})
+		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/report", "--name", "Example", "--access=" + mode}})
 		if result.code != 2 || !strings.Contains(result.stderr.String(), "--access requires") {
 			t.Fatalf("mode=%q exit=%d error=%s", mode, result.code, result.stderr.String())
 		}
@@ -224,7 +224,7 @@ func TestConsumerAccessApprovalRequestBodies(t *testing.T) {
 func TestPublishRejectsExplicitEmptyContractBeforeRequest(t *testing.T) {
 	srv := apitest.NewServer(t)
 	for _, contract := range []string{"", "   "} {
-		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/report", "--contract=" + contract}})
+		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/report", "--name", "Example", "--contract=" + contract}})
 		if result.code != 2 || !strings.Contains(result.stderr.String(), "--contract requires") {
 			t.Fatalf("contract=%q exit=%d error=%s", contract, result.code, result.stderr.String())
 		}

@@ -160,6 +160,13 @@ const (
 	// public keys are bounded: each is one request, sent one after another.
 	msgGrantsRemoveTooManyPeople = "--remove accepts at most 256 device ids"
 
+	// The public name a publish gives a new resource. The "100" in these
+	// messages must change together with maxPublicNameRunes.
+	msgPublishNameDefault  = "Name for a new resource: %s (change with --name)"
+	msgPublishNamePrompt   = "Public name recipients will see (a target already published keeps its name): "
+	msgPublishNameRequired = "a public name is required: pass --name \"<name>\" with the name recipients will see (up to 100 characters)"
+	msgPublishNameInvalid  = "--name must be one line of 1 to 100 characters with no control or invisible formatting characters"
+
 	// Usage errors of the commands for access requests.
 	msgAllowRequestsWithPublic  = "--allow-requests cannot be used with --public: access requests are for a private resource, and a public one already opens for anyone who has the CRID"
 	msgRequestsOnAndOff         = "--on and --off cannot be used together"
@@ -287,6 +294,7 @@ func customerMessages() []string {
 		msgPublisherClearRefusedReason,
 		msgPublisherClearRefused,
 		msgPublisherUnsupported,
+		msgOriginHeaderPrompt, msgNoOriginHeaderValue, msgOriginHeaderLocal,
 	}
 }
 
