@@ -45,6 +45,7 @@ func publishCmd(opts *globalOpts) *cobra.Command {
 		allowRequests        bool
 		allowedDeviceKeys    []string
 		foreground           bool
+		originHeaderName     string
 	)
 
 	cmd := &cobra.Command{
@@ -112,6 +113,16 @@ CRID. A flag that asks for what the existing resource is not is refused:
 --allow-device-key or --allow-requests for a public resource, --public for a
 private one.
 
+For a remote URL whose origin admits only requests that carry a secret
+header, such as a Vercel deployment with Deployment Protection, pass
+--origin-header with the header name. qURL then adds that header to every
+request it forwards to the target. The value is never an argument: pipe it on
+standard input, or type it at the hidden prompt. Publishing a target again
+without --origin-header keeps the header it has. Publishing it again with
+another header name or value, or with a header for a target that has none, is
+refused and changes nothing: rotate or change it with
+"qurl origin-header set".
+
 For paid contract access, use "qurl access configure" with the Stripe account
 and price to make an existing public CRID private. Removing payment keeps it
 private. Publishing the same target again does not change its payment policy.
@@ -125,7 +136,8 @@ owns the share and turns it off when it exits.`,
   qurl publish https://api.example.com/reports --name "Reports API"
   qurl publish https://docs.example.com/handbook --name Handbook --public
   qurl publish https://wiki.example.com/team --name "Team wiki" --allow-requests
-  qurl publish https://grafana.internal.example.com --name Dashboards --description "Team dashboard" --quiet`,
+  qurl publish https://grafana.internal.example.com --name Dashboards --description "Team dashboard" --quiet
+  printf '%s' "$VERCEL_BYPASS_SECRET" | qurl publish https://app.example.vercel.app --name App --origin-header x-vercel-protection-bypass`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
@@ -151,6 +163,15 @@ owns the share and turns it off when it exits.`,
 			}
 			if err := validatePublishTargetFlags(cmd, target); err != nil {
 				return err
+			}
+			// The secret is read before the name prompt. Piped, it is the
+			// first line of stdin, and the name is never prompted for (that
+			// needs a terminal). In a terminal, the hidden read takes one
+			// line and leaves the next for the name.
+			if cmd.Flags().Changed("origin-header") {
+				if access.OriginHeader, err = readOriginHeader(opts, originHeaderName); err != nil {
+					return err
+				}
 			}
 			if access.Name, err = publishName(opts, cmd, name, connectorID, target); err != nil {
 				return err
@@ -200,6 +221,7 @@ owns the share and turns it off when it exits.`,
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tag stored with the resource (repeatable)")
 	cmd.Flags().StringVar(&alias, "alias", "", "memorable handle stored with the resource")
 	cmd.Flags().StringVar(&connectorID, "id", "", "Connector ID for a local publish (default: stable ID for this machine and origin)")
+	cmd.Flags().StringVar(&originHeaderName, "origin-header", "", "header name qURL adds, with a secret value read from stdin or a hidden prompt, to every request it forwards to a remote URL")
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "serve in this process for debugging or CI and stop sharing when it exits")
 
 	return cmd
@@ -980,6 +1002,9 @@ func validPublicName(name string) bool {
 // target, before the command asks for a name.
 func validatePublishTargetFlags(cmd *cobra.Command, target *publishTarget) error {
 	if target.kind == publishTargetLocal {
+		if cmd.Flags().Changed("origin-header") {
+			return exitcode.UsageError(errOriginHeaderLocal)
+		}
 		for _, flag := range []string{"description", "tag", "alias"} {
 			if cmd.Flags().Changed(flag) {
 				return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", flag))

@@ -52,6 +52,9 @@ type resourceRow struct {
 	// without it is read as "the service did not say"; see allowedPasskeys.
 	AccessRequests  *bool        `json:"access_requests"`
 	AllowedPasskeys []passkeyRow `json:"allowed_passkeys"`
+	// OriginHeaderName names the resource's origin header; the service
+	// never sends its value.
+	OriginHeaderName string `json:"origin_header_name"`
 	// Publisher is read by UnmarshalJSON, not by the struct decoder, so a
 	// repeated member can be counted; see publisherMember.
 	Publisher publisherWire `json:"-"`
@@ -231,6 +234,9 @@ type publishRequest struct {
 	Description string   `json:"description,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	Alias       string   `json:"alias,omitempty"`
+	// OriginHeader is sent only when the publisher asked for one. Omitted,
+	// the service reuses an existing resource with the header it has.
+	OriginHeader *originHeaderWire `json:"origin_header,omitempty"`
 }
 
 // Publish registers a URL or pre-creates a Connector resource, private unless
@@ -247,25 +253,12 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if err := validatePublishConsumerPolicy(&opts); err != nil {
 		return nil, err
 	}
+	if err := validatePublishOriginHeader(&opts); err != nil {
+		return nil, err
+	}
 
 	wantPrivate := !opts.Public
-	body := publishRequest{
-		ConsumerAccess:    opts.ConsumerAccess,
-		Private:           &wantPrivate,
-		AllowedDeviceKeys: opts.AllowedDeviceKeys,
-		AccessRequests:    opts.AllowRequests,
-		Type:              "url",
-		TargetURL:         targetURL,
-		Name:              opts.Name,
-		Description:       opts.Description,
-		Tags:              opts.Tags,
-		Alias:             opts.Alias,
-	}
-	if opts.ConnectorID != "" {
-		body.Type = "tunnel"
-		body.Slug = opts.ConnectorID
-		body.FindOrCreate = true
-	}
+	body := newPublishRequest(targetURL, &opts, wantPrivate)
 	// Publish has no service idempotency key. A rate-limit response is usually
 	// pre-application, but the client cannot prove that a replay would not mint
 	// a duplicate resource, so it is deliberately single-shot.
@@ -279,7 +272,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		if !mayKeepExistingPublic(&opts, refusal) {
 			return nil, refusal
 		}
-		return c.keepExistingPublic(ctx, &body, refusal, firstCreateSentAt)
+		return originHeaderConfirmed(opts.OriginHeader)(c.keepExistingPublic(ctx, &body, refusal, firstCreateSentAt))
 	}
 	published, allowedDeviceKeys, err := publishedFromReply(reply)
 	if err != nil {
@@ -305,12 +298,44 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		}
 		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
 	}
+	// After privacy and devices: a resource whose privacy is not confirmed
+	// is reported as that, and names no CRID. Before access requests, on
+	// purpose: an unconfirmed header is the failure the publisher must act
+	// on first, and no change is made to a resource whose answer is outside
+	// the contract.
+	if err := confirmOriginHeader(opts.OriginHeader, published); err != nil {
+		return nil, err
+	}
 	if opts.AllowRequests {
 		if err := c.confirmAccessRequests(ctx, published); err != nil {
 			return nil, err
 		}
 	}
 	return published, nil
+}
+
+// newPublishRequest builds the create request that states privacy as
+// wantPrivate: a URL resource, or a Connector find-or-create.
+func newPublishRequest(targetURL string, opts *PublishOptions, wantPrivate bool) publishRequest {
+	body := publishRequest{
+		ConsumerAccess:    opts.ConsumerAccess,
+		Private:           &wantPrivate,
+		AllowedDeviceKeys: opts.AllowedDeviceKeys,
+		AccessRequests:    opts.AllowRequests,
+		Type:              "url",
+		TargetURL:         targetURL,
+		Name:              opts.Name,
+		Description:       opts.Description,
+		Tags:              opts.Tags,
+		Alias:             opts.Alias,
+		OriginHeader:      opts.OriginHeader.wire(),
+	}
+	if opts.ConnectorID != "" {
+		body.Type = "tunnel"
+		body.Slug = opts.ConnectorID
+		body.FindOrCreate = true
+	}
+	return body
 }
 
 // publishRefusal builds the error for a create that the service refused.
@@ -324,7 +349,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 // that exists is never that case: the service read the request to find it.
 func (c *client) publishRefusal(ctx context.Context, reply *restReply, opts *PublishOptions) error {
 	refusal := publishProblem(reply, opts)
-	if !opts.AllowRequests || errors.Is(refusal, ErrPublishAccessConflict) {
+	if !opts.AllowRequests || errors.Is(refusal, ErrPublishAccessConflict) || errors.Is(refusal, ErrOriginHeaderMismatch) {
 		return refusal
 	}
 	if c.refusedForNoAccessRequests(ctx, reply) {
@@ -366,6 +391,8 @@ func publishedFromReply(reply *restReply) (*Published, []string, error) {
 		ExpiresAt:      knownTime(env.Data.ExpiresAt),
 		FoundExisting:  env.Meta.FoundExisting,
 		Publisher:      env.Data.Publisher.publisher(),
+
+		OriginHeaderName: env.Data.OriginHeaderName,
 	}, env.Data.AllowedDeviceKeys, nil
 }
 
@@ -572,6 +599,9 @@ func publishProblem(reply *restReply, opts *PublishOptions) error {
 	if !errors.As(problem, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
 		return problem
 	}
+	if strings.EqualFold(apiErr.Code, codeOriginHeaderMismatch) {
+		return &OriginHeaderMismatchError{problem: apiErr}
+	}
 	conflict := func(existing ExistingAccess) error {
 		return &PublishAccessConflictError{Existing: existing, NamedFlags: opts.NamedAccessFlags, problem: apiErr}
 	}
@@ -727,7 +757,8 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		Type: row.Type, Status: row.Status, DesiredState: row.DesiredState,
 		ServingEpoch: row.ServingEpoch, Description: row.Description, Tags: row.Tags,
 		CreatedAt: knownTime(row.CreatedAt), ExpiresAt: knownTime(row.ExpiresAt),
-		Publisher: row.Publisher.publisher(),
+		Publisher:        row.Publisher.publisher(),
+		OriginHeaderName: row.OriginHeaderName,
 	}, nil
 }
 
