@@ -31,20 +31,22 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
-	ConsumerAccess    *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
-	AllowedDeviceKeys []string                   `json:"allowed_device_keys"`
-	Private           *bool                      `json:"private"`
-	ResourceID        string                     `json:"resource_id"`
-	CRID              string                     `json:"crid"`
-	TargetURL         string                     `json:"target_url"`
-	Type              string                     `json:"type"`
-	Status            string                     `json:"status"`
-	DesiredState      DesiredState               `json:"desired_state"`
-	ServingEpoch      uint64                     `json:"serving_epoch"`
-	Description       string                     `json:"description"`
-	Tags              []string                   `json:"tags"`
-	CreatedAt         *time.Time                 `json:"created_at"`
-	ExpiresAt         *time.Time                 `json:"expires_at"`
+	ConsumerAccess        *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	ConsumerAccessVersion int64                      `json:"consumer_access_version"`
+
+	AllowedDeviceKeys []string     `json:"allowed_device_keys"`
+	Private           *bool        `json:"private"`
+	ResourceID        string       `json:"resource_id"`
+	CRID              string       `json:"crid"`
+	TargetURL         string       `json:"target_url"`
+	Type              string       `json:"type"`
+	Status            string       `json:"status"`
+	DesiredState      DesiredState `json:"desired_state"`
+	ServingEpoch      uint64       `json:"serving_epoch"`
+	Description       string       `json:"description"`
+	Tags              []string     `json:"tags"`
+	CreatedAt         *time.Time   `json:"created_at"`
+	ExpiresAt         *time.Time   `json:"expires_at"`
 	// AccessRequests is nil when the row has no such member, which is how a
 	// service from before access requests answers. AllowedPasskeys are the
 	// people the publisher approved. The service sends the member on every
@@ -749,7 +751,7 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		return nil, err
 	}
 	return &ResourceSummary{
-		ConsumerAccess: row.ConsumerAccess, AccessRequests: row.AccessRequests,
+		ConsumerAccess: row.ConsumerAccess, ConsumerAccessVersion: row.ConsumerAccessVersion, AccessRequests: row.AccessRequests,
 		AllowedPasskeys:   people,
 		AllowedDeviceKeys: row.AllowedDeviceKeys,
 		Private:           row.Private,

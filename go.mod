@@ -14,10 +14,11 @@ require (
 	github.com/fatedier/golib v0.8.2
 	github.com/layervai/qurl-conformance v0.17.2
 	github.com/layervai/qurl-connector v0.14.5
-	github.com/layervai/qurl-go v0.26.5-0.20261106222823-362cb36047bf
+	github.com/layervai/qurl-go v0.28.2-0.20261110213731-91a9e2398ce9
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
+	github.com/stretchr/testify v1.12.1
 	golang.org/x/crypto v0.58.0
 	golang.org/x/mod v0.42.0
 	golang.org/x/sys v0.49.0

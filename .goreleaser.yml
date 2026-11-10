@@ -144,6 +144,7 @@ homebrew_casks:
       - manpages/qurl-origin-header.1
       - manpages/qurl-origin-header-clear.1
       - manpages/qurl-origin-header-set.1
+      - manpages/qurl-payments-setup.1
       - manpages/qurl-payments.1
       - manpages/qurl-publish.1
       - manpages/qurl-preview.1

@@ -331,7 +331,9 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
-	ConsumerAccess    *qurl.ConsumerAccessPolicy
+	ConsumerAccess        *qurl.ConsumerAccessPolicy
+	ConsumerAccessVersion int64
+
 	AllowedDeviceKeys []string
 	Private           *bool
 	CRID              string
