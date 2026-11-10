@@ -58,12 +58,12 @@ func TestSandboxConnectorCustomDomain(t *testing.T) {
 	browser := newSandboxGrantedRouteHTTPClient()
 	defer browser.CloseIdleConnections()
 	browser.CheckRedirect = sandboxCleanupHTTPClient.CheckRedirect
-	installSandboxConnectorBrowserCookie(t, browser, shortGrant, shortLink)
+	cookie := installSandboxConnectorBrowserCookie(t, browser, shortGrant, shortLink)
 	beforeDenial := fixture.backendHits.Load()
 	// Use the same direct network path without the installed cookie.
 	denialCtx, cancelDenial := context.WithTimeout(t.Context(), sandboxDeletedRouteProbeTimeout)
 	defer cancelDenial()
-	request, err := http.NewRequestWithContext(denialCtx, http.MethodGet, "https://"+sandboxConnectorProofDomain+"/", http.NoBody)
+	request, err := http.NewRequestWithContext(denialCtx, http.MethodGet, shortGrant.url, http.NoBody)
 	if err != nil {
 		t.Fatal("build Sandbox request without admission")
 	}
@@ -91,13 +91,20 @@ func TestSandboxConnectorCustomDomain(t *testing.T) {
 	if fixture.backendHits.Load() != beforeDenial {
 		t.Fatal("the browser without a cookie reached the Sandbox origin")
 	}
-	// The handoff checks that the installed cookie is identical to the grant cookie.
 	beforeReload := fixture.backendHits.Load()
 	reloadCtx, cancelReload := context.WithTimeout(t.Context(), sandboxDeletedRouteProbeTimeout)
-	state, probeErr := shortGrant.probe(reloadCtx)
-	cancelReload()
-	if probeErr != nil || state != sandboxGrantedRouteServed || fixture.backendHits.Load() <= beforeReload {
-		t.Fatal("Sandbox did not serve the browser with the installed cookie")
+	defer cancelReload()
+	reload := request.Clone(reloadCtx)
+	reload.AddCookie(cookie)
+	response, err = browser.Do(reload)
+	if err != nil {
+		t.Fatal("Sandbox reload with the installed cookie failed before an HTTP response")
+	}
+	payload, readErr := io.ReadAll(io.LimitReader(response.Body, int64(len(fixture.marker)+1)))
+	_ = response.Body.Close()
+	if readErr != nil || response.StatusCode != http.StatusOK || string(payload) != fixture.marker ||
+		fixture.backendHits.Load() <= beforeReload {
+		t.Fatalf("Sandbox reload with the installed cookie did not reach the private origin (HTTP %d)", response.StatusCode)
 	}
 	t.Log("Browser cookie handoff allowed the admitted browser and denied a browser on the same IP")
 	// The server reports the network lease, which includes 10 seconds for first arrival.
@@ -130,7 +137,7 @@ func TestSandboxConnectorCustomDomain(t *testing.T) {
 }
 
 // TODO(upstream-contract): Keep the form and cookie checks aligned with qurl-service's visitor-session smoke.
-func installSandboxConnectorBrowserCookie(t *testing.T, browser *http.Client, route *sandboxGrantedRoute, link string) {
+func installSandboxConnectorBrowserCookie(t *testing.T, browser *http.Client, route *sandboxGrantedRoute, link string) *http.Cookie {
 	t.Helper()
 	// Match the browser's form POST from qurl.link to the granted origin.
 	portal, err := url.Parse(link)
@@ -165,9 +172,11 @@ func installSandboxConnectorBrowserCookie(t *testing.T, browser *http.Client, ro
 	}
 	for _, cookie := range response.Cookies() {
 		if cookie.Name == bearer.Name && cookie.Value == bearer.Value && cookie.Domain == "" &&
-			cookie.Path == "/" && cookie.HttpOnly && cookie.Secure && cookie.MaxAge > 0 {
-			return
+			cookie.Path == "/" && cookie.HttpOnly && cookie.Secure && cookie.MaxAge > 0 &&
+			cookie.SameSite == http.SameSiteLaxMode {
+			return cookie
 		}
 	}
 	t.Fatal("Sandbox browser cookie handoff omitted the secure host-only cookie")
+	return nil
 }
