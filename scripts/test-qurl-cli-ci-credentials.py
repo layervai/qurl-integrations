@@ -53,6 +53,7 @@ class FakeAPI:
                 "description": "qurl CLI journey v2 resource 1231/2/host",
                 "resource_id": "r_customer_ci",
                 "status": "active",
+                "type": "url",
                 "target_url": "https://example.com/?qurl-private-sandbox-device-journey=1",
             },
             {
@@ -241,11 +242,17 @@ class FakeAPI:
                 row = self.connector_resources.get(query["slug"][0])
                 return 200, json.dumps({"data": [] if row is None else [row]}).encode()
             self.resource_inventory_requests += 1
-            assert query == {"limit": [str(credentials.INVENTORY_PAGE_SIZE)]}
+            assert query == {
+                "limit": [str(credentials.INVENTORY_PAGE_SIZE)],
+                "type": ["url"],
+            }
             return (
                 200,
                 json.dumps(
-                    {"data": self.resources, "meta": {"has_more": False}}
+                    {
+                        "data": [row for row in self.resources if row["type"] == "url"],
+                        "meta": {"has_more": False},
+                    }
                 ).encode(),
             )
         if parsed.path.startswith("/v1/resources/") and method == "DELETE":
@@ -1192,6 +1199,24 @@ def read_inventory() -> list[dict[str, object]]:
     )
 
 
+def test_resource_inventory_rejects_a_wrong_type() -> None:
+    with mock.patch.object(credentials, "request", return_value=(200, inventory_page([{"type": "tunnel"}]))):
+        try:
+            credentials.paged_rows(
+                "https://sandbox.example",
+                "automation_key",
+                "/v1/resources",
+                "qURL resource cleanup",
+                status_filter=None,
+                resource_type="url",
+                deadline=time.monotonic() + 60,
+            )
+        except credentials.CredentialError as exc:
+            assert "did not honor the resource type" in str(exc)
+        else:
+            raise AssertionError("resource inventory accepted an unexpected type")
+
+
 def test_a_page_of_rows_has_the_bound_of_a_page() -> None:
     # A full page of ordinary rows of the CI owner. It is more than the bound of
     # an ordinary response, which is what broke every journey cleanup: the
@@ -2022,6 +2047,7 @@ def main() -> None:
     test_automation_key_identity_and_lifetime_fail_closed()
     test_bounded_valid_pagination()
     test_a_page_of_rows_has_the_bound_of_a_page()
+    test_resource_inventory_rejects_a_wrong_type()
     test_pagination_safety_limits_fail_closed()
     test_reconciliation_reserves_time_for_resource_inventory()
     test_connector_cleanup_lookup_fails_closed()
