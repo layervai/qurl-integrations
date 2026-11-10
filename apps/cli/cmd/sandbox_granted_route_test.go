@@ -247,10 +247,7 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		if errors.Is(err, errSandboxGrantedRouteCrossOrigin) {
 			return 0, errSandboxGrantedRouteCrossOrigin
 		}
-		if sandboxGrantedRoutePeerRefused(err, grantedURL) {
-			return sandboxGrantedRouteRefused, nil
-		}
-		return 0, sandboxGrantedRouteTransportCategory(err)
+		return 0, sandboxGrantedRouteRequestFailure(err, grantedURL)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, int64(len(r.marker)+1)))
@@ -301,13 +298,19 @@ func sandboxGrantedRouteTransportCategory(err error) sandboxGrantedRouteTranspor
 
 // The edge can deny by resetting the stream before sending headers. Only the
 // granted origin can supply this refusal. A body read error never counts.
-func sandboxGrantedRoutePeerRefused(err error, grantedURL *url.URL) bool {
-	requestError, ok := err.(*url.Error) //nolint:errorlint // Only Client.Do's direct error qualifies.
-	if !ok || requestError == nil || !isSandboxGrantedRouteHTTP2Reset(requestError.Err) {
-		return false
+func sandboxGrantedRouteRequestFailure(err error, grantedURL *url.URL) sandboxGrantedRouteTransportFailure {
+	category := sandboxGrantedRouteTransportCategory(err)
+	if category != sandboxGrantedRouteHTTP2PeerReset {
+		return category
 	}
-	target, parseErr := url.Parse(requestError.URL)
-	return parseErr == nil && consume.SameHTTPOrigin(grantedURL, target)
+	requestError, ok := err.(*url.Error) //nolint:errorlint // Only Client.Do's direct error qualifies.
+	if ok && requestError != nil {
+		target, parseErr := url.Parse(requestError.URL)
+		if parseErr == nil && consume.SameHTTPOrigin(grantedURL, target) {
+			return category
+		}
+	}
+	return "HTTP/2 reset outside the granted request"
 }
 
 // TODO(upstream-contract): shortcut: Go's HTTP/2 error type is private. Check
@@ -776,8 +779,11 @@ func TestSandboxGrantedRoutePeerRefusalRequiresGrantedOrigin(t *testing.T) {
 		{"TCP reset", &url.Error{URL: "https://granted.test/private", Err: syscall.ECONNRESET}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := sandboxGrantedRoutePeerRefused(test.err, origin); got != test.want {
-				t.Fatalf("peer refusal = %t, want %t", got, test.want)
+			failure := sandboxGrantedRouteRequestFailure(test.err, origin)
+			state, probeFailed, unexpectedSuccess := classifySandboxGrantedRouteProbe(0, failure, nil)
+			refused := state == sandboxGrantedRouteRefused && !probeFailed && !unexpectedSuccess
+			if refused != test.want {
+				t.Fatalf("peer refusal = %t, want %t", refused, test.want)
 			}
 		})
 	}
