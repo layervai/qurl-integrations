@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.1.0](https://github.com/layervai/qurl-integrations/compare/v4.0.1...v4.1.0) (2026-11-10)
+
+
+### Features
+
+* **cli:** set a price and connect Stripe from the publisher device ([#1999](https://github.com/layervai/qurl-integrations/issues/1999)) ([0213c22](https://github.com/layervai/qurl-integrations/commit/0213c225316cf856ef666c2f87856c35a708f5c8))
+* **cli:** set a secret origin header on a remote URL resource ([#2012](https://github.com/layervai/qurl-integrations/issues/2012)) ([204c9eb](https://github.com/layervai/qurl-integrations/commit/204c9eb355fdbc1edc40e62bf7edb34e60787678))
+
 ## [4.0.1](https://github.com/layervai/qurl-integrations/compare/v4.0.0...v4.0.1) (2026-11-10)
 
 
