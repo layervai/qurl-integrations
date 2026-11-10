@@ -16,9 +16,9 @@ type publisherStripeClient interface {
 
 func paymentsCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "payments <connect|account>",
+		Use:   "payments <setup|connect|account>",
 		Short: "Connect Stripe to receive CRID payments; LayerV collects 3%",
-		Long:  "Set a price on a private app with qurl payments setup. LayerV collects 3%. For dashboard-based setup, run qurl account setup and then qurl payments connect.",
+		Long:  "Set a price on a CRID with qurl payments setup. LayerV collects 3%. For dashboard-based setup, run qurl account setup and then qurl payments connect.",
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if args[0] != "connect" && args[0] != "account" {

@@ -99,26 +99,36 @@ func TestPaymentsSetupAttachesTheCreatedPrice(t *testing.T) {
 		"private": false, "type": "url", "status": "active",
 	}
 	path := "/v1/resources/" + srv.Key.CRID
-	srv.ScriptRepeat(http.MethodGet, path, 2, func(w http.ResponseWriter, _ *http.Request) {
+	srv.ScriptRepeat(http.MethodGet, path, 3, func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource": resource}, nil)
 	})
-	srv.ScriptRepeat(http.MethodGet, path+"/preview", 2, func(w http.ResponseWriter, _ *http.Request) {
+	srv.ScriptRepeat(http.MethodGet, path+"/preview", 3, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"name": "An app", "revision": 1}))
 	})
-	srv.ScriptRepeat(http.MethodGet, "/v1/payments/account", 2, func(w http.ResponseWriter, _ *http.Request) {
+	srv.ScriptRepeat(http.MethodGet, "/v1/payments/account", 1, func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"account_id": "acct_owner", "layerv_fee_percent": 3}, nil)
 	})
-	srv.ScriptRepeat(http.MethodPost, "/v1/payments/prices", 2, func(w http.ResponseWriter, r *http.Request) {
+	srv.ScriptRepeat(http.MethodPost, "/v1/payments/prices", 3, func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Name     string `json:"name"`
-			Amount   int64  `json:"amount"`
-			Interval string `json:"interval"`
+			Name            string `json:"name"`
+			Amount          int64  `json:"amount"`
+			Interval        string `json:"interval"`
+			ExpectedPriceID string `json:"expected_price_id"`
 		}
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		require.Equal(t, "An app", body.Name)
-		require.Equal(t, int64(501), body.Amount)
 		require.Equal(t, "month", body.Interval)
+		if _, retry := resource["consumer_access"]; retry {
+			require.Equal(t, "price_new", body.ExpectedPriceID)
+		} else {
+			require.Empty(t, body.ExpectedPriceID)
+		}
+		if body.Amount == 601 {
+			apitest.WriteProblem(t, w, http.StatusConflict, "payment_price_mismatch", "Stripe Price Does Not Match", "The current Stripe price does not match the requested terms.")
+			return
+		}
+		require.Equal(t, int64(501), body.Amount)
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"account_id": "acct_owner", "price_id": "price_new"}, nil)
 	})
 	srv.ScriptRepeat(http.MethodPatch, path, 2, func(w http.ResponseWriter, r *http.Request) {
@@ -141,4 +151,9 @@ func TestPaymentsSetupAttachesTheCreatedPrice(t *testing.T) {
 		require.Zero(t, result.code, result.stderr.String())
 		require.JSONEq(t, `{"crid":`+strconv.Quote(srv.Key.CRID)+`,"version":1}`, result.stdout.String())
 	}
+	args[6] = "6.01"
+	conflict := runCLI(t, &runOpts{args: args})
+	require.NotZero(t, conflict.code)
+	require.Contains(t, conflict.stderr.String(), "replacing it with --version 1")
+	require.Empty(t, conflict.stdout.String())
 }

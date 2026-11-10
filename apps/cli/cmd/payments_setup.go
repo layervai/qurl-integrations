@@ -27,6 +27,7 @@ type deviceStripePayments interface {
 	ConnectPublisherStripeForDevice(context.Context, int) (link, state string, err error)
 	CompletePublisherStripe(context.Context, string, string) error
 	CreatePublisherStripePrice(context.Context, string, int64, string) (*qurl.CRIDPaymentPolicy, error)
+	MatchPublisherStripePrice(context.Context, string, int64, string, string) (*qurl.CRIDPaymentPolicy, error)
 }
 
 func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
@@ -71,18 +72,33 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 			if !ok {
 				return errors.New("publisher payments are unavailable in this client")
 			}
-			if err := ensurePublisherStripe(ctx, opts, payments); err != nil {
-				return err
+			var price *qurl.CRIDPaymentPolicy
+			if retry {
+				expected := resource.ConsumerAccess.Payment
+				if expected.AccessSeconds != accessSeconds {
+					return differentPaidOffer(version + 1)
+				}
+				price, err = payments.MatchPublisherStripePrice(ctx, checkoutName, cents, interval, expected.PriceID)
+				var problem *qurlapi.Error
+				if errors.As(err, &problem) && problem.Code == "payment_price_mismatch" {
+					return differentPaidOffer(version + 1)
+				}
+			} else {
+				if err := ensurePublisherStripe(ctx, opts, payments); err != nil {
+					return err
+				}
+				price, err = payments.CreatePublisherStripePrice(ctx, checkoutName, cents, interval)
 			}
-			price, err := payments.CreatePublisherStripePrice(ctx, checkoutName, cents, interval)
 			if err != nil {
 				return err
 			}
 			price.AccessSeconds = accessSeconds
 			if retry && *resource.ConsumerAccess.Payment != *price {
-				return exitcode.UsageError(fmt.Errorf("this CRID has a different paid offer at version %d. Review it before replacing it with --version %d", version+1, version+1))
+				return differentPaidOffer(version + 1)
 			}
 			policy := qurl.ConsumerAccessPolicy{Mode: consumerContract, Version: version + 1, ContractID: paidAccessContract, Payment: price}
+			// TODO(upstream-contract): The API accepts an identical policy at
+			// expected version + 1 and rejects intervening changes.
 			if err := management.UpdateConsumerAccess(ctx, assessment.Input, version, policy); err != nil {
 				return err
 			}
@@ -103,6 +119,10 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 	cmd.Flags().BoolVar(&yes, "yes", false, "allow changes to a test CRID on a production endpoint")
 	cmd.Long = "Set a price and connect Stripe if needed. Turning on paid access makes the CRID private."
 	return cmd
+}
+
+func differentPaidOffer(version int64) error {
+	return exitcode.UsageError(fmt.Errorf("this CRID has a different paid offer at version %d. Review it before replacing it with --version %d", version, version))
 }
 
 func validatePaidAccessSetup(amount, interval string, version, accessSeconds int64) (int64, error) {

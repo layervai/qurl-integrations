@@ -125,3 +125,9 @@ func (m consumerManagement) CreatePublisherStripePrice(ctx context.Context, name
 	price, err := m.sdk.CreatePublisherStripePrice(ctx, name, amount, interval)
 	return price, mapError(err)
 }
+
+// MatchPublisherStripePrice checks the existing price without creating one.
+func (m consumerManagement) MatchPublisherStripePrice(ctx context.Context, name string, amount int64, interval, expectedPriceID string) (*qurl.CRIDPaymentPolicy, error) {
+	price, err := m.sdk.MatchPublisherStripePrice(ctx, name, amount, interval, expectedPriceID)
+	return price, mapError(err)
+}
