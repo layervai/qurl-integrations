@@ -503,6 +503,10 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if fmt.Sprint(cleanup.Env["QURL_JOURNEY_OWNER_ID"]) != "${{ secrets.QURL_JOURNEY_OWNER_ID }}" {
 		t.Errorf("terminal cleanup exposes its owner ID through a non-secret source: %#v", cleanup.Env)
 	}
+	if len(cleanup.Steps) == 0 || !strings.HasPrefix(cleanup.Steps[0].Uses, checkoutActionPrefix) ||
+		cleanup.Steps[0].With["ref"] != "${{ github.sha }}" || cleanup.Steps[0].With["persist-credentials"] != false {
+		t.Error("terminal cleanup must use the trusted workflow source with no persisted credentials")
+	}
 	var cleanupRun *step
 	for index := range cleanup.Steps {
 		if cleanup.Steps[index].Name == "Revoke run resources and credentials" {
