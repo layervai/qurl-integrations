@@ -247,7 +247,7 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		if errors.Is(err, errSandboxGrantedRouteCrossOrigin) {
 			return 0, errSandboxGrantedRouteCrossOrigin
 		}
-		return 0, sandboxGrantedRouteTransportCategory(err)
+		return 0, sandboxGrantedRouteRequestFailure(err, grantedURL)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, int64(len(r.marker)+1)))
@@ -294,6 +294,23 @@ func sandboxGrantedRouteTransportCategory(err error) sandboxGrantedRouteTranspor
 		// The Go type is safe to log. The error value can include the grant URL.
 		return sandboxGrantedRouteTransportFailure(fmt.Sprintf("transport error (%T)", err))
 	}
+}
+
+// The edge can deny by resetting the stream before sending headers. Only the
+// granted origin can supply this refusal. A body read error never counts.
+func sandboxGrantedRouteRequestFailure(err error, grantedURL *url.URL) sandboxGrantedRouteTransportFailure {
+	category := sandboxGrantedRouteTransportCategory(err)
+	if category != sandboxGrantedRouteHTTP2PeerReset {
+		return category
+	}
+	requestError, ok := err.(*url.Error) //nolint:errorlint // Only Client.Do's direct error qualifies.
+	if ok && requestError != nil {
+		target, parseErr := url.Parse(requestError.URL)
+		if parseErr == nil && consume.SameHTTPOrigin(grantedURL, target) {
+			return category
+		}
+	}
+	return "HTTP/2 reset outside the granted request"
 }
 
 // TODO(upstream-contract): shortcut: Go's HTTP/2 error type is private. Check
@@ -743,6 +760,30 @@ func TestSandboxGrantedRouteTransportCategoryUnwrapsURLError(t *testing.T) {
 			err := &url.Error{Op: "Get", URL: "https://example.test/private-grant", Err: test.err}
 			if got := sandboxGrantedRouteTransportCategory(err); got != test.want {
 				t.Fatalf("transport category = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSandboxGrantedRoutePeerRefusalRequiresGrantedOrigin(t *testing.T) {
+	origin := &url.URL{Scheme: "https", Host: "granted.test"}
+	reset := errors.New("stream error: stream ID 1; INTERNAL_ERROR; received from peer")
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"granted origin", &url.Error{URL: "https://granted.test/private", Err: reset}, true},
+		{"redirected origin", &url.Error{URL: "https://other.test/private", Err: reset}, false},
+		{"body read", reset, false},
+		{"TCP reset", &url.Error{URL: "https://granted.test/private", Err: syscall.ECONNRESET}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			failure := sandboxGrantedRouteRequestFailure(test.err, origin)
+			state, probeFailed, unexpectedSuccess := classifySandboxGrantedRouteProbe(0, failure, nil)
+			refused := state == sandboxGrantedRouteRefused && !probeFailed && !unexpectedSuccess
+			if refused != test.want {
+				t.Fatalf("peer refusal = %t, want %t", refused, test.want)
 			}
 		})
 	}
