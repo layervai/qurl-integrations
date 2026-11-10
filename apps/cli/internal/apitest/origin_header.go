@@ -91,6 +91,8 @@ func (s *Server) addOriginHeaderName(row map[string]any) {
 
 // isOriginHeaderPatch reports whether r is a PATCH whose body has an
 // origin_header member, an object or null, and leaves the body readable.
+// Such a PATCH is served as an origin header change only: the CLI never
+// sends one together with a grant change, so the mock does not combine them.
 func isOriginHeaderPatch(r *http.Request) bool {
 	body, err := io.ReadAll(r.Body)
 	r.Body = io.NopCloser(bytes.NewReader(body))

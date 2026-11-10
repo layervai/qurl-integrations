@@ -353,6 +353,10 @@ func TestOriginHeaderClearSendsNull(t *testing.T) {
 	if !strings.Contains(res.stdout.String(), "none") {
 		t.Fatalf("stdout:\n%s", res.stdout.String())
 	}
+	quiet := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-q", "origin-header", "clear", srv.Key.CRID}})
+	if quiet.code != 0 || quiet.stdout.Len() != 0 {
+		t.Fatalf("-q clear: exit %d, stdout %q", quiet.code, quiet.stdout.String())
+	}
 }
 
 // TestOriginHeaderChangeMustBeConfirmed holds set and clear to an answer
