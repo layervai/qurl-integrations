@@ -108,3 +108,26 @@ func (m consumerManagement) PublisherStripeAccount(ctx context.Context) (string,
 	account, err := m.sdk.PublisherStripeAccount(ctx)
 	return account, mapError(err)
 }
+
+// ConnectPublisherStripeForDevice starts Stripe consent with a local return.
+func (m consumerManagement) ConnectPublisherStripeForDevice(ctx context.Context, port int) (link, state string, err error) {
+	link, state, err = m.sdk.ConnectPublisherStripeForDevice(ctx, port)
+	return link, state, mapError(err)
+}
+
+// CompletePublisherStripe completes the consent started by this publisher.
+func (m consumerManagement) CompletePublisherStripe(ctx context.Context, state, code string) error {
+	return mapError(m.sdk.CompletePublisherStripe(ctx, state, code))
+}
+
+// CreatePublisherStripePrice writes the price on the connected account.
+func (m consumerManagement) CreatePublisherStripePrice(ctx context.Context, name string, amount int64, interval string) (*qurl.CRIDPaymentPolicy, error) {
+	price, err := m.sdk.CreatePublisherStripePrice(ctx, name, amount, interval)
+	return price, mapError(err)
+}
+
+// MatchPublisherStripePrice checks the existing price without creating one.
+func (m consumerManagement) MatchPublisherStripePrice(ctx context.Context, name string, amount int64, interval, expectedPriceID string) (*qurl.CRIDPaymentPolicy, error) {
+	price, err := m.sdk.MatchPublisherStripePrice(ctx, name, amount, interval, expectedPriceID)
+	return price, mapError(err)
+}
