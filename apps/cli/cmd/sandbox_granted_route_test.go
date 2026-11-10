@@ -268,6 +268,8 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 
 type sandboxGrantedRouteTransportFailure string
 
+const sandboxGrantedRouteHTTP2PeerReset sandboxGrantedRouteTransportFailure = "HTTP/2 peer reset"
+
 func (failure sandboxGrantedRouteTransportFailure) Error() string { return string(failure) }
 
 // Report only fixed categories. Transport errors may include a grant URL.
@@ -279,7 +281,7 @@ func sandboxGrantedRouteTransportCategory(err error) sandboxGrantedRouteTranspor
 	}
 	switch {
 	case isSandboxGrantedRouteHTTP2Reset(err):
-		return "HTTP/2 peer reset"
+		return sandboxGrantedRouteHTTP2PeerReset
 	case errors.As(err, &dnsError):
 		return "DNS lookup failed"
 	case errors.Is(err, syscall.ECONNREFUSED):
@@ -333,9 +335,8 @@ func classifySandboxGrantedRouteProbe(
 	switch {
 	case errors.Is(probeErr, errSandboxGrantedRouteUnexpectedSuccess):
 		return 0, false, true
-	case errors.Is(probeErr, context.DeadlineExceeded) && outerErr == nil:
-		// A live outer bound plus an expired per-probe bound is an observed
-		// blackhole. Deletion may deny with a response or silently drop.
+	case outerErr == nil && (errors.Is(probeErr, context.DeadlineExceeded) || errors.Is(probeErr, sandboxGrantedRouteHTTP2PeerReset)):
+		// The edge can drop the request or reset its HTTP/2 stream after refusing it.
 		return sandboxGrantedRouteRefused, false, false
 	default:
 		return state, probeErr != nil, false
@@ -852,6 +853,17 @@ func TestSandboxGrantedRouteFenceValidator(t *testing.T) {
 		probeState, failed, fatal = classifySandboxGrantedRouteProbe(0, errSandboxGrantedRouteTransport, nil)
 		if probeState != 0 || !failed || fatal {
 			t.Fatalf("transport-failure classification = state %d, failed %v, fatal %v", probeState, failed, fatal)
+		}
+	})
+
+	t.Run("accepts the edge peer reset only within the outer bound", func(t *testing.T) {
+		state, failed, fatal := classifySandboxGrantedRouteProbe(0, sandboxGrantedRouteHTTP2PeerReset, nil)
+		if state != sandboxGrantedRouteRefused || failed || fatal {
+			t.Fatalf("live peer reset = state %d, failed %v, fatal %v", state, failed, fatal)
+		}
+		state, failed, fatal = classifySandboxGrantedRouteProbe(0, sandboxGrantedRouteHTTP2PeerReset, context.Canceled)
+		if state != 0 || !failed || fatal {
+			t.Fatalf("canceled peer reset = state %d, failed %v, fatal %v", state, failed, fatal)
 		}
 	})
 
