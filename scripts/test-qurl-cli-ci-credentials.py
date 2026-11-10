@@ -355,7 +355,7 @@ def test_scheduled_soak_workflow_contract() -> None:
             {
                 "lane": "linux",
                 "lane_id": 1,
-                "os": "ubuntu-24.04",
+                "os": "ubuntu-latest",
                 "test_name": "TestSandboxLinuxDefaultDaemonLifecycle",
                 "timeout_minutes": 35,
                 "soak": False,
