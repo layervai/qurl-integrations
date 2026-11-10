@@ -40,6 +40,9 @@ type publishJSON struct {
 	// reconciliation omits the field rather than claiming a fresh publish.
 	FoundExisting *bool         `json:"found_existing,omitempty"`
 	Publisher     publisherJSON `json:"publisher"`
+	// OriginHeaderName names the header added to requests to the target;
+	// the value is never part of any output.
+	OriginHeaderName string `json:"origin_header_name,omitempty"`
 }
 
 type shareLinkJSON struct {
@@ -158,6 +161,8 @@ type resourceStatusJSON struct {
 	CreatedAt  *time.Time    `json:"created_at,omitempty"`
 	ExpiresAt  *time.Time    `json:"expires_at,omitempty"`
 	Publisher  publisherJSON `json:"publisher"`
+	// OriginHeaderName names the header added to requests to the target.
+	OriginHeaderName string `json:"origin_header_name,omitempty"`
 }
 
 type downloadJSON struct {
@@ -209,6 +214,8 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			ExpiresAt:      res.ExpiresAt,
 			FoundExisting:  res.FoundExisting,
 			Publisher:      publisherDocument(res.Publisher),
+
+			OriginHeaderName: res.OriginHeaderName,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, res.CRID)
@@ -328,7 +335,8 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 			CRID:              resource.CRID, ResourceID: resource.ResourceID,
 			TargetURL: resource.TargetURL, Type: resource.Type, Status: resource.Status,
 			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
-			Publisher: publisherDocument(resource.Publisher),
+			Publisher:        publisherDocument(resource.Publisher),
+			OriginHeaderName: resource.OriginHeaderName,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, resource.CRID)
@@ -356,6 +364,9 @@ func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSu
 	}
 	if resource.ConsumerAccess != nil {
 		ew.printf("%s\t%s (version %d)\n", p.bold("Policy:"), resource.ConsumerAccess.Mode, resource.ConsumerAccess.Version)
+	}
+	if resource.OriginHeaderName != "" {
+		ew.printf("%s\t%s\n", p.bold(labelOriginHeader), resource.OriginHeaderName)
 	}
 	if grants && resource.AccessRequests != nil {
 		state := msgStateOff
@@ -421,6 +432,9 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 		if address := requestAddress(res); address != "" {
 			twe.printf("  %s\t%s\n", p.bold("Address:"), address)
 		}
+	}
+	if res.OriginHeaderName != "" {
+		twe.printf("  %s\t%s\n", p.bold(labelOriginHeader), res.OriginHeaderName)
 	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)

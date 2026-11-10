@@ -535,6 +535,7 @@ than switching in place.
 | `qurl login` | Enroll this device with a one-time account key, from a supervisor's enrollment token file, or anonymously for a supervisor |
 | `qurl whoami` | Show which account this registered device belongs to |
 | `qurl publisher` | Show the publisher name shown with your CRIDs; `set <name>` and `clear` change it |
+| `qurl origin-header set <CRID> <name>` | Set or rotate the secret header qURL adds to requests to a remote URL; `clear <CRID>` removes it |
 | `qurl request METHOD PATH` | Make a device-authorized JSON request for a supervising app (see [Supervised installs](#supervised-installs)) |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
@@ -986,11 +987,39 @@ credential or making a network request.
 | `--description <text>` | Human-readable description stored with the resource |
 | `--tag <tag>` | Tag stored with the resource (repeatable) |
 | `--alias <name>` | Memorable handle stored with the resource |
+| `--origin-header <name>` | Header qURL adds to every request it forwards to the target; the secret value is read from stdin or a hidden prompt, never from an argument |
 | `--id <id>` | Connector ID for a local publish; local-only |
 
-Description, tags, and alias apply only to remote resources. `--id` applies
+Description, tags, alias, and origin header apply only to remote resources. `--id` applies
 only to a local publish. Mixing those options fails loudly instead of being
 silently ignored.
+
+#### Origin headers
+
+An origin that admits only requests carrying a secret header, such as a
+Vercel deployment with Deployment Protection, can be published so that qURL
+adds the header to every request it forwards:
+
+```bash
+printf '%s' "$VERCEL_BYPASS_SECRET" | \
+  qurl publish https://app.example.vercel.app --name App --origin-header x-vercel-protection-bypass
+```
+
+The value is a secret: it is read from standard input or typed at a hidden
+prompt, never passed as an argument, and no command shows it again. Output
+shows only the header name, in canonical form (`X-Vercel-Protection-Bypass`).
+`Authorization` is allowed for basic or bearer origins and replaces the
+visitor's own; headers qURL manages itself (`Host`, `Cookie`,
+`X-Forwarded-*`, and the like) are refused.
+
+Publishing a target again without `--origin-header` keeps the header it has.
+Naming a different header, or one for a target that has none, is refused and
+changes nothing. Change it with `qurl origin-header set <CRID> <name>` (the
+value again from stdin or a hidden prompt) and remove it with
+`qurl origin-header clear <CRID>`; `qurl status <CRID>` shows its name. To
+rotate without an outage, add the new secret at the origin first, then set it
+in qURL, then remove the old secret from the origin a few minutes later: qURL
+may keep sending the old value for about a minute.
 
 #### Private or public
 

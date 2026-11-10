@@ -290,6 +290,7 @@ func customerMessages() []string {
 		msgPublisherClearRefusedReason,
 		msgPublisherClearRefused,
 		msgPublisherUnsupported,
+		msgOriginHeaderPrompt, msgNoOriginHeaderValue, msgOriginHeaderLocal,
 	}
 }
 
