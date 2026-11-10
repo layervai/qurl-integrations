@@ -445,6 +445,7 @@ def paged_rows(
     status_filter: str | None,
     *,
     deadline: float,
+    resource_type: str | None = None,
 ) -> list[dict[str, Any]]:
     cursor = ""
     seen: set[str] = set()
@@ -462,6 +463,8 @@ def paged_rows(
         query = {"limit": str(INVENTORY_PAGE_SIZE)}
         if status_filter is not None:
             query["status"] = status_filter
+        if resource_type is not None:
+            query["type"] = resource_type
         if cursor:
             query["cursor"] = cursor
         status, response = qurl_json(
@@ -685,6 +688,8 @@ def reconciliation_inventory(
     if not include_resources:
         return ReconciliationInventory(credential_rows, credential_failure, (), None)
 
+    # Connector rows use exact slug lookups below. Scan only the URL index
+    # for fixtures whose run description is visible.
     resource_rows: tuple[dict[str, Any], ...] | None = None
     resource_failure: str | None = None
     try:
@@ -696,6 +701,7 @@ def reconciliation_inventory(
                 "qURL resource cleanup",
                 status_filter=None,
                 deadline=inventory_deadline,
+                resource_type="url",
             )
         )
     except InventoryBoundError as exc:

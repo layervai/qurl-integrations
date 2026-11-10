@@ -241,7 +241,10 @@ class FakeAPI:
                 row = self.connector_resources.get(query["slug"][0])
                 return 200, json.dumps({"data": [] if row is None else [row]}).encode()
             self.resource_inventory_requests += 1
-            assert query == {"limit": [str(credentials.INVENTORY_PAGE_SIZE)]}
+            assert query == {
+                "limit": [str(credentials.INVENTORY_PAGE_SIZE)],
+                "type": ["url"],
+            }
             return (
                 200,
                 json.dumps(
