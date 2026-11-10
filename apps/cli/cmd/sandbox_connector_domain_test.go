@@ -72,7 +72,8 @@ func TestSandboxConnectorCustomDomain(t *testing.T) {
 		var dnsError *net.DNSError
 		var networkError net.Error
 		// The edge can deny access before HTTP. A DNS or certificate error is a failed fixture.
-		edgeClosed := errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) ||
+		edgeClosed := sandboxGrantedRouteTransportCategory(err) == "HTTP/2 peer reset" ||
+			errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) ||
 			(errors.As(err, &networkError) && networkError.Timeout())
 		if errors.As(err, &dnsError) || !edgeClosed {
 			t.Fatalf("Sandbox denial probe failed before a valid edge denial (%T)", err)
