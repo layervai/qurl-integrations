@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.0.1](https://github.com/layervai/qurl-integrations/compare/v4.0.0...v4.0.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **ci:** keep the CLI Linux lifecycle gate on Ubuntu 24.04 ([#2003](https://github.com/layervai/qurl-integrations/issues/2003)) ([656111e](https://github.com/layervai/qurl-integrations/commit/656111ee35a48223afba5faf0cc7d605ae438c2f))
+* **cli:** require the granted origin for a peer refusal ([#2009](https://github.com/layervai/qurl-integrations/issues/2009)) ([a206c42](https://github.com/layervai/qurl-integrations/commit/a206c42e3f82599ab24ffd104997e098b03c2695))
+
 ## [4.0.0](https://github.com/layervai/qurl-integrations/compare/v3.7.1...v4.0.0) (2026-11-07)
 
 
