@@ -256,7 +256,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if err := json.Unmarshal([]byte(baseJSON), &baseMatrix); err != nil {
 		t.Fatalf("parse base journey matrix: %v", err)
 	}
-	wantOS := map[string]string{"linux": "ubuntu-24.04", "macos": "macos-latest", "windows": "windows-latest"}
+	wantOS := map[string]string{"linux": "ubuntu-latest", "macos": "macos-latest", "windows": "windows-latest"}
 	wantTests := map[string]string{
 		"linux":   "TestSandboxLinuxDefaultDaemonLifecycle",
 		"macos":   "TestSandboxMacOSDefaultDaemonLifecycle",
@@ -1030,7 +1030,7 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 	}{
 		{
 			name:    "rendered matrix lane",
-			jobName: "cli / customer journey (linux, 1, ubuntu-24.04, TestSandboxLinuxDefaultDaemonLifecycle)",
+			jobName: "cli / customer journey (linux, 1, ubuntu-latest, TestSandboxLinuxDefaultDaemonLifecycle)",
 			want:    "true",
 		},
 		{name: "unsuffixed job", jobName: "cli / customer journey", want: "true"},
@@ -1146,7 +1146,7 @@ fi
 			"SOURCE_SHA":              "0123456789abcdef0123456789abcdef01234567",
 			"SOURCE_WORKFLOW_PATH":    ".github/workflows/cli.yml",
 			"WORKFLOW_REPOSITORY":     "layervai/qurl-integrations",
-			"MOCK_JOB_NAME":           "cli / customer journey (linux, 1, ubuntu-24.04, TestSandboxLinuxDefaultDaemonLifecycle, 35, false)",
+			"MOCK_JOB_NAME":           "cli / customer journey (linux, 1, ubuntu-latest, TestSandboxLinuxDefaultDaemonLifecycle, 35, false)",
 			"MOCK_JOB_CONCLUSION":     "success",
 			"MOCK_CLEANUP_CONCLUSION": "",
 			"MOCK_RUN_STATUS":         "completed",

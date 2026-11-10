@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -254,7 +255,7 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return 0, ctxErr
 		}
-		return 0, errors.New("read granted-route response")
+		return 0, "response body: " + sandboxGrantedRouteTransportCategory(err)
 	}
 	if resp.StatusCode/100 != 2 {
 		return sandboxGrantedRouteRefused, nil
@@ -272,7 +273,13 @@ func (failure sandboxGrantedRouteTransportFailure) Error() string { return strin
 // Report only fixed categories. Transport errors may include a grant URL.
 func sandboxGrantedRouteTransportCategory(err error) sandboxGrantedRouteTransportFailure {
 	var dnsError *net.DNSError
+	var requestError *url.Error
+	if errors.As(err, &requestError) && requestError != nil && requestError.Err != nil {
+		err = requestError.Err
+	}
 	switch {
+	case isSandboxGrantedRouteHTTP2Reset(err):
+		return "HTTP/2 peer reset"
 	case errors.As(err, &dnsError):
 		return "DNS lookup failed"
 	case errors.Is(err, syscall.ECONNREFUSED):
@@ -282,8 +289,28 @@ func sandboxGrantedRouteTransportCategory(err error) sandboxGrantedRouteTranspor
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return "peer closed the connection"
 	default:
-		return errSandboxGrantedRouteTransport
+		// The Go type is safe to log. The error value can include the grant URL.
+		return sandboxGrantedRouteTransportFailure(fmt.Sprintf("transport error (%T)", err))
 	}
+}
+
+// TODO(upstream-contract): shortcut: Go's HTTP/2 error type is private. Check
+// this shape against qurl-service's denial smoke when the Go toolchain changes.
+func isSandboxGrantedRouteHTTP2Reset(err error) bool {
+	if err == nil {
+		return false
+	}
+	const prefix, suffix = "stream error: stream ID ", "; INTERNAL_ERROR; received from peer"
+	id, ok := strings.CutPrefix(err.Error(), prefix)
+	if !ok {
+		return false
+	}
+	id, ok = strings.CutSuffix(id, suffix)
+	if !ok {
+		return false
+	}
+	stream, parseErr := strconv.ParseUint(id, 10, 31)
+	return parseErr == nil && stream%2 == 1 && strconv.FormatUint(stream, 10) == id
 }
 
 // newSandboxGrantedRouteHTTPClient matches the hermetic customer process used
@@ -701,9 +728,22 @@ func TestSandboxGrantedRouteAccessFailureCategories(t *testing.T) {
 }
 
 func TestSandboxGrantedRouteTransportCategoryUnwrapsURLError(t *testing.T) {
-	err := &url.Error{Op: "Get", URL: "https://example.test/private-grant", Err: syscall.ECONNRESET}
-	if got := sandboxGrantedRouteTransportCategory(err); got != "connection reset" {
-		t.Fatalf("transport category = %q", got)
+	for _, test := range []struct {
+		name string
+		err  error
+		want sandboxGrantedRouteTransportFailure
+	}{
+		{"TCP reset", syscall.ECONNRESET, "connection reset"},
+		{"HTTP/2 peer reset", errors.New("stream error: stream ID 3; INTERNAL_ERROR; received from peer"), "HTTP/2 peer reset"},
+		{"HTTP/2 other failure", errors.New("stream error: stream ID 3; CANCEL; received from peer"), "transport error (*errors.errorString)"},
+		{"unclassified private detail", errors.New("https://example.test/private-grant"), "transport error (*errors.errorString)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := &url.Error{Op: "Get", URL: "https://example.test/private-grant", Err: test.err}
+			if got := sandboxGrantedRouteTransportCategory(err); got != test.want {
+				t.Fatalf("transport category = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
