@@ -485,6 +485,8 @@ def paged_rows(
             raise CredentialError(f"{label} inventory was rejected")
         if any(not isinstance(row, dict) for row in rows):
             raise CredentialError(f"{label} inventory contains a malformed row")
+        if resource_type is not None and any(row.get("type") != resource_type for row in rows):
+            raise CredentialError(f"{label} inventory did not honor the resource type")
         if len(result) + len(rows) > INVENTORY_MAX_ROWS:
             raise InventoryBoundError(
                 f"{label} inventory exceeded its row limit", result
@@ -688,8 +690,9 @@ def reconciliation_inventory(
     if not include_resources:
         return ReconciliationInventory(credential_rows, credential_failure, (), None)
 
-    # Connector rows use exact slug lookups below. Scan only the URL index
-    # for fixtures whose run description is visible.
+    # TODO(upstream-contract): GET /v1/resources?type=url uses the URL index.
+    # Tagged journeys create URL fixtures and Connectors. Exact slug lookups
+    # below already cover every Connector.
     resource_rows: tuple[dict[str, Any], ...] | None = None
     resource_failure: str | None = None
     try:
