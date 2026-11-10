@@ -74,27 +74,19 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 			}
 			var price *qurl.CRIDPaymentPolicy
 			if retry {
-				expected := resource.ConsumerAccess.Payment
-				if expected.AccessSeconds != accessSeconds {
-					return differentPaidOffer(version + 1)
-				}
-				price, err = payments.MatchPublisherStripePrice(ctx, checkoutName, cents, interval, expected.PriceID)
-				var problem *qurlapi.Error
-				if errors.As(err, &problem) && problem.Code == "payment_price_mismatch" {
-					return differentPaidOffer(version + 1)
+				price = resource.ConsumerAccess.Payment
+				if err := checkPaidAccessRetry(ctx, payments, price, checkoutName, cents, interval, accessSeconds, version+1); err != nil {
+					return err
 				}
 			} else {
 				if err := ensurePublisherStripe(ctx, opts, payments); err != nil {
 					return err
 				}
 				price, err = payments.CreatePublisherStripePrice(ctx, checkoutName, cents, interval)
-			}
-			if err != nil {
-				return err
-			}
-			price.AccessSeconds = accessSeconds
-			if retry && *resource.ConsumerAccess.Payment != *price {
-				return differentPaidOffer(version + 1)
+				if err != nil {
+					return err
+				}
+				price.AccessSeconds = accessSeconds
 			}
 			policy := qurl.ConsumerAccessPolicy{Mode: consumerContract, Version: version + 1, ContractID: paidAccessContract, Payment: price}
 			// TODO(upstream-contract): The API accepts an identical policy at
@@ -102,13 +94,7 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 			if err := management.UpdateConsumerAccess(ctx, assessment.Input, version, policy); err != nil {
 				return err
 			}
-			link := ""
-			if opts.productionEndpoint() {
-				link = "https://qurl.link/" + resource.CRID
-			} else if strings.TrimRight(opts.resolvedEndpoint, "/") == "https://api.layerv.xyz" {
-				link = "https://qurl.link.layerv.xyz/" + resource.CRID
-			}
-			return opts.printer().PaidAccessReady(resource.CRID, link, policy.Version)
+			return opts.printer().PaidAccessReady(resource.CRID, paidAccessLink(opts, resource.CRID), policy.Version)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "app name on Stripe Checkout (defaults to the public CRID name)")
@@ -119,6 +105,36 @@ func paidAccessSetupCmd(opts *globalOpts) *cobra.Command {
 	cmd.Flags().BoolVar(&yes, "yes", false, "allow changes to a test CRID on a production endpoint")
 	cmd.Long = "Set a price and connect Stripe if needed. Turning on paid access makes the CRID private."
 	return cmd
+}
+
+func paidAccessLink(opts *globalOpts, crid string) string {
+	switch {
+	case opts.productionEndpoint():
+		return "https://qurl.link/" + crid
+	case strings.TrimRight(opts.resolvedEndpoint, "/") == "https://api.layerv.xyz":
+		return "https://qurl.link.layerv.xyz/" + crid
+	default:
+		return ""
+	}
+}
+
+func checkPaidAccessRetry(ctx context.Context, payments deviceStripePayments, expected *qurl.CRIDPaymentPolicy, name string, cents int64, interval string, accessSeconds, version int64) error {
+	if expected.AccessSeconds != accessSeconds {
+		return differentPaidOffer(version)
+	}
+	price, err := payments.MatchPublisherStripePrice(ctx, name, cents, interval, expected.PriceID)
+	var problem *qurlapi.Error
+	if errors.As(err, &problem) && problem.Code == "payment_price_mismatch" {
+		return differentPaidOffer(version)
+	}
+	if err != nil {
+		return err
+	}
+	price.AccessSeconds = accessSeconds
+	if *expected != *price {
+		return differentPaidOffer(version)
+	}
+	return nil
 }
 
 func differentPaidOffer(version int64) error {
