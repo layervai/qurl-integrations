@@ -120,11 +120,13 @@ on Vercel. Vercel's [Deployment Protection](https://vercel.com/docs/deployment-p
 refuses requests that lack the project's *Protection Bypass for Automation*
 secret. You give that secret to qURL as the resource's **origin header**, and
 qURL adds it to every request it forwards to the app. Visitors never see it,
-and a copy a visitor sends is replaced.
+and if a visitor sends that header themselves, qURL replaces it.
 
 1. In the Vercel project, open *Settings → Deployment Protection*. Choose the
-   **All Deployments** scope (free on every plan): *Standard Protection* leaves
-   production domains, such as `my-app.vercel.app`, open to everyone. Then
+   [**All Deployments**](https://vercel.com/docs/deployment-protection#all-deployments)
+   scope, which Vercel offers on every plan: *Standard Protection* leaves
+   production domains, such as `my-app.vercel.app`, open to everyone.
+   <!-- TODO(upstream-contract): Vercel plan availability of All Deployments and Protection Bypass for Automation. --> Then
    create a *Protection Bypass for Automation* secret, and check that a direct
    request is refused: `curl -sI https://my-app.vercel.app` should answer
    `401` or redirect to Vercel's login page.
@@ -134,9 +136,12 @@ and a copy a visitor sends is replaced.
    your own shell):
 
    ```bash
-   printf '%s' "$VERCEL_AUTOMATION_BYPASS_SECRET" | qurl publish https://my-app.vercel.app --name "Preview app" --origin-header x-vercel-protection-bypass
-   qurl share <CRID>
+   CRID=$(printf '%s' "$VERCEL_AUTOMATION_BYPASS_SECRET" | qurl publish https://my-app.vercel.app --name "Preview app" --origin-header x-vercel-protection-bypass --quiet)
+   qurl share "$CRID"
    ```
+
+   If the URL is already published, publishing it again does not add or
+   change the header: use `qurl origin-header set <CRID> x-vercel-protection-bypass`.
 
    Or use the
    [TypeScript SDK](https://github.com/layervai/qurl-typescript#protect-a-vercel-app):
