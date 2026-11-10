@@ -118,8 +118,9 @@ header, such as a Vercel deployment with Deployment Protection, pass
 --origin-header with the header name. qURL then adds that header to every
 request it forwards to the target. The value is never an argument: pipe it on
 standard input, or type it at the hidden prompt. Publishing a target again
-without --origin-header keeps the header it has; one that names a different
-header, or a target that has none, is refused. Change it with
+without --origin-header keeps the header it has. Publishing it again with
+another header name or value, or with a header for a target that has none, is
+refused and changes nothing: rotate or change it with
 "qurl origin-header set".
 
 For paid contract access, use "qurl access configure" with the Stripe account

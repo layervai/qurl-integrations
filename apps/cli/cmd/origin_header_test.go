@@ -209,6 +209,26 @@ func TestPublishOriginHeaderMismatchSaysHowToChangeIt(t *testing.T) {
 	}
 }
 
+// TestPublishAgainWithANewSecretIsRefused pins that a publish cannot rotate
+// the secret: the same name with another value is a mismatch, and the stored
+// value is unchanged.
+func TestPublishAgainWithANewSecretIsRefused(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.SetPublishFoundExisting(true)
+	srv.SetOriginHeader("X-Key", "old-secret")
+	res := runCLI(t, &runOpts{
+		args:  originPublishArgs(srv, "--origin-header", "x-key"),
+		stdin: strings.NewReader(originSecret + "\n"),
+	})
+	if res.code != exitcode.Conflict || !strings.Contains(res.stderr.String(), "qurl origin-header set") {
+		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
+	}
+	if _, value := srv.OriginHeader(); value != "old-secret" {
+		t.Fatal("the refused publish changed the stored value")
+	}
+	assertNoSecret(t, res)
+}
+
 func TestPublishAgainWithoutOriginHeaderKeepsIt(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishFoundExisting(true)

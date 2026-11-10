@@ -77,7 +77,7 @@ var reservedOriginHeaderPrefixes = []string{"x-forwarded-", "x-qurl-", "proxy-"}
 // The texts of a refused origin header. None of them repeats the name or the
 // value: the value is a secret, and the name is on the command line already.
 const (
-	msgOriginHeaderNameLength   = "the origin header name must be 1 to 256 characters"
+	msgOriginHeaderNameLength   = "the origin header name must be 1 to 256 bytes"
 	msgOriginHeaderNameToken    = "the origin header name may contain only letters, digits and !#$%&'*+-.^_`|~"
 	msgOriginHeaderNameReserved = "qURL sets that header itself, so it cannot be the origin header; choose another name"
 	msgOriginHeaderValueLength  = "the origin header value must be 1 to 4096 bytes"
@@ -164,7 +164,7 @@ const codeOriginHeaderMismatch = "origin_header_mismatch"
 const (
 	// msgOriginHeaderMismatch is a publish that stated an origin header for a
 	// target that is already published with another one, or with none.
-	msgOriginHeaderMismatch = "this target is already published with a different origin header, or with none, and publishing again does not change it. Nothing was changed. Run `qurl list` to find its CRID, then set the header with `qurl origin-header set <CRID> <name>`, or publish again without --origin-header to keep the one it has"
+	msgOriginHeaderMismatch = "this target is already published with a different origin header or value, or with none, and publishing again does not change it. Nothing was changed. Run `qurl list` to find its CRID, then set the header with `qurl origin-header set <CRID> <name>`, or publish again without --origin-header to keep the one it has"
 	// msgOriginHeaderUnconfirmed is a publish whose answer does not name the
 	// origin header that was asked for. The resource may exist without it.
 	msgOriginHeaderUnconfirmed = "the service did not confirm the origin header for %s. The resource exists, and requests to the target may not carry the header. Set it with `qurl origin-header set %s <name>`, or check that this service offers origin headers"
@@ -235,6 +235,11 @@ func originHeaderConfirmed(header *OriginHeader) func(*Published, error) (*Publi
 
 // confirmOriginHeader holds a publish that asked for an origin header to an
 // answer that names it, in canonical form.
+//
+// TODO(upstream-contract): the qURL API stores and returns the name in the
+// form http.CanonicalHeaderKey gives ("X-Vercel-Protection-Bypass"), so the
+// match is exact. An answer in another case is outside that contract and is
+// refused like any other unconfirmed header, never read as a match.
 func confirmOriginHeader(header *OriginHeader, published *Published) error {
 	if header == nil || published.OriginHeaderName == http.CanonicalHeaderKey(header.Name) {
 		return nil
@@ -254,7 +259,8 @@ type originHeaderPatch struct {
 // removal.
 //
 // TODO(upstream-contract): PATCH returns 200 with a flat data resource row
-// that names the header as origin_header_name and never carries the value.
+// that names the header as origin_header_name, in http.CanonicalHeaderKey
+// form, and never carries the value.
 func (c *client) SetOriginHeader(ctx context.Context, id string, header *OriginHeader) (*ResourceSummary, error) {
 	if header != nil {
 		if err := header.Validate(); err != nil {

@@ -299,7 +299,10 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
 	}
 	// After privacy and devices: a resource whose privacy is not confirmed
-	// is reported as that, and names no CRID.
+	// is reported as that, and names no CRID. Before access requests, on
+	// purpose: an unconfirmed header is the failure the publisher must act
+	// on first, and no change is made to a resource whose answer is outside
+	// the contract.
 	if err := confirmOriginHeader(opts.OriginHeader, published); err != nil {
 		return nil, err
 	}

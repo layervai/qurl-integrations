@@ -1013,7 +1013,8 @@ visitor's own; headers qURL manages itself (`Host`, `Cookie`,
 `X-Forwarded-*`, and the like) are refused.
 
 Publishing a target again without `--origin-header` keeps the header it has.
-Naming a different header, or one for a target that has none, is refused and
+Publishing it again with another header name or value (a new secret
+included), or with a header for a target that has none, is refused and
 changes nothing. Change it with `qurl origin-header set <CRID> <name>` (the
 value again from stdin or a hidden prompt) and remove it with
 `qurl origin-header clear <CRID>`; `qurl status <CRID>` shows its name. To

@@ -13,10 +13,11 @@ const (
 	labelOriginHeader = "Origin header:"
 	// msgOriginHeaderNone is the row value after a removal.
 	msgOriginHeaderNone = "none"
-	// msgOriginHeaderSaved and msgOriginHeaderRemoved confirm a change on
-	// stderr. Neither names the value: the service never returns it.
+	// msgOriginHeaderSaved and msgOriginHeaderRemoved confirm the result on
+	// stderr. Neither names the value: the service never returns it. The
+	// second is true whether or not the resource had a header before.
 	msgOriginHeaderSaved   = "Origin header saved. qURL adds it to every request it forwards to the target."
-	msgOriginHeaderRemoved = "Origin header removed. qURL no longer adds a header to requests it forwards to the target."
+	msgOriginHeaderRemoved = "This resource has no origin header. qURL adds no header to requests it forwards to the target."
 )
 
 type originHeaderJSON struct {
