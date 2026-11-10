@@ -35,6 +35,7 @@ var (
 	errSandboxGrantedRouteUnexpectedSuccess    = errors.New("granted route returned an unexpected successful response")
 	errSandboxGrantedRouteMissingAuthorization = errors.New("granted route omitted application authorization")
 	errSandboxGrantedRouteAuthorization        = errors.New("granted route authorization failed")
+	errSandboxGrantedRouteCrossOrigin          = errors.New("custom domain redirected outside the granted origin")
 	errSandboxGrantedRouteConfiguration        = errors.New("granted route probe configuration is invalid")
 	errSandboxGrantedRouteTransport            = sandboxGrantedRouteTransportFailure("other transport failure")
 )
@@ -49,11 +50,12 @@ const (
 // sandboxGrantedRoute retains one working access path across delete. The URL
 // carries access authority, so this type and every diagnostic keep it private.
 type sandboxGrantedRoute struct {
-	url         string
-	marker      string
-	backendHits func() uint64
-	expiresAt   time.Time
-	authorize   func(*http.Request) error
+	url            string
+	marker         string
+	backendHits    func() uint64
+	expiresAt      time.Time
+	authorize      func(*http.Request) error
+	sameOriginOnly bool
 }
 
 func prepareSandboxGrantedRoute(
@@ -62,6 +64,7 @@ func prepareSandboxGrantedRoute(
 	shareLink string,
 	marker string,
 	backendHits func() uint64,
+	customHost string,
 ) *sandboxGrantedRoute {
 	t.Helper()
 	link := strings.TrimSpace(shareLink)
@@ -82,12 +85,19 @@ func prepareSandboxGrantedRoute(
 			sandboxGrantedRouteAccessFailureCategory(err),
 		)
 	}
+	if customHost != "" {
+		target, err := url.Parse(grant.ContentURL)
+		if err != nil || target.Scheme != "https" || target.Hostname() != customHost {
+			t.Fatal("Sandbox admission did not return the exact HTTPS custom hostname")
+		}
+	}
 	route := &sandboxGrantedRoute{
-		url:         grant.ContentURL,
-		marker:      marker,
-		backendHits: backendHits,
-		expiresAt:   grantStartedAt.Add(time.Duration(grant.OpenSeconds) * time.Second),
-		authorize:   grant.AuthorizeContentRequest,
+		url:            grant.ContentURL,
+		sameOriginOnly: customHost != "",
+		marker:         marker,
+		backendHits:    backendHits,
+		expiresAt:      grantStartedAt.Add(time.Duration(grant.OpenSeconds) * time.Second),
+		authorize:      grant.AuthorizeContentRequest,
 	}
 	readyCtx, cancelReady := context.WithTimeout(ctx, sandboxGrantedRouteReadyWindow)
 	defer cancelReady()
@@ -152,6 +162,8 @@ func waitSandboxGrantedRouteReady(
 		switch {
 		case errors.Is(probeErr, errSandboxGrantedRouteMissingAuthorization):
 			return fmt.Errorf("pre-delete granted Connector route is invalid: access grant omitted application authorization: %w", errSandboxGrantedRouteMissingAuthorization)
+		case errors.Is(probeErr, errSandboxGrantedRouteCrossOrigin):
+			return errSandboxGrantedRouteCrossOrigin
 		case errors.Is(probeErr, errSandboxGrantedRouteConfiguration):
 			return fmt.Errorf("pre-delete granted Connector route is invalid: probe configuration is invalid: %w", errSandboxGrantedRouteConfiguration)
 		}
@@ -213,6 +225,9 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 			}
 		}
 		if !consume.SameHTTPOrigin(grantedURL, redirectReq.URL) {
+			if r.sameOriginOnly {
+				return errSandboxGrantedRouteCrossOrigin
+			}
 			return nil
 		}
 		if err := r.authorize(redirectReq); err != nil {
@@ -228,6 +243,9 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		}
 		if errors.Is(err, errSandboxGrantedRouteAuthorization) {
 			return 0, errSandboxGrantedRouteAuthorization
+		}
+		if errors.Is(err, errSandboxGrantedRouteCrossOrigin) {
+			return 0, errSandboxGrantedRouteCrossOrigin
 		}
 		return 0, sandboxGrantedRouteTransportCategory(err)
 	}
@@ -639,6 +657,11 @@ func TestSandboxGrantedRouteProbeAllowsCrossOriginWithoutSendingBearer(t *testin
 		authorizations.Load() != 1 || leaked.Load() {
 		t.Fatalf("cross-origin probe = state %d, error %v, destination requests %d, authorizations %d, leaked %t",
 			state, err, destinationRequests.Load(), authorizations.Load(), leaked.Load())
+	}
+	route.sameOriginOnly = true
+	state, err = route.probe(t.Context())
+	if state != 0 || !errors.Is(err, errSandboxGrantedRouteCrossOrigin) || destinationRequests.Load() != 1 {
+		t.Fatalf("origin-bound probe = state %d, error %v, total destination requests %d", state, err, destinationRequests.Load())
 	}
 }
 
