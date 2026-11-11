@@ -313,7 +313,8 @@ func TestHTTPAPIKeyMinterMintWorkspaceRejectsShortKeyWithoutPrefix(t *testing.T)
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case testBindingPath:
-					http.NotFound(w, r)
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = io.WriteString(w, `{"error":{"code":"bindings_disabled"}}`)
 				case testAPIKeysPath:
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(map[string]any{
@@ -379,33 +380,26 @@ func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnStructured404(t *testing.
 	}
 }
 
-func TestHTTPAPIKeyMinterMintWorkspaceFallsBackOnJSON404WithoutQURLErrorCode(t *testing.T) {
-	var legacyCalled bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case testBindingPath:
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = io.WriteString(w, `{"message":"not found"}`)
-		case testAPIKeysPath:
-			legacyCalled = true
-			writeLegacyMintSuccess(t, w)
-		default:
-			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	minted, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
-	if err != nil {
-		t.Fatalf("MintWorkspaceAPIKey: %v", err)
-	}
-	if !legacyCalled {
-		t.Fatal("expected legacy fallback for JSON 404 without qURL error code")
-	}
-	if minted.BindingBacked {
-		t.Error("JSON route-missing fallback must not mark the key binding-backed")
+func TestHTTPAPIKeyMinterMintWorkspaceRejectsUnstructured404(t *testing.T) {
+	for _, body := range []string{"404 page not found", `{"message":"not found"}`, "", "<html>Not Found</html>"} {
+		t.Run(body, func(t *testing.T) {
+			var legacyCalls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == testAPIKeysPath {
+					legacyCalls++
+					writeLegacyMintSuccess(t, w)
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, body)
+			}))
+			t.Cleanup(srv.Close)
+			m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+			_, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
+			if err == nil || !strings.Contains(err.Error(), "404") || legacyCalls != 0 {
+				t.Fatalf("missing route: err=%v legacy calls=%d", err, legacyCalls)
+			}
+		})
 	}
 }
 
@@ -487,14 +481,15 @@ func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnOversizedDetailFirstStruc
 	}
 }
 
-func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingRouteMissing(t *testing.T) {
+func TestHTTPAPIKeyMinterMintWorkspaceDisabledFallbackOmitsIdempotency(t *testing.T) {
 	var paths []string
 	var legacyIdempotency string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		switch r.URL.Path {
 		case testBindingPath:
-			http.NotFound(w, r)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"code":"bindings_disabled"}}`)
 		case testAPIKeysPath:
 			legacyIdempotency = r.Header.Get("Idempotency-Key")
 			writeLegacyMintSuccess(t, w)
@@ -535,7 +530,7 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallbackUsesCallerContext(t *testing.T) {
 			switch req.URL.Path {
 			case testBindingPath:
 				cancel()
-				return textResponse(req, http.StatusNotFound, "404 page not found"), nil
+				return textResponse(req, http.StatusServiceUnavailable, `{"error":{"code":"bindings_disabled"}}`), nil
 			case testAPIKeysPath:
 				if !errors.Is(req.Context().Err(), context.Canceled) {
 					t.Fatalf("legacy fallback context error = %v, want context.Canceled", req.Context().Err())
@@ -583,7 +578,8 @@ func TestHTTPAPIKeyMinterMintWorkspaceDerivesLegacyKeyPrefix(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case testBindingPath:
-			http.NotFound(w, r)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"code":"bindings_disabled"}}`)
 		case testAPIKeysPath:
 			writeLegacyMintSuccessWithoutPrefix(t, w)
 		default:

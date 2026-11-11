@@ -64,8 +64,7 @@ const (
 	// structuredErrorEnvelopeCode is an internal sentinel for a bounded
 	// qurl-service `{"error":{...}}` body whose concrete code could not be
 	// recovered. Treat it as structured so a truncated detail-first envelope
-	// cannot be misclassified as a route-missing 404 and fall back to legacy
-	// minting.
+	// cannot lose its structured error classification.
 	structuredErrorEnvelopeCode = "__structured_error_envelope__"
 
 	credentialKindAPIKey = qurlclient.CredentialKindAPIKey
@@ -693,18 +692,6 @@ func validateIdempotencyKey(key string) error {
 }
 
 func shouldFallbackToLegacyMint(status int, errorCode string) bool {
-	if status == http.StatusNotFound {
-		// During rollout, an older qurl-service has no route and returns a
-		// 404 that is not a qURL error envelope. Intentionally treat any 404
-		// without a qURL envelope code as legacy-compatible while the new
-		// endpoint rolls out, even though that can also catch an infra 404.
-		// TODO(#705): remove this path as soon as the binding route is live
-		// everywhere. A rollback during a persist-failure retry can otherwise
-		// fall back to a legacy key instead of replaying the binding. If a
-		// deployed route returns a structured qURL error envelope, surface it
-		// instead of minting a legacy key.
-		return errorCode == ""
-	}
 	if status != http.StatusServiceUnavailable {
 		return false
 	}
