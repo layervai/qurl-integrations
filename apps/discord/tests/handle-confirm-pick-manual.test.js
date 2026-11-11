@@ -44,8 +44,7 @@ describe('handleConfirmPickManual', () => {
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: expect.objectContaining({
         recipientMode: 'picker',
-        recipientIds: [],
-        recipientAliases: {},
+        recipients: [],
         selfIncluded: false,
       }),
       terminal: false,

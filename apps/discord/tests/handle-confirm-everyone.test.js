@@ -58,7 +58,7 @@ describe('handleConfirmEveryone', () => {
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockTransitionFlow).toHaveBeenCalled();
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
-    expect(payload.recipientIds.sort()).toEqual([u1, u2, SENDER_ID].sort());
+    expect(payload.recipients.map(recipient => recipient.id).sort()).toEqual([u1, u2, SENDER_ID].sort());
     expect(payload.selfIncluded).toBe(true);
     expect(payload.recipientMode).toBe('everyone');
   });
@@ -112,7 +112,7 @@ describe('handleConfirmEveryone', () => {
       await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
       expect(mockTransitionFlow).toHaveBeenCalled();
       const payload = mockTransitionFlow.mock.calls[0][2].payload;
-      expect(payload.recipientIds.length).toBe(3);
+      expect(payload.recipients.map(recipient => recipient.id).length).toBe(3);
     } finally {
       Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: originalCap, configurable: true, writable: true });
     }
@@ -224,7 +224,7 @@ describe('handleConfirmEveryone', () => {
     await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
-    expect(payload.recipientIds.sort()).toEqual([SENDER_ID, otherUser].sort());
+    expect(payload.recipients.map(recipient => recipient.id).sort()).toEqual([SENDER_ID, otherUser].sort());
     expect(payload.selfIncluded).toBe(true);
   });
 
@@ -238,7 +238,7 @@ describe('handleConfirmEveryone', () => {
     await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
-    expect(payload.recipientIds.sort()).toEqual([SENDER_ID, otherUser].sort());
+    expect(payload.recipients.map(recipient => recipient.id).sort()).toEqual([SENDER_ID, otherUser].sort());
     expect(payload.selfIncluded).toBe(true);
     const logger = require('../src/logger');
     expect(logger.debug).toHaveBeenCalledWith(
@@ -317,6 +317,6 @@ describe('handleConfirmEveryone', () => {
     expect(mockTransitionFlow).toHaveBeenCalled();
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
     expect(payload.recipientMode).toBe('everyone');
-    expect(payload.recipientIds.sort()).toEqual([u1, u2, SENDER_ID].sort());
+    expect(payload.recipients.map(recipient => recipient.id).sort()).toEqual([u1, u2, SENDER_ID].sort());
   });
 });

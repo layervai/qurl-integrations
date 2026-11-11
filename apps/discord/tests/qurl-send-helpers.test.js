@@ -1487,7 +1487,7 @@ describe('renderConfirmCardRows', () => {
     }
   });
 
-  test('pre-resolved defaults beyond the per-pick cap truncate to the first 25 via addDefaultUsers, but the full set persists in payload.recipientIds', async () => {
+  test('pre-resolved defaults beyond the per-pick cap truncate to the first 25 via addDefaultUsers, but the full set persists in the canonical payload', async () => {
     const config = require('../src/config');
     const origCap = config.QURL_SEND_MAX_RECIPIENTS;
     config.QURL_SEND_MAX_RECIPIENTS = 30;
@@ -1506,7 +1506,7 @@ describe('renderConfirmCardRows', () => {
       expect(builder.setMaxValues).toHaveBeenCalledWith(25);
       expect(builder.addDefaultUsers).toHaveBeenCalledWith(...ids.slice(0, 25));
       const persistedPayload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-      expect(persistedPayload.recipientIds.sort()).toEqual([...ids].sort());
+      expect(persistedPayload.recipients.map(recipient => recipient.id).sort()).toEqual([...ids].sort());
     } finally {
       config.QURL_SEND_MAX_RECIPIENTS = origCap;
     }

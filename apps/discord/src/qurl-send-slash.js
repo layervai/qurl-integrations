@@ -5067,7 +5067,6 @@ async function handleQurlSlashSend(interaction, params) {
       locationUrl: params.locationUrl,
       locationName: params.locationName,
       resourceLabel: params.resourceLabel,
-      // Keep new flows legacy until the reader fleet rollout is complete.
       ...withFlowRecipients({}, storedRecipients),
       voiceChannelId,
       // Mode token. Drives both the row layout (picker vs. pick-people-

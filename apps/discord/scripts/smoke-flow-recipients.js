@@ -37,6 +37,22 @@ async function main() {
     await client.send(new CreateTableCommand({ TableName: table, BillingMode: 'PAY_PER_REQUEST',
       KeySchema: [{ AttributeName: 'flow_id', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'flow_id', AttributeType: 'S' }] }));
     created = true;
+    // Writer phase: large legacy inputs become bounded canonical sets too.
+    const legacyID = '0:1#fixture-guild#fixture-channel#legacy-writer';
+    const legacyPayload = { recipientIds: recipients.map(recipient => recipient.id),
+      recipientAliases: Object.fromEntries(recipients.map(recipient => [recipient.id, recipient.alias])) };
+    await createFlow({ flow_id: legacyID, stage, payload: legacyPayload, expires_at: expires });
+    assert.deepEqual((await loadFlow(legacyID)).payload, { recipients });
+    // Model an old worker's inline row, then renew it through the new writer.
+    const oldPayload = { recipientIds: recipients.slice(0, 2).map(recipient => recipient.id),
+      recipientAliases: { [recipients[0].id]: 'Legacy Alice' }, sendNonce: 'legacy' };
+    await client.send(new PutCommand({ TableName: table, Item: { ...(await get(legacyID)), payload: encryptStrict(JSON.stringify(oldPayload)) } }));
+    const oldLegacy = await loadFlow(legacyID);
+    assert.equal((await transitionFlow(legacyID, oldLegacy.version, { stage_to: stage, terminal: false,
+      set_expires_at: expires + 180, expectedPayload: oldLegacy.payloadSnapshot })).result, 'success');
+    const converted = { recipients: [{ id: recipients[0].id, alias: 'Legacy Alice' }, { id: recipients[1].id, alias: '' }], sendNonce: 'legacy' };
+    assert.deepEqual((await loadFlow(legacyID)).payload, converted);
+    assert.deepEqual(JSON.parse(decrypt((await get(legacyID)).payload)), converted);
     assert.equal((await createFlow({ flow_id, stage, payload, expires_at: expires })).created, true);
     let parent = await get(flow_id);
     assert(Buffer.byteLength(JSON.stringify(parent)) < 400 * 1024);
@@ -71,7 +87,20 @@ async function main() {
     assert.equal(chunk.expires_at, parent.expires_at);
     assert.equal(chunk.expires_at, expires + 360);
     assert(!chunk.payload.includes('User00000'));
+    // Known-stale versions, payload snapshots and expiry must not read or stage chunks.
+    DynamoDBDocumentClient.prototype.send = function (command, options) {
+      assert(!(command instanceof BatchGetCommand) && !(command instanceof BatchWriteCommand), 'stale flow must not perform recipient IO');
+      return originalSend.call(this, command, options);
+    };
     assert.equal((await transitionFlow(flow_id, 1, { stage_to: stage, payload: { ...payload, sendNonce: 'stale' }, terminal: false })).result, 'conflict');
+    assert.equal((await transitionFlow(flow_id, parent.version, { stage_to: stage, payload, terminal: false,
+      expectedPayload: 'enc:v1:obsolete-snapshot' })).result, 'conflict');
+    const preflightNow = Date.now;
+    try {
+      Date.now = () => preflightNow() + 3600_000;
+      assert.equal((await transitionFlow(flow_id, parent.version, { stage_to: stage, payload, terminal: false })).result, 'not_found');
+    } finally { Date.now = preflightNow; DynamoDBDocumentClient.prototype.send = originalSend; }
+
     assert.equal((await get(flow_id)).payload, parent.payload);
     assert.deepEqual((await loadFlow(flow_id)).payload, payload);
 
@@ -97,6 +126,30 @@ async function main() {
     assert.equal((await deleteFlow(abaID, { stage, reason: 'terminal', expectedVersion: 1, expectedPayload: old.payloadSnapshot })).deleted, false);
     assert.equal((await transitionFlow(abaID, 1, { stage_to: stage, payload: old.payload, terminal: false, expectedPayload: old.payloadSnapshot })).result, 'conflict');
     assert.deepEqual((await loadFlow(abaID)).payload, replacement);
+
+    // A replacement after preflight must still lose at the final parent condition.
+    for (const kind of ['payload', 'version']) {
+      const raceFlow = `0:1#fixture-guild#fixture-channel#after-preflight-${kind}`;
+      await createFlow({ flow_id: raceFlow, stage, payload, expires_at: expires });
+      const before = await get(raceFlow);
+      let replaced = false;
+      const replacementPayload = { recipients: recipients.slice(0, 1), sendNonce: 'concurrent-replacement' };
+      const replacement = kind === 'payload' ? { ...before, payload: encryptStrict(JSON.stringify(replacementPayload)) }
+        : { ...before, version: before.version + 1 };
+      DynamoDBDocumentClient.prototype.send = async function (command, options) {
+        if (command instanceof BatchWriteCommand && !replaced) {
+          replaced = true;
+          await originalSend.call(client, new PutCommand({ TableName: table, Item: replacement }));
+        }
+        return originalSend.call(this, command, options);
+      };
+      try {
+        assert.equal((await transitionFlow(raceFlow, before.version, { stage_to: stage, payload,
+          terminal: false, expectedPayload: before.payload })).result, 'conflict');
+      } finally { DynamoDBDocumentClient.prototype.send = originalSend; }
+      assert(replaced, 'race must occur after preflight during chunk staging');
+      assert.deepEqual(await get(raceFlow), replacement);
+    }
 
     // A clock advance during staging must be checked by the parent CAS after staging.
     const raceID = '0:1#fixture-guild#fixture-channel#expiry-race';

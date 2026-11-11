@@ -36,8 +36,10 @@ can lag. Expired parent cleanup does not require child items to survive.
 
 ## Writer and compatibility removal
 
-After reader deployment is confirmed, a separate writer change can create and
-convert flows to the canonical list. Keep that change held until fleet evidence
+After reader deployment is confirmed, the writer change creates canonical flows
+and converts legacy recipients on payload writes and lifetime-only extensions.
+Persisted aliases are retained; absent legacy aliases stay empty so the renderer
+can use its existing cache or ID fallback. Keep that change held until fleet evidence
 is available. Check real create, repick, menu, modal, cancel, restart and confirm
 journeys across worker boundaries before removing the legacy reader.
 

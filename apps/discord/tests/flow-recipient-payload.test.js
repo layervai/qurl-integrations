@@ -18,8 +18,11 @@ test.each([null, {}, [null], [{ id: '', alias: 'Alice' }], [{ id: 'one' }]])('ma
   expect(() => readFlowRecipients({ ...legacy, recipients: value })).toThrow(TypeError);
 });
 
-test('legacy writers stay legacy until the reader-first fleet rollout is complete', () => {
-  expect(withFlowRecipients({ note: 'kept' }, recipients)).toEqual({ note: 'kept', ...legacy });
+test('new and repicked legacy flows write canonical recipients without parallel fields', () => {
+  for (const payload of [{ note: 'kept' }, { ...legacy, note: 'kept' }]) {
+    expect(withFlowRecipients(payload, recipients)).toEqual({ note: 'kept', recipients });
+    expect(withFlowRecipients(payload, [])).toEqual({ note: 'kept', recipients: [] });
+  }
 });
 
 test('repicking a canonical flow preserves its format and drops stale legacy fields', () => {
