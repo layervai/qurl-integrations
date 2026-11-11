@@ -1,7 +1,7 @@
 // DDB-backed @discordjs/ws session store. Persists
 // `WebSocketShard.sessionInfo`
 // (`{sessionId, resumeURL, sequence, shardId, shardCount}`)
-// so a process restart can RESUME from the last observed sequence
+// so a process restart can RESUME from a confirmed dispatch checkpoint
 // instead of IDENTIFYing fresh — Discord replays buffered events
 // from the last sequence within its ~60 s resume buffer window.
 //
@@ -33,7 +33,8 @@
 //
 // 4. Final flush on SIGTERM. `flushFinal()` cancels any pending
 //    timer and writes the mirror's current state synchronously
-//    so the next process's hydrate sees the latest sequence.
+//    after the publication gate. Failed publication keeps the earlier checkpoint.
+//    Reconnect rewinds the local mirror to that last confirmed row too.
 
 const { PutCommand, GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
 
@@ -69,11 +70,15 @@ function createGatewaySessionStore({
   // Injected for deterministic throttle tests. Production uses Date.now.
   clock = () => Date.now(),
   writeThrottleMs = DEFAULT_WRITE_THROTTLE_MS,
+  beforePersist,
 } = {}) {
   if (!ddbClient) throw new Error('createGatewaySessionStore: ddbClient is required');
   if (!tableName) throw new Error('createGatewaySessionStore: tableName is required');
   if (!shardId) throw new Error('createGatewaySessionStore: shardId is required');
   if (!logger) throw new Error('createGatewaySessionStore: logger is required');
+  if (beforePersist !== undefined && typeof beforePersist !== 'function') {
+    throw new Error('createGatewaySessionStore: beforePersist must be a function');
+  }
   const configuredShard = parseShardKey(shardId);
   if (!configuredShard) {
     throw new Error('createGatewaySessionStore: shardId must be a valid k:n shard key');
@@ -96,6 +101,8 @@ function createGatewaySessionStore({
   // throttle anchor. `pendingFlush` is the deferred-write timer
   // handle, cleared by every immediate-write path AND by stop().
   let mirror = null;
+  let durableMirror = null;
+  let explicitlyCleared = false;
   let geometryMismatchLogged = false;
   let lastWrittenSessionId = null;
   let lastWriteAt = 0;
@@ -110,6 +117,7 @@ function createGatewaySessionStore({
   let skippedWrites = 0;
 
   async function persistRow(info) {
+    if (beforePersist) await beforePersist();
     // Wall-clock epoch ms for `updated_at`. Matches the design
     // doc's table schema. DDB Number type takes JS Number directly;
     // no marshaling concerns up to 2^53.
@@ -125,6 +133,7 @@ function createGatewaySessionStore({
         updated_at: clock(),
       },
     }));
+    durableMirror = { ...info };
   }
 
   async function deleteRow() {
@@ -132,6 +141,7 @@ function createGatewaySessionStore({
       TableName: tableName,
       Key: { shard_id: shardId },
     }));
+    durableMirror = null;
   }
 
   function cancelPendingFlush() {
@@ -257,6 +267,7 @@ function createGatewaySessionStore({
       if (stopped) return;
 
       if (info === null) {
+        explicitlyCleared = true;
         mirror = null;
         lastWrittenSessionId = null;
         cancelPendingFlush();
@@ -288,6 +299,7 @@ function createGatewaySessionStore({
       // Mirror always updated synchronously so retrieveSessionInfo
       // sees the latest sequence even if the DDB write is throttled.
       mirror = info;
+      explicitlyCleared = false;
 
       const sessionChanged = info.sessionId !== lastWrittenSessionId;
       const throttleExpired = (clock() - lastWriteAt) >= writeThrottleMs;
@@ -371,6 +383,7 @@ function createGatewaySessionStore({
           shardId: hydratedShardId,
           shardCount: hydratedShardCount,
         };
+        durableMirror = { ...mirror };
         lastWrittenSessionId = session_id;
         // Note: NOT setting lastWriteAt here — the next dispatch
         // should hit the immediate-write path (throttleExpired=true
@@ -405,6 +418,14 @@ function createGatewaySessionStore({
     // and the new process IDENTIFYs (acceptable degradation). Log
     // error-level so operators can correlate a failed flush with
     // a degraded RESUME on the next boot.
+    rewindToDurableCheckpoint() {
+      if (!beforePersist || explicitlyCleared) return;
+      mirror = durableMirror ? { ...durableMirror } : null;
+      lastWrittenSessionId = mirror?.sessionId ?? null;
+      lastWriteAt = 0;
+      cancelPendingFlush();
+    },
+
     async flushFinal() {
       // Idempotent: a second SIGTERM/SIGINT racing the first must
       // not re-write the mirror to DDB. The shim's stop() is also

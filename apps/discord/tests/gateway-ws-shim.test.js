@@ -102,6 +102,7 @@ function makeFakeStore() {
     retrieveSessionInfo: jest.fn(() => mirror),
     updateSessionInfo: jest.fn(async (_shardId, info) => { mirror = info; }),
     flushFinal: jest.fn().mockResolvedValue(undefined),
+    rewindToDurableCheckpoint: jest.fn(),
     stop: jest.fn(),
     _setMirror: (val) => { mirror = val; },
   };
@@ -685,7 +686,7 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
   });
 
   it('isConnected() flips back to false on Closed', async () => {
-    const { shim, managerInstances } = makeShim();
+    const { shim, managerInstances, store } = makeShim();
     await shim.start({ connect: false });
     managerInstances[0].emit(WebSocketShardEvents.Ready, {
       data: { application: { id: 'app-1' } },
@@ -698,6 +699,7 @@ describe('Pillar 3 manager contract — connect() + connection state', () => {
     managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
     expect(shim.isConnected()).toBe(false);
     expect(shim.isRecovering()).toBe(true);
+    expect(store.rewindToDurableCheckpoint).toHaveBeenCalledTimes(1);
   });
 
   it('isRecovering() stays true from Closed until Ready/Resumed', async () => {
