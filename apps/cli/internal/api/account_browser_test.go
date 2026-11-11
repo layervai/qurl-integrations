@@ -17,6 +17,20 @@ import (
 )
 
 func TestAccountBrowserPKCEAndState(t *testing.T) {
+	testAccountBrowserPKCEAndState(t, SignInAccount, "openid email qurl:read qurl:write qurl:agent")
+}
+
+func TestAccountManagementBrowserScopes(t *testing.T) {
+	for _, scopes := range [][]string{{"qurl:read"}, {"qurl:read", "qurl:write"}, {"qurl:read", "qurl:write", "qurl:agent", "qurl:keys"}} {
+		t.Run(strings.Join(scopes, " "), func(t *testing.T) {
+			testAccountBrowserPKCEAndState(t, func(ctx context.Context, cfg *Config, open func(context.Context, string) error) (string, error) {
+				return SignInAccountForManagement(ctx, cfg, open, scopes)
+			}, "openid email "+strings.Join(scopes, " "))
+		})
+	}
+}
+
+func testAccountBrowserPKCEAndState(t *testing.T, signIn func(context.Context, *Config, func(context.Context, string) error) (string, error), wantScope string) {
 	var authQuery url.Values
 	var server *httptest.Server
 	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +56,7 @@ func TestAccountBrowserPKCEAndState(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	token, err := SignInAccount(context.Background(), &Config{BaseURL: server.URL, HTTPClient: server.Client()}, func(ctx context.Context, link string) error {
+	token, err := signIn(context.Background(), &Config{BaseURL: server.URL, HTTPClient: server.Client()}, func(ctx context.Context, link string) error {
 		u, err := url.Parse(link)
 		if err != nil {
 			return err
@@ -69,7 +83,7 @@ func TestAccountBrowserPKCEAndState(t *testing.T) {
 		}
 		for _, method := range []string{"email", "google-oauth2", "Username-Password-Authentication"} {
 			chosen := links[method]
-			if chosen == nil || chosen.Host != strings.TrimPrefix(server.URL, "https://") || chosen.Query().Get("state") != u.Query().Get("state") || chosen.Query().Get("redirect_uri") != accountCallback || chosen.Query().Get("code_challenge") != links["email"].Query().Get("code_challenge") || chosen.Query().Get("code_challenge_method") != "S256" || chosen.Query().Get("scope") != "openid email qurl:read qurl:write qurl:agent" {
+			if chosen == nil || chosen.Host != strings.TrimPrefix(server.URL, "https://") || chosen.Query().Get("state") != u.Query().Get("state") || chosen.Query().Get("redirect_uri") != accountCallback || chosen.Query().Get("code_challenge") != links["email"].Query().Get("code_challenge") || chosen.Query().Get("code_challenge_method") != "S256" || chosen.Query().Get("scope") != wantScope {
 				t.Fatalf("method %s changed the OAuth transaction", method)
 			}
 		}
