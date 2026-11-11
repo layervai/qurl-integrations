@@ -226,7 +226,7 @@ describe('OAuth rate-limit store', () => {
     expect(res.status).toHaveBeenCalledWith(429);
     expect(rateLimitStore.has('new-install')).toBe(false);
     // Stable audit name is the cross-repository CloudWatch filter contract.
-    expect(AUDIT_EVENTS.OAUTH_RATE_LIMIT_HARD_CAP).toBe('oauth_rate_limit_hard_cap');
+    expect(AUDIT_EVENTS.RATE_LIMIT_STORE_HARD_CAP).toBe('oauth_rate_limit_hard_cap');
     expect(rateLimitStore.size).toBe(MAX_RATE_LIMIT_STORE_SIZE);
   });
 
@@ -274,7 +274,7 @@ describe('OAuth rate-limit store', () => {
     shed('shed-3');
     expect(warn).toHaveBeenCalledTimes(2);
     expect(logger.audit).toHaveBeenCalledTimes(2);
-    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.OAUTH_RATE_LIMIT_HARD_CAP, {
+    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.RATE_LIMIT_STORE_HARD_CAP, {
       size: MAX_RATE_LIMIT_STORE_SIZE,
       shed_by_bucket: { 'discord-install-entry': 2, callback: 1 },
       since_last_warning_ms: config.RATE_LIMIT_WINDOW_MS,
@@ -314,7 +314,7 @@ describe('OAuth rate-limit store', () => {
     shed('episode-2');
     expect(warn).toHaveBeenCalledTimes(2);
     expect(logger.audit).toHaveBeenCalledTimes(2);
-    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.OAUTH_RATE_LIMIT_HARD_CAP, {
+    expect(logger.audit).toHaveBeenLastCalledWith(AUDIT_EVENTS.RATE_LIMIT_STORE_HARD_CAP, {
       size: MAX_RATE_LIMIT_STORE_SIZE,
       shed_by_bucket: { 'discord-install-entry': 1 },
       since_last_warning_ms: null,

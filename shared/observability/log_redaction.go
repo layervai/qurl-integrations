@@ -20,8 +20,8 @@ const (
 
 // Mirrors Discord's substring policy exactly; intentionally do not broaden
 // this to generic names like "key" without changing both implementations.
-// This mirrors Discord's redact() path, not its wider audit() secret list;
-// #221 should account for both lists when consolidating the definitions.
+// Key-name parity with Discord's ordinary logger is covered by source guards;
+// its audit policy adds exact credential names.
 var redactSubstrings = [...]string{
 	"token",
 	"secret",
@@ -32,16 +32,6 @@ var redactSubstrings = [...]string{
 	"qurllink",
 	"qurl_link",
 }
-
-var qurlAccessLinkSubstrings = func() []string {
-	var substrings []string
-	for _, substring := range redactSubstrings {
-		if strings.HasPrefix(substring, "qurl") {
-			substrings = append(substrings, substring)
-		}
-	}
-	return substrings
-}()
 
 var contentHashLogKeys = [...]string{
 	logKeyHash,
@@ -55,8 +45,8 @@ var contentHashLogKeys = [...]string{
 	"body_hash",
 }
 
-// Keep this mirror discoverable with the Discord logger until #221
-// consolidates the cross-app redaction key definitions.
+// The cross-language source guard keeps this set in sync with Discord's
+// canonical exact-match set, which also feeds its audit policy.
 var redactExactKeys = func() map[string]struct{} {
 	keys := make(map[string]struct{}, len(contentHashLogKeys)+1)
 	for _, key := range contentHashLogKeys {
@@ -73,12 +63,11 @@ func NewRedactingJSONHandler(w io.Writer, opts *slog.HandlerOptions) slog.Handle
 }
 
 // NewRedactingHandler wraps next with qURL's shared log redaction policy.
-// For Discord parity, matched keys blank non-empty strings, byte sequences, and
-// JSON-marshaled string scalars. Other scalars, including numbers, are
-// preserved; most matched-key containers and collections are walked by inner
-// field names rather than fully suppressed. qURL access-link containers are
-// suppressed as a unit because inner keys are not guaranteed to identify
-// bearer values. Map values are walked only when their Go map keys are strings.
+// Key-name rules match Discord. Matched Go structs and non-empty collections are suppressed
+// as a unit because wrappers and marshalers can hide sensitive values under
+// harmless inner names. Scalar counters and unmatched context are preserved.
+// Discord instead walks general containers, hiding strings and keeping numbers.
+// Map values are walked only when their Go map keys are strings.
 // Struct values passed through slog.Any are only reflected when nested
 // redaction changes them. In that case, rich struct output can differ from
 // encoding/json details like omitempty, string coercion, or embedded-field
@@ -126,7 +115,7 @@ func redactAttrs(attrs []slog.Attr, depth int) []slog.Attr {
 
 func redactAttr(attr slog.Attr, depth int) slog.Attr {
 	if shouldRedactKey(attr.Key) {
-		attr.Value = redactMatchedValue(attr.Key, attr.Value, depth+1)
+		attr.Value = redactMatchedValue(attr.Value, depth+1)
 		return attr
 	}
 
@@ -156,7 +145,7 @@ func redactResolvedValue(value slog.Value, depth int) slog.Value {
 	return value
 }
 
-func redactMatchedValue(key string, value slog.Value, depth int) slog.Value {
+func redactMatchedValue(value slog.Value, depth int) slog.Value {
 	value = value.Resolve()
 	if value.Kind() == slog.KindString && value.String() != "" {
 		return slog.StringValue(redactedLogValue)
@@ -164,36 +153,19 @@ func redactMatchedValue(key string, value slog.Value, depth int) slog.Value {
 	if value.Kind() == slog.KindAny && matchedScalarNeedsRedaction(value.Any()) {
 		return slog.StringValue(redactedLogValue)
 	}
-	if isQurlAccessLinkKey(key) && ((value.Kind() == slog.KindGroup && len(value.Group()) > 0) ||
-		(value.Kind() == slog.KindAny && isSuppressibleContainer(value.Any()))) {
-		// A qurlLinks container semantically consists of live bearer links.
-		// Inner keys are not guaranteed to describe bearer values (for example,
-		// a user-id-to-link map), so suppress the whole non-empty container
-		// instead of risking a leak. Empty containers are safe.
+	if (value.Kind() == slog.KindGroup && len(value.Group()) > 0) ||
+		(value.Kind() == slog.KindAny && isSuppressibleContainer(value.Any())) {
+		// A matched key makes structs and non-empty collections sensitive: inner
+		// names do not reliably identify strings that carry its secret value.
 		return slog.StringValue(redactedLogValue)
 	}
-	// Match Discord's behavior: other scalars, including numbers, pass through;
-	// non-qURL containers are walked so nested sensitive fields can still be
-	// found. A matched object such as slog.Any("token",
-	// SomeStruct{Public: "ok"}) can still emit safe inner fields; qURL access-
-	// link containers were suppressed above because their bare elements carry
-	// bearer credentials without inner field names.
+	// Non-string scalars and empty containers retain their original values.
 	return redactResolvedValue(value, depth)
 }
 
-func isQurlAccessLinkKey(key string) bool {
-	key = strings.ToLower(key)
-	for _, substring := range qurlAccessLinkSubstrings {
-		if strings.Contains(key, substring) {
-			return true
-		}
-	}
-	return false
-}
-
 func redactAny(value any, depth int) (any, bool) {
-	// This intentionally mirrors the Discord logger's depth-5 contract:
-	// beyond the cap, values pass through unchanged rather than risking an
+	// The depth bound matches Discord; container handling differs as documented above.
+	// Beyond the cap, values pass through unchanged rather than risking an
 	// unbounded walk. Redaction is a bounded backstop, not a complete guarantee
 	// for arbitrarily deep payloads.
 	if depth > maxRedactionDepth || value == nil {
@@ -327,7 +299,7 @@ func fieldNeedsRedaction(key string, value any, depth int) bool {
 		if matchedScalarNeedsRedaction(value) {
 			return true
 		}
-		if isQurlAccessLinkKey(key) && isSuppressibleContainer(value) {
+		if isSuppressibleContainer(value) {
 			return true
 		}
 	}
@@ -496,7 +468,7 @@ func redactAnyField(key string, value any, depth int) (any, bool) {
 		if matchedScalarNeedsRedaction(value) {
 			return redactedLogValue, true
 		}
-		if isQurlAccessLinkKey(key) && isSuppressibleContainer(value) {
+		if isSuppressibleContainer(value) {
 			return redactedLogValue, true
 		}
 	}

@@ -528,8 +528,9 @@ const AUDIT_EVENTS = {
   // binary (success has its own event below).
   QURL_WEBHOOK_SUBSCRIPTION_REGISTERED: 'qurl_webhook_subscription_registered',
   QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED: 'qurl_webhook_subscription_register_failed',
-  // Peer: the infra repo's install_monitoring.tf.
-  OAUTH_RATE_LIMIT_HARD_CAP: 'oauth_rate_limit_hard_cap',
+  // TODO(upstream-contract): capacity metadata only; keep this wire name aligned
+  // with the infra repo's install_monitoring.tf alert filter.
+  RATE_LIMIT_STORE_HARD_CAP: 'oauth_rate_limit_hard_cap',
   QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED: 'qurl_webhook_subscription_delete_failed',
   // Per-row decrypt failure during scanGuildSubscriptions. Sustained
   // rate = KMS key rotation drift, partial migration, or manual DDB

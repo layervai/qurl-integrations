@@ -11,15 +11,13 @@ import (
 
 // productionRetainedSessionFetch reuses an already authorized request. It has
 // no opener, resolver, cookie jar, or redirect path that can replace its grant.
-// A nil transport opens a new connection; non-nil transports are unit-test fakes.
+// A nil transport opens a new connection; tests can supply an explicit transport.
 func productionRetainedSessionFetch(original *http.Request, marker string, transport http.RoundTripper) (resultErr error) {
 	if transport == nil {
-		base, ok := http.DefaultTransport.(*http.Transport)
-		if !ok {
-			return errors.New("retained production session transport could not be isolated")
+		fresh, err := productionRetainedSessionCloneTransport(http.DefaultTransport)
+		if err != nil {
+			return err
 		}
-		// A Connector restart can close pooled connections; the grant must work on a new one.
-		fresh := base.Clone()
 		defer fresh.CloseIdleConnections()
 		transport = fresh
 	}
@@ -47,4 +45,13 @@ func productionRetainedSessionFetch(original *http.Request, marker string, trans
 		return errors.New("original production session returned unexpected content")
 	}
 	return nil
+}
+
+// Clone an explicit base so unit tests never replace the process-wide transport.
+func productionRetainedSessionCloneTransport(transport http.RoundTripper) (*http.Transport, error) {
+	base, ok := transport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("retained production session transport could not be isolated")
+	}
+	return base.Clone(), nil
 }

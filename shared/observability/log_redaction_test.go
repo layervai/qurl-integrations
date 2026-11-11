@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -61,8 +62,8 @@ func TestContentHashLogKeys(t *testing.T) {
 func TestDiscordRedactExactKeysStayInSync(t *testing.T) {
 	t.Parallel()
 
-	// Temporary shared-to-Discord source coupling: #221 tracks replacing this
-	// parser with a consolidated key definition. These guards pin key lists,
+	// Cross-language source contract: Discord's audit policy derives from its
+	// canonical exact-match set. These guards pin the shared key lists,
 	// not the independently implemented recursion and matching semantics.
 	want := append([]string(nil), contentHashLogKeys[:]...)
 	want = append(want, logKeyPrivateKey)
@@ -159,12 +160,8 @@ func TestRedactingJSONHandlerRecursesIntoGroups(t *testing.T) {
 	if got := contextFields[logKeyHash]; got != redactedLogValue {
 		t.Fatalf("context.hash = %#v, want %q; line=%s", got, redactedLogValue, line)
 	}
-	bodyHash := contextFields["body_hash"].(map[string]interface{})
-	if got := bodyHash["myToken"]; got != redactedLogValue {
-		t.Fatalf("context.body_hash.myToken = %#v, want %q; line=%s", got, redactedLogValue, line)
-	}
-	if got := bodyHash["nested_hash"]; got != testAllowedValue {
-		t.Fatalf("context.body_hash.nested_hash = %#v, want allowed; line=%s", got, line)
+	if got := contextFields["body_hash"]; got != redactedLogValue {
+		t.Fatalf("context.body_hash = %#v, want redacted; line=%s", got, line)
 	}
 }
 
@@ -733,7 +730,7 @@ func TestRedactingJSONHandlerPreservesSensitiveNamedNumbersInRedactedStructs(t *
 	}
 }
 
-func TestRedactingJSONHandlerWalksMatchedKeyContainersByInnerNames(t *testing.T) {
+func TestRedactingJSONHandlerSuppressesMatchedKeyContainers(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
@@ -755,20 +752,14 @@ func TestRedactingJSONHandlerWalksMatchedKeyContainersByInnerNames(t *testing.T)
 	}
 
 	fields := decodeLogLine(t, line)
-	token := fields["token"].(map[string]interface{})
-	if got := token[testAccessTokenKey]; got != redactedLogValue {
-		t.Fatalf("token.access_token = %#v, want %q; line=%s", got, redactedLogValue, line)
-	}
-	if got := token["public"]; got != testAllowedValue {
-		t.Fatalf("token.public = %#v, want allowed; line=%s", got, line)
-	}
-	secret := fields["secret"].(map[string]interface{})
-	if got := secret["public"]; got != testAllowedValue {
-		t.Fatalf("secret.public = %#v, want allowed; line=%s", got, line)
+	for _, key := range []string{"token", "secret"} {
+		if got := fields[key]; got != redactedLogValue {
+			t.Fatalf("%s = %#v, want redacted; line=%s", key, got, line)
+		}
 	}
 }
 
-func TestRedactingJSONHandlerWalksMatchedStringSlicesByInnerNames(t *testing.T) {
+func TestRedactingJSONHandlerSuppressesMatchedStringSlices(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
@@ -776,14 +767,11 @@ func TestRedactingJSONHandlerWalksMatchedStringSlicesByInnerNames(t *testing.T) 
 	logger.Info("uploaded", slog.Any("token", []string{testRealToken}))
 
 	line := buf.String()
-	if !bytes.Contains(buf.Bytes(), []byte(testRealToken)) {
-		t.Fatalf("log line unexpectedly redacted matched-key string slice: %s", line)
+	if bytes.Contains(buf.Bytes(), []byte(testRealToken)) {
+		t.Fatalf("matched-key string slice leaked: %s", line)
 	}
-
-	fields := decodeLogLine(t, line)
-	token := fields["token"].([]interface{})
-	if got := token[0]; got != testRealToken {
-		t.Fatalf("token[0] = %#v, want %q; line=%s", got, testRealToken, line)
+	if got := decodeLogLine(t, line)["token"]; got != redactedLogValue {
+		t.Fatalf("token = %#v, want redacted; line=%s", got, line)
 	}
 }
 
@@ -1310,4 +1298,39 @@ func (e errorHandler) WithAttrs([]slog.Attr) slog.Handler {
 
 func (e errorHandler) WithGroup(string) slog.Handler {
 	return e
+}
+
+func TestRedactingJSONHandlerSuppressesMatchedSecretContainers(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{"hash", "token", "password", "private_key"} {
+		for _, value := range []any{[]string{testRealToken}, map[string]any{"value": testRealToken, "count": 7}, struct{ Value string }{testRealToken}, errors.New(testRealToken)} {
+			var buf bytes.Buffer
+			logger := slog.New(NewRedactingJSONHandler(&buf, nil))
+			logger.Info("secret-container", slog.Any(key, value), slog.Int("adjacent_count", 9))
+			if strings.Contains(buf.String(), testRealToken) {
+				t.Fatalf("%s container leaked: %s", key, buf.String())
+			}
+			fields := decodeLogLine(t, buf.String())
+			if fields[key] != redactedLogValue {
+				t.Fatalf("%s = %#v, want redacted", key, fields[key])
+			}
+			if fields["adjacent_count"] != float64(9) {
+				t.Fatalf("counter changed: %#v", fields)
+			}
+		}
+	}
+}
+
+func TestRedactingJSONHandlerSuppressesSensitiveNumericGroupsButKeepsScalarCounters(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := slog.New(NewRedactingJSONHandler(&buf, nil))
+	logger.Info("usage", slog.Group("token_usage", slog.Int("input", 7), slog.Int("output", 3)), slog.Int("token_count", 10))
+	fields := decodeLogLine(t, buf.String())
+	if fields["token_usage"] != redactedLogValue {
+		t.Fatalf("sensitive container was not suppressed: %#v", fields)
+	}
+	if fields["token_count"] != float64(10) {
+		t.Fatalf("scalar counter changed: %#v", fields)
+	}
 }
