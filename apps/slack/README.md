@@ -249,3 +249,21 @@ development.
 ## License
 
 [MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.
+
+### Access links in group DMs
+
+The typed `/qurl get` command and the list's **Create qURL** button refuse to
+mint a link when Slack confirms that the source conversation is a group DM
+(`is_mpim`). They use the same conversation check as agent confirmations.
+This prevents a one-time link from being created for an ephemeral response
+whose visibility in a group DM has not been proved. Use a channel, private
+channel or 1:1 DM instead. A typed `get ... dm:true` can send the link directly
+to the requester when direct-message delivery is configured.
+
+Private-channel and group-DM IDs both use the `G` prefix. The app checks
+`conversations.info` for these IDs, with a bounded timeout. If metadata is
+unavailable or `mpim:read` is missing, the existing ephemeral fallback stays
+in place; the app does not post the link into shared conversation history.
+That fallback does not prove group-DM visibility. Ordinary channel and 1:1
+DM IDs do not need an extra metadata request. No live Slack rendering or
+notification-prefetch behavior is claimed by the local tests.
