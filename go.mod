@@ -1,6 +1,6 @@
 module github.com/layervai/qurl-integrations
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/Microsoft/go-winio v0.6.4
