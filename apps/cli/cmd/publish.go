@@ -199,26 +199,8 @@ owns the share and turns it off when it exits.`,
 			if target.kind == publishTargetLocal {
 				return publishNameError(runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access))
 			}
-			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
-				return err
-			}
-			opts.beginTermsNotice()
-			client, err := opts.newClient(cmd.Context())
-			if err != nil {
-				return err
-			}
-			if err := completeRulePayment(cmd.Context(), client, access.ConsumerAccess); err != nil {
-				return err
-			}
-
 			access.Description, access.Tags, access.Alias = description, tags, alias
-			result, err := opts.publishRemote(cmd.Context(), client, args[0], &access)
-			if err != nil {
-				return publishNameError(err)
-			}
-
-			printer := opts.printer()
-			return opts.finishTermsNotice(printer.Publish(result))
+			return opts.runRemotePublish(cmd.Context(), args[0], &access)
 		},
 	}
 
@@ -249,6 +231,25 @@ owns the share and turns it off when it exits.`,
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "serve in this process for debugging or CI and stop sharing when it exits")
 
 	return cmd
+}
+
+func (o *globalOpts) runRemotePublish(ctx context.Context, target string, access *qurlapi.PublishOptions) error {
+	if err := o.requireRuntimeSupervisionIfNamespace(); err != nil {
+		return err
+	}
+	o.beginTermsNotice()
+	client, err := o.newClient(ctx)
+	if err != nil {
+		return err
+	}
+	if err := completeRulePayment(ctx, client, access.ConsumerAccess); err != nil {
+		return err
+	}
+	result, err := o.publishRemote(ctx, client, target, access)
+	if err != nil {
+		return publishNameError(err)
+	}
+	return o.finishTermsNotice(o.printer().Publish(result))
 }
 
 // publishAccessFlags returns the flags on the command line that said who may

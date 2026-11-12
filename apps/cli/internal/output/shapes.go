@@ -446,24 +446,7 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
-	// A publish result always carries the privacy the service confirmed. The
-	// row is left out only for a value that has none, never guessed.
-	if res.Private != nil {
-		access := msgPublishPublic
-		if *res.Private {
-			access = msgPublishPrivate
-			if res.ConsumerAccess != nil {
-				access = "private — consumers must meet the publisher's access policy"
-			}
-		}
-		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
-	}
-	if res.ConsumerAccess != nil {
-		twe.printf("  %s\t%s (version %d)\n", p.bold("Policy:"), res.ConsumerAccess.Mode, res.ConsumerAccess.Version)
-		if address := requestAddress(res); address != "" {
-			twe.printf("  %s\t%s\n", p.bold("Address:"), address)
-		}
-	}
+	p.publishAccessRows(twe, res)
 	if res.OriginHeaderName != "" {
 		twe.printf("  %s\t%s\n", p.bold(labelOriginHeader), res.OriginHeaderName)
 	}
@@ -510,6 +493,27 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	}
 	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	return ew.flush(nil)
+}
+
+func (p *Printer) publishAccessRows(twe *errWriter, res *qurlapi.Published) {
+	// A publish result always carries the privacy the service confirmed. The
+	// row is left out only for a value that has none, never guessed.
+	if res.Private != nil {
+		access := msgPublishPublic
+		if *res.Private {
+			access = msgPublishPrivate
+			if res.ConsumerAccess != nil {
+				access = "private — consumers must meet the publisher's access policy"
+			}
+		}
+		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
+	}
+	if res.ConsumerAccess != nil {
+		twe.printf("  %s\t%s (version %d)\n", p.bold("Policy:"), res.ConsumerAccess.Mode, res.ConsumerAccess.Version)
+		if address := requestAddress(res); address != "" {
+			twe.printf("  %s\t%s\n", p.bold("Address:"), address)
+		}
+	}
 }
 
 // limitedLinkRows shows the temporary link a rule with link limits minted.
