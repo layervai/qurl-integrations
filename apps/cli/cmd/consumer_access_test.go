@@ -10,7 +10,37 @@ import (
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
+
+func TestConsumerInvitationExplainsEmailLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, detail string
+		wantHint     bool
+	}{
+		{"email budget", "Too many consumer emails were requested; retry later", true},
+		{"request rate", "Too many requests; retry later", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			requests := 0
+			srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/invitations", func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				w.Header().Set("Retry-After", "3600")
+				apitest.WriteProblem(t, w, http.StatusTooManyRequests, "rate_limited", "Too Many Requests", tc.detail)
+			})
+			result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "access", "invite", srv.Key.CRID, "--email", "ana@example.com"}})
+			if result.code != exitcode.RateLimited || requests != 1 || result.stdout.Len() != 0 {
+				t.Fatalf("exit=%d requests=%d stdout=%s stderr=%s", result.code, requests, result.stdout.String(), result.stderr.String())
+			}
+			for _, explanation := range []string{"next UTC hour", "recipient", "resource", "account", "shared with other customers", "does not identify which", "all account tiers"} {
+				if strings.Contains(result.stderr.String(), explanation) != tc.wantHint {
+					t.Errorf("explanation %q present=%t, want %t: %s", explanation, !tc.wantHint, tc.wantHint, result.stderr.String())
+				}
+			}
+		})
+	}
+}
 
 func TestConsumerAccessConfiguresFirstPolicyWithVersionZero(t *testing.T) {
 	srv := apitest.NewServer(t)

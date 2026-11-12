@@ -556,6 +556,12 @@ func apiProblemLines(head string, apiErr *qurlapi.Error) []string {
 // same way: account_frozen is an account-standing condition, not a
 // permissions problem, and says so.
 func errorHint(apiErr *qurlapi.Error) string {
+	// TODO(upstream-contract): qurl-service shares rate_limited with other limits;
+	// match its exact mail-budget detail until it supplies a distinct code. The
+	// hint also mirrors its fixed UTC-hour reset and tier-independent mail caps.
+	if apiErr.StatusCode == http.StatusTooManyRequests && apiErr.Code == "rate_limited" && apiErr.Detail == "Too many consumer emails were requested; retry later" {
+		return hintConsumerEmailLimit
+	}
 	switch {
 	case apiErr.AgentEnrollmentScopeRequired():
 		return hintEnrollmentScope

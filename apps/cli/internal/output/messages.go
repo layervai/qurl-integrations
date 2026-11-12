@@ -30,6 +30,9 @@ const (
 	hintNotFound      = "Hint: the CRID may be mistyped, expired, or no longer published. Ask whoever shared it for a current one."
 	hintQuotaExceeded = "Hint: if this device is not linked to an account, run `qurl account setup`. For account plan limits, see https://layerv.ai/pricing."
 	hintRetryAfter    = "Retry after %ds."
+
+	hintConsumerEmailLimit = "Hourly email limits apply per recipient, resource, and account, plus a limit shared with other customers. The server does not identify which limit was reached. Retry after the next UTC hour begins. These email limits apply equally to all account tiers."
+
 	// The two lines after a "too many requests" answer to an approval or to
 	// a denial by code. %s is the wait in words.
 	hintTryCodeAgainIn = "Try again in %s."
@@ -386,6 +389,7 @@ func CustomerMessages() []string {
 		hintCRIDNotFoundNoDevice,
 		hintQuotaExceeded,
 		hintRetryAfter, hintTryCodeAgainIn, hintAskForCode,
+		hintConsumerEmailLimit,
 		hintRevoked,
 		hintRetired,
 		hintScope,
