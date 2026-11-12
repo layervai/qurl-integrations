@@ -26,6 +26,8 @@ var ErrAccessRulesFile = errors.New("access rules file is damaged or unreadable"
 type AccessRulesFileError struct {
 	Path string
 	Err  error
+	// LinkLimits marks the per-share link limits file, not the rules journal.
+	LinkLimits bool
 }
 
 func (e *AccessRulesFileError) Error() string   { return ErrAccessRulesFile.Error() + ": " + e.Path }
@@ -224,6 +226,10 @@ func (s *AccessRuleStore) Save(ctx context.Context, version int64, d *accessrule
 			return accessrules.ErrRuleConflict
 		}
 		index := slices.IndexFunc(j.Items, func(item accessrules.Definition) bool { return item.ID == d.ID })
+		// Replacing a rule with settings this CLI doesn't know would drop them.
+		if d.HasUnknownFields() || index >= 0 && j.Items[index].HasUnknownFields() {
+			return accessrules.ErrNewerRule
+		}
 		// An edit that keeps its name is never refused for a duplicate a merge brought in.
 		renamed := index < 0 || j.Items[index].Name != d.Name
 		if renamed && accessrules.NameTaken(j.Items, d) {
@@ -239,7 +245,7 @@ func (s *AccessRuleStore) Save(ctx context.Context, version int64, d *accessrule
 	})
 }
 
-// Delete removes the preset with this ID or exact name; no resource is changed.
+// Delete removes the saved rule with this ID or exact name; no resource is changed.
 func (s *AccessRuleStore) Delete(ctx context.Context, version int64, selector string) (accessrules.Snapshot, error) {
 	return s.update(ctx, func(j *accessRuleJournal) error {
 		if version >= 0 && version != j.LocalVersion {
@@ -381,10 +387,11 @@ func (s *AccessRuleStore) switchAccount(j *accessRuleJournal, accountID string) 
 }
 func (s *AccessRuleStore) syncFailure(ctx context.Context, cause error) (accessrules.Snapshot, error) {
 	snapshot, err := s.update(ctx, func(j *accessRuleJournal) error {
-		// A journal never linked to an account has nothing to be offline from.
-		j.Sync = accessrules.SyncOffline
-		if j.AccountID == "" {
-			j.Sync = accessrules.SyncLocal
+		// A journal never linked to an account has nothing to be offline from,
+		// and an unresolved conflict still needs resolving.
+		j.status()
+		if j.Sync != accessrules.SyncLocal && j.Sync != accessrules.SyncConflict {
+			j.Sync = accessrules.SyncOffline
 		}
 		return nil
 	})

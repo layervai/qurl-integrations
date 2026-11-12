@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/layervai/qurl-go/qurl"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
@@ -25,8 +28,8 @@ const (
 	accessFlag   = "access"
 	ruleFlag     = "rule"
 	ruleFileFlag = "rule-file"
-	// builtInPrefix marks the catalog's ready-made rule IDs, such as builtin.review.
-	builtInPrefix = "builtin."
+	// emailsFileFlag reads a rule's additional email addresses.
+	emailsFileFlag = "emails-file"
 )
 
 func rulesCmd(opts *globalOpts) *cobra.Command {
@@ -39,7 +42,7 @@ func rulesCmd(opts *globalOpts) *cobra.Command {
 		})
 	}})
 	command.AddCommand(ruleSaveCmd(opts), ruleDeleteCmd(opts))
-	command.AddCommand(&cobra.Command{Use: "sync", Short: "Synchronize saved rules with your linked account; read the JSON sync field, since a deferred sync exits 0", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	command.AddCommand(&cobra.Command{Use: "sync", Short: "Synchronize saved rules with your linked account; read the JSON sync field, since a deferred sync exits 0", Long: "Synchronize saved rules with your account; read the JSON sync field, since a deferred sync exits 0. Rules saved before linking upload to the first account that syncs: QURL_API_KEY's account when it is set, otherwise this device's linked account.", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		return opts.runRulesSync(cmd.Context())
 	}})
 	command.AddCommand(ruleResolveCmd(opts))
@@ -57,7 +60,7 @@ func ruleSaveCmd(opts *globalOpts) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if strings.HasPrefix(definition.ID, builtInPrefix) {
+		if accessrules.IsPresetID(definition.ID) {
 			return exitcode.UsageError(errors.New("ready-made rules cannot be edited; save a custom rule with its own UUID"))
 		}
 		return opts.printRuleStore(func(store *connectorstate.AccessRuleStore) (accessrules.Snapshot, error) {
@@ -131,6 +134,7 @@ func (o *globalOpts) ruleStore() (*connectorstate.AccessRuleStore, error) {
 	}
 	return connectorstate.OpenAccessRules(dir, o.resolvedEndpoint)
 }
+
 func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file, flag string) (accessrules.Definition, error) {
 	if file != "-" {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("use " + flag + " - and pipe one access rule as JSON"))
@@ -144,14 +148,15 @@ func readRuleDefinition(cmd *cobra.Command, opts *globalOpts, file, flag string)
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("access rule JSON is too large"))
 	}
 	var definition accessrules.Definition
-	if connectorstate.DecodeStrictJSON(body, &definition) != nil {
+	if connectorstate.DecodeStrictJSON(body, &definition) != nil || definition.HasUnknownFields() {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("invalid access rule definition"))
 	}
-	if err := definition.Validate(strings.HasPrefix(definition.ID, builtInPrefix)); err != nil {
+	if err := definition.Validate(accessrules.IsPresetID(definition.ID)); err != nil {
 		return accessrules.Definition{}, exitcode.UsageError(fmt.Errorf("invalid access rule definition: %w", err))
 	}
 	return definition, nil
 }
+
 func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (accessrules.Definition, error) {
 	if cmd.Flags().Changed(ruleFileFlag) {
 		return readRuleDefinition(cmd, o, file, "--"+ruleFileFlag)
@@ -159,14 +164,16 @@ func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (ac
 	if strings.TrimSpace(selector) == "" {
 		return accessrules.Definition{}, exitcode.UsageError(errors.New("--rule requires an access rule ID or exact name"))
 	}
-	// Presets resolve before saved rules; NameTaken keeps saved names off them.
-	if accessrules.IsOnlyFirstPerson(selector) {
-		return accessrules.OnlyFirstPerson(), nil
-	}
-	// Built-ins need no saved state, so a damaged rules file cannot block them;
-	// saved rules cannot take their names (NameTaken).
-	if rule, err := accessrules.Find(selector, accessrules.BuiltIns()); err == nil {
-		return rule, nil
+	// Presets resolve before saved rules and need no saved state, so a damaged
+	// rules file cannot block them. NameTaken keeps local saves off their names,
+	// but a rule synced from another client can share one; that name is then
+	// ambiguous and the rule's ID or the preset's ID picks.
+	preset, err := accessrules.Find(selector, []accessrules.Definition{accessrules.OnlyFirstPerson()}, accessrules.BuiltIns())
+	if err == nil {
+		if selector != preset.ID && o.savedRuleNamed(cmd, selector) {
+			return accessrules.Definition{}, ruleCommandError(accessrules.ErrAmbiguousRule)
+		}
+		return preset, nil
 	}
 	store, err := o.ruleStore()
 	if err != nil {
@@ -177,10 +184,39 @@ func (o *globalOpts) selectedRule(cmd *cobra.Command, selector, file string) (ac
 		return accessrules.Definition{}, ruleCommandError(err)
 	}
 	rule, err := accessrules.Find(selector, snapshot.BuiltIns, snapshot.Items)
+	if err == nil && rule.HasUnknownFields() {
+		err = accessrules.ErrNewerRule
+	}
 	if err != nil {
 		return accessrules.Definition{}, ruleCommandError(err)
 	}
 	return rule, nil
+}
+
+// savedRuleNamed reports whether a readable saved rule is named exactly name,
+// matching Find. An unreadable rules file leaves the preset chosen, so it
+// cannot block presets.
+func (o *globalOpts) savedRuleNamed(cmd *cobra.Command, name string) bool {
+	// No profile directory means nothing saved; do not create one here.
+	dir, err := o.resolveShareStateDir("")
+	if err != nil {
+		return false
+	}
+	if _, err = os.Stat(dir); err != nil {
+		return false
+	}
+	store, err := o.ruleStore()
+	var snapshot accessrules.Snapshot
+	if err == nil {
+		snapshot, err = store.Snapshot(cmd.Context())
+	}
+	if err != nil {
+		if log := o.verboseLogger(); log != nil {
+			log("saved access rules are unreadable; using the default rule named %q: %v", name, err)
+		}
+		return false
+	}
+	return slices.ContainsFunc(snapshot.Items, func(d accessrules.Definition) bool { return d.Name == name })
 }
 
 func (o *globalOpts) syncRules(ctx context.Context) (accessrules.Snapshot, error) {
@@ -226,9 +262,22 @@ func (o *globalOpts) syncRules(ctx context.Context) (accessrules.Snapshot, error
 		defer func() { _ = closeStore() }()
 	}
 	if err != nil {
-		return accessrules.Snapshot{}, err
+		// Through Sync, so a client that cannot reach the account records
+		// the journal as offline like any other deferred sync.
+		return store.Sync(ctx, unreachableRules{err})
 	}
 	return store.Sync(ctx, client.AccessRules())
+}
+
+// unreachableRules is the account library when its client could not open.
+type unreachableRules struct{ err error }
+
+func (u unreachableRules) Load(context.Context) (accessrules.AccountLibrary, error) {
+	return accessrules.AccountLibrary{}, u.err
+}
+
+func (u unreachableRules) Replace(context.Context, int64, []accessrules.Definition) (accessrules.AccountLibrary, error) {
+	return accessrules.AccountLibrary{}, u.err
 }
 
 // runRulesSync keeps JSON output unchanged and adds one warning in text mode
@@ -297,6 +346,9 @@ func ruleErrorMessage(err error) string {
 	var file *connectorstate.AccessRulesFileError
 	switch {
 	case errors.As(err, &file):
+		if file.LinkLimits {
+			return fmt.Sprintf(msgLinkLimitsFileDamaged, file.Path)
+		}
 		return fmt.Sprintf(msgRulesFileDamaged, file.Path)
 	case errors.Is(err, accessrules.ErrRuleConflict):
 		return msgRulesRuleConflict
@@ -312,6 +364,8 @@ func ruleErrorMessage(err error) string {
 		return msgRulesDuplicateName
 	case errors.Is(err, accessrules.ErrLibraryLimit):
 		return msgRulesLimit
+	case errors.Is(err, accessrules.ErrNewerRule):
+		return msgRulesNewer
 	}
 	return ""
 }
@@ -324,7 +378,7 @@ func validateRuleSelectionFlags(cmd *cobra.Command) error {
 	if cmd.Flags().Changed(ruleFlag) && cmd.Flags().Changed(ruleFileFlag) {
 		return exitcode.UsageError(errors.New("choose --rule or --rule-file, not both"))
 	}
-	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerContract, modeFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerEmailDomainFlag, consumerContract, modeFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
 		if cmd.Flags().Lookup(name) != nil && cmd.Flags().Changed(name) {
 			return exitcode.UsageError(errors.New("an access rule cannot be combined with other access settings"))
 		}
@@ -343,6 +397,22 @@ func (o *globalOpts) reconcileRulesAfterLink(ctx context.Context) {
 		if notice = ruleErrorMessage(err); notice == "" {
 			notice = msgRulesNotSynced
 		}
+	}
+	if exitcode.FromError(err) == exitcode.Auth {
+		// "Sign in again" would be wrong right after signing in.
+		notice = msgRulesLoginNotSynced
+	}
+	if snapshot.SchemaVersion == 0 {
+		// Sync stopped before reading the journal; read it here so a device
+		// with nothing saved stays quiet.
+		// A fresh budget: the sync may have spent the shared one.
+		readCtx, cancelRead := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		if store, storeErr := o.ruleStore(); storeErr == nil {
+			if local, readErr := store.Snapshot(readCtx); readErr == nil {
+				snapshot = local
+			}
+		}
+		cancelRead()
 	}
 	// A never-linked journal with no saved rules has nothing waiting, so any
 	// sync failure stays quiet; a linked or unreadable journal still warns.
@@ -368,18 +438,20 @@ type ruleSettingFlags struct {
 
 func (f *ruleSettingFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.expiresIn, "expires-in", "", "public rules: each shared link expires after this long, such as 1h or 7d (1m to 30d)")
-	cmd.Flags().BoolVar(&f.oneBrowser, "once", false, "public rules: Only the first person. Anyone else sees that the link no longer works (alias --one-browser)")
+	cmd.Flags().BoolVar(&f.oneBrowser, "once", false, "public rules: one-time links; only the first person to open each link gets in, anyone else sees that it no longer works (alias --one-browser)")
 	cmd.Flags().StringVar(&f.sessionLength, "stays-open-for", "", "public rules: how long they can use it after opening the link, such as 30m (1s to 24h) (alias --session-length)")
 	cmd.Flags().StringVar(&f.approvals, "approvals-last", "", "review and keys rules: 1d, 7d, 30d, 90d or never (default: never)")
 	// The earlier names stay accepted, and named in help, for released clients.
-	cmd.Flags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+	// Wrap, not replace, any normalizer the flag set already has.
+	previous := cmd.Flags().GetNormalizeFunc()
+	cmd.Flags().SetNormalizeFunc(func(set *pflag.FlagSet, name string) pflag.NormalizedName {
 		switch name {
 		case "one-browser":
 			name = "once"
 		case "session-length":
 			name = "stays-open-for"
 		}
-		return pflag.NormalizedName(name)
+		return previous(set, name)
 	})
 }
 
@@ -426,7 +498,8 @@ func (f *ruleSettingFlags) apply(cmd *cobra.Command, d *accessrules.Definition) 
 }
 
 func ruleCreateCmd(opts *globalOpts) *cobra.Command {
-	var mode, domain, contract, emailsFile string
+	var mode, domain, contract, emailsFile, price string
+	var accessSeconds int64
 	var settings ruleSettingFlags
 	cmd := &cobra.Command{Use: "create <name>", Short: "Create a named access rule", Long: `Create a named access rule for future shares.
 
@@ -435,25 +508,25 @@ Who can open it (--mode):
 
 Public rules with --expires-in share a link that expires instead of the
 item's permanent address; qurl share makes later links with the same limits.
-Approvals last (review and keys rules) is how long each approval lasts.`, Example: `  qurl rules create "Acme team" --mode email_domain --email-domain acme.com
+Approvals last (review and keys rules) is how long each approval lasts.
+A contract rule with --stripe-price is People who pay: sharing with it uses
+the Stripe account connected then (qurl payments account).`, Example: `  qurl rules create "Acme team" --mode email_domain --email-domain acme.com
+  qurl rules create "Buyers" --mode contract --contract buyers --stripe-price price_123
   qurl rules create "Quick look" --mode public --expires-in 1h --stays-open-for 30m
   qurl rules create "Client review" --mode review --approvals-last 7d
   qurl rules create "Lab devices" --mode keys --approvals-last 30d`, Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if cmd.Flags().Changed(consumerContract) && mode != accessrules.ModeContract {
-			return exitcode.UsageError(errors.New("--contract applies only to --mode contract"))
+		if (cmd.Flags().Changed(consumerContract) || cmd.Flags().Changed(stripePriceFlag) || cmd.Flags().Changed(paymentAccessSecondsFlag)) && mode != accessrules.ModeContract {
+			return exitcode.UsageError(errors.New("--contract, --stripe-price and --payment-access-seconds apply only to --mode contract"))
 		}
-		if (cmd.Flags().Changed("email-domain") || cmd.Flags().Changed("emails-file")) && mode != accessrules.ModeEmailDomain {
+		if (cmd.Flags().Changed(consumerEmailDomainFlag) || cmd.Flags().Changed(emailsFileFlag)) && mode != accessrules.ModeEmailDomain {
 			return exitcode.UsageError(errors.New("--email-domain and --emails-file apply only to --mode email_domain"))
 		}
-		// A random (version 4, RFC 4122 variant) UUID; no UUID package is in the module graph.
-		var id [16]byte
-		if _, err := rand.Read(id[:]); err != nil {
+		id, err := newRuleID()
+		if err != nil {
 			return err
 		}
-		id[6] = (id[6] & 15) | 64
-		id[8] = (id[8] & 63) | 128
-		definition := accessrules.Definition{ID: fmt.Sprintf("%x-%x-%x-%x-%x", id[:4], id[4:6], id[6:8], id[8:10], id[10:]), Name: strings.TrimSpace(args[0]), Mode: mode, EmailDomain: strings.ToLower(strings.TrimSpace(domain)), ContractID: contract}
-		if cmd.Flags().Changed("emails-file") {
+		definition := accessrules.Definition{ID: id, Name: strings.TrimSpace(args[0]), Mode: mode, EmailDomain: strings.ToLower(strings.TrimSpace(domain)), ContractID: contract}
+		if cmd.Flags().Changed(emailsFileFlag) {
 			emails, err := readAllowedEmails(cmd, opts, emailsFile)
 			if err != nil {
 				return err
@@ -462,6 +535,11 @@ Approvals last (review and keys rules) is how long each approval lasts.`, Exampl
 		}
 		if err := settings.apply(cmd, &definition); err != nil {
 			return exitcode.UsageError(err)
+		}
+		if cmd.Flags().Changed(stripePriceFlag) {
+			definition.Payment = &accessrules.Payment{PriceID: price, AccessSeconds: accessSeconds}
+		} else if cmd.Flags().Changed(paymentAccessSecondsFlag) {
+			return exitcode.UsageError(errors.New("--payment-access-seconds needs --stripe-price"))
 		}
 		if definition.Validate(false) != nil {
 			return exitcode.UsageError(ruleInputError(&definition))
@@ -476,11 +554,25 @@ Approvals last (review and keys rules) is how long each approval lasts.`, Exampl
 		return opts.printer().AccessRule(&definition)
 	}}
 	cmd.Flags().StringVar(&mode, modeFlag, "", modeChoices)
-	cmd.Flags().StringVar(&domain, "email-domain", "", "email domain for domain access, such as acme.com")
+	cmd.Flags().StringVar(&domain, consumerEmailDomainFlag, "", "email domain for domain access, such as acme.com")
 	cmd.Flags().StringVar(&contract, consumerContract, "", "integration reference for Custom access, where your service decides who gets in")
-	cmd.Flags().StringVar(&emailsFile, "emails-file", "", "use - to read optional additional email addresses as a JSON array")
+	cmd.Flags().StringVar(&emailsFile, emailsFileFlag, "", "use - to read optional additional email addresses as a JSON array")
+	cmd.Flags().StringVar(&price, stripePriceFlag, "", "contract rules: Stripe price people pay; LayerV collects 3%")
+	cmd.Flags().Int64Var(&accessSeconds, paymentAccessSecondsFlag, 0, "contract rules: one-time access duration; zero lasts for the resource lifetime; subscriptions require zero")
 	settings.register(cmd)
 	return cmd
+}
+
+// newRuleID returns a random (version 4, RFC 4122 variant) UUID; no UUID
+// package is in the module graph.
+func newRuleID() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	id[6] = (id[6] & 15) | 64
+	id[8] = (id[8] & 63) | 128
+	return fmt.Sprintf("%x-%x-%x-%x-%x", id[:4], id[4:6], id[6:8], id[8:10], id[10:]), nil
 }
 
 // readAllowedEmails reads --emails-file - as a JSON array of normalized addresses.
@@ -491,6 +583,9 @@ func readAllowedEmails(cmd *cobra.Command, opts *globalOpts, file string) ([]str
 	body, err := readRequestBody(cmd.Context(), opts.streams, http.MethodPut)
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > accessrules.MaxBytes {
+		return nil, exitcode.UsageError(errors.New("the email address list is too large"))
 	}
 	var emails []string
 	if connectorstate.DecodeStrictJSON(body, &emails) != nil || emails == nil {
@@ -530,11 +625,37 @@ func ruleInputError(d *accessrules.Definition) error {
 		return errors.New("--email-domain must be a domain such as acme.com")
 	case d.Mode == accessrules.ModeEmailDomain:
 		return errors.New("--emails-file must list each email address once, such as name@acme.com")
+	// Valid without the payment, so the payment is what is wrong.
+	case d.Payment != nil && validWith(func(p *accessrules.Definition) { p.Payment = nil }):
+		return errors.New("--stripe-price must be a Stripe price ID such as price_123, and --payment-access-seconds from 0 to 315360000")
 	case d.Mode == accessrules.ModeContract:
 		return errors.New("--contract must be 1 to 128 letters, digits, hyphens or underscores")
 	default:
 		return fmt.Errorf("invalid access rule: %w", d.Validate(false))
 	}
+}
+
+// completeRulePayment fills in a paid rule's Stripe account, read like qurl
+// payments account; a saved rule stores only the price.
+func completeRulePayment(ctx context.Context, client qurlapi.Client, policy *qurl.ConsumerAccessPolicy) error {
+	if policy == nil || policy.Payment == nil || policy.Payment.AccountID != "" {
+		return nil
+	}
+	payments, err := publisherPayments(client)
+	if err != nil {
+		return err
+	}
+	account, err := payments.PublisherStripeAccount(ctx)
+	if code := exitcode.FromError(err); code == exitcode.Unavailable || code == exitcode.RateLimited {
+		return &accessRuleCommandError{message: msgRulesPaymentsUnavailable, cause: err}
+	}
+	if err != nil {
+		return err
+	}
+	if account == "" {
+		return exitcode.InvalidInputError(msgRulesStripeNotConnected, nil)
+	}
+	return setStripePayment(policy, account, policy.Payment.PriceID, policy.Payment.AccessSeconds)
 }
 
 // applyRuleToShare runs once the resource exists. A new public share keeps
@@ -544,10 +665,29 @@ func ruleInputError(d *accessrules.Definition) error {
 // explicit public rule supplies limits without changing the resource policy.
 // published.OtherSettings says when the chosen rule differs from saved settings.
 func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, published *qurlapi.Published) error {
+	limits, err := o.ruleLinkLimits(ctx, rule, published)
+	if err != nil {
+		return err
+	}
+	return o.mintRuleLink(ctx, client, rule, published, limits)
+}
+
+// ruleLinkLimits saves a new share's limits, or reads an existing share's, and
+// returns the limits to mint with; nil mints nothing. Local publish calls it
+// before serving, so a failed save can still turn the new share back off.
+func (o *globalOpts) ruleLinkLimits(ctx context.Context, rule *accessrules.Definition, published *qurlapi.Published) (*accessrules.LinkLimits, error) {
 	existing := published.FoundExisting != nil && *published.FoundExisting
+	var kept *accessrules.LinkLimits
+	var keptErr error
+	keptRead := false
+	if published.FoundExisting == nil && rule != nil && rule.LinkLimits != nil {
+		// An unproven outcome never overwrites limits this share already has.
+		kept, keptErr = o.savedLinkLimits(ctx, published.CRID)
+		keptRead, existing = true, keptErr != nil || kept != nil
+	}
 	remember := !existing
 	if rule == nil && !existing {
-		return nil
+		return nil, nil //nolint:nilnil // nothing to mint
 	}
 	id := published.CRID
 	var limits *accessrules.LinkLimits
@@ -555,49 +695,67 @@ func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client
 		limits = rule.LinkLimits
 	}
 	if existing {
-		kept, err := o.savedLinkLimits(ctx, id)
+		if !keptRead {
+			kept, keptErr = o.savedLinkLimits(ctx, id)
+		}
+		err := keptErr
 		if err != nil && rule == nil {
 			// A plain republish never asked for rules; it still succeeds.
-			o.printer().Warnf(msgRulesLimitsUnread+" %v", id, err)
-			return nil
+			o.printer().Warnf(msgRulesLimitsUnread, id, err)
+			return nil, nil //nolint:nilnil // nothing to mint
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if kept == nil && limits != nil && published.Private != nil && !*published.Private {
 			// Recover a lost first-publish response/save; these limits are device-local.
 			kept, remember = limits, true
 		}
-		if rule != nil {
-			// Only approvals can differ here (Publish refuses any other policy
-			// change); SameDefinition compares them in the service's stored form.
-			policy := rule.Policy(1)
-			received := policy
-			received.ApprovalExpiresIn = ""
-			if published.ConsumerAccess != nil {
-				received.ApprovalExpiresIn = published.ConsumerAccess.ApprovalExpiresIn
-			}
-			published.OtherSettings = !accessrules.SameEffectiveLinkLimits(kept, limits) || !received.SameDefinition(policy)
-		}
+		recordRuleSettingsDifference(rule, published, kept)
 		limits = kept
 	}
-	if remember && limits != nil {
-		store, err := o.shareRuleStore()
-		if err == nil {
-			err = store.Set(ctx, id, limits)
-		}
-		if err != nil {
-			return fmt.Errorf("%s was published, but its link limits could not be saved on this device: %w", id, err)
+	if remember {
+		if err := o.saveRuleLinkLimits(ctx, id, limits); err != nil {
+			return nil, err
 		}
 	}
-	return o.mintRuleLink(ctx, client, rule, published, limits)
+	return limits, nil
 }
 
-func (o *globalOpts) mintRuleLink(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, published *qurlapi.Published, limits *accessrules.LinkLimits) error {
-	id := published.CRID
+func recordRuleSettingsDifference(rule *accessrules.Definition, published *qurlapi.Published, kept *accessrules.LinkLimits) {
+	if rule != nil {
+		// Only approvals can differ here (Publish refuses any other policy
+		// change); SameDefinition compares them in the service's stored form.
+		policy := rule.Policy(1)
+		received := policy
+		received.ApprovalExpiresIn = ""
+		if published.ConsumerAccess != nil {
+			received.ApprovalExpiresIn = published.ConsumerAccess.ApprovalExpiresIn
+		}
+		published.OtherSettings = !accessrules.SameEffectiveLinkLimits(kept, rule.LinkLimits) || !received.SameDefinition(policy)
+	}
+}
+
+func (o *globalOpts) saveRuleLinkLimits(ctx context.Context, id string, limits *accessrules.LinkLimits) error {
 	if limits == nil {
 		return nil
 	}
+	store, err := o.shareRuleStore()
+	if err == nil {
+		err = store.Set(ctx, id, limits)
+	}
+	if err != nil {
+		return fmt.Errorf("%s was published, but its link limits could not be saved on this device: %w", id, err)
+	}
+	return nil
+}
+
+// mintRuleLink mints and verifies the link with limits into published.LimitedLink.
+func (o *globalOpts) mintRuleLink(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, published *qurlapi.Published, limits *accessrules.LinkLimits) error {
+	if limits == nil {
+		return nil
+	}
+	id := published.CRID
 	// The same checks share applies before any link is printed.
 	link, err := client.MintLimitedLink(ctx, id, *limits)
 	if err = verifyShareLink(id, link, err); err == nil {

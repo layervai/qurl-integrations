@@ -18,7 +18,7 @@ import (
 )
 
 func consumerAccessCmd(opts *globalOpts) *cobra.Command {
-	var email, mode, contract, cursor, kind, credentialID, key, entitlement, expiry, ruleSelector, ruleFile string
+	var email, emailDomain, mode, contract, cursor, kind, credentialID, key, entitlement, expiry, ruleSelector, ruleFile string
 	var version int64
 	var stripeAccount, stripePrice string
 	var paymentAccessSeconds int64
@@ -26,7 +26,7 @@ func consumerAccessCmd(opts *globalOpts) *cobra.Command {
 	allowed := map[string][]string{
 		consumerInvite: {"email"}, consumerListInvitations: {consumerCursor}, consumerListGrants: {consumerCursor},
 		consumerResend: {consumerVersion}, consumerRevokeInvitation: {consumerVersion}, consumerDeny: {consumerVersion}, consumerRevokeGrant: {consumerVersion},
-		consumerConfigure: {modeFlag, consumerContract, consumerVersion, ruleFlag, ruleFileFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag},
+		consumerConfigure: {modeFlag, consumerEmailDomainFlag, consumerContract, consumerVersion, ruleFlag, ruleFileFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag},
 		consumerApprove:   {consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at"},
 	}
 	cmd := &cobra.Command{
@@ -54,7 +54,7 @@ Use --access when you publish to choose the initial policy.`,
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			input := consumerAccessInput{stripeAccount: stripeAccount, stripePrice: stripePrice, paymentAccessSeconds: paymentAccessSeconds, action: args[0], email: email, mode: mode, contract: contract, cursor: cursor, version: version, kind: kind, credentialID: credentialID, key: key, entitlement: entitlement, expiry: expiry}
+			input := consumerAccessInput{stripeAccount: stripeAccount, stripePrice: stripePrice, paymentAccessSeconds: paymentAccessSeconds, action: args[0], email: email, mode: mode, emailDomain: emailDomain, contract: contract, cursor: cursor, version: version, kind: kind, credentialID: credentialID, key: key, entitlement: entitlement, expiry: expiry}
 			if len(args) == 3 {
 				input.decision = args[2]
 			}
@@ -67,7 +67,7 @@ Use --access when you publish to choose the initial policy.`,
 			if err := validateConsumerDecision(&input); err != nil {
 				return err
 			}
-			// After the flag checks, so a rejected command reads no stdin or rule state.
+			// After the flag checks, so a rejected flag reads no stdin or rule state.
 			if err := opts.applyConsumerRule(cmd, &input, ruleSelector, ruleFile); err != nil {
 				return err
 			}
@@ -90,6 +90,9 @@ Use --access when you publish to choose the initial policy.`,
 			if err != nil {
 				return err
 			}
+			if err := completeRulePayment(cmd.Context(), client, input.policy); err != nil {
+				return err
+			}
 			result, err := executeConsumerAction(cmd.Context(), client.ConsumerManagement(), assessment.Input, &input)
 			if err != nil {
 				return err
@@ -102,6 +105,7 @@ Use --access when you publish to choose the initial policy.`,
 	cmd.Flags().StringVar(&stripeAccount, stripeAccountFlag, "", "connected publisher Stripe account")
 	cmd.Flags().StringVar(&stripePrice, stripePriceFlag, "", "Stripe price for paid contract access; LayerV collects 3%")
 	cmd.Flags().Int64Var(&paymentAccessSeconds, paymentAccessSecondsFlag, 0, "one-time access duration; zero lasts for the resource lifetime; subscriptions require zero")
+	cmd.Flags().StringVar(&emailDomain, consumerEmailDomainFlag, "", "exact lowercase email domain for email_domain access")
 	cmd.Flags().StringVar(&email, "email", "", "email address for an invitation")
 	cmd.Flags().StringVar(&mode, modeFlag, "", "private access policy")
 	cmd.Flags().StringVar(&contract, consumerContract, "", "publisher contract identifier")
@@ -129,6 +133,7 @@ const (
 	consumerVersion          = "version"
 	consumerCursor           = "cursor"
 	consumerContract         = "contract"
+	consumerEmailDomainFlag  = "email-domain"
 	consumerNewKey           = "new"
 )
 
@@ -142,12 +147,12 @@ const (
 )
 
 type consumerAccessInput struct {
-	stripeAccount, stripePrice                                                                    string
-	paymentAccessSeconds                                                                          int64
-	action, decision, email, mode, contract, cursor, kind, credentialID, key, entitlement, expiry string
-	version                                                                                       int64
-	expiresAt                                                                                     *time.Time
-	policy                                                                                        *qurl.ConsumerAccessPolicy
+	stripeAccount, stripePrice                                                                                 string
+	paymentAccessSeconds                                                                                       int64
+	action, decision, email, emailDomain, mode, contract, cursor, kind, credentialID, key, entitlement, expiry string
+	version                                                                                                    int64
+	expiresAt                                                                                                  *time.Time
+	policy                                                                                                     *qurl.ConsumerAccessPolicy
 }
 
 func validateConsumerActionFlags(cmd *cobra.Command, action string, allowed map[string][]string) error {
@@ -155,7 +160,7 @@ func validateConsumerActionFlags(cmd *cobra.Command, action string, allowed map[
 	if !ok {
 		return exitcode.UsageError(errors.New("unknown access action"))
 	}
-	for _, name := range []string{"email", modeFlag, ruleFlag, ruleFileFlag, consumerContract, consumerCursor, consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at", stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
+	for _, name := range []string{"email", modeFlag, consumerEmailDomainFlag, ruleFlag, ruleFileFlag, consumerContract, consumerCursor, consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at", stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
 		if cmd.Flags().Changed(name) && !slices.Contains(flags, name) {
 			return exitcode.UsageError(fmt.Errorf("--%s does not apply to %s", name, action))
 		}
@@ -201,8 +206,8 @@ func validateConsumerFields(input *consumerAccessInput) error {
 		// Exact receipt retries can recover a pending notification after expiry.
 		input.expiresAt = &parsed
 	}
-	if input.action == consumerConfigure && input.policy == nil && qurlapi.ValidateConsumerPolicyFields(input.mode, input.contract) != nil {
-		return exitcode.UsageError(errors.New("choose a valid --mode and a --contract only for contract mode"))
+	if input.action == consumerConfigure && input.policy == nil && qurlapi.ValidateConsumerPolicyFields(input.mode, input.contract, input.emailDomain) != nil {
+		return exitcode.UsageError(errors.New("choose a valid --mode; --email-domain requires email_domain mode and an exact lowercase DNS domain; --contract requires contract mode"))
 	}
 	if input.action == consumerApprove {
 		return validateConsumerApproval(input)
@@ -249,7 +254,7 @@ func executeConsumerAction(ctx context.Context, owner qurlapi.ConsumerManagement
 	case consumerRevokeGrant:
 		result.Grant, err = owner.RevokeConsumerGrant(ctx, crid, input.decision, input.version)
 	case consumerConfigure:
-		policy := qurl.ConsumerAccessPolicy{Mode: input.mode, Version: input.version + 1, ContractID: input.contract}
+		policy := qurl.ConsumerAccessPolicy{Mode: input.mode, Version: input.version + 1, ContractID: input.contract, EmailDomain: input.emailDomain}
 		if input.policy != nil {
 			policy = *input.policy
 		}
@@ -299,11 +304,16 @@ func (o *globalOpts) applyConsumerRule(cmd *cobra.Command, input *consumerAccess
 	return nil
 }
 
+var (
+	stripeAccountPattern = regexp.MustCompile(`^acct_[A-Za-z0-9]{1,128}$`)
+	stripePricePattern   = regexp.MustCompile(`^price_[A-Za-z0-9]{1,128}$`)
+)
+
 func setStripePayment(policy *qurl.ConsumerAccessPolicy, account, price string, seconds int64) error {
 	if account == "" && price == "" && seconds == 0 {
 		return nil
 	}
-	if policy == nil || policy.Mode != consumerContract || !regexp.MustCompile(`^acct_[A-Za-z0-9]{1,128}$`).MatchString(account) || !regexp.MustCompile(`^price_[A-Za-z0-9]{1,128}$`).MatchString(price) || seconds < 0 || seconds > 315360000 {
+	if policy == nil || policy.Mode != consumerContract || !stripeAccountPattern.MatchString(account) || !stripePricePattern.MatchString(price) || seconds < 0 || seconds > 315360000 {
 		return exitcode.UsageError(errors.New("stripe payments require contract access, --stripe-account, --stripe-price and a valid --payment-access-seconds"))
 	}
 	policy.Payment = &qurl.CRIDPaymentPolicy{AccountID: account, PriceID: price, AccessSeconds: seconds}

@@ -26,7 +26,9 @@ func (p *Printer) AccessRules(snapshot *accessrules.Snapshot) error {
 	ew := &errWriter{w: p.out}
 	if p.quiet {
 		for _, d := range defaultRules {
-			ew.printf("%s\n", d.selector)
+			if d.selector != "" {
+				ew.printf("%s\n", d.selector)
+			}
 		}
 		for i := range snapshot.Items {
 			ew.printf("%s\n", snapshot.Items[i].ID)
@@ -53,12 +55,13 @@ func (p *Printer) AccessRules(snapshot *accessrules.Snapshot) error {
 }
 
 // defaultRules mirrors the catalog's defaults, easiest to open first; selector
-// is what --rule takes. TestDefaultRulesMatchCatalog keeps them identical.
+// is what --rule takes (none for People who pay, which needs a price: save a
+// contract rule with --stripe-price). TestAccessModesMatchCatalog keeps them identical.
 var defaultRules = []struct{ id, selector, label, line string }{
-	{"public", "builtin.public", "Anyone with the link", "Anyone who gets the link can open it."},
-	{"once", accessrules.OnlyFirstPersonID, accessrules.OnlyFirstPersonLabel, "The first person to open it within 1 hour gets in. Then it’s used up."},
+	{"once", accessrules.OnlyFirstPersonID, accessrules.OnlyFirstPersonLabel, "The first person to open it gets in. Then it’s used up."},
 	{"invite_only", "builtin.invite_only", "People you invite", "Only the email addresses you add can open it."},
 	{"review", "builtin.review", "People you approve", "They confirm their email and ask. You approve each person."},
+	{"paid", "", "People who pay", "They pay your price, then it opens for them."},
 }
 
 // AccessRule prints one rule, or only its ID when quiet.
@@ -95,6 +98,12 @@ func AccessRuleSummary(d *accessrules.Definition) string {
 		}
 		if l.SessionDuration != nil {
 			parts = append(parts, "stays open for "+ruleDuration(*l.SessionDuration))
+		}
+	}
+	if p := d.Payment; p != nil {
+		parts[0] = "People who pay"
+		if p.AccessSeconds > 0 {
+			parts = append(parts, "access lasts "+ruleDuration(fmt.Sprintf("%ds", p.AccessSeconds)))
 		}
 	}
 	switch {

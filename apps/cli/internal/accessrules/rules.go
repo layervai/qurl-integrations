@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -63,7 +64,42 @@ type Definition struct {
 	// ApprovalExpiresIn is how long a review or keys approval lasts; nil
 	// approvals never expire. It travels in the policy and the service enforces it.
 	ApprovalExpiresIn *string `json:"approval_expires_in,omitempty"`
+	// Payment makes a contract rule "People who pay". It holds no Stripe
+	// account: the connected one is read when the rule is applied.
+	Payment *Payment `json:"payment,omitempty"`
+	// raw is the rule exactly as read when it holds fields this CLI does not
+	// model (qurl.AccessRule.HasUnknownFields), such as ones a newer service
+	// adds. Such a rule is listed, deleted and written back as raw, never
+	// edited or applied: dropping a setting could share more openly.
+	raw json.RawMessage
 }
+
+// HasUnknownFields reports whether the rule holds fields this CLI does not model.
+func (d *Definition) HasUnknownFields() bool { return d.raw != nil }
+
+// MarshalJSON writes a rule with unknown fields exactly as it was read.
+func (d Definition) MarshalJSON() ([]byte, error) { //nolint:gocritic // A value receiver marshals every copy, so none drops its unknown fields.
+	type plain Definition
+	if d.raw == nil {
+		return json.Marshal(plain(d))
+	}
+	var read Definition
+	if json.Unmarshal(d.raw, &read) != nil || !EqualItems([]Definition{read}, []Definition{d}) {
+		return nil, ErrNewerRule
+	}
+	return d.raw, nil
+}
+
+// Payment is a CRID payment policy without its account; the SDK's policy
+// validation checks it.
+type Payment struct {
+	PriceID       string `json:"price_id"`
+	AccessSeconds int64  `json:"access_seconds"`
+}
+
+// validationAccount stands in for the account a paid rule never stores, so
+// the SDK checks the rest of its payment.
+const validationAccount = "acct_rule"
 
 // LinkLimits bounds one minted temporary link. Durations use the service's
 // expires_in and session_duration grammar; nil one_time_use is false.
@@ -152,6 +188,10 @@ func (d *Definition) validateSettings() error {
 			return errors.New("approval_expires_in must be from 1h to 365d")
 		}
 	}
+	// The SDK checks the price and duration; public rules never reach it.
+	if d.Payment != nil && d.Mode != ModeContract {
+		return errors.New("payment applies only to contract rules")
+	}
 	return nil
 }
 
@@ -178,20 +218,29 @@ func sameSettings(a, b *Definition) bool {
 	return sameLinkLimits(a.LinkLimits, b.LinkLimits) && samePointer(a.ApprovalExpiresIn, b.ApprovalExpiresIn)
 }
 
-// SameEffectiveLinkLimits compares what the limits do: an explicit
-// one_time_use false is the same as omitting it. session_duration has no
-// such default, since omitting it leaves the client's own.
+// SameEffectiveLinkLimits compares what the limits do: durations by length
+// ("60m" is "1h"), and an explicit one_time_use false is the same as omitting
+// it. session_duration has no such default, since omitting it leaves the
+// client's own.
 func SameEffectiveLinkLimits(a, b *LinkLimits) bool {
-	return sameLinkLimits(withoutDefaults(a), withoutDefaults(b))
+	if a == nil || b == nil {
+		return a == b
+	}
+	return sameDuration(&a.ExpiresIn, &b.ExpiresIn) && sameDuration(a.SessionDuration, b.SessionDuration) &&
+		(a.OneTimeUse != nil && *a.OneTimeUse) == (b.OneTimeUse != nil && *b.OneTimeUse)
 }
 
-func withoutDefaults(l *LinkLimits) *LinkLimits {
-	if l == nil || l.OneTimeUse == nil || *l.OneTimeUse {
-		return l
+// sameDuration compares presence, then length; unparsable values compare as text.
+func sameDuration(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
 	}
-	copied := *l
-	copied.OneTimeUse = nil
-	return &copied
+	x, errA := ParseDuration(*a)
+	y, errB := ParseDuration(*b)
+	if errA != nil || errB != nil {
+		return *a == *b
+	}
+	return x == y
 }
 
 // sameLinkLimits compares limits field by field, presence included.
@@ -217,27 +266,37 @@ func BuiltIns() []Definition {
 	}
 }
 
-// OnlyFirstPersonID selects the Only the first person preset wherever a rule is chosen.
+// OnlyFirstPersonID selects the One-time link preset wherever a rule is chosen.
 const OnlyFirstPersonID = "once"
 
+// IsPresetID reports whether id names a ready-made choice: a built-in or the
+// One-time link preset. Saved rules never carry one.
+func IsPresetID(id string) bool {
+	return strings.HasPrefix(id, BuiltInPrefix) || id == OnlyFirstPersonID
+}
+
+// BuiltInPrefix marks the catalog's built-in rule IDs, such as builtin.review.
+const BuiltInPrefix = "builtin."
+
 // OnlyFirstPersonLabel is the preset's name on every surface.
-const OnlyFirstPersonLabel = "Only the first person"
+const OnlyFirstPersonLabel = "One-time link"
 
 // OnlyFirstPerson is Anyone with the link on a single-use link that expires
 // like any temporary link. It is a preset, never saved as a rule; it matches
 // the catalog's defaults entry, which TestFrozenCatalogContract enforces.
 func OnlyFirstPerson() Definition {
-	return Definition{ID: OnlyFirstPersonID, Name: OnlyFirstPersonLabel, Mode: ModePublic, LinkLimits: &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true), SessionDuration: new("1h")}}
-}
-
-// IsOnlyFirstPerson reports whether selector names the preset by its ID or exact name.
-func IsOnlyFirstPerson(selector string) bool {
-	return selector == OnlyFirstPersonID || selector == OnlyFirstPersonLabel
+	return Definition{ID: OnlyFirstPersonID, Name: OnlyFirstPersonLabel, Mode: ModePublic, LinkLimits: &LinkLimits{ExpiresIn: "30d", OneTimeUse: new(true), SessionDuration: new("24h")}}
 }
 
 // Policy expands this preset into an independent resource policy snapshot.
+// A paid rule's payment has no account, so the policy fails validation until
+// the connected account is filled in.
 func (d *Definition) Policy(version int64) qurl.ConsumerAccessPolicy {
-	return qurl.ConsumerAccessPolicy{Mode: d.Mode, Version: version, ContractID: d.ContractID, EmailDomain: d.EmailDomain, AllowedEmails: slices.Clone(d.AllowedEmails), ApprovalExpiresIn: d.approvalExpiresIn()}
+	policy := qurl.ConsumerAccessPolicy{Mode: d.Mode, Version: version, ContractID: d.ContractID, EmailDomain: d.EmailDomain, AllowedEmails: slices.Clone(d.AllowedEmails), ApprovalExpiresIn: d.approvalExpiresIn()}
+	if d.Payment != nil {
+		policy.Payment = &qurl.CRIDPaymentPolicy{PriceID: d.Payment.PriceID, AccessSeconds: d.Payment.AccessSeconds}
+	}
+	return policy
 }
 
 func (d *Definition) approvalExpiresIn() string {
@@ -251,7 +310,7 @@ func (d *Definition) approvalExpiresIn() string {
 // A built-in matches by ID and policy only, so its display name may change.
 func (d *Definition) Validate(builtin bool) error {
 	if builtin {
-		if !d.builtIn() {
+		if !validName(d.Name) || !d.builtIn() {
 			return errors.New("unsupported built-in access rule")
 		}
 		return nil
@@ -259,9 +318,7 @@ func (d *Definition) Validate(builtin bool) error {
 	if err := d.validateSettings(); err != nil {
 		return err
 	}
-	if !uuidPattern.MatchString(d.ID) || !utf8.ValidString(d.Name) || utf8.RuneCountInString(d.Name) < 1 || utf8.RuneCountInString(d.Name) > 120 || strings.TrimSpace(d.Name) == "" || strings.ContainsFunc(d.Name, func(r rune) bool {
-		return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
-	}) {
+	if !uuidPattern.MatchString(d.ID) || !validName(d.Name) {
 		return errors.New("invalid access rule identity or name")
 	}
 	if d.Mode == ModePublic {
@@ -270,13 +327,116 @@ func (d *Definition) Validate(builtin bool) error {
 		}
 		return nil
 	}
-	if d.Policy(1).Validate() != nil {
+	policy := d.Policy(1)
+	if policy.Payment != nil {
+		policy.Payment.AccountID = validationAccount
+	}
+	if policy.Validate() != nil {
 		return errors.New("invalid access rule policy")
 	}
 	return nil
 }
 
+// maxStackedMarks is the most combining marks one base character may carry.
+const maxStackedMarks = 3
+
+// validName accepts 1-120 runes of single-line display text.
+// TODO(upstream-contract): copied from qurl-service internal/domain/access_rule_name.go
+// validAccessRuleName; keep identical, since a stricter copy fails sync on read.
+func validName(name string) bool {
+	if !utf8.ValidString(name) || utf8.RuneCountInString(name) > 120 || strings.TrimSpace(name) == "" {
+		return false
+	}
+	runes := []rune(name)
+	marks, base := 0, false
+	for i, c := range runes {
+		// Emoji ZWJ, tag sequences and in-word script joiners are the only format characters allowed.
+		if unicode.Is(unicode.Cf, c) && emojiFormatRune(runes, i) {
+			continue
+		}
+		if unicode.IsControl(c) || unicode.In(c, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return false
+		}
+		// Combining marks need a base and stack at most maxStackedMarks deep.
+		switch {
+		case unicode.In(c, unicode.M):
+			marks++
+			if !base || marks > maxStackedMarks {
+				return false
+			}
+		case unicode.IsSpace(c):
+			marks, base = 0, false
+		default:
+			marks, base = 0, true
+		}
+	}
+	return true
+}
+
+const cancelTag = '\U000E007F'
+
+func tagSpec(r rune) bool { return r >= '\U000E0020' && r < cancelTag }
+
+// emojiFormatRune accepts a zero width joiner between two emoji (after any
+// skin-tone modifier or variation selector), a script joiner, and the tag
+// characters of a subdivision flag.
+func emojiFormatRune(runes []rune, i int) bool {
+	if c := runes[i]; c == cancelTag || tagSpec(c) {
+		return subdivisionFlagTag(runes, i)
+	}
+	if scriptJoiner(runes, i) {
+		return true
+	}
+	if runes[i] != '\u200d' || i == 0 || i+1 == len(runes) || !unicode.Is(unicode.So, runes[i+1]) {
+		return false
+	}
+	prev := i - 1
+	if runes[prev] == '\ufe0f' && prev > 0 {
+		prev--
+	}
+	if runes[prev] >= '\U0001F3FB' && runes[prev] <= '\U0001F3FF' && prev > 0 {
+		prev-- // skin-tone modifier
+	}
+	return unicode.Is(unicode.So, runes[prev])
+}
+
+// joinerScripts are the scripts whose words use the zero width (non-)joiner.
+var joinerScripts = []*unicode.RangeTable{unicode.Arabic, unicode.Syriac, unicode.Devanagari, unicode.Bengali,
+	unicode.Gurmukhi, unicode.Gujarati, unicode.Oriya, unicode.Tamil, unicode.Telugu, unicode.Kannada,
+	unicode.Malayalam, unicode.Sinhala}
+
+// scriptJoiner accepts a ZWNJ or ZWJ between a letter or mark and a letter of one joiner script.
+func scriptJoiner(runes []rune, i int) bool {
+	if (runes[i] != '\u200c' && runes[i] != '\u200d') || i == 0 || i+1 == len(runes) {
+		return false
+	}
+	prev, next := runes[i-1], runes[i+1]
+	if !unicode.IsLetter(prev) && !unicode.In(prev, unicode.M) || !unicode.IsLetter(next) {
+		return false
+	}
+	return slices.ContainsFunc(joinerScripts, func(script *unicode.RangeTable) bool {
+		return unicode.Is(script, prev) && unicode.Is(script, next)
+	})
+}
+
+// subdivisionFlagTag accepts a tag in the black flag, one to six tag specs, then the cancel tag.
+func subdivisionFlagTag(runes []rune, i int) bool {
+	first, end := i, i
+	for first > 0 && tagSpec(runes[first-1]) {
+		first--
+	}
+	for end < len(runes) && tagSpec(runes[end]) {
+		end++
+	}
+	specs := end - first
+	return first > 0 && runes[first-1] == '\U0001F3F4' && specs >= 1 && specs <= 6 && end < len(runes) && runes[end] == cancelTag
+}
+
 func (d *Definition) builtIn() bool {
+	// The One-time link preset is the one ready-made choice with link limits.
+	if once := OnlyFirstPerson(); d.ID == once.ID {
+		return d.Mode == once.Mode && d.Policy(1).SameDefinition(once.Policy(1)) && d.ApprovalExpiresIn == nil && SameEffectiveLinkLimits(d.LinkLimits, once.LinkLimits)
+	}
 	builtIns := BuiltIns()
 	for i := range builtIns {
 		if b := &builtIns[i]; b.ID == d.ID && b.Policy(1).SameDefinition(d.Policy(1)) && !d.hasSettings() {
@@ -340,10 +500,14 @@ func settingsSize(d *Definition) int {
 			size += len("session_duration") + len(*l.SessionDuration)
 		}
 	}
+	if p := d.Payment; p != nil {
+		size += 3 + len("payment") + len("price_id") + len(p.PriceID) + len("access_seconds") + len(strconv.FormatInt(p.AccessSeconds, 10))
+	}
 	return size
 }
 
-// Find returns the one rule whose ID or exact name is selector.
+// Find returns the one rule whose ID or exact name is selector. Names match
+// exactly here; NameTaken ignores case so no two names differ only by case.
 func Find(selector string, lists ...[]Definition) (Definition, error) {
 	var matches []Definition
 	for _, list := range lists {
@@ -367,13 +531,13 @@ func Find(selector string, lists ...[]Definition) (Definition, error) {
 	}
 }
 
-// NameTaken reports whether another custom rule, a built-in or Only the first
-// person already uses d's name, ignoring case and surrounding space.
+// NameTaken reports whether another custom rule, a built-in or the One-time
+// link preset already uses d's name, ignoring case and surrounding space.
 func NameTaken(items []Definition, d *Definition) bool {
 	name := strings.TrimSpace(d.Name)
 	// --rule reads these selectors as presets before saved names, so a rule named
 	// "once" or "builtin.…" could never be chosen and would silently pick a preset.
-	if strings.EqualFold(name, OnlyFirstPersonID) || strings.HasPrefix(strings.ToLower(name), "builtin.") {
+	if strings.EqualFold(name, OnlyFirstPersonID) || strings.HasPrefix(strings.ToLower(name), BuiltInPrefix) {
 		return true
 	}
 	return slices.ContainsFunc(append(append(BuiltIns(), OnlyFirstPerson()), items...), func(other Definition) bool {
@@ -433,6 +597,7 @@ var (
 	ErrAmbiguousRule   = errors.New("more than one access rule has this name; use its ID")
 	ErrDuplicateName   = errors.New("an access rule with this name already exists")
 	ErrLibraryLimit    = errors.New("access rules exceed the 100-rule or size limit")
+	ErrNewerRule       = errors.New("access rule has settings from a newer qURL app and cannot be changed or used here")
 )
 
 // AccountLibrary is the authenticated service snapshot, never printed directly.
@@ -465,11 +630,28 @@ func EqualItems(a, b []Definition) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].ID != b[i].ID || a[i].Name != b[i].Name || !a[i].Policy(1).Equal(b[i].Policy(1)) || !sameSettings(&a[i], &b[i]) {
+		if a[i].ID != b[i].ID || a[i].Name != b[i].Name || !a[i].Policy(1).Equal(b[i].Policy(1)) || !sameSettings(&a[i], &b[i]) || !sameJSON(a[i].raw, b[i].raw) {
 			return false
 		}
 	}
 	return true
+}
+
+// sameJSON compares two optional JSON values ignoring member order and spacing.
+func sameJSON(a, b json.RawMessage) bool {
+	if bytes.Equal(a, b) {
+		return true
+	}
+	decode := func(raw json.RawMessage) (any, error) {
+		var value any
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber() // large integers stay exact
+		err := decoder.Decode(&value)
+		return value, err
+	}
+	x, errX := decode(a)
+	y, errY := decode(b)
+	return a != nil && b != nil && errX == nil && errY == nil && reflect.DeepEqual(x, y)
 }
 
 // Validate verifies a complete service response without guessing absent fields.
@@ -481,9 +663,7 @@ func (l AccountLibrary) Validate() error {
 }
 
 // UnmarshalJSON preserves field presence so irrelevant empty settings cannot pass.
-// It accepts exactly the contract's fields; a write-back therefore never drops one.
-// TODO(upstream-contract): a new rule field from qurl-service fails sync on
-// released CLIs until the catalog schema is versioned or older clients are served without it.
+// Fields the SDK does not model are kept in raw, so a write-back never drops one.
 func (d *Definition) UnmarshalJSON(data []byte) error {
 	type plain Definition
 	var fields map[string]json.RawMessage
@@ -491,10 +671,12 @@ func (d *Definition) UnmarshalJSON(data []byte) error {
 		return errors.New("invalid access rule definition")
 	}
 	var parsed plain
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&parsed) != nil {
+	var err error
+	if json.Unmarshal(data, &parsed) != nil {
 		return errors.New("invalid access rule definition")
+	}
+	if parsed.raw, err = unknownFieldsRaw(data); err != nil {
+		return err
 	}
 	for key, value := range fields {
 		switch key {
@@ -507,28 +689,49 @@ func (d *Definition) UnmarshalJSON(data []byte) error {
 			if parsed.Mode != ModeEmailDomain || bytes.Equal(value, []byte("null")) {
 				return errors.New("invalid access rule definition")
 			}
-		case "link_limits":
-			// A nested null would read as omitted; Validate checks the mode.
-			if !presentWithoutNulls(value, "expires_in") {
+		case "link_limits", "payment":
+			// A nested null or missing member would read as omitted or zero;
+			// Validate checks the mode.
+			if !presentWithoutNulls(value, requiredMembers[key]...) {
 				return errors.New("invalid access rule definition")
 			}
 		case "approval_expires_in":
 			if bytes.Equal(value, []byte("null")) {
 				return errors.New("invalid access rule definition")
 			}
-		default:
-			return errors.New("invalid access rule definition")
 		}
 	}
 	*d = Definition(parsed)
 	return nil
 }
 
-// presentWithoutNulls reports whether value is an object holding required and no null member.
-func presentWithoutNulls(value json.RawMessage, required string) bool {
+// unknownFieldsRaw returns data compacted when it holds a field the SDK does
+// not model, or nil when it holds none.
+func unknownFieldsRaw(data []byte) (json.RawMessage, error) {
+	var probe qurl.AccessRule
+	var compact bytes.Buffer
+	if json.Unmarshal(data, &probe) != nil || json.Compact(&compact, data) != nil {
+		return nil, errors.New("invalid access rule definition")
+	}
+	if !probe.HasUnknownFields() {
+		return nil, nil
+	}
+	return compact.Bytes(), nil
+}
+
+// requiredMembers are the members each nested setting must hold.
+var requiredMembers = map[string][]string{"link_limits": {"expires_in"}, "payment": {"price_id", "access_seconds"}}
+
+// presentWithoutNulls reports whether value is an object holding every required and no null member.
+func presentWithoutNulls(value json.RawMessage, required ...string) bool {
 	var members map[string]json.RawMessage
-	if json.Unmarshal(value, &members) != nil || members == nil || members[required] == nil {
+	if json.Unmarshal(value, &members) != nil || members == nil {
 		return false
+	}
+	for _, name := range required {
+		if members[name] == nil {
+			return false
+		}
 	}
 	for _, member := range members {
 		if bytes.Equal(member, []byte("null")) {

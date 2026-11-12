@@ -15,6 +15,7 @@ import (
 // cannot silently change the CLI's output.
 
 type publishJSON struct {
+	TermsNotice    string              `json:"terms_notice,omitempty"`
 	ConsumerAccess *consumerAccessJSON `json:"consumer_access,omitempty"`
 	Private        *bool               `json:"private,omitempty"`
 	// KeptPublic is true, and otherwise absent, when the target was already
@@ -44,6 +45,9 @@ type publishJSON struct {
 	// SettingsDiffer is true when an existing share keeps settings other
 	// than the chosen rule's.
 	SettingsDiffer bool `json:"settings_differ,omitempty"`
+	// OriginHeaderName names the header added to requests to the target;
+	// the value is never part of any output.
+	OriginHeaderName string `json:"origin_header_name,omitempty"`
 }
 
 type limitedLinkJSON struct {
@@ -64,6 +68,7 @@ func limitedLinkDocument(link *qurlapi.ShareLink) *limitedLinkJSON {
 }
 
 type shareLinkJSON struct {
+	TermsNotice      string     `json:"terms_notice,omitempty"`
 	QURL             string     `json:"qurl"`
 	CRID             string     `json:"crid,omitempty"`
 	Type             string     `json:"type,omitempty"`
@@ -178,6 +183,8 @@ type resourceStatusJSON struct {
 	CreatedAt  *time.Time    `json:"created_at,omitempty"`
 	ExpiresAt  *time.Time    `json:"expires_at,omitempty"`
 	Publisher  publisherJSON `json:"publisher"`
+	// OriginHeaderName names the header added to requests to the target.
+	OriginHeaderName string `json:"origin_header_name,omitempty"`
 }
 
 type downloadJSON struct {
@@ -218,21 +225,23 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
-			ConsumerAccess: policyDocument(res.ConsumerAccess),
-			Private:        res.Private,
-			KeptPublic:     res.KeptPublic,
-			AccessRequests: res.AccessRequests,
-			ResourceURL:    requestAddress(res),
-			CRID:           res.CRID,
-			ResourceID:     res.ResourceID,
-			TargetURL:      res.TargetURL,
-			Status:         res.Status,
-			CreatedAt:      res.CreatedAt,
-			ExpiresAt:      res.ExpiresAt,
-			FoundExisting:  res.FoundExisting,
-			Publisher:      publisherDocument(res.Publisher),
-			Link:           limitedLinkDocument(res.LimitedLink),
-			SettingsDiffer: res.OtherSettings,
+			TermsNotice:      p.TermsNotice,
+			ConsumerAccess:   policyDocument(res.ConsumerAccess),
+			Private:          res.Private,
+			KeptPublic:       res.KeptPublic,
+			AccessRequests:   res.AccessRequests,
+			ResourceURL:      requestAddress(res),
+			CRID:             res.CRID,
+			ResourceID:       res.ResourceID,
+			TargetURL:        res.TargetURL,
+			Status:           res.Status,
+			CreatedAt:        res.CreatedAt,
+			ExpiresAt:        res.ExpiresAt,
+			FoundExisting:    res.FoundExisting,
+			Publisher:        publisherDocument(res.Publisher),
+			Link:             limitedLinkDocument(res.LimitedLink),
+			SettingsDiffer:   res.OtherSettings,
+			OriginHeaderName: res.OriginHeaderName,
 		})
 	case p.quiet:
 		// A rule's temporary link follows the CRID; with once it is the only copy.
@@ -357,7 +366,8 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 			CRID:              resource.CRID, ResourceID: resource.ResourceID,
 			TargetURL: resource.TargetURL, Type: resource.Type, Status: resource.Status,
 			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
-			Publisher: publisherDocument(resource.Publisher),
+			Publisher:        publisherDocument(resource.Publisher),
+			OriginHeaderName: resource.OriginHeaderName,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, resource.CRID)
@@ -385,6 +395,9 @@ func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSu
 	}
 	if resource.ConsumerAccess != nil {
 		ew.printf("%s\t%s (version %d)\n", p.bold("Policy:"), resource.ConsumerAccess.Mode, resource.ConsumerAccess.Version)
+	}
+	if resource.OriginHeaderName != "" {
+		ew.printf("%s\t%s\n", p.bold(labelOriginHeader), resource.OriginHeaderName)
 	}
 	if grants && resource.AccessRequests != nil {
 		state := msgStateOff
@@ -433,23 +446,9 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
-	// A publish result always carries the privacy the service confirmed. The
-	// row is left out only for a value that has none, never guessed.
-	if res.Private != nil {
-		access := msgPublishPublic
-		if *res.Private {
-			access = msgPublishPrivate
-			if res.ConsumerAccess != nil {
-				access = "private — consumers must meet the publisher's access policy"
-			}
-		}
-		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
-	}
-	if res.ConsumerAccess != nil {
-		twe.printf("  %s\t%s (version %d)\n", p.bold("Policy:"), res.ConsumerAccess.Mode, res.ConsumerAccess.Version)
-		if address := requestAddress(res); address != "" {
-			twe.printf("  %s\t%s\n", p.bold("Address:"), address)
-		}
+	p.publishAccessRows(twe, res)
+	if res.OriginHeaderName != "" {
+		twe.printf("  %s\t%s\n", p.bold(labelOriginHeader), res.OriginHeaderName)
 	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)
@@ -494,6 +493,27 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	}
 	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	return ew.flush(nil)
+}
+
+func (p *Printer) publishAccessRows(twe *errWriter, res *qurlapi.Published) {
+	// A publish result always carries the privacy the service confirmed. The
+	// row is left out only for a value that has none, never guessed.
+	if res.Private != nil {
+		access := msgPublishPublic
+		if *res.Private {
+			access = msgPublishPrivate
+			if res.ConsumerAccess != nil {
+				access = "private — consumers must meet the publisher's access policy"
+			}
+		}
+		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
+	}
+	if res.ConsumerAccess != nil {
+		twe.printf("  %s\t%s (version %d)\n", p.bold("Policy:"), res.ConsumerAccess.Mode, res.ConsumerAccess.Version)
+		if address := requestAddress(res); address != "" {
+			twe.printf("  %s\t%s\n", p.bold("Address:"), address)
+		}
+	}
 }
 
 // limitedLinkRows shows the temporary link a rule with link limits minted.
@@ -559,6 +579,7 @@ func (p *Printer) publisherRows(ew *errWriter, publisher qurlapi.Publisher, crea
 func (p *Printer) ShareLink(link *qurlapi.ShareLink) error {
 	if p.format == FormatJSON {
 		out := shareLinkJSON{
+			TermsNotice:       p.TermsNotice,
 			QURL:              link.QURL,
 			CRID:              link.CRID,
 			Type:              link.Type,

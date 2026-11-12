@@ -200,6 +200,8 @@ function startActiveGuildCount(client, opts = {}) {
   let sampleInFlight = false;
 
   function emitCount(count) {
+    // A resolved sample can outlive the connection that produced it.
+    if (typeof client.isConnected === 'function' && !client.isConnected()) return;
     if (typeof count === 'number') {
       logger.audit(AUDIT_EVENTS.ACTIVE_GUILD_COUNT, { count });
     }

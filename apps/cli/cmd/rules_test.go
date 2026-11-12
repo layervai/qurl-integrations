@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -186,7 +187,7 @@ func TestRulesHumanCreateNeedsNoUUIDOrVersion(t *testing.T) {
 		t.Fatalf("create printed more than the new rule: %q", text.stdout.String())
 	}
 	listed := runCLI(t, &runOpts{args: []string{"rules", "list", "-q"}, env: map[string]string{}, shareStateDir: dir})
-	if lines := strings.Split(strings.TrimSpace(listed.stdout.String()), "\n"); listed.code != 0 || len(lines) != 7 || !slices.Contains(lines, id) || strings.Contains(listed.stdout.String(), "Version") {
+	if lines := strings.Split(strings.TrimSpace(listed.stdout.String()), "\n"); listed.code != 0 || len(lines) != 6 || !slices.Contains(lines, id) || strings.Contains(listed.stdout.String(), "Version") {
 		t.Fatalf("quiet list %q", listed.stdout.String())
 	}
 }
@@ -366,5 +367,61 @@ func TestLocalRepublishKeepsSelectedDomainSnapshot(t *testing.T) {
 	result := runCLI(t, options)
 	if result.code != 0 || !strings.Contains(result.stdout.String(), "Partner@outside.com") {
 		t.Fatalf("local snapshot lost %d %s %s", result.code, result.stdout.String(), result.stderr.String())
+	}
+}
+
+// A rule with a field from a newer service syncs and lists, but is never
+// applied or replaced, only deleted; a built-in this CLI doesn't know is ignored.
+func TestRulesKeepARuleFromANewerApp(t *testing.T) {
+	srv := apitest.NewServer(t)
+	const id = "11111111-1111-4111-8111-111111111111"
+	newer := `{"id":"` + id + `","name":"Reviewers","mode":"review","approval_expires_in":"7d","region":"eu"}`
+	items, version := "["+newer+"]", 3
+	srv.ScriptRepeat(http.MethodGet, "/v1/me/access-rules", 3, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"data":{"account_id":"account-one","version":%d,"items":%s,"built_ins":[{"id":"builtin.future","name":"Future","mode":"future"}]}}`, version, items)
+	})
+	var put string
+	srv.ScriptRepeat(http.MethodPut, "/v1/me/access-rules", 2, func(w http.ResponseWriter, r *http.Request) {
+		var sent struct{ Items json.RawMessage }
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &sent)
+		put, items, version = string(body), string(sent.Items), version+1
+		_, _ = fmt.Fprintf(w, `{"data":{"account_id":"account-one","version":%d,"items":%s}}`, version, items)
+	})
+	dir := connectorStateTestDir(t)
+	run := func(stdin string, args ...string) *runResult {
+		return runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL}, args...), stdin: strings.NewReader(stdin), shareStateDir: dir})
+	}
+	synced := run("", "rules", "sync", "-o", "json")
+	var listed struct {
+		LocalVersion int64 `json:"local_version"`
+		Items        []map[string]any
+	}
+	if synced.code != 0 || json.Unmarshal(synced.stdout.Bytes(), &listed) != nil || len(listed.Items) != 1 || listed.Items[0]["region"] != "eu" {
+		t.Fatalf("sync %d %s %s", synced.code, synced.stdout.String(), synced.stderr.String())
+	}
+	edit := `{"id":"` + id + `","name":"Reviewers","mode":"review"}`
+	for _, args := range [][]string{
+		{"access", "configure", srv.Key.CRID, "--rule", "Reviewers", "--version", "1"},
+		{"rules", "save", "--file", "-", "--version", strconv.FormatInt(listed.LocalVersion, 10)},
+	} {
+		if result := run(edit, args...); result.code != 8 || !strings.Contains(result.stderr.String(), "newer qURL app") {
+			t.Errorf("%v: %d %s", args, result.code, result.stderr.String())
+		}
+	}
+	if result := run(newer, "rules", "save", "--file", "-", "--version", strconv.FormatInt(listed.LocalVersion, 10)); result.code != 2 {
+		t.Errorf("saving typed unknown fields: %d %s", result.code, result.stderr.String())
+	}
+	if result := run("", "rules", "create", "Team", "--mode", "keys"); result.code != 0 {
+		t.Fatalf("create %d %s", result.code, result.stderr.String())
+	}
+	if result := run("", "rules", "sync"); result.code != 0 || !strings.HasPrefix(put, `{"version":3,"items":[`+newer+`,{"id":`) {
+		t.Fatalf("sync with a new rule %d put %s %s", result.code, put, result.stderr.String())
+	}
+	if result := run("", "rules", "delete", "Reviewers"); result.code != 0 {
+		t.Fatalf("delete %d %s", result.code, result.stderr.String())
+	}
+	if result := run("", "rules", "sync", "-o", "json"); result.code != 0 || strings.Contains(put, "Reviewers") || !strings.Contains(put, `"version":4`) {
+		t.Fatalf("sync after delete %d put %s %s", result.code, put, result.stderr.String())
 	}
 }

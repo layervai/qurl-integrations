@@ -57,7 +57,7 @@ func TestShareFromOlderServiceRendersUnverified(t *testing.T) {
 		want := fixtureShareLink + "\n\n" +
 			"  " + wantUnnamedPublisherRow + "\n" +
 			"  Expires in 5m (single use)\n\n" +
-			"Only the first person can open it. Run qurl share " + srv.Key.CRID + " for a new link.\n"
+			"Only the first person can open this link. Run qurl share " + srv.Key.CRID + " for a new link.\n"
 		if got := res.stdout.String(); got != want {
 			t.Errorf("terminal share =\n%s\nwant\n%s", got, want)
 		}
@@ -222,9 +222,11 @@ func TestOwnerReadsOmitAZeroDate(t *testing.T) {
 	// How each format shows the mock's real date, a day before the test clock.
 	shown := map[string]string{"text": "1d ago", "json": `"created_at": "2026-03-01T00:00:00Z"`}
 	for name, command := range map[string]func(*apitest.Server) []string{
-		"status":  func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
-		"list":    func(*apitest.Server) []string { return []string{"list"} },
-		"publish": func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+		"status": func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
+		"list":   func(*apitest.Server) []string { return []string{"list"} },
+		"publish": func(*apitest.Server) []string {
+			return []string{"publish", "https://example.com/data", "--name", "Example"}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			for _, format := range []string{"text", "json"} {
