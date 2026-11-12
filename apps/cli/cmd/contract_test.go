@@ -25,7 +25,7 @@ import (
 
 func TestPublishContract(t *testing.T) {
 	srv := apitest.NewServer(t)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "publish", "https://example.com/data"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "publish", "https://example.com/data", "--name", "Example"}})
 
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
@@ -337,7 +337,7 @@ func TestShareInsufficientScope(t *testing.T) {
 func TestPublishFoundExistingNote(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishFoundExisting(true)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "publish", "https://example.com/data"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "publish", "https://example.com/data", "--name", "Example"}})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
@@ -355,7 +355,7 @@ func TestPublishFoundExistingNote(t *testing.T) {
 func TestPublishFoundExistingTextAnatomy(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishFoundExisting(true)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data", "--name", "Example"}})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
@@ -386,7 +386,7 @@ func TestPublishFoundExistingTextAnatomy(t *testing.T) {
 func TestPublishNoCRIDFailsClosed(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishOmitCRID(true)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data", "--name", "Example"}})
 	if res.code == 0 {
 		t.Fatalf("exit = 0, stdout: %s", res.stdout.String())
 	}
@@ -790,7 +790,7 @@ func TestListJSONCarriesHasMore(t *testing.T) {
 func TestPublishJSONCarriesFoundExisting(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishFoundExisting(true)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-o", "json", "publish", "https://example.com/data"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-o", "json", "publish", "https://example.com/data", "--name", "Example"}})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}

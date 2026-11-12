@@ -280,7 +280,7 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 		return NotFound, true
 	case errors.Is(err, accessrules.ErrAmbiguousRule):
 		return Usage, true
-	case errors.Is(err, accessrules.ErrDuplicateName), errors.Is(err, accessrules.ErrLibraryLimit):
+	case errors.Is(err, accessrules.ErrDuplicateName), errors.Is(err, accessrules.ErrLibraryLimit), errors.Is(err, accessrules.ErrNewerRule):
 		return InvalidInput, true
 
 	case errors.Is(err, qurlapi.ErrAccountPort), errors.Is(err, qurlapi.ErrAccountEndpoint):
@@ -308,6 +308,10 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 		// is already published with the other privacy, and privacy cannot
 		// change after creation. A request that conflicts with state which
 		// already exists is the Conflict row, as for ErrFileExists above.
+		return Conflict, true
+	case errors.Is(err, qurlapi.ErrOriginHeaderMismatch):
+		// The same 400 shape: publishing again does not change the origin
+		// header of a resource that exists.
 		return Conflict, true
 	case errors.Is(err, qurlapi.ErrApprovedPersonNotFound):
 		// A removal named a device id that no approved person has. The read

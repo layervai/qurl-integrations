@@ -46,6 +46,8 @@ func (a accountAccessRules) request(ctx context.Context, method string, body any
 		if reply.status == http.StatusForbidden {
 			// A frozen account keeps its own standing message; any other 403
 			// means this identity has no linked account library.
+			// TODO(upstream-contract): qurl-service documents only
+			// account_frozen and device_not_linked for this route.
 			var problem *Error
 			if errors.As(reply.problem(), &problem) && strings.EqualFold(problem.Code, "account_frozen") {
 				fixed.Code = problem.Code
@@ -56,7 +58,7 @@ func (a accountAccessRules) request(ctx context.Context, method string, body any
 		return accessrules.AccountLibrary{}, fixed
 	}
 	// Unknown envelope fields, including the service's built-ins, are ignored
-	// so the service can evolve; each rule still decodes strictly because the
+	// so the service can evolve; a rule keeps its unknown fields because the
 	// whole list is written back.
 	var envelope struct {
 		Data struct {

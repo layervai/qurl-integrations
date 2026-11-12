@@ -56,7 +56,7 @@ func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResul
 		return err
 	}
 	if result.Policy != nil {
-		policy := result.Policy.Mode
+		policy := strings.TrimSpace(result.Policy.Mode + " " + result.Policy.EmailDomain)
 		if result.Policy.ContractID != "" {
 			policy += " " + result.Policy.ContractID
 		}
@@ -181,9 +181,9 @@ func consumerManagementDocument(result *qurlapi.ConsumerManagementResult) any {
 type consumerAccessJSON struct {
 	Mode          string                  `json:"mode"`
 	Version       int64                   `json:"version"`
+	EmailDomain   string                  `json:"email_domain,omitempty"`
 	ContractID    string                  `json:"contract_id,omitempty"`
 	Payment       *qurl.CRIDPaymentPolicy `json:"payment,omitempty"`
-	EmailDomain   string                  `json:"email_domain,omitempty"`
 	AllowedEmails []string                `json:"allowed_emails,omitempty"`
 	// ApprovalExpiresIn is how long each approval lasts; the service enforces it.
 	ApprovalExpiresIn string `json:"approval_expires_in,omitempty"`

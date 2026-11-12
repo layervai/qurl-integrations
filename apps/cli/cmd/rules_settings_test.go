@@ -225,7 +225,7 @@ func TestPublishSaysASingleUseLinkWorksOnce(t *testing.T) {
 	scriptMint(t, srv, &mints)
 	rule := `{"id":"11111111-1111-4111-8111-111111111111","name":"Once","mode":"public","link_limits":{"expires_in":"1h","one_time_use":true}}`
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--color", "never", "publish", "https://api.example.com", "--rule-file", "-"}, stdin: strings.NewReader(rule), shareStateDir: connectorStateTestDir(t), tty: true})
-	want := "Only the first person can open it. Run qurl share " + srv.Key.CRID + " for a new link."
+	want := "Only the first person can open this link. Run qurl share " + srv.Key.CRID + " for a new link."
 	if result.code != 0 || !strings.Contains(result.stdout.String(), want) || len(mints) != 1 || mints[0]["one_time_use"] != true {
 		t.Fatalf("publish %d mints %v\n%s%s", result.code, mints, result.stdout.String(), result.stderr.String())
 	}
@@ -238,7 +238,7 @@ func TestShareFailsClosedOnDamagedLinkLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}, shareStateDir: dir})
-	if result.code != 3 || !strings.Contains(result.stderr.String(), "share_rules.json") || len(srv.Requests()) != 0 {
+	if result.code != 3 || !strings.Contains(result.stderr.String(), "link limits saved for your shares") || !strings.Contains(result.stderr.String(), "share_rules.json") || len(srv.Requests()) != 0 {
 		t.Fatalf("share without its limits: %d %s", result.code, result.stderr.String())
 	}
 }
@@ -342,12 +342,24 @@ func TestRepublishTreatsAnExplicitDefaultAsTheSameSettings(t *testing.T) {
 	}
 }
 
+// An explicit preset recovers limits when this device has no saved record.
+func TestRuleOnceOnAnExistingPublicShareWithoutSavedLimitsMintsALink(t *testing.T) {
+	srv := apitest.NewServer(t)
+	var mints []map[string]any
+	scriptPublish(t, srv, false, true, nil, nil)
+	scriptMint(t, srv, &mints)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: connectorStateTestDir(t)})
+	if result.code != 0 || len(mints) != 1 || mints[0]["one_time_use"] != true || strings.Contains(result.stdout.String(), `"settings_differ": true`) || !strings.Contains(result.stdout.String(), `"link"`) {
+		t.Fatalf("publish %d mints %v %s %s", result.code, mints, result.stdout.String(), result.stderr.String())
+	}
+}
+
 func TestPublishRuleOnceMintsAndRepublishMintsAgain(t *testing.T) {
 	srv := apitest.NewServer(t)
 	dir := connectorStateTestDir(t)
 	var mints []map[string]any
 	scriptMint(t, srv, &mints)
-	for i, args := range [][]string{{"--rule", "once"}, {"--rule", "Only the first person"}, {"--public"}} {
+	for i, args := range [][]string{{"--rule", "once"}, {"--rule", "One-time link"}, {"--public"}} {
 		scriptPublish(t, srv, false, i > 0, nil, nil)
 		args = append([]string{"--endpoint", srv.URL, "publish", "https://api.example.com", "-o", "json"}, args...)
 		result := runCLI(t, &runOpts{args: args, shareStateDir: dir})
@@ -364,7 +376,7 @@ func TestPublishRuleOnceMintsAndRepublishMintsAgain(t *testing.T) {
 		t.Fatalf("mints = %d, want one per publish", len(mints))
 	}
 	for i, got := range mints {
-		if got["expires_in"] != "1h" || got["one_time_use"] != true || got["session_duration"] != "1h" {
+		if got["expires_in"] != "720h" || got["one_time_use"] != true || got["session_duration"] != "24h" {
 			t.Errorf("mint %d sent %v", i, got)
 		}
 	}
@@ -395,12 +407,72 @@ func TestQuietPublishWithOncePrintsItsLink(t *testing.T) {
 	}
 }
 
-func TestRuleNamedOnlyTheFirstPersonIsTaken(t *testing.T) {
-	for _, name := range []string{"only the first person", "once", "ONCE", "builtin.public", "Builtin.x"} {
+func TestRuleNamedOneTimeLinkIsTaken(t *testing.T) {
+	for _, name := range []string{"one-time link", "once", "ONCE", "builtin.public", "Builtin.x"} {
 		result := runCLI(t, &runOpts{args: []string{"rules", "create", name, "--mode", "invite_only"}, env: map[string]string{}, shareStateDir: connectorStateTestDir(t)})
 		if result.code == 0 || !strings.Contains(result.stderr.String(), "already exists") {
 			t.Fatalf("create %q %d %s", name, result.code, result.stderr.String())
 		}
+	}
+}
+
+// Desktop may pass the One-time link preset as a snapshot on standard input.
+func TestRuleFileAcceptsTheOneTimeLinkPresetOnly(t *testing.T) {
+	once := `{"id":"once","name":"One-time link","mode":"public","link_limits":{"expires_in":"30d","one_time_use":true,"session_duration":"24h"}}`
+	srv := apitest.NewServer(t)
+	var mints []map[string]any
+	scriptPublish(t, srv, false, false, nil, nil)
+	scriptMint(t, srv, &mints)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(once), shareStateDir: connectorStateTestDir(t)})
+	if result.code != 0 || len(mints) != 1 || mints[0]["one_time_use"] != true {
+		t.Fatalf("once snapshot: %d mints %v %s", result.code, mints, result.stderr.String())
+	}
+	for _, raw := range []string{
+		`{"id":"once","name":"One-time link","mode":"public","link_limits":{"expires_in":"1h","one_time_use":true}}`,
+		`{"id":"builtin.keys","name":"Devices\u001b[2J","mode":"keys"}`,
+	} {
+		result := runCLI(t, &runOpts{args: []string{"publish", "https://api.example.com", "--rule-file", "-"}, stdin: strings.NewReader(raw), shareStateDir: connectorStateTestDir(t)})
+		if result.code != 2 {
+			t.Errorf("%s accepted: %d %s", raw, result.code, result.stderr.String())
+		}
+	}
+	if result := runCLI(t, &runOpts{args: []string{"rules", "save", "--file", "-", "--version", "0"}, stdin: strings.NewReader(once), env: map[string]string{}, shareStateDir: connectorStateTestDir(t)}); result.code != 2 || !strings.Contains(result.stderr.String(), "ready-made rules cannot be edited") {
+		t.Fatalf("saving the preset: %d %s", result.code, result.stderr.String())
+	}
+}
+
+// A publish whose outcome is unknown never replaces limits the share already has.
+func TestUnknownPublishOutcomeKeepsSavedLimits(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	var mints []map[string]any
+	scriptMint(t, srv, &mints)
+	scriptPublish(t, srv, false, false, nil, nil)
+	if result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(hourRule), shareStateDir: dir}); result.code != 0 {
+		t.Fatalf("first publish %d %s", result.code, result.stderr.String())
+	}
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": false}, nil)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: dir})
+	if result.code != 0 || !strings.Contains(result.stdout.String(), `"settings_differ": true`) || len(mints) != 2 || mints[1]["expires_in"] != "1h" {
+		t.Fatalf("unknown outcome: %d mints %v %s %s", result.code, mints, result.stdout.String(), result.stderr.String())
+	}
+}
+
+// A link minted with saved limits shows the same publisher rows as any share.
+func TestShareWithSavedLimitsShowsThePublisher(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	var mints []map[string]any
+	scriptPublish(t, srv, false, false, nil, nil)
+	scriptMint(t, srv, &mints)
+	if result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(hourRule), shareStateDir: dir}); result.code != 0 {
+		t.Fatalf("publish %d %s", result.code, result.stderr.String())
+	}
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}, tty: true, shareStateDir: dir})
+	if result.code != 0 || len(mints) != 2 || !strings.Contains(result.stdout.String(), apitest.DefaultPublisherName) || !strings.Contains(result.stdout.String(), "Created") {
+		t.Fatalf("share %d %s %s", result.code, result.stdout.String(), result.stderr.String())
 	}
 }
 
@@ -445,11 +517,9 @@ func TestRepublishKeepsSavedLimitsInsteadOfAnExplicitDifferentRule(t *testing.T)
 	}
 }
 
-func TestLocalPublishLinkFailureReportsResourceAndCompensates(t *testing.T) {
+func TestLocalPublishLinkFailureReportsResourceAndKeepsServing(t *testing.T) {
 	srv := apitest.NewServer(t)
 	opts := servingLocalPublish(t, srv, false, "--rule", "once", "-o", "json")
-	sharingPath := "/v1/resources/" + srv.Key.CRID + "/sharing"
-	srv.Script(http.MethodPut, sharingPath, sharingResponse(t, srv, "off", 1, "stopped"))
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", apitest.HandlerRevoked400(t))
 	result := runCLI(t, opts)
 	var document map[string]any
@@ -460,8 +530,8 @@ func TestLocalPublishLinkFailureReportsResourceAndCompensates(t *testing.T) {
 		t.Fatal("failed local publish offered a link")
 	}
 	local, err := opts.shareRegistry.Get(context.Background(), srv.Key.CRID)
-	if err != nil || local.DesiredState != "off" {
-		t.Fatalf("failed publish did not retain compensating off: %+v %v", local, err)
+	if err != nil || local.DesiredState != "on" {
+		t.Fatalf("link failure changed the serving share: %+v %v", local, err)
 	}
 }
 

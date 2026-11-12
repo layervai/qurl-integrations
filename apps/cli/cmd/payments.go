@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
@@ -15,10 +16,10 @@ type publisherStripeClient interface {
 }
 
 func paymentsCmd(opts *globalOpts) *cobra.Command {
-	return &cobra.Command{
-		Use:   "payments <connect|account>",
+	cmd := &cobra.Command{
+		Use:   "payments <setup|connect|account>",
 		Short: "Connect Stripe to receive CRID payments; LayerV collects 3%",
-		Long:  "Connect Stripe to receive CRID payments; LayerV collects 3%. First run qurl account setup to link this device. Open the consent URL yourself, then finish setup in LayerV billing while signed in to that publisher account. Run qurl payments account after completion.",
+		Long:  "Set a price on a CRID with qurl payments setup. LayerV collects 3%. For dashboard-based setup, run qurl account setup and then qurl payments connect.",
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if args[0] != "connect" && args[0] != "account" {
@@ -28,9 +29,9 @@ func paymentsCmd(opts *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			payments, ok := client.ConsumerManagement().(publisherStripeClient)
-			if !ok {
-				return errors.New("publisher payments are unavailable in this client")
+			payments, err := publisherPayments(client)
+			if err != nil {
+				return err
 			}
 			if args[0] == "connect" {
 				link, e := payments.ConnectPublisherStripe(cmd.Context())
@@ -45,4 +46,14 @@ func paymentsCmd(opts *globalOpts) *cobra.Command {
 			}
 			return opts.printer().PublisherPayments(account, "")
 		}}
+	cmd.AddCommand(paidAccessSetupCmd(opts))
+	return cmd
+}
+
+func publisherPayments(client qurlapi.Client) (publisherStripeClient, error) {
+	payments, ok := client.ConsumerManagement().(publisherStripeClient)
+	if !ok {
+		return nil, errors.New("publisher payments are unavailable in this client")
+	}
+	return payments, nil
 }

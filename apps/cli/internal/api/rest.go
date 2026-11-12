@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,20 +31,22 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
-	ConsumerAccess    *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
-	AllowedDeviceKeys []string                   `json:"allowed_device_keys"`
-	Private           *bool                      `json:"private"`
-	ResourceID        string                     `json:"resource_id"`
-	CRID              string                     `json:"crid"`
-	TargetURL         string                     `json:"target_url"`
-	Type              string                     `json:"type"`
-	Status            string                     `json:"status"`
-	DesiredState      DesiredState               `json:"desired_state"`
-	ServingEpoch      uint64                     `json:"serving_epoch"`
-	Description       string                     `json:"description"`
-	Tags              []string                   `json:"tags"`
-	CreatedAt         *time.Time                 `json:"created_at"`
-	ExpiresAt         *time.Time                 `json:"expires_at"`
+	ConsumerAccess        *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	ConsumerAccessVersion int64                      `json:"consumer_access_version"`
+
+	AllowedDeviceKeys []string     `json:"allowed_device_keys"`
+	Private           *bool        `json:"private"`
+	ResourceID        string       `json:"resource_id"`
+	CRID              string       `json:"crid"`
+	TargetURL         string       `json:"target_url"`
+	Type              string       `json:"type"`
+	Status            string       `json:"status"`
+	DesiredState      DesiredState `json:"desired_state"`
+	ServingEpoch      uint64       `json:"serving_epoch"`
+	Description       string       `json:"description"`
+	Tags              []string     `json:"tags"`
+	CreatedAt         *time.Time   `json:"created_at"`
+	ExpiresAt         *time.Time   `json:"expires_at"`
 	// AccessRequests is nil when the row has no such member, which is how a
 	// service from before access requests answers. AllowedPasskeys are the
 	// people the publisher approved. The service sends the member on every
@@ -51,6 +54,9 @@ type resourceRow struct {
 	// without it is read as "the service did not say"; see allowedPasskeys.
 	AccessRequests  *bool        `json:"access_requests"`
 	AllowedPasskeys []passkeyRow `json:"allowed_passkeys"`
+	// OriginHeaderName names the resource's origin header; the service
+	// never sends its value.
+	OriginHeaderName string `json:"origin_header_name"`
 	// Publisher is read by UnmarshalJSON, not by the struct decoder, so a
 	// repeated member can be counted; see publisherMember.
 	Publisher publisherWire `json:"-"`
@@ -219,14 +225,20 @@ type publishRequest struct {
 	// AccessRequests is sent only to turn access requests on. Off is the
 	// service's default and is not planned to change, and a service from
 	// before access requests is never sent a member it does not know.
-	AccessRequests bool     `json:"access_requests,omitempty"`
-	Slug           string   `json:"slug,omitempty"`
-	FindOrCreate   bool     `json:"find_or_create,omitempty"`
-	Type           string   `json:"type"`
-	TargetURL      string   `json:"target_url,omitempty"`
-	Description    string   `json:"description,omitempty"`
-	Tags           []string `json:"tags,omitempty"`
-	Alias          string   `json:"alias,omitempty"`
+	AccessRequests bool   `json:"access_requests,omitempty"`
+	Slug           string `json:"slug,omitempty"`
+	FindOrCreate   bool   `json:"find_or_create,omitempty"`
+	Type           string `json:"type"`
+	TargetURL      string `json:"target_url,omitempty"`
+	// Name is the public name recipients see. The service requires it to
+	// create a resource and ignores it when the target is already published.
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Alias       string   `json:"alias,omitempty"`
+	// OriginHeader is sent only when the publisher asked for one. Omitted,
+	// the service reuses an existing resource with the header it has.
+	OriginHeader *originHeaderWire `json:"origin_header,omitempty"`
 }
 
 // Publish registers a URL or pre-creates a Connector resource, private unless
@@ -243,24 +255,12 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if err := validatePublishConsumerPolicy(&opts); err != nil {
 		return nil, err
 	}
+	if err := validatePublishOriginHeader(&opts); err != nil {
+		return nil, err
+	}
 
 	wantPrivate := !opts.Public
-	body := publishRequest{
-		ConsumerAccess:    opts.ConsumerAccess,
-		Private:           &wantPrivate,
-		AllowedDeviceKeys: opts.AllowedDeviceKeys,
-		AccessRequests:    opts.AllowRequests,
-		Type:              "url",
-		TargetURL:         targetURL,
-		Description:       opts.Description,
-		Tags:              opts.Tags,
-		Alias:             opts.Alias,
-	}
-	if opts.ConnectorID != "" {
-		body.Type = "tunnel"
-		body.Slug = opts.ConnectorID
-		body.FindOrCreate = true
-	}
+	body := newPublishRequest(targetURL, &opts, wantPrivate)
 	// Publish has no service idempotency key. A rate-limit response is usually
 	// pre-application, but the client cannot prove that a replay would not mint
 	// a duplicate resource, so it is deliberately single-shot.
@@ -274,7 +274,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		if !mayKeepExistingPublic(&opts, refusal) {
 			return nil, refusal
 		}
-		return c.keepExistingPublic(ctx, &body, refusal, firstCreateSentAt)
+		return originHeaderConfirmed(opts.OriginHeader)(c.keepExistingPublic(ctx, &body, refusal, firstCreateSentAt))
 	}
 	published, allowedDeviceKeys, err := publishedFromReply(reply)
 	if err != nil {
@@ -300,12 +300,44 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		}
 		return nil, fmt.Errorf("%w: API did not confirm the requested device grants", qurl.ErrInvalidAPIResponse)
 	}
+	// After privacy and devices: a resource whose privacy is not confirmed
+	// is reported as that, and names no CRID. Before access requests, on
+	// purpose: an unconfirmed header is the failure the publisher must act
+	// on first, and no change is made to a resource whose answer is outside
+	// the contract.
+	if err := confirmOriginHeader(opts.OriginHeader, published); err != nil {
+		return nil, err
+	}
 	if opts.AllowRequests {
 		if err := c.confirmAccessRequests(ctx, published); err != nil {
 			return nil, err
 		}
 	}
 	return published, nil
+}
+
+// newPublishRequest builds the create request that states privacy as
+// wantPrivate: a URL resource, or a Connector find-or-create.
+func newPublishRequest(targetURL string, opts *PublishOptions, wantPrivate bool) publishRequest {
+	body := publishRequest{
+		ConsumerAccess:    opts.ConsumerAccess,
+		Private:           &wantPrivate,
+		AllowedDeviceKeys: opts.AllowedDeviceKeys,
+		AccessRequests:    opts.AllowRequests,
+		Type:              "url",
+		TargetURL:         targetURL,
+		Name:              opts.Name,
+		Description:       opts.Description,
+		Tags:              opts.Tags,
+		Alias:             opts.Alias,
+		OriginHeader:      opts.OriginHeader.wire(),
+	}
+	if opts.ConnectorID != "" {
+		body.Type = "tunnel"
+		body.Slug = opts.ConnectorID
+		body.FindOrCreate = true
+	}
+	return body
 }
 
 // publishRefusal builds the error for a create that the service refused.
@@ -319,7 +351,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 // that exists is never that case: the service read the request to find it.
 func (c *client) publishRefusal(ctx context.Context, reply *restReply, opts *PublishOptions) error {
 	refusal := publishProblem(reply, opts)
-	if !opts.AllowRequests || errors.Is(refusal, ErrPublishAccessConflict) {
+	if !opts.AllowRequests || errors.Is(refusal, ErrPublishAccessConflict) || errors.Is(refusal, ErrOriginHeaderMismatch) {
 		return refusal
 	}
 	if c.refusedForNoAccessRequests(ctx, reply) {
@@ -361,6 +393,8 @@ func publishedFromReply(reply *restReply) (*Published, []string, error) {
 		ExpiresAt:      knownTime(env.Data.ExpiresAt),
 		FoundExisting:  env.Meta.FoundExisting,
 		Publisher:      env.Data.Publisher.publisher(),
+
+		OriginHeaderName: env.Data.OriginHeaderName,
 	}, env.Data.AllowedDeviceKeys, nil
 }
 
@@ -567,6 +601,9 @@ func publishProblem(reply *restReply, opts *PublishOptions) error {
 	if !errors.As(problem, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
 		return problem
 	}
+	if strings.EqualFold(apiErr.Code, codeOriginHeaderMismatch) {
+		return &OriginHeaderMismatchError{problem: apiErr}
+	}
 	conflict := func(existing ExistingAccess) error {
 		return &PublishAccessConflictError{Existing: existing, NamedFlags: opts.NamedAccessFlags, problem: apiErr}
 	}
@@ -714,7 +751,7 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		return nil, err
 	}
 	return &ResourceSummary{
-		ConsumerAccess: row.ConsumerAccess, AccessRequests: row.AccessRequests,
+		ConsumerAccess: row.ConsumerAccess, ConsumerAccessVersion: row.ConsumerAccessVersion, AccessRequests: row.AccessRequests,
 		AllowedPasskeys:   people,
 		AllowedDeviceKeys: row.AllowedDeviceKeys,
 		Private:           row.Private,
@@ -722,7 +759,8 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		Type: row.Type, Status: row.Status, DesiredState: row.DesiredState,
 		ServingEpoch: row.ServingEpoch, Description: row.Description, Tags: row.Tags,
 		CreatedAt: knownTime(row.CreatedAt), ExpiresAt: knownTime(row.ExpiresAt),
-		Publisher: row.Publisher.publisher(),
+		Publisher:        row.Publisher.publisher(),
+		OriginHeaderName: row.OriginHeaderName,
 	}, nil
 }
 
@@ -1198,11 +1236,20 @@ func validateConsumerPolicy(policy *qurl.ConsumerAccessPolicy) error {
 	return policy.Validate()
 }
 
+var consumerEmailDomain = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
 // ValidateConsumerPolicyFields checks the shared publish and configure inputs.
 // TODO(upstream-contract): Keep modes and contract limits in sync with qurl-service.
-func ValidateConsumerPolicyFields(mode, contract string) error {
+func ValidateConsumerPolicyFields(mode, contract, emailDomain string) error {
+	if mode == "email_domain" {
+		if len(emailDomain) > 253 || !consumerEmailDomain.MatchString(emailDomain) {
+			return qurl.ErrInvalidResourceRequest
+		}
+	} else if emailDomain != "" {
+		return qurl.ErrInvalidResourceRequest
+	}
 	switch mode {
-	case "keys", "invite_only", "email_capture", "review":
+	case "keys", "invite_only", "email_capture", "email_domain", "review":
 		if contract != "" {
 			return qurl.ErrInvalidResourceRequest
 		}

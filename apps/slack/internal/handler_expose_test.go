@@ -853,6 +853,9 @@ func TestHandleExposeURLCreateSubmission_UpsertsResourceBindsAlias(t *testing.T)
 		if input.Alias != "" {
 			t.Errorf("create/find must not send a resource alias; Slack binds the channel alias separately, got %q", input.Alias)
 		}
+		if input.Name != testResourceExposeChannelAlias {
+			t.Errorf("name = %q, want the chosen channel alias %q", input.Name, testResourceExposeChannelAlias)
+		}
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyResourceID: testResourceExposeID,
 			testKeyTargetURL:  testResourceExposeURL,

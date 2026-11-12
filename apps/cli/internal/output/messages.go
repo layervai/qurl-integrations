@@ -128,8 +128,8 @@ const (
 	// settings it was created with, not the chosen rule's.
 	msgPublishSettingsDiffer = "This item is already shared with other settings, which were kept. Use qurl access configure to change its access, or delete and publish it again for new link limits."
 
-	// msgWorksOnce follows an Only the first person link in a text document; %s is its CRID.
-	msgWorksOnce = "Only the first person can open it. Run qurl share %s for a new link."
+	// msgWorksOnce follows a one-time link in a text document; %s is its CRID.
+	msgWorksOnce = "Only the first person can open this link. Run qurl share %s for a new link."
 
 	// msgPublishFoundExisting is the text-document note for that same case:
 	// what happened, then the one next step.
@@ -402,6 +402,7 @@ func CustomerMessages() []string {
 		hintKeyInvalid,
 		labelCRID,
 		labelWarning,
+		labelOriginHeader, msgOriginHeaderNone, msgOriginHeaderSaved, msgOriginHeaderRemoved,
 		placeholderCRID,
 		msgDeviceEnrolled,
 		msgSavedTo,
