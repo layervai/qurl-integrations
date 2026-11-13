@@ -12,13 +12,8 @@ fmt:
 
 ## Linting
 
-# Pinned so local runs match CI exactly. Keep in sync with every pin site:
-# .github/workflows/slack.yml (2), .github/workflows/shared-test.yml (2),
-# .github/workflows/cli.yml (2), .github/workflows/e2e.yml (2),
-# .github/workflows/workflow-contract.yml (1),
-# and .pre-commit-config.yaml's golangci-lint rev. An unpinned PATH install
-# drifts: newer golangci-lint versions flag issues the pinned config is clean
-# on.
+# Pinned so local runs match CI exactly. internal/ciworkflows/linter_pin_test.go
+# checks every workflow pin and the pre-commit hook against this version.
 GOLANGCI_LINT_VERSION := v2.12.2
 
 lint:
@@ -124,12 +119,8 @@ pre-commit-run:
 ## CI job closely enough to predict it — output-only flags differ, and what a
 ## target omits is noted on the target.
 ##
-## Side effect worth knowing: these create node_modules/ that Go's `./...` walk
-## then sees (eslint's flatted ships a .go file). .golangci.yml already drops
-## findings under node_modules/, so `lint` is covered; `vet` and `test-race`
-## are not, so a dep shipping malformed Go would surface as a `make check`
-## failure with no Go change behind it. Harmless today — measured at ~0.7s of
-## extra package loading, and the one Go file in there is clean.
+## The root go.mod excludes node_modules from Go package discovery.
+## gofmt and goimports in fmt still walk node_modules and may format its Go files.
 
 # $(1) is the app directory. Every app pins its own Node in .nvmrc and CI
 # feeds that file to setup-node, so a mismatched local Node can pass here and
@@ -242,6 +233,7 @@ check-teams-docker:
 check-e2e:
 	go test -race ./e2e/cmd/verify-ownership
 	go vet ./e2e/cmd/verify-ownership
+	go tool govulncheck ./e2e/cmd/...
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) config verify
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./e2e/cmd/verify-ownership/...
 	$(call node_version_warning,e2e)

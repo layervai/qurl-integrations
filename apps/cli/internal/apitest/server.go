@@ -13,6 +13,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/crid"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 )
 
 // RecordedRequest captures one request for header/shape assertions.
@@ -88,6 +90,9 @@ type Server struct {
 	// which is safe to call from a handler goroutine; this package's own
 	// tests replace it to observe the report without failing themselves.
 	failf func(format string, args ...any)
+
+	// originHeader is the resource's origin header; nil for none.
+	originHeader *originHeaderFixture
 }
 
 // DownloadPath is the mock's link-host route: SetShareQURL(srv.URL +
@@ -289,6 +294,7 @@ func (s *Server) addResourceAccess(row map[string]any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	row[fieldPrivate] = s.private
+	s.addOriginHeaderName(row)
 	if len(s.allowedDeviceKeys) > 0 {
 		row[fieldAllowedDeviceKeys] = append([]string(nil), s.allowedDeviceKeys...)
 	}
@@ -441,15 +447,12 @@ func (s *Server) writeUnauthorized(w http.ResponseWriter) {
 }
 
 func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
-	if s.handleResourceRoute(w, r) {
+	if s.handleResourceRoute(w, r) || s.handleIdentityRoute(w, r) {
 		return
 	}
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/resources":
 		s.handlePublish(w, r)
-
-	case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
-		s.handleMe(w, r)
 
 	case (r.Method == http.MethodGet || r.Method == http.MethodPatch) && r.URL.Path == publisherPath:
 		s.handlePublisher(w, r)
@@ -458,6 +461,10 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 		s.handleShare(w, r)
 
 	case r.Method == http.MethodPatch && (r.URL.Path == "/v1/resources/"+s.Key.CRID || r.URL.Path == "/v1/resources/"+s.Key.ResourceID):
+		if isOriginHeaderPatch(r) {
+			s.handleOriginHeaderPatch(w, r)
+			return
+		}
 		s.handleDeviceGrants(w, r)
 
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
@@ -549,6 +556,8 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		FindOrCreate      bool     `json:"find_or_create"`
 		Type              string   `json:"type"`
 		TargetURL         string   `json:"target_url"`
+
+		OriginHeader *originHeaderBody `json:"origin_header"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_request", "Bad Request", "request body must be JSON")
@@ -574,7 +583,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 	meta := map[string]any{}
 	s.mu.Lock()
-	refusal := s.applyCreateAccess(body.Private, body.AllowedDeviceKeys)
+	refusal := s.applyCreateAccessAndOriginHeader(body.Private, body.AllowedDeviceKeys, body.OriginHeader)
 	requestsRefusal := ""
 	if refusal == "" {
 		existing := s.publishFoundExisting != nil && *s.publishFoundExisting
@@ -619,6 +628,9 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 // generic invalid-input problem an older service sends for both.
 func (s *Server) writeCreateRefusal(w http.ResponseWriter, refusal string) {
 	switch refusal {
+	case CodeOriginHeaderMismatch:
+		WriteProblem(s.t, w, http.StatusBadRequest, CodeOriginHeaderMismatch, "Origin Header Mismatch",
+			"publishing again does not change the origin header of a resource that exists")
 	case CodePrivacyMismatch:
 		WriteProblem(s.t, w, http.StatusBadRequest, CodePrivacyMismatch, "Privacy Mismatch",
 			"this target is already published with the other privacy")
@@ -927,4 +939,19 @@ func (s *Server) cridFor(requestedID string) string {
 		return s.Key.CRID
 	}
 	return s.Key.CRID
+}
+
+func (s *Server) handleIdentityRoute(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	switch r.URL.Path {
+	case "/v1/me":
+		s.handleMe(w, r)
+	case "/v1/me/access-rules":
+		WriteEnvelope(s.t, w, http.StatusOK, map[string]any{"account_id": MeOwnerID, "version": 0, "items": []accessrules.Definition{}, "built_ins": accessrules.BuiltIns()}, nil)
+	default:
+		return false
+	}
+	return true
 }
