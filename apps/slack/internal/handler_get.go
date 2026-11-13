@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/layervai/qurl-go/qurl"
+
 	slackoauth "github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/shared/auth"
@@ -45,7 +47,8 @@ const getUsageMessage = "Usage: `/qurl get <$id|$alias>` to create a qURL for a 
 // they are separate constants rather than one shared knob.
 const getReasonAuditMaxRunes = 240
 
-// Access limits applied to every `/qurl get` mint. Raw URLs are unsupported
+// Access limits applied to every `/qurl get` mint without `rule:` (an access
+// rule replaces all four; see resolveAccessRule). Raw URLs are unsupported
 // (see urlNotSupportedGetMessage), but existing URL resources can be minted by
 // their listed `$alias`. These limits bound a shared Slack-created link to a
 // single short-lived viewer:
@@ -417,33 +420,29 @@ func oneTimeUseNotice() string {
 	return "one-time use · link expires in " + resourceLinkExpiryHuman
 }
 
-// renderGetSuccess builds the two renderings of a minted one-time link: the
+// renderGetSuccess builds the two renderings of a minted link: the
 // Block Kit blocks (headline section + primary "Enter Portal" URL button) and
 // the plain-text fallback. The link rides in the button's `url` rather than as
 // raw prose, so it's one tap and Slack never link-unfurls it (an unfurl fetch
-// could brush a one-time link). The fallback KEEPS the raw URL so a non-block
-// client still has something actionable. Both strings here are static templates —
-// no user or LLM input — so the mrkdwn headline carries no injection surface.
-func renderGetSuccess(link string) (fallbackText string, blocks []any) {
+// could burn a one-time link). The fallback KEEPS the raw URL so a non-block
+// client still has something actionable. notice is oneTimeUseNotice or
+// ruleLinkNotice, which escapes the one rule-sourced value it carries.
+func renderGetSuccess(link, notice string) (fallbackText string, blocks []any) {
 	button := primaryURLButtonElement(enterPortalButtonLabel, enterPortalActionID, link)
-	// sectionBlock renders mrkdwn (bold + :emoji:); the text is a static template
-	// with no user/LLM input, so the mrkdwn carries no injection surface.
 	blocks = []any{
-		sectionBlock(":link: *qURL ready* — " + oneTimeUseNotice()),
+		sectionBlock(":link: *qURL ready* — " + notice),
 		actionsBlock(button),
 	}
-	return enterPortalFallbackText(link), blocks
+	return enterPortalFallbackText(link, notice), blocks
 }
 
 // enterPortalFallbackText is the notification / non-block-client fallback for a
 // minted link. It mirrors the pre-button prose (raw URL included) so a client
 // that can't render the Enter Portal button still receives a usable link. NOTE:
 // Slack also uses this text as the push/desktop notification preview, so the raw
-// one-time URL still transits the notification channel — same exposure as the
-// pre-button prose message, and out of scope for the button's in-body privacy win.
-// A link-less fallback for notification-capable clients is tracked in #922.
-func enterPortalFallbackText(link string) string {
-	return ":link: qURL ready: " + link + " (" + oneTimeUseNotice() + ")"
+// URL (reusable for some `rule:` links) transits notifications; see #922, #2024.
+func enterPortalFallbackText(link, notice string) string {
+	return ":link: qURL ready: " + link + " (" + notice + ")"
 }
 
 // slackButtonURLMaxLen is Slack's hard cap on a Block Kit button `url`; a longer
@@ -522,6 +521,16 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	return h.mintForResource(ctx, log, args, boundResourceID)
 }
 
+// getClient is authenticatedClient with getWork's user-facing error.
+func (h *Handler) getClient(ctx context.Context, log *slog.Logger, teamID string) (*client.Client, error) {
+	c, err := h.authenticatedClient(ctx, teamID)
+	if err != nil {
+		log.Error("get: API key lookup failed", "error", err)
+		return nil, &userError{msg: authErrorMessage(err)}
+	}
+	return c, nil
+}
+
 // mintForResource runs the rate-limit→mint→render tail shared by `/qurl get`
 // and `/qurl crid` once the caller has resolved a channel-authorized
 // resource_id. Every mint surface therefore pins the same link policy,
@@ -536,6 +545,22 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	// PostDMBlocks, so that is the seam to guard on.)
 	if args.cmd.DM() && h.cfg.PostDMBlocks == nil {
 		return getResult{}, errDMNotConfigured
+	}
+
+	// A `rule:` resolves before the quota check, so a refused rule uses none;
+	// the saved-rules read is bounded like the alias resolution reads above.
+	var (
+		c    *client.Client
+		rule *qurl.AccessRule
+		err  error
+	)
+	if selector := args.cmd.Rule(); selector != "" {
+		if c, err = h.getClient(ctx, log, args.teamID); err != nil {
+			return getResult{}, err
+		}
+		if rule, err = resolveAccessRule(ctx, log, c, selector); err != nil {
+			return getResult{}, err
+		}
 	}
 
 	// Rate-limit AFTER a successful resolution: only a request that resolved to a
@@ -554,8 +579,8 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	}
 
 	input := &client.CreateInput{
-		// One-time use is the only mode for `/qurl get` — there is no
-		// `once` flag; every minted link burns on first redemption.
+		// One-time use unless an access rule says otherwise; there is no
+		// `once` flag.
 		OneTimeUse: true,
 		// Slack-created resource access limits — see the const block above.
 		ExpiresIn:       resourceLinkExpiry,
@@ -564,11 +589,14 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 		IdempotencyKey:  IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
 		ResourceID:      resourceID,
 	}
+	if rule != nil {
+		applyAccessRule(input, rule)
+	}
 
-	c, err := h.authenticatedClient(ctx, args.teamID)
-	if err != nil {
-		log.Error("get: API key lookup failed", "error", err)
-		return getResult{}, &userError{msg: authErrorMessage(err)}
+	if c == nil {
+		if c, err = h.getClient(ctx, log, args.teamID); err != nil {
+			return getResult{}, err
+		}
 	}
 
 	out, err := c.Create(ctx, input)
@@ -606,6 +634,11 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	if args.cmd.Subcommand == SubcmdCRID {
 		slackaudit.LogQURLMintCRID(log, args.teamID, args.channelID, args.userID, input.ResourceID)
 	}
+	notice := oneTimeUseNotice()
+	if rule != nil {
+		slackaudit.LogQURLMintRule(log, args.teamID, args.channelID, args.userID, input.ResourceID, rule.ID, rule.Mode, input.OneTimeUse, input.ExpiresIn, input.SessionDuration)
+		notice = ruleLinkNotice(input, out.ExpiresAt)
+	}
 	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
 	// return absolute https qurl.link URLs). The Enter Portal render puts the link in a
 	// Block Kit button `url`, and Slack rejects the WHOLE message if that url is
@@ -619,10 +652,11 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	}
 
 	// Render the minted link as an "Enter Portal" URL button (blocks) plus a
-	// plain-text fallback. The one-time-use / admit-window suffix rides in the
-	// headline: that window is tight, so a recipient who taps after it lapses
-	// gets a dead portal, and the copy tells them why.
-	fallbackText, blocks := renderGetSuccess(out.QURLLink)
+	// plain-text fallback. The notice (one-time use and admit window, or the
+	// rule's limits) rides in the headline: the default window is tight, so a
+	// recipient who taps after it lapses gets a dead portal, and the copy tells
+	// them why.
+	fallbackText, blocks := renderGetSuccess(out.QURLLink, notice)
 	if args.cmd.DM() {
 		// deliverGetDM posts the Enter Portal blocks to the user's DM and returns
 		// the plain-text ":incoming_envelope: Sent to your DM." status. The link

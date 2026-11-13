@@ -4,9 +4,9 @@ Share internal resources from Slack as secure, one-time links — without
 leaving the channel. Admins protect a resource once; anyone in the channel
 mints a fresh, expiring link with a single slash command.
 
-A **qURL™** is a one-time-use access link: it works for the first person who
-opens it, then burns. Links also expire on their own, so nothing stays live
-longer than it needs to.
+A **qURL™** is a one-time-use access link by default: it works for the first
+person who opens it, then burns. Links also expire on their own, so nothing
+stays live longer than it needs to.
 
 ## Quickstart
 
@@ -57,9 +57,11 @@ personal data out of the repository.
 | `/qurl get <$id\|$alias>` | Mint a one-time qURL link for a resource in this channel. |
 | `/qurl get <$id\|$alias> dm:true` | Mint the link and DM it to you instead of posting it in the channel. |
 | `/qurl get <$id\|$alias> reason:"…"` | Mint the link and record a reason in the audit log. |
+| `/qurl get <$id\|$alias> rule:"…"` | Mint the link with an access rule: `Anyone with the link`, `One-time link`, or a rule saved on the workspace's qURL account. |
 | `/qurl crid <CRID>` | Mint a one-time qURL link for a resource in this channel, by its permanent CRID. |
 | `/qurl crid <CRID> dm:true` | Mint the CRID's link and DM it to you instead of posting it in the channel. |
 | `/qurl crid <CRID> reason:"…"` | Mint the CRID's link and record a reason in the audit log. |
+| `/qurl crid <CRID> rule:"…"` | Mint the CRID's link with an access rule, as for `/qurl get`. |
 | `/qurl list` | List the resources available to you in this channel. |
 | `/qurl aliases` | List this channel's aliases and the resource each one points to. |
 | `/qurl uninstall` | Owner/admin-gated: shows a confirmation card. Click **Disconnect qURL** and confirm to disconnect Slack commands and clear the admin list, channel access, and aliases. Reconnecting requires setting up channel access and aliases again. This is a **local-only disconnect** — it does **not** revoke the workspace's qURL API key outside Slack (an API key can't revoke itself), so if you're disconnecting because the key may be exposed, revoke it through qURL key management or your operator. |
@@ -157,9 +159,25 @@ immediately available for `/qurl get` in the channel.
 
 `/qurl get $id` mints a one-time qURL link for any resource available in the
 current channel (pass a resource `$id` or a channel `$alias`). The reply
-includes how long the link stays valid. Every link is single-use: it burns on
-first open. Add `dm:true` to receive the link privately, or `reason:"…"` to
-note why you minted it in the audit log.
+includes how long the link stays valid. By default every link is single-use:
+it burns on first open. Add `dm:true` to receive the link privately, or
+`reason:"…"` to note why you minted it in the audit log.
+
+Add `rule:"…"` to share with an access rule instead, by name or ID (such as
+`rule:once`; use the ID for a name with a `"` in it): one of the Default access rules (`Anyone with the link`,
+`One-time link`) or a saved rule ("Your rules"). Saved rules are the ones on
+the qURL account that connected this workspace, so every member of the
+workspace shares them; they are managed in qURL Desktop or the qURL CLI. The
+link then follows only the rule's limits, without the default single-session
+cap, so any member can mint an `Anyone with the link` link that opens more
+than once, by more than one person. Like every `/qurl get` reply, the link is
+shown only to the member who ran the command (or sent by DM with `dm:true`).
+If the saved rules can't be read, only a Default access rule's ID applies
+(`rule:builtin.public` or `rule:once`), since a name could belong to a saved
+rule. Slack mints links on existing resources only, so it refuses a rule that decides
+who can open the resource (`People you invite`, `People you approve`, email,
+device or paid rules) and a rule with settings from a newer qURL app; share
+with those from qURL Desktop or the qURL CLI.
 
 `/qurl crid <CRID>` is the same command addressed by a resource's permanent
 CRID instead of a `$id` or `$alias`. It is channel-scoped exactly like

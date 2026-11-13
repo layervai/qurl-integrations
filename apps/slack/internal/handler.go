@@ -2594,6 +2594,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		}
 		lines = append(lines,
 			"• `/qurl get <$id|$alias> reason:\"…\"` — Create a qURL, recording a reason in the audit log",
+			"• `/qurl get <$id|$alias> rule:\"…\"` — Create a qURL with an access rule: `Anyone with the link`, `One-time link`, or a rule saved on this workspace's qURL account",
 			"• `/qurl crid <CRID>` — Create a qURL for a resource in this channel by its CRID (same flags as `/qurl get`)",
 		)
 	}

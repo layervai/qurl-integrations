@@ -251,7 +251,14 @@ func TestHandleBlockActions_CreateQurlMints(t *testing.T) {
 	// Bind $prod-db → r_prod_db in C_test so the token resolves, exactly
 	// as the typed `/qurl get $prod-db` happy path does.
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer(http.MethodGet, "/v1/me/access-rules", func(http.ResponseWriter, *http.Request) {
+		t.Error("the Get button read the access rules")
+	})
+	var mint map[string]any
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&mint); err != nil {
+			t.Errorf("decode mint body: %v", err)
+		}
 		writeCreateFixture(t, w, "https://qurl.link/btn", testResourceIDFix)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -274,6 +281,10 @@ func TestHandleBlockActions_CreateQurlMints(t *testing.T) {
 	}
 	if !strings.Contains(async, "one-time use") {
 		t.Errorf("async reply missing one-time-use note: %q", async)
+	}
+	// The button takes no rule, so it keeps the default limits.
+	if mint["one_time_use"] != true || mint["expires_in"] != resourceLinkExpiry || mint["max_sessions"] != float64(resourceMaxSessions) {
+		t.Errorf("mint body = %v, want the default one-time limits", mint)
 	}
 }
 

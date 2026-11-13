@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-go/crid"
+	"github.com/layervai/qurl-go/qurl"
 )
 
 const (
@@ -326,10 +327,12 @@ type CreateInput struct {
 	// `description` — the resource-level `description` lives on the Update /
 	// Resource bodies and on the GET response (QurlData.description).
 	// TODO(upstream-rebrand): keep aligned with qurl-service's openapi.
-	Label       string `json:"label,omitempty"`
-	ExpiresIn   string `json:"expires_in,omitempty"`
-	OneTimeUse  bool   `json:"one_time_use,omitempty"`
-	MaxSessions int    `json:"max_sessions,omitempty"`
+	Label     string `json:"label,omitempty"`
+	ExpiresIn string `json:"expires_in,omitempty"`
+	// OneTimeUse is always sent on a resource mint: leaving it false mints a
+	// reusable link, not the service's one-time tunnel default.
+	OneTimeUse  bool `json:"one_time_use,omitempty"`
+	MaxSessions int  `json:"max_sessions,omitempty"`
 	// SessionDuration is the per-qURL session lifetime (e.g. "1h"): how
 	// long access lasts after a visitor reaches the content, distinct
 	// from ExpiresIn (the link's own expiry). Server-side it maps to
@@ -493,9 +496,12 @@ type createQurlBody struct {
 // the same reason — the resource already owns it).
 type createForResourceBody struct {
 	// `label` per CreateQurlForResourceRequest (not `description`).
-	Label           string        `json:"label,omitempty"`
-	ExpiresIn       string        `json:"expires_in,omitempty"`
-	OneTimeUse      bool          `json:"one_time_use,omitempty"`
+	Label     string `json:"label,omitempty"`
+	ExpiresIn string `json:"expires_in,omitempty"`
+	// Always sent: the service defaults an omitted one_time_use to true on a
+	// tunnel, so false must be explicit for a reusable link.
+	// TODO(upstream-contract): qurl-service's tunnel one_time_use default.
+	OneTimeUse      bool          `json:"one_time_use"`
 	MaxSessions     int           `json:"max_sessions,omitempty"`
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
@@ -1329,6 +1335,33 @@ func (c *Client) GetQuota(ctx context.Context) (*QuotaOutput, error) {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// ErrInvalidAccessRules is returned when GET /v1/me/access-rules answers
+// without a rule list.
+var ErrInvalidAccessRules = errors.New("access rules: response has no items")
+
+// AccessRules returns the saved access rules of the qURL account that owns
+// the API key (GET /v1/me/access-rules). Rules keep fields this client does
+// not model, so HasUnknownFields reports a rule that is unsafe to apply.
+func (c *Client) AccessRules(ctx context.Context) ([]qurl.AccessRule, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/me/access-rules", http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	// TODO(upstream-contract): the service returns the whole library (at most
+	// 100 rules) in one unpaginated response.
+	var out struct {
+		Items []qurl.AccessRule `json:"items"`
+	}
+	// One attempt: it sits on a slash command's deadline, and callers retry.
+	if _, err := c.doOnce(req, &out, "GET /v1/me/access-rules"); err != nil {
+		return nil, err
+	}
+	if out.Items == nil {
+		return nil, ErrInvalidAccessRules
+	}
+	return out.Items, nil
 }
 
 // --- Error types (RFC 7807) ---
