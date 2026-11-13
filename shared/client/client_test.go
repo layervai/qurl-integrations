@@ -893,6 +893,19 @@ func TestAccessRules(t *testing.T) {
 	}
 }
 
+func TestAccessRulesEmptyItems(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apiEnvelope(t, w, map[string]any{"account_id": "acct", "version": 0, "items": []any{}})
+	}))
+	defer srv.Close()
+
+	rules, err := testClient(srv.URL, "test-key").AccessRules(context.Background())
+	if err != nil || rules == nil || len(rules) != 0 {
+		t.Fatalf("AccessRules = %v, %v; want an empty list", rules, err)
+	}
+}
+
 func TestAccessRulesMissingItems(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

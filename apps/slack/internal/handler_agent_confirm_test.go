@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -2078,5 +2079,62 @@ func TestConfirm_GetCarriesAccessRule(t *testing.T) {
 	_, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 	if !strings.Contains(card, agentConfirmGetFailedReply) || strings.Contains(card, "invite") {
 		t.Fatalf("public card = %q", card)
+	}
+}
+
+// TestAgentConfirmCardRendersRuleLiterally pins that a model-supplied rule
+// name can't ping a channel or format the card: the card is plain_text and the
+// fallback is escaped.
+func TestAgentConfirmCardRendersRuleLiterally(t *testing.T) {
+	t.Parallel()
+	summary := fmt.Sprintf("Mint an access link for `$x` with the access rule %q.", "<!channel> *hi*")
+	section, ok := buildAgentConfirmBlocks(summary, "", "id")[0].(map[string]any)
+	if !ok {
+		t.Fatal("first block is not a section")
+	}
+	if text, _ := section[blockKitFieldText].(map[string]any); text["type"] != "plain_text" {
+		t.Fatalf("summary block = %+v, want plain_text", section)
+	}
+	if fallback := agentConfirmFallbackText(summary, ""); strings.Contains(fallback, "<!channel>") {
+		t.Fatalf("fallback carries a live mention: %q", fallback)
+	}
+}
+
+// TestConfirm_GetWithRuleMintsWithItsLimits fences the approved-get success
+// path with a rule: the One-time link limits reach the mint and the notice
+// reaches the private delivery.
+func TestConfirm_GetWithRuleMintsWithItsLimits(t *testing.T) {
+	names := defaultTestTableNames()
+	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
+		names.channelPolicy: {seedChannelPolicySet("T1", "D1", "", []string{testAgentGetResourceID})},
+	})
+	backend := qurlBackendServer(t)
+	var mint map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/me/access-rules":
+			writeAccessRules(t, w)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/"+testAgentGetResourceID+"/qurls":
+			if err := json.NewDecoder(r.Body).Decode(&mint); err != nil {
+				t.Errorf("decode mint body: %v", err)
+			}
+			respondRawQURLEnvelope(t, w, map[string]any{testKeyResourceID: testAgentGetResourceID, "qurl_link": testAgentGetQURLLink})
+		default:
+			// Token resolution reuses the shared backend stub.
+			backend.Config.Handler.ServeHTTP(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	hc.h.cfg.NewClient = func(apiKey string) *client.Client { return client.New(srv.URL, apiKey, client.WithRetry(0)) }
+
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Rule: "One-time link", Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+
+	if mint["one_time_use"] != true || mint["expires_in"] != "30d" || mint["session_duration"] != "24h" {
+		t.Fatalf("mint body = %v, want the One-time link limits", mint)
+	}
+	if calls := hc.blocks.calls; len(calls) != 1 || !strings.Contains(calls[0].fallback, "one-time use · link expires in 30d") {
+		t.Fatalf("private delivery = %+v", calls)
 	}
 }

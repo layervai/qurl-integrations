@@ -1819,3 +1819,24 @@ func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
 		}
 	})
 }
+
+// TestHandleGet_DMWithRuleCarriesRuleNotice pins that dm:true delivers a
+// rule link with the rule's notice, not the default one.
+func TestHandleGet_DMWithRuleCarriesRuleNotice(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer(http.MethodGet, accessRulesPath, func(w http.ResponseWriter, _ *http.Request) { writeAccessRules(t, w) })
+	ts.addCustomer(http.MethodPost, mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/dm-rule", testResourceIDFix)
+	})
+	var dmText string
+	h := newAdminTestHandler(t, ts)
+	h.cfg.PostDMBlocks = func(_ context.Context, _, _, _ string, _ []any, fallbackText string) error {
+		dmText = fallbackText
+		return nil
+	}
+	newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db rule:once dm:true", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(dmText, "one-time use · link expires in 30d") {
+		t.Errorf("DM fallback = %q, want the One-time link notice", dmText)
+	}
+}

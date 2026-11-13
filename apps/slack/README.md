@@ -162,7 +162,8 @@ includes how long the link stays valid. Every link is single-use: it burns on
 first open. Add `dm:true` to receive the link privately, or `reason:"…"` to
 note why you minted it in the audit log.
 
-Add `rule:"…"` to share with an access rule instead, by name: one of the
+Add `rule:"…"` to share with an access rule instead, by name or ID (such as
+`rule:once`): one of the
 Default access rules (`Anyone with the link`, `One-time link`) or one of your
 saved rules ("Your rules"). Saved rules are the ones on the qURL account that
 connected this workspace, managed in qURL Desktop or the qURL CLI. The link

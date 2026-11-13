@@ -39,6 +39,7 @@ var defaultAccessRules = []qurl.AccessRule{
 	// by name rather than reported as missing.
 	{ID: "builtin.email_capture", Name: "Anyone with a verified email", Mode: "email_capture"},
 	{ID: "builtin.keys", Name: "Devices you approve", Mode: "keys"},
+	// A non-nil Payment marks it paid; it is never applied, so it holds no price.
 	{ID: "paid", Name: "People who pay", Mode: "contract", Payment: &qurl.AccessRulePayment{}},
 }
 
@@ -114,7 +115,9 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 	saved, loadErr := c.AccessRules(ctx)
 	var apiErr *client.APIError
 	if errors.As(loadErr, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
-		// The account has no saved rules this key may read.
+		// The account has no saved rules this key may read. TODO(upstream-contract):
+		// qurl-service documents account_frozen and device_not_linked here; a
+		// frozen account's mint fails on its own, so every 403 reads as none.
 		log.Info("get: saved access rules unavailable", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code)...)
 		saved, loadErr = nil, nil
 	}

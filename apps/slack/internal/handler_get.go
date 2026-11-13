@@ -424,7 +424,7 @@ func oneTimeUseNotice() string {
 // Block Kit blocks (headline section + primary "Enter Portal" URL button) and
 // the plain-text fallback. The link rides in the button's `url` rather than as
 // raw prose, so it's one tap and Slack never link-unfurls it (an unfurl fetch
-// could brush a one-time link). The fallback KEEPS the raw URL so a non-block
+// could burn a one-time link). The fallback KEEPS the raw URL so a non-block
 // client still has something actionable. notice is oneTimeUseNotice or
 // ruleLinkNotice, which escapes the one rule-sourced value it carries.
 func renderGetSuccess(link, notice string) (fallbackText string, blocks []any) {
@@ -440,9 +440,10 @@ func renderGetSuccess(link, notice string) (fallbackText string, blocks []any) {
 // minted link. It mirrors the pre-button prose (raw URL included) so a client
 // that can't render the Enter Portal button still receives a usable link. NOTE:
 // Slack also uses this text as the push/desktop notification preview, so the raw
-// one-time URL still transits the notification channel — same exposure as the
-// pre-button prose message, and out of scope for the button's in-body privacy win.
-// A link-less fallback for notification-capable clients is tracked in #922.
+// URL still transits the notification channel — reusable for a `rule:` link
+// such as Anyone with the link — and is out of scope for the button's in-body
+// privacy win. A link-less fallback is tracked in #922; whether rule links
+// need an opt-in is #2024.
 func enterPortalFallbackText(link, notice string) string {
 	return ":link: qURL ready: " + link + " (" + notice + ")"
 }
@@ -557,6 +558,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 		return getResult{}, &userError{msg: authErrorMessage(err)}
 	}
 
+	// After input is built: an applied rule replaces all four default limits.
 	var rule *qurl.AccessRule
 	if selector := args.cmd.Rule(); selector != "" {
 		if rule, err = resolveAccessRule(ctx, log, c, input, selector); err != nil {
@@ -634,9 +636,10 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	}
 
 	// Render the minted link as an "Enter Portal" URL button (blocks) plus a
-	// plain-text fallback. The one-time-use / admit-window suffix rides in the
-	// headline: that window is tight, so a recipient who taps after it lapses
-	// gets a dead portal, and the copy tells them why.
+	// plain-text fallback. The notice (one-time use and admit window, or the
+	// rule's limits) rides in the headline: the default window is tight, so a
+	// recipient who taps after it lapses gets a dead portal, and the copy tells
+	// them why.
 	fallbackText, blocks := renderGetSuccess(out.QURLLink, notice)
 	if args.cmd.DM() {
 		// deliverGetDM posts the Enter Portal blocks to the user's DM and returns
