@@ -329,12 +329,7 @@ func TestHandleExposeConnectorClick_OpensSetupChooser(t *testing.T) {
 		t.Fatalf("connector click ack = %d %q, want 200 {}", w.Code, w.Body.String())
 	}
 
-	var view []byte
-	select {
-	case view = <-views:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView was not called")
-	}
+	view := waitForTestValue(t, views, "OpenView was not called")
 	var modal map[string]any
 	if err := json.Unmarshal(view, &modal); err != nil {
 		t.Fatalf("modal JSON: %v", err)
@@ -405,12 +400,7 @@ func TestHandleExposeURLClick_OpensPickerModal(t *testing.T) {
 		t.Fatalf("url click ack = %d, want 200", w.Code)
 	}
 
-	var view []byte
-	select {
-	case view = <-views:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView was not called")
-	}
+	view := waitForTestValue(t, views, "OpenView was not called")
 	assertURLPickerModal(t, view)
 	for _, want := range []string{testResourceExposeID, testFileviewerResource, testFileviewerTargetURL} {
 		if !strings.Contains(string(view), want) {
@@ -448,12 +438,7 @@ func TestHandleExposeURLClick_FileviewerOnlyOpensPickerModal(t *testing.T) {
 		t.Fatalf("url click ack = %d, want 200", w.Code)
 	}
 
-	var view []byte
-	select {
-	case view = <-views:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView was not called")
-	}
+	view := waitForTestValue(t, views, "OpenView was not called")
 	assertURLPickerModal(t, view)
 	for _, want := range []string{testFileviewerResource, testFileviewerTargetURL} {
 		if !strings.Contains(string(view), want) {
@@ -534,17 +519,8 @@ func TestHandleExposeURLClick_FallsBackToEnterpriseOpen(t *testing.T) {
 		t.Fatalf("url click ack = %d, want 200", w.Code)
 	}
 
-	var first, second openCall
-	select {
-	case first = <-opens:
-	case <-time.After(2 * time.Second):
-		t.Fatal("workspace OpenView was not called")
-	}
-	select {
-	case second = <-opens:
-	case <-time.After(2 * time.Second):
-		t.Fatal("enterprise OpenView fallback was not called")
-	}
+	first := waitForTestValue(t, opens, "workspace OpenView was not called")
+	second := waitForTestValue(t, opens, "enterprise OpenView fallback was not called")
 	if first.tokenOwnerID != testAdminTeamID || second.tokenOwnerID != testEnterpriseID {
 		t.Fatalf("OpenView token owner order = %q, %q; want workspace then enterprise", first.tokenOwnerID, second.tokenOwnerID)
 	}
@@ -631,12 +607,7 @@ func TestHandleExposeURLBareOpensPickerModal(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("ack status = %d, want 200", status)
 	}
-	var view []byte
-	select {
-	case view = <-views:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView was not called for bare protect-url")
-	}
+	view := waitForTestValue(t, views, "OpenView was not called for bare protect-url")
 	assertURLPickerModal(t, view)
 	for _, want := range []string{testResourceExposeID, testFileviewerResource, testFileviewerTargetURL} {
 		if !strings.Contains(string(view), want) {
@@ -725,12 +696,7 @@ func TestHandleExposeURLBareAcksBeforeOpeningPickerModal(t *testing.T) {
 	if !strings.Contains(ack, "Working") {
 		t.Fatalf("ack = %q, want working response", ack)
 	}
-	var view []byte
-	select {
-	case view = <-views:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView was not called for bare protect-url")
-	}
+	view := waitForTestValue(t, views, "OpenView was not called for bare protect-url")
 	assertURLPickerModal(t, view)
 }
 
@@ -886,6 +852,9 @@ func TestHandleExposeURLCreateSubmission_UpsertsResourceBindsAlias(t *testing.T)
 		}
 		if input.Alias != "" {
 			t.Errorf("create/find must not send a resource alias; Slack binds the channel alias separately, got %q", input.Alias)
+		}
+		if input.Name != testResourceExposeChannelAlias {
+			t.Errorf("name = %q, want the chosen channel alias %q", input.Name, testResourceExposeChannelAlias)
 		}
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyResourceID: testResourceExposeID,

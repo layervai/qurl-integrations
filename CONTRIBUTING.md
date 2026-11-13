@@ -89,9 +89,10 @@ lockfile, so the suites are opt-in targets rather than prerequisites of
   Discord messages, and needs credentials in `e2e/.env` that CI does not have.
 - `make check-node` — all five.
 
-Go by what your change *triggers*, not just which directory it sits in:
-`discord.yml`'s filter includes `shared/**`, so a Go-only change under
-`shared/` runs Discord CI and is worth a `make check-discord`.
+Go by what your change *triggers*, not just which directory it sits in.
+`shared/` is Go-only and is covered by `shared-test.yml`; changes there do not
+run Discord CI or dispatch a Discord deploy. Run `make check-discord` for
+Discord app or workflow changes.
 
 A green run predicts that app's `*/ required` aggregate, but CI stays the gate.
 Each CI job carries a comment pointing back at its target, and each target

@@ -74,7 +74,7 @@ func TestPublishWithNoPrivacyFlagKeepsAPublicTarget(t *testing.T) {
 					}
 					srv.SetResourceAccess(false)
 					srv.SetPublishFoundExisting(true)
-					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}}
+					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}}
 					if local {
 						opts = servingLocalPublish(t, srv, true)
 					}
@@ -146,7 +146,7 @@ func TestPublishWithNoPrivacyFlagOfAPrivateTargetIsUnchanged(t *testing.T) {
 	for _, found := range []bool{true, false} {
 		srv := apitest.NewServer(t)
 		srv.SetPublishFoundExisting(found)
-		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}})
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}})
 		if res.code != 0 || !slices.Equal(sentLog(srv), []string{"POST /v1/resources"}) {
 			t.Fatalf("found %t: exit %d, requests %v, stderr %s", found, res.code, sentLog(srv), res.stderr.String())
 		}
@@ -175,7 +175,7 @@ func TestPublishJSONSaysKeptPublicOnlyForAKeptResource(t *testing.T) {
 		srv := apitest.NewServer(t)
 		srv.SetResourceAccess(test.private)
 		srv.SetPublishFoundExisting(test.found)
-		args := append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "-o", "json"}, test.flags...)
+		args := append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example", "-o", "json"}, test.flags...)
 		res := runCLI(t, &runOpts{args: args})
 		var document map[string]json.RawMessage
 		if err := json.Unmarshal(res.stdout.Bytes(), &document); res.code != 0 || err != nil {
@@ -230,7 +230,7 @@ func TestPublishNeverKeepsAPublicResourceThatWasJustMade(t *testing.T) {
 							apitest.WriteProblem(t, w, http.StatusServiceUnavailable, "service_unavailable", "Service Unavailable", "try again")
 						})
 					}
-					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}}
+					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}}
 					if local {
 						opts = refusingLocalPublish(t, srv)
 					}
@@ -283,7 +283,7 @@ func TestPublishDeletesNothingItCannotShowItMade(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/local=%t/%v", name, local, mode), func(t *testing.T) {
 					srv := apitest.NewServer(t)
 					scriptUnaskedPublicResource(t, srv, createdAt)
-					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}}
+					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}}
 					if local {
 						opts = refusingLocalPublish(t, srv)
 					}
@@ -377,7 +377,7 @@ func TestPublishWithADeviceListThatDiffersIsAConflict(t *testing.T) {
 				srv := apitest.NewServer(t)
 				test.prepare(t, srv)
 				flags := []string{"--allow-device-key", goldenDevicePublicKey}
-				opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}, flags...)}
+				opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}, flags...)}
 				if local {
 					opts = refusingLocalPublish(t, srv, flags...)
 				}
@@ -452,7 +452,7 @@ func TestPublishConflictHintsCanBeFollowed(t *testing.T) {
 					srv := apitest.NewServer(t)
 					srv.SetResourceAccess(test.existingPrivate)
 					srv.SetPublishFoundExisting(true)
-					opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}, flags...)}
+					opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}, flags...)}
 					switch {
 					case local && serves:
 						opts = servingLocalPublish(t, srv, true, flags...)
