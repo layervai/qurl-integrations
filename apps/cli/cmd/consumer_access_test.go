@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-go/qurl"
 
@@ -113,7 +114,8 @@ func TestConsumerAccessRejectsBadDecisionsBeforeRequest(t *testing.T) {
 		{"approve", srv.Key.CRID, "new", "--version", "1", "--credential-kind", "device", "--credential-id", "agent-consumer01", "--credential-key", "public-key"},
 		{"approve", srv.Key.CRID, "new", "--version", "0", "--credential-kind", "unknown", "--credential-id", "id", "--credential-key", "key"},
 		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--entitlement", "receipt"},
-		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--expires-at", "2027-01-01T00:00:00Z"},
+		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--expires-at", "2020-01-01T00:00:00Z"},
+		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--expires-at", time.Now().AddDate(1, 0, 2).UTC().Format(time.RFC3339)},
 		{"approve", srv.Key.CRID, strings.Repeat("a", 64), "--version", "1", "--credential-id", "id"},
 		{"invite", srv.Key.CRID},
 		{"invite", srv.Key.CRID, "--email", "ana@example.com", "--version", "1"},
@@ -164,7 +166,7 @@ func TestPublishConsumerPolicyRejectsInvalidFlags(t *testing.T) {
 		{"", "receipt", false}, {"review", "", true}, {"contract", "   ", false}, {"contract", strings.Repeat("a", 129), false}, {"review", "   ", false},
 	} {
 		access := &qurlapi.PublishOptions{Public: input.public}
-		if err := setPublishConsumerPolicy(access, input.mode, input.contract); err == nil || access.ConsumerAccess != nil {
+		if err := setPublishConsumerPolicy(access, input.mode, input.contract, ""); err == nil || access.ConsumerAccess != nil {
 			t.Fatal("invalid publish policy accepted")
 		}
 	}
@@ -173,7 +175,7 @@ func TestPublishConsumerPolicyRejectsInvalidFlags(t *testing.T) {
 func TestPublishRejectsExplicitEmptyAccessBeforeRequest(t *testing.T) {
 	srv := apitest.NewServer(t)
 	for _, mode := range []string{"", "   "} {
-		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/report", "--access=" + mode}})
+		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/report", "--name", "Example", "--access=" + mode}})
 		if result.code != 2 || !strings.Contains(result.stderr.String(), "--access requires") {
 			t.Fatalf("mode=%q exit=%d error=%s", mode, result.code, result.stderr.String())
 		}
@@ -189,9 +191,11 @@ func TestConsumerAccessApprovalRequestBodies(t *testing.T) {
 			srv := apitest.NewServer(t)
 			id, version := strings.Repeat("a", 64), "1"
 			flags := []string{"--entitlement", "receipt", "--expires-at", "2027-01-01T00:00:00Z"}
+			// A key opt-in may end sooner than the policy's approval lifetime.
+			keyExpiry := time.Now().AddDate(0, 1, 0).UTC().Truncate(time.Second).Format(time.RFC3339)
 			if key {
 				id, version = "new", "0"
-				flags = []string{"--credential-kind", "device", "--credential-id", "agent-consumer01", "--credential-key", "public-key"}
+				flags = []string{"--credential-kind", "device", "--credential-id", "agent-consumer01", "--credential-key", "public-key", "--expires-at", keyExpiry}
 			}
 			srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/consumer-grants/"+id+"/approve", func(w http.ResponseWriter, r *http.Request) {
 				var body qurl.ConsumerGrantApproval
@@ -199,7 +203,7 @@ func TestConsumerAccessApprovalRequestBodies(t *testing.T) {
 					t.Fatal(err)
 				}
 				if key {
-					if body.ExpectedVersion != 0 || body.CredentialKind != "device" || body.CredentialID != "agent-consumer01" || body.CredentialPublicKey != "public-key" || body.EntitlementID != "" || body.ExpiresAt != nil {
+					if body.ExpectedVersion != 0 || body.CredentialKind != "device" || body.CredentialID != "agent-consumer01" || body.CredentialPublicKey != "public-key" || body.EntitlementID != "" || body.ExpiresAt == nil || body.ExpiresAt.UTC().Format(time.RFC3339) != keyExpiry {
 						t.Fatalf("key body=%+v", body)
 					}
 				} else if body.ExpectedVersion != 1 || body.EntitlementID != "receipt" || body.ExpiresAt == nil || body.ExpiresAt.Format("2006-01-02T15:04:05Z07:00") != "2027-01-01T00:00:00Z" || body.CredentialKind != "" || body.CredentialID != "" || body.CredentialPublicKey != "" {
@@ -220,12 +224,69 @@ func TestConsumerAccessApprovalRequestBodies(t *testing.T) {
 func TestPublishRejectsExplicitEmptyContractBeforeRequest(t *testing.T) {
 	srv := apitest.NewServer(t)
 	for _, contract := range []string{"", "   "} {
-		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/report", "--contract=" + contract}})
+		result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/report", "--name", "Example", "--contract=" + contract}})
 		if result.code != 2 || !strings.Contains(result.stderr.String(), "--contract requires") {
 			t.Fatalf("contract=%q exit=%d error=%s", contract, result.code, result.stderr.String())
 		}
 	}
 	if len(srv.Requests()) != 0 {
 		t.Fatal("empty contract reached API")
+	}
+}
+
+func TestConsumerAccessConfiguresStripeContractAndConfirmsEveryPaymentField(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Policy   qurl.ConsumerAccessPolicy `json:"consumer_access"`
+			Expected int64                     `json:"expected_consumer_access_version"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Policy.Payment == nil || body.Policy.Payment.AccountID != "acct_publisher" || body.Policy.Payment.PriceID != "price_product" || body.Policy.Payment.AccessSeconds != 3600 {
+			t.Fatalf("invalid payment policy: %+v", body.Policy)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "consumer_access": body.Policy}, nil)
+	})
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "access", "configure", srv.Key.CRID, "--mode", "contract", "--contract", "sale", "--version", "0", "--stripe-account", "acct_publisher", "--stripe-price", "price_product", "--payment-access-seconds", "3600", "-o", "json"}})
+	if result.code != 0 {
+		t.Fatalf("exit=%d stderr=%s", result.code, result.stderr.String())
+	}
+	if !strings.Contains(result.stdout.String(), `"price_id": "price_product"`) {
+		t.Fatalf("payment receipt missing: %s", result.stdout.String())
+	}
+}
+func TestStripePaymentFlagsRefusePartialOrWrongPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		mode, account, price string
+		seconds              int64
+	}{{"review", "acct_p", "price_p", 0}, {"contract", "acct_p", "", 0}, {"contract", "acct_p", "price_p", -1}, {"contract", "acct_wrong/route", "price_p", 0}} {
+		policy := &qurl.ConsumerAccessPolicy{Mode: tt.mode, ContractID: "sale", Version: 1}
+		if err := setStripePayment(policy, tt.account, tt.price, tt.seconds); err == nil {
+			t.Fatal("invalid payment flags accepted")
+		}
+	}
+}
+
+func TestPublisherPaymentsCommandsShowThreePercent(t *testing.T) {
+	for _, operation := range []string{"connect", "account"} {
+		t.Run(operation, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			method, path := http.MethodGet, "/v1/payments/account"
+			data := map[string]any{"account_id": "acct_publisher", "layerv_fee_percent": 3, "charges_enabled": true, "payouts_enabled": true, "renewing_subscriptions": 0}
+			if operation == "connect" {
+				method, path = http.MethodPost, "/v1/payments/connect"
+				data = map[string]any{"url": "https://connect.stripe.com/oauth/authorize?state=fixture"}
+			}
+			srv.Script(method, path, func(w http.ResponseWriter, _ *http.Request) { apitest.WriteEnvelope(t, w, http.StatusOK, data, nil) })
+			result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "payments", operation, "-o", "json"}})
+			if result.code != 0 {
+				t.Fatalf("exit=%d error=%s", result.code, result.stderr.String())
+			}
+			if !strings.Contains(result.stdout.String(), `"layerv_fee_percent": 3`) {
+				t.Fatalf("missing fee: %s", result.stdout.String())
+			}
+		})
 	}
 }

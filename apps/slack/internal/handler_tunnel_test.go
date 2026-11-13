@@ -775,6 +775,9 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if asyncEnvelope[respFieldResponseType] != respTypeEphemeral {
 		t.Fatalf("response_url response_type = %q, want ephemeral", asyncEnvelope[respFieldResponseType])
 	}
+	if resourceBody["name"] != testTunnelSlug {
+		t.Errorf("resource name = %v, want the Connector ID %q", resourceBody["name"], testTunnelSlug)
+	}
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}
@@ -965,12 +968,7 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 	if ack != ackWorkingOnIt {
 		t.Fatalf("ack = %q, want %q", ack, ackWorkingOnIt)
 	}
-	var call openViewCall
-	select {
-	case call = <-calls:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView was not called")
-	}
+	call := waitForTestValue(t, calls, "OpenView was not called")
 	if !call.hasDL {
 		t.Fatal("OpenView context missing deadline")
 	}
@@ -1055,17 +1053,8 @@ func TestTunnelInstallBareFallsBackToEnterpriseInstallToken(t *testing.T) {
 	if ack != ackWorkingOnIt {
 		t.Fatalf("ack = %q, want %q", ack, ackWorkingOnIt)
 	}
-	var first, second openViewCall
-	select {
-	case first = <-calls:
-	case <-time.After(2 * time.Second):
-		t.Fatal("workspace OpenView lookup was not called")
-	}
-	select {
-	case second = <-calls:
-	case <-time.After(2 * time.Second):
-		t.Fatal("enterprise OpenView fallback was not called")
-	}
+	first := waitForTestValue(t, calls, "workspace OpenView lookup was not called")
+	second := waitForTestValue(t, calls, "enterprise OpenView fallback was not called")
 	if first.tokenOwnerID != testAdminTeamID || second.tokenOwnerID != testEnterpriseID {
 		t.Fatalf("OpenView token lookup order = %q, %q; want team then enterprise", first.tokenOwnerID, second.tokenOwnerID)
 	}
@@ -1125,12 +1114,8 @@ func TestTunnelInstallBareReportsInstallLinkWhenWorkspaceAndEnterpriseTokensMiss
 	}
 	var gotCalls []string
 	for len(gotCalls) < 2 {
-		select {
-		case tokenOwnerID := <-calls:
-			gotCalls = append(gotCalls, tokenOwnerID)
-		case <-time.After(2 * time.Second):
-			t.Fatalf("OpenView token lookups = %v, want workspace then enterprise", gotCalls)
-		}
+		tokenOwnerID := waitForTestValue(t, calls, fmt.Sprintf("OpenView token lookups = %v, want workspace then enterprise", gotCalls))
+		gotCalls = append(gotCalls, tokenOwnerID)
 	}
 	if strings.Join(gotCalls, ",") != testAdminTeamID+","+testEnterpriseID {
 		t.Fatalf("OpenView token lookups = %v, want workspace then enterprise", gotCalls)
@@ -1488,21 +1473,13 @@ func TestTunnelInstallBareAcksBeforeSlowOpenView(t *testing.T) {
 		status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 		returned <- reply{status: status, ack: ack}
 	}()
-	select {
-	case <-openViewStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView did not start")
+	waitForTestValue(t, openViewStarted, "OpenView did not start")
+	got := waitForTestValue(t, returned, "slash-command ack waited for views.open to finish")
+	if got.status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", got.status)
 	}
-	select {
-	case got := <-returned:
-		if got.status != http.StatusOK {
-			t.Fatalf("status = %d, want 200", got.status)
-		}
-		if !strings.Contains(got.ack, "Working on it") {
-			t.Fatalf("ack = %q, want immediate guided setup copy", got.ack)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("slash-command ack waited for views.open to finish")
+	if !strings.Contains(got.ack, "Working on it") {
+		t.Fatalf("ack = %q, want immediate guided setup copy", got.ack)
 	}
 }
 
@@ -1530,11 +1507,7 @@ func TestTunnelInstallBareCancelsSlowOpenViewAtBudget(t *testing.T) {
 	if !strings.Contains(ack, "Working on it") {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
-	select {
-	case <-openViewStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView did not start")
-	}
+	waitForTestValue(t, openViewStarted, "OpenView did not start")
 	select {
 	case err := <-openViewCanceled:
 		if !errors.Is(err, context.DeadlineExceeded) {
@@ -1635,6 +1608,9 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		t.Fatalf("modal ack = %q, want empty JSON object", w.Body.String())
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	if resourceBody["name"] != testTunnelSlug {
+		t.Errorf("resource name = %v, want the Connector ID %q", resourceBody["name"], testTunnelSlug)
+	}
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}

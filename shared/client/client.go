@@ -400,15 +400,8 @@ func validateIdempotencyKey(key string) error {
 //     does NOT accept resource_id in its body — a body-keyed call
 //     surfaces as 400 invalid_target_url because target_url is
 //     required for that endpoint.
-//
-// Note: Create takes a value receiver for backward-compat with the existing
-// callers in apps/slack; the new methods ([Client.CreateResource],
-// [Client.UpdateResource]) take *Input pointers, which is the going-forward
-// idiom. Pointer migration tracked at #146.
-//
-//nolint:gocritic // hugeParam: CreateInput is 120 bytes; *CreateInput migration tracked at #146.
-func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
-	if input.TargetURL == "" && input.ResourceID == "" {
+func (c *Client) Create(ctx context.Context, input *CreateInput) (*CreateOutput, error) {
+	if input == nil || (input.TargetURL == "" && input.ResourceID == "") {
 		return nil, ErrCreateRequiresTarget
 	}
 	if input.TargetURL != "" && input.ResourceID != "" {
@@ -705,8 +698,14 @@ type CreateResourceInput struct {
 	// can't distinguish "unset" from "empty" without an extra sentinel,
 	// and the create surface accepts the silent-no-alias semantic so
 	// callers can pass an optional alias literal.)
-	Alias        string        `json:"alias,omitempty"`
-	CustomDomain string        `json:"custom_domain,omitempty"`
+	Alias        string `json:"alias,omitempty"`
+	CustomDomain string `json:"custom_domain,omitempty"`
+	// Name is the public name recipients see (link page, previews, their
+	// saved passkey). The service requires it to create a URL or tunnel
+	// resource and ignores it when find-or-create reuses one. Never derive
+	// it from TargetURL or Description: that would publish a hidden origin.
+	// TODO(upstream-contract): qurl-service CreateResourceRequest.name.
+	Name         string        `json:"name,omitempty"`
 	Description  string        `json:"description,omitempty"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 }

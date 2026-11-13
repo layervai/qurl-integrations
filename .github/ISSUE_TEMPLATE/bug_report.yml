@@ -58,8 +58,8 @@ body:
       label: Component
       # Keep this list aligned with the Commit Format scopes in CLAUDE.md,
       # EXCEPT for `other` — that's a reporter-UX escape hatch, not a
-      # valid commit scope. Adding a new app? Update both places in
-      # the same PR. Don't propagate `other` to CLAUDE.md.
+      # valid commit scope. Update this form, CLAUDE.md, CONTRIBUTING.md,
+      # and pr-title.yml in the same PR. Keep `other` only in this form.
       # Not enforced at CI here; convention only.
       description: Match one of the commit scopes in CLAUDE.md (or pick `other` for cross-cutting). Keeps downstream triage scriptable.
       options:
@@ -71,7 +71,9 @@ body:
         - edge-extension
         - origins
         - shared
+        - infra
         - ci
+        - deps
         - other
     validations:
       required: true

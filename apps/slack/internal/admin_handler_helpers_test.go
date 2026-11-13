@@ -316,3 +316,18 @@ func (f *fakeDDB) workspaceMappingHasAdmin(t *testing.T, teamID, slackUserID str
 	}
 	return false
 }
+
+// Keep async setup waits bounded and cancel them with their owning test.
+func waitForTestValue[T any](t *testing.T, values <-chan T, failure string) T {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	select {
+	case value := <-values:
+		return value
+	case <-ctx.Done():
+		t.Fatalf("%s: %v", failure, ctx.Err())
+		var zero T
+		return zero
+	}
+}

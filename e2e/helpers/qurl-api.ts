@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { fetchWithTransientRetry } from './http';
+import { CleanupRetryBudget, fetchGetWithTransientRetry, fetchWithCleanupRetry, fetchWithTransientRetry } from './http';
 
 export interface MintResult {
   resource_id: string;
@@ -113,12 +113,18 @@ export async function mintConnectorView(
   uploadUrl: string,
   resourceId: string,
   apiKey: string,
-  opts: { expiresAt: string; oneTimeUse?: boolean },
+  opts: { expiresAt: string; oneTimeUse?: boolean; sessionDurationSeconds?: number },
 ): Promise<{ qurl_link: string; qurl_id: string; expires_at: string }> {
+  const seconds = opts.sessionDurationSeconds;
+  // TODO(upstream-contract): connector and qurl-service accept whole seconds, 1s–24h.
+  if (seconds !== undefined && (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400)) {
+    throw new RangeError('sessionDurationSeconds must be an integer from 1 to 86400');
+  }
   const res = await fetchWithTransientRetry(`${uploadUrl}/mint_link/${encodeURIComponent(resourceId)}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ n: 1, expires_at: opts.expiresAt, one_time_use: opts.oneTimeUse ?? true }),
+    body: JSON.stringify({ n: 1, expires_at: opts.expiresAt, one_time_use: opts.oneTimeUse ?? true,
+      ...(seconds !== undefined && { session_duration: `${seconds}s` }) }),
   });
   if (!res.ok) throw new Error(`mint_link failed: ${res.status} ${await res.text()}`);
   const data = (await res.json()) as {
@@ -218,7 +224,7 @@ export async function mintLink(
 
 /** Access a qURL link and return the HTTP result */
 export async function accessLink(url: string): Promise<LinkAccessResult> {
-  const res = await fetch(url, { redirect: 'follow' });
+  const res = await fetchGetWithTransientRetry(url, { redirect: 'follow' });
   return {
     status: res.status,
     finalUrl: res.url,
@@ -229,7 +235,7 @@ export async function accessLink(url: string): Promise<LinkAccessResult> {
 
 /** Access a qURL link without following redirects */
 export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResult> {
-  const res = await fetch(url, { redirect: 'manual' });
+  const res = await fetchGetWithTransientRetry(url, { redirect: 'manual' });
   return {
     status: res.status,
     finalUrl: res.headers.get('location') ?? res.url,
@@ -245,29 +251,47 @@ export const REVOKE_CONFIRM_WAIT_MS = 35_000;
 /** Revoke the resource. A successful DELETE confirms the protection update.
  * Repeated DELETEs retry the same committed epoch (qurl-service RevokeQurl).
  * A management status of `revoked` alone does not confirm that update.
- * Cleanup skips the retry so a bulk sweep keeps its existing time budget. */
+ * A confirmation 404 succeeds only after the dedicated committed-revocation code.
+ * Cleanup retries only a 429 within the sweep's shared wait budget.
+ * cleanupRetryBudget is reserved for cleanup with confirmPending=false. */
 export async function revokeLink(
   baseUrl: string,
   apiKey: string,
   resourceId: string,
-  { confirmPending = true }: { confirmPending?: boolean } = {},
+  { confirmPending = true, cleanupRetryBudget }: { confirmPending?: boolean; cleanupRetryBudget?: CleanupRetryBudget } = {},
 ): Promise<boolean> {
   const url = new URL(baseUrl);
   url.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
-  const res = await fetchWithTransientRetry(url, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${apiKey}` },
-  }, confirmPending
-    ? { maxAttempts: 2, maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS }
-    : { maxAttempts: 1 });
+  const init = { method: 'DELETE', headers: { Authorization: `Bearer ${apiKey}` } };
+  let committed = false;
+  const res = cleanupRetryBudget
+    ? await fetchWithCleanupRetry(url, init, cleanupRetryBudget)
+    : await fetchWithTransientRetry(url, init, confirmPending ? {
+      maxAttempts: 2,
+      maxRetryAfterMs: REVOKE_CONFIRM_WAIT_MS,
+      shouldRetry: async (response) => {
+        if (response.status !== 503) return true;
+        const raw = response.headers.get('retry-after')?.trim() ?? '';
+        const waitMs = /^\d+$/.test(raw) ? Number(raw) * 1000 : NaN;
+        // Never shorten a server directive to fit this caller's wait budget.
+        if (waitMs > REVOKE_CONFIRM_WAIT_MS) return false;
+        // This caller needs only the status; the retry response body is discarded.
+        const problem = await response.json().catch(() => null) as { error?: { code?: unknown } } | null;
+        // TODO(upstream-contract): qurl-service#1998 reserves this code for a saved revoke.
+        committed = problem?.error?.code === 'revocation_pending';
+        return !committed || waitMs > 0;
+      },
+    } : { maxAttempts: 1 });
   await res.body?.cancel().catch(() => {});
-  if (!res.ok && confirmPending) {
+  const confirmed = res.status === 204 || (committed && res.status === 404);
+  if (!confirmed && confirmPending) {
     console.warn(`[revokeLink] DELETE returned ${res.status}; protection update not confirmed`);
   }
-  return res.ok;
+  return confirmed;
 }
 
 export interface LinkStatus {
+  target_path?: string;
   qurl_id: string;
   use_count: number;
   status: string;
@@ -275,6 +299,7 @@ export interface LinkStatus {
 }
 
 export interface ResourceStatus {
+  type?: string;
   resource_id: string;
   status: string;
   expires_at?: string;
@@ -329,13 +354,15 @@ function parseLinkStatus(value: unknown, resourceId: string, index: number): Lin
     typeof value.qurl_id !== 'string' ||
     typeof value.use_count !== 'number' ||
     typeof value.status !== 'string' ||
-    (value.expires_at !== undefined && typeof value.expires_at !== 'string')
+    (value.expires_at !== undefined && typeof value.expires_at !== 'string') ||
+    (value.target_path !== undefined && typeof value.target_path !== 'string')
   ) {
     throw new Error(
       `qURL lookup returned an invalid token status shape for resource ${resourceId} at qurls[${index}]`,
     );
   }
   return {
+    ...(value.target_path === undefined ? {} : { target_path: value.target_path }),
     qurl_id: value.qurl_id,
     use_count: value.use_count,
     status: value.status,
@@ -351,6 +378,7 @@ function parseResourceStatus(value: unknown, id: string): ResourceStatus | null 
   ) {
     return null;
   }
+  if (value.type !== undefined && typeof value.type !== 'string') throw new Error('Invalid resource type');
   if (value.expires_at !== undefined && typeof value.expires_at !== 'string') {
     throw new Error(`qURL lookup returned an invalid expires_at for resource ${id}`);
   }
@@ -366,6 +394,7 @@ function parseResourceStatus(value: unknown, id: string): ResourceStatus | null 
     parseLinkStatus(qurl, resourceId, index)
   ));
   return {
+    ...(value.type === undefined ? {} : { type: value.type }),
     resource_id: resourceId,
     status: value.status,
     ...(value.expires_at === undefined ? {} : { expires_at: value.expires_at }),
@@ -374,7 +403,7 @@ function parseResourceStatus(value: unknown, id: string): ResourceStatus | null 
 }
 
 /** A typed HTTP failure from the qURL management lookup. */
-class StatusCheckError extends Error {
+export class StatusCheckError extends Error {
   constructor(readonly status: number) {
     super(`qURL lookup failed: ${status}`);
     this.name = 'StatusCheckError';
@@ -397,16 +426,21 @@ class TokenSummaryNotVisibleError extends Error {
  * either a public resource ID or a q_ display ID and returns the parent
  * resource. There is no `/status` sub-route: per-qURL status lives in the
  * response's `qurls` summaries. */
-async function getQurlResource(
+export async function getQurlResource(
   managementUrl: string,
   apiKey: string,
   id: string,
+  signal?: AbortSignal,
+  cleanupRetryBudget?: CleanupRetryBudget,
 ): Promise<ResourceStatus> {
   const base = stripTrailingSlashes(managementUrl);
-  const res = await fetchWithTransientRetry(`${base}/${encodeURIComponent(id)}`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
-  if (!res.ok) throw new StatusCheckError(res.status);
+  const init = { signal, headers: { Authorization: `Bearer ${apiKey}` } };
+  const url = `${base}/${encodeURIComponent(id)}`;
+  const res = await fetchWithTransientRetry(url, init, { cleanupRetryBudget });
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    throw new StatusCheckError(res.status);
+  }
 
   const body = await res.json() as unknown;
   const resource = parseBareOrEnveloped(body, (value) => parseResourceStatus(value, id));
@@ -418,16 +452,14 @@ async function getQurlResource(
  * TODO(upstream-contract): GET /v1/qurls/{child} returns its canonical parent;
  * child DELETE enforces that parent binding and repeated revocation succeeds.
  * This confirms API revocation, not native session CLOSED. */
-export async function revokeChild(managementUrl: string, apiKey: string, qurlId: string): Promise<void> {
+export async function revokeChild(managementUrl: string, apiKey: string, qurlId: string, signal?: AbortSignal, cleanupRetryBudget?: CleanupRetryBudget): Promise<void> {
   if (!/^q_[a-zA-Z0-9]+$/.test(qurlId)) throw new TypeError('Child cleanup requires a qurl_id');
-  const parent = await getQurlResource(managementUrl, apiKey, qurlId);
+  const parent = await getQurlResource(managementUrl, apiKey, qurlId, signal, cleanupRetryBudget);
   if (!parent.resource_id) throw new Error('Child cleanup requires a canonical parent');
   const url = new URL(managementUrl);
   url.pathname = `/v1/resources/${encodeURIComponent(parent.resource_id)}/qurls/${encodeURIComponent(qurlId)}`;
-  const res = await fetchWithTransientRetry(url, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
+  const init = { method: 'DELETE', signal, headers: { Authorization: `Bearer ${apiKey}` } };
+  const res = await fetchWithTransientRetry(url, init, { cleanupRetryBudget });
   await res.body?.cancel().catch(() => {});
   if (res.status !== 204) {
     throw Object.assign(new Error(`Child cleanup did not confirm revocation: ${res.status}`), { status: res.status });
@@ -445,13 +477,14 @@ export async function getLinkStatus(
   managementUrl: string,
   apiKey: string,
   qurlId: string,
+  signal?: AbortSignal,
 ): Promise<LinkStatus> {
   // TODO(upstream-contract): layervai/qurl-service#1233 tracks whether `q_`
   // remains the stable discriminator between qurl_id and opaque resource_id.
   if (!qurlId.startsWith('q_')) {
     throw new TypeError('qURL token lookup requires a qurl_id; use getResourceStatus for resource IDs');
   }
-  const resource = await getQurlResource(managementUrl, apiKey, qurlId);
+  const resource = await getQurlResource(managementUrl, apiKey, qurlId, signal);
   const status = resource.qurls?.find((qurl) => qurl.qurl_id === qurlId);
   if (!status) {
     throw new TokenSummaryNotVisibleError(qurlId, resource.resource_id);
@@ -464,8 +497,9 @@ export async function getResourceStatus(
   managementUrl: string,
   apiKey: string,
   resourceId: string,
+  signal?: AbortSignal,
 ): Promise<ResourceStatus> {
-  const resource = await getQurlResource(managementUrl, apiKey, resourceId);
+  const resource = await getQurlResource(managementUrl, apiKey, resourceId, signal);
   // Resource-level callers pass the canonical public resource_id, never a qURL
   // display ID; require the management response to echo that encoding exactly.
   if (resource.resource_id !== resourceId) {
