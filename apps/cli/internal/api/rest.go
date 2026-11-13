@@ -1018,12 +1018,17 @@ func (c *client) doRESTRequest(ctx context.Context, method, path string, body an
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
+	limit := maxResponseBody
+	if path == accessRulesPath {
+		// The service JSON-escapes libraries up to 256 KiB.
+		limit = 2 << 20
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
 		return nil, fmt.Errorf("read qURL API response: %w", err)
 	}
-	if len(respBody) > maxResponseBody {
-		return nil, fmt.Errorf("%w: response exceeds %d-byte cap", qurl.ErrInvalidAPIResponse, maxResponseBody)
+	if len(respBody) > limit {
+		return nil, fmt.Errorf("%w: response exceeds %d-byte cap", qurl.ErrInvalidAPIResponse, limit)
 	}
 	return &restReply{status: resp.StatusCode, header: resp.Header, body: respBody}, nil
 }
@@ -1233,7 +1238,7 @@ func validateConsumerPolicy(policy *qurl.ConsumerAccessPolicy) error {
 	if policy.Version != 1 {
 		return qurl.ErrInvalidResourceRequest
 	}
-	return ValidateConsumerPolicyFields(policy.Mode, policy.ContractID, policy.EmailDomain)
+	return policy.Validate()
 }
 
 var consumerEmailDomain = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -1277,8 +1282,14 @@ func consumerPolicyConfirmed(requested, received *qurl.ConsumerAccessPolicy, fou
 	if requested == nil {
 		return true
 	}
-	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID && received.EmailDomain == requested.EmailDomain && samePaymentPolicy(received.Payment, requested.Payment) &&
-		(received.Version == requested.Version || (foundExisting != nil && *foundExisting && received.Version > requested.Version && received.Version < 1<<53))
+	existing := foundExisting != nil && *foundExisting
+	want := *requested
+	if existing && received != nil {
+		// A rule setting that differs is a warning for the caller, not a conflict.
+		want.ApprovalExpiresIn = received.ApprovalExpiresIn
+	}
+	return received != nil && received.Validate() == nil && received.SameDefinition(want) &&
+		(received.Version == requested.Version || (existing && received.Version > requested.Version && received.Version < 1<<53))
 }
 
 func confirmPublishConsumerPolicy(requested *qurl.ConsumerAccessPolicy, published *Published) error {
@@ -1289,11 +1300,4 @@ func confirmPublishConsumerPolicy(requested *qurl.ConsumerAccessPolicy, publishe
 		return fmt.Errorf("%w: the existing resource has a different private access policy; check `qurl status <CRID>` and use `qurl access configure` to change it", ErrPublishAccessConflict)
 	}
 	return fmt.Errorf("%w: API did not confirm the requested private access policy; the resource may exist; check `qurl list` before you retry", qurl.ErrInvalidAPIResponse)
-}
-
-func samePaymentPolicy(a, b *qurl.CRIDPaymentPolicy) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
 }

@@ -517,6 +517,7 @@ than switching in place.
 | `qurl publish <target-url>` | Publish a remote URL or serve a local app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |
+| `qurl rules list`, `create`, `save`, `delete`, `sync`, `resolve` | Manage saved access rules; works locally before account linking |
 | `qurl access <action> <CRID> [<decision-id>]` | Manage private consumer policies, invitations, and grants |
 | `qurl requests [<CRID>]` | List access requests, or turn them on or off for a private resource |
 | `qurl approve <CRID> <code>` | Approve one person's request for access to a private resource |
@@ -832,6 +833,63 @@ authorization expires. A header update is not immediate revocation; remove the
 route or stop the publisher to close its old work. See
 [docs/session-groups.md](../../docs/session-groups.md#runtime-request-headers).
 
+### Saved access rules
+
+Access rules are named presets for future shares. They work before account
+linking; `qurl rules sync` merges them with your linked account (`login`,
+`account setup` and `account recover` also sync, uploading rules saved before
+linking), and different edits to the same rule need
+`qurl rules resolve <id-or-name> --use local|account` (until then no pending
+edit is uploaded). A sync that stays local
+exits 0; read the JSON `sync` field. Changing or deleting a rule never changes
+existing shares.
+
+```sh
+qurl rules create Reviewers --mode review --approvals-last 7d
+qurl publish http://127.0.0.1:3000 --rule Reviewers
+qurl publish http://127.0.0.1:8080 --rule once
+```
+
+| Flag | Applies to | Values |
+|------|------------|--------|
+| `--expires-in` | public | `1m` to `30d` (required with any link limit) |
+| `--once` (alias `--one-browser`) | public | only the first person to open the link gets in |
+| `--stays-open-for` (alias `--session-length`) | public | `1s` to `24h` |
+| `--approvals-last` | review, keys | `1d`, `7d`, `30d`, `90d` or `never` (default) |
+| `--stripe-price` | contract | a Stripe price ID such as `price_123`; makes the rule People who pay |
+| `--payment-access-seconds` | contract with `--stripe-price` | `0` (default, the resource lifetime) to `315360000`; subscriptions require `0` |
+
+A paid rule saves `"payment": {"price_id": "price_123", "access_seconds": 0}`
+(both members required, contract mode only) and never a Stripe account.
+Sharing with it reads the account connected now, like `qurl payments account`,
+and publishes the same payment policy as `--stripe-account`/`--stripe-price`,
+including when you publish the same target again; if a different Stripe
+account is connected by then, that publish fails as a conflict (exit 7)
+without changing the item. With no connected account
+it fails (exit 8) before publishing or changing access; run
+`qurl payments connect`. If the account cannot be checked, such as while
+payments are unavailable, it fails with exit 11.
+
+```sh
+qurl payments connect
+qurl rules create Buyers --mode contract --contract buyers --stripe-price price_123
+qurl publish http://127.0.0.1:3000 --rule Buyers
+```
+
+A public rule with link limits makes `publish` mint a temporary link (`Link:`,
+JSON `link`) and keeps the limits for later `qurl share <CRID>` links on this
+device. Link limits shape the links this device makes; they are not access
+control, and the CRID still opens a public item. Approvals last is part of the resource policy and the service enforces
+it. Publishing again to an existing item with a different access policy fails
+without changing it; different link limits or approval lifetime keep the
+existing settings and JSON reports `"settings_differ": true`.
+
+Supervising apps call `qurl rules capabilities -o json` (offline), read and edit
+with `rules list|save|delete|sync|resolve -o json` (`save` reads one rule from
+`--file -` and needs `--version <local_version>`), and pass a complete rule on
+standard input with `publish --rule-file -` or
+`access configure <CRID> --rule-file - --version <policy_version>`.
+
 ### qurl publish
 
 `qurl publish` handles both local apps and remote URLs:
@@ -973,7 +1031,8 @@ addresses. It intentionally rejects HTTPS, paths, queries, fragments,
 credentials, wildcard listeners, and localhost subdomains. These restrictions
 keep the one-command path unambiguous. `--foreground` runs the same production
 daemon engine in the current process for CI and debugging. Scripts can use
-`--quiet` to read only the full CRID.
+`--quiet` to read the full CRID on the first line; an item shared with link
+limits adds its new link on a second line.
 
 #### Remote URLs
 
@@ -1080,8 +1139,8 @@ The warning is part of the text output, and goes to stderr with `-o json` and
 stays as it is until you delete it. A publish never turns a public resource
 private, and it never makes a new public resource unless you pass `--public`.
 
-In either mode, the CRID is last and alone on its line; `--quiet` prints only
-the CRID. Publishing the same target again does not create a duplicate while
+In either mode, the CRID is last and alone on its line; `--quiet` prints the
+CRID first, then any link minted with saved or rule link limits. Publishing the same target again does not create a duplicate while
 its resource is active: the existing CRID is returned and the output says so.
 JSON reports a known outcome as `found_existing: true` or `false`; if recovery
 cannot prove which happened, it omits the field rather than guessing. Delete

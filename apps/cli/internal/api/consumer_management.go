@@ -81,7 +81,7 @@ func (m consumerManagement) RevokeConsumerGrant(ctx context.Context, crid, id st
 }
 
 // UpdateConsumerAccess changes the resource policy, with API errors mapped.
-func (m consumerManagement) UpdateConsumerAccess(ctx context.Context, crid string, expected int64, policy qurl.ConsumerAccessPolicy) error {
+func (m consumerManagement) UpdateConsumerAccess(ctx context.Context, crid string, expected int64, policy qurl.ConsumerAccessPolicy) error { //nolint:gocritic // hugeParam: signature is dictated by the ConsumerManagementClient interface and SDK method.
 	return mapError(m.sdk.UpdateConsumerAccess(ctx, crid, expected, policy))
 }
 
