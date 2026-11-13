@@ -4169,6 +4169,8 @@ async function handleSetupModal(interaction, { flow_id }) {
   const logFields = {
     guild_id: interaction.guildId,
     configured_by: interaction.user.id,
+    // flow_id is a reusable slot; the modal interaction ID identifies this attempt.
+    setup_session_id: interaction.id,
   };
 
   // `String(...)` coerces any non-string return shape (a hypothetical
@@ -4228,7 +4230,7 @@ async function handleSetupModal(interaction, { flow_id }) {
     });
   }
 
-  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE);
+  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE, interaction.id);
   logger.info('Guild API key configured', logFields);
 
   fireAndForgetLinkGuildWebhookSubscription({

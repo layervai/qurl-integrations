@@ -425,10 +425,10 @@ router.get('/callback', rateLimit, async (req, res) => {
   // TODO(#1366): persist the verified qURL owner identity and reject a
   // setup re-run that would silently repoint this guild to another owner.
   try {
-    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH);
+    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH, keyId);
   } catch (err) {
     logger.error('Failed to persist guild API key after successful mint', {
-      error: err?.message, guildId, discordUserId, keyId,
+      error: err?.message, guildId, discordUserId, keyId, setup_session_id: keyId,
     });
     // Key was minted but not stored. Best-effort delete on qurl-service
     // so retries don't pile up orphan keys under the admin's account.
@@ -458,7 +458,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       + 'If this keeps happening, contact your layerv.ai admin.');
   }
   logger.info('qURL OAuth setup complete', {
-    guildId, configuredBy: discordUserId, keyPrefix,
+    guildId, configuredBy: discordUserId, keyPrefix, setup_session_id: keyId,
   });
   // Audit evidence must never break setup. Compute only after persistence,
   // on the path that emits it. A fingerprint is never emitted without its
@@ -489,6 +489,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
       guild_id: guildId,
       configured_by: discordUserId,
+      setup_session_id: keyId,
       // Prefix is already shown in the success page and info log; including it
       // makes this forensic event self-contained without exposing the API key.
       key_prefix: keyPrefix || null,
