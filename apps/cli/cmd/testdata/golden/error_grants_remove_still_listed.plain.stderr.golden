@@ -1,0 +1,3 @@
+Error: access was taken away from abcd-efgh-2345-mnop. The service answered the same for qrst-uvwx-yz67-abcd, but its list still shows qrst-uvwx-yz67-abcd. qrst-uvwx-yz67-abcd still has access.
+
+  Run `qurl grants qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q` to see who has access now.

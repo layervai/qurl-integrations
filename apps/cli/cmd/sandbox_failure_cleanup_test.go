@@ -5,12 +5,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -31,6 +33,8 @@ const (
 	sandboxFailurePhaseMarker              = "QURL_CONTROLLED_FAILURE_PHASE"
 	sandboxFailureDiagnosticMarker         = "QURL_CONTROLLED_FAILURE_DIAGNOSTIC"
 	sandboxFailureLoginExitMarker          = "QURL_CONTROLLED_FAILURE_LOGIN_EXIT"
+	sandboxFailureReadinessMarker          = "QURL_CONTROLLED_FAILURE_READINESS"
+	sandboxFailureDaemonStateMarker        = "QURL_CONTROLLED_FAILURE_DAEMON_STATE"
 	sandboxFailureLoginExitTimeout         = "timeout"
 	sandboxFailureLoginExitUnknown         = "unknown"
 	sandboxLocalStateUnclassified          = "unclassified_local_state"
@@ -167,6 +171,88 @@ var sandboxFailureCategories = map[string]struct{}{
 	"unknown":              {},
 }
 
+// The readiness phase makes three checks in order. A child that stops there
+// names the one that stopped it and what that check last saw.
+const (
+	sandboxReadinessShareRow     = "share_row"
+	sandboxReadinessJobStatus    = "job_status"
+	sandboxReadinessSharingState = "sharing_state"
+
+	sandboxReadinessReadFailed         = "read_failed"
+	sandboxReadinessTimeout            = "timeout"
+	sandboxReadinessNotReady           = "not_ready"
+	sandboxReadinessQueryFailed        = "query_failed"
+	sandboxReadinessDelayed            = "delayed"
+	sandboxReadinessDelayedQueryFailed = "delayed_query_failed"
+	sandboxReadinessStateMismatch      = "state_mismatch"
+	sandboxReadinessCommandFailed      = "command_failed"
+	sandboxReadinessDecodeFailed       = "decode_failed"
+	sandboxReadinessNotSampled         = "not_sampled"
+
+	sandboxReadinessYes   = "yes"
+	sandboxReadinessNo    = "no"
+	sandboxReadinessNone  = "none"
+	sandboxReadinessOther = "other"
+)
+
+// sandboxFailureReadiness is what one readiness check last saw. Every field is
+// one token from the closed set of its check, so the parent can print it
+// without forwarding anything else the child process wrote.
+type sandboxFailureReadiness struct {
+	Check  string
+	Result string
+	First  string
+	Second string
+}
+
+type sandboxReadinessCheck struct {
+	results     []string
+	first       []string
+	second      []string
+	firstLabel  string
+	secondLabel string
+}
+
+var sandboxReadinessChecks = map[string]sandboxReadinessCheck{
+	sandboxReadinessShareRow: {
+		results: []string{sandboxReadinessReadFailed, sandboxReadinessTimeout},
+		first:   []string{sandboxReadinessNone},
+		second:  []string{sandboxReadinessNone},
+	},
+	sandboxReadinessJobStatus: {
+		results: []string{
+			sandboxReadinessNotReady, sandboxReadinessQueryFailed,
+			sandboxReadinessDelayed, sandboxReadinessDelayedQueryFailed,
+		},
+		first:      []string{sandboxReadinessYes, sandboxReadinessNo},
+		second:     []string{sandboxReadinessYes, sandboxReadinessNo},
+		firstLabel: "job installed", secondLabel: "job running",
+	},
+	sandboxReadinessSharingState: {
+		results: []string{
+			sandboxReadinessStateMismatch, sandboxReadinessCommandFailed,
+			sandboxReadinessDecodeFailed, sandboxReadinessNotSampled,
+		},
+		first:      []string{"on", "off", sandboxReadinessOther, sandboxReadinessNone},
+		second:     []string{"serving", "connecting", "stopped", sandboxReadinessOther, sandboxReadinessNone},
+		firstLabel: "desired state", secondLabel: "observed state",
+	},
+}
+
+// The daemon states `qurl inspect` can print. The child reports the one it
+// reads after a failure, which says whether a daemon answered at that moment.
+var sandboxFailureDaemonStates = map[string]struct{}{
+	"failed":         {},
+	"idle":           {},
+	"not_registered": {},
+	"not_running":    {},
+	"retrying":       {},
+	"serving":        {},
+	"starting":       {},
+	"stopped":        {},
+	"unavailable":    {},
+}
+
 func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	t.Helper()
 	if childTestName == "" || strings.ContainsAny(childTestName, "^$[]()|*+?\\") {
@@ -212,6 +298,11 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 		sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"),
 	}); err != nil {
 		t.Fatalf("controlled-failure child result: %v", err)
+	}
+	// A check that passed only after waiting never fails the child, so say it
+	// here: it is the one sign that the wait was needed in this run.
+	if readiness, ok := sandboxFailureLastReadiness(combined, true); ok {
+		t.Logf("controlled-failure child readiness note: %s", sandboxFailureReadinessDetail(readiness))
 	}
 	crid, err := sandboxFailureCleanedCRID(combined)
 	if err != nil {
@@ -380,6 +471,99 @@ func writeSandboxFailureDiagnostic(w io.Writer, diagnostic sandboxFailureDiagnos
 	_, _ = fmt.Fprintf(w, "%s %s %s\n", sandboxFailureDiagnosticMarker, diagnostic.Category, code)
 }
 
+func validSandboxFailureReadiness(readiness sandboxFailureReadiness) bool {
+	check, ok := sandboxReadinessChecks[readiness.Check]
+	return ok && slices.Contains(check.results, readiness.Result) &&
+		slices.Contains(check.first, readiness.First) && slices.Contains(check.second, readiness.Second)
+}
+
+func markSandboxFailureReadiness(readiness sandboxFailureReadiness) {
+	writeSandboxFailureReadiness(os.Stdout, readiness)
+}
+
+func writeSandboxFailureReadiness(w io.Writer, readiness sandboxFailureReadiness) {
+	if !validSandboxFailureReadiness(readiness) {
+		panic("invalid controlled-failure readiness")
+	}
+	_, _ = fmt.Fprintf(w, "%s %s %s %s %s\n", sandboxFailureReadinessMarker,
+		readiness.Check, readiness.Result, readiness.First, readiness.Second)
+}
+
+// sandboxReadinessSettledLate reports a check that passed, but not when it was
+// first asked. It is a note about a run, not the reason a child stopped.
+func sandboxReadinessSettledLate(result string) bool {
+	return result == sandboxReadinessDelayed || result == sandboxReadinessDelayedQueryFailed
+}
+
+// sandboxFailureLastReadiness returns the last valid readiness record of one
+// kind: the check that stopped the child, or a check that settled late.
+func sandboxFailureLastReadiness(output string, settledLate bool) (sandboxFailureReadiness, bool) {
+	var last sandboxFailureReadiness
+	found := false
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		fields := strings.Split(line, " ")
+		if len(fields) != 5 || fields[0] != sandboxFailureReadinessMarker {
+			continue
+		}
+		readiness := sandboxFailureReadiness{Check: fields[1], Result: fields[2], First: fields[3], Second: fields[4]}
+		if validSandboxFailureReadiness(readiness) && sandboxReadinessSettledLate(readiness.Result) == settledLate {
+			last, found = readiness, true
+		}
+	}
+	return last, found
+}
+
+func sandboxFailureReadinessDetail(readiness sandboxFailureReadiness) string {
+	check := sandboxReadinessChecks[readiness.Check]
+	detail := "readiness check: " + readiness.Check + ", result: " + readiness.Result
+	if check.firstLabel != "" {
+		detail += ", " + check.firstLabel + ": " + readiness.First + ", " + check.secondLabel + ": " + readiness.Second
+	}
+	return detail
+}
+
+func sandboxFailureDaemonStateFromInspection(raw []byte) (string, bool) {
+	var document sandboxInspectionDoc
+	if json.Unmarshal(raw, &document) != nil || document.DaemonState == nil {
+		return "", false
+	}
+	if _, ok := sandboxFailureDaemonStates[*document.DaemonState]; !ok {
+		return "", false
+	}
+	return *document.DaemonState, true
+}
+
+// markSandboxFailureDaemonStateFromCommand reports the daemon state of a
+// successful `qurl inspect`. A failed or unreadable inspection reports nothing.
+func markSandboxFailureDaemonStateFromCommand(stdout string, commandErr error) {
+	writeSandboxFailureDaemonStateFromCommand(os.Stdout, stdout, commandErr)
+}
+
+func writeSandboxFailureDaemonStateFromCommand(w io.Writer, stdout string, commandErr error) {
+	if commandErr != nil {
+		return
+	}
+	if state, ok := sandboxFailureDaemonStateFromInspection([]byte(stdout)); ok {
+		_, _ = fmt.Fprintf(w, "%s %s\n", sandboxFailureDaemonStateMarker, state)
+	}
+}
+
+func sandboxFailureLastDaemonState(output string) (string, bool) {
+	last, found := "", false
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		value, ok := strings.CutPrefix(line, sandboxFailureDaemonStateMarker+" ")
+		if !ok {
+			continue
+		}
+		if _, known := sandboxFailureDaemonStates[value]; known {
+			last, found = value, true
+		}
+	}
+	return last, found
+}
+
 func sandboxFailureLastPhase(output string) sandboxFailurePhase {
 	last := sandboxFailurePhaseUnknown
 	for _, line := range strings.Split(output, "\n") {
@@ -440,11 +624,21 @@ func sandboxFailureMissingSentinelError(output string) error {
 	if exit := sandboxFailureLastLoginExit(output); exit != "" {
 		detail += ", login exit: " + exit
 	}
+	// A check that settled late comes before the check that stopped the child.
+	if late, ok := sandboxFailureLastReadiness(output, true); ok {
+		detail += ", " + sandboxFailureReadinessDetail(late)
+	}
+	if stopped, ok := sandboxFailureLastReadiness(output, false); ok {
+		detail += ", " + sandboxFailureReadinessDetail(stopped)
+	}
 	if diagnostic, ok := sandboxFailureLastDiagnostic(output); ok {
 		detail += ", failure category: " + diagnostic.Category
 		if diagnostic.Code != "" {
 			detail += ", failure code: " + diagnostic.Code
 		}
+	}
+	if state, ok := sandboxFailureLastDaemonState(output); ok {
+		detail += ", daemon state: " + state
 	}
 	return fmt.Errorf("child did not reach the controlled customer failure (%s)", detail)
 }
@@ -515,6 +709,165 @@ func TestSandboxFailureDiagnosticsAreAllowListedAndRedacted(t *testing.T) {
 					t.Fatalf("closed login token error = %q, want %q", got, want)
 				}
 			})
+		}
+	})
+	t.Run("closed readiness", func(t *testing.T) {
+		// Every record after the second is refused, so the second is the last.
+		output := strings.Join([]string{
+			sandboxFailureReadinessMarker + " job_status not_ready yes no",
+			sandboxFailureReadinessMarker + " job_status query_failed no no\r",
+			sandboxFailureReadinessMarker + " job_status not_ready yes " + secret,
+			sandboxFailureReadinessMarker + " internal_topology not_ready yes no",
+			sandboxFailureReadinessMarker + " share_row timeout yes no",
+			sandboxFailureReadinessMarker + " job_status state_mismatch yes no",
+			sandboxFailureReadinessMarker + " sharing_state state_mismatch on serving extra",
+			sandboxFailureReadinessMarker + " sharing_state state_mismatch on",
+			" " + sandboxFailureReadinessMarker + " sharing_state state_mismatch on stopped",
+			sandboxFailureReadinessMarker + "  sharing_state state_mismatch on stopped",
+		}, "\n")
+		readiness, ok := sandboxFailureLastReadiness(output, false)
+		if !ok || readiness != (sandboxFailureReadiness{Check: sandboxReadinessJobStatus, Result: sandboxReadinessQueryFailed, First: sandboxReadinessNo, Second: sandboxReadinessNo}) {
+			t.Fatalf("last controlled-failure readiness = %#v, %t", readiness, ok)
+		}
+		if late, found := sandboxFailureLastReadiness(output, true); found {
+			t.Fatalf("a stopped check was read as one that settled late: %#v", late)
+		}
+		err := sandboxFailureMissingSentinelError(sandboxFailurePhaseMarker + " readiness\n" + output)
+		want := "child did not reach the controlled customer failure (last phase: readiness, readiness check: job_status, result: query_failed, job installed: no, job running: no)"
+		if err.Error() != want || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "internal_topology") {
+			t.Fatalf("controlled-failure readiness error = %q, want %q", err, want)
+		}
+	})
+	t.Run("readiness names each check", func(t *testing.T) {
+		for _, test := range []struct {
+			record sandboxFailureReadiness
+			want   string
+		}{
+			{
+				record: sandboxFailureReadiness{Check: sandboxReadinessShareRow, Result: sandboxReadinessTimeout, First: sandboxReadinessNone, Second: sandboxReadinessNone},
+				want:   "readiness check: share_row, result: timeout",
+			},
+			{
+				record: sandboxFailureReadiness{Check: sandboxReadinessJobStatus, Result: sandboxReadinessNotReady, First: sandboxReadinessYes, Second: sandboxReadinessNo},
+				want:   "readiness check: job_status, result: not_ready, job installed: yes, job running: no",
+			},
+			{
+				record: sandboxFailureReadiness{Check: sandboxReadinessSharingState, Result: sandboxReadinessStateMismatch, First: "on", Second: "connecting"},
+				want:   "readiness check: sharing_state, result: state_mismatch, desired state: on, observed state: connecting",
+			},
+		} {
+			var written strings.Builder
+			writeSandboxFailureReadiness(&written, test.record)
+			err := sandboxFailureMissingSentinelError(sandboxFailurePhaseMarker + " readiness\n" + written.String())
+			want := "child did not reach the controlled customer failure (last phase: readiness, " + test.want + ")"
+			if err.Error() != want {
+				t.Errorf("controlled-failure readiness error = %q, want %q", err, want)
+			}
+		}
+	})
+	t.Run("every allowed readiness record is read back", func(t *testing.T) {
+		records := 0
+		for name, check := range sandboxReadinessChecks {
+			for _, result := range check.results {
+				for _, first := range check.first {
+					for _, second := range check.second {
+						record := sandboxFailureReadiness{Check: name, Result: result, First: first, Second: second}
+						var written strings.Builder
+						writeSandboxFailureReadiness(&written, record)
+						got, ok := sandboxFailureLastReadiness(written.String(), sandboxReadinessSettledLate(result))
+						if !ok || got != record {
+							t.Errorf("readiness record %#v was read back as %#v, %t", record, got, ok)
+						}
+						records++
+					}
+				}
+			}
+		}
+		if records == 0 {
+			t.Fatal("no readiness record was checked")
+		}
+	})
+	t.Run("readiness writer refuses a token outside its set", func(t *testing.T) {
+		for _, record := range []sandboxFailureReadiness{
+			{Check: sandboxReadinessJobStatus, Result: sandboxReadinessNotReady, First: secret, Second: sandboxReadinessNo},
+			{Check: sandboxReadinessJobStatus, Result: sandboxReadinessTimeout, First: sandboxReadinessYes, Second: sandboxReadinessNo},
+			{Check: secret, Result: sandboxReadinessTimeout, First: sandboxReadinessNone, Second: sandboxReadinessNone},
+			{},
+		} {
+			var written strings.Builder
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Errorf("readiness record %#v was written", record)
+					}
+				}()
+				writeSandboxFailureReadiness(&written, record)
+			}()
+			if written.Len() != 0 {
+				t.Errorf("refused readiness record %#v still wrote %q", record, written.String())
+			}
+		}
+	})
+	t.Run("a check that settled late is a note beside the check that stopped", func(t *testing.T) {
+		output := strings.Join([]string{
+			sandboxFailurePhaseMarker + " readiness",
+			sandboxFailureReadinessMarker + " job_status delayed yes no",
+			sandboxFailureReadinessMarker + " sharing_state state_mismatch on connecting",
+		}, "\n")
+		late, ok := sandboxFailureLastReadiness(output, true)
+		if !ok || sandboxFailureReadinessDetail(late) != "readiness check: job_status, result: delayed, job installed: yes, job running: no" {
+			t.Fatalf("late readiness note = %#v, %t", late, ok)
+		}
+		err := sandboxFailureMissingSentinelError(output)
+		want := "child did not reach the controlled customer failure (last phase: readiness, " +
+			"readiness check: job_status, result: delayed, job installed: yes, job running: no, " +
+			"readiness check: sharing_state, result: state_mismatch, desired state: on, observed state: connecting)"
+		if err.Error() != want {
+			t.Fatalf("controlled-failure readiness error = %q, want %q", err, want)
+		}
+	})
+	t.Run("closed daemon state", func(t *testing.T) {
+		// Every record after the second is refused, so the second is the last.
+		output := strings.Join([]string{
+			sandboxFailureDaemonStateMarker + " serving",
+			sandboxFailureDaemonStateMarker + " starting\r",
+			sandboxFailureDaemonStateMarker + " " + secret,
+			sandboxFailureDaemonStateMarker + " internal_topology",
+			sandboxFailureDaemonStateMarker + " not_running extra",
+			sandboxFailureDaemonStateMarker + "  failed",
+			" " + sandboxFailureDaemonStateMarker + " failed",
+		}, "\n")
+		if state, ok := sandboxFailureLastDaemonState(output); !ok || state != "starting" {
+			t.Fatalf("last controlled-failure daemon state = %q, %t", state, ok)
+		}
+		err := sandboxFailureMissingSentinelError(strings.Join([]string{
+			sandboxFailurePhaseMarker + " readiness",
+			sandboxFailureDiagnosticMarker + " local_daemon none",
+			output,
+		}, "\n"))
+		want := "child did not reach the controlled customer failure (last phase: readiness, failure category: local_daemon, daemon state: starting)"
+		if err.Error() != want || strings.Contains(err.Error(), secret) {
+			t.Fatalf("controlled-failure daemon state error = %q, want %q", err, want)
+		}
+	})
+	t.Run("daemon state comes only from a readable inspection", func(t *testing.T) {
+		for _, test := range []struct {
+			name   string
+			stdout string
+			err    error
+			want   string
+		}{
+			{name: "known state", stdout: `{"daemon_state":"not_running","target_url":"http://127.0.0.1:1"}`, want: sandboxFailureDaemonStateMarker + " not_running\n"},
+			{name: "state outside the set", stdout: `{"daemon_state":"` + secret + `"}`},
+			{name: "no state", stdout: `{"target_url":"` + secret + `"}`},
+			{name: "malformed", stdout: `{"daemon_state":`},
+			{name: "failed command", stdout: `{"daemon_state":"serving"}`, err: errors.New(secret)},
+		} {
+			var written strings.Builder
+			writeSandboxFailureDaemonStateFromCommand(&written, test.stdout, test.err)
+			if written.String() != test.want {
+				t.Errorf("%s: daemon state record = %q, want %q", test.name, written.String(), test.want)
+			}
 		}
 	})
 	t.Run("diagnostic cannot carry secret", func(t *testing.T) {

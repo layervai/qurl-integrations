@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: scripts-${{ github.head_ref || github.ref_name }}
+  group: scripts-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -50,6 +50,10 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: shellcheck scripts/*.sh
 
+      - name: Test signed public CLI proof staging
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 scripts/test-stage-public-cli-proof.py
+
       - name: Test install.sh
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-install.sh
@@ -72,6 +76,17 @@ jobs:
       - name: Test CLI release verifier
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-verify-cli-release.sh
+
+      - name: Test production CLI evidence binding
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 scripts/test-cli-production-proof.py
+
+      # The pruner deletes draft releases, which cannot be undone, and runs
+      # only after a CLI release is published. Its selection rules and its
+      # refusals are exercised here because nothing else runs it before then.
+      - name: Test superseded CLI draft pruner
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-prune-superseded-cli-drafts.sh
 
       - name: Test macOS CLI egress lifecycle
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

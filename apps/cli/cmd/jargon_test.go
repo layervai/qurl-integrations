@@ -2,6 +2,7 @@ package main
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -130,16 +132,24 @@ func TestNoJargonOnHelpSurfaces(t *testing.T) {
 	}
 }
 
-// TestNoJargonInCustomerMessages asserts every fixed customer-facing message
-// constant in the CLI — command messages, CRID warnings, API error framing,
-// error-rendering hints — is free of forbidden jargon.
-func TestNoJargonInCustomerMessages(t *testing.T) {
+// allCustomerMessages returns every fixed customer-facing message constant
+// in the CLI: command messages, CRID warnings, API error framing and
+// error-rendering hints.
+func allCustomerMessages() []string {
 	all := make([]string, 0, 64)
 	all = append(all, customerMessages()...)
 	all = append(all, consume.CustomerMessages()...)
 	all = append(all, cridux.Messages()...)
 	all = append(all, qurlapi.CustomerMessages()...)
 	all = append(all, output.CustomerMessages()...)
+	return all
+}
+
+// TestNoJargonInCustomerMessages asserts every fixed customer-facing message
+// constant in the CLI — command messages, CRID warnings, API error framing,
+// error-rendering hints — is free of forbidden jargon.
+func TestNoJargonInCustomerMessages(t *testing.T) {
+	all := allCustomerMessages()
 
 	if len(all) == 0 {
 		t.Fatal("no customer messages collected; the gate would be vacuous")
@@ -161,6 +171,26 @@ func TestNoJargonInCustomerMessages(t *testing.T) {
 	if exempted != len(jargonExemptMessages) {
 		t.Errorf("jargonExemptMessages matched %d registered messages, want %d — a stale exemption is a hole in the gate",
 			exempted, len(jargonExemptMessages))
+	}
+}
+
+// TestRefusalOfAnOperandThatIsNotACRIDIsUnderTheGate pins that the message
+// share and get print for an operand that is not a CRID is one of the
+// messages TestNoJargonInCustomerMessages reads. The text is taken from what
+// the commands print. So the test fails when the message is no longer
+// registered, and when a command prints a second copy of the text that never
+// was.
+func TestRefusalOfAnOperandThatIsNotACRIDIsUnderTheGate(t *testing.T) {
+	for _, command := range []string{"share", "get"} {
+		res := runCLI(t, &runOpts{args: []string{command, "not-a-crid"}})
+		shown, isError := strings.CutPrefix(strings.TrimSuffix(res.stderr.String(), "\n"), "Error: ")
+		if res.code != exitcode.InvalidInput || !isError || shown == "" {
+			t.Fatalf("qurl %s not-a-crid: exit = %d, stderr = %q; want the refusal of an operand that is not a CRID",
+				command, res.code, res.stderr.String())
+		}
+		if !slices.Contains(customerMessages(), shown) {
+			t.Errorf("qurl %s prints %q, and customerMessages() does not register it", command, shown)
+		}
 	}
 }
 

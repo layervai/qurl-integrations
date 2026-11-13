@@ -39,9 +39,20 @@ limit is 1 MiB including surrounding whitespace.
 
 The envelope is returned unvalidated. For POST /v1/account/link, record the
 link only after status 200 with an owner_id matching this device and an
-account_id matching the intended account.`,
+account_id matching the intended account.
+
+This command is for an app that supervises qURL. To see who asked for access
+to your resources, use "qurl requests".`,
 		Example: "  qurl request GET /v1/me --supervision external -o json\n  # Redirect stdin from the null device (/dev/null, or NUL on Windows) when a mutation has no body.\n  qurl request DELETE /v1/resources/r_abc/sessions --supervision external -o json",
-		Args:    exactArgs(2),
+		// A person who meant `qurl requests` lands on the operand count, or
+		// on one of its flags that this command does not have. Both errors
+		// name that command.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.ExactArgs(2)(cmd, args); err != nil {
+				return usageErrorWithHint(err, hintMeantRequests)
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateRequestInvocation(opts, args[0], args[1], idempotencyKey); err != nil {
 				return err
@@ -62,6 +73,9 @@ account_id matching the intended account.`,
 		},
 	}
 	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "stable nonsecret key a supervisor reuses when retrying a mutation; effective only where the service implements idempotency (32-256 letters, digits, hyphens or underscores)")
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return usageErrorWithHint(err, hintMeantRequests)
+	})
 	return cmd
 }
 

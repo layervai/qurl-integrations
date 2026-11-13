@@ -26,6 +26,9 @@ func ValidFormat(f Format) bool {
 // Printer renders command results under the stream discipline. Build one per
 // invocation with New; it is not safe for concurrent use.
 type Printer struct {
+	// TermsNotice is present only on a first-use publish or share result.
+	TermsNotice string
+
 	out    io.Writer
 	err    io.Writer
 	outTTY bool
@@ -59,7 +62,7 @@ func New(s *Streams, format Format, quiet, color, ascii bool, now func() time.Ti
 // already reached stdout.
 func (p *Printer) Warnf(format string, args ...any) {
 	line := qurlapi.Redact(fmt.Sprintf(format, args...))
-	_, _ = fmt.Fprintf(p.err, "%s %s\n", p.yellow("Warning:"), line)
+	_, _ = fmt.Fprintf(p.err, "%s %s\n", p.yellow(labelWarning), line)
 }
 
 // Notef writes one redacted informational line to stderr, best-effort like

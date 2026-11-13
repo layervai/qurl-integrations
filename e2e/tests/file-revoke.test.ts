@@ -1,6 +1,9 @@
 /**
  * File upload → revoke → revoked status E2E flow.
  *
+ * Also requires native type:url uploads to display the exact web-app iframe;
+ * these fixtures use the same tracked child/source cleanup.
+ *
  * Covers the revoke path for actual file resources (images/PDFs/etc.) — the
  * other revoke tests (smoke.test.ts, link-lifecycle.test.ts) only exercise
  * URL-based qURLs (`target_url=https://example.com/...`). This file fills
@@ -19,11 +22,10 @@
  * already covered by smoke.test.ts).
  *
  * Also home to the knock-driven SINGLE-USE enforcement test ("a consumed
- * one-time link does not serve a second knock") — this file is the only
- * place a real consuming knock is driven (viewViaQurlLink); the URL-mint
- * suites can only exercise bare fetches, which don't run the SPA knock,
- * so their status checks pin counter coherence rather than enforcement
- * (URL-target knock coverage tracked in #951).
+ * one-time link does not serve a second knock"), driven by viewViaQurlLink. The
+ * URL-target equivalent lives in url-target-one-time.test.ts. Bare-fetch suites
+ * don't run the SPA knock, so their status checks pin counter coherence
+ * rather than enforcement.
  *
  * Also pins two render-at-mint security guarantees (#1027, EPIC #1019), in the
  * "distinct-per-viewer watermark + `_` route-label SNI" test below:
@@ -45,11 +47,19 @@
  */
 
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 
 import { trackedQurlResources } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';
 import * as qurl from '../helpers/qurl-api';
+import { runTargetPathInput } from '../helpers/targetPathInput';
+import { resolve } from 'node:path';
+let targetPathInputSeedChild = '';
 import { mintIdFromTunnelViewUrl, viewViaQurlLink, checkOwnershipConfig } from '../helpers/tunnelView';
+
+// Explicit per-test budgets must include both views' bounded cleanup when enabled.
+const nativeCleanupTestTimeout = (normal: number) =>
+  process.env.QURL_NATIVE_CLEANUP_ENABLED === '1' ? 12 * 60_000 : normal;
 
 const env = loadEnv();
 
@@ -81,6 +91,26 @@ const ONE_PIXEL_PNG = Uint8Array.from(
 );
 
 describe('File Revoke', () => {
+  // TODO(upstream-contract): infra verify-native-url-smoke-result.sh requires this exact test title.
+  test('type:url upload renders the exact web app through a native recipient view', async () => {
+    const target = `https://example.com/?release=${randomUUID()}`;
+    const upload = await qurl.uploadFile(env.UPLOAD_API_URL, {
+      bytes: Buffer.from(JSON.stringify({ type: 'url', content: target })),
+      filename: 'native-web-app.json', mime: 'application/json',
+    }, env.QURL_API_KEY);
+    tracked.track(upload.resource_id);
+    const minted = await qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(), oneTimeUse: true,
+    });
+    tracked.trackChild(minted.qurl_id);
+    const view = await viewViaQurlLink(minted.qurl_link, {
+      ownership: { resource_id: upload.resource_id, qurl_id: minted.qurl_id, expires_at: minted.expires_at },
+      expectedIframeSrc: target,
+    });
+    expect(view.status).toBe(200);
+    expect(mintIdFromTunnelViewUrl(view.url)).toMatch(/^[0-9a-f]{32}$/);
+  }, nativeCleanupTestTimeout(90_000));
+
   test('upload file → view 200 → revoke → resource status revoked', async () => {
     const upload = await qurl.uploadFile(
       env.UPLOAD_API_URL,
@@ -126,10 +156,11 @@ describe('File Revoke', () => {
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id,
     );
     expect(status.status).toBe('revoked');
+    targetPathInputSeedChild = minted.qurl_id;
     // Preserve the 90s upload/browser budget and add one confirmation wait.
-  }, 90_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+  }, nativeCleanupTestTimeout(90_000 + qurl.REVOKE_CONFIRM_WAIT_MS));
 
-  test('distinct-per-viewer watermark + `_` route-label SNI on the tunnel', async () => {
+  test('distinct-per-viewer watermark + DNS-safe route-label SNI on the tunnel', async () => {
     // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
     // each recipient gets their OWN baked `views/<mint-id>` object, so a leak is
     // traceable to the specific recipient.
@@ -167,8 +198,13 @@ describe('File Revoke', () => {
     // cold chromium and these run on a single jest worker (maxWorkers:1) — serial
     // keeps peak memory to one browser and avoids the two knocks racing for the
     // shared CI egress IP's WAF budget.
-    const viewA = await viewViaQurlLink(mintedA.qurl_link, { ownership: { resource_id: upload.resource_id, qurl_id: mintedA.qurl_id, expires_at: mintedA.expires_at } });
+    // Open B first so its real existing object path is known. Its browser closes
+    // before A opens; A's same-session probe never follows B's admission link.
     const viewB = await viewViaQurlLink(mintedB.qurl_link, { ownership: { resource_id: upload.resource_id, qurl_id: mintedB.qurl_id, expires_at: mintedB.expires_at } });
+    const viewA = await viewViaQurlLink(mintedA.qurl_link, {
+      ownership: { resource_id: upload.resource_id, qurl_id: mintedA.qurl_id, expires_at: mintedA.expires_at },
+      siblingViewPath: new URL(viewB.url).pathname,
+    });
 
     // Both recipients get a served (200) per-recipient object end-to-end.
     expect(viewA.status).toBe(200);
@@ -194,19 +230,14 @@ describe('File Revoke', () => {
     expect(mintIdB).toMatch(/^[0-9a-f]+$/);
     expect(mintIdA).not.toBe(mintIdB); // ← distinct per-recipient `views/` objects
 
-    // ── `_`-bearing resource-id host resolves over DNS + TLS-SNI ──
-    // Both views are served from the single wildcard `r_<route-label>.qurl.site`
-    // host. The routing label carries `_` (the `r_` prefix); a 200 proves DNS + the
-    // wildcard cert presenting via SNI for an `_`-bearing label end-to-end — the
-    // backstop for the relaxed `view_domain` charset. (Asserted on both resolved
-    // URLs since they share the tunnel host.) NOTE: the live sandbox tunnel host id
-    // contains `_` but no `-`; the `-` half of the charset is not exercised by the
-    // live host — see the PR body.
+    // Each recipient uses a fresh 256-bit base32 browser routing label.
+    // Both successful views must pass DNS and TLS SNI on that exact label.
     for (const url of [viewA.url, viewB.url]) {
       const host = new URL(url).hostname;
-      expect(host).toMatch(/^r_[a-z0-9_-]+\.qurl\.site/);
-      expect(host).toContain('_'); // the relaxed-charset character, resolving + TLS-valid
+      expect(host).toMatch(/^q-[a-z2-7]{52}\.qurl\.site(?:\.|$)/);
     }
+
+    expect(new URL(viewA.url).origin).not.toBe(new URL(viewB.url).origin);
 
     // Source cleanup only; shared-tunnel children require owner cleanup (#1552).
     const revoked = await tracked.revoke(upload.resource_id);
@@ -217,7 +248,7 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     // Keep the 180s total for two browser views; spend 35s of existing margin
     // on confirmation. This case took 10.3s in the final sandbox run.
-  }, 145_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+  }, nativeCleanupTestTimeout(145_000 + qurl.REVOKE_CONFIRM_WAIT_MS));
 
   test('a consumed one-time link does not serve a second knock (single-use enforced)', async () => {
     // THE knock-driven enforcement guard for one-time links. The URL-mint
@@ -254,7 +285,7 @@ describe('File Revoke', () => {
     // (tunnelView.ts's sandbox-proven note), so 20s amply proves "did
     // not serve" without spending the default 30s on a pass-by-timeout.
     await expect(
-      viewViaQurlLink(minted.qurl_link, { timeoutMs: 20_000, ownership: { resource_id: upload.resource_id, qurl_id: minted.qurl_id, expires_at: minted.expires_at } }),
+      viewViaQurlLink(minted.qurl_link, { timeoutMs: 20_000, expectedNoAdmission: true, ownership: { resource_id: upload.resource_id, qurl_id: minted.qurl_id, expires_at: minted.expires_at } }),
     ).rejects.toThrow(/no tunnel-view response|tunnel-view returned/);
 
     // Cleanup as assertion (tracked.revoke also syncs the afterAll ledger).
@@ -267,7 +298,7 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     // Keep the 150s total for one view plus a 20s negative knock and revoke.
     // The confirmation wait uses existing margin; measured work took 34.9s.
-  }, 115_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+  }, nativeCleanupTestTimeout(115_000 + qurl.REVOKE_CONFIRM_WAIT_MS));
 
   test('double revoke on file is idempotent', async () => {
     const upload = await qurl.uploadFile(
@@ -301,5 +332,13 @@ describe('File Revoke', () => {
     expect(status.status).toBe('revoked');
     // Keep the 120s total for upload and two DELETEs; only the first confirms.
     // Measured 9.8s without a retry, 48.0s with a retry in the earlier run.
-  }, 85_000 + qurl.REVOKE_CONFIRM_WAIT_MS);
+  }, nativeCleanupTestTimeout(85_000 + qurl.REVOKE_CONFIRM_WAIT_MS));
 });
+
+// Only the reviewed normal file workflow enables this operator probe.
+(process.env.QURL_TARGET_PATH_INPUT_PROBE === '1' ? test : test.skip)(
+  'both target-path mint routes on the existing owned Connector parent', async () => {
+    await runTargetPathInput(targetPathInputSeedChild, env.QURL_API_KEY,
+      resolve('owned-target-path-input-journal.jsonl'));
+  }, 900_000,
+);

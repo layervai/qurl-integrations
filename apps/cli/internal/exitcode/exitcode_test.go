@@ -14,9 +14,11 @@ import (
 	"testing"
 	"time"
 
+	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
@@ -36,33 +38,63 @@ var cliSentinels = map[string]struct {
 	err  error
 	code int
 }{
-	"qurlapi.ErrAccountLoad":            {qurlapi.ErrAccountLoad, Unavailable},
-	"qurlapi.ErrAccountUnavailable":     {qurlapi.ErrAccountUnavailable, Unavailable},
-	"qurlapi.ErrAccountExchange":        {qurlapi.ErrAccountExchange, Unavailable},
-	"qurlapi.ErrAccountPort":            {qurlapi.ErrAccountPort, Config},
-	"qurlapi.ErrAccountEndpoint":        {qurlapi.ErrAccountEndpoint, Config},
-	"qurlapi.ErrAccountDenied":          {qurlapi.ErrAccountDenied, Auth},
-	"auth.ErrAccountRecoveryState":      {auth.ErrAccountRecoveryState, Auth},
-	"auth.ErrAnonymousRecovery":         {auth.ErrAnonymousRecovery, Auth},
-	"auth.ErrExternalDeviceMissing":     {auth.ErrExternalDeviceMissing, Auth},
-	"auth.ErrExternalAnonymousRecovery": {auth.ErrExternalAnonymousRecovery, Auth},
-	"auth.ErrNoCredential":              {auth.ErrNoCredential, Auth},
-	"auth.ErrInvalidKey":                {auth.ErrInvalidKey, Auth},
-	"auth.ErrDeviceEnrollmentScope":     {auth.ErrDeviceEnrollmentScope, Auth},
-	"auth.ErrEnrollmentTokenFile":       {auth.ErrEnrollmentTokenFile, Auth},
-	"auth.ErrCredentialConflict":        {auth.ErrCredentialConflict, Conflict},
-	"auth.ErrDeviceAccountConflict":     {auth.ErrDeviceAccountConflict, Conflict},
-	"config.ErrInvalidProfileName":      {config.ErrInvalidProfileName, Config},
-	"config.ErrConfigFile":              {config.ErrConfigFile, Config},
-	"config.ErrSecretInConfig":          {config.ErrSecretInConfig, Config},
-	"cridux.ErrUnusableID":              {cridux.ErrUnusableID, InvalidInput},
-	"cridux.ErrTestIDOnProduction":      {cridux.ErrTestIDOnProduction, Usage},
-	"consume.ErrPipedNeedsFile":         {consume.ErrPipedNeedsFile, Usage},
-	"consume.ErrFileExists":             {consume.ErrFileExists, Conflict},
-	"consume.ErrLinkExpired":            {consume.ErrLinkExpired, NotFound},
-	"consume.ErrLinkUnavailable":        {consume.ErrLinkUnavailable, Unavailable},
-	"consume.ErrLinkFetch":              {consume.ErrLinkFetch, ServerError},
-	"consume.ErrUnopenableLink":         {consume.ErrUnopenableLink, ServerError},
+	"daemon.ErrJobRefused":               {connectordaemon.ErrJobRefused, Unavailable},
+	"daemon.ErrStateNamespaceMismatch":   {connectordaemon.ErrStateNamespaceMismatch, Conflict},
+	"daemon.ErrStateNamespaceUnverified": {connectordaemon.ErrStateNamespaceUnverified, Unavailable},
+	"daemon.ErrNativeDaemonUnreachable":  {connectordaemon.ErrNativeDaemonUnreachable, Unavailable},
+	"accessrules.ErrConflict":            {accessrules.ErrConflict, Conflict},
+	"accessrules.ErrRuleConflict":        {accessrules.ErrRuleConflict, Conflict},
+	"accessrules.ErrAccountMismatch":     {accessrules.ErrAccountMismatch, Config},
+	"accessrules.ErrUnlinked":            {accessrules.ErrUnlinked, Forbidden},
+	"accessrules.ErrRuleNotFound":        {accessrules.ErrRuleNotFound, NotFound},
+	"accessrules.ErrAmbiguousRule":       {accessrules.ErrAmbiguousRule, Usage},
+	"accessrules.ErrDuplicateName":       {accessrules.ErrDuplicateName, InvalidInput},
+	"accessrules.ErrLibraryLimit":        {accessrules.ErrLibraryLimit, InvalidInput},
+	"accessrules.ErrNewerRule":           {accessrules.ErrNewerRule, InvalidInput},
+	"state.ErrAccessRulesFile":           {state.ErrAccessRulesFile, Config},
+	"qurlapi.ErrAccountLoad":             {qurlapi.ErrAccountLoad, Unavailable},
+	"qurlapi.ErrAccountUnavailable":      {qurlapi.ErrAccountUnavailable, Unavailable},
+	"qurlapi.ErrAccountExchange":         {qurlapi.ErrAccountExchange, Unavailable},
+	"qurlapi.ErrAccountPort":             {qurlapi.ErrAccountPort, Config},
+	"qurlapi.ErrAccountEndpoint":         {qurlapi.ErrAccountEndpoint, Config},
+	"qurlapi.ErrAccountDenied":           {qurlapi.ErrAccountDenied, Auth},
+	"qurlapi.ErrPublishAccessConflict":   {qurlapi.ErrPublishAccessConflict, Conflict},
+	"qurlapi.ErrOriginHeaderMismatch":    {qurlapi.ErrOriginHeaderMismatch, Conflict},
+	"auth.ErrAccountRecoveryState":       {auth.ErrAccountRecoveryState, Auth},
+	"auth.ErrAnonymousRecovery":          {auth.ErrAnonymousRecovery, Auth},
+	"auth.ErrExternalDeviceMissing":      {auth.ErrExternalDeviceMissing, Auth},
+	"auth.ErrExternalAnonymousRecovery":  {auth.ErrExternalAnonymousRecovery, Auth},
+	"auth.ErrNoCredential":               {auth.ErrNoCredential, Auth},
+	"auth.ErrInvalidKey":                 {auth.ErrInvalidKey, Auth},
+	"auth.ErrDeviceEnrollmentScope":      {auth.ErrDeviceEnrollmentScope, Auth},
+	"auth.ErrEnrollmentTokenFile":        {auth.ErrEnrollmentTokenFile, Auth},
+	"auth.ErrCredentialConflict":         {auth.ErrCredentialConflict, Conflict},
+	"auth.ErrDeviceAccountConflict":      {auth.ErrDeviceAccountConflict, Conflict},
+	"config.ErrInvalidProfileName":       {config.ErrInvalidProfileName, Config},
+	"config.ErrConfigFile":               {config.ErrConfigFile, Config},
+	"config.ErrSecretInConfig":           {config.ErrSecretInConfig, Config},
+	"cridux.ErrUnusableID":               {cridux.ErrUnusableID, InvalidInput},
+	"cridux.ErrTestIDOnProduction":       {cridux.ErrTestIDOnProduction, Usage},
+	"consume.ErrPipedNeedsFile":          {consume.ErrPipedNeedsFile, Usage},
+	"consume.ErrFileExists":              {consume.ErrFileExists, Conflict},
+	"consume.ErrLinkExpired":             {consume.ErrLinkExpired, NotFound},
+	"consume.ErrLinkUnavailable":         {consume.ErrLinkUnavailable, Unavailable},
+	"consume.ErrLinkFetch":               {consume.ErrLinkFetch, ServerError},
+	"consume.ErrUnopenableLink":          {consume.ErrUnopenableLink, ServerError},
+
+	// A link asked for with only a CRID. Not found is one answer whatever the
+	// cause and whatever the device; a closed resource joins the gone family;
+	// "not now" and "no answer" are Unavailable; an answer that failed its
+	// check shares CRID verification's fail-closed row.
+	"consume.ErrCRIDNotFound":            {consume.ErrCRIDNotFound, NotFound},
+	"consume.ErrCRIDNotFoundNoDevice":    {consume.ErrCRIDNotFoundNoDevice, NotFound},
+	"consume.ErrCRIDResourceClosed":      {consume.ErrCRIDResourceClosed, NotFound},
+	"consume.ErrCRIDLinkUnavailable":     {consume.ErrCRIDLinkUnavailable, Unavailable},
+	"consume.ErrCRIDLinkNoAnswer":        {consume.ErrCRIDLinkNoAnswer, Unavailable},
+	"consume.ErrCRIDPublisherOffline":    {consume.ErrCRIDPublisherOffline, Unavailable},
+	"consume.ErrCRIDLinkRateLimited":     {consume.ErrCRIDLinkRateLimited, RateLimited},
+	"consume.ErrCRIDLinkRequestRejected": {consume.ErrCRIDLinkRequestRejected, InvalidInput},
+	"consume.ErrCRIDLinkRefused":         {consume.ErrCRIDLinkRefused, VerificationFailed},
 
 	// Platform access flow (direct downloads through the SDK opener). The
 	// two settings sentinels share the Hub triple's Config row; the local
@@ -105,6 +137,14 @@ var cliSentinels = map[string]struct {
 	// even though it lives in the environment.
 	"hub.ErrConfig":           {hub.ErrConfig, Config},
 	"sessionconfig.ErrConfig": {sessionconfig.ErrConfig, Config},
+
+	// A service that does not offer access requests is not serving that
+	// surface: the Unavailable row, whether a missing route or an answer
+	// without the setting showed it.
+	"qurlapi.ErrAccessRequestsUnsupported": {qurlapi.ErrAccessRequestsUnsupported, Unavailable},
+
+	// A device id that no approved person has is a thing that is not there.
+	"qurlapi.ErrApprovedPersonNotFound": {qurlapi.ErrApprovedPersonNotFound, NotFound},
 }
 
 // sdkSentinels pins the mapping for every qurl-go sentinel the CLI can
@@ -119,6 +159,7 @@ var sdkSentinels = map[string]struct {
 	"qurl.ErrInvalidClientConfig":                 {qurl.ErrInvalidClientConfig, Config},
 	"qurl.ErrInvalidResourceRequest":              {qurl.ErrInvalidResourceRequest, InvalidInput},
 	"qurl.ErrInvalidPortalRequest":                {qurl.ErrInvalidPortalRequest, InvalidInput},
+	"qurl.ErrInvalidPublisherName":                {qurl.ErrInvalidPublisherName, InvalidInput},
 	"qurl.ErrInvalidAPIResponse":                  {qurl.ErrInvalidAPIResponse, ServerError},
 	"qurl.ErrCredentialStateNotFound":             {qurl.ErrCredentialStateNotFound, Auth},
 	"qurl.ErrInsecureCredentialStatePermissions":  {qurl.ErrInsecureCredentialStatePermissions, Auth},
@@ -200,6 +241,11 @@ var sdkSentinels = map[string]struct {
 	"qurl.ErrConnectorResourceRateLimited":           {qurl.ErrConnectorResourceRateLimited, RateLimited},
 	"qurl.ErrConnectorResourceRequestRejected":       {qurl.ErrConnectorResourceRequestRejected, InvalidInput},
 	"qurl.ErrInvalidNativeConnectorResourceResponse": {qurl.ErrInvalidNativeConnectorResourceResponse, ServerError},
+
+	// The device credential may be used on a fixed list of routes. A request
+	// outside it is refused before it is sent: a capability this build does
+	// not have, the General row.
+	"qurl.ErrRegisteredAgentResourceRequestDenied": {qurl.ErrRegisteredAgentResourceRequestDenied, General},
 }
 
 // TestSentinelMapping asserts every defined sentinel — CLI and SDK — maps to
@@ -439,6 +485,8 @@ func TestSealedOpenKeepsTheCauseQurlGoClassifies(t *testing.T) {
 		"state not found":      {qurl.ErrCredentialStateNotFound, Auth},
 		"setup lock":           {qurl.ErrAgentSetupLock, General},
 		"envelope mismatch":    {nil, Config},
+		"TPM not responding":   {fmt.Errorf("%w: operation abandoned: %w", connectoragentstate.ErrTPMNotResponding, context.DeadlineExceeded), Unavailable},
+		"TPM busy at create":   {fmt.Errorf("%w; retry, or set LAYERV_KEY_PROVIDER=file", connectoragentstate.ErrTPMNotResponding), Unavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := fmt.Errorf("%w: initialize sealed agent state", state.ErrAgentStateEnvelope)
@@ -464,5 +512,16 @@ func TestHostConditionsWinOverWrappedSentinels(t *testing.T) {
 				t.Errorf("FromError(%v) = %d, want Config", err, got)
 			}
 		}
+	}
+}
+
+// TestTPMNotRespondingOutranksAHostCondition pins the deliberate exception in
+// hostConditionCode: a chain carrying both a host condition and a TPM that is
+// not responding exits retryable.
+func TestTPMNotRespondingOutranksAHostCondition(t *testing.T) {
+	unsafeDir := &state.UnsafeDirectoryError{Dir: "/home/agent/.local", Mode: 0o775, Err: errors.New("open")}
+	err := errors.Join(unsafeDir, fmt.Errorf("%w: busy", connectoragentstate.ErrTPMNotResponding))
+	if got := FromError(err); got != Unavailable {
+		t.Fatalf("FromError(unsafe directory + TPM not responding) = %d, want Unavailable", got)
 	}
 }

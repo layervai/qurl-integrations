@@ -24,6 +24,7 @@ import (
 	golibmux "github.com/fatedier/golib/net/mux"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state/statetest"
 )
 
 type cmdFRPSTestService struct {
@@ -50,6 +51,9 @@ func openOwnedTestShareRegistry(dir string) (*connectorstate.LocalShareRegistry,
 // TestMain pins FRP's process-global logger before journey-test goroutines
 // start. The in-process client and server share this logger.
 func TestMain(m *testing.M) {
+	// Keep fresh test namespaces off the host TPM; see
+	// statetest.PinFileKeyProvider.
+	statetest.PinFileKeyProvider()
 	frplog.Logger = goliblog.New(
 		goliblog.WithCaller(false),
 		goliblog.WithLevel(goliblog.WarnLevel),

@@ -139,6 +139,7 @@ function loadPopup(sendMessageImpl, timerImpl, options) {
   delete require.cache[popupModulePath];
   const resolvedOptions = options || {};
 
+  const runtimeListeners = [];
   const elements = new Map();
   [
     'fileInput',
@@ -202,6 +203,8 @@ function loadPopup(sendMessageImpl, timerImpl, options) {
       },
     },
     runtime: {
+      id: 'qurl-test-extension',
+      onMessage: { addListener(listener) { runtimeListeners.push(listener); } },
       sendMessage: sendMessageImpl,
     },
   };
@@ -271,6 +274,8 @@ function loadPopup(sendMessageImpl, timerImpl, options) {
 
   const popup = require('../popup/popup.js');
   popup.__testElements = elements;
+  popup.__testRuntimeListeners = runtimeListeners;
+  popup.__testFooter = footer;
   return popup;
 }
 
@@ -1283,4 +1288,65 @@ test('copied links carry their expiry in both clipboard flavors', function () {
     '<a href="https://files.example.com/a">https://files.example.com/a</a> (Expires: 2026-01-02T03:04:05Z)'
       + '<br><a href="https://files.example.com/c">https://files.example.com/c</a>'
   );
+});
+
+
+test('late insertion success corrects only the matching trusted Gmail request', async function () {
+  const sent = [];
+  let uploads = 0;
+  const popup = loadPopup(message => {
+    sent.push(message);
+    return Promise.resolve({ success: false, error: 'Timed out while waiting to insert links into Gmail.' });
+  }, { setTimeout() { return 1; }, clearTimeout() {} }, {
+    uploadFile: async () => { uploads++; return { success: true, qurl_link: 'https://files.example.com/demo' }; },
+  });
+  global.QURLComposeFormatter.normalizeAllowedLink = link => link;
+  const input = popup.__testElements.get('fileInput');
+  input.files = [{ name: 'demo.txt', size: 10, type: 'text/plain', arrayBuffer: async () => new ArrayBuffer(10) }];
+  await input.trigger('change');
+  await popup.__testElements.get('uploadBtn').trigger('click');
+  const errorArea = popup.__testElements.get('errorArea');
+  assert.equal(errorArea.classList.contains('hidden'), false);
+  const sender = { id: 'qurl-test-extension', tab: { id: 7 }, url: 'https://mail.google.com/mail/u/0/' };
+  const emit = (message, source) => popup.__testRuntimeListeners.forEach(listener => listener(message, source));
+  const message = { type: 'INSERT_LINKS_LATE_SUCCESS', requestId: sent[0].requestId };
+  for (const invalid of [null, {}, { ...sender, id: 'other' }, { ...sender, tab: undefined }, { ...sender, url: 'https://mail.google.com.attacker.test/mail/' }]) {
+    emit(message, invalid);
+    assert.equal(errorArea.classList.contains('hidden'), false);
+  }
+  emit({ ...message, requestId: 'other-request' }, sender);
+  assert.equal(errorArea.classList.contains('hidden'), false);
+  emit(message, sender);
+  assert.equal(errorArea.classList.contains('hidden'), true);
+  assert.equal(popup.__testFooter.textContent, 'Links were inserted into Gmail after the earlier timeout. Check the draft before inserting again.');
+  assert.equal(uploads, 1);
+  assert.equal(sent.length, 1);
+
+  await popup.__testElements.get('uploadBtn').trigger('click');
+  assert.equal(errorArea.classList.contains('hidden'), false);
+  emit(message, sender);
+  assert.equal(errorArea.classList.contains('hidden'), false, 'an old completion must not clear the next upload status');
+  emit({ ...message, requestId: sent[1].requestId }, sender);
+  assert.equal(errorArea.classList.contains('hidden'), true);
+});
+
+
+test('late success arriving before the timeout reply is rendered still wins', async function () {
+  let popup;
+  popup = loadPopup(message => {
+    popup.__testRuntimeListeners.forEach(listener => listener(
+      { type: 'INSERT_LINKS_LATE_SUCCESS', requestId: message.requestId },
+      { id: 'qurl-test-extension', tab: { id: 7 }, url: 'https://mail.google.com/mail/u/0/' }
+    ));
+    return Promise.resolve({ success: false, error: 'earlier timeout' });
+  }, { setTimeout() { return 1; }, clearTimeout() {} }, {
+    uploadFile: async () => ({ success: true, qurl_link: 'https://files.example.com/demo' }),
+  });
+  global.QURLComposeFormatter.normalizeAllowedLink = link => link;
+  const input = popup.__testElements.get('fileInput');
+  input.files = [{ name: 'demo.txt', size: 10, type: 'text/plain', arrayBuffer: async () => new ArrayBuffer(10) }];
+  await input.trigger('change');
+  await popup.__testElements.get('uploadBtn').trigger('click');
+  assert.equal(popup.__testElements.get('errorArea').classList.contains('hidden'), true);
+  assert.match(popup.__testFooter.textContent, /inserted into Gmail after the earlier timeout/);
 });

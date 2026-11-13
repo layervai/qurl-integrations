@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.6.0...slack-v0.6.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **deps:** build the CLI and Slack images with Go 1.26.9 ([#1574](https://github.com/layervai/qurl-integrations/issues/1574)) ([56ca8ef](https://github.com/layervai/qurl-integrations/commit/56ca8efa35c15e0e229592525d73256afb13786f))
+
 ## [0.6.0](https://github.com/layervai/qurl-integrations/compare/slack-v0.5.1...slack-v0.6.0) (2026-09-28)
 
 

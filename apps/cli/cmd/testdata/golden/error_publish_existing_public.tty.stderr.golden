@@ -1,0 +1,4 @@
+[31m[1mError:[0m this target is already published as public, and privacy is fixed when a resource is first published
+
+  [2mHint: to keep using the public resource, run the command again with --public and without --allow-device-key. To make it private instead, delete it with `qurl delete <CRID>` (`qurl list` shows its CRID) and publish again; the new resource gets a new CRID.[0m
+  [2mRequest ID: req_test[0m

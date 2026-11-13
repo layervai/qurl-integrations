@@ -52,6 +52,27 @@ describe('index gateway-fatal composition contract', () => {
 });
 
 describe('runGracefulShutdown', () => {
+  it('retains a fatal failure while an earlier graceful teardown drains', async () => {
+    let fatalRequested = false;
+    let finish;
+    const teardown = new Promise(resolve => { finish = resolve; });
+    const exit = jest.fn();
+    const shutdown = runGracefulShutdown({
+      claimShutdown: () => true,
+      teardown: () => teardown,
+      isFatalRequested: () => fatalRequested,
+      logger: makeFakeLogger(),
+      scheduleHardExit: () => ({ unref() {} }),
+      clearHardExit: jest.fn(),
+      exit,
+    });
+    fatalRequested = true;
+    finish();
+    await shutdown;
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
   it('claims shutdown and arms the hard-exit backstop before teardown starts', async () => {
     const order = [];
     let finishTeardown;
@@ -783,6 +804,42 @@ describe('runPushHandoffShutdown', () => {
     expect(deps.gatewayLeader.pushHandoff).toHaveBeenCalledTimes(1);
     expect(deps.exit).toHaveBeenCalledWith(fails ? 1 : 0);
     expect(deps.clearHardExit).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not begin a handoff after a gateway fatal has been requested', async () => {
+    const deps = makeDeps();
+    await runPushHandoffShutdown({ ...deps, isFatalRequested: () => true });
+    expect(deps.gatewayLeader.pushHandoff).not.toHaveBeenCalled();
+    expect(deps.exit).toHaveBeenCalledWith(1);
+    expect(deps.clearHardExit).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['handoff', 'publisher drain'])('exits as failed when a fatal races the %s', async stage => {
+    let fatalRequested = false;
+    let finish;
+    const pending = new Promise(resolve => { finish = resolve; });
+    const deps = makeDeps({
+      ...(stage === 'handoff'
+        ? { gatewayLeader: { pushHandoff: jest.fn(() => pending) } }
+        : { eventPublisher: { stop: jest.fn(() => pending) } }),
+    });
+    const shutdown = runPushHandoffShutdown({
+      ...deps, isFatalRequested: () => fatalRequested,
+    });
+    fatalRequested = true;
+    await runGatewayFatalShutdown({
+      gracefulShutdown: jest.fn().mockResolvedValue(undefined),
+      getConnectionWatchdog: () => null,
+      logger: deps.logger,
+      scheduleHardExit: makeTimerSpy(),
+      exit: deps.exit,
+    });
+    expect(deps.exit).not.toHaveBeenCalled();
+    finish({ transferred: true, pushAcked: true });
+    await shutdown;
+    expect(deps.exit).toHaveBeenCalledTimes(1);
+    expect(deps.exit).toHaveBeenCalledWith(1);
+    expect(deps.gatewayLeader.pushHandoff).toHaveBeenCalledTimes(1);
   });
 
   it('on a successful pushHandoff, exits with the incoming code', async () => {

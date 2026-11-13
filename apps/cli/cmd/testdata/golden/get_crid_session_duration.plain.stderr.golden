@@ -1,0 +1,3 @@
+Note: --session-duration applies only on the resource owner's devices and on devices the publisher allowed. This link uses the resource's own session lifetime.
+Warning: UNVERIFIED publisher "Acme Docs" (self-declared name, not confirmed by LayerV). Created 2026-03-01.
+Saved to out.bin (23 bytes).

@@ -83,6 +83,9 @@ jobs:
               # e2e/'s own TypeScript in isolation. The suite that actually exercises
               # the apps is the live one, which cannot run in CI (see below).
               - 'e2e/**'
+              - 'go.mod'
+              - 'go.sum'
+              - '.golangci.yml'
               - '.github/workflows/e2e.yml'
 
   # Mirrored locally by `make check-e2e`, so a contributor can run this gate
@@ -117,6 +120,7 @@ jobs:
         run: |
           go test -race ./e2e/cmd/verify-ownership
           go vet ./e2e/cmd/verify-ownership
+          go tool govulncheck ./e2e/cmd/...
 
       - name: Verify golangci-lint config
         working-directory: .
@@ -130,7 +134,7 @@ jobs:
           args: --timeout=5m ./e2e/cmd/verify-ownership/...
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit
 
       # The wider of the two gates: tsconfig.json includes **/*.ts, so this
       # covers helpers/ and the live tests/ too, while the unit run below

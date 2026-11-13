@@ -17,7 +17,7 @@ import (
 // has stopped its daemon. It never opens native credentials or a REST client.
 func daemonRetargetLocalCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
-		Use: "retarget-local", Short: "Move stopped local shares to a private Unix origin", Args: noArgs,
+		Use: "retarget-local", Short: "Move stopped local shares to a private local origin", Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if opts.resolvedSupervision != connectorstate.RuntimeSupervisionExternal {
 				return exitcode.UsageError(errors.New("local target conversion requires external supervision"))
@@ -42,7 +42,7 @@ func daemonRetargetLocalCmd(opts *globalOpts) *cobra.Command {
 			if err := connectorstate.ValidateLocalRetargetSelector(input.OwnerID, input.ConnectorIDPrefix); err != nil {
 				return exitcode.UsageError(err)
 			}
-			if _, err := connectorstate.ParseUnixTarget(input.Target); err != nil {
+			if _, err := connectorstate.ParsePrivateTarget(input.Target); err != nil {
 				return exitcode.UsageError(err)
 			}
 			stateDir, err := opts.resolveShareStateDir("")
@@ -63,7 +63,7 @@ func daemonRetargetLocalCmd(opts *globalOpts) *cobra.Command {
 			var changed int
 			err = connectordaemon.WithStoppedDaemon(cmd.Context(), socketPath, func() error {
 				var updateErr error
-				changed, updateErr = registry.RetargetStoppedToUnix(cmd.Context(), input.OwnerID, input.ConnectorIDPrefix, input.Target)
+				changed, updateErr = registry.RetargetStoppedToPrivate(cmd.Context(), input.OwnerID, input.ConnectorIDPrefix, input.Target)
 				return updateErr
 			})
 			if err != nil {

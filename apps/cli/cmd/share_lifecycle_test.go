@@ -205,6 +205,8 @@ func (d *journeyDaemon) Ensure(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// JobController.Ensure reloads an existing daemon after durable intent changes.
+	d.manager.Trigger()
 	return nil
 }
 
@@ -532,7 +534,7 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
+		StateDir: stateDir, SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
@@ -591,7 +593,7 @@ func TestWaitForSharingSettlesStartingDiagnosticIntoRetryCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
+		StateDir: stateDir, SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
@@ -623,7 +625,7 @@ func TestWaitForSharingReportsMissingDaemonResourceDiagnostic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
+		StateDir: stateDir, SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
@@ -839,11 +841,15 @@ func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 			if test.command == "restart" {
 				path += "/restart"
 			}
+			// The answers carry the publisher and creation date, as the
+			// service sends them with every sharing state.
 			reply := func(w http.ResponseWriter, _ *http.Request) {
 				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
 					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
 					"desired_state": test.desired, "serving_epoch": test.epoch,
 					"connection_state": test.connection,
+					"created_at":       "2026-03-01T00:00:00Z",
+					"publisher":        map[string]any{"name": apitest.DefaultPublisherName, "verified": false},
 				}, nil)
 			}
 			if test.command != "stop" {
@@ -885,6 +891,14 @@ func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 			for _, want := range []string{srv.Key.CRID, seed.TargetURL, test.desired, test.connection} {
 				if !strings.Contains(res.stdout.String(), want) {
 					t.Errorf("stdout missing %q:\n%s", want, res.stdout.String())
+				}
+			}
+			// A lifecycle change reports the change. The publisher and creation
+			// date belong to the read views (status, inspect), not here.
+			shown := res.stdout.String() + res.stderr.String()
+			for _, unwanted := range []string{"Publisher", "Created", "UNVERIFIED", apitest.DefaultPublisherName} {
+				if strings.Contains(shown, unwanted) {
+					t.Errorf("%s text shows %q:\n%s", test.command, unwanted, shown)
 				}
 			}
 		})
@@ -1263,7 +1277,7 @@ func TestShareInspectKeepsAuthoritativeStoppedStateOverStaleDaemonDiagnostic(t *
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	server := &connectordaemon.IPCServer{
-		SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
+		StateDir: stateDir, SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: "1/test",
 	}
 	go func() { done <- server.Run(ctx) }()
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
@@ -1948,7 +1962,7 @@ func TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership(t *testing.T) 
 			if res.code == 0 || !strings.Contains(res.stderr.String(), setupErr.Error()) {
 				t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 			}
-			requests := srv.Requests()
+			requests := sharingRequests(t, srv)
 			if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPut || requests[2].Method != http.MethodPut {
 				t.Fatalf("lifecycle requests = %#v, want on then compensating off", requests)
 			}
@@ -1992,7 +2006,10 @@ func TestLocalPublishCompensatesAmbiguousEnableBeforeLocalHandoff(t *testing.T) 
 		env:           map[string]string{"QURL_API_KEY": testAPIKey},
 		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
 		preflightTarget: func(context.Context, string, int) error { return nil },
-		localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+		localResource: func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+			if _, err := resolveID("agent-one"); err != nil {
+				return nil, err
+			}
 			return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
 				ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
 				ConnectorRoutingID: seed.ConnectorRoutingID, KnockResourceID: seed.KnockResourceID,
@@ -2002,7 +2019,7 @@ func TestLocalPublishCompensatesAmbiguousEnableBeforeLocalHandoff(t *testing.T) 
 	if res.code == 0 || !strings.Contains(res.stderr.String(), "ambiguous") {
 		t.Fatalf("ambiguous enable result code=%d stdout=%s stderr=%s", res.code, res.stdout.String(), res.stderr.String())
 	}
-	requests := srv.Requests()
+	requests := sharingRequests(t, srv)
 	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPut || requests[2].Method != http.MethodPut {
 		t.Fatalf("ambiguous enable requests = %#v, want GET, enable PUT, compensating off PUT", requests)
 	}
@@ -2039,7 +2056,10 @@ func TestLocalPublishCompensatesInvalidRestartBeforeLocalHandoff(t *testing.T) {
 		env:           map[string]string{"QURL_API_KEY": testAPIKey},
 		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
 		preflightTarget: func(context.Context, string, int) error { return nil },
-		localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+		localResource: func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+			if _, err := resolveID("agent-one"); err != nil {
+				return nil, err
+			}
 			return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
 				ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
 				ConnectorRoutingID: seed.ConnectorRoutingID, KnockResourceID: seed.KnockResourceID,
@@ -2049,7 +2069,7 @@ func TestLocalPublishCompensatesInvalidRestartBeforeLocalHandoff(t *testing.T) {
 	if res.code == 0 || !strings.Contains(res.stderr.String(), "serving epoch") {
 		t.Fatalf("invalid restart result code=%d stdout=%s stderr=%s", res.code, res.stdout.String(), res.stderr.String())
 	}
-	requests := srv.Requests()
+	requests := sharingRequests(t, srv)
 	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodPut {
 		t.Fatalf("invalid restart requests = %#v, want GET, restart POST, compensating off PUT", requests)
 	}
@@ -2209,7 +2229,10 @@ func TestRepublishPriorOnSetupFailureDoesNotDisableHealthyShare(t *testing.T) {
 				env:           map[string]string{"QURL_API_KEY": testAPIKey},
 				shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
 				preflightTarget: func(context.Context, string, int) error { return nil },
-				localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+				localResource: func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+					if _, err := resolveID("agent-one"); err != nil {
+						return nil, err
+					}
 					return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
 						ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: seed.ConnectorID,
 						ConnectorRoutingID: seed.ConnectorRoutingID, KnockResourceID: seed.KnockResourceID,
@@ -2219,7 +2242,7 @@ func TestRepublishPriorOnSetupFailureDoesNotDisableHealthyShare(t *testing.T) {
 			if res.code == 0 || !strings.Contains(res.stderr.String(), setupErr.Error()) {
 				t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 			}
-			requests := srv.Requests()
+			requests := sharingRequests(t, srv)
 			if len(requests) != 2 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPut {
 				t.Fatalf("lifecycle requests = %#v, want GET then idempotent PUT with no compensating off", requests)
 			}
@@ -2394,7 +2417,7 @@ func TestPublishNewMachineTakeoverRotatesEpochOnce(t *testing.T) {
 		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 	}
 	posts, puts := 0, 0
-	for _, request := range srv.Requests() {
+	for _, request := range sharingRequests(t, srv) {
 		if request.Method == http.MethodPost {
 			posts++
 		}
@@ -2439,7 +2462,7 @@ func TestPublishRotatesEpochAfterLocalTerminalDisable(t *testing.T) {
 		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 	}
 	posts, puts := 0, 0
-	for _, request := range srv.Requests() {
+	for _, request := range sharingRequests(t, srv) {
 		if request.Method == http.MethodPost {
 			posts++
 		}
@@ -2491,7 +2514,7 @@ func TestPublishTargetChangeReconcilesAmbiguousRestart(t *testing.T) {
 		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 	}
 	posts := 0
-	for _, request := range srv.Requests() {
+	for _, request := range sharingRequests(t, srv) {
 		if request.Method == http.MethodPost {
 			posts++
 		}
@@ -2503,6 +2526,19 @@ func TestPublishTargetChangeReconcilesAmbiguousRestart(t *testing.T) {
 	if err != nil || local.ServingEpoch != 5 || local.TargetURL != "http://127.0.0.1:4000" {
 		t.Fatalf("target-change local state = %+v err=%v", local, err)
 	}
+}
+
+// sharingRequests returns what one local publish sent after its first
+// request. The first is always the create request that states the resource's
+// privacy, and the test fails if it is anything else; the rest are the sharing
+// lifecycle requests these tests count.
+func sharingRequests(t *testing.T, srv *apitest.Server) []apitest.RecordedRequest {
+	t.Helper()
+	requests := srv.Requests()
+	if len(requests) == 0 || requests[0].Method != http.MethodPost || requests[0].Path != "/v1/resources" {
+		t.Fatalf("local publish did not begin with the create request that states privacy: %#v", requests)
+	}
+	return requests[1:]
 }
 
 func sharingResponse(t *testing.T, srv *apitest.Server, desired string, epoch uint64, connection string) http.HandlerFunc {
@@ -2951,6 +2987,17 @@ func runPublishDaemonLifecycle(t *testing.T, external bool) {
 	}
 	srv.ScriptRepeat(http.MethodPut, replacementPath, 2, servingReplacement)
 	srv.ScriptRepeat(http.MethodGet, replacementPath, 3, servingReplacement)
+	// Each publish first creates its resource over the API, with privacy
+	// stated. After the delete the same name makes a new resource; the
+	// repeated publish finds that one.
+	createReplacement := func(found bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+				"resource_id": resourceKey.ResourceID, "crid": resourceKey.CRID, "private": true,
+			}, map[string]any{"found_existing": found})
+		}
+	}
+	srv.Script(http.MethodPost, "/v1/resources", createReplacement(false), createReplacement(true))
 	for range 2 {
 		republished := runCLI(t, &runOpts{
 			args:          []string{"--endpoint", srv.URL, "--quiet", "publish", echo.URL, "--id", connectorID},
@@ -3118,7 +3165,7 @@ func TestForegroundPublishStartupFailureStopsOwnedSharing(t *testing.T) {
 	if res.code == 0 || !strings.Contains(res.stderr.String(), want.Error()) {
 		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 	}
-	requests := srv.Requests()
+	requests := sharingRequests(t, srv)
 	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPut || requests[2].Method != http.MethodPut {
 		t.Fatalf("lifecycle requests = %#v, want GET, on PUT, foreground-owned off PUT", requests)
 	}
@@ -3171,6 +3218,13 @@ func TestForegroundPublishServingTimeoutIsNotMaskedByDaemonCancellation(t *testi
 }
 
 func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) { runForegroundPublishCancellation(t, format) })
+	}
+}
+
+func runForegroundPublishCancellation(t *testing.T, format string) {
+	t.Helper()
 	srv := apitest.NewServer(t)
 	stateDir := foregroundLifecycleStateDir(t, "qurl-fg-")
 	registry, err := openOwnedTestShareRegistry(stateDir)
@@ -3185,15 +3239,17 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 	)
 	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", 1, "serving"))
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	started := make(chan struct{})
 	stopped := make(chan struct{})
 	done := make(chan *runResult, 1)
 	go func() {
 		done <- runCLI(t, &runOpts{
-			ctx:           ctx,
-			args:          []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000", "--foreground"},
-			env:           map[string]string{"QURL_API_KEY": testAPIKey},
-			shareRegistry: registry, shareStateDir: stateDir,
+			ctx:              ctx,
+			firstTermsNotice: true,
+			args:             []string{"--endpoint", srv.URL, "-o", format, "publish", "http://127.0.0.1:3000", "--foreground"},
+			env:              map[string]string{"QURL_API_KEY": testAPIKey},
+			shareRegistry:    registry, shareStateDir: stateDir,
 			preflightTarget:  func(context.Context, string, int) error { return nil },
 			localResource:    resolvedLocalResource(srv, false),
 			foregroundDaemon: foregroundIPCTestDaemon(started, stopped),
@@ -3206,10 +3262,28 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("foreground daemon did not bind IPC")
 	}
+	// The create request that states privacy, then the three sharing requests
+	// that reach serving.
 	deadline := time.Now().Add(2 * time.Second)
-	for len(srv.Requests()) < 3 {
+	for len(srv.Requests()) < 4 {
 		if time.Now().After(deadline) {
 			t.Fatalf("foreground publish did not reach serving; requests=%#v", srv.Requests())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The foreground command is still running: JSON must already be delivered
+	// and recorded, not delayed until this command exits on cancellation.
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		shown, err := connectorstate.TermsNoticeShown(stateDir, termsVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if shown {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("foreground notice was not recorded while serving")
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -3228,7 +3302,18 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 	default:
 		t.Fatal("foreground daemon was not joined before command returned")
 	}
-	requests := srv.Requests()
+	if format == "json" {
+		var document map[string]any
+		if err := json.Unmarshal(res.stdout.Bytes(), &document); err != nil {
+			t.Fatal(err)
+		}
+		if document["terms_notice"] != termsNotice {
+			t.Fatal("foreground JSON lost notice")
+		}
+	} else if !strings.Contains(res.stderr.String(), termsNotice) {
+		t.Fatal("foreground text lost notice")
+	}
+	requests := sharingRequests(t, srv)
 	if len(requests) != 4 || requests[3].Method != http.MethodPut {
 		t.Fatalf("lifecycle requests = %#v, want final foreground-owned off PUT", requests)
 	}
@@ -3238,8 +3323,17 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 	}
 }
 
+// resolvedLocalResource answers the Connector resource request with the
+// mock's one resource. Like the production resolver it asks for the Connector
+// ID first: that call is where publish creates the resource over the API with
+// its privacy stated, and a resolver that skips it is refused. found is what
+// that create answer reports, so the mock is told the same.
 func resolvedLocalResource(srv *apitest.Server, found bool) localResourceResolver {
-	return func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+	srv.SetPublishFoundExisting(found)
+	return func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+		if _, err := resolveID("agent-one"); err != nil {
+			return nil, err
+		}
 		return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
 			ResourcePublicKey: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: "local-test",
 			ConnectorRoutingID: "c-" + strings.Repeat("a", 52), KnockResourceID: "q_catalog_key",
@@ -3263,7 +3357,7 @@ func foregroundIPCTestDaemon(started, stopped chan struct{}) func(context.Contex
 		done := make(chan error, 1)
 		go func() {
 			done <- (&connectordaemon.IPCServer{
-				SocketPath: path, Manager: manager, JobVersion: jobVersion,
+				StateDir: stateDir, SocketPath: path, Manager: manager, JobVersion: jobVersion,
 			}).Run(runCtx)
 		}()
 		readyCtx, cancelReady := context.WithTimeout(ctx, 2*time.Second)
@@ -3382,11 +3476,11 @@ func startExternalJourneyDaemon(t *testing.T, daemon *journeyDaemon, stateDir, e
 	admissionsBefore := daemon.admitter.admissions()
 	ctx, cancel := context.WithCancel(context.Background())
 	daemon.manager, daemon.cancel, daemon.done = manager, cancel, make(chan error, 1)
-	version, err := connectordaemon.JobVersion(daemon.version, connectordaemon.GroupModeSingle)
+	version, err := connectordaemon.JobVersion(daemon.version, connectordaemon.GroupModeSingle, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &connectordaemon.IPCServer{SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: version}
+	server := &connectordaemon.IPCServer{StateDir: stateDir, SocketPath: stateSocketPath(t, stateDir), Manager: manager, JobVersion: version}
 	go func() { daemon.done <- server.Run(ctx) }()
 	controller, err := connectordaemon.NewJobController(stateDir, t.TempDir(), daemon.version, endpoint, connectordaemon.GroupModeSingle, connectorstate.RuntimeSupervisionExternal, func() (qurl.HubBootstrap, error) {
 		t.Error("external lifecycle resolved native job deployment")
@@ -3490,7 +3584,10 @@ func TestRestartWithoutTargetKeepsTodaysOutput(t *testing.T) {
 					"  \"target_url\": \"http://127.0.0.1:3000\",\n" +
 					"  \"desired_state\": \"on\",\n" +
 					"  \"connection_state\": \"serving\",\n" +
-					"  \"serving_epoch\": 5\n" +
+					"  \"serving_epoch\": 5,\n" +
+					"  \"publisher\": {\n" +
+					"    \"verified\": false\n" +
+					"  }\n" +
 					"}\n"
 			}
 			daemon := &recordingShareDaemon{}
@@ -3947,5 +4044,160 @@ func TestRestartRetargetServesNewOriginThroughRealConnector(t *testing.T) {
 	requests := srv.Requests()
 	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodGet {
 		t.Fatalf("unexpected resource creation or API requests: %#v", requests)
+	}
+}
+
+// TestPublishRejectsContradictoryAccessFlagsBeforeAnyRequest pins the usage
+// errors for the flags that say who can open the resource. Each is refused on
+// the command line, for a remote URL and for a local app, before a credential
+// is read or a request is sent.
+func TestPublishRejectsContradictoryAccessFlagsBeforeAnyRequest(t *testing.T) {
+	key := "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA="
+	for _, test := range []struct {
+		name  string
+		flags []string
+		want  string
+	}{
+		{name: "a device list on a public resource", flags: []string{"--public", "--allow-device-key", key}, want: msgAllowKeyWithPublic},
+		{name: "private and public", flags: []string{"--private", "--public"}, want: msgPublicAndPrivate},
+		{name: "private=true and public", flags: []string{"--private=true", "--public"}, want: msgPublicAndPrivate},
+		{name: "private=false and public", flags: []string{"--private=false", "--public"}, want: msgPublicAndPrivate},
+		{name: "private=false alone", flags: []string{"--private=false"}, want: msgPrivateFalse},
+		{name: "a value that is not a public key", flags: []string{"--allow-device-key", "invalid"}, want: "--allow-device-key requires unique canonical"},
+		{name: "the hidden flag with a bad list", flags: []string{"--private", "--allow-device-key", "invalid"}, want: "--allow-device-key requires unique canonical"},
+		{name: "the same public key twice", flags: []string{"--allow-device-key", key, "--allow-device-key", key}, want: "--allow-device-key requires unique canonical"},
+	} {
+		for _, target := range []string{"https://example.com", "http://127.0.0.1:3000"} {
+			t.Run(test.name+"/"+target, func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				res := runCLI(t, &runOpts{
+					args: append([]string{"--endpoint", srv.URL, "publish", target}, test.flags...),
+					localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+						t.Error("a refused command line reached the Connector resource request")
+						return nil, errors.New("unexpected Connector resource request")
+					},
+				})
+				if res.code != exitcode.Usage || !strings.Contains(res.stderr.String(), test.want) {
+					t.Fatalf("exit = %d, stderr = %q; want the usage error %q", res.code, res.stderr.String(), test.want)
+				}
+				mustEmptyStdout(t, res)
+				if got := len(srv.Requests()); got != 0 {
+					t.Fatalf("a refused command line sent %d requests", got)
+				}
+			})
+		}
+	}
+}
+
+func TestLocalPublishRejectsDivergentConnectorResource(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000"},
+		env:  map[string]string{"QURL_API_KEY": testAPIKey}, shareStateDir: stateDir, shareRegistry: registry, shareDaemon: &recordingShareDaemon{},
+		preflightTarget: func(context.Context, string, int) error { return nil },
+		localResource: func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+			if _, err := resolveID("agent-one"); err != nil {
+				return nil, err
+			}
+			return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{CRID: "different", ResourcePublicKey: srv.Key.ResourceID}}, nil
+		},
+	})
+	if res.code == 0 || res.stdout.Len() != 0 || !strings.Contains(res.stderr.String(), "does not match the Connector resource") {
+		t.Fatalf("divergent Connector resource accepted: %s", res.stderr.String())
+	}
+}
+
+// A committed revoke may fail its protection proof. Withdraw a confirmed
+// revoked route without hiding the error that tells the caller to retry.
+func TestDeleteFailureWithdrawsOnlyConfirmedRevokedShare(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		deleteStatus   int
+		resourceStatus string
+		reloadErr      error
+		wantExit       int
+		wantWithdraw   bool
+	}{
+		{name: "revoked", deleteStatus: 503, resourceStatus: "revoked", wantExit: exitcode.Unavailable, wantWithdraw: true},
+		{name: "cleanup failure preserves retry", deleteStatus: 503, resourceStatus: "revoked", reloadErr: connectordaemon.ErrAlreadyRunning, wantExit: exitcode.Unavailable, wantWithdraw: true},
+		{name: "active", deleteStatus: 503, resourceStatus: "active", wantExit: exitcode.Unavailable},
+		{name: "read unavailable", deleteStatus: 503, resourceStatus: "unavailable", wantExit: exitcode.Unavailable},
+		{name: "server failure", deleteStatus: 500, resourceStatus: "revoked", wantExit: exitcode.ServerError, wantWithdraw: true},
+		{name: "forbidden", deleteStatus: 403, resourceStatus: "revoked", wantExit: exitcode.Forbidden},
+		{name: "rate limited", deleteStatus: 429, resourceStatus: "revoked", wantExit: exitcode.RateLimited},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			const deleteDetail = "Delete did not confirm protection; retry to confirm."
+			srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteProblem(t, w, test.deleteStatus, "delete_failed", "Delete Failed", deleteDetail)
+			})
+			srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				if test.resourceStatus == "unavailable" {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource": map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel", "status": test.resourceStatus,
+					"desired_state": "off", "serving_epoch": 1,
+				}}, nil)
+			})
+			stateDir := connectorStateTestDir(t)
+			t.Setenv("QURL_CONNECTOR_STATE_DIR", stateDir)
+			registry, err := openOwnedTestShareRegistry(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			local := localShareFixture(srv)
+			seedLocalConnectorResourceBinding(t, stateDir, &local)
+			if err := registry.Put(context.Background(), &local); err != nil {
+				t.Fatal(err)
+			}
+			daemon := &recordingShareDaemon{reloadErr: test.reloadErr}
+			res := runCLI(t, &runOpts{
+				args:          []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"},
+				env:           map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir},
+				shareRegistry: registry, shareStateDir: stateDir, shareDaemon: daemon,
+			})
+			if res.code != test.wantExit || !strings.Contains(res.stderr.String(), deleteDetail) {
+				t.Fatalf("exit=%d stderr=%q; want exit %d and original delete error", res.code, res.stderr.String(), test.wantExit)
+			}
+			mustEmptyStdout(t, res)
+			if test.reloadErr != nil && !strings.Contains(res.stderr.String(), "local sharing cleanup did not finish") {
+				t.Fatalf("cleanup failure was hidden: %s", res.stderr.String())
+			}
+			_, err = registry.Get(context.Background(), srv.Key.CRID)
+			if test.wantWithdraw {
+				if !errors.Is(err, os.ErrNotExist) || daemon.reloads != 1 || daemon.ensures != 0 {
+					t.Fatalf("revoked route not withdrawn: err=%v daemon=%+v", err, daemon)
+				}
+				assertLocalConnectorResourceRetired(t, stateDir, local.ConnectorID)
+			} else {
+				if err != nil || daemon.reloads != 0 || daemon.ensures != 0 {
+					t.Fatalf("unconfirmed share changed: err=%v daemon=%+v", err, daemon)
+				}
+				store, err := connectorstate.Open(stateDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = store.Close() }()
+				_, retired, found, err := store.ConnectorResourceBinding(context.Background(), local.ConnectorID)
+				if err != nil || !found || retired {
+					t.Fatalf("unconfirmed binding changed: found=%t retired=%t err=%v", found, retired, err)
+				}
+			}
+			if test.deleteStatus < 500 {
+				for _, request := range srv.Requests() {
+					if request.Method == http.MethodGet && request.Path == "/v1/resources/"+srv.Key.CRID {
+						t.Fatal("unambiguous client failure triggered a resource readback")
+					}
+				}
+			}
+		})
 	}
 }

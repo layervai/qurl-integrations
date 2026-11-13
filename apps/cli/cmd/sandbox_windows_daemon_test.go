@@ -210,7 +210,7 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 		if sharedBeforeDelete.err != nil || strings.TrimSpace(sharedBeforeDelete.stdout) == "" {
 			t.Fatal("Windows share before Connector delete failed; private details withheld")
 		}
-		grantedBeforeDelete := prepareSandboxGrantedRoute(t, cliEnv, sharedBeforeDelete.stdout, marker, backendHits.Load)
+		grantedBeforeDelete := prepareSandboxGrantedRoute(t, cliEnv, sharedBeforeDelete.stdout, marker, backendHits.Load, "")
 
 		deleted := runWindowsSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")
 		if deleted.err != nil {
@@ -687,8 +687,8 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 	if err := json.Unmarshal([]byte(published.stdout), &resource); err != nil {
 		t.Fatalf("decode Windows remote publish output: %v", err)
 	}
-	if resource.CRID == "" || resource.ResourceID == "" || resource.TargetURL != canonicalTarget || resource.FoundExisting {
-		t.Fatalf("Windows remote publish = %+v, want one new URL resource", resource)
+	if resource.CRID == "" || resource.ResourceID == "" || resource.TargetURL != canonicalTarget || resource.FoundExisting || !resource.confirmedPrivate() {
+		t.Fatalf("Windows remote publish = %+v (private confirmed: %t), want one new private URL resource", resource, resource.confirmedPrivate())
 	}
 	deleted := false
 	t.Cleanup(func() {
@@ -720,6 +720,7 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 		windowsSandboxExitCode(shared.err),
 		shared.stdout,
 		shared.stderr,
+		resource.publisherVerified(t),
 	); err != nil {
 		t.Fatal(err)
 	}

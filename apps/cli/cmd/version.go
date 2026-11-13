@@ -16,7 +16,10 @@ import (
 // versionCmd prints the version line. The output shape is a distribution
 // contract: the Homebrew formula's install test asserts on `qurl version`
 // output, so keep the format stable.
-func versionCmd(version string) *cobra.Command {
+//
+// A note about an old saved copy of the agent skill goes to stderr after the
+// line, so the line on stdout stays as it is.
+func versionCmd(opts *globalOpts) *cobra.Command {
 	var verifyReleaseNativeTrust bool
 	cmd := &cobra.Command{
 		Use:   "version",
@@ -45,9 +48,12 @@ func versionCmd(version string) *cobra.Command {
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), fingerprint)
 				return err
 			}
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "qurl version %s (%s/%s)\n",
-				version, runtime.GOOS, runtime.GOARCH)
-			return err
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "qurl version %s (%s/%s)\n",
+				opts.version, runtime.GOOS, runtime.GOARCH); err != nil {
+				return err
+			}
+			opts.noteOutdatedSkill()
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&verifyReleaseNativeTrust, "verify-release-native-trust", false, "verify the embedded native Hub trust root")

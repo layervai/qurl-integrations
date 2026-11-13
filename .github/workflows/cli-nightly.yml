@@ -82,7 +82,8 @@ jobs:
 
       # syft for the `sboms:` step in .goreleaser.yml, so the snapshot
       # exercises SBOM generation exactly like release-cli. Keep the pin and
-      # `syft-version` in lockstep with release-please.yml's copy.
+      # `syft-version` in lockstep with release-please.yml's and
+      # cli-candidate.yml's copies.
       - name: Install syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:

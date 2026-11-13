@@ -1,5 +1,167 @@
 # Changelog
 
+## [4.1.0](https://github.com/layervai/qurl-integrations/compare/v4.0.1...v4.1.0) (2026-11-10)
+
+
+### Features
+
+* **cli:** set a price and connect Stripe from the publisher device ([#1999](https://github.com/layervai/qurl-integrations/issues/1999)) ([0213c22](https://github.com/layervai/qurl-integrations/commit/0213c225316cf856ef666c2f87856c35a708f5c8))
+* **cli:** set a secret origin header on a remote URL resource ([#2012](https://github.com/layervai/qurl-integrations/issues/2012)) ([204c9eb](https://github.com/layervai/qurl-integrations/commit/204c9eb355fdbc1edc40e62bf7edb34e60787678))
+
+## [4.0.1](https://github.com/layervai/qurl-integrations/compare/v4.0.0...v4.0.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **ci:** keep the CLI Linux lifecycle gate on Ubuntu 24.04 ([#2003](https://github.com/layervai/qurl-integrations/issues/2003)) ([656111e](https://github.com/layervai/qurl-integrations/commit/656111ee35a48223afba5faf0cc7d605ae438c2f))
+* **cli:** require the granted origin for a peer refusal ([#2009](https://github.com/layervai/qurl-integrations/issues/2009)) ([a206c42](https://github.com/layervai/qurl-integrations/commit/a206c42e3f82599ab24ffd104997e098b03c2695))
+
+## [4.0.0](https://github.com/layervai/qurl-integrations/compare/v3.7.1...v4.0.0) (2026-11-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** require a public name when publishing ([#1992](https://github.com/layervai/qurl-integrations/issues/1992))
+
+### Features
+
+* **cli:** require a public name when publishing ([#1992](https://github.com/layervai/qurl-integrations/issues/1992)) ([ba6d4a7](https://github.com/layervai/qurl-integrations/commit/ba6d4a72449fd77a60d35c264a25baa4f385e70f))
+
+
+### Bug Fixes
+
+* **cli:** preserve publisher streams through session renewal ([#1984](https://github.com/layervai/qurl-integrations/issues/1984)) ([a0e0ba4](https://github.com/layervai/qurl-integrations/commit/a0e0ba4d07d7b03f4ab47243d146ae22d63d074d))
+
+## [3.7.1](https://github.com/layervai/qurl-integrations/compare/v3.7.0...v3.7.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **cli:** retain real user service paths in daemon journeys ([#1976](https://github.com/layervai/qurl-integrations/issues/1976)) ([f5079ce](https://github.com/layervai/qurl-integrations/commit/f5079ce6eadfb4cf97c95f82acc4f6069b862ddc))
+
+## [3.7.0](https://github.com/layervai/qurl-integrations/compare/v3.6.1...v3.7.0) (2026-11-03)
+
+
+### Features
+
+* add CRID Stripe payment commands and policy flags ([#1879](https://github.com/layervai/qurl-integrations/issues/1879)) ([3883553](https://github.com/layervai/qurl-integrations/commit/3883553341faa3af51b8f4a13c7980fc0008e08f))
+* **cli:** configure exact email-domain access policies ([#1970](https://github.com/layervai/qurl-integrations/issues/1970)) ([5310365](https://github.com/layervai/qurl-integrations/commit/531036524a1625753b3b6facb1352992abe4b693))
+* **cli:** let host apps name themselves in the User-Agent ([#1657](https://github.com/layervai/qurl-integrations/issues/1657)) ([80ca51a](https://github.com/layervai/qurl-integrations/commit/80ca51a1e5c69d84f6765a6b21c48e0cb637b955))
+* **cli:** show the first-use Terms notice without prompting ([#1730](https://github.com/layervai/qurl-integrations/issues/1730)) ([e05286a](https://github.com/layervai/qurl-integrations/commit/e05286aa7f5252f11b01688f19a84e6f74e2647d))
+
+
+### Bug Fixes
+
+* **cli:** bind daemon control to its state namespace ([#1747](https://github.com/layervai/qurl-integrations/issues/1747)) ([87a9dfe](https://github.com/layervai/qurl-integrations/commit/87a9dfecf60a0cd6fec90589ab2d935f86a633e7))
+* **cli:** confirm committed revocation after stopping local sharing ([#1708](https://github.com/layervai/qurl-integrations/issues/1708)) ([081f004](https://github.com/layervai/qurl-integrations/commit/081f004dcf7ff774ce3467f8057e1270e176c2c7))
+* **cli:** keep daemon diagnostic timestamps unambiguous ([#1852](https://github.com/layervai/qurl-integrations/issues/1852)) ([6989c7d](https://github.com/layervai/qurl-integrations/commit/6989c7ddfa86f929dd54b35b44d5e18d61641d99))
+* **cli:** preserve host product in native daemon jobs ([#1728](https://github.com/layervai/qurl-integrations/issues/1728)) ([7053bb9](https://github.com/layervai/qurl-integrations/commit/7053bb91277502226aa0ee1df2a85f6b867f3b7e)), closes [#1658](https://github.com/layervai/qurl-integrations/issues/1658)
+
+
+### Performance Improvements
+
+* **cli:** cross-compile images with a native compiler ([#1699](https://github.com/layervai/qurl-integrations/issues/1699)) ([4d172bc](https://github.com/layervai/qurl-integrations/commit/4d172bc69e376e0da27cbe5bd2f8a62bb900fd5d))
+
+## [3.6.1](https://github.com/layervai/qurl-integrations/compare/v3.6.0...v3.6.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **cli:** offer email code, Google and password for account setup ([#1643](https://github.com/layervai/qurl-integrations/issues/1643)) ([ddd5d56](https://github.com/layervai/qurl-integrations/commit/ddd5d56f00cc473c8ae885d9970d4add89c5f7a7))
+
+## [3.6.0](https://github.com/layervai/qurl-integrations/compare/v3.5.0...v3.6.0) (2026-10-22)
+
+
+### Features
+
+* **cli:** add commands for per-CRID preview metadata ([#1587](https://github.com/layervai/qurl-integrations/issues/1587)) ([0c07054](https://github.com/layervai/qurl-integrations/commit/0c07054af9653f5f992490c72941f1c05534bf04))
+* **cli:** publish and manage private consumer access ([#1586](https://github.com/layervai/qurl-integrations/issues/1586)) ([d7373c3](https://github.com/layervai/qurl-integrations/commit/d7373c3ffcba91d610bf64f2a435dcec50cf2020))
+* **cli:** say when a saved copy of the qURL agent skill is too old ([#1582](https://github.com/layervai/qurl-integrations/issues/1582)) ([3e79d0e](https://github.com/layervai/qurl-integrations/commit/3e79d0edece0b215dc403ff04ca52aae5edcc874))
+* **cli:** set a public name for each CRID ([#1598](https://github.com/layervai/qurl-integrations/issues/1598)) ([ffeb4a3](https://github.com/layervai/qurl-integrations/commit/ffeb4a380fa433370cec2e3284dafd27d92b6e65))
+* **cli:** support private Windows file origins ([#1532](https://github.com/layervai/qurl-integrations/issues/1532)) ([eb5c529](https://github.com/layervai/qurl-integrations/commit/eb5c529d26cb1b768bc6d21698ac3cca7af4680a))
+
+
+### Bug Fixes
+
+* **ci:** pin anonymous CRID journey settings ([#1614](https://github.com/layervai/qurl-integrations/issues/1614)) ([2280e94](https://github.com/layervai/qurl-integrations/commit/2280e94073769a19e2de7533a6c0b4542deaaa57))
+* **ci:** prove exact CLI candidates against production before release ([#1607](https://github.com/layervai/qurl-integrations/issues/1607)) ([edd3e76](https://github.com/layervai/qurl-integrations/commit/edd3e760e3ce13b520539dfc1c9dc4c77b6b8feb))
+* **cli:** clean up local routes after confirmed committed revocation ([#1517](https://github.com/layervai/qurl-integrations/issues/1517)) ([c53ae04](https://github.com/layervai/qurl-integrations/commit/c53ae04dd520a274b5e7c5f2f52a1353599846ba))
+* **cli:** explain service-reported publisher verification ([#1608](https://github.com/layervai/qurl-integrations/issues/1608)) ([4cce8b7](https://github.com/layervai/qurl-integrations/commit/4cce8b704e716f4a336429d068a21cc134d250e6))
+* **cli:** explain verified publisher status in help ([#1593](https://github.com/layervai/qurl-integrations/issues/1593)) ([6d1c367](https://github.com/layervai/qurl-integrations/commit/6d1c367effb82bc6506c36c567b4f990acec139f))
+* **cli:** get reads the device key only when the link request sends it ([#1583](https://github.com/layervai/qurl-integrations/issues/1583)) ([af0b4db](https://github.com/layervai/qurl-integrations/commit/af0b4db14cdd91ec85237b84cb457cf4fe87c85f))
+* **cli:** keep the share daemon running after a package upgrade ([#1591](https://github.com/layervai/qurl-integrations/issues/1591)) ([31e5159](https://github.com/layervai/qurl-integrations/commit/31e5159d36635b11e33aff37ade089193a1fef21))
+* **cli:** log a Windows daemon job that cannot be parsed ([#1592](https://github.com/layervai/qurl-integrations/issues/1592)) ([57e8f53](https://github.com/layervai/qurl-integrations/commit/57e8f53b12f1ff6c0ad6fd31b0359d438b29018c))
+* **cli:** qurl access exits with the code its failure means ([#1603](https://github.com/layervai/qurl-integrations/issues/1603)) ([7ab4382](https://github.com/layervai/qurl-integrations/commit/7ab43825ee4714ce563f2fb6a077d2fce94bf1fe))
+* **cli:** use the released production CRID configuration ([#1615](https://github.com/layervai/qurl-integrations/issues/1615)) ([cf627d9](https://github.com/layervai/qurl-integrations/commit/cf627d906916cd78e025ea333dbcc29447bfaaf4))
+* patch Go security and align sandbox fixtures ([#1611](https://github.com/layervai/qurl-integrations/issues/1611)) ([05ea8df](https://github.com/layervai/qurl-integrations/commit/05ea8df07d58362bdecf5260ca5981f4936e4622))
+
+## [3.5.0](https://github.com/layervai/qurl-integrations/compare/v3.4.1...v3.5.0) (2026-10-09)
+
+
+### Features
+
+* **cli:** get asks for a CRID link first where the deployment offers it, also on a machine that has only an account key (no change with the deployment this release ships) ([4e5266d](https://github.com/layervai/qurl-integrations/commit/4e5266d00d43e04cad1fb890de970f5badc83ca3))
+
+## [3.4.1](https://github.com/layervai/qurl-integrations/compare/v3.4.0...v3.4.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **cli:** say what a code shows, and from whom to take one ([#1576](https://github.com/layervai/qurl-integrations/issues/1576)) ([105c7aa](https://github.com/layervai/qurl-integrations/commit/105c7aabc4ed84a0ecdf8027585b2afc1f01f556))
+
+## [3.4.0](https://github.com/layervai/qurl-integrations/compare/v3.3.1...v3.4.0) (2026-10-09)
+
+
+### Features
+
+* **cli:** add and remove device grants without replacing the list ([0844a34](https://github.com/layervai/qurl-integrations/commit/0844a34030160e467912d66781998ac6b281eda3))
+* **cli:** let people without the CLI ask for access to a private resource ([fcc9905](https://github.com/layervai/qurl-integrations/commit/fcc9905251753d94c8a6232b629fa4e590cb01ae))
+* **cli:** publish is private unless --public ([0844a34](https://github.com/layervai/qurl-integrations/commit/0844a34030160e467912d66781998ac6b281eda3))
+
+
+### Bug Fixes
+
+* **cli:** say "not said" when the service does not list who has access ([5a591fe](https://github.com/layervai/qurl-integrations/commit/5a591fe2ec115614874ea77f3aeda0ad3eaed1e6))
+* **deps:** build the CLI and Slack images with Go 1.26.9 ([#1574](https://github.com/layervai/qurl-integrations/issues/1574)) ([56ca8ef](https://github.com/layervai/qurl-integrations/commit/56ca8efa35c15e0e229592525d73256afb13786f))
+
+## [3.3.1](https://github.com/layervai/qurl-integrations/compare/v3.3.0...v3.3.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **cli:** the journey reads the publisher and creation date that inspect writes ([#1560](https://github.com/layervai/qurl-integrations/issues/1560)) ([8dd72dd](https://github.com/layervai/qurl-integrations/commit/8dd72dd56145fb9053f522a523cc12658c3cf2a5))
+
+## [3.3.0](https://github.com/layervai/qurl-integrations/compare/v3.2.0...v3.3.0) (2026-10-06)
+
+
+### Features
+
+* **cli:** get opens a public resource with only its CRID ([#1557](https://github.com/layervai/qurl-integrations/issues/1557)) ([902fa8d](https://github.com/layervai/qurl-integrations/commit/902fa8dd27a70ba2c4a44d20423a8cbd73e3e90d))
+* **cli:** seal new local device state to the TPM when one is available; LAYERV_KEY_PROVIDER=file opts out ([63d912b](https://github.com/layervai/qurl-integrations/commit/63d912ba99680d5f813237d430e1474e38a2ec91))
+* **cli:** show a CRID's publisher and creation date ([#1550](https://github.com/layervai/qurl-integrations/issues/1550)) ([b5f959f](https://github.com/layervai/qurl-integrations/commit/b5f959fc0b9934125c7e923baf83c645a6e34462))
+* **cli:** support private device grants ([127fb9e](https://github.com/layervai/qurl-integrations/commit/127fb9e690a78e6b832a2211e3e5cbb1a2b2c01a))
+* **cli:** whoami shows which key storage protects local state ([63d912b](https://github.com/layervai/qurl-integrations/commit/63d912ba99680d5f813237d430e1474e38a2ec91))
+
+
+### Bug Fixes
+
+* **cli:** a TPM that is not responding exits 11 (unavailable) instead of 3 ([63d912b](https://github.com/layervai/qurl-integrations/commit/63d912ba99680d5f813237d430e1474e38a2ec91))
+* **cli:** correct the public-CRID text, and keep a refresh on the request that worked ([#1559](https://github.com/layervai/qurl-integrations/issues/1559)) ([6403197](https://github.com/layervai/qurl-integrations/commit/64031970e84ba26067edaca0853ddefe4b5b8300))
+* **cli:** explain a share or get "not found" result and how a private resource is opened ([e419a20](https://github.com/layervai/qurl-integrations/commit/e419a201e93ce37002ec5209fa6373c8922824a8))
+* **cli:** omit unset creation dates and reword publisher refusals ([#1551](https://github.com/layervai/qurl-integrations/issues/1551)) ([bb2ccef](https://github.com/layervai/qurl-integrations/commit/bb2ccef514d2453907ae8b3cac7145e4308df80f))
+
+## [3.2.0](https://github.com/layervai/qurl-integrations/compare/v3.1.0...v3.2.0) (2026-09-30)
+
+
+### Features
+
+* **cli:** whoami shows the device public key ([03fd58c](https://github.com/layervai/qurl-integrations/commit/03fd58cf4ee0e4cd9e1317af7d593ad142ff5b0c))
+
+
+### Bug Fixes
+
+* **cli:** whoami no longer prints the API key prefix. For -o json consumers: api_key.key_prefix is removed; use api_key.key_id ([03fd58c](https://github.com/layervai/qurl-integrations/commit/03fd58cf4ee0e4cd9e1317af7d593ad142ff5b0c))
+
 ## [3.1.0](https://github.com/layervai/qurl-integrations/compare/v3.0.0...v3.1.0) (2026-09-29)
 
 

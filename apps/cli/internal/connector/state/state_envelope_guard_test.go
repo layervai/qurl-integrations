@@ -22,6 +22,9 @@ func TestOpenPlaintextRefusesSealedEnvelope(t *testing.T) {
 	if err := os.WriteFile(sealed, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// This guard is about the unset path; the namespace already holds an
+	// envelope, so no fresh default reaches the host TPM.
+	unsetKeyProvider(t)
 	store, err := Open(dir)
 	if err == nil {
 		_ = store.Close()

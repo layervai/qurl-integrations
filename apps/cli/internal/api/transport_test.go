@@ -222,3 +222,18 @@ func TestTransportDoesNotMutateCallerRequestAcrossRetry(t *testing.T) {
 		t.Fatalf("caller request was mutated: body_same=%t headers=%v", req.Body == originalBody, req.Header)
 	}
 }
+
+func TestTransportClientProductUserAgent(t *testing.T) {
+	for _, tc := range []struct{ name, product, want string }{
+		{"unset", "", "qurl-cli/test"},
+		{"desktop", "qurl-desktop/1.2.3", "qurl-desktop/1.2.3 qurl-cli/test"},
+		{"crlf", "desktop/1\r\nInjected: yes", "qurl-cli/test"},
+		{"reserved", "qurl-cli/9", "qurl-cli/test"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := newTransport(&Config{Version: "test", ClientProduct: tc.product}).userAgent; got != tc.want {
+				t.Errorf("ClientProduct %q: User-Agent = %q, want %q", tc.product, got, tc.want)
+			}
+		})
+	}
+}

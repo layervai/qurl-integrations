@@ -1,33 +1,54 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func publishCmd(opts *globalOpts) *cobra.Command {
 	var (
-		description string
-		tags        []string
-		alias       string
-		connectorID string
-		foreground  bool
+		ruleSelector         string
+		ruleFile             string
+		consumerMode         string
+		emailDomain          string
+		stripeAccount        string
+		stripePrice          string
+		paymentAccessSeconds int64
+		contractID           string
+		name                 string
+		description          string
+		tags                 []string
+		alias                string
+		connectorID          string
+		public               bool
+		private              bool
+		allowRequests        bool
+		allowedDeviceKeys    []string
+		foreground           bool
+		originHeaderName     string
 	)
 
 	cmd := &cobra.Command{
@@ -39,6 +60,9 @@ For a local app, pass its loopback HTTP address:
 
   qurl publish http://127.0.0.1:3000
 
+Private origins also accept http+unix socket URLs on Unix or canonical
+http+npipe URLs on Windows. Private transports never fall back to TCP.
+
 On Linux, macOS, and Windows, qURL starts a per-user background daemon, waits
 until the route is serving, prints the CRID, and exits. The daemon resumes
 desired-on shares after login, sleep, wake, and network changes. Running the
@@ -49,72 +73,268 @@ Old links remain invalid.
 
 For a remote URL, qURL registers it, prints the CRID, and exits:
 
-  qurl publish https://api.example.com/reports
+  qurl publish https://api.example.com/reports --name "Reports API"
 
-A CRID is safe to share: it identifies the resource but grants no access.
-Authorized users open it with "qurl get <CRID>". The --quiet flag prints only
-the CRID. Use --foreground for CI or daemon debugging; that process owns the
-share and turns it off when it exits.`,
+In Sandbox, omit --name for a remote HTTPS URL to use its homepage title.
+Use --name to choose a different public name.
+
+Every new resource needs a public name: recipients see it on the link page
+and in the passkey they save. Set it with --name. A local app defaults to its
+--id, else, in a terminal, the name of the directory you run the command in;
+qURL shows the name before it publishes. Outside Sandbox a remote URL has no default:
+a terminal asks for the name, and a script must pass --name to create a
+resource. Publishing a target again needs no name and keeps the one it has;
+change it with "qurl preview set --name".
+
+A resource is private unless you publish it with --public. A private resource
+is limited to its owner and the devices you allow: with --allow-device-key
+when you publish it, and with "qurl grants" afterwards. Run
+"qurl whoami -o json" on a recipient's device to find its public key.
+
+"qurl share" and "qurl get" use the identity of the device they run on. They
+work on the resource owner's devices and, for a private resource, on the
+devices you allowed; any other device gets "not found".
+
+To share a private resource with people who have no qURL CLI, publish it with
+--allow-requests. They open the resource's address in a browser, ask for
+access, and are shown a six-digit code to give you. You approve each person
+with "qurl approve <CRID> <code>". A name can be typed by anyone, and a code
+shows only that it came from the screen that asked: approve a code only when
+the person you mean to let in gave it to you themselves, in a way you know it
+is them. The address and the CRID are safe to send to anyone, because a
+private resource opens only for you and the people you allow. If the target is
+already published as a private resource, --allow-requests turns access
+requests on for that resource.
+
+Where the deployment offers it, a public resource can also be opened by anyone
+who has its CRID. The deployment this release ships does not offer it yet.
+Privacy is set at creation; a publish retry cannot change it. Publishing a target
+again reuses its resource, with the privacy it has.
+
+If you published a target with a release that made resources public by
+default, that resource is still public. Publishing it again with no privacy
+flag keeps it, and warns you that it stays public. To make it private, delete
+it with "qurl delete <CRID>" and publish again; the new resource gets a new
+CRID. A flag that asks for what the existing resource is not is refused:
+--allow-device-key or --allow-requests for a public resource, --public for a
+private one.
+
+To choose who can open it, pass --rule with a default access rule's name or
+a saved rule's ID or name (see "qurl rules list"). --rule once is the One-time
+link: a link that works for whoever opens it first and expires after
+30 days if nobody opens it. The resource itself is public; only that link is
+limited. Publishing
+an item again, with or without --rule, makes a new link with the limits saved
+on this device. If an existing public item has no saved limits, an explicit
+--rule saves its limits and makes the requested link.
+
+For a remote URL whose origin admits only requests that carry a secret
+header, such as a Vercel deployment with Deployment Protection, pass
+--origin-header with the header name. qURL then adds that header to every
+request it forwards to the target. The value is never an argument: pipe it on
+standard input, or type it at the hidden prompt. Publishing a target again
+without --origin-header keeps the header it has. Publishing it again with
+another header name or value, or with a header for a target that has none, is
+refused and changes nothing: rotate or change it with
+"qurl origin-header set".
+
+For paid contract access, use "qurl access configure" with the Stripe account
+and price to make an existing public CRID private. Removing payment keeps it
+private. Publishing the same target again does not change its payment policy.
+
+Authorized users open the resource with "qurl get <CRID>". The --quiet flag
+prints only the CRID, then any temporary link minted with a rule's limits,
+including the limits saved for an item published again. Use --foreground for CI or daemon debugging; that process
+owns the share and turns it off when it exits.`,
 		Example: `  qurl publish http://127.0.0.1:3000
   qurl publish http://localhost:8080 --id local-dashboard
-  qurl publish https://api.example.com/reports
-  qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
+  qurl publish http://127.0.0.1:3000 --name "Design review"
+  qurl publish https://api.example.com/reports --name "Reports API"
+  qurl publish https://docs.example.com/handbook --name Handbook --public
+  qurl publish https://wiki.example.com/team --name "Team wiki" --allow-requests
+  qurl publish https://grafana.internal.example.com --name Dashboards --description "Team dashboard" --quiet
+  qurl publish https://app.example.com --name App --rule once
+  qurl publish https://app.example.com --name App --rule "People you approve"
+  printf '%s' "$VERCEL_BYPASS_SECRET" | qurl publish https://app.example.vercel.app --name App --origin-header x-vercel-protection-bypass`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateRuleSelectionFlags(cmd); err != nil {
+				return err
+			}
+			if ruleFile == "-" && cmd.Flags().Changed("origin-header") {
+				return exitcode.UsageError(errors.New("--rule-file - and --origin-header both read standard input; use --rule <id-or-name>"))
+			}
+			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
+				return exitcode.UsageError(err)
+			}
+			// Before the publish, so a foreground publish says it too.
+			opts.noteOutdatedSkill()
+			named := publishAccessFlags(cmd)
+			access := qurlapi.PublishOptions{
+				Public: public, AllowedDeviceKeys: allowedDeviceKeys, AllowRequests: allowRequests,
+				KeepExistingPublic: len(named) == 0, NamedAccessFlags: named,
+			}
+			if err := setPublishConsumerPolicy(&access, consumerMode, contractID, emailDomain); err != nil {
+				return err
+			}
+			if err := opts.applyPublishRule(cmd, &access, ruleSelector, ruleFile); err != nil {
+				return err
+			}
+			if err := setStripePayment(access.ConsumerAccess, stripeAccount, stripePrice, paymentAccessSeconds); err != nil {
+				return err
+			}
+
 			target, err := classifyPublishTarget(args[0])
 			if err != nil {
 				return err
 			}
-			if target.kind == publishTargetLocal {
-				for _, name := range []string{"description", "tag", "alias"} {
-					if cmd.Flags().Changed(name) {
-						return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", name))
-					}
+			if err := validatePublishTargetFlags(cmd, target); err != nil {
+				return err
+			}
+			// The secret is read before the name prompt. Piped, it is the
+			// first line of stdin, and the name is never prompted for (that
+			// needs a terminal). In a terminal, the hidden read takes one
+			// line and leaves the next for the name.
+			if cmd.Flags().Changed("origin-header") {
+				if access.OriginHeader, err = readOriginHeader(opts, originHeaderName); err != nil {
+					return err
 				}
-				return runLocalPublish(cmd.Context(), opts, target, connectorID, foreground)
 			}
-			if cmd.Flags().Changed("id") {
-				return exitcode.UsageError(errors.New("--id applies only when publishing a loopback HTTP origin"))
+			access.UseHomepageTitle = sandboxHomepageName(opts.resolvedEndpoint, target, cmd.Flags().Changed("name"))
+			if !access.UseHomepageTitle {
+				if access.Name, err = publishName(opts, cmd, name, connectorID, target); err != nil {
+					return err
+				}
 			}
-			if cmd.Flags().Changed("foreground") {
-				return exitcode.UsageError(errors.New("--foreground applies only when publishing a loopback HTTP origin"))
+			if target.kind == publishTargetLocal {
+				return publishNameError(runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access))
 			}
-			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
-				return err
-			}
-			client, err := opts.newClient(cmd.Context())
-			if err != nil {
-				return err
-			}
-
-			result, err := client.Publish(cmd.Context(), args[0], qurlapi.PublishOptions{
-				Description: description,
-				Tags:        tags,
-				Alias:       alias,
-			})
-			if err != nil {
-				return err
-			}
-
-			printer := opts.printer()
-			return printer.Publish(result)
+			access.Description, access.Tags, access.Alias = description, tags, alias
+			return opts.runRemotePublish(cmd.Context(), args[0], &access)
 		},
 	}
 
+	cmd.Flags().StringVar(&ruleSelector, ruleFlag, "", "access rule: once, a default rule's name, or a saved rule's ID or name")
+	cmd.Flags().StringVar(&ruleFile, ruleFileFlag, "", "use - to publish the access rule snapshot from standard input")
+	cmd.Flags().StringVar(&stripeAccount, stripeAccountFlag, "", "connected publisher Stripe account")
+	cmd.Flags().StringVar(&stripePrice, stripePriceFlag, "", "Stripe price for paid contract access; LayerV collects 3%")
+	cmd.Flags().Int64Var(&paymentAccessSeconds, paymentAccessSecondsFlag, 0, "one-time access duration; zero lasts for the resource lifetime; subscriptions require zero")
+	cmd.Flags().StringVar(&emailDomain, consumerEmailDomainFlag, "", "exact lowercase email domain for email_domain access")
+	cmd.Flags().StringVar(&consumerMode, "access", "", "private access mode: keys, invite_only, email_capture, email_domain, review or contract")
+	cmd.Flags().StringVar(&contractID, "contract", "", "publisher contract identifier for contract access")
+	cmd.Flags().BoolVar(&public, "public", false, "let anyone who has the CRID open the resource (default: private, only you and the devices you allow)")
+	// --private was how a private resource was published while public was the
+	// default. Private is the default now, so the flag changes nothing. It is
+	// kept, hidden, so a command copied from earlier documentation still runs.
+	cmd.Flags().BoolVar(&private, "private", false, "publish a private resource (the default)")
+	if err := cmd.Flags().MarkHidden("private"); err != nil {
+		panic(err) // unreachable: the flag is defined on the line above
+	}
+	cmd.Flags().StringArrayVar(&allowedDeviceKeys, "allow-device-key", nil, "recipient public key allowed to open the private resource (repeatable)")
+	cmd.Flags().BoolVar(&allowRequests, "allow-requests", false, "let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you")
+	cmd.Flags().StringVar(&name, "name", "", "public name recipients see, up to 100 characters (default in Sandbox for HTTPS URLs: homepage title; local app: --id or current directory name in a terminal)")
 	cmd.Flags().StringVar(&description, "description", "", "human-readable description stored with the resource")
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tag stored with the resource (repeatable)")
 	cmd.Flags().StringVar(&alias, "alias", "", "memorable handle stored with the resource")
 	cmd.Flags().StringVar(&connectorID, "id", "", "Connector ID for a local publish (default: stable ID for this machine and origin)")
+	cmd.Flags().StringVar(&originHeaderName, "origin-header", "", "header name qURL adds, with a secret value read from stdin or a hidden prompt, to every request it forwards to a remote URL")
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "serve in this process for debugging or CI and stop sharing when it exits")
 
 	return cmd
 }
 
-func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool) (retErr error) {
+func (o *globalOpts) runRemotePublish(ctx context.Context, target string, access *qurlapi.PublishOptions) error {
+	if err := o.requireRuntimeSupervisionIfNamespace(); err != nil {
+		return err
+	}
+	o.beginTermsNotice()
+	client, err := o.newClient(ctx)
+	if err != nil {
+		return err
+	}
+	if err := completeRulePayment(ctx, client, access.ConsumerAccess); err != nil {
+		return err
+	}
+	result, err := o.publishRemote(ctx, client, target, access)
+	if err != nil {
+		return publishNameError(err)
+	}
+	return o.finishTermsNotice(o.printer().Publish(result))
+}
+
+// publishAccessFlags returns the flags on the command line that said who may
+// open the resource, as they were written. A publish that gave none asks for
+// a private resource only because that is the default, so it keeps a target
+// that is already published as public instead of failing: the person may
+// have published it while public was the default and never chose either. A
+// flag that was given, in any form, is a choice, and a resource that cannot
+// be given that way stays a conflict, whose next step names these flags.
+// Asking for access requests is such a choice: they are for a private
+// resource.
+func publishAccessFlags(cmd *cobra.Command) []string {
+	var named []string
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerEmailDomainFlag, consumerContract, ruleFlag, ruleFileFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
+		flag := cmd.Flags().Lookup(name)
+		if flag == nil || !flag.Changed {
+			continue
+		}
+		written := "--" + name
+		if flag.Value.Type() == "bool" && flag.Value.String() == "false" {
+			written += "=false"
+		}
+		named = append(named, written)
+	}
+	return named
+}
+
+// validatePublishAccessFlags refuses flag combinations that contradict each
+// other, before any state or network is touched. The hidden --private flag is
+// accepted alone because it asks for what a publish does anyway. Its explicit
+// false form is refused instead of ignored: read literally it asks for a
+// public resource, and a private one must never be the silent answer to that,
+// nor a public one to anything but --public.
+func validatePublishAccessFlags(cmd *cobra.Command, public, private, allowRequests bool, allowedDeviceKeys []string) error {
+	for _, name := range []string{"access", "contract"} {
+		if cmd.Flags().Changed(name) && strings.TrimSpace(cmd.Flags().Lookup(name).Value.String()) == "" {
+			return fmt.Errorf("--%s requires a non-empty value", name)
+		}
+	}
+	if cmd.Flags().Changed("private") {
+		if public {
+			return errors.New(msgPublicAndPrivate)
+		}
+		if !private {
+			return errors.New(msgPrivateFalse)
+		}
+	}
+	if public && len(allowedDeviceKeys) > 0 {
+		return errors.New(msgAllowKeyWithPublic)
+	}
+	if public && allowRequests {
+		return errors.New(msgAllowRequestsWithPublic)
+	}
+	return validateAllowedDeviceKeys(allowedDeviceKeys)
+}
+
+// publishRemote publishes a remote URL and applies the selected access rule.
+func (o *globalOpts) publishRemote(ctx context.Context, client qurlapi.Client, target string, access *qurlapi.PublishOptions) (*qurlapi.Published, error) {
+	result, err := client.Publish(ctx, target, *access)
+	if err != nil {
+		return nil, err
+	}
+	result.LinkSiteURL = o.resourceAddress(result.CRID)
+	if err := o.applyRuleToShare(ctx, client, access.Rule, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool, access *qurlapi.PublishOptions) (retErr error) {
 	requestedID, err := validateLocalPublishRequest(ctx, opts, target, flagID, foreground)
 	if err != nil {
 		return err
 	}
+	opts.beginTermsNotice()
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
 		return err
@@ -141,6 +361,9 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return err
 	}
+	if err := completeRulePayment(ctx, client, access.ConsumerAccess); err != nil {
+		return err
+	}
 	// Validate the owner-bound session authority before any Connector-resource
 	// mutation. The short-lived discovery runtime below never transfers to
 	// NewNativeAdmitter, so it must not retain that authority or non-default UDP
@@ -148,7 +371,7 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if _, err := opts.resolveSessionConfig(ownerID); err != nil {
 		return err
 	}
-	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID}
+	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID, access: *access}
 	// The registered REST client is open and cached before resource discovery
 	// can request a Connector enrollment credential. Resource discovery can
 	// therefore reuse it without a nested native-runtime open. The separate
@@ -178,7 +401,15 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err := registry.Put(ctx, local); err != nil {
 		return compensate(err)
 	}
-	return finishLocalPublish(ctx, opts, client, registry, resolved, local, stateDir, foreground, compensate)
+	shared := &qurlapi.Published{CRID: local.CRID, ResourceID: local.ResourceID, FoundExisting: resolved.FoundExisting, Private: resolved.Private, ConsumerAccess: resolved.ConsumerAccess}
+	// Limits are saved before serving, so a failed save still turns a new
+	// share back off; the link is minted once the share serves.
+	limits, err := opts.ruleLinkLimits(ctx, access.Rule, shared)
+	if err != nil {
+		return compensate(err)
+	}
+	mintLink := func() error { return opts.mintRuleLink(ctx, client, access.Rule, shared, limits) }
+	return finishLocalPublish(ctx, opts, client, registry, resolved, local, shared, mintLink, stateDir, foreground, compensate)
 }
 
 func validateLocalPublishRequest(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool) (string, error) {
@@ -235,6 +466,9 @@ func localPublishOwner(ctx context.Context, opts *globalOpts, registry localShar
 }
 
 type localEnrollment struct {
+	// access is who may open the resource: public or private, and the first
+	// list of allowed devices.
+	access      qurlapi.PublishOptions
 	opts        *globalOpts
 	target      *publishTarget
 	requestedID string
@@ -366,12 +600,48 @@ func prepareLocalPublishResource(
 		RecoveryCredentialProvider:   enrollment.recoveryCredential,
 		RefreshMode:                  connectorRefreshModeAuto,
 	}
+	// The Connector resource request that follows cannot say who may open the
+	// resource, so the service would decide. The resource is therefore created
+	// first, over the API, with its privacy stated and confirmed, for a public
+	// resource as for a private one. The Connector request then finds that
+	// resource, and the two answers must name the same one.
+	var precreated *qurlapi.Published
 	resolved, err = opts.resolveLocalResource(ctx, cfg, func(agentID string) (string, error) {
-		return enrollment.resolveID(ctx, stateDir, agentID)
+		id, err := enrollment.resolveID(ctx, stateDir, agentID)
+		if err != nil {
+			return "", err
+		}
+		client, err := opts.newClient(ctx)
+		if err != nil {
+			return "", err
+		}
+		access := enrollment.access
+		access.ConnectorID = id
+		precreated, err = client.Publish(ctx, "", access)
+		if err != nil {
+			return "", err
+		}
+		return id, nil
 	})
 	if err != nil {
 		return nil, "", err
 	}
+	if precreated == nil || precreated.Private == nil {
+		// No resource may be served whose privacy this command did not state.
+		return nil, "", fmt.Errorf("%w: the resource was resolved before its privacy was stated; nothing was published", qurl.ErrInvalidAPIResponse)
+	}
+	if resolved == nil || resolved.Resource == nil || precreated.CRID != resolved.Resource.CRID || precreated.ResourceID != resolved.Resource.ResourcePublicKey {
+		return nil, "", fmt.Errorf("%w: the resource created for this app does not match the Connector resource; check your published resources with `qurl list` before retrying", qurl.ErrInvalidAPIResponse)
+	}
+	resolved.ConsumerAccess = precreated.ConsumerAccess
+	resolved.Private = precreated.Private
+	resolved.AccessRequests = precreated.AccessRequests
+	resolved.AccessRequestsTurnedOn = precreated.AccessRequestsTurnedOn
+	resolved.KeptPublic = precreated.KeptPublic
+	// The Connector request always finds the resource created just above, so
+	// its own answer cannot tell a first publish from a repeated one. The
+	// create answer can.
+	resolved.FoundExisting = precreated.FoundExisting
 	knockResourceID, err = agent.KnockResourceID(resolved.Resource)
 	if err != nil {
 		return nil, "", err
@@ -419,7 +689,7 @@ func activateLocalPublish(
 	local := &connectorstate.LocalShare{
 		CRID: resource.CRID, ResourceID: resource.ResourcePublicKey, ConnectorID: resource.Slug,
 		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: knockResourceID,
-		TargetURL: target.canonicalOrigin, LocalIP: target.localIP, LocalPort: target.localPort, LocalSocketPath: target.localSocketPath,
+		TargetURL: target.canonicalOrigin, LocalIP: target.localIP, LocalPort: target.localPort, LocalSocketPath: target.localSocketPath, LocalPipeName: target.localPipeName,
 		DesiredState: string(sharing.DesiredState), ServingEpoch: sharing.ServingEpoch,
 	}
 	return local, sharing, compensateOff, nil
@@ -448,12 +718,14 @@ func finishLocalPublish(
 	registry localShareRegistry,
 	resolved *agent.ResolvedResource,
 	local *connectorstate.LocalShare,
+	applied *qurlapi.Published,
+	mintLink func() error,
 	stateDir string,
 	foreground bool,
 	compensate func(error) error,
 ) error {
 	if foreground {
-		return runForegroundLocalPublish(ctx, opts, client, registry, resolved, local, stateDir)
+		return runForegroundLocalPublish(ctx, opts, client, registry, resolved, local, applied, mintLink, stateDir)
 	}
 	logDir, err := connectordaemon.DefaultLogDir(stateDir)
 	if err != nil {
@@ -466,10 +738,16 @@ func finishLocalPublish(
 	if err := daemon.Ensure(ctx); err != nil {
 		return compensate(err)
 	}
-	if _, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit); err != nil {
+	sharing, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit)
+	if err != nil {
 		return err
 	}
-	return printLocalPublishServing(opts, resolved, local)
+	// Minted once serving, like a remote publish: a failed link leaves the
+	// share on, and its lifetime starts when the route works.
+	if err := mintLink(); err != nil {
+		return err
+	}
+	return printLocalPublishServing(opts, resolved, local, applied, sharing)
 }
 
 func runForegroundLocalPublish(
@@ -479,6 +757,8 @@ func runForegroundLocalPublish(
 	registry localShareRegistry,
 	resolved *agent.ResolvedResource,
 	local *connectorstate.LocalShare,
+	applied *qurlapi.Published,
+	mintLink func() error,
 	stateDir string,
 ) (retErr error) {
 	var (
@@ -513,7 +793,7 @@ func runForegroundLocalPublish(
 		// strand a desired-on share without this foreground process as its owner.
 		retErr = compensateLocalPublish(client, registry, resolved.Resource, retErr)
 	}()
-	jobVersion, err := connectordaemon.JobVersion(opts.version, opts.resolvedShareGroupMode)
+	jobVersion, err := connectordaemon.JobVersion(opts.version, opts.resolvedShareGroupMode, opts.resolvedClientProduct)
 	if err != nil {
 		return err
 	}
@@ -525,7 +805,7 @@ func runForegroundLocalPublish(
 	cancelDaemon = cancel
 	daemonErr = make(chan error, 1)
 	go func() { daemonErr <- opts.runForegroundDaemon(daemonCtx, opts, stateDir, jobVersion) }()
-	ipc := connectordaemon.IPCClient{SocketPath: socketPath}
+	ipc := connectordaemon.IPCClient{SocketPath: socketPath, StateDir: stateDir}
 	readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	readyErr := make(chan error, 1)
 	go func() { readyErr <- ipc.WaitReady(readyCtx) }()
@@ -541,10 +821,14 @@ func runForegroundLocalPublish(
 	if err != nil {
 		return err
 	}
-	if _, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit); err != nil {
+	sharing, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit)
+	if err != nil {
 		return err
 	}
-	if err := printLocalPublishServing(opts, resolved, local); err != nil {
+	if err := mintLink(); err != nil {
+		return err
+	}
+	if err := printLocalPublishServing(opts, resolved, local, applied, sharing); err != nil {
 		return err
 	}
 	retErr = <-daemonErr
@@ -585,12 +869,26 @@ func withoutExpectedDaemonCancellation(err error) error {
 	return err
 }
 
-func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource, local *connectorstate.LocalShare) error {
-	printer := opts.printer()
-	return printer.Publish(&qurlapi.Published{
+// printLocalPublishServing renders a serving local publish. The publisher in
+// the JSON document comes from the sharing state that confirmed serving, so it
+// costs no extra request; a service that does not report one leaves it
+// unnamed and unverified. The text document deliberately has no publisher
+// row: a first publish stays calm, and the status is shown where a recipient
+// decides (share, get) and where an owner asks (status, inspect, publisher).
+func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource, local *connectorstate.LocalShare, applied *qurlapi.Published, sharing *qurlapi.Sharing) error {
+	published := &qurlapi.Published{
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
-		Status: "serving", FoundExisting: resolved.FoundExisting,
-	})
+		Status: "serving", FoundExisting: resolved.FoundExisting, Private: resolved.Private, ConsumerAccess: resolved.ConsumerAccess,
+		AccessRequests: resolved.AccessRequests, AccessRequestsTurnedOn: resolved.AccessRequestsTurnedOn,
+		KeptPublic: resolved.KeptPublic, LinkSiteURL: opts.resourceAddress(local.CRID),
+	}
+	if applied != nil {
+		published.LimitedLink, published.OtherSettings = applied.LimitedLink, applied.OtherSettings
+	}
+	if sharing != nil {
+		published.Publisher = sharing.Publisher
+	}
+	return opts.finishTermsNotice(opts.printer().Publish(published))
 }
 
 func resolveLocalConnectorID(opts *globalOpts, flagID string) string {
@@ -633,4 +931,191 @@ func resolveLocalPublishResource(ctx context.Context, cfg *connectorshare.Native
 	}
 	defer func() { retErr = errors.Join(retErr, resourceStore.Close()) }()
 	return agent.ResolveResourceWithResult(ctx, nativeRuntime.Binding, resourceStore, id)
+}
+
+func validateAllowedDeviceKeys(keys []string) error {
+	return validateDeviceKeys("--allow-device-key", keys)
+}
+
+// validateDeviceKeys checks the device public keys given to one flag, named
+// in the message, before anything is sent: publish and grants apply the same
+// rule to every list.
+func validateDeviceKeys(flag string, keys []string) error {
+	// TODO(upstream-contract): service grants allow at most 256 unique,
+	// canonical padded-base64 X25519 public keys.
+	if len(keys) > 256 {
+		return fmt.Errorf("%s accepts at most 256 keys", flag)
+	}
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		raw, err := base64.StdEncoding.DecodeString(key)
+		if err != nil || len(raw) != devicePublicKeySize || base64.StdEncoding.EncodeToString(raw) != key || seen[key] {
+			return fmt.Errorf("%s requires unique canonical base64 X25519 public keys", flag)
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract, emailDomain string) error {
+	if mode == "" {
+		if contract != "" || emailDomain != "" {
+			return exitcode.UsageError(errors.New("--contract or --email-domain requires a matching --access mode"))
+		}
+		return nil
+	}
+	if access.Public || access.AllowRequests || len(access.AllowedDeviceKeys) != 0 {
+		return exitcode.UsageError(errors.New("--access cannot be combined with --public, --allow-requests or --allow-device-key"))
+	}
+	if qurlapi.ValidateConsumerPolicyFields(mode, contract, emailDomain) != nil {
+		return exitcode.UsageError(errors.New("--access must be keys, invite_only, email_capture, email_domain, review or contract; --email-domain requires email_domain mode and an exact lowercase DNS domain; --contract is required only for contract mode and must have at most 128 characters"))
+	}
+	access.ConsumerAccess = &qurl.ConsumerAccessPolicy{Mode: mode, Version: 1, ContractID: contract, EmailDomain: emailDomain}
+	return nil
+}
+
+func (o *globalOpts) applyPublishRule(cmd *cobra.Command, access *qurlapi.PublishOptions, selector, file string) error {
+	if !cmd.Flags().Changed(ruleFlag) && !cmd.Flags().Changed(ruleFileFlag) {
+		return nil
+	}
+	definition, err := o.selectedRule(cmd, selector, file)
+	if err != nil {
+		return err
+	}
+	access.Rule = &definition
+	access.Public = definition.Mode == accessrules.ModePublic
+	if !access.Public {
+		policy := definition.Policy(1)
+		access.ConsumerAccess = &policy
+	}
+	return nil
+}
+
+// sandboxHomepageName matches the Sandbox API that accepts use_homepage_title.
+// TODO(upstream-contract): Keep this in sync with the service's Sandbox gate.
+func sandboxHomepageName(endpoint string, target *publishTarget, hasName bool) bool {
+	return !hasName && target.kind == publishTargetRemote &&
+		strings.HasPrefix(strings.ToLower(target.original), "https://") &&
+		strings.EqualFold(strings.TrimRight(endpoint, "/"), "https://api.layerv.xyz")
+}
+
+// publishName returns the public name when Sandbox automatic naming does not apply, checked against the
+// service's rules so the create is never refused for it. --name wins. A local
+// app defaults to its configured Connector ID, else, in a terminal only, the
+// name of the directory the command runs in (its project) unless that is the
+// home or root directory. Nothing is derived from the target URL or the description: the
+// name is public, and they may name a hidden origin. With no such value an
+// interactive terminal asks for one; any other caller sends none, which the
+// service accepts only for a target that is already published.
+func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string, target *publishTarget) (string, error) {
+	if cmd.Flags().Changed("name") {
+		return checkPublicName(flag)
+	}
+	terminal := opts.streams.InIsTTY && opts.streams.ErrIsTTY
+	shown := terminal && !opts.quiet && opts.resolvedFormat != output.FormatJSON
+	name := ""
+	if target.kind == publishTargetLocal {
+		// The directory name only where the note shows it before it is public.
+		if name = resolveLocalConnectorID(opts, connectorID); name == "" && shown {
+			name = directoryPublishName(os.Getwd, os.UserHomeDir)
+		}
+	}
+	if validPublicName(name) {
+		if shown {
+			opts.printer().Notef(msgPublishNameDefault, name)
+		}
+		return name, nil
+	}
+	if !terminal {
+		// A script that republishes needs no name: the service asks for one
+		// only when it would create the resource; publishNameError explains it.
+		return "", nil
+	}
+	if _, err := fmt.Fprint(opts.streams.Err, msgPublishNamePrompt); err != nil {
+		return "", err
+	}
+	// The name is the last input, so buffering past the line is safe.
+	scanner := bufio.NewScanner(opts.streams.In)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return "", fmt.Errorf("read the public name: %w", err)
+		}
+		return "", exitcode.UsageError(errors.New(msgPublishNameRequired))
+	}
+	if strings.TrimSpace(scanner.Text()) == "" {
+		return "", exitcode.UsageError(errors.New(msgPublishNameRequired))
+	}
+	return checkPublicName(scanner.Text())
+}
+
+// publishNameError turns the service's name_required refusal, which comes only
+// for a create sent without a name, into the --name next step.
+func publishNameError(err error) error {
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) && apiErr.Code == "name_required" {
+		return exitcode.UsageError(errors.New(msgPublishNameRequired))
+	}
+	return err
+}
+
+// checkPublicName trims a name the person typed and refuses one the service
+// would refuse.
+func checkPublicName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if !validPublicName(name) {
+		return "", exitcode.UsageError(errors.New(msgPublishNameInvalid))
+	}
+	return name, nil
+}
+
+func directoryPublishName(getwd, home func() (string, error)) string {
+	dir, err := getwd()
+	if err != nil {
+		return ""
+	}
+	// EqualFold: home paths are case-insensitive on Windows and macOS.
+	if h, err := home(); err == nil && strings.EqualFold(filepath.Clean(h), filepath.Clean(dir)) {
+		return ""
+	}
+	if name := strings.TrimSpace(filepath.Base(dir)); name != string(filepath.Separator) && name != "." {
+		return name
+	}
+	return ""
+}
+
+// maxPublicNameRunes is the service's limit on a public name.
+const maxPublicNameRunes = 100
+
+// validPublicName applies the service's preview-name rules to a trimmed name:
+// valid UTF-8, 1 to 100 characters, no surrounding space, one line, no control
+// or format characters.
+// TODO(upstream-contract): mirrors qurl-service domain.ValidatePreviewName.
+func validPublicName(name string) bool {
+	return name != "" && name == strings.TrimSpace(name) && utf8.ValidString(name) && utf8.RuneCountInString(name) <= maxPublicNameRunes &&
+		!strings.ContainsFunc(name, func(r rune) bool {
+			return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029'
+		})
+}
+
+// validatePublishTargetFlags refuses flags that do not apply to the kind of
+// target, before the command asks for a name.
+func validatePublishTargetFlags(cmd *cobra.Command, target *publishTarget) error {
+	if target.kind == publishTargetLocal {
+		if cmd.Flags().Changed("origin-header") {
+			return exitcode.UsageError(errOriginHeaderLocal)
+		}
+		for _, flag := range []string{"description", "tag", "alias"} {
+			if cmd.Flags().Changed(flag) {
+				return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", flag))
+			}
+		}
+		return nil
+	}
+	if cmd.Flags().Changed("id") {
+		return exitcode.UsageError(errors.New("--id applies only when publishing a local origin"))
+	}
+	if cmd.Flags().Changed("foreground") {
+		return exitcode.UsageError(errors.New("--foreground applies only when publishing a local origin"))
+	}
+	return nil
 }

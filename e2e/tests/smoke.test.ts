@@ -7,7 +7,7 @@
  * 5. Bot can read/write in test channel
  *
  * Minted target_urls carry the per-run nonce, and every resource / sent
- * Discord message is tracked for best-effort cleanup in afterAll — see
+ * Discord message is tracked for cleanup in afterAll — see
  * helpers/cleanup.ts.
  */
 
@@ -22,8 +22,11 @@ const sentMessages = trackedDiscordMessages(env);
 
 afterAll(async () => {
   // Independent backends (qURL API / Discord) with no shared rate-limit
-  // bucket — run the two best-effort sweeps concurrently.
-  await Promise.all([tracked.revokeAll(), sentMessages.deleteAll()]);
+  // bucket — revoke resources and best-effort delete messages concurrently.
+  const results = await Promise.allSettled([tracked.revokeAll(), sentMessages.deleteAll()]);
+  for (const result of results) {
+    if (result.status === 'rejected') throw result.reason;
+  }
 });
 
 describe('Smoke: Bot connectivity', () => {
@@ -106,7 +109,7 @@ describe('Smoke: qURL link lifecycle', () => {
     // a consumed token stays present with status=consumed until TTL cleanup.
     // Knock-driven single-use ENFORCEMENT is
     // pinned in file-revoke.test.ts ("a consumed one-time link does not
-    // serve a second knock"); URL-target knock coverage is #951.
+    // serve a second knock") and url-target-one-time.test.ts.
     const status = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
     console.log('Link status after first access:', JSON.stringify(status));
     expect(status.use_count).toBeLessThanOrEqual(1);
@@ -117,9 +120,8 @@ describe('Smoke: qURL link lifecycle', () => {
     // scope: the SPA knock that consumes a use is client-side JS, so a
     // bare accessLink() GET may never advance use_count at all. In a
     // deployment where bare GETs don't consume, the counter stays 0 here
-    // and only the knock-driven test in file-revoke.test.ts ("a consumed
-    // one-time link does not serve a second knock") can catch the
-    // reusable-links bug (URL-target knock coverage: #951). Where bare
+    // and only the knock-driven tests in file-revoke.test.ts and
+    // url-target-one-time.test.ts can catch the reusable-links bug. Where bare
     // GETs DO consume, `use_count === 2` here is that exact bug shape.
     // Either way the counter must stay coherent. That bound is NOT a
     // server-side cap — see the note in concurrency.test.ts: this mint sends

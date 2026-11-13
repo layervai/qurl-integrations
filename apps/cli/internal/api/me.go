@@ -33,8 +33,6 @@ type KeyIdentity struct {
 	Kind string
 	// Scopes come back in alphabetical order (a platform contract).
 	Scopes []string
-	// KeyPrefix is the non-secret leading portion (e.g. "lv_live_a3x9").
-	KeyPrefix string
 	// ExpiresAt is nil for non-expiring keys.
 	ExpiresAt *time.Time
 }
@@ -47,7 +45,6 @@ type meData struct {
 		KeyID     string     `json:"key_id"`
 		Kind      string     `json:"kind"`
 		Scopes    []string   `json:"scopes"`
-		KeyPrefix string     `json:"key_prefix"`
 		ExpiresAt *time.Time `json:"expires_at"`
 	} `json:"api_key"`
 }
@@ -77,7 +74,6 @@ func (c *client) Me(ctx context.Context) (*Identity, error) {
 			KeyID:     k.KeyID,
 			Kind:      k.Kind,
 			Scopes:    k.Scopes,
-			KeyPrefix: k.KeyPrefix,
 			ExpiresAt: k.ExpiresAt,
 		}
 	}

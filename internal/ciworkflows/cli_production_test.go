@@ -1,0 +1,222 @@
+package ciworkflows
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"testing"
+)
+
+func TestCLIPublicationRequiresExactProductionProof(t *testing.T) {
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	for _, name := range []string{"production-proof", "production-cleanup", "publish-cli-release"} {
+		if workflow.Jobs[name] == nil {
+			t.Fatalf("required production gate is missing: %s", name)
+		}
+	}
+	publisher := workflow.Jobs["publish-cli-release"]
+	for _, gate := range []string{"production-proof", "production-cleanup"} {
+		if !slices.Contains(parseWorkflowNeeds(t, "publish-cli-release", publisher.Needs), gate) ||
+			!strings.Contains(publisher.If, "needs."+gate+".result == 'success'") {
+			t.Fatalf("publication must require successful %s, including recovery dispatches", gate)
+		}
+	}
+	verified, checkedOut := false, false
+	for _, current := range publisher.Steps {
+		if strings.HasPrefix(current.Uses, checkoutActionPrefix) {
+			checkedOut = true
+		}
+		if strings.Contains(current.Run, "verify-production-proof.py\" verify") {
+			if !checkedOut {
+				t.Fatal("production proof verification requires the checked-out trusted guard")
+			}
+			if current.If != "" || current.ContinueOnError != nil {
+				t.Fatal("production evidence verification cannot be optional")
+			}
+			verified = true
+		}
+		if strings.Contains(current.Run, "docker buildx imagetools create") || strings.Contains(current.Run, "--draft=false") {
+			if !verified {
+				t.Fatal("public distribution precedes production proof verification")
+			}
+		}
+	}
+	if !verified {
+		t.Fatal("publication does not verify exact archive and evidence bytes")
+	}
+	proof := workflow.Jobs["production-proof"]
+	assertJobPermissions(t, "production-proof", proof.Permissions, map[string]string{"contents": "read"})
+	steps := map[string]step{}
+	for _, current := range proof.Steps {
+		steps[current.Name] = current
+	}
+	journey := steps["Require the real production journey to pass without skips"]
+	for _, required := range []string{"TestProductionReleaseJourney", "-test.count=1", "-test.list", "--- SKIP:", `[[ "$status" == 0 ]]`, "scripts/cli-production-proof.py record"} {
+		if !strings.Contains(journey.Run, required) {
+			t.Errorf("production journey must enforce %q", required)
+		}
+	}
+	if journey.If != "" || journey.ContinueOnError != nil {
+		t.Fatal("production journey is optional")
+	}
+	download := steps["Download the exact draft release candidate"]
+	if !strings.Contains(download.Uses, "actions/download-artifact@") ||
+		!strings.Contains(download.With["name"].(string), "needs.cli-release-gate.outputs.source_sha") ||
+		!strings.Contains(download.With["name"].(string), "github.run_attempt") {
+		t.Fatal("production must use the exact packaged candidate from this attempt")
+	}
+	staged := false
+	for _, current := range workflow.Jobs["release-cli"].Steps {
+		if current.Name == "Stage the production candidate bundle" {
+			staged = strings.Contains(current.Uses, "actions/upload-artifact@") && current.With["name"] == download.With["name"] && strings.Contains(current.With["path"].(string), "dist/checksums.txt") && strings.Contains(current.With["path"].(string), "dist/qurl_*.tar.gz") && strings.Contains(current.With["path"].(string), "dist/qurl_*.zip")
+		}
+	}
+	if !staged {
+		t.Fatal("release build must stage every archive and checksum for production proof")
+	}
+	cleanup := workflow.Jobs["production-cleanup"]
+	if !strings.Contains(cleanup.If, "always()") {
+		t.Fatal("failed production runs must still clean up")
+	}
+	fallback := readWorkflow(t, "cli-production-cleanup.yml")
+	if !strings.Contains(fallback.Jobs["cleanup"].If, "head_branch == 'main'") {
+		t.Fatal("cancellation cleanup must reject branch workflows")
+	}
+	for _, current := range fallback.Jobs["cleanup"].Steps {
+		if strings.Contains(current.Uses, "download-artifact") {
+			t.Fatal("privileged cancellation cleanup must not consume candidate artifacts")
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "apps", "cli", "cmd", "production_release_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "t.Skip") || !strings.Contains(string(raw), `const productionProofEndpoint = "https://api.layerv.ai"`) {
+		t.Fatal("production proof must target production and never skip")
+	}
+}
+
+func TestCLIProductionCredentialsUseNativeWindowsPermissionsAndCleanup(t *testing.T) {
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	steps := map[string]step{}
+	for _, current := range workflow.Jobs["production-proof"].Steps {
+		steps[current.Name] = current
+	}
+	for _, name := range []string{"Mint disposable production credentials", "Remove local disposable credentials"} {
+		if !strings.Contains(steps[name].If, "runner.os != 'Windows'") {
+			t.Fatalf("POSIX credential operations must exclude Windows: %s", name)
+		}
+	}
+	mint := steps["Mint disposable Windows production credentials"]
+	if mint.If != "runner.os == 'Windows'" || mint.Shell != "pwsh" || mint.ContinueOnError != nil {
+		t.Fatal("Windows credentials require a mandatory native PowerShell step")
+	}
+	for _, required := range []string{"icacls.exe", "/inheritance:r", "/grant:r", "Remove-Item Env:AUTOMATION_API_KEY", "create-pair", "--qurl-endpoint https://api.layerv.ai", "--run-id $env:QURL_SHARING_RUN_ID", "--run-attempt $env:QURL_SHARING_RUN_ATTEMPT", "finally {", "Test-Path -LiteralPath $authority"} {
+		if !strings.Contains(mint.Run, required) {
+			t.Errorf("Windows production credentials lack %q", required)
+		}
+	}
+	if strings.Index(mint.Run, "icacls.exe") > strings.Index(mint.Run, "WriteAllText") {
+		t.Fatal("Windows directory ACL must be restricted before the parent key is written")
+	}
+	cleanup := steps["Remove local Windows production credentials"]
+	if cleanup.If != "always() && runner.os == 'Windows'" || cleanup.Shell != "pwsh" || cleanup.ContinueOnError != nil {
+		t.Fatal("Windows production credential cleanup must always run and fail closed")
+	}
+	for _, required := range []string{"@('production-authority', 'production-keys')", "Join-Path $env:RUNNER_TEMP $name", "Remove-Item -LiteralPath $path -Recurse -Force", "throw 'local production credentials remain"} {
+		if !strings.Contains(cleanup.Run, required) {
+			t.Errorf("Windows production cleanup lacks %q", required)
+		}
+	}
+}
+
+func TestPublicCLIProofCannotBuildOrPublish(t *testing.T) {
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	build := workflow.Jobs["release-cli"]
+	if !strings.Contains(build.If, "!inputs.production_proof_only") {
+		t.Fatal("public proof must skip every native and image build")
+	}
+	for _, name := range []string{"publish-cli-release", "validate-homebrew-cask", "validate-windows-release-archive"} {
+		if !strings.Contains(workflow.Jobs[name].If, "needs.release-cli.result == 'success'") {
+			t.Fatalf("%s must still require the ordinary build", name)
+		}
+	}
+	gate := workflow.Jobs["cli-release-gate"]
+	var resolver, qualification step
+	for _, current := range gate.Steps {
+		if current.Name == "Resolve the exact release source" {
+			resolver = current
+		}
+		if current.Name == "Check the exact packaged customer-journey gate once" {
+			qualification = current
+		}
+	}
+	if !strings.Contains(qualification.If, "!inputs.production_proof_only") {
+		t.Fatal("public proof must not run the Sandbox gate")
+	}
+	for _, required := range []string{`"$draft" == false`, `"$HANDOFF_SOURCE_SHA" == "$source_sha"`, `"$release_target" == "$source_sha"`, `"$GITHUB_REPOSITORY" == layervai/qurl-integrations`} {
+		if !strings.Contains(resolver.Run, required) {
+			t.Fatalf("public source binding lacks %s", required)
+		}
+	}
+	public := workflow.Jobs["public-production-candidate"]
+	assertJobPermissions(t, "public-production-candidate", public.Permissions, map[string]string{"contents": "read"})
+	if !strings.Contains(public.If, "inputs.production_proof_only") {
+		t.Fatal("public staging must be opt-in")
+	}
+	proof := workflow.Jobs["production-proof"]
+	if !slices.Contains(parseWorkflowNeeds(t, "production-proof", proof.Needs), "public-production-candidate") ||
+		!strings.Contains(proof.If, "always()") || !strings.Contains(proof.If, "inputs.production_proof_only && needs.public-production-candidate.result == 'success'") {
+		t.Fatal("reuse the production matrix only after signed public archive validation")
+	}
+}
+
+func TestWindowsProductionProofUsesProtectedCustomerReader(t *testing.T) {
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	steps := map[string]step{}
+	for _, current := range workflow.Jobs["production-proof"].Steps {
+		steps[current.Name] = current
+	}
+	reader := steps["Verify the Windows production credential reader"]
+	if reader.If != "runner.os == 'Windows'" || !strings.Contains(reader.Run, "TestProductionProofWindowsCredentialFile") {
+		t.Fatal("Windows reader must execute its native ACL regression")
+	}
+	mint := steps["Mint disposable Windows production credentials"]
+	for _, required := range []string{"icacls.exe $readerKey /setowner $env:USERNAME", "could not set production API-key file owner", "icacls.exe $readerKey /inheritance:r /grant:r", "primary/api-key-env", "[IO.File]::WriteAllText($readerKey", " + \"`n\"", "QURL_API_KEY_FILE=$readerKey"} {
+		if !strings.Contains(mint.Run, required) {
+			t.Fatalf("Windows proof reader file lacks %s", required)
+		}
+	}
+}
+
+func TestWindowsPublicProofSelectionPreservesNormalThreePlatforms(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", releasePleaseWorkflow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pattern := `include: \$\{\{ fromJSON\(inputs.production_proof_only && inputs.production_proof_platform == 'windows' && '([^']+)' \|\| '([^']+)'\) \}\}`
+	match := regexp.MustCompile(pattern).FindStringSubmatch(string(raw))
+	if len(match) != 3 {
+		t.Fatal("Windows selection must be restricted to public-proof mode")
+	}
+	type lane struct {
+		Lane    string `json:"lane"`
+		ID      int    `json:"lane_id"`
+		OS      string `json:"os"`
+		Archive string `json:"archive"`
+	}
+	var windows, normal []lane
+	if json.Unmarshal([]byte(match[1]), &windows) != nil || json.Unmarshal([]byte(match[2]), &normal) != nil {
+		t.Fatal("invalid proof matrix JSON")
+	}
+	want := []lane{{"linux", 1, "ubuntu-latest", "linux_*.tar.gz"}, {"macos", 2, "macos-latest", "darwin_*.tar.gz"}, {"windows", 3, "windows-latest", "windows_*.zip"}}
+	if !slices.Equal(normal, want) || !slices.Equal(windows, want[2:]) {
+		t.Fatal("normal release must retain all3 exact lanes; Windows probe must select only Windows")
+	}
+	if !strings.Contains(string(raw), "default: all\n        type: choice\n        options: [all, windows]") {
+		t.Fatal("public proof must default to all platforms")
+	}
+}

@@ -8,7 +8,6 @@
       "qurl:read",
       "qurl:resolve",
       "qurl:write"
-    ],
-    "key_prefix": "lv_test_abcd"
+    ]
   }
 }

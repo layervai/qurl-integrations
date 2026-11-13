@@ -21,6 +21,20 @@ from typing import Any
 
 
 MAX_RESPONSE = 64 * 1024
+# A response that lists resources or API keys is a page of whole rows, and it
+# has a bound of its own. A resource row carries lists: up to 256 device keys
+# and the people its owner approved. So one row can be tens of kilobytes, and a
+# page of INVENTORY_PAGE_SIZE rows a few megabytes. With MAX_RESPONSE as the
+# bound for a page, the cleanup inventory failed as soon as 100 ordinary rows
+# of the CI owner came to more than 64 KiB (66,609 bytes on 2026-10-09, after
+# the service added two members to every row), and every journey cleanup with
+# it. The bound stays: a page is read into memory before it is parsed. What
+# one inventory holds in all is bounded by INVENTORY_MAX_ROWS rows of that
+# size: about 160 MiB of response bytes at the worst, and more once parsed.
+# It is no longer bounded by pages of 64 KiB.
+# TODO(upstream-contract): 8 MiB is 100 rows of about 80 KiB, above what the
+# service's limits on those lists allow today. Recalibrate it with them.
+INVENTORY_MAX_RESPONSE = 8 * 1024 * 1024
 # Conservative setup budget; the three-hour journey lifetime floor is stronger.
 CREATE_PAIR_BUDGET_SECONDS = 15 * 60
 # Validate the requested credential lifetime; workflow timeouts bound execution.
@@ -50,7 +64,7 @@ RUN_AGENT_ID = re.compile(
 )
 RUN_SPEC = re.compile(
     r"([1-9][0-9]{0,18}):([1-9][0-9]{0,18}):"
-    r"(linux|macos|windows):(host|hardened_container):(full|soak)\Z"
+    r"(linux|macos|windows):(host|hardened_container):(full|soak|production)\Z"
 )
 MAX_RECONCILE_RUNS = 12
 MAX_ATTEMPTS = 3
@@ -189,6 +203,7 @@ def request(
     body: bytes | None = None,
     content_type: str | None = None,
     extra_headers: dict[str, str] | None = None,
+    max_response: int = MAX_RESPONSE,
 ) -> tuple[int, bytes]:
     headers = {"Accept": "application/json"}
     if bearer:
@@ -205,10 +220,10 @@ def request(
     except (OSError, urllib.error.URLError) as exc:
         raise CredentialError("credential HTTP request failed") from exc
     try:
-        raw = response.read(MAX_RESPONSE + 1)
+        raw = response.read(max_response + 1)
     finally:
         response.close()
-    if len(raw) > MAX_RESPONSE:
+    if len(raw) > max_response:
         raise CredentialError("credential HTTP response exceeds its size limit")
     return response.status, raw
 
@@ -238,6 +253,8 @@ def qurl_json(
     path: str,
     body: dict[str, Any] | None = None,
     extra_headers: dict[str, str] | None = None,
+    *,
+    max_response: int = MAX_RESPONSE,
 ) -> tuple[int, dict[str, Any]]:
     encoded = None
     content_type = None
@@ -253,6 +270,7 @@ def qurl_json(
         body=encoded,
         content_type=content_type,
         extra_headers=extra_headers,
+        max_response=max_response,
     )
     return status, json_object(raw, "qURL API response") if raw else {}
 
@@ -260,7 +278,7 @@ def qurl_json(
 def identity(endpoint: str, token: str) -> dict[str, Any]:
     status, response = qurl_json(endpoint, token, "GET", "/v1/me")
     if status != 200 or not isinstance(response.get("data"), dict):
-        raise CredentialError("qURL identity check failed")
+        raise CredentialError(f"qURL identity check failed (HTTP {status})")
     return response["data"]
 
 
@@ -363,8 +381,14 @@ def retry_connector_resource_delete(
     for attempt in range(MAX_ATTEMPTS):
         try:
             query = urllib.parse.urlencode({"slug": connector_id})
+            # The answer is a list of whole resource rows, like an inventory
+            # page, so it has that bound.
             status, response = qurl_json(
-                endpoint, automation_key, "GET", "/v1/resources?" + query
+                endpoint,
+                automation_key,
+                "GET",
+                "/v1/resources?" + query,
+                max_response=INVENTORY_MAX_RESPONSE,
             )
         except CredentialError as exc:
             last_error = exc
@@ -421,6 +445,7 @@ def paged_rows(
     status_filter: str | None,
     *,
     deadline: float,
+    resource_type: str | None = None,
 ) -> list[dict[str, Any]]:
     cursor = ""
     seen: set[str] = set()
@@ -438,10 +463,16 @@ def paged_rows(
         query = {"limit": str(INVENTORY_PAGE_SIZE)}
         if status_filter is not None:
             query["status"] = status_filter
+        if resource_type is not None:
+            query["type"] = resource_type
         if cursor:
             query["cursor"] = cursor
         status, response = qurl_json(
-            endpoint, automation_key, "GET", path + "?" + urllib.parse.urlencode(query)
+            endpoint,
+            automation_key,
+            "GET",
+            path + "?" + urllib.parse.urlencode(query),
+            max_response=INVENTORY_MAX_RESPONSE,
         )
         pages += 1
         if time.monotonic() >= deadline:
@@ -454,6 +485,8 @@ def paged_rows(
             raise CredentialError(f"{label} inventory was rejected")
         if any(not isinstance(row, dict) for row in rows):
             raise CredentialError(f"{label} inventory contains a malformed row")
+        if resource_type is not None and any(row.get("type") != resource_type for row in rows):
+            raise CredentialError(f"{label} inventory did not honor the resource type")
         if len(result) + len(rows) > INVENTORY_MAX_ROWS:
             raise InventoryBoundError(
                 f"{label} inventory exceeded its row limit", result
@@ -604,6 +637,8 @@ def run_connector_ids(args: RunCleanup) -> set[str]:
 def cleanup_labels(args: RunCleanup) -> tuple[str, ...]:
     if args.profile == "full":
         return ("smoke", "crid", "sibling-a", "sibling-b", "failure")
+    if args.profile == "production":
+        return ("smoke", "failure")
     if args.profile == "soak":
         return ("soak",)
     raise CredentialError("journey cleanup profile is invalid")
@@ -622,7 +657,7 @@ def cleanup_label_codes(args: RunCleanup) -> tuple[str, ...]:
 
 
 def reconciliation_inventory(
-    endpoint: str, automation_key: str
+    endpoint: str, automation_key: str, *, include_resources: bool = True
 ) -> ReconciliationInventory:
     """Load one bounded snapshot without suppressing either inventory attempt."""
     inventory_deadline = time.monotonic() + RECONCILE_INVENTORY_BUDGET_SECONDS
@@ -650,6 +685,14 @@ def reconciliation_inventory(
     except (CredentialError, OSError, UnicodeError):
         credential_failure = "credential_inventory"
 
+    # Production proof creates only deterministic Connector resources. Exact
+    # slug lookups below clean those without scanning unrelated owner rows.
+    if not include_resources:
+        return ReconciliationInventory(credential_rows, credential_failure, (), None)
+
+    # TODO(upstream-contract): GET /v1/resources?type=url uses the URL index.
+    # Tagged journeys create URL fixtures and Connectors. Exact slug lookups
+    # below already cover every Connector.
     resource_rows: tuple[dict[str, Any], ...] | None = None
     resource_failure: str | None = None
     try:
@@ -661,6 +704,7 @@ def reconciliation_inventory(
                 "qURL resource cleanup",
                 status_filter=None,
                 deadline=inventory_deadline,
+                resource_type="url",
             )
         )
     except InventoryBoundError as exc:
@@ -820,7 +864,10 @@ def reconcile_batch(args: argparse.Namespace) -> None:
     endpoint, automation_key, _ = authenticated_owner(
         args, args.operation_budget_seconds
     )
-    inventory = reconciliation_inventory(endpoint, automation_key)
+    inventory = reconciliation_inventory(
+        endpoint, automation_key,
+        include_resources=any(run.profile != "production" for run in parsed),
+    )
     failures = 0
     for run in parsed:
         try:

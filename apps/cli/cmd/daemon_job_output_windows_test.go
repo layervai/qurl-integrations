@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -162,6 +163,62 @@ func TestWindowsDaemonJobEarlyErrorHelper(t *testing.T) {
 	})
 	if code := run(context.Background(), root, opts); code == 0 {
 		t.Fatal("invalid Windows daemon settings unexpectedly succeeded")
+	}
+}
+
+// TestWindowsDaemonJobUnparsableArgumentsUseProtectedLog covers a job this
+// binary cannot parse. Flag parsing fails before the persistent pre-run hook
+// attaches the job's log files, so the refusal must attach them itself.
+func TestWindowsDaemonJobUnparsableArgumentsUseProtectedLog(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "flag error logs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stdoutPath := filepath.Join(dir, "stdout.log")
+	stderrPath := filepath.Join(dir, "stderr.log")
+	command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestWindowsDaemonJobUnparsableArgumentsHelper$", "--", stdoutPath, stderrPath) //nolint:gosec // Exact test binary and test-owned paths.
+	command.Env = append(os.Environ(), "QURL_WINDOWS_DAEMON_FLAG_ERROR_HELPER=1")
+	if raw, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("run Windows flag-error helper: %v: %s", err, raw)
+	}
+	stderr, err := os.ReadFile(stderrPath) //nolint:gosec // Test-owned exact path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stderr), "passes arguments this qURL version cannot read") ||
+		strings.Count(string(stderr), "unknown flag: --added-by-a-later-release") < 2 {
+		t.Fatalf("Windows daemon flag error did not reach its durable log: %q", stderr)
+	}
+}
+
+func TestWindowsDaemonJobUnparsableArgumentsHelper(t *testing.T) {
+	if os.Getenv("QURL_WINDOWS_DAEMON_FLAG_ERROR_HELPER") != "1" {
+		t.Skip("subprocess helper; driven by TestWindowsDaemonJobUnparsableArgumentsUseProtectedLog")
+	}
+	separator := -1
+	for index, argument := range os.Args {
+		if argument == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || separator+2 >= len(os.Args) {
+		t.Fatal("Windows flag-error helper arguments are incomplete")
+	}
+	arguments := []string{
+		"daemon", "run", "--job-version", "6/later", "--added-by-a-later-release", "value",
+		"--job-stdout-log", os.Args[separator+1],
+		"--job-stderr-log", os.Args[separator+2],
+	}
+	holds := 0
+	waitDaemonJobRefusal = func(context.Context, time.Duration) { holds++ }
+	daemonJobArguments = func() []string { return arguments }
+	root, opts := newRoot("2.1.0", output.Detect(), func(global *globalOpts) {
+		global.configDir = t.TempDir()
+	})
+	root.SetArgs(arguments)
+	if code := run(context.Background(), root, opts); code != 2 || holds != 1 {
+		t.Fatalf("unparsable Windows daemon job = exit %d with %d holds, want a held usage error", code, holds)
 	}
 }
 

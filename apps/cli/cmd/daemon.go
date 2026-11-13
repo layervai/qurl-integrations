@@ -32,6 +32,8 @@ var openShareNativeRuntime = connectorshare.OpenNativeRuntime
 
 type nativeRegisteredIdentityReader func(context.Context, *connectorshare.NativeRuntime, *qurlapi.Config) (*qurlapi.Identity, error)
 
+const daemonCommandName = "daemon"
+
 func readNativeRegisteredIdentity(ctx context.Context, runtime *connectorshare.NativeRuntime, config *qurlapi.Config) (*qurlapi.Identity, error) {
 	store, err := runtime.Handoff()
 	if err != nil {
@@ -229,7 +231,7 @@ var headlessNativeRetryJitter = func(window time.Duration) time.Duration {
 // let publish/start manage the native per-user background job.
 func daemonCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "daemon",
+		Use:   daemonCommandName,
 		Short: "Run the local sharing daemon",
 		Long: `Run the local sharing daemon directly.
 
@@ -241,7 +243,7 @@ commands then reload this daemon and never install a background job.`,
 		Args: noArgs,
 	}
 	var stateDir, runtimeDir, jobVersion, headlessConfig, enrollmentTokenFile string
-	var hubHost, hubServerPublicKeyB64 string
+	var hubHost, hubServerPublicKeyB64, clientProduct string
 	var hubPort int
 	run := &cobra.Command{
 		Use:   "run",
@@ -251,15 +253,19 @@ commands then reload this daemon and never install a background job.`,
 			if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
 				return err
 			}
-			expected, err := connectordaemon.JobVersion(opts.version, opts.resolvedShareGroupMode)
+
+			if cmd.Flags().Changed("client-product-b64") {
+				decoded, err := connectordaemon.DecodeClientProduct(clientProduct)
+				if err != nil {
+					holdDaemonJobFlagError(cmd, opts, err)
+					return err
+				}
+				opts.resolvedClientProduct = decoded
+				opts.resolvedClientProductExplicit = true
+			}
+			jobVersion, err := admitDaemonJobVersion(cmd.Context(), opts, jobVersion)
 			if err != nil {
 				return err
-			}
-			if jobVersion != "" && jobVersion != expected {
-				return fmt.Errorf("share daemon job version %q does not match binary %q", jobVersion, expected)
-			}
-			if jobVersion == "" {
-				jobVersion = expected
 			}
 			hubBootstrap, hasHubOverride, err := exactDaemonHubOverride(hubHost, hubPort, hubServerPublicKeyB64)
 			if err != nil {
@@ -280,6 +286,7 @@ commands then reload this daemon and never install a background job.`,
 	run.Flags().StringVar(&opts.tunnelServerName, "tunnel-server-name", "", "expected tunnel certificate name (default: admitted host)")
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
 	run.Flags().StringVar(&runtimeDir, "runtime-dir", "", "dedicated per-namespace directory for the qURL share daemon control socket (enforced mode 0700)")
+	run.Flags().StringVar(&clientProduct, "client-product-b64", "", "encoded installed job host product")
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
 	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
 	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "one-time enrollment credential file for first headless bootstrap")
@@ -295,7 +302,11 @@ commands then reload this daemon and never install a background job.`,
 	run.Flags().StringVar(&hubHost, "hub-host", "", "pinned share-daemon Hub host")
 	run.Flags().IntVar(&hubPort, "hub-port", 0, "pinned share-daemon Hub port")
 	run.Flags().StringVar(&hubServerPublicKeyB64, "hub-server-public-key-b64", "", "pinned share-daemon Hub server public key")
-	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log", "runtime-dir"} {
+	run.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		holdDaemonJobFlagError(cmd, opts, err)
+		return exitcode.UsageError(err)
+	})
+	for _, name := range []string{"client-product-b64", "hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log", "runtime-dir"} {
 		_ = run.Flags().MarkHidden(name)
 	}
 	validateTestCRID := &cobra.Command{
@@ -311,6 +322,157 @@ commands then reload this daemon and never install a background job.`,
 	}
 	cmd.AddCommand(run, validateTestCRID, daemonRetargetLocalCmd(opts))
 	return cmd
+}
+
+// daemonJobRefusalHold is how long a natively supervised daemon that refuses
+// its job stays alive before it exits. Every native manager restarts a failed
+// job about ten seconds later, so an immediate exit is a restart loop that
+// only another qurl command ends; holding bounds it to one start, and one log
+// line, per hold. The hold is finite so a later binary that accepts the job
+// still gets its turn without a command.
+const daemonJobRefusalHold = time.Hour
+
+var waitDaemonJobRefusal = func(ctx context.Context, hold time.Duration) {
+	timer := time.NewTimer(hold)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
+// daemonJobArguments returns the process arguments. Flag parsing stops at the
+// first argument it cannot read, so the job's log paths, which the job passes
+// last, are read from here when parsing fails.
+var daemonJobArguments = func() []string { return os.Args[1:] }
+
+// daemonJobLogPaths finds the job's log paths in unparsed arguments. It reads
+// both spellings pflag accepts and stops at the argument terminator.
+func daemonJobLogPaths(arguments []string) (stdoutPath, stderrPath string) {
+	return daemonJobArgument(arguments, "--job-stdout-log"), daemonJobArgument(arguments, "--job-stderr-log")
+}
+
+func daemonJobArgument(arguments []string, name string) string {
+	value := ""
+	for index, argument := range arguments {
+		if argument == "--" {
+			break
+		}
+		if parsed, ok := strings.CutPrefix(argument, name+"="); ok {
+			value = parsed
+		} else if argument == name && index+1 < len(arguments) {
+			value = arguments[index+1]
+		}
+	}
+	return value
+}
+
+// A refused job still reports its namespace so the next command can safely
+// replace it. The native hold never opens a session or reconciles resources.
+func waitDaemonJobRefusalWithIPC(ctx context.Context, opts *globalOpts, hold time.Duration) {
+	arguments := daemonJobArguments()
+	// Native definitions always pass state-dir; do not infer a namespace for raw invalid input.
+	stateDir := filepath.Clean(daemonJobArgument(arguments, "--state-dir"))
+	if !filepath.IsAbs(stateDir) || stateDir == filepath.Dir(stateDir) {
+		waitDaemonJobRefusal(ctx, hold)
+		return
+	}
+	socket, err := connectordaemon.SocketPathForDaemon(stateDir, runtimeDirLookup(daemonJobArgument(arguments, "--runtime-dir"), opts.lookupEnv))
+	mode, modeErr := connectorstate.ReadRuntimeSupervision(stateDir)
+	if err != nil || modeErr != nil || mode != connectorstate.RuntimeSupervisionNative {
+		waitDaemonJobRefusal(ctx, hold)
+		return
+	}
+	holdCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		unlock, err := connectorstate.AcquireDaemonLeaseWithin(holdCtx, stateDir, hold)
+		if err != nil {
+			return
+		}
+		defer func() {
+			if err := unlock(); err != nil {
+				slog.WarnContext(ctx, "release refused daemon namespace", "error", err.Error())
+			}
+		}()
+		mode, err := connectorstate.ReadRuntimeSupervision(stateDir)
+		if err != nil || mode != connectorstate.RuntimeSupervisionNative {
+			return
+		}
+		if err := connectordaemon.RunRefusedJob(holdCtx, stateDir, socket); err != nil && !errors.Is(err, context.Canceled) {
+			slog.WarnContext(ctx, "refused daemon ownership status could not be served", "error", err.Error())
+		}
+	}()
+	defer func() { cancel(); <-done }()
+	waitDaemonJobRefusal(ctx, hold)
+}
+
+// holdDaemonJobFlagError applies the refusal hold to a job whose arguments
+// this binary cannot parse: a job from a release with a later argument
+// contract, started after a downgrade. Flag parsing fails before the job
+// version is compared, and without the hold the manager restarts that start
+// every ten seconds too. Only a service-manager job passes --job-version, so a
+// mistyped flag on a hand-run daemon still fails at once. Supervision is not
+// resolved this early; the job always pins native.
+//
+// The failure also comes before root.go attaches the job's own log files,
+// which is the only durable output a Windows job has. Attach them here first,
+// or the refusal and the hour it holds would leave no trace there.
+func holdDaemonJobFlagError(cmd *cobra.Command, opts *globalOpts, flagErr error) {
+	if !cmd.Flags().Changed("job-version") && daemonJobArgument(daemonJobArguments(), "--job-version") == "" {
+		return
+	}
+	ctx := cmd.Context()
+	if stdoutPath, stderrPath := daemonJobLogPaths(daemonJobArguments()); stdoutPath != "" || stderrPath != "" {
+		if err := redirectDaemonJobOutput(stdoutPath, stderrPath, opts.streams); err != nil {
+			slog.WarnContext(ctx, "share daemon job log files could not be attached", "error", err.Error())
+		}
+	}
+	slog.ErrorContext(ctx, "share daemon job passes arguments this qURL version cannot read; the next qurl start, restart or publish replaces it",
+		"error", flagErr.Error(), "retry_in", daemonJobRefusalHold)
+	waitDaemonJobRefusalWithIPC(ctx, opts, daemonJobRefusalHold)
+}
+
+// admitDaemonJobVersion decides whether this binary may run with the
+// arguments of the job that started it, and returns the job version the daemon
+// reports over IPC.
+//
+// A job from another release with the same argument contract and mode runs:
+// a package upgrade replaces the binary but not the job, and refusing it would
+// keep every desired-on share down until some later command rewrites the job.
+// The daemon keeps reporting the job's own version, so that command's ensure
+// step still sees a stale definition and replaces it.
+//
+// A job for another argument contract or mode is still refused, because its
+// arguments would start the daemon wrongly. Under native supervision the
+// refusal holds before it exits; see daemonJobRefusalHold. The hold ends when
+// ctx does: root.go cancels the command context on an interrupt or SIGTERM,
+// which is how a service manager stops the job it is replacing.
+func admitDaemonJobVersion(ctx context.Context, opts *globalOpts, jobVersion string) (string, error) {
+	match, expected, err := connectordaemon.MatchJobVersion(jobVersion, opts.version, opts.resolvedShareGroupMode, opts.resolvedClientProduct)
+	if err != nil {
+		return "", err
+	}
+	if jobVersion == "" {
+		return expected, nil
+	}
+	switch match {
+	case connectordaemon.JobVersionCurrent:
+		return jobVersion, nil
+	case connectordaemon.JobVersionStaleBinary:
+		slog.WarnContext(ctx, "share daemon job was installed by another qURL version; running it until the next qurl command replaces it",
+			"job_version", jobVersion, "binary_job_version", expected)
+		return jobVersion, nil
+	case connectordaemon.JobVersionIncompatible:
+		// Refused below.
+	}
+	if opts.resolvedSupervision == connectorstate.RuntimeSupervisionNative {
+		slog.ErrorContext(ctx, "share daemon job cannot run with this qURL version; the next qurl start, restart or publish replaces it",
+			"job_version", jobVersion, "binary_job_version", expected, "retry_in", daemonJobRefusalHold)
+		waitDaemonJobRefusalWithIPC(ctx, opts, daemonJobRefusalHold)
+	}
+	return "", fmt.Errorf("share daemon job version %q does not match binary %q", jobVersion, expected)
 }
 
 func requireTestResourceIdentity(cridValue, resourceID string) error {
@@ -381,7 +543,7 @@ func resolveDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride,
 	// Resolve the socket before the supervision policy can write anything
 	// durable: a runtime directory the daemon cannot use leaves a fresh
 	// namespace untouched.
-	socketPath, err = connectordaemon.SocketPathForStateDir(stateDir, runtimeDirLookup(runtimeDirOverride, opts.lookupEnv))
+	socketPath, err = connectordaemon.SocketPathForDaemon(stateDir, runtimeDirLookup(runtimeDirOverride, opts.lookupEnv))
 	if err != nil {
 		// Only restate the flag for errors about the runtime directory: a state
 		// directory rejection is about --state-dir and must not be relabelled.
@@ -455,16 +617,12 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	}
 	configured := configuredHeadlessShare(headless)
 	openFactory := func(initCtx context.Context) (connectordaemon.GroupFactory, error) {
-		apiConfig := &qurlapi.Config{
-			BaseURL: origin, Version: opts.version, Verbose: opts.verboseLogger(),
-			Sleep: opts.sleep, NewRequestID: opts.newRequestID,
-		}
 		return buildNativeSessionFactory(initCtx, connectorshare.NativeRuntimeConfig{
 			StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
 			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
 			EnrollmentCredential: enrollmentCredential, RefreshMode: connectorRefreshModeAuto,
 			SessionOperations: sessionOperations,
-		}, common, apiConfig, verifyOwner, configured)
+		}, common, opts.apiConfig(origin), verifyOwner, configured)
 	}
 	var factory connectordaemon.GroupFactory
 	var closeFactory func() error
@@ -506,8 +664,8 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	}
 	opts.redirectFRPLogs()
 	server := &connectordaemon.IPCServer{
-		SocketPath: socketPath,
-		Manager:    manager, JobVersion: jobVersion,
+		SocketPath: socketPath, StateDir: stateDir,
+		Manager: manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
 }

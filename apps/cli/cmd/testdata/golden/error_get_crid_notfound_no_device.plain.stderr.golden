@@ -1,0 +1,3 @@
+Error: this CRID was not found, or this device is not allowed to open it
+
+  Hint: the CRID may be mistyped, the resource may have been removed, or this device may not be allowed to open it. If the resource is private, the publisher must allow this device, and this device has no identity yet. Run `qurl whoami -o json` to create one, then send the publisher the device public key it shows. Some public resources open only on their owner's devices.
