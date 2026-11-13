@@ -369,6 +369,9 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 		if apiConfig.ClientProduct != "qurl-desktop/1.2.3" {
 			t.Fatalf("headless registered-client ClientProduct = %q, want %q", apiConfig.ClientProduct, "qurl-desktop/1.2.3")
 		}
+		if cfg.Version != "test+desktop" {
+			t.Fatalf("headless registration version = %q, want %q", cfg.Version, "test+desktop")
+		}
 		if cfg.EnrollmentCredential != credential {
 			t.Fatalf("attempt %d enrollment credential = %q", attempts.Load()+1, cfg.EnrollmentCredential)
 		}

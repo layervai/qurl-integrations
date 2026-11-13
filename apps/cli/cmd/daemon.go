@@ -619,7 +619,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	openFactory := func(initCtx context.Context) (connectordaemon.GroupFactory, error) {
 		return buildNativeSessionFactory(initCtx, connectorshare.NativeRuntimeConfig{
 			StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
-			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
+			Hostname: hostname, Version: agentRegistrationVersion(opts.version, opts.resolvedClientProduct), ClientBaseURL: origin,
 			EnrollmentCredential: enrollmentCredential, RefreshMode: connectorRefreshModeAuto,
 			SessionOperations: sessionOperations,
 		}, common, opts.apiConfig(origin), verifyOwner, configured)

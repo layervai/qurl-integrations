@@ -31,10 +31,15 @@ func TestLocalPublishBindsAuthenticatedOwnerBeforeNativeOpen(t *testing.T) {
 	stop := errors.New("stop after owner binding")
 	res := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000"},
-		env:           map[string]string{"QURL_API_KEY": testAPIKey},
+		env:           map[string]string{"QURL_API_KEY": testAPIKey, clientProductEnv: "qurl-desktop/1.2.3"},
 		shareRegistry: registry, shareStateDir: stateDir,
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource: func(_ context.Context, cfg *connectorshare.NativeRuntimeConfig, _ func(string) (string, error)) (*agent.ResolvedResource, error) {
+			// The product comes from the environment through resolveSettings,
+			// which must run before the runtime is configured.
+			if cfg.Version != "test+desktop" {
+				t.Fatalf("registration version = %q, want %q", cfg.Version, "test+desktop")
+			}
 			if cfg.SessionOperations.OwnerID != "" {
 				t.Fatalf("discovery-only runtime retained session authority: %#v", cfg.SessionOperations)
 			}
