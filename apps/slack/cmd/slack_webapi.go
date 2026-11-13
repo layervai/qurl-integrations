@@ -17,6 +17,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/httpbody"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacklog"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -38,8 +39,6 @@ const slackViewsOpenTimeout = 2 * time.Second
 const slackViewsOpenResponseBodyLimit = 64 * 1024
 const slackAPIMaxErrorSnippetBytes = 200
 const slackAPITruncationSuffix = "..."
-const slackOwnerLogIDMaxBytes = 64
-const slackOwnerLogIDInvalidFormat = "invalid-slack-owner-id-len-%d"
 
 func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string) func(context.Context, string, string, []byte) error {
 	return newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL, nil)
@@ -201,26 +200,6 @@ func printableLogSnippet(s string) string {
 
 func slackAPIErrorCode(code string) string {
 	return printableLogSnippet(strings.ToValidUTF8(strings.TrimSpace(code), "?"))
-}
-
-func slackOwnerLogID(id string) string {
-	if id == "" {
-		return ""
-	}
-	// Pre-verification owner-ID log sites use this stricter Slack ID allowlist;
-	// printableLogSnippet remains for free-form Slack API strings.
-	// TODO(upstream-contract): if Slack broadens the owner-ID alphabet, update this
-	// allowlist and the sanitizer tests in lockstep.
-	if len(id) > slackOwnerLogIDMaxBytes {
-		return fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(id))
-	}
-	for i := 0; i < len(id); i++ {
-		c := id[i]
-		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
-			return fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(id))
-		}
-	}
-	return id
 }
 
 const (
@@ -412,8 +391,8 @@ func (p *slackWebAPIPoster) gridPost(ctx context.Context, teamID, enterpriseID s
 		slog.LevelWarn,
 		"workspace Slack bot token missing; retrying with Enterprise Grid install token",
 		slog.String("op", p.op),
-		slog.String("team_id", slackOwnerLogID(teamID)),
-		slog.String("enterprise_id", slackOwnerLogID(enterpriseID)),
+		slog.String("team_id", slacklog.ID(teamID)),
+		slog.String("enterprise_id", slacklog.ID(enterpriseID)),
 	)
 	return p.postOnce(ctx, enterpriseID, body)
 }
@@ -584,8 +563,8 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 		}
 		fallbackLogMu.Unlock()
 		logAttrs := []slog.Attr{
-			slog.String("team_id", slackOwnerLogID(teamID)),
-			slog.String("enterprise_id", slackOwnerLogID(enterpriseID)),
+			slog.String("team_id", slacklog.ID(teamID)),
+			slog.String("enterprise_id", slacklog.ID(enterpriseID)),
 			slog.String("error_code", errorCode),
 			slog.Any("error", err),
 		}
@@ -1212,12 +1191,12 @@ func logRejectedSlackUserLookup(ownerID, requestedUserID string, info slackUserI
 		reason = "bot"
 	}
 	attrs := []any{
-		"token_owner_id", slackOwnerLogID(ownerID),
-		"target_user_id", slackOwnerLogID(requestedUserID),
+		"token_owner_id", slacklog.ID(ownerID),
+		"target_user_id", slacklog.ID(requestedUserID),
 		"reason", reason,
 	}
 	if reason == "mismatched_id" {
-		attrs = append(attrs, "returned_user_id", slackOwnerLogID(info.ID))
+		attrs = append(attrs, "returned_user_id", slacklog.ID(info.ID))
 	}
 	slog.Warn("users.info rejected ownership transfer target", attrs...)
 }
