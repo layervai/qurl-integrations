@@ -33,6 +33,8 @@ const schemeHTTPS = "https"
 type Client interface {
 	AccessRules() accessrules.Remote
 	ConsumerManagement() ConsumerManagementClient
+	// PublisherStripe is part of Client so the registered wrapper keeps it.
+	PublisherStripe
 	// MintLimitedLink mints a temporary link to an existing resource with an
 	// access rule's link limits, so the permanent address is never shared.
 	MintLimitedLink(ctx context.Context, crid string, limits accessrules.LinkLimits) (*ShareLink, error)
