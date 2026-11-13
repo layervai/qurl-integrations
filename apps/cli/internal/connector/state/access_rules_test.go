@@ -441,3 +441,34 @@ func TestAccessRulesConflictHoldsPendingEditsUntilResolvedLocally(t *testing.T) 
 		t.Fatalf("after resolve %+v %+v %v", snapshot, remote.library.Items, err)
 	}
 }
+
+func TestAccessRulesRejectStaleAccountConflictChoice(t *testing.T) {
+	store := openAccessRulesTestStore(t)
+	base := accessrules.Definition{ID: ruleID, Name: "Base", Mode: "keys"}
+	remote := &ruleRemote{library: accessrules.AccountLibrary{AccountID: "one", Items: []accessrules.Definition{base}}}
+	start, err := store.Sync(t.Context(), remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := base
+	local.Name = "Local"
+	if _, err = store.Save(t.Context(), start.LocalVersion, &local); err != nil {
+		t.Fatal(err)
+	}
+	remote.library.Items[0].Name = "First account edit"
+	remote.library.Version++
+	first, err := store.Sync(t.Context(), remote)
+	if err != nil || first.Sync != "conflict" {
+		t.Fatalf("first conflict: %+v %v", first, err)
+	}
+	remote.library.Items[0].Name = "Second account edit"
+	remote.library.Version++
+	second, err := store.Sync(t.Context(), remote)
+	if err != nil || second.Sync != "conflict" {
+		t.Fatalf("second conflict: %+v %v", second, err)
+	}
+	applied, err := store.Resolve(t.Context(), first.LocalVersion, ruleID, "account")
+	if !errors.Is(err, accessrules.ErrConflict) {
+		t.Fatalf("first revision=%d second=%d resolved=%+v err=%v", first.LocalVersion, second.LocalVersion, applied.Items, err)
+	}
+}

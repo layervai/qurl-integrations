@@ -81,7 +81,11 @@ func (d *Definition) HasUnknownFields() bool { return d.raw != nil }
 func (d Definition) MarshalJSON() ([]byte, error) { //nolint:gocritic // A value receiver marshals every copy, so none drops its unknown fields.
 	type plain Definition
 	if d.raw == nil {
-		return json.Marshal(plain(d))
+		var out bytes.Buffer
+		enc := json.NewEncoder(&out)
+		enc.SetEscapeHTML(false)
+		err := enc.Encode(plain(d))
+		return out.Bytes(), err
 	}
 	var read Definition
 	if json.Unmarshal(d.raw, &read) != nil || !EqualItems([]Definition{read}, []Definition{d}) {
@@ -167,6 +171,16 @@ func (l LinkLimits) Validate() error {
 	}
 	if l.SessionDuration != nil && !ValidSessionLength(*l.SessionDuration) {
 		return errors.New("link_limits.session_duration must be whole seconds from 1s to 24h")
+	}
+	return nil
+}
+
+// ValidateNewExpiry checks the link expiry on a new or edited rule. Existing
+// service rules can have fractions, which the mint path rounds down.
+func (l LinkLimits) ValidateNewExpiry() error {
+	d, ok := LinkExpiry.Parse(l.ExpiresIn)
+	if !ok || len(l.ExpiresIn) > 16 || d%time.Second != 0 {
+		return errors.New("--expires-in must be from 1m to 30d in whole seconds, such as 1h or 7d")
 	}
 	return nil
 }

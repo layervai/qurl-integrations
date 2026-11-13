@@ -60,6 +60,11 @@ func ruleSaveCmd(opts *globalOpts) *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if limits := definition.LinkLimits; limits != nil {
+			if err := limits.ValidateNewExpiry(); err != nil {
+				return exitcode.UsageError(err)
+			}
+		}
 		if accessrules.IsPresetID(definition.ID) {
 			return exitcode.UsageError(errors.New("ready-made rules cannot be edited; save a custom rule with its own UUID"))
 		}
@@ -467,14 +472,15 @@ func (f *ruleSettingFlags) apply(cmd *cobra.Command, d *accessrules.Definition) 
 		if !changed("expires-in") {
 			return errors.New("link limits need --expires-in, such as --expires-in 1h")
 		}
-		if _, ok := accessrules.LinkExpiry.Parse(f.expiresIn); !ok {
-			return errors.New("--expires-in must be from 1m to 30d, such as 1h or 7d")
+		limits := &accessrules.LinkLimits{ExpiresIn: f.expiresIn}
+		if err := limits.ValidateNewExpiry(); err != nil {
+			return err
 		}
 		if changed("stays-open-for") && !accessrules.ValidSessionLength(f.sessionLength) {
 			return errors.New("--stays-open-for must be whole seconds from 1s to 24h, such as 30m")
 		}
 		// Only flags given are stored, so an unset limit stays absent.
-		d.LinkLimits = &accessrules.LinkLimits{ExpiresIn: f.expiresIn}
+		d.LinkLimits = limits
 		if changed("once") {
 			d.LinkLimits.OneTimeUse = new(f.oneBrowser)
 		}
