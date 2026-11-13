@@ -165,14 +165,16 @@ it burns on first open. Add `dm:true` to receive the link privately, or
 Add `rule:"…"` to share with an access rule instead, by name or ID (such as
 `rule:once`): one of the Default access rules (`Anyone with the link`,
 `One-time link`) or a saved rule ("Your rules"). Saved rules are the ones on
-the qURL account that connected this workspace, so every member shares them, managed in qURL Desktop
-or the qURL CLI. The link then follows only the rule's limits, without the
-default single-session cap, so an `Anyone with the link` link can be opened
-more than once, by more than one person. Slack mints links on existing
-resources only, so it refuses a rule that decides who can open the resource
-(`People you invite`, `People you approve`, email, device or paid rules) and a
-rule with settings from a newer qURL app; share with those from qURL Desktop or
-the qURL CLI.
+the qURL account that connected this workspace, so every member of the
+workspace shares them; they are managed in qURL Desktop or the qURL CLI. The
+link then follows only the rule's limits, without the default single-session
+cap, so any member can mint an `Anyone with the link` link that opens more
+than once, by more than one person. Like every `/qurl get` reply, the link is
+shown only to the member who ran the command (or sent by DM with `dm:true`).
+Slack mints links on existing resources only, so it refuses a rule that decides
+who can open the resource (`People you invite`, `People you approve`, email,
+device or paid rules) and a rule with settings from a newer qURL app; share
+with those from qURL Desktop or the qURL CLI.
 
 `/qurl crid <CRID>` is the same command addressed by a resource's permanent
 CRID instead of a `$id` or `$alias`. It is channel-scoped exactly like

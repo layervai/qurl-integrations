@@ -260,10 +260,9 @@ func TestHandleGet_RuleReadFailure(t *testing.T) {
 	if reply, mint := ruleGet(t, `rule:"One-time link"`, failing); mint != nil {
 		t.Fatalf("One-time link by name minted without the saved rules; reply %q", reply)
 	}
-	// Intended: a Default rule's ID mints even though an unread saved rule could
-	// share its name (the CLI refuses saving such names).
-	if reply, mint := ruleGet(t, "rule:once", failing); mint == nil {
-		t.Fatalf("rule:once did not mint; reply %q", reply)
+	// A Default rule's ID could also be an unread saved rule's name.
+	if reply, mint := ruleGet(t, "rule:once", failing); mint != nil {
+		t.Fatalf("rule:once minted without the saved rules; reply %q", reply)
 	}
 }
 

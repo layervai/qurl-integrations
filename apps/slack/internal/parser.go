@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/crid"
 )
@@ -157,6 +158,9 @@ func (c *Command) Reason() string {
 	}
 	return c.Flags["reason"]
 }
+
+// maxRuleRunes is the longest access rule name the service accepts.
+const maxRuleRunes = 120
 
 // Rule returns the parsed `rule:"..."` flag on `get`: an access rule's
 // name or ID, empty when unset.
@@ -833,6 +837,10 @@ func applyFlag(cmd *Command, tok string) error {
 		// A blank name would otherwise mint with Slack's default, not a rule.
 		if strings.TrimSpace(val) == "" {
 			return fmt.Errorf("%w: `%s` (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, truncateForError(tok))
+		}
+		// No rule name is longer (the agent's propose_get has the same cap).
+		if utf8.RuneCountInString(val) > maxRuleRunes {
+			return fmt.Errorf("%w: `rule` is longer than %d characters", ErrInvalidFlag, maxRuleRunes)
 		}
 		cmd.Flags[key] = val
 		return nil

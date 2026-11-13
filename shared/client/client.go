@@ -1346,6 +1346,8 @@ func (c *Client) AccessRules(ctx context.Context) ([]qurl.AccessRule, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
+	// TODO(upstream-contract): the service returns the whole library (at most
+	// 100 rules) in one unpaginated response.
 	var out struct {
 		Items []qurl.AccessRule `json:"items"`
 	}

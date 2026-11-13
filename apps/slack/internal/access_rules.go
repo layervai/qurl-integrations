@@ -97,8 +97,8 @@ func applyAccessRule(input *client.CreateInput, r *qurl.AccessRule) {
 // onlyLinkLimits reports whether r is a public rule whose only settings are
 // the three link limits Slack applies. It allows fields rather than listing
 // private ones, so a field a newer SDK models is refused, never dropped. It
-// relies on the SDK leaving unset fields nil (not empty), which
-// TestHandleGet_RuleSaved checks end to end.
+// relies on the SDK leaving unset fields nil (not empty) and adding no
+// unexported state, which TestOnlyLinkLimitsDecodedRule checks.
 func onlyLinkLimits(r *qurl.AccessRule) bool {
 	rest := *r
 	rest.ID, rest.Name, rest.Mode, rest.LinkLimits = "", "", "", nil
@@ -114,31 +114,31 @@ func onlyLinkLimits(r *qurl.AccessRule) bool {
 }
 
 // resolveAccessRule finds selector among the Default access rules and the
-// workspace account's saved rules, and returns it if Slack can apply it. When the account
-// has no saved rules this key may read (403), the Default access rules still
-// work; when the read fails, only a Default rule's ID does.
+// workspace account's saved rules, and returns it if Slack can apply it. When
+// the account has no saved rules this key may read (403), the Default access
+// rules still work; when the read fails, nothing applies.
 func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, selector string) (*qurl.AccessRule, error) {
 	selector = strings.TrimSpace(selector)
-	saved, loadErr := c.AccessRules(ctx)
+	saved, err := c.AccessRules(ctx)
 	unreadable := false
 	var apiErr *client.APIError
-	if errors.As(loadErr, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
+	switch {
+	case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden:
 		// The account has no saved rules this key may read. TODO(upstream-contract):
 		// qurl-service documents account_frozen and device_not_linked here; a
 		// frozen account's mint fails on its own, so every 403 reads as none.
 		log.Info("get: saved access rules unavailable", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code)...)
-		saved, loadErr = nil, nil
 		unreadable = true
+	case err != nil:
+		// Any rule could clash with an unread saved name, so none is applied.
+		log.Warn("get: saved access rules read failed", "error", err)
+		return nil, &userError{msg: "Couldn't read this workspace's saved access rules. Please try again. " + accessRuleChoicesHint}
 	}
 	rule, err := findAccessRule(selector, saved)
 	switch {
 	case err != nil:
 		log.Info("get: access rule is ambiguous")
 		return nil, &userError{msg: fmt.Sprintf("*%s* matches more than one access rule. Rename the saved rule in qURL Desktop or the qURL CLI, or pick a Default access rule by ID (`rule:builtin.public`, `rule:once`).", escapeMrkdwnText(truncateForError(selector)))}
-	case loadErr != nil && (rule == nil || !strings.EqualFold(rule.ID, selector)):
-		// With no saved rules read, only a Default rule's exact ID is unambiguous.
-		log.Warn("get: saved access rules read failed", "error", loadErr)
-		return nil, &userError{msg: "Couldn't read this workspace's saved access rules. Please try again. " + accessRuleChoicesHint}
 	case rule == nil:
 		log.Info("get: access rule not found", "saved_rules", len(saved), "saved_rules_unreadable", unreadable)
 		msg := fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateForError(selector)), accessRuleChoicesHint)
@@ -147,11 +147,10 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 		}
 		return nil, &userError{msg: msg}
 	}
-	if loadErr != nil {
-		// A Default rule's exact ID still applies; keep the failed read visible.
-		log.Warn("get: saved access rules read failed; applying a Default rule by ID", "error", loadErr)
+	if err := refuseAccessRule(rule); err != nil {
+		return nil, err
 	}
-	return rule, refuseAccessRule(rule)
+	return rule, nil
 }
 
 // ruleLinkNotice describes a rule-shared link for the success reply; the
