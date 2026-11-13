@@ -44,7 +44,9 @@ const (
 	fieldRule   = "rule"
 )
 
-// maxRuleRunes is the longest access rule name the service accepts.
+// maxRuleRunes is the longest access rule name the service accepts; keep in
+// sync with the internal package's maxRuleRunes. TODO(upstream-contract):
+// qurl-service's access rule name limit.
 const maxRuleRunes = 120
 
 // stringProp is a small helper for a JSON-Schema string property.

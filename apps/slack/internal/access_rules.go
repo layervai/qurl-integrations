@@ -50,7 +50,8 @@ var errAccessRuleAmbiguous = errors.New("more than one access rule matches")
 
 // findAccessRule returns the Default or saved rule whose ID or name is
 // selector, ignoring case and the name's surrounding space; nil if none.
-// Matches on different rules, an ID and a name included, are ambiguous.
+// Matches on different rules, an ID and a name included, are ambiguous. IDs
+// are compared untrimmed: they are UUIDs or the catalog's fixed IDs.
 func findAccessRule(selector string, saved []qurl.AccessRule) (*qurl.AccessRule, error) {
 	var match *qurl.AccessRule
 	for _, list := range [][]qurl.AccessRule{defaultAccessRules, saved} {
@@ -74,6 +75,9 @@ func refuseAccessRule(r *qurl.AccessRule) error {
 	name := escapeMrkdwnText(r.Name)
 	if r.HasUnknownFields() {
 		return &userError{msg: fmt.Sprintf("*%s* has settings from a newer qURL app, so Slack can't share with it.", name)}
+	}
+	if r.Payment != nil {
+		return &userError{msg: fmt.Sprintf("*%s* is a paid rule, which Slack can't set up. Share with it from qURL Desktop or the qURL CLI. %s", name, accessRuleChoicesHint)}
 	}
 	if !onlyLinkLimits(r) {
 		return &userError{msg: fmt.Sprintf("*%s* decides who can open the resource itself, which Slack can't set. Share with it from qURL Desktop or the qURL CLI. %s", name, accessRuleChoicesHint)}

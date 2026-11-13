@@ -159,7 +159,9 @@ func (c *Command) Reason() string {
 	return c.Flags["reason"]
 }
 
-// maxRuleRunes is the longest access rule name the service accepts.
+// maxRuleRunes is the longest access rule name the service accepts; keep in
+// sync with agent.maxRuleRunes. TODO(upstream-contract): qurl-service's
+// access rule name limit.
 const maxRuleRunes = 120
 
 // Rule returns the parsed `rule:"..."` flag on `get`: an access rule's

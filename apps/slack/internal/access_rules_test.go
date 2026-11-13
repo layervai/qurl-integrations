@@ -121,7 +121,7 @@ func TestRefuseAndApplyAccessRule(t *testing.T) {
 		{name: "limits without one_time_use", rule: qurl.AccessRule{Name: "Hour", Mode: accessRuleModePublic, LinkLimits: &qurl.AccessRuleLinkLimits{ExpiresIn: "1h"}}, want: client.CreateInput{ExpiresIn: "1h"}},
 		{name: "saved public rule", rule: qurl.AccessRule{Name: "Quick", Mode: accessRuleModePublic, LinkLimits: &qurl.AccessRuleLinkLimits{ExpiresIn: "1h", OneTimeUse: new(false)}}, want: client.CreateInput{ExpiresIn: "1h"}},
 		{name: "work email", rule: qurl.AccessRule{Name: "Team", Mode: "email_domain", EmailDomain: "example.com"}, refusal: "Slack can't set"},
-		{name: "paid", rule: qurl.AccessRule{Name: "Paid", Mode: "contract", Payment: &qurl.AccessRulePayment{PriceID: "price_1"}}, refusal: "Slack can't set"},
+		{name: "paid", rule: qurl.AccessRule{Name: "Paid", Mode: "contract", Payment: &qurl.AccessRulePayment{PriceID: "price_1"}}, refusal: "is a paid rule"},
 		{name: "unknown mode", rule: qurl.AccessRule{Name: "Future", Mode: "future_mode"}, refusal: "Slack can't set"},
 		{name: "public with a private setting", rule: qurl.AccessRule{Name: "Odd", Mode: accessRuleModePublic, AllowedEmails: []string{"a@example.com"}}, refusal: "Slack can't set"},
 		{name: "unknown field", rule: qurl.AccessRule{Name: "*Newer*", Mode: accessRuleModePublic, Unknown: map[string]json.RawMessage{"geo": []byte(`"us"`)}}, refusal: "newer qURL app"},
@@ -185,7 +185,7 @@ func ruleGet(t *testing.T, flags string, rules http.HandlerFunc) (reply string, 
 		if err := json.Unmarshal(b, &mint); err != nil {
 			t.Errorf("decode mint body: %v", err)
 		}
-		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
+		respondRawQURLEnvelope(t, w, map[string]any{testKeyResourceID: testResourceIDFix, "qurl_link": "https://qurl.link/abc", "expires_at": "2026-11-14T09:30:00Z"})
 	})
 	inv := newAdminSlashInvoker(t, newAdminTestHandler(t, ts))
 	_, _, reply = inv.invokeAdminAsync("get $prod-db "+flags, testAdminTeamID, testAdminUserID)
@@ -205,7 +205,8 @@ func TestHandleGet_RuleAnyoneWithTheLink(t *testing.T) {
 			t.Errorf("%s = %v, want the service default", field, mint[field])
 		}
 	}
-	if !strings.Contains(reply, "anyone with the link can open it") {
+	// No rule expiry, so the reply shows the service's.
+	if !strings.Contains(reply, "anyone with the link can open it · link expires <!date^1794648600^") {
 		t.Errorf("reply = %q", reply)
 	}
 }
@@ -256,11 +257,11 @@ func TestHandleGet_RuleReadFailure(t *testing.T) {
 	if mint != nil || !strings.Contains(reply, "Couldn't read this workspace's saved access rules") {
 		t.Fatalf("mint = %v, reply = %q", mint, reply)
 	}
-	// A Default rule's name could be an unread saved rule's too; only its ID mints.
+	// Neither a Default rule's name nor its ID applies: either could be an unread
+	// saved rule's name.
 	if reply, mint := ruleGet(t, `rule:"One-time link"`, failing); mint != nil {
 		t.Fatalf("One-time link by name minted without the saved rules; reply %q", reply)
 	}
-	// A Default rule's ID could also be an unread saved rule's name.
 	if reply, mint := ruleGet(t, "rule:once", failing); mint != nil {
 		t.Fatalf("rule:once minted without the saved rules; reply %q", reply)
 	}
@@ -349,5 +350,14 @@ func TestOnlyLinkLimitsDecodedRule(t *testing.T) {
 		if got := onlyLinkLimits(&r); got != want {
 			t.Errorf("onlyLinkLimits(%s) = %v, want %v", raw, got, want)
 		}
+	}
+}
+
+func TestHandleGet_RuleSavedByID(t *testing.T) {
+	_, mint := ruleGet(t, "rule:11111111-1111-4111-8111-111111111111", func(w http.ResponseWriter, _ *http.Request) {
+		writeAccessRules(t, w, map[string]any{"id": "11111111-1111-4111-8111-111111111111", "name": "Team only", "mode": "public"})
+	})
+	if mint == nil || mint["one_time_use"] != false {
+		t.Fatalf("by-ID mint = %v", mint)
 	}
 }
