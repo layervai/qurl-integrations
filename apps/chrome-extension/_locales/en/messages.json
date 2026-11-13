@@ -138,7 +138,7 @@
     "description": "Button label while uploading"
   },
   "uploading_hint": {
-    "message": "Uploading — keep this popup open until it finishes…",
+    "message": "Uploading \u2014 keep this popup open until it finishes\u2026",
     "description": "Footer hint while uploading"
   },
   "inserting_hint": {
@@ -294,7 +294,7 @@
     "description": "Shown when the Gmail insertion request remains pending for too long"
   },
   "compose_insert_evicted_error": {
-    "message": "Insertion is taking longer than expected — check the draft before retrying.",
+    "message": "Insertion is taking longer than expected \u2014 check the draft before retrying.",
     "description": "Shown when a pending insertion request is evicted; the insertion may have succeeded"
   },
   "compose_insert_no_results_error": {
@@ -310,5 +310,9 @@
         "example": "2026-05-01 12:00:00"
       }
     }
+  },
+  "gmail_insert_late_success": {
+    "message": "Links were inserted into Gmail after the earlier timeout. Check the draft before inserting again.",
+    "description": "Corrected status when the current Gmail insertion succeeds after its timeout"
   }
 }

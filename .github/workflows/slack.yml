@@ -85,14 +85,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Verify golangci-lint config
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 config verify
-
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2
-          verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
+          verify: true # Uses the pinned binary's embedded schema without a remote schema fetch.
           skip-cache: true # Keep analysis from other package selections out of this lane.
           args: --timeout=5m
 
@@ -101,6 +98,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.slack == 'true'
+    services:
+      dynamodb:
+        # Same immutable fixture as apps/discord/docker-compose.yml.
+        image: amazon/dynamodb-local:2.5.4@sha256:cf8cebd061f988628c02daff10fdb950a54478feff9c52f6ddf84710fe3c3906
+        ports:
+          - "8000:8000"
+        options: >-
+          --health-cmd "bash -c ': >/dev/tcp/127.0.0.1/8000'"
+          --health-interval 2s --health-timeout 2s --health-retries 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -110,6 +116,8 @@ jobs:
           cache: true
 
       - name: Run tests with coverage
+        env:
+          QURL_TEST_DYNAMODB_ENDPOINT: http://127.0.0.1:8000
         run: |
           go test -race -count=1 -coverprofile=coverage.out -covermode=atomic \
             ./apps/slack/... ./shared/...
@@ -140,18 +148,16 @@ jobs:
           cache: true
 
       - name: Run govulncheck
-        run: go tool govulncheck ./...
+        run: go tool govulncheck ./apps/slack/... ./shared/...
 
   docker-check:
     name: slack / docker
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.slack == 'true'
-    # arm64 Go builds under QEMU routinely take several minutes, and Buildx's
-    # GitHub Actions cache export is part of the job. Keep the timeout above
-    # the observed build+cache path so successful image builds do not get
-    # canceled during cache upload.
-    timeout-minutes: 30
+    # Native Go cross-compilation keeps the ARM64 image and all image checks.
+    # Pre-cross-compile PR p95 was 11m07s including cache export; see #514 and #750.
+    timeout-minutes: 15
     env:
       # Pulled anonymously: the ghcr.io/layervai/qurl package is public. If it ever
       # turns private, add docker/login-action and `packages: read` here.

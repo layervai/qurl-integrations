@@ -5,6 +5,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -731,7 +734,11 @@ func writeHeadlessAgentState(t *testing.T, stateDir string, complete bool) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	state := &qurl.AgentState{AgentID: "headless-test-agent"}
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &qurl.AgentState{AgentID: "headless-test-agent", PrivateKeyB64: base64.StdEncoding.EncodeToString(key.Bytes()), PublicKeyB64: base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())}
 	if complete {
 		registeredAt := time.Now().UTC()
 		state.RegisteredAt = &registeredAt
