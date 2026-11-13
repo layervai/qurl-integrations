@@ -129,48 +129,63 @@ func onlyLinkLimits(r *qurl.AccessRule) bool {
 
 // resolveAccessRule finds selector among the Default access rules and the
 // workspace account's saved rules, and returns it if Slack can apply it. When
-// the account has no saved rules this key may read (403), the Default access
-// rules still work; when the read fails, nothing applies.
+// the saved rules can't be read, only a Default rule's exact ID applies.
 func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, selector string) (*qurl.AccessRule, error) {
 	selector = strings.TrimSpace(selector)
 	saved, err := c.AccessRules(ctx)
-	unreadable := false
-	var apiErr *client.APIError
-	switch {
-	case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden:
-		// The account has no saved rules this key may read. TODO(upstream-contract):
-		// qurl-service documents account_frozen and device_not_linked here; a
-		// frozen account's mint fails on its own, so every 403 reads as none.
-		log.Info("get: saved access rules unavailable", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code)...)
-		unreadable = true
-	case err != nil:
-		// Any rule could clash with an unread saved name, so none is applied.
-		log.Warn("get: saved access rules read failed", "error", err)
-		return nil, &userError{msg: "Couldn't read this workspace's saved access rules. Please try again. " + accessRuleChoicesHint}
+	if err != nil {
+		return defaultRuleByID(log, selector, err)
 	}
 	rule, err := findAccessRule(selector, saved)
 	switch {
 	case err != nil:
 		log.Info("get: access rule is ambiguous")
 		msg := fmt.Sprintf("*%s* matches more than one access rule. Rename the saved rule in qURL Desktop or the qURL CLI", escapeMrkdwnText(truncateRunes(selector, 40)))
-		if slices.ContainsFunc(defaultAccessRules, func(r qurl.AccessRule) bool { return strings.EqualFold(r.ID, selector) }) {
+		if isDefaultRuleID(selector) {
 			msg += `, or pick the Default access rule by name, such as rule:"One-time link"`
 		} else {
 			msg += ", or pick a Default access rule by ID (`rule:builtin.public`, `rule:once`)"
 		}
 		return nil, &userError{msg: msg + "."}
 	case rule == nil:
-		log.Info("get: access rule not found", "saved_rules", len(saved), "saved_rules_unreadable", unreadable)
-		msg := fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateRunes(selector, 40)), accessRuleChoicesHint)
-		if unreadable {
-			msg += " Saved rules can't be read for the qURL account connected to this workspace."
-		}
-		return nil, &userError{msg: msg}
+		log.Info("get: access rule not found", "saved_rules", len(saved))
+		return nil, &userError{msg: fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateRunes(selector, 40)), accessRuleChoicesHint)}
 	}
 	if err := refuseAccessRule(rule); err != nil {
 		return nil, err
 	}
 	return rule, nil
+}
+
+// defaultRuleByID handles a failed saved-rules read: any name could be an
+// unread saved rule's, so only a Default rule's exact ID applies. A 403 means
+// the account has no saved rules this key may read (no linked library).
+// TODO(upstream-contract): qurl-service documents account_frozen and
+// device_not_linked for that 403.
+func defaultRuleByID(log *slog.Logger, selector string, readErr error) (*qurl.AccessRule, error) {
+	byID := "Use a Default access rule by ID: `rule:builtin.public` (Anyone with the link) or `rule:once` (One-time link)."
+	msg := "Couldn't read this workspace's saved access rules. Please try again, or " + strings.ToLower(byID[:1]) + byID[1:]
+	var apiErr *client.APIError
+	if errors.As(readErr, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
+		log.Info("get: saved access rules unavailable", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code)...)
+		msg = "Saved rules can't be read for the qURL account connected to this workspace. " + byID
+	} else {
+		log.Warn("get: saved access rules read failed", "error", readErr)
+	}
+	for i := range defaultAccessRules {
+		if r := &defaultAccessRules[i]; strings.EqualFold(r.ID, selector) {
+			if err := refuseAccessRule(r); err != nil {
+				return nil, err
+			}
+			return r, nil
+		}
+	}
+	return nil, &userError{msg: msg}
+}
+
+// isDefaultRuleID reports whether selector is a Default access rule's ID.
+func isDefaultRuleID(selector string) bool {
+	return slices.ContainsFunc(defaultAccessRules, func(r qurl.AccessRule) bool { return strings.EqualFold(r.ID, selector) })
 }
 
 // ruleLinkNotice describes a rule-shared link for the success reply, with

@@ -172,7 +172,9 @@ link then follows only the rule's limits, without the default single-session
 cap, so any member can mint an `Anyone with the link` link that opens more
 than once, by more than one person. Like every `/qurl get` reply, the link is
 shown only to the member who ran the command (or sent by DM with `dm:true`).
-Slack mints links on existing resources only, so it refuses a rule that decides
+If the saved rules can't be read, only a Default access rule's ID applies
+(`rule:builtin.public` or `rule:once`), since a name could belong to a saved
+rule. Slack mints links on existing resources only, so it refuses a rule that decides
 who can open the resource (`People you invite`, `People you approve`, email,
 device or paid rules) and a rule with settings from a newer qURL app; share
 with those from qURL Desktop or the qURL CLI.

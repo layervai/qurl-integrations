@@ -247,37 +247,26 @@ func TestHandleGet_RuleSaved(t *testing.T) {
 	}
 }
 
-// TestHandleGet_RuleNoAccountLibrary covers a workspace whose qURL account has
-// no saved rules this key may read: Default access rules still mint, and a
-// saved-rule name is not found.
-func TestHandleGet_RuleNoAccountLibrary(t *testing.T) {
-	forbidden := func(w http.ResponseWriter, _ *http.Request) {
-		writeAPIError(t, w, http.StatusForbidden, "forbidden", "Forbidden")
-	}
-	if reply, mint := ruleGet(t, "rule:once", forbidden); mint == nil || mint["one_time_use"] != true || mint["expires_in"] != "30d" {
-		t.Fatalf("One-time link mint = %v; reply %q", mint, reply)
-	}
-	reply, mint := ruleGet(t, `rule:"Team only"`, forbidden)
-	if mint != nil || !strings.Contains(reply, "No access rule is named *Team only*") || !strings.Contains(reply, "Saved rules can't be read") {
-		t.Fatalf("mint = %v, reply = %q", mint, reply)
-	}
-}
-
-func TestHandleGet_RuleReadFailure(t *testing.T) {
-	failing := func(w http.ResponseWriter, _ *http.Request) {
-		writeAPIError(t, w, http.StatusInternalServerError, "internal", "Internal")
-	}
-	reply, mint := ruleGet(t, `rule:"Team only"`, failing)
-	if mint != nil || !strings.Contains(reply, "Couldn't read this workspace's saved access rules") {
-		t.Fatalf("mint = %v, reply = %q", mint, reply)
-	}
-	// Neither a Default rule's name nor its ID applies: either could be an unread
-	// saved rule's name.
-	if reply, mint := ruleGet(t, `rule:"One-time link"`, failing); mint != nil {
-		t.Fatalf("One-time link by name minted without the saved rules; reply %q", reply)
-	}
-	if reply, mint := ruleGet(t, "rule:once", failing); mint != nil {
-		t.Fatalf("rule:once minted without the saved rules; reply %q", reply)
+// TestHandleGet_RuleSavedRulesUnreadable covers both read failures: a 403
+// (no saved rules this key may read, as with no linked library) and any other
+// error. Either way only a Default rule's exact ID applies, since a name could
+// belong to an unread saved rule.
+func TestHandleGet_RuleSavedRulesUnreadable(t *testing.T) {
+	for status, want := range map[int]string{
+		http.StatusForbidden:           "Saved rules can't be read for the qURL account connected to this workspace",
+		http.StatusInternalServerError: "Couldn't read this workspace's saved access rules",
+	} {
+		failing := func(w http.ResponseWriter, _ *http.Request) {
+			writeAPIError(t, w, status, "error", "Error")
+		}
+		if reply, mint := ruleGet(t, "rule:Once", failing); mint == nil || mint["one_time_use"] != true || mint["expires_in"] != "30d" {
+			t.Errorf("%d: rule:Once mint = %v; reply %q", status, mint, reply)
+		}
+		for _, flags := range []string{`rule:"Team only"`, `rule:"One-time link"`} {
+			if reply, mint := ruleGet(t, flags, failing); mint != nil || !strings.Contains(reply, want) || !strings.Contains(reply, "rule:builtin.public") {
+				t.Errorf("%d %s: mint = %v, reply = %q", status, flags, mint, reply)
+			}
+		}
 	}
 }
 
