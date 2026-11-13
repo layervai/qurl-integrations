@@ -100,7 +100,7 @@ func TestHarnessRefusesRequestsThatLeaveThisMachine(t *testing.T) {
 		wantCall string
 	}{
 		{name: "no endpoint resolves the default", args: []string{"list"}, wantHost: defaultHost, wantCall: "GET /v1/resources"},
-		{name: "publish with no endpoint", args: []string{"publish", "https://example.com"}, wantHost: defaultHost, wantCall: "POST /v1/resources"},
+		{name: "publish with no endpoint", args: []string{"publish", "https://example.com", "--name", "Example"}, wantHost: defaultHost, wantCall: "POST /v1/resources"},
 		{name: "flag endpoint", args: []string{"--endpoint", "https://api.example.test", "list"}, wantHost: "api.example.test", wantCall: "GET /v1/resources"},
 		{
 			name: "environment endpoint", args: []string{"list"},
