@@ -200,11 +200,44 @@ removal) before these rules — a strict superset of CloudFront for the static
 paths served here; it differs only on pathological inputs (e.g. `//a`, `/../a`)
 that the protected dashboards never emit.
 
-The CI-backed key contract is for simple static-site object paths using
-letters, numbers, dots, underscores, hyphens, and slashes. Object keys that
-need percent-encoding (spaces, non-ASCII bytes, literal `%2F`, etc.) stay in
-the staging-soak bucket before this image is reused for such keyspaces. Treat
-the SigV4 exotic-key soak as a hard reuse gate, tracked in GitHub issue #854.
+The tested key contract covers ASCII static-site paths, including plus signs
+and common filename punctuation (`~`, `@`, brackets, parentheses, commas,
+equals and semicolons). Envoy encodes non-unreserved path bytes before the
+SigV4 signer, so the signed path and S3 wire path match the AWS SDK form.
+Normal unreserved paths need no header rewrite; cache hits stay in nginx.
+
+Spaces, literal percent signs, `?`, `#`, control bytes and non-ASCII keys are
+rejected with the normal viewer 404 before reaching the signer. Supporting
+those keys needs a different first-hop escaping strategy. The fixture matrix defines the tested punctuation contract; other ASCII
+punctuation retains legacy proxy behavior and needs its own validation before use.
+
+The local S3 fixture verifies SigV4 HMACs with synthetic credentials. Its
+canonical-request verifier is checked against AWS's published S3 signing
+example and seven independent AWS CLI signed requests. Cold-cache requests
+traverse the real nginx and Envoy processes; tests reject forged signatures
+and signed-wire mutations. This covers #854's canonicalization gate, not live
+AWS IAM, TLS, credential-provider or object-deployment readiness.
+
+| Viewer path | S3 key / result |
+|---|---|
+| `/a+b.txt`, `/a%2Bb.txt` | `a+b.txt`; wire path is `/a%2Bb.txt` |
+| `/a%2Fb.txt` | `a/b.txt`; encoded slash aliases a path separator |
+| `/a%252Fb.txt` | 404 before S3; a literal `%2F` key is unsupported |
+| `/a%20b.txt` | 404 before S3; spaces are unsupported |
+| `/bundle@2x[slug]~(1)!,=;.js` | exact punctuation key; encoded on the S3 hop |
+| `/dir//file.txt` | `dir/file.txt`; nginx merges repeated slashes |
+
+Objects whose names contain repeated slashes are not directly addressable:
+nginx normalization selects the single-slash path. Queries remain stripped
+before signing. Range behavior is tested on the nginx response/cache path;
+the AWS unit vector covers signing a Range header. HEAD uses real signed
+upstream requests. The fixture also requires zero signature mismatches across
+all upstream paths, including simulated error responses.
+See [the complete fixture matrix](test/sigv4_fixtures.txt). Use an image built
+from this contract before depending on exotic keys: the existing Slack-pinned
+image predates it and must be replaced after producer publication. Its existing
+exact-digest test exception excludes the new exotic-key contract, but never
+skips signature verification of the baseline static-key requests.
 
 Successful responses pass through the object's `Content-Type` and `Cache-Control`
 verbatim. These security headers are set on **every** response (200/404/405/5xx):
@@ -382,3 +415,8 @@ bash test/cachectl_test.sh                    # cache-control path/safety tests
 bash test/behavior_test.sh                    # run the host-arch image against a stub S3
 PLATFORM=linux/arm64 bash test/behavior_test.sh # run the t4g target image under QEMU
 ```
+
+The behavior test builds its local S3 stub from `test/stub-s3/Dockerfile`.
+The Python base stays pinned by digest, and Dependabot checks it weekly.
+A stub-image update must pass the behavior test before merge. The stub runs
+on the host architecture even when the origin image runs under QEMU.
