@@ -46,6 +46,7 @@ func TestRulesCreateTakesSettingsForItsModeOnly(t *testing.T) {
 		{[]string{"--mode", "review", "--expires-in", "1h"}, "apply only to --mode public"},
 		{[]string{"--mode", "public", "--one-browser"}, "need --expires-in"},
 		{[]string{"--mode", "public", "--expires-in", "45d"}, "--expires-in must be from 1m to 30d"},
+		{[]string{"--mode", "public", "--expires-in", "1m0.5s"}, "in whole seconds"},
 		{[]string{"--mode", "public", "--expires-in", "1h", "--session-length", "2d"}, "--stays-open-for must be whole seconds from 1s to 24h"},
 		{[]string{"--mode", "public", "--approvals-last", "7d"}, "--approvals-last applies only to --mode review or keys"},
 		{[]string{"--mode", "review", "--approvals-last", "2d"}, "--approvals-last must be one of"},
@@ -198,6 +199,23 @@ func TestPublishWithLinkLimitsMintsAndLaterSharesUseThem(t *testing.T) {
 		if got["expires_in"] != want.expires || got["session_duration"] != want.session || got["one_time_use"] != false || got["max_sessions"] != float64(0) {
 			t.Errorf("mint %d sent %v, want expires_in %s and session_duration %s", i, got, want.expires, want.session)
 		}
+	}
+}
+
+func TestPublishWithExistingFractionalRuleExpiry(t *testing.T) {
+	srv := apitest.NewServer(t)
+	var mints []map[string]any
+	scriptPublish(t, srv, false, false, nil, nil)
+	scriptMint(t, srv, &mints)
+	rule := strings.Replace(hourRule, `"1h"`, `"1m0.5s"`, 1)
+	dir := connectorStateTestDir(t)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "rules", "save", "--version", "0", "--file", "-"}, stdin: strings.NewReader(rule), shareStateDir: dir})
+	if result.code != 2 || !strings.Contains(result.stderr.String(), "in whole seconds") {
+		t.Fatalf("save %d %s", result.code, result.stderr.String())
+	}
+	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(rule), shareStateDir: dir})
+	if result.code != 0 || len(mints) != 1 || mints[0]["expires_in"] != "1m" {
+		t.Fatalf("publish %d mints %v: %s", result.code, mints, result.stderr.String())
 	}
 }
 

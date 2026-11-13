@@ -50,6 +50,17 @@ func TestAccessModesMatchCatalog(t *testing.T) {
 	}
 }
 
+func TestAccessRulesJSONKeepsMailboxCharacters(t *testing.T) {
+	var out, stderr bytes.Buffer
+	snapshot := accessrules.Snapshot{Items: []accessrules.Definition{{AllowedEmails: []string{"a&b@example.com"}}}}
+	if err := newTestPrinter(&out, &stderr, FormatJSON, false, false, false).AccessRules(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "a&b@example.com") {
+		t.Fatalf("mailbox was escaped: %s", out.String())
+	}
+}
+
 func TestAccessRulesListShowsDefaultsThenSavedRules(t *testing.T) {
 	var out, stderr bytes.Buffer
 	snapshot := accessrules.Snapshot{BuiltIns: accessrules.BuiltIns(), Items: []accessrules.Definition{{ID: "11111111-1111-4111-8111-111111111111", Name: "Acme team", Mode: "email_domain", EmailDomain: "acme.com"}}, LocalVersion: 2, Sync: "local"}

@@ -17,7 +17,9 @@ import (
 )
 
 const accessRulesFile = "access_rules.json"
-const accessRulesMaxJournal = accessrules.MaxBytes * 4
+
+// The journal holds two libraries, each of which can grow to 2 MiB as escaped JSON.
+const accessRulesMaxJournal = 4 << 20
 
 // ErrAccessRulesFile marks an access rules file that cannot be read safely.
 var ErrAccessRulesFile = errors.New("access rules file is damaged or unreadable")
@@ -166,9 +168,8 @@ func (s *AccessRuleStore) update(ctx context.Context, change func(*accessRuleJou
 	if err != nil {
 		return accessrules.Snapshot{}, err
 	}
-	// Only rules and conflicts move the revision a caller edits against; a
-	// status-only change such as pending to offline must not invalidate it.
-	edited, err := json.Marshal([]any{j.Items, j.Conflicts})
+	// A status-only change such as pending to offline must not invalidate a revision.
+	beforeChoices, err := j.editableState()
 	if err != nil {
 		return accessrules.Snapshot{}, err
 	}
@@ -182,9 +183,9 @@ func (s *AccessRuleStore) update(ctx context.Context, change func(*accessRuleJou
 	if bytes.Equal(before, after) {
 		return j.snapshot(), nil
 	}
-	if now, err := json.Marshal([]any{j.Items, j.Conflicts}); err != nil {
+	if now, err := j.editableState(); err != nil {
 		return accessrules.Snapshot{}, err
-	} else if !bytes.Equal(edited, now) {
+	} else if !bytes.Equal(beforeChoices, now) {
 		if j.LocalVersion >= accessrules.MaxVersion {
 			return accessrules.Snapshot{}, accessrules.ErrConflict
 		}
@@ -204,6 +205,18 @@ func (s *AccessRuleStore) update(ctx context.Context, change func(*accessRuleJou
 		return accessrules.Snapshot{}, err
 	}
 	return j.snapshot(), nil
+}
+
+// editableState includes the account definition a conflict resolution can apply.
+func (j *accessRuleJournal) editableState() ([]byte, error) {
+	accountChoices := make(map[string]*accessrules.Definition, len(j.Conflicts))
+	for i := range j.Base {
+		rule := &j.Base[i]
+		if slices.Contains(j.Conflicts, rule.ID) {
+			accountChoices[rule.ID] = rule
+		}
+	}
+	return json.Marshal([]any{j.Items, j.Conflicts, accountChoices})
 }
 
 // Snapshot reads the validated journal without authentication or network. It

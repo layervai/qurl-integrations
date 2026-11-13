@@ -1018,12 +1018,17 @@ func (c *client) doRESTRequest(ctx context.Context, method, path string, body an
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
+	limit := maxResponseBody
+	if path == accessRulesPath {
+		// The service JSON-escapes libraries up to 256 KiB.
+		limit = 2 << 20
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
 		return nil, fmt.Errorf("read qURL API response: %w", err)
 	}
-	if len(respBody) > maxResponseBody {
-		return nil, fmt.Errorf("%w: response exceeds %d-byte cap", qurl.ErrInvalidAPIResponse, maxResponseBody)
+	if len(respBody) > limit {
+		return nil, fmt.Errorf("%w: response exceeds %d-byte cap", qurl.ErrInvalidAPIResponse, limit)
 	}
 	return &restReply{status: resp.StatusCode, header: resp.Header, body: respBody}, nil
 }
