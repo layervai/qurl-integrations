@@ -74,14 +74,14 @@ func TestExternalLoginEnrollsFreshNamespaceFromTheTokenFile(t *testing.T) {
 	providerCalls := 0
 	res := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "login", "--enrollment-token-file", tokenPath},
-		env:           externalLoginEnv(connectorstate.EnvRuntimeSupervision, string(connectorstate.RuntimeSupervisionExternal)),
+		env:           externalLoginEnv(connectorstate.EnvRuntimeSupervision, string(connectorstate.RuntimeSupervisionExternal), clientProductEnv, "qurl-desktop/1.2.3"),
 		shareStateDir: stateDir,
 		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 			if err := connectorstate.RequireRuntimeSupervision(stateDir, connectorstate.RuntimeSupervisionExternal); err != nil {
 				t.Fatalf("runtime opened before the external policy was established: %v", err)
 			}
 			if cfg.StateDir != stateDir || cfg.ClientBaseURL != srv.URL || cfg.AgentID != connectorstate.ConfiguredAgentID() ||
-				cfg.Hostname == "" || cfg.Version != "test+cli" || cfg.RefreshMode != connectorRefreshModeAuto ||
+				cfg.Hostname == "" || cfg.Version != "test+desktop" || cfg.RefreshMode != connectorRefreshModeAuto ||
 				cfg.EnrollmentCredential != "" || cfg.EnrollmentCredentialProvider == nil || cfg.RecoveryCredentialProvider != nil {
 				t.Fatalf("external native runtime config = %+v", cfg)
 			}
