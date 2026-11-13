@@ -782,8 +782,8 @@ describe('qurl-oauth — not configured', () => {
   });
 });
 
-describe('qurl-oauth — MAP_COMMAND_ENABLED=true', () => {
-  it('advertises both enabled commands on the success page and in the admin DM', async () => {
+describe('qurl-oauth — retired Maps flag cannot enable command copy', () => {
+  it('advertises only file sharing even when the legacy Maps flag is true', async () => {
     const savedMapCommandEnabled = process.env.MAP_COMMAND_ENABLED;
     process.env.MAP_COMMAND_ENABLED = 'true';
     try {
@@ -832,14 +832,17 @@ describe('qurl-oauth — MAP_COMMAND_ENABLED=true', () => {
           .set('Cookie', cookieFor(state));
 
         expect(res.status).toBe(200);
-        expect(res.text).toContain('/qurl send and /qurl map are ready');
+        expect(res.text).toContain('/qurl send is ready');
+        expect(res.text).not.toContain('/qurl map');
         expect(freshDiscord.sendDM).toHaveBeenCalledTimes(1);
         expect(freshDiscord.sendDM.mock.calls[0][0]).toBe('admin-2');
         expect(freshDiscord.sendDM.mock.calls[0][1])
-          .toContain('`/qurl send` and `/qurl map`');
+          .toContain('`/qurl send`');
+        expect(freshDiscord.sendDM.mock.calls[0][1]).not.toContain('/qurl map');
       });
     } finally {
-      process.env.MAP_COMMAND_ENABLED = savedMapCommandEnabled;
+      if (savedMapCommandEnabled === undefined) delete process.env.MAP_COMMAND_ENABLED;
+      else process.env.MAP_COMMAND_ENABLED = savedMapCommandEnabled;
       globalThis.fetch = originalFetch;
     }
   });

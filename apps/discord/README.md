@@ -21,7 +21,6 @@ revocable at any time.
 | Command | Description |
 |---------|-------------|
 | `/qurl send` | Share a file as one-time qURL links, DM'd to the recipients you pick |
-| `/qurl map` | Share a Google Maps location as one-time qURL links *(where enabled)* |
 | `/qurl revoke` | Revoke every link from a previous send |
 | `/qurl help` | Show the command reference |
 | `/qurl setup` | *(admin)* Connect this server to qURL |
@@ -37,11 +36,7 @@ revocable at any time.
 | `self-destruct` | No | Countdown after the first open (default: no timer) |
 | `personal-message` | No | A note included in each recipient's DM |
 
-When `MAP_COMMAND_ENABLED=true`, `/qurl map` shares a location instead of a
-file: it takes a required `location` (a Google Maps URL, or a place/address to
-search) in place of `attachment`, the
-same `recipients` / `expires-in` / `self-destruct` / `personal-message` options,
-and an optional `location-name` to override the label recipients see.
+Maps sharing is retired. Existing sent links can still be revoked with `/qurl revoke`.
 
 ## Getting started
 
@@ -141,7 +136,7 @@ The variables below are the ones most deployments need; see `.env.example` for
 the complete reference, including advanced operational and per-deployment knobs.
 
 In the **Required** column: **Yes**/**No** means always/never required; **Production**
-means required when `NODE_ENV=production`; a feature label (e.g. `/qurl map`, OAuth
+means required when `NODE_ENV=production`; a feature label (e.g. OAuth
 setup) means required to use that feature.
 
 | Variable | Required | Description |
@@ -160,13 +155,11 @@ setup) means required to use that feature.
 | `RATE_LIMIT_INSTALL_MAX_REQUESTS` | No | Per-IP ceiling for the public `/oauth/discord/install` page per rate-limit window (default 120). Completed installs are still bounded by `RATE_LIMIT_MAX_REQUESTS` (two callback slots per install). Both limits are per bot task, not global. |
 | `KEY_ENCRYPTION_KEY` | Production | 32 random bytes, base64 — encrypts stored keys at rest |
 | `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
-| `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |
 | `DETECT_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl detect` (default off) |
 | `QURL_DEPLOYMENT` | Native `/qurl detect` | Environment-specific public SDK trust: JSON or an absolute JSON file path, with `issuers` and `cells` |
 | `DETECT_TUNNEL_SLUG` | `/qurl detect` | qURL tunnel resource slug used to mint short-lived `/api/detect/discord/<guild_id>` qURLs |
 | `DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS` | No | Comma-separated extra non-prod `QURL_ENDPOINT` hosts for `/qurl detect` (extends the built-in set below) |
 | `DETECT_EXTRA_NON_PROD_HOST_SUFFIXES` | No | Comma-separated extra `qurl_site` suffixes granted for the hosts above; each entry must start with `.` |
-| `GOOGLE_MAPS_API_KEY` | `/qurl map` | Google Maps key for location autocomplete (needed when map is enabled) |
 | `GUILD_ID` | No | Scope commands to a single server; unset runs the multi-tenant public bot |
 | `PORT` | No | HTTP listen port (default 3000) |
 
@@ -244,7 +237,7 @@ keys in plaintext with a loud warning.
 
 The bot's Discord application must have the **Server Members Intent** privileged
 gateway intent enabled (Developer Portal → Bot → Privileged Gateway Intents).
-It is required to resolve recipients for `/qurl send` and `/qurl map`, and the
+It is required to resolve recipients for `/qurl send`, and the
 bot fails to start without it.
 
 ## Development
