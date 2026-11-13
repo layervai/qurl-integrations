@@ -18,6 +18,9 @@ type dynamoDBScanner interface {
 }
 
 const (
+	// ErrCodeRateLimitClockSkew requires operator review, not a counter reset.
+	ErrCodeRateLimitClockSkew = "rate_limit_clock_skew"
+
 	defaultRateLimitLimit  = 30
 	defaultRateLimitWindow = time.Hour
 	rateLimitKeyPrefix     = "__slack_rate_limit#"
@@ -66,6 +69,9 @@ func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) 
 		return ok, 0, updateErr
 	}
 	storedWindow, hasWindow := readRateLimitWindow(item)
+	if hasWindow && storedWindow > windowUnix {
+		return s.followFutureRateLimitWindow(ctx, counterKey, now, windowUnix, item)
+	}
 	if hasWindow && storedWindow == windowUnix {
 		return false, retry, nil
 	}
@@ -86,13 +92,49 @@ func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) 
 	if updateErr != nil || ok {
 		return ok, 0, updateErr
 	}
-	if storedWindow, hasWindow = readRateLimitWindow(item); hasWindow && storedWindow == windowUnix {
+	storedWindow, hasWindow = readRateLimitWindow(item)
+	if hasWindow && storedWindow > windowUnix {
+		return s.followFutureRateLimitWindow(ctx, counterKey, now, windowUnix, item)
+	}
+	if hasWindow && storedWindow == windowUnix {
 		return false, retry, nil
 	}
 	return false, 0, &Error{
 		StatusCode: http.StatusServiceUnavailable,
 		Title:      "CheckRateLimit: concurrent counter update did not settle",
 	}
+}
+
+// Follow a peer's next window without resetting its budget or extending its TTL.
+// Two conditional attempts bound races; a later call can read a settled row.
+func (s *Store) followFutureRateLimitWindow(ctx context.Context, key string, now time.Time, localWindow int64, item map[string]ddbtypes.AttributeValue) (bool, time.Duration, error) {
+	window, limit := s.rateLimitWindow(), s.rateLimitLimit()
+	maxWindow := time.Unix(localWindow, 0).Add(window).Unix()
+	var retry time.Duration
+	for attempts := 0; attempts <= 2; attempts++ {
+		storedWindow, ok := readRateLimitWindow(item)
+		if !ok || storedWindow <= localWindow {
+			return false, retry, nil
+		}
+		// Compare integers before constructing a time, including corrupt int64 maxima.
+		if storedWindow > maxWindow {
+			return false, 0, &Error{
+				StatusCode: http.StatusServiceUnavailable,
+				Code:       ErrCodeRateLimitClockSkew,
+				Title:      "CheckRateLimit: counter window exceeds clock skew allowance",
+			}
+		}
+		retry = max(retry, time.Unix(storedWindow, 0).Add(window).Sub(now))
+		if readNumber(item, attrRateLimitCount) >= int64(limit) || attempts == 2 {
+			return false, retry, nil
+		}
+		allowed, latest, err := s.incrementCurrentRateLimitWindow(ctx, key, now, storedWindow, limit)
+		if err != nil || allowed {
+			return allowed, 0, err
+		}
+		item = latest
+	}
+	return false, retry, nil
 }
 
 func (s *Store) rateLimitLimit() int {
@@ -178,7 +220,7 @@ func (s *Store) initializeRateLimitWindow(ctx context.Context, counterKey string
 }
 
 func (s *Store) resetRateLimitWindow(ctx context.Context, counterKey string, now time.Time, windowUnix, oldWindow int64) (bool, error) {
-	return s.setRateLimitWindow(ctx, counterKey, now, windowUnix, "#window = :old_window", map[string]ddbtypes.AttributeValue{
+	return s.setRateLimitWindow(ctx, counterKey, now, windowUnix, "#window = :old_window AND #window < :window", map[string]ddbtypes.AttributeValue{
 		":old_window": numberAttr(oldWindow),
 	})
 }

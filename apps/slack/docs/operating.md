@@ -1003,11 +1003,21 @@ enabled on `workspace_mappings.expires_at`. Durable workspace binding rows must
 not write `expires_at`; DynamoDB TTL is table-wide and would reap any real row
 that accidentally carried a numeric value.
 
+If a peer has already advanced to the next window, tasks share that window's
+budget instead of resetting it backward. A counter more than one window ahead
+fails closed with `rate_limit_clock_skew`; its count, window, and expiry stay
+unchanged. The user gets an operator-check message rather than a large retry
+estimate. Check every writer's clock and the stored window before repair. Do
+not delete/reset the counter or disable the gate to shorten the wait: that can
+reuse a consumed budget. Correcting a clock does not repair an existing future
+counter automatically; any manual repair must preserve its consumed budget.
+
 ## Environment variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SLACK_SIGNING_SECRET` | Yes | Slack app signing secret |
+| `FEEDBACK_SLACK_WEBHOOK_URL` | No | Secret HTTPS incoming-webhook URL without userinfo, normally on `hooks.slack.com`. Unset or invalid values disable `/qurl feedback` and omit it from help; startup logs at info when unset and warning when invalid. A different host warns but still receives feedback. The endpoint must return HTTP 200 directly; redirects are not followed. Store this value as a secret. |
 | `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
 | `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
@@ -1145,3 +1155,21 @@ budgeted at 800 ms and the `views.open` call at 1500 ms, leaving headroom inside
 Slack's roughly three-second trigger window. Sustained p99 latency near either
 budget should be treated as an operator action item before customers see setup
 window-expired prompts.
+
+## Client User-Agent
+
+The qURL API and Slack WebAPI adapters use `qurl-bot-slack/<build>` as their
+User-Agent. Update attribution or log filters that match the old `qurl-slack/`
+prefix when adopting this build.
+
+## Async pool pressure
+
+A rejected worker in the shared async pool emits `event=async_pool_rejected`. This includes slash commands, interactions, and conversation turns; each caller chooses its reply. Use this CloudWatch Logs Insights query to find sustained pressure without matching on message text:
+
+```text
+filter event = "async_pool_rejected"
+| stats count(*) as drops by bin(1m)
+| filter drops >= 3
+```
+
+This event counts shared-pool rejections, including the slash-command busy acknowledgment. It does not count every command failure or rejection from a separate follow-up gate. Group by `command` when you need the slash-command breakdown; rejections without that field appear in an empty group. Check request latency and dependency health before raising concurrency limits.

@@ -138,7 +138,8 @@ func TestCollectDaemonLogsFiltersWindowAndNeedles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	stamp := func(at time.Time) string { return "time=" + at.Format(time.RFC3339Nano) }
-	now := time.Now()
+	// Timestamp digits must not count as throttling evidence.
+	now := time.Date(2026, time.November, 1, 12, 0, 0, 429000000, time.UTC)
 	lines := []string{
 		stamp(now.Add(-2*time.Hour)) + " WARN old line crid=abc",
 		stamp(now.Add(-time.Minute)) + " WARN share daemon session attempt failed; retrying crid=abc error=\"denied (errCode=\\\"52005\\\")\"",

@@ -26,6 +26,9 @@ func ValidFormat(f Format) bool {
 // Printer renders command results under the stream discipline. Build one per
 // invocation with New; it is not safe for concurrent use.
 type Printer struct {
+	// TermsNotice is present only on a first-use publish or share result.
+	TermsNotice string
+
 	out    io.Writer
 	err    io.Writer
 	outTTY bool

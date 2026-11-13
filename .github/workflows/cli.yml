@@ -1233,7 +1233,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.changes.outputs.source_sha }}
+          # Use the same trusted cleanup code as manual recovery. The
+          # run identity contract must stay compatible with older tags.
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       # Reconcile identities minted in this attempt. On a cleanup-only rerun,

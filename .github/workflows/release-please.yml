@@ -901,6 +901,7 @@ jobs:
           echo "QURL_HOMEBREW_TAP_LINK=$tap_link" >>"$GITHUB_ENV"
 
           token=layervaici/qurl-release-gate/qurl
+          brew trust --cask "$token"
           brew audit --cask "$token"
           case "$(uname -m)" in
             arm64) archive="$RUNNER_TEMP/qurl-homebrew-validation/qurl_${release_version}_darwin_arm64.tar.gz" ;;
@@ -972,6 +973,7 @@ jobs:
         if: always()
         run: |
           brew uninstall --cask layervaici/qurl-release-gate/qurl 2>/dev/null || true
+          brew untrust --cask layervaici/qurl-release-gate/qurl
           [[ -z "${QURL_HOMEBREW_TAP_LINK:-}" || ! -L "$QURL_HOMEBREW_TAP_LINK" ]] || unlink "$QURL_HOMEBREW_TAP_LINK"
           [[ -z "${QURL_HOMEBREW_CACHE_PATH:-}" || ! -f "$QURL_HOMEBREW_CACHE_PATH" ]] || unlink "$QURL_HOMEBREW_CACHE_PATH"
 

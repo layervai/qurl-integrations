@@ -977,6 +977,13 @@ function createGatewayWsShim({
             // TODO(upstream-contract): Routes.userGuilds() maps to Discord's
             // GET /users/@me/guilds endpoint.
             const page = await restInstance.get(Routes.userGuilds(), { query });
+            // A late REST result must not repopulate state or report a disconnected gateway.
+            if (stopped || !restInstance || !isReady || !wsConnected) {
+              // A lifecycle abort is not a failed REST attempt.
+              guildSeedAttempts = Math.max(0, guildSeedAttempts - 1);
+              if (guildSeedAttempts < GUILD_SEED_MAX_ATTEMPTS) guildSeedRetryAt = 0;
+              return null;
+            }
             if (!Array.isArray(page)) {
               throw new Error('gateway-ws-shim: current-user guilds response was not an array');
             }

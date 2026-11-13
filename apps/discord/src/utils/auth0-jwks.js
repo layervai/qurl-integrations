@@ -12,13 +12,12 @@
 // doesn't leave us pinned on a retired key. Cache is per-Node-process;
 // not shared across replicas — fine because each replica's cache
 // converges independently in seconds.
-const jose = require('jose');
 const config = require('../config');
 const logger = require('../logger');
 
 let _jwksFn = null;
 
-function getJwks() {
+function getJwks(createRemoteJWKSet) {
   if (_jwksFn) return _jwksFn;
   // verifyAuth0IdToken short-circuits on `!config.AUTH0_DOMAIN` BEFORE
   // calling getJwks(), so the unset case is unreachable here. No
@@ -27,7 +26,7 @@ function getJwks() {
   // JWKS, with built-in key-id-miss refresh. Defaults: 5-min cache TTL,
   // 30-sec cooldown between refresh attempts on miss. Acceptable for our
   // workload (id_tokens are minted once per /qurl setup completion).
-  _jwksFn = jose.createRemoteJWKSet(
+  _jwksFn = createRemoteJWKSet(
     new URL(`https://${config.AUTH0_DOMAIN}/.well-known/jwks.json`),
     { cooldownDuration: 30000, cacheMaxAge: 5 * 60 * 1000 },
   );
@@ -54,7 +53,8 @@ async function verifyAuth0IdToken(idToken) {
     return { ok: false, reason: 'auth0_not_configured' };
   }
   try {
-    const { payload } = await jose.jwtVerify(idToken, getJwks(), {
+    const { createRemoteJWKSet, jwtVerify } = await import('jose');
+    const { payload } = await jwtVerify(idToken, getJwks(createRemoteJWKSet), {
       issuer: `https://${config.AUTH0_DOMAIN}/`,
       audience: config.AUTH0_CLIENT_ID,
       // Default `clockTolerance` is 0 — production Auth0 clock drift is
@@ -79,7 +79,7 @@ async function verifyAuth0IdToken(idToken) {
   }
 }
 
-// Tests mock at the `jose` boundary (jest.mock('jose')) rather than
+// Tests mock at the `jose` boundary (jest.unstable_mockModule('jose')) rather than
 // reaching into this module's internal cache, so no test seam is
 // exported. Earlier rounds had a `_setJwksFnForTesting` escape hatch
 // that no test ever called — dropped per Justin's PR #177 round-9
