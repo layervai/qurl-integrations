@@ -29,6 +29,10 @@ const (
 	// With a reason, QURLMintReason is emitted too; the events must not be summed as mint counts.
 	QURLMintCRID = "qurl_mint_crid"
 
+	// QURLMintRule records every mint shared with an access rule, with the
+	// limits it applied. Like QURLMintCRID, it is not a mint count.
+	QURLMintRule = "qurl_mint_rule"
+
 	// AgentSlack is the audit.agent value for Slack-originated dependency events.
 	AgentSlack = "slack"
 	// DependencyQURLService is the audit.dependency value for qurl-service calls.
@@ -103,6 +107,15 @@ func logAudit(log *slog.Logger, level slog.Level, msg, event string, attrs ...sl
 
 	log.LogAttrs(context.Background(), level, msg,
 		slog.Attr{Key: "audit", Value: slog.GroupValue(auditAttrs...)})
+}
+
+// LogQURLMintRule records the access rule a mint applied and its effective
+// limits, without logging the link. expiresIn is empty for the service default.
+func LogQURLMintRule(log *slog.Logger, teamID, channelID, userID, resourceID, ruleID string, oneTimeUse bool, expiresIn string) {
+	logAudit(log, slog.LevelInfo, "qurl mint with access rule", QURLMintRule,
+		slog.String("team_id", teamID), slog.String("channel_id", channelID),
+		slog.String("user_id", userID), slog.String("resource_id", resourceID),
+		slog.String("rule_id", ruleID), slog.Bool("one_time_use", oneTimeUse), slog.String("expires_in", expiresIn))
 }
 
 // LogQURLMintCRID records the channel-authorized resource without logging the link.

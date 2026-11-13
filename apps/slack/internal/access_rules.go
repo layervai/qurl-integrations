@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-go/qurl"
 
@@ -56,7 +58,7 @@ func findAccessRule(selector string, saved []qurl.AccessRule) (*qurl.AccessRule,
 			if r.ID != selector && !strings.EqualFold(strings.TrimSpace(r.Name), selector) {
 				continue
 			}
-			if match != nil && match.ID != r.ID {
+			if match != nil {
 				return nil, errAccessRuleAmbiguous
 			}
 			match = r
@@ -72,9 +74,7 @@ func applyAccessRule(input *client.CreateInput, r *qurl.AccessRule) error {
 	if r.HasUnknownFields() {
 		return &userError{msg: fmt.Sprintf("*%s* has settings from a newer qURL app, so Slack can't share with it.", name)}
 	}
-	// A public rule holds only link limits; any other setting is one Slack
-	// would drop.
-	if r.Mode != accessRuleModePublic || r.EmailDomain != "" || len(r.AllowedEmails) > 0 || r.ContractID != "" || r.Payment != nil || r.ApprovalExpiresIn != "" {
+	if !onlyLinkLimits(r) {
 		return &userError{msg: fmt.Sprintf("*%s* decides who can open the resource itself, which Slack can't set. Share with it from qURL Desktop or the qURL CLI. %s", name, accessRuleChoicesHint)}
 	}
 	var limits qurl.AccessRuleLinkLimits
@@ -88,11 +88,28 @@ func applyAccessRule(input *client.CreateInput, r *qurl.AccessRule) error {
 	return nil
 }
 
+// onlyLinkLimits reports whether r is a public rule whose only settings are
+// the three link limits Slack applies. It allows fields rather than listing
+// private ones, so a field a newer SDK models is refused, never dropped.
+func onlyLinkLimits(r *qurl.AccessRule) bool {
+	rest := *r
+	rest.ID, rest.Name, rest.Mode, rest.LinkLimits = "", "", "", nil
+	if r.Mode != accessRuleModePublic || !reflect.DeepEqual(rest, qurl.AccessRule{}) {
+		return false
+	}
+	if r.LinkLimits == nil {
+		return true
+	}
+	limits := *r.LinkLimits
+	limits.ExpiresIn, limits.OneTimeUse, limits.SessionDuration = "", nil, ""
+	return reflect.DeepEqual(limits, qurl.AccessRuleLinkLimits{})
+}
+
 // resolveAccessRule finds selector among the Default access rules and the
 // workspace account's saved rules and applies it to input. When the account
 // has no saved rules this key may read (403), the Default access rules still
 // work; when the read fails, only a Default rule's ID does.
-func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, input *client.CreateInput, selector string) error {
+func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, input *client.CreateInput, selector string) (*qurl.AccessRule, error) {
 	selector = strings.TrimSpace(selector)
 	saved, loadErr := c.AccessRules(ctx)
 	var apiErr *client.APIError
@@ -104,25 +121,30 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 	rule, err := findAccessRule(selector, saved)
 	switch {
 	case err != nil:
-		return &userError{msg: fmt.Sprintf("More than one access rule is named *%s*. Rename your saved rule in qURL Desktop or the qURL CLI.", escapeMrkdwnText(truncateForError(selector)))}
+		return nil, &userError{msg: fmt.Sprintf("*%s* matches more than one access rule. Rename your saved rule in qURL Desktop or the qURL CLI.", escapeMrkdwnText(truncateForError(selector)))}
 	case loadErr != nil && (rule == nil || rule.ID != selector):
 		// With no saved rules read, only a Default rule's exact ID is unambiguous.
 		log.Warn("get: saved access rules read failed", "error", loadErr)
-		return &userError{msg: "Couldn't read your saved access rules. Please try again. " + accessRuleChoicesHint}
+		return nil, &userError{msg: "Couldn't read your saved access rules. Please try again. " + accessRuleChoicesHint}
 	case rule == nil:
-		return &userError{msg: fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateForError(selector)), accessRuleChoicesHint)}
+		return nil, &userError{msg: fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateForError(selector)), accessRuleChoicesHint)}
 	}
-	return applyAccessRule(input, rule)
+	return rule, applyAccessRule(input, rule)
 }
 
-// ruleLinkNotice describes a rule-shared link for the success reply.
-func ruleLinkNotice(input *client.CreateInput) string {
+// ruleLinkNotice describes a rule-shared link for the success reply; the
+// service's expiry stands in when the rule sets none.
+func ruleLinkNotice(input *client.CreateInput, expiresAt *time.Time) string {
 	notice := "anyone with the link can open it"
 	if input.OneTimeUse {
 		notice = "one-time use"
 	}
-	if input.ExpiresIn != "" {
+	switch {
+	case input.ExpiresIn != "":
 		notice += " · link expires in " + escapeMrkdwnText(input.ExpiresIn)
+	case expiresAt != nil:
+		// Slack renders the date in the reader's time zone.
+		notice += fmt.Sprintf(" · link expires <!date^%d^{date_short_pretty} at {time}|%s>", expiresAt.Unix(), expiresAt.UTC().Format("2006-01-02 15:04 UTC"))
 	}
 	return notice
 }

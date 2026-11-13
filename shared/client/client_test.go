@@ -934,6 +934,10 @@ func TestCreateTargetURLOnlyOmitsResourceID(t *testing.T) {
 	if _, ok := raw["resource_id"]; ok {
 		t.Errorf("resource_id must be omitted when empty; body=%s", gotBody)
 	}
+	// Only the resource mint always sends one_time_use.
+	if _, ok := raw["one_time_use"]; ok {
+		t.Errorf("one_time_use false must stay omitted on a target-URL mint; body=%s", gotBody)
+	}
 }
 
 // TestCreateSessionDurationOnWire pins that CreateInput.SessionDuration

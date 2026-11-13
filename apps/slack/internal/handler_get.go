@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/layervai/qurl-go/qurl"
+
 	slackoauth "github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/shared/auth"
@@ -555,21 +557,21 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 		return getResult{}, &userError{msg: authErrorMessage(err)}
 	}
 
-	notice := oneTimeUseNotice()
+	var rule *qurl.AccessRule
 	if selector := args.cmd.Rule(); selector != "" {
-		if err := resolveAccessRule(ctx, log, c, input, selector); err != nil {
+		if rule, err = resolveAccessRule(ctx, log, c, input, selector); err != nil {
 			return getResult{}, err
 		}
-		notice = ruleLinkNotice(input)
 	}
 
-	// Rate-limit AFTER a successful resolution: only a request that resolved to a
-	// real, channel-authorized resource and an access rule Slack can apply — i.e.
-	// an actual mint attempt — counts
-	// against the user's quota. The dm:true delivery guard above runs first
-	// so an undeliverable privacy request consumes nothing either. (Resolution
-	// work for unknown aliases is instead bounded by Slack's own per-user
-	// slash-command throttle, not by spending the user's mint quota on typos.)
+	// Rate-limit AFTER a successful resolution: only a request that resolved to
+	// a real, channel-authorized resource and an access rule Slack can apply —
+	// i.e. an actual mint attempt — counts against the user's quota. A `rule:`
+	// request reads the saved rules first, bounded like alias resolution below.
+	// The dm:true delivery guard above runs first so an undeliverable privacy
+	// request consumes nothing either. (Resolution work for unknown aliases is
+	// instead bounded by Slack's own per-user slash-command throttle, not by
+	// spending the user's mint quota on typos.)
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 	if err != nil {
 		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
@@ -613,6 +615,11 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	}
 	if args.cmd.Subcommand == SubcmdCRID {
 		slackaudit.LogQURLMintCRID(log, args.teamID, args.channelID, args.userID, input.ResourceID)
+	}
+	notice := oneTimeUseNotice()
+	if rule != nil {
+		slackaudit.LogQURLMintRule(log, args.teamID, args.channelID, args.userID, input.ResourceID, rule.ID, input.OneTimeUse, input.ExpiresIn)
+		notice = ruleLinkNotice(input, out.ExpiresAt)
 	}
 	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
 	// return absolute https qurl.link URLs). The Enter Portal render puts the link in a

@@ -8,9 +8,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-go/qurl"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -45,6 +47,16 @@ func TestDefaultAccessRulesMatchCatalog(t *testing.T) {
 	}
 	for _, d := range catalog.Defaults {
 		want[d.ID] = qurl.AccessRule{ID: d.ID, Name: d.Label, Mode: d.Mode, LinkLimits: d.LinkLimits}
+	}
+	// Every ready-made choice is known, so none is reported as missing.
+	known := map[string]bool{}
+	for _, r := range defaultAccessRules {
+		known[r.ID] = true
+	}
+	for _, b := range catalog.BuiltIns {
+		if !known[b.ID] {
+			t.Errorf("catalog built-in %q is missing from defaultAccessRules", b.ID)
+		}
 	}
 	for _, got := range defaultAccessRules {
 		w, ok := want[got.ID]
@@ -125,11 +137,15 @@ func TestApplyAccessRule(t *testing.T) {
 
 func TestRuleLinkNotice(t *testing.T) {
 	t.Parallel()
-	if got := ruleLinkNotice(&client.CreateInput{}); got != "anyone with the link can open it" {
+	if got := ruleLinkNotice(&client.CreateInput{}, nil); got != "anyone with the link can open it" {
 		t.Errorf("reusable notice = %q", got)
 	}
-	if got := ruleLinkNotice(&client.CreateInput{OneTimeUse: true, ExpiresIn: "30d"}); got != "one-time use · link expires in 30d" {
+	if got := ruleLinkNotice(&client.CreateInput{OneTimeUse: true, ExpiresIn: "30d"}, nil); got != "one-time use · link expires in 30d" {
 		t.Errorf("one-time notice = %q", got)
+	}
+	at := time.Date(2026, 11, 14, 9, 30, 0, 0, time.UTC)
+	if got, want := ruleLinkNotice(&client.CreateInput{}, &at), "anyone with the link can open it · link expires <!date^1794648600^{date_short_pretty} at {time}|2026-11-14 09:30 UTC>"; got != want {
+		t.Errorf("service-expiry notice = %q, want %q", got, want)
 	}
 }
 
@@ -184,6 +200,7 @@ func TestHandleGet_RuleAnyoneWithTheLink(t *testing.T) {
 }
 
 func TestHandleGet_RuleSaved(t *testing.T) {
+	logs := captureDefaultSlog(t)
 	reply, mint := ruleGet(t, `rule:"team only"`, func(w http.ResponseWriter, _ *http.Request) {
 		writeAccessRules(t, w, map[string]any{"id": "11111111-1111-4111-8111-111111111111", "name": "Team only", "mode": "public", "link_limits": map[string]any{"expires_in": "2h", "one_time_use": true, "session_duration": "30m"}})
 	})
@@ -192,6 +209,15 @@ func TestHandleGet_RuleSaved(t *testing.T) {
 	}
 	if !strings.Contains(reply, "one-time use · link expires in 2h") {
 		t.Errorf("reply = %q", reply)
+	}
+	audit := findAuditRecord(logs, slackaudit.QURLMintRule)
+	for k, want := range map[string]any{
+		"team_id": testAdminTeamID, "channel_id": "C_test", "user_id": testAdminUserID, "resource_id": testResourceIDFix,
+		"rule_id": "11111111-1111-4111-8111-111111111111", "one_time_use": true, "expires_in": "2h",
+	} {
+		if audit[k] != want {
+			t.Errorf("audit[%s] = %#v, want %#v; audit=%#v", k, audit[k], want, audit)
+		}
 	}
 }
 
@@ -249,8 +275,8 @@ func TestHandleGet_RuleRefusedBeforeMint(t *testing.T) {
 		{flags: `rule:"People you approve"`, want: "Slack can't set"},
 		{flags: "rule:Newer", want: "newer qURL app", saved: map[string]any{"name": "Newer", "mode": "public", "max_opens": 2}},
 		{flags: "rule:Quick", want: "newer qURL app", saved: map[string]any{"name": "Quick", "mode": "public", "link_limits": map[string]any{"expires_in": "1h", "max_opens": 3}}},
-		{flags: `rule:"one-time link"`, want: "More than one access rule", saved: map[string]any{"name": "One-time link", "mode": "invite_only"}},
-		{flags: "rule:once", want: "More than one access rule", saved: map[string]any{"name": "once", "mode": "invite_only"}},
+		{flags: `rule:"one-time link"`, want: "matches more than one access rule", saved: map[string]any{"name": "One-time link", "mode": "invite_only"}},
+		{flags: "rule:once", want: "matches more than one access rule", saved: map[string]any{"name": "once", "mode": "invite_only"}},
 	} {
 		var items []map[string]any
 		if tc.saved != nil {

@@ -372,7 +372,9 @@ func TestHandleCRID_Rule(t *testing.T) {
 	var body map[string]any
 	ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(b, &body)
+		if err := json.Unmarshal(b, &body); err != nil {
+			t.Errorf("decode mint body: %v", err)
+		}
 		writeCreateFixture(t, w, "https://qurl.link/crid", testTunnelResourceID)
 	})
 	h := newAdminTestHandler(t, ts)
