@@ -80,6 +80,9 @@ type globalOpts struct {
 	// openBrowser launches the user's browser at an already-verified link;
 	// tests inject a recorder so no real browser ever starts under test.
 	openBrowser func(ctx context.Context, link string) error
+	// readHidden reads one line from the terminal without echo, for a
+	// secret typed at a prompt; tests inject the typed text.
+	readHidden func() ([]byte, error)
 	// Browser authentication is injected separately from command wiring tests.
 	signInAccount func(context.Context, *qurlapi.Config, func(context.Context, string) error) (string, error)
 	// httpClient is the HTTP client every qURL API client sends with. Nil is
@@ -299,7 +302,7 @@ automatically. Use "qurl account setup" to enable recovery and other devices.
 Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		Example: "  qurl publish http://127.0.0.1:3000\n" +
 			"  qurl get " + exampleCRID + "\n" +
-			"  qurl publish https://api.example.com/reports",
+			"  qurl publish https://api.example.com/reports --name \"Reports API\"",
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -357,6 +360,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 
 	cmd.AddCommand(
 		accountCmd(opts),
+		rulesCmd(opts),
 		publishCmd(opts),
 		shareCmd(opts),
 		grantsCmd(opts),
@@ -378,6 +382,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		whoamiCmd(opts),
 		publisherCmd(opts),
 		previewCmd(opts),
+		originHeaderCmd(opts),
 		requestCmd(opts),
 		versionCmd(opts),
 		completionCmd(),
@@ -439,6 +444,9 @@ func (o *globalOpts) applyDefaults() {
 	if o.openBrowser == nil {
 		launcher := &consume.Launcher{LookupEnv: o.lookupEnv, GOOS: runtime.GOOS}
 		o.openBrowser = launcher.Open
+	}
+	if o.readHidden == nil {
+		o.readHidden = readTerminalHidden
 	}
 	o.applyLinkDefaults()
 	if o.redirectFRPLogs == nil {

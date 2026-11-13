@@ -21,14 +21,15 @@ const (
 
 type publisherStripeClient interface {
 	ConnectPublisherStripe(context.Context) (string, error)
+	PublisherStripeAccount(context.Context) (string, error)
 }
 
 func paymentsCmd(opts *globalOpts) *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "payments <connect|account|disconnect>",
+		Use:   "payments <setup|connect|account|disconnect>",
 		Short: "Connect Stripe to receive CRID payments; LayerV collects 3%",
-		Long: `Connect Stripe to receive CRID payments; LayerV collects 3%. First run qurl account setup to link this device. Open the consent URL yourself, then finish setup in LayerV billing while signed in to that publisher account. Run qurl payments account after completion to see whether Stripe lets the account take payments.
+		Long: `Connect Stripe to receive CRID payments; LayerV collects 3%. Use qurl payments setup to set a price on a CRID. For dashboard setup, first run qurl account setup to link this device. Open the consent URL yourself, then finish setup in LayerV billing while signed in to that publisher account. Run qurl payments account after completion to see whether Stripe lets the account take payments.
 
 qurl payments disconnect stops every subscription from renewing, then removes LayerV from the Stripe account. Buyers keep access until their paid period ends and are not charged again or refunded. New purchases stop until you connect the same or another account. Interactive runs confirm first; scripts and pipelines must pass --yes. Finishing a disconnect that already started, or releasing an account whose LayerV access was removed in Stripe, asks nothing more. With --yes no status is read, so "disconnected": true then means that nothing is connected any more, whether or not something was.`,
 		Example: "  qurl payments account\n  qurl payments disconnect --yes",
@@ -45,12 +46,10 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 			if err != nil {
 				return err
 			}
-			// connect goes through the SDK; account and disconnect use direct REST
-			// calls because the SDK has neither the status members nor a disconnect.
 			if operation == paymentsConnect {
-				payments, ok := client.ConsumerManagement().(publisherStripeClient)
-				if !ok {
-					return errors.New("publisher payments are unavailable in this client")
+				payments, err := publisherPayments(client)
+				if err != nil {
+					return err
 				}
 				link, e := payments.ConnectPublisherStripe(cmd.Context())
 				if e != nil {
@@ -76,6 +75,7 @@ qurl payments disconnect stops every subscription from renewing, then removes La
 			return disconnectStripe(cmd.Context(), opts, client, yes)
 		}}
 	cmd.Flags().BoolVar(&yes, "yes", false, "disconnect without confirmation")
+	cmd.AddCommand(paidAccessSetupCmd(opts))
 	return cmd
 }
 
@@ -143,4 +143,12 @@ func confirmStripeDisconnect(opts *globalOpts, status *qurlapi.PublisherStripeAc
 		renewals = "1 subscription will stop renewing"
 	}
 	return confirmOnTerminal(opts, "disconnect", fmt.Sprintf("Disconnect Stripe account %s? %s; buyers keep access until their paid period ends. [y/N] ", status.AccountID, renewals))
+}
+
+func publisherPayments(client qurlapi.Client) (publisherStripeClient, error) {
+	payments, ok := client.ConsumerManagement().(publisherStripeClient)
+	if !ok {
+		return nil, errors.New("publisher payments are unavailable in this client")
+	}
+	return payments, nil
 }

@@ -103,6 +103,9 @@ type runOpts struct {
 	stdin io.Reader
 	inTTY bool
 	tty   bool // stdout+stderr TTY-ness
+	// hiddenInput is what is typed at a hidden prompt, without its line
+	// ending; nil fails a test that reads one.
+	hiddenInput *string
 
 	configDir string
 	// Existing fixtures represent an install that already saw the current Terms.
@@ -322,6 +325,13 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			g.resolveHubBootstrap = func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil }
 		}
 		g.openBrowser = browser.open
+		g.readHidden = func() ([]byte, error) {
+			if o.hiddenInput == nil {
+				t.Error("the command read hidden terminal input, and the test gave none")
+				return nil, io.EOF
+			}
+			return []byte(*o.hiddenInput), nil
+		}
 		switch {
 		case o.egress != nil:
 			g.httpClient = o.egress.client()

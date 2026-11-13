@@ -6,6 +6,22 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
 
+// PaidAccessReady shows the stable buyer address once the policy is active.
+func (p *Printer) PaidAccessReady(crid, link string, version int64) error {
+	if p.format == FormatJSON {
+		return p.writeJSON(struct {
+			CRID    string `json:"crid"`
+			Link    string `json:"link,omitempty"`
+			Version int64  `json:"version"`
+		}{crid, link, version})
+	}
+	if link == "" {
+		link = crid
+	}
+	_, err := fmt.Fprintln(p.out, link)
+	return err
+}
+
 // PublisherPayments prints the Stripe consent URL.
 func (p *Printer) PublisherPayments(link string) error {
 	if p.format == FormatJSON {

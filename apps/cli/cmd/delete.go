@@ -13,6 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/layervai/qurl-go/crid"
+
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -161,13 +163,19 @@ func cleanupAfterDeleteFailure(ctx context.Context, opts *globalOpts, client qur
 // cleanupDeletedLocalShare converges local desired state after the service has
 // committed deletion. It signals an existing daemon through IPC but never
 // installs or starts one.
-func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) error {
+func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) (err error) {
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
 		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
 			return nil
 		}
 		return err
+	}
+	if crid.Validate(id) == nil {
+		// A deleted share's link limits are never used again; forgetting them
+		// never blocks the cleanup below, and callers report a cleanup error
+		// as a warning after the committed delete.
+		defer func() { err = errors.Join(err, forgetLinkLimits(ctx, stateDir, id)) }()
 	}
 	registry, local, err := findDeletedLocalShare(ctx, opts, stateDir, id)
 	if err != nil {

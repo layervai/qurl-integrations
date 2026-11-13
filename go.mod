@@ -1,6 +1,6 @@
 module github.com/layervai/qurl-integrations
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/Microsoft/go-winio v0.6.4
@@ -14,10 +14,11 @@ require (
 	github.com/fatedier/golib v0.8.2
 	github.com/layervai/qurl-conformance v0.17.2
 	github.com/layervai/qurl-connector v0.14.5
-	github.com/layervai/qurl-go v0.26.4-rc.2
+	github.com/layervai/qurl-go v0.29.0
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
+	github.com/stretchr/testify v1.12.1
 	golang.org/x/crypto v0.58.0
 	golang.org/x/mod v0.42.0
 	golang.org/x/sys v0.49.0
