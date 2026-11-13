@@ -251,6 +251,10 @@ func customerMessages() []string {
 		msgDevicePublicKeyInvalid,
 		msgAccountChooseOwner,
 		msgAccountOwnerDenied,
+		msgRulesFileDamaged, msgLinkLimitsFileDamaged, msgRulesRuleConflict, msgRulesChanged, msgRulesOtherAccount, msgRulesNotFound,
+		msgRulesAmbiguous, msgRulesDuplicateName, msgRulesLimit, msgRulesNotSynced, msgRulesLocalOnly,
+		msgRulesUnlinked, msgRulesSignIn, msgRulesLoginNotSynced, msgRulesUnavailable, msgRulesBusy, msgRulesConflict,
+		msgRulesLinkNotMade, msgRulesLimitsUnread, msgRulesStripeNotConnected, msgRulesPaymentsUnavailable, msgRulesNewer,
 		msgVerifyMismatch,
 		msgVerifyMissing,
 		msgSavedSkillOutdated,
@@ -290,6 +294,7 @@ func customerMessages() []string {
 		msgPublisherClearRefusedReason,
 		msgPublisherClearRefused,
 		msgPublisherUnsupported,
+		msgOriginHeaderPrompt, msgNoOriginHeaderValue, msgOriginHeaderLocal,
 	}
 }
 
@@ -304,4 +309,34 @@ const (
 	msgAnonymousSupervisedDevice = "Using a new device identity. Keep its local state; the supervising app can link an account to enable recovery."
 	msgAccountChooseOwner        = "choose resources to recover with --owner; available owners: %s"
 	msgAccountOwnerDenied        = "this account does not own the selected resources"
+)
+
+// Access rule messages. %s in msgRulesFileDamaged is the file's path.
+const (
+	msgRulesFileDamaged = "Could not read access rules from %s. Move that file aside to start fresh."
+	// Sharing stops rather than silently replace limits the publisher chose.
+	msgLinkLimitsFileDamaged = "Could not read the link limits saved for your shares from %s, so no link was made. Move that file aside to share with default link settings."
+	msgRulesRuleConflict     = "This rule changed here and in your account. Keep one version first with qurl rules resolve <rule> --use local or --use account."
+	msgRulesChanged          = "Access rules changed. Reload the list before retrying."
+	msgRulesOtherAccount     = "These access rules belong to another account or deployment. Use that profile."
+	msgRulesNotFound         = "No access rule has that ID or name. Run qurl rules list to see them."
+	msgRulesAmbiguous        = "More than one access rule has that name. Use its ID from qurl rules list."
+	msgRulesDuplicateName    = "An access rule with that name already exists. Choose another name."
+	msgRulesLimit            = "Access rules are limited to 100 rules and 256 KB in total. Delete rules you no longer need, then try again."
+	msgRulesNewer            = "This rule has settings from a newer qURL app, so this version can't change or use it. Update qurl, or delete the rule."
+	msgRulesNotSynced        = "Could not sync access rules with your account. Your saved rules are preserved."
+	msgRulesLocalOnly        = "Access rules are saved on this device only. Run qurl account setup to sync them with an account."
+	msgRulesUnlinked         = "Access rules stay on this device: it is not linked to an active account."
+	msgRulesSignIn           = "Access rules stay on this device until you sign in again with qurl login."
+	msgRulesLoginNotSynced   = "Signed in, but this account could not sync access rules yet. They stay on this device; run qurl rules sync later."
+	msgRulesUnavailable      = "Could not reach your account. Access rules stay on this device; run qurl rules sync later."
+	msgRulesBusy             = "Your account's access rules kept changing. Run qurl rules sync again."
+	msgRulesConflict         = "Some access rules changed here and in your account. Keep one version with qurl rules resolve <rule> --use local or --use account."
+	// %s is the published CRID in the two messages below.
+	msgRulesLinkNotMade = "The link with the rule's limits was not made for %s. Run the same publish again."
+	// %v is the read error.
+	msgRulesLimitsUnread = "Published %s, but its saved link limits could not be read, so no link was made: %v"
+	// A paid rule stores only its price; sharing with it needs the connected Stripe account.
+	msgRulesStripeNotConnected  = "This rule takes payments, but no Stripe account is connected. Run qurl payments connect, then try again."
+	msgRulesPaymentsUnavailable = "This rule takes payments, but your payments account could not be checked right now. Nothing was published or changed; try again later."
 )

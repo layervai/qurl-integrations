@@ -210,7 +210,7 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 		if sharedBeforeDelete.err != nil || strings.TrimSpace(sharedBeforeDelete.stdout) == "" {
 			t.Fatal("Windows share before Connector delete failed; private details withheld")
 		}
-		grantedBeforeDelete := prepareSandboxGrantedRoute(t, cliEnv, sharedBeforeDelete.stdout, marker, backendHits.Load)
+		grantedBeforeDelete := prepareSandboxGrantedRoute(t, cliEnv, sharedBeforeDelete.stdout, marker, backendHits.Load, "")
 
 		deleted := runWindowsSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")
 		if deleted.err != nil {
