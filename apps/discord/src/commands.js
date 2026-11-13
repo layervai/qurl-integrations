@@ -7,7 +7,6 @@ const {
   ButtonStyle,
   ComponentType,
   StringSelectMenuBuilder,
-  UserSelectMenuBuilder,
   MentionableSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
@@ -850,7 +849,7 @@ function isValidExpiry(v) {
   return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v);
 }
 
-// Per-pick cap on UserSelectMenuBuilder.setMaxValues, set to Discord's
+// Per-pick cap on recipient menus' setMaxValues, set to Discord's
 // max_values hard limit. Used by both the initial confirm-card picker
 // and the post-send "Add Recipients" flow — keep them in lockstep.
 const USER_SELECT_PER_PICK_CAP = 25;
@@ -2373,9 +2372,12 @@ async function executeSendPipeline(interaction, {
     return { recipientId: link.recipientId, username: recipient?.username, sent: result.ok === true };
   }, 5);
 
+  // Collector-local delivery history; a restored collector must seed this from persisted items.
+  const addRecipientExclusions = new Set([interaction.user.id]);
   for (const r of dmResults) {
     if (r.status === 'fulfilled' && r.value.sent) {
       delivered++;
+      addRecipientExclusions.add(r.value.recipientId);
     } else {
       failed++;
       if (r.status === 'fulfilled') {
@@ -2870,16 +2872,16 @@ async function executeSendPipeline(interaction, {
           }
           setCooldown(interaction.user.id);
 
-          // Show user select menu — collect the response on the REPLY message.
+          // Collect users and roles on the private picker reply.
           const maxSelect = Math.min(
             USER_SELECT_PER_PICK_CAP,
             remaining,
             DISCORD_SELECT_MAX_VALUES_HARD_CAP,
           );
           const userSelectRow = new ActionRowBuilder().addComponents(
-            new UserSelectMenuBuilder()
+            new MentionableSelectMenuBuilder()
               .setCustomId(`qurl_addusers_${sendId}`)
-              .setPlaceholder('Select users to send to')
+              .setPlaceholder('Select users or roles to send to')
               .setMinValues(1)
               .setMaxValues(maxSelect)
           );
@@ -2892,17 +2894,54 @@ async function executeSendPipeline(interaction, {
 
           try {
             const selectInteraction = await selectReply.awaitMessageComponent({
-              componentType: ComponentType.UserSelect,
+              componentType: ComponentType.MentionableSelect,
               time: 60000,
             });
 
             await selectInteraction.deferUpdate();
-            const addResult = await handleAddRecipients(
-              sendId, selectInteraction.users, interaction, apiKey,
-            );
+            let warnings = '';
+            let emptySelection = false;
+            const addResult = await handleAddRecipients(sendId, async () => {
+              const canMentionEveryone = !!selectInteraction.guild
+                && selectInteraction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
+              if ([...(selectInteraction.roles?.values() || [])].some(role =>
+                canMentionEveryone || (role.id !== selectInteraction.guild?.id && role.mentionable === true))) {
+                await prewarmGuildMembersCache(selectInteraction.guild, { caller: 'addRecipients' });
+              }
+              const selection = resolveMentionableSelection({
+                interaction: selectInteraction,
+                excludedUserIds: addRecipientExclusions,
+                canMentionEveryone,
+              });
+              const { valid, droppedBots } = partitionRecipients(selection.users, interaction.user.id, { excludeSender: true });
+              // One role can exceed the remaining send capacity even when only one picker value is selected.
+              const additional = valid.slice(0, remaining);
+              warnings = renderRecipientWarnings({
+                droppedBots,
+                droppedFromRoles: selection.droppedFromRoles,
+                droppedFromEveryoneRoleOnly: selection.droppedFromEveryoneRoleOnly,
+                iterationBoundHit: selection.iterationBoundHit,
+                namedRoleMembersUnavailableCount: selection.namedRoleMembersUnavailable.size,
+                alreadyDeliveredCount: selection.alreadyDeliveredCount,
+                massMentionDenied: selection.massMentionDenied,
+                everyoneCacheCold: selection.everyoneCacheCold,
+                roleMentionsDeniedNames: resolveRoleNames(selectInteraction.guild, selection.roleMentionsDenied),
+                cappedCount: valid.length - additional.length,
+              });
+              emptySelection = additional.length === 0;
+              return additional;
+            }, interaction, apiKey);
+            if (emptySelection) {
+              await selectInteraction.editReply({
+                content: ['No new recipients could be added.', warnings].filter(Boolean).join('\n'),
+                components: [],
+              });
+              return;
+            }
+            for (const id of addResult.deliveredRecipientIds || []) addRecipientExclusions.add(id);
 
             // Extend recipients[] for the post-revoke names line.
-            // Dedupe by id — re-Add of an already-included user.
+            // Dedupe names by id — a failed delivery can be retried.
             if (addResult.newRecipients?.length) {
               const existingIds = new Set(recipients.map(r => r.id));
               for (const r of addResult.newRecipients) {
@@ -2952,7 +2991,10 @@ async function executeSendPipeline(interaction, {
               }
             }
 
-            await selectInteraction.editReply({ content: addResult.msg, components: [] });
+            await selectInteraction.editReply({
+              content: [addResult.msg, addResult.dispatchAttempted ? warnings : ''].filter(Boolean).join('\n'),
+              components: [],
+            });
           } catch (err) {
             const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
             // Generic user-facing message; real details only land in logs.
@@ -3115,7 +3157,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
 // derived from originalInteraction directly so no caller can pass a
 // mismatched value and accidentally let one user add recipients to another
 // user's send.
-async function handleAddRecipients(sendId, usersCollection, originalInteraction, apiKey) {
+async function handleAddRecipients(sendId, usersSource, originalInteraction, apiKey) {
   const senderDiscordId = originalInteraction.user.id;
   const sendConfig = await db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
@@ -3163,8 +3205,10 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     };
   }
 
-  // Filter out bots and the sender. Convert the Discord Collection to a
-  // plain array so later callers (map/forEach over newRecipients[i]) work.
+  // Arrays and Discord Collections both support filter/values. Normalize
+  // to an array while excluding bots and the sender before dispatch.
+  // Resolve potentially slow picker work only after the stored-state gates pass.
+  const usersCollection = typeof usersSource === 'function' ? await usersSource() : usersSource;
   const newRecipients = [...usersCollection
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];
@@ -3580,12 +3624,15 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // One persist write per recipient regardless of links.length —
     // both store methods key on (send_id, recipient_discord_id).
     await persistDispatchResult(sendId, recipient.id, result);
-    return { sent: result.ok === true, username: recipient.username };
+    return { sent: result.ok === true, username: recipient.username, recipientId: recipient.id };
   }, 5);
 
+  const deliveredRecipientIds = [];
   for (const r of dmResults) {
-    if (r.status === 'fulfilled' && r.value.sent) delivered++;
-    else failed++;
+    if (r.status === 'fulfilled' && r.value.sent) {
+      delivered++;
+      deliveredRecipientIds.push(r.value.recipientId);
+    } else failed++;
   }
 
   // newLinks pairs each qurlId with the recipient's username so the
@@ -3604,7 +3651,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   let msg = `Added ${delivered} recipient${delivered !== 1 ? 's' : ''}`;
   if (failed > 0) msg += ` (${failed} could not be reached)`;
   logger.info('/qurl add recipients', { sendId, delivered, failed });
-  return { msg, newLinks, delivered, failed, newRecipients: resolvedRecipients };
+  return { msg, newLinks, delivered, failed, newRecipients: resolvedRecipients, deliveredRecipientIds, dispatchAttempted: true };
 }
 
 // --- /qurl revoke handler ---
@@ -4632,12 +4679,23 @@ function partitionRecipients(users, senderId, { excludeSender = false } = {}) {
 // in prod and plain Maps in tests. Both implement `.values()`,
 // `.entries()`, and `Symbol.iterator` — the duck-type guards below
 // gate on the methods we actually call.
-function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id = null }) {
+// Add Recipients excludes the sender and successful prior deliveries before
+// either picked users or role members consume expansion capacity.
+function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id = null, excludedUserIds }) {
   const guild = interaction.guild;
   const userMap = new Map();
+  const pickedBots = new Map();
+  const alreadyDeliveredIds = new Set();
   if (interaction.users && typeof interaction.users.values === 'function') {
     for (const u of interaction.users.values()) {
-      if (u && u.id) userMap.set(u.id, u);
+      if (!u?.id) continue;
+      if (excludedUserIds?.has(u.id)) {
+        if (u.id !== interaction.user?.id) alreadyDeliveredIds.add(u.id);
+        continue;
+      }
+      // Bots remain in the result for warnings, but cannot consume human capacity.
+      if (u.bot) pickedBots.set(u.id, u);
+      else userMap.set(u.id, u);
     }
   }
   let massMentionDenied = false;
@@ -4648,6 +4706,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
   // silent deferUpdate-only no-op the user-visible path would
   // otherwise hit.
   let everyoneCacheCold = false;
+  const namedRoleMembersUnavailable = new Set();
   // Per-role denied list (issue #326): a picked role that's not
   // `mentionable: true` AND the sender lacks MENTION_EVERYONE lands
   // here as `roleId`. Dedup via parallel Set so a future picker that
@@ -4734,6 +4793,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
       //     chunk-on-startup completion).
       if (!source || typeof source.entries !== 'function') {
         if (isEveryoneRole) everyoneCacheCold = true;
+        else namedRoleMembersUnavailable.add(roleId);
         continue;
       }
       if (isEveryoneRole && source.size === 0) {
@@ -4781,7 +4841,11 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
         // will report it via droppedBots. Skipping here means it
         // doesn't ALSO tick the role-side bot signal — avoids
         // surfacing two warnings for the same underlying bot.
-        if (userMap.has(memberId)) continue;
+        if (excludedUserIds?.has(memberId)) {
+          if (memberId !== interaction.user?.id) alreadyDeliveredIds.add(memberId);
+          continue;
+        }
+        if (userMap.has(memberId) || pickedBots.has(memberId)) continue;
         if (droppedFromRolesSet.has(memberId)) continue;
         if (isBotMember(member)) {
           droppedFromRolesSet.add(memberId);
@@ -4795,10 +4859,15 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
     }
   }
   return {
-    users: [...userMap.values()],
+    users: [...userMap.values(), ...pickedBots.values()],
+    alreadyDeliveredCount: alreadyDeliveredIds.size,
     massMentionDenied,
     droppedFromRoles: droppedFromRolesSet.size,
+    droppedFromEveryoneRoleOnly: droppedFromRolesSet.size > 0
+      && interaction.roles?.size === 1 && interaction.roles.has(guild?.id),
+    iterationBoundHit: boundLogged,
     everyoneCacheCold,
+    namedRoleMembersUnavailable,
     roleMentionsDenied,
   };
 }
@@ -4833,24 +4902,32 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  * @param {{
  *   invalidTokens?: string[],
  *   cappedCount?: number,
+ *   alreadyDeliveredCount?: number,
  *   unresolvedIds?: string[],
  *   transientFailureIds?: string[],
  *   droppedBots?: number,
  *   droppedFromRoles?: number,
+ *   droppedFromEveryoneRoleOnly?: boolean,
+ *   iterationBoundHit?: boolean,
  *   massMentionDenied?: boolean,
  *   everyoneCacheCold?: boolean,
+ *   namedRoleMembersUnavailableCount?: number,
  *   roleMentionsDeniedNames?: string[],
  * }} [opts]
  */
 function renderRecipientWarnings({
   invalidTokens = [],
   cappedCount = 0,
+  alreadyDeliveredCount = 0,
   unresolvedIds = [],
   transientFailureIds = [],
   droppedBots = 0,
   droppedFromRoles = 0,
+  droppedFromEveryoneRoleOnly = false,
+  iterationBoundHit = false,
   massMentionDenied = false,
   everyoneCacheCold = false,
+  namedRoleMembersUnavailableCount = 0,
   roleMentionsDeniedNames = [],
 } = {}) {
   const lines = [];
@@ -4862,7 +4939,10 @@ function renderRecipientWarnings({
   const sanitizeForBullet = (s) =>
     sliceWithEllipsis(s.replace(/`/g, ''), WARNING_NAME_CODEPOINT_CAP, '…');
   if (cappedCount > 0) {
-    lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — ${cappedCount} recipient(s) past the cap were dropped.`);
+    lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — at least ${cappedCount} recipient(s) past the cap were dropped.`);
+  }
+  if (alreadyDeliveredCount > 0) {
+    lines.push(`• ${alreadyDeliveredCount} recipient(s) already received this send — skipped.`);
   }
   if (invalidTokens.length > 0) {
     // recipient-parser.js's docstring is explicit: invalidTokens are
@@ -4905,7 +4985,15 @@ function renderRecipientWarnings({
     // recipient count). Distinct copy from droppedBots since the
     // user took a different picker action (selecting a role rather
     // than an individual bot).
-    lines.push(`• ${droppedFromRoles} bot(s) filtered from picked role(s) — skipped.`);
+    lines.push(droppedFromEveryoneRoleOnly
+      ? `• ${droppedFromRoles} bot(s) skipped from \`@everyone\` — bots cannot receive qURL links.`
+      : `• ${droppedFromRoles} bot(s) filtered from picked role(s) — skipped.`);
+  }
+  if (iterationBoundHit) {
+    lines.push('• Picked role(s) are too large to fully evaluate — try fewer or smaller roles.');
+  }
+  if (namedRoleMembersUnavailableCount > 0) {
+    lines.push("• Picked role(s) couldn't be loaded — try again in a few seconds.");
   }
   if (everyoneCacheCold) {
     // Symmetric with droppedFromRoles: surfaced even on partial-valid
@@ -6802,29 +6890,19 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // the text-path gate in #323.
   const canMentionEveryone = !!interaction.guild
     && interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
-  // Trigger on any role pick (not just @everyone): `role.members` for a
-  // non-@everyone role is a filtered view of `guild.members.cache`, so
-  // both hit the same empty-cache failure mode. Direct user picks skip
-  // the fetch — Discord ships the User object in `interaction.users`.
-  //
-  // DIVERGES from the text-path gate at handleQurlSlashSend, which
-  // additionally requires `canMentionEveryone || hasRoleMention` to
-  // skip the wasted fetch on bare `@everyone` typed without perm. The
-  // picker omits the @everyone role from its UI (Discord platform
-  // filter — out of scope here), so the only roles reaching this gate
-  // are user-deliberately-picked custom roles. A wasted fetch on a
-  // non-mentionable custom role pick (which the per-role
-  // `role.mentionable` gate inside `resolveMentionableSelection` will
-  // ultimately deny) is rare enough that the simpler trigger is worth
-  // the marginal optimization loss.
-  if (interaction.roles?.size > 0) {
+  // Denied roles do not need member data. Direct picks already include their User objects.
+  if ([...(interaction.roles?.values() || [])].some(role =>
+    canMentionEveryone || (role.id !== interaction.guild?.id && role.mentionable === true))) {
     await prewarmGuildMembersCache(interaction.guild, { caller: 'handleConfirmUserSelect', flow_id });
   }
   const {
     users: selected,
     massMentionDenied,
     droppedFromRoles,
+    droppedFromEveryoneRoleOnly,
+    iterationBoundHit,
     everyoneCacheCold,
+    namedRoleMembersUnavailable,
     roleMentionsDenied,
   } = resolveMentionableSelection({
     interaction,
@@ -6839,7 +6917,9 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     selected.length === 0
     && !massMentionDenied
     && droppedFromRoles === 0
+    && !iterationBoundHit
     && !everyoneCacheCold
+    && namedRoleMembersUnavailable.size === 0
     && roleMentionsDenied.length === 0
   ) {
     // Truly empty pick (no users, no roles, no @everyone, no
@@ -6914,7 +6994,9 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       dropped_bots: droppedBots,
       mass_mention_denied: massMentionDenied,
       dropped_from_roles: droppedFromRoles,
+      iteration_bound_hit: iterationBoundHit,
       everyone_cache_cold: everyoneCacheCold,
+      named_role_members_unavailable: namedRoleMembersUnavailable.size,
       role_mentions_denied: roleMentionsDenied.length,
     });
     // Reachable cases:
@@ -6944,8 +7026,11 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // but pin the parity here against future drift.
     const reasons = [];
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
-    if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
+    if (droppedFromRoles > 0 && !iterationBoundHit) reasons.push(droppedFromEveryoneRoleOnly
+      ? '`@everyone` has no non-bot members' : 'Picked role(s) have no non-bot members');
+    if (iterationBoundHit) reasons.push('Picked role(s) are too large to fully evaluate — try fewer or smaller roles');
     if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
+    if (namedRoleMembersUnavailable.size > 0) reasons.push("Picked role(s) couldn't be loaded — try again in a few seconds");
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
     if (roleMentionsDenied.length > 0) {
       // Condensed copy (count, not per-role) for the rejection banner —
@@ -6991,8 +7076,11 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   const newWarningsBlock = renderRecipientWarnings({
     droppedBots,
     droppedFromRoles,
+    droppedFromEveryoneRoleOnly,
+    iterationBoundHit,
     massMentionDenied,
     everyoneCacheCold,
+    namedRoleMembersUnavailableCount: namedRoleMembersUnavailable.size,
     roleMentionsDeniedNames,
   });
   const newRecipientAliases = Object.fromEntries(
