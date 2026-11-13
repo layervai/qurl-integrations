@@ -215,6 +215,7 @@ function canonicalUrl(u) {
 const ORPHAN_FILTER_RESULTS = Object.freeze({
   MATCH: 'match',
   NEAR_MISS_LIVENESS: 'near-miss-liveness',
+  NEAR_MISS_RETIREMENT: 'near-miss-retirement', // Matching peer; not marked for deletion.
   NO_MATCH: 'no-match',
 });
 
@@ -225,19 +226,20 @@ const ORPHAN_FILTER_RESULTS = Object.freeze({
 // requested explicitly; loop bounded at 50 iterations (5000 subs)
 // so a misbehaving cursor can't spin forever.
 //
-// Always returns `{ matches, orphans, nearMissCount }`. `orphans` is
-// the subset of the walk's rows that the `orphanFilter(s)` classifies
+// Always returns `{ matches, orphans, nearMissCount, unmarkedCount }`.
+// `orphans` is the subset of the walk's rows that the `orphanFilter(s)` classifies
 // as a full match (URL-migration leftovers, see
 // buildUrlMigrationOrphanFilter). `nearMissCount` is the count of rows
 // that matched host+path+description but failed the liveness gate —
 // useful observability: if the sweep DELETEs nothing despite a known
 // rename, an operator can grep CloudWatch for the near-miss log to
 // distinguish "qurl-service schema drifted (field missing)" from
-// "everything looks alive."
+// "everything looks alive." Only marked rows reach the liveness diagnostics.
+// `unmarkedCount` counts matching cross-host rows awaiting explicit retirement.
 //
 // Two terminal states to distinguish:
 //   - natural exhaustion (cursor walk ends, no more pages) → returns
-//     {matches, orphans, nearMissCount}, possibly empty. Caller takes
+//     {matches, orphans, nearMissCount, unmarkedCount}, possibly empty. Caller takes
 //     create-fresh on empty matches.
 //   - 50-page cap hit (cursor never ends) → THROWS, refuses to fall
 //     through to create-fresh which would silently compound
@@ -247,6 +249,7 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl, orpha
   const matches = [];
   const orphans = [];
   let nearMissCount = 0;
+  let unmarkedCount = 0;
   let cursor = '';
   for (let i = 0; i < 50; i++) {
     // Explicit limit=100 (vs relying on a server default that could
@@ -266,10 +269,11 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl, orpha
         const verdict = orphanFilter(s);
         if (verdict === ORPHAN_FILTER_RESULTS.MATCH) orphans.push(s);
         else if (verdict === ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS) nearMissCount += 1;
+        else if (verdict === ORPHAN_FILTER_RESULTS.NEAR_MISS_RETIREMENT) unmarkedCount += 1;
       }
     }
     const next = resp && resp.meta && resp.meta.next_cursor;
-    if (!next) return { matches, orphans, nearMissCount };
+    if (!next) return { matches, orphans, nearMissCount, unmarkedCount };
     cursor = next;
   }
   throw new Error('findExistingSubscriptions: pagination cap hit (50 pages, ~5000 subs); possible stuck cursor — refusing to fall through to create-fresh which would compound duplicates');
@@ -424,7 +428,8 @@ function urlPathname(u) {
 //      landed first sticks. After a rename, that one old-host sub IS
 //      the orphan this sweep targets — regardless of whether the first-
 //      to-register was the central Lambda or a guild link.
-//   4. Liveness gate: BOTH `last_delivery_success === false` AND
+//   4. Explicit retirement marker: description ends with ` [ORPHAN]`.
+//   5. Liveness gate: BOTH `last_delivery_success === false` AND
 //      `failure_count >= URL_MIGRATION_ORPHAN_MIN_FAILURES`. The
 //      compound check tolerates not just transient delivery failures
 //      but also short sustained outages (the floor is 30, not 3, so
@@ -433,44 +438,12 @@ function urlPathname(u) {
 //      brand-new sub with no deliveries yet typically reports
 //      null/undefined — treat that as "presumed alive, do not delete."
 //
-//      LOAD-BEARING ENVIRONMENT-ISOLATION ASSUMPTION:
-//      The description prefix is identical across environments
-//      (`Discord bot view counter`), so the ONLY structural separator
-//      between this sweep and another live environment's sub is the
-//      owner_id scope (subscriptions are listed via the API key's
-//      owner_id). If sandbox and prod (or any two envs) ever share
-//      ONE `QURL_API_KEY` — i.e. resolve to the same `owner_id` in
-//      qurl-service — then a sandbox boot during a prod outage
-//      (`last_delivery_success: false` + `failure_count` past 30)
-//      would DELETE prod's live subscription. Today's deployment
-//      uses per-env SSM `QURL_API_KEY` parameters (one per env), each
-//      backed by a distinct qurl-service API key tied to a distinct
-//      owner_id — confirmed via the infra terraform's per-env
-//      `apiKeySsmParamName` wiring + the API key creation procedure
-//      (each env's key is minted separately). The owner-isolation
-//      invariant is therefore established by configuration, not
-//      enforced in code here. Anything that lets two envs share an
-//      owner_id (key migration, accidental SSM cross-mount, a future
-//      "shared key for stage and prod" decision) MUST flip the
-//      kill-switch BEFORE landing, or the sweep must gain an explicit
-//      env-discriminator first (#827 covers the latter durable fix).
-//
-//      Limitations the gate does NOT cover (see #827 for the durable
-//      fix tracking issue):
-//        - Sustained-outage cannibalization: a sibling in a hard outage
-//          produces the same `last_delivery_success=false` + climbing
-//          `failure_count` signal as a true orphan. These signals
-//          fundamentally can't distinguish the two cases — the durable
-//          fix is a non-signal-based discriminator (host allowlist,
-//          explicit old-host marker, region-tagged description).
-//          Today's deployment is single-host so this is hypothetical.
-//        - First-boot-after-rename: the old sub's `last_delivery_success`
-//          may still be `true` (last delivery before the rename
-//          succeeded). It flips to false only after the first post-
-//          rename delivery fails sig verification. So the immediate
-//          first post-rename boot may not sweep — caught on a
-//          subsequent boot once a real delivery has been attempted.
-//          Acceptable because the hoisted sweep retries every boot.
+//      An operator must first append the exact ` [ORPHAN]` suffix to the
+//      retired subscription's description. Never mark an active peer, even
+//      during a long outage. Failure counts alone cannot identify retirement
+//      (#827); unmarked historical rows require explicit operator cleanup.
+//      Any registrar sharing the API owner can delete marked rows; see the runbook.
+//      Marked rows whose last delivery succeeded still wait for failed deliveries.
 //
 //      TODO(upstream-contract): field names `last_delivery_success` and
 //      `failure_count` are pinned against qurl-service's webhook list
@@ -489,14 +462,8 @@ function urlPathname(u) {
 // failure_count below this is treated as transient (NEAR_MISS), not
 // orphan-confirmed (MATCH). Sized at 30 (not 3) because:
 //   - The motivating orphan had 1475, comfortably above.
-//   - A sustained-but-recoverable peer outage (~minutes) would
-//     reach failure_count=3 trivially, so a small floor buys almost
-//     no protection against the active-active cannibalization
-//     scenario in #827. Raising to 30 means a peer would need to be
-//     down for ~10-30+ minutes (assuming roughly one delivery
-//     attempt per minute) before its sub becomes sweep-eligible,
-//     which is the kind of sustained outage where operator
-//     intervention is already in progress.
+//   - The explicit retirement marker distinguishes a retired endpoint from
+//     a peer outage. The failure floor remains an extra delay before deletion.
 //   - Cost is asymmetric: a true URL-migration orphan's failure_count
 //     climbs unbounded, so the higher floor just delays cleanup by a
 //     bounded amount, not prevents it. A false-positive deletion of a
@@ -512,8 +479,9 @@ function urlPathname(u) {
 // semantics when they exist; absent that, the assumption is
 // observational.
 const URL_MIGRATION_ORPHAN_MIN_FAILURES = 30;
+const URL_MIGRATION_RETIREMENT_MARKER = ' [ORPHAN]';
 // ORPHAN_FILTER_RESULTS defined above findExistingSubscriptions (the
-// only consumer) so the tri-state predicate composes cleanly. The
+// only consumer) so the predicate composes cleanly. The
 // observability rationale for the tri-state: "matched everything except
 // the liveness gate" is the case we WANT to surface in CloudWatch so an
 // operator can grep CloudWatch for "schema field is missing" (TODO
@@ -531,10 +499,15 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
     if (subHost === null || subPath === null) return ORPHAN_FILTER_RESULTS.NO_MATCH;
     if (subPath !== targetPath) return ORPHAN_FILTER_RESULTS.NO_MATCH;
     if (subHost === targetHost) return ORPHAN_FILTER_RESULTS.NO_MATCH;
-    const subDesc = typeof s.description === 'string' ? s.description : '';
+    // TODO(upstream-contract): webhook PATCH/list preserve description verbatim (500-character schema limit).
+    if (typeof s.description !== 'string') return ORPHAN_FILTER_RESULTS.NO_MATCH;
+    const isRetired = s.description.endsWith(URL_MIGRATION_RETIREMENT_MARKER);
+    const subDesc = isRetired ? s.description.slice(0, -URL_MIGRATION_RETIREMENT_MARKER.length) : s.description;
     if (subDesc !== descriptionPrefix && !subDesc.startsWith(prefixWithBoundary)) {
       return ORPHAN_FILTER_RESULTS.NO_MATCH;
     }
+    // Delivery failures never authorize retirement, even during a long peer outage.
+    if (!isRetired) return ORPHAN_FILTER_RESULTS.NEAR_MISS_RETIREMENT;
     // From here on: host + path + description all match (a "candidate").
     // Liveness gate decides match vs near-miss. Both checks below
     // route an unparseable / missing field to NEAR_MISS_LIVENESS
@@ -839,16 +812,15 @@ async function ensureWebhookSubscription(opts) {
   // Hard guard: `urlMigrationSweepEnabled=false` collapses the filter
   // to null so no row is classified as orphan or near-miss. The Lambda
   // wrapper reads `QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP`
-  // to flip this without code changes — required defense-in-depth for
-  // the hypothetical active-active multi-region case (#827) where the
-  // sweep would cannibalize healthy peers.
+  // to disable cleanup without code changes. Both call paths also require
+  // the explicit retirement marker, so outage length cannot select a peer.
   const orphanFilter = urlMigrationSweepEnabled
     ? buildUrlMigrationOrphanFilter({
       bridgeUrl,
       descriptionPrefix: deriveDescriptionPrefix(description),
     })
     : null;
-  const { matches, orphans, nearMissCount } = await findExistingSubscriptions({
+  const { matches, orphans, nearMissCount, unmarkedCount } = await findExistingSubscriptions({
     apiEndpoint, apiKey, bridgeUrl, orphanFilter,
   });
 
@@ -890,7 +862,22 @@ async function ensureWebhookSubscription(opts) {
     }
   }
 
+  if (unmarkedCount > 0) {
+    const cacheKey = `unmarked:${bridgeUrl}:${unmarkedCount}`;
+    if (!nearMissLogSuppressionCache.has(cacheKey)) {
+      nearMissLogSuppressionCache.add(cacheKey);
+      logger.info('Cross-host webhook subscriptions retained without retirement markers; they may be live peers', {
+        unmarked_count: unmarkedCount, url: bridgeUrl,
+      });
+    }
+  }
+
   const existing = pickSurvivor(matches);
+  if (typeof existing?.description === 'string' && existing.description.endsWith(URL_MIGRATION_RETIREMENT_MARKER)) {
+    logger.warn('Active webhook subscription is marked retired; remove retirement markers before reusing its URL', {
+      webhook_id: existing.webhook_id, url: bridgeUrl,
+    });
+  }
   const wasDedupe = matches.length > 1 && existing != null;
   if (wasDedupe) {
     const losers = matches.filter(s => s.webhook_id !== existing.webhook_id);
