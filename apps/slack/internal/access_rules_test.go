@@ -98,7 +98,7 @@ func TestFindAccessRule(t *testing.T) {
 	}
 }
 
-func TestApplyAccessRule(t *testing.T) {
+func TestRefuseAndApplyAccessRule(t *testing.T) {
 	t.Parallel()
 	type testCase struct {
 		name    string
@@ -129,7 +129,10 @@ func TestApplyAccessRule(t *testing.T) {
 	}...) {
 		// Start from Slack's default limits: an applied rule replaces all of them.
 		input := client.CreateInput{OneTimeUse: true, ExpiresIn: resourceLinkExpiry, SessionDuration: resourceSessionDuration, MaxSessions: resourceMaxSessions}
-		err := applyAccessRule(&input, &tc.rule)
+		err := refuseAccessRule(&tc.rule)
+		if err == nil {
+			applyAccessRule(&input, &tc.rule)
+		}
 		if tc.refusal != "" {
 			// "**Newer**" would mean the name's own markup reached the reply.
 			if err == nil || !strings.Contains(err.Error(), tc.refusal) || strings.Contains(err.Error(), "**Newer**") {
@@ -240,7 +243,7 @@ func TestHandleGet_RuleNoAccountLibrary(t *testing.T) {
 		t.Fatalf("One-time link mint = %v; reply %q", mint, reply)
 	}
 	reply, mint := ruleGet(t, `rule:"Team only"`, forbidden)
-	if mint != nil || !strings.Contains(reply, "No access rule is named *Team only*") {
+	if mint != nil || !strings.Contains(reply, "No access rule is named *Team only*") || !strings.Contains(reply, "Saved rules can't be read") {
 		t.Fatalf("mint = %v, reply = %q", mint, reply)
 	}
 }
@@ -257,6 +260,8 @@ func TestHandleGet_RuleReadFailure(t *testing.T) {
 	if reply, mint := ruleGet(t, `rule:"One-time link"`, failing); mint != nil {
 		t.Fatalf("One-time link by name minted without the saved rules; reply %q", reply)
 	}
+	// Intended: a Default rule's ID mints even though an unread saved rule could
+	// share its name (the CLI refuses saving such names).
 	if reply, mint := ruleGet(t, "rule:once", failing); mint == nil {
 		t.Fatalf("rule:once did not mint; reply %q", reply)
 	}
@@ -324,5 +329,25 @@ func TestHandleGet_RuleAndRateLimit(t *testing.T) {
 	}
 	if got := mints.Load(); got != 1 {
 		t.Fatalf("mints = %d, want 1", got)
+	}
+}
+
+// TestOnlyLinkLimitsDecodedRule decodes rules as the SDK does, so an SDK bump
+// that fills unset fields with empty values fails here, next to the check.
+func TestOnlyLinkLimitsDecodedRule(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]bool{
+		`{"id":"r","name":"Open","mode":"public"}`: true,
+		`{"id":"r","name":"Hour","mode":"public","link_limits":{"expires_in":"1h","one_time_use":true,"session_duration":"1h"}}`: true,
+		`{"id":"r","name":"Team","mode":"public","allowed_emails":["a@example.com"]}`:                                            false,
+		`{"id":"r","name":"Ask","mode":"review","approval_expires_in":"7d"}`:                                                     false,
+	} {
+		var r qurl.AccessRule
+		if err := json.Unmarshal([]byte(raw), &r); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		if got := onlyLinkLimits(&r); got != want {
+			t.Errorf("onlyLinkLimits(%s) = %v, want %v", raw, got, want)
+		}
 	}
 }

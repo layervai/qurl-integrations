@@ -4,8 +4,8 @@ Share internal resources from Slack as secure, one-time links — without
 leaving the channel. Admins protect a resource once; anyone in the channel
 mints a fresh, expiring link with a single slash command.
 
-A **qURL™** is a one-time-use access link: it works for the first person who
-opens it, then burns. Links also expire on their own, so nothing stays live
+A **qURL™** is a one-time-use access link by default: it works for the first
+person who opens it, then burns. Links also expire on their own, so nothing stays live
 longer than it needs to.
 
 ## Quickstart
@@ -158,20 +158,21 @@ immediately available for `/qurl get` in the channel.
 
 `/qurl get $id` mints a one-time qURL link for any resource available in the
 current channel (pass a resource `$id` or a channel `$alias`). The reply
-includes how long the link stays valid. Every link is single-use: it burns on
-first open. Add `dm:true` to receive the link privately, or `reason:"…"` to
-note why you minted it in the audit log.
+includes how long the link stays valid. By default every link is single-use:
+it burns on first open. Add `dm:true` to receive the link privately, or
+`reason:"…"` to note why you minted it in the audit log.
 
 Add `rule:"…"` to share with an access rule instead, by name or ID (such as
-`rule:once`): one of the
-Default access rules (`Anyone with the link`, `One-time link`) or one of your
-saved rules ("Your rules"). Saved rules are the ones on the qURL account that
-connected this workspace, managed in qURL Desktop or the qURL CLI. The link
-then follows the rule's limits, so an `Anyone with the link` link can be
-opened more than once. Slack mints links on existing resources only, so it
-refuses a rule that decides who can open the resource (`People you invite`,
-`People you approve`, email, device or paid rules) and a rule with settings
-from a newer qURL app; share with those from qURL Desktop or the qURL CLI.
+`rule:once`): one of the Default access rules (`Anyone with the link`,
+`One-time link`) or one of your saved rules ("Your rules"). Saved rules are the
+ones on the qURL account that connected this workspace, managed in qURL Desktop
+or the qURL CLI. The link then follows only the rule's limits, without the
+default single-session cap, so an `Anyone with the link` link can be opened
+more than once, by more than one person. Slack mints links on existing
+resources only, so it refuses a rule that decides who can open the resource
+(`People you invite`, `People you approve`, email, device or paid rules) and a
+rule with settings from a newer qURL app; share with those from qURL Desktop or
+the qURL CLI.
 
 `/qurl crid <CRID>` is the same command addressed by a resource's permanent
 CRID instead of a `$id` or `$alias`. It is channel-scoped exactly like

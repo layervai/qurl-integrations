@@ -2069,11 +2069,8 @@ func TestConfirm_GetCarriesAccessRule(t *testing.T) {
 	if len(hc.blocks.calls) != 0 {
 		t.Fatalf("a refused rule must not deliver a link, got %+v", hc.blocks.calls)
 	}
-	private := make([]string, 0, len(*hc.posts))
-	for _, p := range *hc.posts {
-		private = append(private, p.text)
-	}
-	if !strings.Contains(strings.Join(private, "\n"), "Slack can't set") {
+	private := postedTexts(hc)
+	if !strings.Contains(private, "Slack can't set") {
 		t.Fatalf("private reply = %q, want the rule refusal", private)
 	}
 	_, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
@@ -2100,10 +2097,10 @@ func TestAgentConfirmCardRendersRuleLiterally(t *testing.T) {
 	}
 }
 
-// TestConfirm_GetWithRuleMintsWithItsLimits fences the approved-get success
-// path with a rule: the One-time link limits reach the mint and the notice
-// reaches the private delivery.
-func TestConfirm_GetWithRuleMintsWithItsLimits(t *testing.T) {
+// confirmRuleGet approves an agent get with rule against a qURL stub serving
+// saved, and returns the mint body (nil when nothing minted) and the harness.
+func confirmRuleGet(t *testing.T, rule string, saved ...map[string]any) (map[string]any, *confirmHarness) {
+	t.Helper()
 	names := defaultTestTableNames()
 	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
 		names.channelPolicy: {seedChannelPolicySet("T1", "D1", "", []string{testAgentGetResourceID})},
@@ -2113,7 +2110,7 @@ func TestConfirm_GetWithRuleMintsWithItsLimits(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/me/access-rules":
-			writeAccessRules(t, w)
+			writeAccessRules(t, w, saved...)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/"+testAgentGetResourceID+"/qurls":
 			if err := json.NewDecoder(r.Body).Decode(&mint); err != nil {
 				t.Errorf("decode mint body: %v", err)
@@ -2127,14 +2124,43 @@ func TestConfirm_GetWithRuleMintsWithItsLimits(t *testing.T) {
 	t.Cleanup(srv.Close)
 	hc.h.cfg.NewClient = func(apiKey string) *client.Client { return client.New(srv.URL, apiKey, client.WithRetry(0)) }
 
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Rule: "One-time link", Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Rule: rule, Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
 	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
 	hc.h.Wait()
+	return mint, hc
+}
 
+// TestConfirm_GetWithRuleMintsWithItsLimits fences the approved-get success
+// path with a rule: the One-time link limits reach the mint and the notice
+// reaches the private delivery.
+func TestConfirm_GetWithRuleMintsWithItsLimits(t *testing.T) {
+	mint, hc := confirmRuleGet(t, "One-time link")
 	if mint["one_time_use"] != true || mint["expires_in"] != "30d" || mint["session_duration"] != "24h" {
 		t.Fatalf("mint body = %v, want the One-time link limits", mint)
 	}
 	if calls := hc.blocks.calls; len(calls) != 1 || !strings.Contains(calls[0].fallback, "one-time use · link expires in 30d") {
 		t.Fatalf("private delivery = %+v", calls)
 	}
+}
+
+// TestConfirm_GetWithNewerSavedRuleRefused pins that an approved get re-reads
+// the saved rule and refuses one with fields this app does not model.
+func TestConfirm_GetWithNewerSavedRuleRefused(t *testing.T) {
+	mint, hc := confirmRuleGet(t, "Newer", map[string]any{"id": "33333333-3333-4333-8333-333333333333", "name": "Newer", "mode": "public", "max_opens": 2})
+	if mint != nil || len(hc.blocks.calls) != 0 {
+		t.Fatalf("mint = %v, deliveries = %+v; want a refusal", mint, hc.blocks.calls)
+	}
+	private := postedTexts(hc)
+	if !strings.Contains(private, "newer qURL app") {
+		t.Fatalf("private reply = %q, want the newer-app refusal", private)
+	}
+}
+
+// postedTexts joins the harness's private text posts.
+func postedTexts(hc *confirmHarness) string {
+	texts := make([]string, 0, len(*hc.posts))
+	for _, p := range *hc.posts {
+		texts = append(texts, p.text)
+	}
+	return strings.Join(texts, "\n")
 }

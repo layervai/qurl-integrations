@@ -540,6 +540,37 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 		return getResult{}, errDMNotConfigured
 	}
 
+	// A `rule:` resolves before the quota check, so a refused rule uses none;
+	// the saved-rules read is bounded like the alias resolution reads above.
+	var (
+		c    *client.Client
+		rule *qurl.AccessRule
+		err  error
+	)
+	if selector := args.cmd.Rule(); selector != "" {
+		if c, err = h.getClient(ctx, log, args.teamID); err != nil {
+			return getResult{}, err
+		}
+		if rule, err = resolveAccessRule(ctx, log, c, selector); err != nil {
+			return getResult{}, err
+		}
+	}
+
+	// Rate-limit AFTER a successful resolution: only a request that resolved to a
+	// real, channel-authorized resource — i.e. an actual mint attempt — counts
+	// against the user's quota. The dm:true delivery guard above runs first
+	// so an undeliverable privacy request consumes nothing either. (Resolution
+	// work for unknown aliases is instead bounded by Slack's own per-user
+	// slash-command throttle, not by spending the user's mint quota on typos.)
+	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
+	if err != nil {
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
+		return getResult{}, &userError{msg: rateLimitErrorMessage(err)}
+	}
+	if !ok {
+		return getResult{}, &userError{msg: rateLimitMessage(retry, "")}
+	}
+
 	input := &client.CreateInput{
 		// One-time use unless an access rule says otherwise; there is no
 		// `once` flag.
@@ -551,37 +582,14 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 		IdempotencyKey:  IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
 		ResourceID:      resourceID,
 	}
-
-	c, err := h.authenticatedClient(ctx, args.teamID)
-	if err != nil {
-		log.Error("get: API key lookup failed", "error", err)
-		return getResult{}, &userError{msg: authErrorMessage(err)}
+	if rule != nil {
+		applyAccessRule(input, rule)
 	}
 
-	// After input is built: an applied rule replaces all four default limits.
-	var rule *qurl.AccessRule
-	if selector := args.cmd.Rule(); selector != "" {
-		if rule, err = resolveAccessRule(ctx, log, c, input, selector); err != nil {
+	if c == nil {
+		if c, err = h.getClient(ctx, log, args.teamID); err != nil {
 			return getResult{}, err
 		}
-	}
-
-	// Rate-limit AFTER a successful resolution: only a request that resolved to
-	// a real, channel-authorized resource and an access rule Slack can apply —
-	// i.e. an actual mint attempt — counts against the user's quota. The API key
-	// lookup and, for `rule:`, the saved-rules read come first, bounded like the
-	// alias resolution reads above.
-	// The dm:true delivery guard above runs first so an undeliverable privacy
-	// request consumes nothing either. (Resolution work for unknown aliases is
-	// instead bounded by Slack's own per-user slash-command throttle, not by
-	// spending the user's mint quota on typos.)
-	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
-	if err != nil {
-		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
-		return getResult{}, &userError{msg: rateLimitErrorMessage(err)}
-	}
-	if !ok {
-		return getResult{}, &userError{msg: rateLimitMessage(retry, "")}
 	}
 
 	out, err := c.Create(ctx, input)
@@ -703,6 +711,16 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 // Caller must have already checked AdminStore (getWork does this before
 // resolving). Returns a [*userError] on lookup failure, not-a-known-token, or
 // not-allowed-here.
+// getClient is authenticatedClient with getWork's user-facing error.
+func (h *Handler) getClient(ctx context.Context, log *slog.Logger, teamID string) (*client.Client, error) {
+	c, err := h.authenticatedClient(ctx, teamID)
+	if err != nil {
+		log.Error("get: API key lookup failed", "error", err)
+		return nil, &userError{msg: authErrorMessage(err)}
+	}
+	return c, nil
+}
+
 func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string) (string, error) {
 	resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, token)
 	if err != nil {

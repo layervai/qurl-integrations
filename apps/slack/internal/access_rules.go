@@ -68,9 +68,9 @@ func findAccessRule(selector string, saved []qurl.AccessRule) (*qurl.AccessRule,
 	return match, nil
 }
 
-// applyAccessRule sets input's link limits from a public rule, or returns
-// the user-facing reason Slack cannot share with it.
-func applyAccessRule(input *client.CreateInput, r *qurl.AccessRule) error {
+// refuseAccessRule returns the user-facing reason Slack cannot share with r,
+// or nil when r is a public rule holding only link limits.
+func refuseAccessRule(r *qurl.AccessRule) error {
 	name := escapeMrkdwnText(r.Name)
 	if r.HasUnknownFields() {
 		return &userError{msg: fmt.Sprintf("*%s* has settings from a newer qURL app, so Slack can't share with it.", name)}
@@ -78,6 +78,12 @@ func applyAccessRule(input *client.CreateInput, r *qurl.AccessRule) error {
 	if !onlyLinkLimits(r) {
 		return &userError{msg: fmt.Sprintf("*%s* decides who can open the resource itself, which Slack can't set. Share with it from qURL Desktop or the qURL CLI. %s", name, accessRuleChoicesHint)}
 	}
+	return nil
+}
+
+// applyAccessRule replaces input's four default limits with a public rule's
+// link limits; refuseAccessRule must have accepted r.
+func applyAccessRule(input *client.CreateInput, r *qurl.AccessRule) {
 	var limits qurl.AccessRuleLinkLimits
 	if r.LinkLimits != nil {
 		limits = *r.LinkLimits
@@ -86,7 +92,6 @@ func applyAccessRule(input *client.CreateInput, r *qurl.AccessRule) error {
 	input.OneTimeUse = limits.OneTimeUse != nil && *limits.OneTimeUse
 	input.ExpiresIn = limits.ExpiresIn
 	input.SessionDuration = limits.SessionDuration
-	return nil
 }
 
 // onlyLinkLimits reports whether r is a public rule whose only settings are
@@ -109,12 +114,13 @@ func onlyLinkLimits(r *qurl.AccessRule) bool {
 }
 
 // resolveAccessRule finds selector among the Default access rules and the
-// workspace account's saved rules and applies it to input. When the account
+// workspace account's saved rules, and returns it if Slack can apply it. When the account
 // has no saved rules this key may read (403), the Default access rules still
 // work; when the read fails, only a Default rule's ID does.
-func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, input *client.CreateInput, selector string) (*qurl.AccessRule, error) {
+func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, selector string) (*qurl.AccessRule, error) {
 	selector = strings.TrimSpace(selector)
 	saved, loadErr := c.AccessRules(ctx)
+	unreadable := false
 	var apiErr *client.APIError
 	if errors.As(loadErr, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
 		// The account has no saved rules this key may read. TODO(upstream-contract):
@@ -122,6 +128,7 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 		// frozen account's mint fails on its own, so every 403 reads as none.
 		log.Info("get: saved access rules unavailable", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code)...)
 		saved, loadErr = nil, nil
+		unreadable = true
 	}
 	rule, err := findAccessRule(selector, saved)
 	switch {
@@ -133,10 +140,18 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 		log.Warn("get: saved access rules read failed", "error", loadErr)
 		return nil, &userError{msg: "Couldn't read your saved access rules. Please try again. " + accessRuleChoicesHint}
 	case rule == nil:
-		log.Info("get: access rule not found", "saved_rules", len(saved))
-		return nil, &userError{msg: fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateForError(selector)), accessRuleChoicesHint)}
+		log.Info("get: access rule not found", "saved_rules", len(saved), "saved_rules_unreadable", unreadable)
+		msg := fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateForError(selector)), accessRuleChoicesHint)
+		if unreadable {
+			msg += " Saved rules can't be read for the qURL account connected to this workspace."
+		}
+		return nil, &userError{msg: msg}
 	}
-	return rule, applyAccessRule(input, rule)
+	if loadErr != nil {
+		// A Default rule's exact ID still applies; keep the failed read visible.
+		log.Warn("get: saved access rules read failed; applying a Default rule by ID", "error", loadErr)
+	}
+	return rule, refuseAccessRule(rule)
 }
 
 // ruleLinkNotice describes a rule-shared link for the success reply; the
