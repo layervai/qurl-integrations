@@ -1514,3 +1514,27 @@ func TestSlackInstallConfigRejectsBadBaseURL(t *testing.T) {
 		t.Fatalf("err=%v, want https error", err)
 	}
 }
+
+func TestConnectorEndpointErrorMessages(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]string{
+		" ":                                "QURL_ENDPOINT is required",
+		"////":                             "QURL_ENDPOINT must be an absolute URL origin",
+		"https://user:secret@example.test": "QURL_ENDPOINT must not include credentials",
+		"https://example.test?q=x":         "QURL_ENDPOINT must not include a query",
+		"https://example.test#x":           "QURL_ENDPOINT must not include a fragment",
+		"https://example.test/V1/":         "QURL_ENDPOINT must omit the /v1 API suffix",
+		"https://example.test/private":     "QURL_ENDPOINT must not include a path",
+		"http://example.test":              "QURL_ENDPOINT is invalid: QURL_API_URL is invalid",
+		"https://example.test?":            "QURL_ENDPOINT is invalid: QURL_API_URL is invalid",
+		"https://example.test#":            "QURL_ENDPOINT is invalid: QURL_API_URL is invalid",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
+			endpoint, api, err := connectorAPIURLFromEndpoint(raw)
+			if err == nil || err.Error() != want || endpoint != "" || api != "" {
+				t.Fatalf("got %q,%q,%v; want exact error %q", endpoint, api, err, want)
+			}
+		})
+	}
+}
