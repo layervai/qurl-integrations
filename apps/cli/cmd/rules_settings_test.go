@@ -202,6 +202,23 @@ func TestPublishWithLinkLimitsMintsAndLaterSharesUseThem(t *testing.T) {
 	}
 }
 
+func TestPublishWithExistingFractionalRuleExpiry(t *testing.T) {
+	srv := apitest.NewServer(t)
+	var mints []map[string]any
+	scriptPublish(t, srv, false, false, nil, nil)
+	scriptMint(t, srv, &mints)
+	rule := strings.Replace(hourRule, `"1h"`, `"1m0.5s"`, 1)
+	dir := connectorStateTestDir(t)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "rules", "save", "--version", "0", "--file", "-"}, stdin: strings.NewReader(rule), shareStateDir: dir})
+	if result.code != 2 || !strings.Contains(result.stderr.String(), "in whole seconds") {
+		t.Fatalf("save %d %s", result.code, result.stderr.String())
+	}
+	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(rule), shareStateDir: dir})
+	if result.code != 0 || len(mints) != 1 || mints[0]["expires_in"] != "1m" {
+		t.Fatalf("publish %d mints %v: %s", result.code, mints, result.stderr.String())
+	}
+}
+
 func TestPublishSaysASingleUseLinkWorksOnce(t *testing.T) {
 	srv := apitest.NewServer(t)
 	var mints []map[string]any
@@ -457,22 +474,5 @@ func TestShareWithSavedLimitsShowsThePublisher(t *testing.T) {
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}, tty: true, shareStateDir: dir})
 	if result.code != 0 || len(mints) != 2 || !strings.Contains(result.stdout.String(), apitest.DefaultPublisherName) || !strings.Contains(result.stdout.String(), "Created") {
 		t.Fatalf("share %d %s %s", result.code, result.stdout.String(), result.stderr.String())
-	}
-}
-
-func TestPublishWithExistingFractionalRuleExpiry(t *testing.T) {
-	srv := apitest.NewServer(t)
-	var mints []map[string]any
-	scriptPublish(t, srv, false, false, nil, nil)
-	scriptMint(t, srv, &mints)
-	rule := strings.Replace(hourRule, `"1h"`, `"1m0.5s"`, 1)
-	dir := connectorStateTestDir(t)
-	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "rules", "save", "--version", "0", "--file", "-"}, stdin: strings.NewReader(rule), shareStateDir: dir})
-	if result.code != 2 || !strings.Contains(result.stderr.String(), "in whole seconds") {
-		t.Fatalf("save %d %s", result.code, result.stderr.String())
-	}
-	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(rule), shareStateDir: dir})
-	if result.code != 0 || len(mints) != 1 || mints[0]["expires_in"] != "1m" {
-		t.Fatalf("publish %d mints %v: %s", result.code, mints, result.stderr.String())
 	}
 }
