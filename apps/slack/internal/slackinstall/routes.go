@@ -143,8 +143,9 @@ func RegisterRoutes(mux *http.ServeMux, cfg *Config) error {
 	}
 	cfg.BotScopes = NormalizeScopes(cfg.BotScopes)
 	cfg.ensureHTTPClient()
-	mux.HandleFunc(InstallPath, Install(cfg))
-	mux.HandleFunc(CallbackPath, Callback(cfg))
+	limit := slackoauth.NewRateLimitMiddleware(cfg.Now)
+	mux.Handle(InstallPath, limit(Install(cfg)))
+	mux.Handle(CallbackPath, limit(Callback(cfg)))
 	return nil
 }
 
