@@ -276,6 +276,13 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
 		t.Logf("production candidate failure class: %s", productionFailureClass(exit.Stderr))
+		if args[0] == "restart" {
+			for _, pattern := range productionRestartDiagnostics {
+				if detail := pattern.FindSubmatch(exit.Stderr); len(detail) == 2 {
+					t.Logf("production restart diagnostic: %s", detail[1])
+				}
+			}
+		}
 		if status := regexp.MustCompile(`HTTP \d{3}`).Find(exit.Stderr); len(status) > 0 {
 			t.Logf("production API rejected %s: %s", args[0], status)
 		}
@@ -283,6 +290,29 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	}
 	t.Fatal("production candidate could not start")
 	return nil, -1
+}
+
+// Capture only the structured fields emitted by the CLI. Raw stderr can
+// contain customer URLs, resource IDs, and credentials.
+var productionRestartDiagnostics = []*regexp.Regexp{
+	regexp.MustCompile(`qURL share did not become ready \((daemon state (?:starting|retrying|serving|failed|stopped|not_running|unavailable)(?:, failure category (?:assignment|enrollment|identity|local_state|network|peer_timeout|platform_denied|resource_unavailable|unknown|verification))?(?:, failure code [0-9]{1,5})?(?:, retry attempt [0-9]{1,9})?)\)`),
+	regexp.MustCompile(`did not start serving within [0-9]+s \((last state: desired=(?:on|off), connection=(?:stopped|connecting|serving), serving_epoch=[0-9]{1,20}|no sharing-state response completed)\)`),
+}
+
+func TestProductionRestartDiagnostics(t *testing.T) {
+	stderr := []byte("qURL share did not become ready (daemon state retrying, failure category peer_timeout, retry attempt 2): qURL share private-resource did not start serving within 30s (last state: desired=on, connection=connecting, serving_epoch=4): context deadline exceeded")
+	for i, want := range []string{
+		"daemon state retrying, failure category peer_timeout, retry attempt 2",
+		"last state: desired=on, connection=connecting, serving_epoch=4",
+	} {
+		got := productionRestartDiagnostics[i].FindSubmatch(stderr)
+		if len(got) != 2 || string(got[1]) != want {
+			t.Fatalf("diagnostic %d did not extract the expected fields", i)
+		}
+	}
+	if productionRestartDiagnostics[0].MatchString("qURL share did not become ready (daemon state retrying, failure category secret-value)") {
+		t.Fatal("unrecognized diagnostic category escaped the allowlist")
+	}
 }
 
 // Emit only a fixed class, never the stderr beside a public error message.
