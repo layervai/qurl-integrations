@@ -111,11 +111,11 @@ func logAudit(log *slog.Logger, level slog.Level, msg, event string, attrs ...sl
 
 // LogQURLMintRule records the access rule a mint applied and its effective
 // limits, without logging the link. An empty duration is the service default.
-func LogQURLMintRule(log *slog.Logger, teamID, channelID, userID, resourceID, ruleID string, oneTimeUse bool, expiresIn, sessionDuration string) {
+func LogQURLMintRule(log *slog.Logger, teamID, channelID, userID, resourceID, ruleID, mode string, oneTimeUse bool, expiresIn, sessionDuration string) {
 	logAudit(log, slog.LevelInfo, "qurl mint with access rule", QURLMintRule,
 		slog.String("team_id", teamID), slog.String("channel_id", channelID),
 		slog.String("user_id", userID), slog.String("resource_id", resourceID),
-		slog.String("rule_id", ruleID), slog.Bool("one_time_use", oneTimeUse),
+		slog.String("rule_id", ruleID), slog.String("mode", mode), slog.Bool("one_time_use", oneTimeUse),
 		slog.String("expires_in", expiresIn), slog.String("session_duration", sessionDuration))
 }
 

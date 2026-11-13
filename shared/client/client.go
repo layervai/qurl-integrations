@@ -498,6 +498,7 @@ type createForResourceBody struct {
 	ExpiresIn string `json:"expires_in,omitempty"`
 	// Always sent: the service defaults an omitted one_time_use to true on a
 	// tunnel, so false must be explicit for a reusable link.
+	// TODO(upstream-contract): qurl-service's tunnel one_time_use default.
 	OneTimeUse      bool          `json:"one_time_use"`
 	MaxSessions     int           `json:"max_sessions,omitempty"`
 	SessionDuration string        `json:"session_duration,omitempty"`

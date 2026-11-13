@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,6 +26,10 @@ import (
 // applying part of a rule could share more openly than the rule says.
 
 const accessRuleModePublic = "public"
+
+// privateRuleModes decide who can open the resource; catalog.v1.json "modes"
+// minus public (TestDefaultAccessRulesMatchCatalog checks it).
+var privateRuleModes = []string{"keys", "invite_only", "email_capture", "email_domain", "review", "contract"}
 
 // defaultAccessRules are the Default access rules, then the other ready-made
 // choices, by the IDs and names of
@@ -79,6 +84,9 @@ func refuseAccessRule(r *qurl.AccessRule) error {
 	if r.Payment != nil {
 		return &userError{msg: fmt.Sprintf("*%s* is a paid rule, which Slack can't set up. Share with it from qURL Desktop or the qURL CLI. %s", name, accessRuleChoicesHint)}
 	}
+	if r.Mode != accessRuleModePublic && !slices.Contains(privateRuleModes, r.Mode) {
+		return &userError{msg: fmt.Sprintf("Slack can't share with *%s*'s kind of rule yet. Share with it from qURL Desktop or the qURL CLI. %s", name, accessRuleChoicesHint)}
+	}
 	if !onlyLinkLimits(r) {
 		return &userError{msg: fmt.Sprintf("*%s* decides who can open the resource itself, which Slack can't set. Share with it from qURL Desktop or the qURL CLI. %s", name, accessRuleChoicesHint)}
 	}
@@ -103,6 +111,8 @@ func applyAccessRule(input *client.CreateInput, r *qurl.AccessRule) {
 // private ones, so a field a newer SDK models is refused, never dropped. It
 // relies on the SDK leaving unset fields nil (not empty) and adding no
 // unexported state, which TestOnlyLinkLimitsDecodedRule checks.
+// TODO(upstream-contract): qurl-service's AccessRule schema has
+// additionalProperties: false and no metadata fields.
 func onlyLinkLimits(r *qurl.AccessRule) bool {
 	rest := *r
 	rest.ID, rest.Name, rest.Mode, rest.LinkLimits = "", "", "", nil
@@ -142,7 +152,11 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 	switch {
 	case err != nil:
 		log.Info("get: access rule is ambiguous")
-		return nil, &userError{msg: fmt.Sprintf("*%s* matches more than one access rule. Rename the saved rule in qURL Desktop or the qURL CLI, or pick a Default access rule by ID (`rule:builtin.public`, `rule:once`).", escapeMrkdwnText(truncateRunes(selector, 40)))}
+		msg := fmt.Sprintf("*%s* matches more than one access rule. Rename the saved rule in qURL Desktop or the qURL CLI", escapeMrkdwnText(truncateRunes(selector, 40)))
+		if !slices.ContainsFunc(defaultAccessRules, func(r qurl.AccessRule) bool { return strings.EqualFold(r.ID, selector) }) {
+			msg += ", or pick a Default access rule by ID (`rule:builtin.public`, `rule:once`)"
+		}
+		return nil, &userError{msg: msg + "."}
 	case rule == nil:
 		log.Info("get: access rule not found", "saved_rules", len(saved), "saved_rules_unreadable", unreadable)
 		msg := fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateRunes(selector, 40)), accessRuleChoicesHint)

@@ -383,4 +383,9 @@ func TestHandleCRID_Rule(t *testing.T) {
 	if body["one_time_use"] != false || body["expires_in"] != nil || !strings.Contains(async, "anyone with the link can open it") {
 		t.Fatalf("mint body = %#v, reply = %q", body, async)
 	}
+	body = nil
+	_, _, async = newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID+` rule:"People you invite"`, testAdminTeamID, testAdminUserID)
+	if body != nil || !strings.Contains(async, "Slack can't set") {
+		t.Fatalf("refused rule minted %#v, reply = %q", body, async)
+	}
 }

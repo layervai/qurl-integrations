@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -31,6 +32,8 @@ func TestDefaultAccessRulesMatchCatalog(t *testing.T) {
 		t.Fatalf("read catalog: %v", err)
 	}
 	var catalog struct {
+		Modes    []string          `json:"modes"`
+		Examples []qurl.AccessRule `json:"examples"`
 		BuiltIns []qurl.AccessRule `json:"built_ins"`
 		Defaults []struct {
 			ID         string                     `json:"id"`
@@ -48,6 +51,16 @@ func TestDefaultAccessRulesMatchCatalog(t *testing.T) {
 	}
 	for _, d := range catalog.Defaults {
 		want[d.ID] = qurl.AccessRule{ID: d.ID, Name: d.Label, Mode: d.Mode, LinkLimits: d.LinkLimits}
+	}
+	if want := slices.DeleteFunc(slices.Clone(catalog.Modes), func(m string) bool { return m == accessRuleModePublic }); !slices.Equal(privateRuleModes, want) {
+		t.Errorf("privateRuleModes = %v, catalog private modes %v", privateRuleModes, want)
+	}
+	// The catalog's example saved rules decode as the service sends them and
+	// are refused as private, not as newer-app rules.
+	for i := range catalog.Examples {
+		if err := refuseAccessRule(&catalog.Examples[i]); err == nil || !strings.Contains(err.Error(), "decides who can open") {
+			t.Errorf("example %q: refusal = %v", catalog.Examples[i].Name, err)
+		}
 	}
 	// Every ready-made choice is known, so none is reported as missing.
 	known := map[string]bool{}
@@ -122,7 +135,7 @@ func TestRefuseAndApplyAccessRule(t *testing.T) {
 		{name: "saved public rule", rule: qurl.AccessRule{Name: "Quick", Mode: accessRuleModePublic, LinkLimits: &qurl.AccessRuleLinkLimits{ExpiresIn: "1h", OneTimeUse: new(false)}}, want: client.CreateInput{ExpiresIn: "1h"}},
 		{name: "work email", rule: qurl.AccessRule{Name: "Team", Mode: "email_domain", EmailDomain: "example.com"}, refusal: "Slack can't set"},
 		{name: "paid", rule: qurl.AccessRule{Name: "Paid", Mode: "contract", Payment: &qurl.AccessRulePayment{PriceID: "price_1"}}, refusal: "is a paid rule"},
-		{name: "unknown mode", rule: qurl.AccessRule{Name: "Future", Mode: "future_mode"}, refusal: "Slack can't set"},
+		{name: "unknown mode", rule: qurl.AccessRule{Name: "Future", Mode: "future_mode"}, refusal: "kind of rule yet"},
 		{name: "public with a private setting", rule: qurl.AccessRule{Name: "Odd", Mode: accessRuleModePublic, AllowedEmails: []string{"a@example.com"}}, refusal: "Slack can't set"},
 		{name: "unknown field", rule: qurl.AccessRule{Name: "*Newer*", Mode: accessRuleModePublic, Unknown: map[string]json.RawMessage{"geo": []byte(`"us"`)}}, refusal: "newer qURL app"},
 		{name: "unknown link-limit field", rule: qurl.AccessRule{Name: "Newer", Mode: accessRuleModePublic, LinkLimits: &qurl.AccessRuleLinkLimits{ExpiresIn: "1h", Unknown: map[string]json.RawMessage{"max_opens": []byte("2")}}}, refusal: "newer qURL app"},
@@ -226,7 +239,7 @@ func TestHandleGet_RuleSaved(t *testing.T) {
 	audit := findAuditRecord(logs, slackaudit.QURLMintRule)
 	for k, want := range map[string]any{
 		"team_id": testAdminTeamID, "channel_id": "C_test", "user_id": testAdminUserID, "resource_id": testResourceIDFix,
-		"rule_id": "11111111-1111-4111-8111-111111111111", "one_time_use": true, "expires_in": "2h", "session_duration": "30m",
+		"rule_id": "11111111-1111-4111-8111-111111111111", "mode": "public", "one_time_use": true, "expires_in": "2h", "session_duration": "30m",
 	} {
 		if audit[k] != want {
 			t.Errorf("audit[%s] = %#v, want %#v; audit=%#v", k, audit[k], want, audit)
@@ -289,8 +302,8 @@ func TestHandleGet_RuleRefusedBeforeMint(t *testing.T) {
 		{flags: `rule:"People you approve"`, want: "Slack can't set"},
 		{flags: "rule:Newer", want: "newer qURL app", saved: map[string]any{"name": "Newer", "mode": "public", "max_opens": 2}},
 		{flags: "rule:Quick", want: "newer qURL app", saved: map[string]any{"name": "Quick", "mode": "public", "link_limits": map[string]any{"expires_in": "1h", "max_opens": 3}}},
-		{flags: `rule:"one-time link"`, want: "matches more than one access rule", saved: map[string]any{"name": "One-time link", "mode": "invite_only"}},
-		{flags: "rule:once", want: "matches more than one access rule", saved: map[string]any{"name": "once", "mode": "invite_only"}},
+		{flags: `rule:"one-time link"`, want: "or pick a Default access rule by ID", saved: map[string]any{"name": "One-time link", "mode": "invite_only"}},
+		{flags: "rule:once", want: "Rename the saved rule in qURL Desktop or the qURL CLI.", saved: map[string]any{"name": "once", "mode": "invite_only"}},
 		{flags: "rule:builtin.public", want: "matches more than one access rule", saved: map[string]any{"name": "builtin.public", "mode": "review"}},
 	} {
 		var items []map[string]any

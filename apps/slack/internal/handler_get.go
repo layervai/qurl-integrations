@@ -636,7 +636,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	}
 	notice := oneTimeUseNotice()
 	if rule != nil {
-		slackaudit.LogQURLMintRule(log, args.teamID, args.channelID, args.userID, input.ResourceID, rule.ID, input.OneTimeUse, input.ExpiresIn, input.SessionDuration)
+		slackaudit.LogQURLMintRule(log, args.teamID, args.channelID, args.userID, input.ResourceID, rule.ID, rule.Mode, input.OneTimeUse, input.ExpiresIn, input.SessionDuration)
 		notice = ruleLinkNotice(input, out.ExpiresAt)
 	}
 	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
