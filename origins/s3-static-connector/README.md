@@ -1,10 +1,24 @@
-# s3-static-connector
+# s3-static-connector (AWS S3 pilot)
 
-Reusable origin image for a **private S3 static site behind qURL™ Connector**.
+Pilot origin image for a **private S3 static site behind qURL™ Connector**.
 It serves a private S3 bucket over plain HTTP on **loopback only**, so the qURL
 Connector (running as a sidecar in the same network namespace) is the sole
 reachable path and applies access control before any traffic reaches the
 origin.
+
+## Pilot compatibility
+
+The pilot supports non-dotted buckets in standard AWS commercial regions,
+with ordinary object paths and standard AWS S3 responses. It is not a generic
+S3-compatible origin. Keep external deployments within this contract.
+
+| Area | Pilot contract | Outside the pilot contract |
+| --- | --- | --- |
+| Bucket names | DNS-compatible, non-dotted names, 3–63 characters, using lowercase letters, numbers, and hyphens. | Dotted bucket names are not accepted. |
+| Partition and region | Standard AWS commercial S3 virtual-hosted endpoints: `<bucket>.s3.<region>.amazonaws.com`. | China, GovCloud, ISO/ISO-B, FIPS, dualstack, and VPC endpoint hostnames are not supported. `S3_ENDPOINT_ADDR` changes the dial target only; it does not change the signed Host or SNI. |
+| Object paths | Ordinary keys under the configured optional prefix, with the configured index/error-document behavior. | Validate exotic escaping, Unicode, and reserved-character cases against the target bucket before customer use; see [key canonicalization follow-up #854](https://github.com/layervai/qurl-integrations/issues/854). |
+| S3-compatible services | Standard AWS S3 behavior. | Custom S3-compatible endpoints are not supported by this signed-host contract. Their cacheable 4xx responses also need separate hardening; see [#874](https://github.com/layervai/qurl-integrations/issues/874). |
+| Readiness evidence | The behavior contract and internal stats/dashboard dogfood cover the pilot path. | Fixture tests and internal dogfood do not establish external customer readiness. Complete the paired-Connector deployment and protected-object smoke test in the target environment first; see [customer quickstart #892](https://github.com/layervai/qurl-integrations/issues/892). |
 
 Published image:
 
