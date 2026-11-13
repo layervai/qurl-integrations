@@ -47,15 +47,13 @@ var errAccessRuleAmbiguous = errors.New("more than one access rule matches")
 
 // findAccessRule returns the Default or saved rule whose ID is selector, or
 // whose name is selector ignoring case and surrounding space; nil if none.
+// Matches on different rules, an ID and a name included, are ambiguous.
 func findAccessRule(selector string, saved []qurl.AccessRule) (*qurl.AccessRule, error) {
 	var match *qurl.AccessRule
 	for _, list := range [][]qurl.AccessRule{defaultAccessRules, saved} {
 		for i := range list {
 			r := &list[i]
-			if r.ID == selector {
-				return r, nil
-			}
-			if !strings.EqualFold(strings.TrimSpace(r.Name), selector) {
+			if r.ID != selector && !strings.EqualFold(strings.TrimSpace(r.Name), selector) {
 				continue
 			}
 			if match != nil && match.ID != r.ID {
@@ -96,10 +94,6 @@ func applyAccessRule(input *client.CreateInput, r *qurl.AccessRule) error {
 // work; when the read fails, only a Default rule's ID does.
 func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, input *client.CreateInput, selector string) error {
 	selector = strings.TrimSpace(selector)
-	// A Default rule's exact ID can't collide with a saved rule, so it needs no read.
-	if rule, _ := findAccessRule(selector, nil); rule != nil && rule.ID == selector {
-		return applyAccessRule(input, rule)
-	}
 	saved, loadErr := c.AccessRules(ctx)
 	var apiErr *client.APIError
 	if errors.As(loadErr, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
@@ -111,8 +105,8 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 	switch {
 	case err != nil:
 		return &userError{msg: fmt.Sprintf("More than one access rule is named *%s*. Rename your saved rule in qURL Desktop or the qURL CLI.", escapeMrkdwnText(truncateForError(selector)))}
-	case loadErr != nil:
-		// A name might also be an unread saved rule's, so nothing is applied.
+	case loadErr != nil && (rule == nil || rule.ID != selector):
+		// With no saved rules read, only a Default rule's exact ID is unambiguous.
 		log.Warn("get: saved access rules read failed", "error", loadErr)
 		return &userError{msg: "Couldn't read your saved access rules. Please try again. " + accessRuleChoicesHint}
 	case rule == nil:

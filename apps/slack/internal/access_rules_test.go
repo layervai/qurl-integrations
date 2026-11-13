@@ -71,6 +71,7 @@ func TestFindAccessRule(t *testing.T) {
 		{selector: "one-time link", wantErr: true}, // a saved rule shares the preset's name
 		{selector: "Nobody"},
 		{selector: "people who pay", wantID: "paid"},
+		{selector: "builtin.review", wantID: "builtin.review"},
 	} {
 		got, err := findAccessRule(tc.selector, saved)
 		gotID := ""
@@ -249,6 +250,7 @@ func TestHandleGet_RuleRefusedBeforeMint(t *testing.T) {
 		{flags: "rule:Newer", want: "newer qURL app", saved: map[string]any{"name": "Newer", "mode": "public", "max_opens": 2}},
 		{flags: "rule:Quick", want: "newer qURL app", saved: map[string]any{"name": "Quick", "mode": "public", "link_limits": map[string]any{"expires_in": "1h", "max_opens": 3}}},
 		{flags: `rule:"one-time link"`, want: "More than one access rule", saved: map[string]any{"name": "One-time link", "mode": "invite_only"}},
+		{flags: "rule:once", want: "More than one access rule", saved: map[string]any{"name": "once", "mode": "invite_only"}},
 	} {
 		var items []map[string]any
 		if tc.saved != nil {
