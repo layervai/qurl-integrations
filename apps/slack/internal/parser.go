@@ -161,7 +161,7 @@ func (c *Command) Reason() string {
 	return c.Flags["reason"]
 }
 
-// Rule returns the parsed `rule:"..."` flag on `get`: an access rule's
+// Rule returns the parsed `rule:"..."` flag on `get` and `crid`: an access rule's
 // name or ID, empty when unset.
 func (c *Command) Rule() string {
 	if c == nil {
@@ -480,7 +480,7 @@ func tokenize(text string) []string {
 }
 
 // parseGet extracts the positional argument (a tunnel `$<slug>` or a
-// channel `$<alias>`) and the optional `dm:` / `reason:` flags. A raw
+// channel `$<alias>`) and the optional `dm:` / `reason:` / `rule:` flags. A raw
 // `http(s)://` first positional is rejected with [ErrURLNotSupportedGet];
 // otherwise the token must start with `$` and validate as an alias-shaped
 // name via [parseAliasToken]. Get mints from a tunnel slug or a channel
@@ -525,7 +525,7 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 	return applyMintFlags(cmd, rest[1:])
 }
 
-// applyMintFlags applies the trailing `dm:` / `reason:` flags shared by `get`
+// applyMintFlags applies the trailing `dm:` / `reason:` / `rule:` flags shared by `get`
 // and `crid`.
 func applyMintFlags(cmd *Command, toks []string) (*Command, error) {
 	for _, tok := range toks {
@@ -837,6 +837,10 @@ func applyFlag(cmd *Command, tok string) error {
 		if strings.TrimSpace(val) == "" {
 			return fmt.Errorf("%w: `%s` (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, truncateForError(tok))
 		}
+		// It changes the link's limits, so a second rule: is an error, not last-wins.
+		if _, dup := cmd.Flags[key]; dup {
+			return fmt.Errorf("%w: `rule` given more than once", ErrInvalidFlag)
+		}
 		// No rule name is longer (the agent's propose_get has the same cap).
 		if utf8.RuneCountInString(val) > agent.MaxRuleRunes {
 			return fmt.Errorf("%w: `rule` is longer than %d characters", ErrInvalidFlag, agent.MaxRuleRunes)
@@ -849,7 +853,7 @@ func applyFlag(cmd *Command, tok string) error {
 		// but with a transitional hint instead of the generic
 		// "unknown flag", since some users have `once:true` in saved
 		// slash-command recipes and deserve to know it's now redundant.
-		return fmt.Errorf("%w: `once` is no longer needed — every `/qurl get` or `/qurl crid` link is one-time use by default", ErrInvalidFlag)
+		return fmt.Errorf("%w: `once` is no longer needed — every `/qurl get` or `/qurl crid` link is one-time use by default (`rule:once` picks the One-time link rule)", ErrInvalidFlag)
 	default:
 		return fmt.Errorf("%w: unknown flag `%s`", ErrInvalidFlag, truncateForError(key))
 	}

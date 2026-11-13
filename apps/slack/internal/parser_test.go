@@ -308,6 +308,7 @@ func TestParse_GetFlagErrors(t *testing.T) {
 		{name: "empty quoted value", text: `get $prod-db reason:""`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
 		{name: "empty rule", text: `get $prod-db rule:""`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
 		{name: "blank rule", text: `get $prod-db rule:"  "`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
+		{name: "repeated rule", text: "get $prod-db rule:once rule:builtin.public", wantSentnl: ErrInvalidFlag, wantSubstr: "more than once"},
 		{name: "over-long rule", text: "get $prod-db rule:" + strings.Repeat("x", agent.MaxRuleRunes+1), wantSentnl: ErrInvalidFlag, wantSubstr: "longer than"},
 		// Strict-posture on dm: only `true` / `false` (case-folded)
 		// accepted. Without these rejections, `dm:yes` / `dm:1`

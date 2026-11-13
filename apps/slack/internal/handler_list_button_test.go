@@ -251,6 +251,9 @@ func TestHandleBlockActions_CreateQurlMints(t *testing.T) {
 	// Bind $prod-db → r_prod_db in C_test so the token resolves, exactly
 	// as the typed `/qurl get $prod-db` happy path does.
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer(http.MethodGet, "/v1/me/access-rules", func(http.ResponseWriter, *http.Request) {
+		t.Error("the Get button read the access rules")
+	})
 	var mint map[string]any
 	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&mint); err != nil {
