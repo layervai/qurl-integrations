@@ -440,10 +440,7 @@ func renderGetSuccess(link, notice string) (fallbackText string, blocks []any) {
 // minted link. It mirrors the pre-button prose (raw URL included) so a client
 // that can't render the Enter Portal button still receives a usable link. NOTE:
 // Slack also uses this text as the push/desktop notification preview, so the raw
-// URL still transits the notification channel — reusable for a `rule:` link
-// such as Anyone with the link — and is out of scope for the button's in-body
-// privacy win. A link-less fallback is tracked in #922; whether rule links
-// need an opt-in is #2024.
+// URL (reusable for some `rule:` links) transits notifications; see #922, #2024.
 func enterPortalFallbackText(link, notice string) string {
 	return ":link: qURL ready: " + link + " (" + notice + ")"
 }
@@ -522,6 +519,16 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 		return getResult{}, err
 	}
 	return h.mintForResource(ctx, log, args, boundResourceID)
+}
+
+// getClient is authenticatedClient with getWork's user-facing error.
+func (h *Handler) getClient(ctx context.Context, log *slog.Logger, teamID string) (*client.Client, error) {
+	c, err := h.authenticatedClient(ctx, teamID)
+	if err != nil {
+		log.Error("get: API key lookup failed", "error", err)
+		return nil, &userError{msg: authErrorMessage(err)}
+	}
+	return c, nil
 }
 
 // mintForResource runs the rate-limit→mint→render tail shared by `/qurl get`
@@ -711,16 +718,6 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 // Caller must have already checked AdminStore (getWork does this before
 // resolving). Returns a [*userError] on lookup failure, not-a-known-token, or
 // not-allowed-here.
-// getClient is authenticatedClient with getWork's user-facing error.
-func (h *Handler) getClient(ctx context.Context, log *slog.Logger, teamID string) (*client.Client, error) {
-	c, err := h.authenticatedClient(ctx, teamID)
-	if err != nil {
-		log.Error("get: API key lookup failed", "error", err)
-		return nil, &userError{msg: authErrorMessage(err)}
-	}
-	return c, nil
-}
-
 func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string) (string, error) {
 	resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, token)
 	if err != nil {

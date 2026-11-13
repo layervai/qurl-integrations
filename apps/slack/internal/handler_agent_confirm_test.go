@@ -2056,21 +2056,13 @@ func TestPostAgentConfirm_BlankSummaryFallsBack(t *testing.T) {
 
 // TestConfirm_GetCarriesAccessRule fences that an approved get applies the
 // proposal's access rule: a rule Slack can't apply is refused privately, with
-// no mint (the backend stub would fail a mint without the default limits).
+// no mint and a neutral public card.
 func TestConfirm_GetCarriesAccessRule(t *testing.T) {
-	names := defaultTestTableNames()
-	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
-		names.channelPolicy: {seedChannelPolicySet("T1", "D1", "", []string{testAgentGetResourceID})},
-	})
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Rule: "builtin.invite_only", Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
-	hc.h.Wait()
-
-	if len(hc.blocks.calls) != 0 {
-		t.Fatalf("a refused rule must not deliver a link, got %+v", hc.blocks.calls)
+	mint, hc := confirmRuleGet(t, "builtin.invite_only")
+	if mint != nil || len(hc.blocks.calls) != 0 {
+		t.Fatalf("mint = %v, deliveries = %+v; want a refusal", mint, hc.blocks.calls)
 	}
-	private := postedTexts(hc)
-	if !strings.Contains(private, "Slack can't set") {
+	if private := postedTexts(hc); !strings.Contains(private, "Slack can't set") {
 		t.Fatalf("private reply = %q, want the rule refusal", private)
 	}
 	_, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
