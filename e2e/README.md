@@ -86,7 +86,7 @@ npm test                        # unit tests, then live E2E (needs .env)
 npm run test:unit               # offline helper tests only (no .env)
 npm run test:e2e -- smoke.test  # one live file
 npm run test:e2e -- -t 'mint 10 links' # one self-contained live test by name
-npx tsc --noEmit                # typecheck only (no .env needed)
+npm run typecheck                # typecheck only (no .env needed)
 ```
 
 Everything — including `playwright`, which the tunnel-view tests
