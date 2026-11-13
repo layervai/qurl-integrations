@@ -22,6 +22,7 @@
 // need for a problem the bot can solve itself.
 
 const express = require('express');
+const { createHash } = require('crypto');
 const db = require('../store');
 const config = require('../config');
 const logger = require('../logger');
@@ -60,14 +61,16 @@ const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
 // rate limit. Threshold is 5× the HMAC limiter to avoid throttling
 // during a real registry-rebuild incident.
 //
-// CROSS-TENANT FAIRNESS TRADE-OFF: keyed on IP alone. qurl-service
-// egresses from a small NAT/proxy pool so a single guild whose
-// webhook_owner_id has drifted vs. qurl-service's signing identity
-// can burn 150/min on the shared source IP and 429 other guilds'
-// legitimate events. Acceptable at low BYOK count today (≤10 in
-// prod); at scale this should key on (ip, owner_id) or skip per-IP
-// limiting for OWNER_UNKNOWN entirely.
-const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000 });
+// Unknown owners share NAT egress with valid tenants, so budget (IP, owner)
+// independently and never apply this limiter to a verified known owner.
+// Owner IDs are untrusted: hash the tuple to bound retained key size and keep
+// the existing limiter's global entry cap. A wider IP budget limits unknown-owner
+// 401 responses under owner rotation. Attempts already limited for one
+// owner do not consume that IP budget; verified known owners bypass both.
+// At the tuple-store cap, refuse unseen unknown owners until the sweep frees
+// space rather than let owner rotation erase active counters.
+const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000, preserveAtCapacity: true });
+const unknownOwnerIpLimiter = createBadSigLimiter({ max: 1500, windowMs: 60_000 });
 
 // Reason codes returned from verifyAndResolve. Caller maps them to
 // HTTP status + audit event + rate-limiter interaction in one place
@@ -128,7 +131,6 @@ function verifyAndResolve(req) {
   }
   const ownerId = body && typeof body.owner_id === 'string' ? body.owner_id : null;
   if (!ownerId) {
-    logger.warn('qURL webhook raw body missing or non-string owner_id');
     return { result: VERIFY_RESULTS.OWNER_ID_MISSING };
   }
 
@@ -999,19 +1001,17 @@ function editSenderCounterInBackground({
     });
 }
 
+function respondRateLimited(res, ip) {
+  logger.warn('qURL webhook rate limit exceeded', { ip });
+  logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, {});
+  return res.status(429).json({ error: 'Too many invalid webhook attempts' });
+}
+
 router.post('/qurl', async (req, res) => {
   const ip = req.ip || 'unknown';
-  // OR-coupling note: an IP that already burned the HMAC limiter
-  // (30/min) will get 429'd here even if its current request would
-  // have been OWNER_UNKNOWN (separately budgeted at 150/min). That's
-  // acceptable — the IP is already flagged as suspicious — so the
-  // looser unknown-owner threshold protects legitimate operational
-  // drift from OTHER IPs, not from the same already-bad-actor IP.
-  if (badSigLimiter.shouldThrottle(ip) || unknownOwnerLimiter.shouldThrottle(ip)) {
-    logger.warn('qURL webhook rate limit exceeded', { ip });
-    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, {});
-    return res.status(429).json({ error: 'Too many invalid webhook attempts' });
-  }
+  // Signature abuse stays IP-scoped before verification; unknown budgets
+  // follow the registry lookup so valid/recovered owners cannot be blocked.
+  if (badSigLimiter.shouldThrottle(ip)) return respondRateLimited(res, ip);
 
   const { result, ownerId, body } = verifyAndResolve(req);
 
@@ -1058,7 +1058,17 @@ router.post('/qurl', async (req, res) => {
       || result === VERIFY_RESULTS.OWNER_ID_MISSING;
     let totalInWindow = null;
     if (isHmacFailure) totalInWindow = badSigLimiter.recordBadSig(ip);
-    else if (isUnknownOwner) totalInWindow = unknownOwnerLimiter.recordBadSig(ip);
+    else if (isUnknownOwner) {
+      const key = createHash('sha256').update(JSON.stringify([ip, ownerId ?? null])).digest('hex');
+      if (unknownOwnerLimiter.shouldThrottle(key) || unknownOwnerIpLimiter.shouldThrottle(ip)) {
+        return respondRateLimited(res, ip);
+      }
+      unknownOwnerIpLimiter.recordBadSig(ip);
+      totalInWindow = unknownOwnerLimiter.recordBadSig(key);
+      if (result === VERIFY_RESULTS.OWNER_ID_MISSING) {
+        logger.warn('qURL webhook raw body missing or non-string owner_id');
+      }
+    }
     // Audit-event split mirrors the threat-model split: OWNER_* are
     // operational/payload-shape signal (route both to the same
     // unknown-owner dashboard line); SIG_* are HMAC-failure signal.
@@ -1188,6 +1198,7 @@ router.post('/qurl', async (req, res) => {
 router.stopIntervals = function stopIntervals() {
   badSigLimiter.stopSweep();
   unknownOwnerLimiter.stopSweep();
+  unknownOwnerIpLimiter.stopSweep();
   clearInterval(senderCounterCacheSweepTimer);
   for (const { timer } of senderCounterFlushTimers.values()) clearTimeout(timer);
   senderCounterFlushTimers.clear();
