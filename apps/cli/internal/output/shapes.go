@@ -44,7 +44,7 @@ type publishJSON struct {
 	Link *limitedLinkJSON `json:"link,omitempty"`
 	// SettingsDiffer is true when an existing share keeps settings other
 	// than the chosen rule's.
-	SettingsDiffer bool `json:"settings_differ,omitempty"`
+	SettingsDiffer *bool `json:"settings_differ,omitempty"`
 	// OriginHeaderName names the header added to requests to the target;
 	// the value is never part of any output.
 	OriginHeaderName string `json:"origin_header_name,omitempty"`
@@ -198,6 +198,30 @@ type downloadJSON struct {
 	Publisher         publisherJSON `json:"publisher"`
 }
 
+// Report whether a limited link used the requested settings, including an explicit false.
+func publishSettingsDiffer(res *qurlapi.Published) *bool {
+	if res.OtherSettings || res.LimitedLink != nil {
+		return new(res.OtherSettings)
+	}
+	return nil
+}
+
+// PublishLinkFailure reports the resource that exists when its link failed.
+// Outside JSON mode this writes nothing; stderr remains the failure diagnostic.
+func (p *Printer) PublishLinkFailure(res *qurlapi.Published) error {
+	if p.format != FormatJSON {
+		return nil
+	}
+	return p.writeJSON(struct {
+		CRID           string `json:"crid"`
+		ResourceID     string `json:"resource_id"`
+		Error          string `json:"error"`
+		Private        *bool  `json:"private,omitempty"`
+		FoundExisting  *bool  `json:"found_existing,omitempty"`
+		SettingsDiffer bool   `json:"settings_differ"`
+	}{CRID: res.CRID, ResourceID: res.ResourceID, Error: "link_creation_failed", Private: res.Private, FoundExisting: res.FoundExisting, SettingsDiffer: res.OtherSettings})
+}
+
 // Publish renders a publish result. Text mode says in one row who can open
 // the resource and prints the CRID last, alone on its line, so it is the
 // easiest thing to select and copy; JSON carries the same fact as `private`,
@@ -240,7 +264,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			FoundExisting:    res.FoundExisting,
 			Publisher:        publisherDocument(res.Publisher),
 			Link:             limitedLinkDocument(res.LimitedLink),
-			SettingsDiffer:   res.OtherSettings,
+			SettingsDiffer:   publishSettingsDiffer(res),
 			OriginHeaderName: res.OriginHeaderName,
 		})
 	case p.quiet:

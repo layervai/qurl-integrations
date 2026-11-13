@@ -774,7 +774,7 @@ func (o *globalOpts) mintRuleLink(ctx context.Context, client qurlapi.Client, ru
 			// A plain republish never asked for a link; it still succeeds.
 			return nil
 		}
-		return err
+		return errors.Join(err, o.printer().PublishLinkFailure(published))
 	}
 	published.LimitedLink = link
 	return nil

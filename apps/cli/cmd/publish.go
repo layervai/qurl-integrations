@@ -395,7 +395,7 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err := registry.Put(ctx, local); err != nil {
 		return compensate(err)
 	}
-	shared := &qurlapi.Published{CRID: local.CRID, FoundExisting: resolved.FoundExisting, Private: resolved.Private, ConsumerAccess: resolved.ConsumerAccess}
+	shared := &qurlapi.Published{CRID: local.CRID, ResourceID: local.ResourceID, FoundExisting: resolved.FoundExisting, Private: resolved.Private, ConsumerAccess: resolved.ConsumerAccess}
 	// Limits are saved before serving, so a failed save still turns a new
 	// share back off; the link is minted once the share serves.
 	limits, err := opts.ruleLinkLimits(ctx, access.Rule, shared)

@@ -885,7 +885,15 @@ without changing it. If this device has no saved limits for an existing public
 item, an explicit rule saves its link limits and mints a link. This also recovers
 a first publish whose response or local save was lost. Existing saved limits
 and approval lifetimes are kept; when they differ from the requested rule,
-JSON reports `"settings_differ": true`.
+JSON reports `"settings_differ": true`. A successfully minted limited link
+explicitly reports `"settings_differ": false` when the requested settings apply.
+
+If publication succeeds but a requested limited link cannot be created or
+verified, `-o json` emits the confirmed `crid`, `resource_id`, `private` and
+`found_existing` (when known), plus `settings_differ` and
+`"error":"link_creation_failed"`, and exits non-zero. The IDs name the confirmed resource; there is no usable
+link in this result. For local origins, link creation runs after serving starts; this result does not report serving status.
+Keep checking the exit code; do not treat this document as a successful share.
 
 Supervising apps call `qurl rules capabilities -o json` (offline), read and edit
 with `rules list|save|delete|sync|resolve -o json` (`save` reads one rule from
