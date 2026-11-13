@@ -5,8 +5,8 @@ leaving the channel. Admins protect a resource once; anyone in the channel
 mints a fresh, expiring link with a single slash command.
 
 A **qURL™** is a one-time-use access link by default: it works for the first
-person who opens it, then burns. Links also expire on their own, so nothing stays live
-longer than it needs to.
+person who opens it, then burns. Links also expire on their own, so nothing
+stays live longer than it needs to.
 
 ## Quickstart
 
@@ -57,7 +57,7 @@ personal data out of the repository.
 | `/qurl get <$id\|$alias>` | Mint a one-time qURL link for a resource in this channel. |
 | `/qurl get <$id\|$alias> dm:true` | Mint the link and DM it to you instead of posting it in the channel. |
 | `/qurl get <$id\|$alias> reason:"…"` | Mint the link and record a reason in the audit log. |
-| `/qurl get <$id\|$alias> rule:"…"` | Mint the link with an access rule: `Anyone with the link`, `One-time link`, or one of your saved rules. |
+| `/qurl get <$id\|$alias> rule:"…"` | Mint the link with an access rule: `Anyone with the link`, `One-time link`, or a rule saved on the workspace's qURL account. |
 | `/qurl crid <CRID>` | Mint a one-time qURL link for a resource in this channel, by its permanent CRID. |
 | `/qurl crid <CRID> dm:true` | Mint the CRID's link and DM it to you instead of posting it in the channel. |
 | `/qurl crid <CRID> reason:"…"` | Mint the CRID's link and record a reason in the audit log. |
@@ -164,8 +164,8 @@ it burns on first open. Add `dm:true` to receive the link privately, or
 
 Add `rule:"…"` to share with an access rule instead, by name or ID (such as
 `rule:once`): one of the Default access rules (`Anyone with the link`,
-`One-time link`) or one of your saved rules ("Your rules"). Saved rules are the
-ones on the qURL account that connected this workspace, managed in qURL Desktop
+`One-time link`) or a saved rule ("Your rules"). Saved rules are the ones on
+the qURL account that connected this workspace, so every member shares them, managed in qURL Desktop
 or the qURL CLI. The link then follows only the rule's limits, without the
 default single-session cap, so an `Anyone with the link` link can be opened
 more than once, by more than one person. Slack mints links on existing

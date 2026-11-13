@@ -61,7 +61,7 @@ func TestParseProposal(t *testing.T) {
 			wantOK:     true,
 			wantAction: ActionGet,
 			check: func(t *testing.T, p *Proposal) {
-				if p.Rule != "Team only" || !strings.Contains(p.Summary, `access rule "Team only"`) {
+				if p.Rule != "Team only" || !strings.Contains(p.Summary, `access rule "Team only"`) || !strings.Contains(p.Summary, "may open more than once") {
 					t.Errorf("got %+v", p)
 				}
 			},

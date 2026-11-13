@@ -44,7 +44,7 @@ var defaultAccessRules = []qurl.AccessRule{
 }
 
 // accessRuleChoicesHint names what a Slack link can be shared with.
-const accessRuleChoicesHint = "Slack can share with *Anyone with the link*, *One-time link*, or one of your saved rules that lets anyone with the link open it."
+const accessRuleChoicesHint = "Slack can share with *Anyone with the link*, *One-time link*, or a rule saved on this workspace's qURL account that lets anyone with the link open it."
 
 var errAccessRuleAmbiguous = errors.New("more than one access rule matches")
 
@@ -134,11 +134,11 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 	switch {
 	case err != nil:
 		log.Info("get: access rule is ambiguous")
-		return nil, &userError{msg: fmt.Sprintf("*%s* matches more than one access rule. Rename your saved rule in qURL Desktop or the qURL CLI.", escapeMrkdwnText(truncateForError(selector)))}
+		return nil, &userError{msg: fmt.Sprintf("*%s* matches more than one access rule. Rename the saved rule in qURL Desktop or the qURL CLI, or pick a Default access rule by ID (`rule:builtin.public`, `rule:once`).", escapeMrkdwnText(truncateForError(selector)))}
 	case loadErr != nil && (rule == nil || !strings.EqualFold(rule.ID, selector)):
 		// With no saved rules read, only a Default rule's exact ID is unambiguous.
 		log.Warn("get: saved access rules read failed", "error", loadErr)
-		return nil, &userError{msg: "Couldn't read your saved access rules. Please try again. " + accessRuleChoicesHint}
+		return nil, &userError{msg: "Couldn't read this workspace's saved access rules. Please try again. " + accessRuleChoicesHint}
 	case rule == nil:
 		log.Info("get: access rule not found", "saved_rules", len(saved), "saved_rules_unreadable", unreadable)
 		msg := fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateForError(selector)), accessRuleChoicesHint)

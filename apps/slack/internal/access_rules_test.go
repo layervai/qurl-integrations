@@ -253,7 +253,7 @@ func TestHandleGet_RuleReadFailure(t *testing.T) {
 		writeAPIError(t, w, http.StatusInternalServerError, "internal", "Internal")
 	}
 	reply, mint := ruleGet(t, `rule:"Team only"`, failing)
-	if mint != nil || !strings.Contains(reply, "Couldn't read your saved access rules") {
+	if mint != nil || !strings.Contains(reply, "Couldn't read this workspace's saved access rules") {
 		t.Fatalf("mint = %v, reply = %q", mint, reply)
 	}
 	// A Default rule's name could be an unread saved rule's too; only its ID mints.
@@ -290,6 +290,7 @@ func TestHandleGet_RuleRefusedBeforeMint(t *testing.T) {
 		{flags: "rule:Quick", want: "newer qURL app", saved: map[string]any{"name": "Quick", "mode": "public", "link_limits": map[string]any{"expires_in": "1h", "max_opens": 3}}},
 		{flags: `rule:"one-time link"`, want: "matches more than one access rule", saved: map[string]any{"name": "One-time link", "mode": "invite_only"}},
 		{flags: "rule:once", want: "matches more than one access rule", saved: map[string]any{"name": "once", "mode": "invite_only"}},
+		{flags: "rule:builtin.public", want: "matches more than one access rule", saved: map[string]any{"name": "builtin.public", "mode": "review"}},
 	} {
 		var items []map[string]any
 		if tc.saved != nil {
