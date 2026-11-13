@@ -994,9 +994,19 @@ LayerV verifies the payment and collects 3%, including on renewals.
 
 If you already have a fixed Stripe price, you can use `--stripe-account` and
 `--stripe-price` when publishing or configuring contract access.
+
+Run `qurl payments account -o json` to check whether Stripe has enabled charges and payouts.
 Adding payment with `qurl access configure` makes an existing public CRID private.
 Removing payment keeps it private. Publishing the same target again does not
 change its payment policy.
+
+`qurl payments disconnect` stops every subscription from renewing, then removes
+LayerV from the Stripe account. Buyers keep access until their paid period ends
+and are not charged again. New purchases stop until you connect the same or a
+different account. It asks first; scripts pass `--yes`. If it reports that it
+did not finish, run it again: LayerV stays connected until every renewal has stopped. Scripts should read `outcome` in `-o json`: with `--yes` no status is read, so
+`disconnected: true` only means nothing is connected any more, and
+`released_revoked` means subscriptions must still be canceled in Stripe.
 
 `qurl access --help` lists all owner actions. Changes require the current
 version. If session removal is pending, retry the exact removal and version;

@@ -8,14 +8,16 @@
   "scripts": {
     "test": "npm run test:unit && npm run test:e2e",
     "test:e2e": "node --env-file-if-exists=.env ./node_modules/jest/bin/jest.js --config jest.config.js",
-    "test:unit": "jest --config jest.unit.config.js"
+    "test:unit": "jest --config jest.unit.config.js",
+    "typecheck": "node node_modules/typescript-native/bin/tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
-    "@types/node": "^24.0.0",
-    "jest": "^30.3.0",
-    "playwright": "^1.60.0",
-    "ts-jest": "^29.4.9",
-    "typescript": "^6.0.2"
+    "@types/node": "^26.6.5",
+    "jest": "^30.5.2",
+    "playwright": "^1.65.0",
+    "ts-jest": "^29.4.15",
+    "typescript": "^6.0.2",
+    "typescript-native": "npm:typescript@7.0.2"
   }
 }
