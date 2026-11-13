@@ -295,7 +295,6 @@ func TestRepublishWithOtherSettingsWarns(t *testing.T) {
 	}{
 		{"approvals", true, map[string]any{"mode": "review", "version": 1, "approval_expires_in": "30d"}, `{"id":"11111111-1111-4111-8111-111111111111","name":"Week","mode":"review","approval_expires_in":"7d"}`, true},
 		{"same approvals", true, map[string]any{"mode": "review", "version": 1, "approval_expires_in": "7d"}, `{"id":"11111111-1111-4111-8111-111111111111","name":"Week","mode":"review","approval_expires_in":"7d"}`, false},
-		{"link limits", false, nil, hourRule, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
@@ -344,14 +343,15 @@ func TestRepublishTreatsAnExplicitDefaultAsTheSameSettings(t *testing.T) {
 	}
 }
 
-// An item first shared without limits keeps that: --rule once mints nothing
-// and reports the different settings.
-func TestRuleOnceOnAnUnlimitedExistingShareKeepsItsSettings(t *testing.T) {
+// An explicit preset recovers limits when this device has no saved record.
+func TestRuleOnceOnAnExistingPublicShareWithoutSavedLimitsMintsALink(t *testing.T) {
 	srv := apitest.NewServer(t)
+	var mints []map[string]any
 	scriptPublish(t, srv, false, true, nil, nil)
+	scriptMint(t, srv, &mints)
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: connectorStateTestDir(t)})
-	if result.code != 0 || !strings.Contains(result.stdout.String(), `"settings_differ": true`) || strings.Contains(result.stdout.String(), `"link"`) {
-		t.Fatalf("publish %d %s %s", result.code, result.stdout.String(), result.stderr.String())
+	if result.code != 0 || len(mints) != 1 || mints[0]["one_time_use"] != true || strings.Contains(result.stdout.String(), `"settings_differ": true`) || !strings.Contains(result.stdout.String(), `"link"`) {
+		t.Fatalf("publish %d mints %v %s %s", result.code, mints, result.stdout.String(), result.stderr.String())
 	}
 }
 
@@ -474,5 +474,39 @@ func TestShareWithSavedLimitsShowsThePublisher(t *testing.T) {
 	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}, tty: true, shareStateDir: dir})
 	if result.code != 0 || len(mints) != 2 || !strings.Contains(result.stdout.String(), apitest.DefaultPublisherName) || !strings.Contains(result.stdout.String(), "Created") {
 		t.Fatalf("share %d %s %s", result.code, result.stdout.String(), result.stderr.String())
+	}
+}
+
+func TestRepublishWithNoSavedLimitsUsesExplicitPublicRule(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	var mints []map[string]any
+	scriptPublish(t, srv, false, true, nil, nil)
+	scriptMint(t, srv, &mints)
+	result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(hourRule), shareStateDir: dir})
+	if result.code != 0 || len(mints) != 1 || mints[0]["expires_in"] != "1h" || strings.Contains(result.stdout.String(), "settings_differ") || !strings.Contains(result.stdout.String(), "at_limited") {
+		t.Fatalf("retry lost explicit rule: exit=%d mints=%v stdout=%s stderr=%s", result.code, mints, result.stdout.String(), result.stderr.String())
+	}
+	// A later plain share uses the recovered limits too.
+	result = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID, "-o", "json"}, shareStateDir: dir})
+	if result.code != 0 || len(mints) != 2 || mints[1]["expires_in"] != "1h" {
+		t.Fatalf("limits not saved: exit=%d mints=%v stderr=%s", result.code, mints, result.stderr.String())
+	}
+}
+
+func TestRepublishKeepsSavedLimitsInsteadOfAnExplicitDifferentRule(t *testing.T) {
+	srv := apitest.NewServer(t)
+	dir := connectorStateTestDir(t)
+	var mints []map[string]any
+	scriptMint(t, srv, &mints)
+	scriptPublish(t, srv, false, false, nil, nil)
+	first := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule-file", "-", "-o", "json"}, stdin: strings.NewReader(hourRule), shareStateDir: dir})
+	if first.code != 0 {
+		t.Fatal(first.stderr.String())
+	}
+	scriptPublish(t, srv, false, true, nil, nil)
+	again := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://api.example.com", "--rule", "once", "-o", "json"}, shareStateDir: dir})
+	if again.code != 0 || len(mints) != 2 || mints[1]["one_time_use"] != false || mints[1]["session_duration"] != "30m" || !strings.Contains(again.stdout.String(), `"settings_differ": true`) {
+		t.Fatalf("saved limits replaced: exit=%d mints=%v stdout=%s stderr=%s", again.code, mints, again.stdout.String(), again.stderr.String())
 	}
 }

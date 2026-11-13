@@ -17,16 +17,21 @@ const limitedRule = `{"id":"11111111-1111-4111-8111-111111111111","name":"Hour",
 // A local publish mints a rule's link only once the share serves.
 func TestLocalPublishMintsTheRuleLinkOnlyOnceServing(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		ensureErr error
-		mintFails bool
+		name          string
+		ensureErr     error
+		mintFails     bool
+		foundExisting bool
 	}{
 		{name: "serving"},
+		{name: "existing without saved limits", foundExisting: true},
 		{name: "mint fails", mintFails: true},
 		{name: "daemon fails", ensureErr: errors.New("synthetic daemon failure")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
+			if tc.foundExisting {
+				srv.SetResourceAccess(false)
+			}
 			stateDir := foregroundLifecycleStateDir(t, "qurl-rule-bg-")
 			registry, err := openOwnedTestShareRegistry(stateDir)
 			if err != nil {
@@ -47,11 +52,11 @@ func TestLocalPublishMintsTheRuleLinkOnlyOnceServing(t *testing.T) {
 				stdin:         strings.NewReader(limitedRule),
 				shareRegistry: registry, shareStateDir: stateDir, shareDaemon: &recordingShareDaemon{ensureErr: tc.ensureErr},
 				preflightTarget: func(context.Context, string, int) error { return nil },
-				localResource:   resolvedLocalResource(srv, false),
+				localResource:   resolvedLocalResource(srv, tc.foundExisting),
 			})
 			local, err := registry.Get(context.Background(), srv.Key.CRID)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("registry: %v; exit=%d stdout=%s stderr=%s", err, res.code, res.stdout.String(), res.stderr.String())
 			}
 			switch {
 			case tc.ensureErr != nil:

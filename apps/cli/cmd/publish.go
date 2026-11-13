@@ -121,8 +121,9 @@ a saved rule's ID or name (see "qurl rules list"). --rule once is the One-time
 link: a link that works for whoever opens it first and expires after
 30 days if nobody opens it. The resource itself is public; only that link is
 limited. Publishing
-an item again, with or without --rule, makes a new link with the limits it was
-first shared with.
+an item again, with or without --rule, makes a new link with the limits saved
+on this device. If an existing public item has no saved limits, an explicit
+--rule saves its limits and makes the requested link.
 
 For a remote URL whose origin admits only requests that carry a secret
 header, such as a Vercel deployment with Deployment Protection, pass
@@ -394,7 +395,7 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err := registry.Put(ctx, local); err != nil {
 		return compensate(err)
 	}
-	shared := &qurlapi.Published{CRID: local.CRID, FoundExisting: resolved.FoundExisting, ConsumerAccess: resolved.ConsumerAccess}
+	shared := &qurlapi.Published{CRID: local.CRID, FoundExisting: resolved.FoundExisting, Private: resolved.Private, ConsumerAccess: resolved.ConsumerAccess}
 	// Limits are saved before serving, so a failed save still turns a new
 	// share back off; the link is minted once the share serves.
 	limits, err := opts.ruleLinkLimits(ctx, access.Rule, shared)

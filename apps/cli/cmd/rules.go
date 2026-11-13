@@ -667,9 +667,9 @@ func completeRulePayment(ctx context.Context, client qurlapi.Client, policy *qur
 // applyRuleToShare runs once the resource exists. A new public share keeps
 // the rule's link limits for later links and gets a temporary link minted with
 // them in published.LimitedLink. A share that already existed keeps what it
-// was created with, with or without a rule, so publishing it again mints a
-// fresh link with its saved limits; published.OtherSettings says when the
-// chosen rule differs.
+// was created with when this device saved them. If none were saved, an
+// explicit public rule supplies limits without changing the resource policy.
+// published.OtherSettings says when the chosen rule differs from saved settings.
 func (o *globalOpts) applyRuleToShare(ctx context.Context, client qurlapi.Client, rule *accessrules.Definition, published *qurlapi.Published) error {
 	limits, err := o.ruleLinkLimits(ctx, rule, published)
 	if err != nil {
@@ -691,6 +691,7 @@ func (o *globalOpts) ruleLinkLimits(ctx context.Context, rule *accessrules.Defin
 		kept, keptErr = o.savedLinkLimits(ctx, published.CRID)
 		keptRead, existing = true, keptErr != nil || kept != nil
 	}
+	remember := !existing
 	if rule == nil && !existing {
 		return nil, nil //nolint:nilnil // nothing to mint
 	}
@@ -712,28 +713,47 @@ func (o *globalOpts) ruleLinkLimits(ctx context.Context, rule *accessrules.Defin
 		if err != nil {
 			return nil, err
 		}
-		if rule != nil {
-			// Only approvals can differ here (Publish refuses any other policy
-			// change); SameDefinition compares them in the service's stored form.
-			policy := rule.Policy(1)
-			received := policy
-			received.ApprovalExpiresIn = ""
-			if published.ConsumerAccess != nil {
-				received.ApprovalExpiresIn = published.ConsumerAccess.ApprovalExpiresIn
-			}
-			published.OtherSettings = !accessrules.SameEffectiveLinkLimits(kept, limits) || !received.SameDefinition(policy)
+		if kept == nil && limits != nil && published.Private != nil && !*published.Private {
+			// Recover a lost first-publish response/save; these limits are device-local.
+			kept, remember = limits, true
 		}
+		recordRuleSettingsDifference(rule, published, kept)
 		limits = kept
-	} else if limits != nil {
-		store, err := o.shareRuleStore()
-		if err == nil {
-			err = store.Set(ctx, id, limits)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("%s was published, but its link limits could not be saved on this device: %w", id, err)
+	}
+	if remember {
+		if err := o.saveRuleLinkLimits(ctx, id, limits); err != nil {
+			return nil, err
 		}
 	}
 	return limits, nil
+}
+
+func recordRuleSettingsDifference(rule *accessrules.Definition, published *qurlapi.Published, kept *accessrules.LinkLimits) {
+	if rule != nil {
+		// Only approvals can differ here (Publish refuses any other policy
+		// change); SameDefinition compares them in the service's stored form.
+		policy := rule.Policy(1)
+		received := policy
+		received.ApprovalExpiresIn = ""
+		if published.ConsumerAccess != nil {
+			received.ApprovalExpiresIn = published.ConsumerAccess.ApprovalExpiresIn
+		}
+		published.OtherSettings = !accessrules.SameEffectiveLinkLimits(kept, rule.LinkLimits) || !received.SameDefinition(policy)
+	}
+}
+
+func (o *globalOpts) saveRuleLinkLimits(ctx context.Context, id string, limits *accessrules.LinkLimits) error {
+	if limits == nil {
+		return nil
+	}
+	store, err := o.shareRuleStore()
+	if err == nil {
+		err = store.Set(ctx, id, limits)
+	}
+	if err != nil {
+		return fmt.Errorf("%s was published, but its link limits could not be saved on this device: %w", id, err)
+	}
+	return nil
 }
 
 // mintRuleLink mints and verifies the link with limits into published.LimitedLink.
