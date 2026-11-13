@@ -142,10 +142,10 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 	switch {
 	case err != nil:
 		log.Info("get: access rule is ambiguous")
-		return nil, &userError{msg: fmt.Sprintf("*%s* matches more than one access rule. Rename the saved rule in qURL Desktop or the qURL CLI, or pick a Default access rule by ID (`rule:builtin.public`, `rule:once`).", escapeMrkdwnText(truncateForError(selector)))}
+		return nil, &userError{msg: fmt.Sprintf("*%s* matches more than one access rule. Rename the saved rule in qURL Desktop or the qURL CLI, or pick a Default access rule by ID (`rule:builtin.public`, `rule:once`).", escapeMrkdwnText(truncateRunes(selector, 40)))}
 	case rule == nil:
 		log.Info("get: access rule not found", "saved_rules", len(saved), "saved_rules_unreadable", unreadable)
-		msg := fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateForError(selector)), accessRuleChoicesHint)
+		msg := fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateRunes(selector, 40)), accessRuleChoicesHint)
 		if unreadable {
 			msg += " Saved rules can't be read for the qURL account connected to this workspace."
 		}
@@ -157,19 +157,19 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 	return rule, nil
 }
 
-// ruleLinkNotice describes a rule-shared link for the success reply; the
-// service's expiry stands in when the rule sets none.
+// ruleLinkNotice describes a rule-shared link for the success reply, with
+// the expiry the service applied when it reports one.
 func ruleLinkNotice(input *client.CreateInput, expiresAt *time.Time) string {
 	notice := "anyone with the link can open it"
 	if input.OneTimeUse {
 		notice = "one-time use"
 	}
 	switch {
-	case input.ExpiresIn != "":
-		notice += " · link expires in " + escapeMrkdwnText(input.ExpiresIn)
 	case expiresAt != nil:
 		// Slack renders the date in the reader's time zone.
 		notice += fmt.Sprintf(" · link expires <!date^%d^{date_short_pretty} at {time}|%s>", expiresAt.Unix(), expiresAt.UTC().Format("2006-01-02 15:04 UTC"))
+	case input.ExpiresIn != "":
+		notice += " · link expires in " + escapeMrkdwnText(input.ExpiresIn)
 	}
 	return notice
 }

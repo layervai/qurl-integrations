@@ -44,10 +44,10 @@ const (
 	fieldRule   = "rule"
 )
 
-// maxRuleRunes is the longest access rule name the service accepts; keep in
-// sync with the internal package's maxRuleRunes. TODO(upstream-contract):
-// qurl-service's access rule name limit.
-const maxRuleRunes = 120
+// MaxRuleRunes is the longest access rule name the service accepts; the slash
+// `rule:` flag shares it. TODO(upstream-contract): qurl-service's access rule
+// name limit.
+const MaxRuleRunes = 120
 
 // stringProp is a small helper for a JSON-Schema string property.
 func stringProp(desc string) map[string]any {
@@ -278,13 +278,13 @@ func proposalGet(f map[string]string) (*Proposal, error) {
 	}
 	rule := strings.TrimSpace(f[fieldRule])
 	// No rule name is longer; a longer value would only overflow the confirm card.
-	if utf8.RuneCountInString(rule) > maxRuleRunes {
-		return nil, fmt.Errorf("%s: %s is longer than %d characters", toolProposeGet, fieldRule, maxRuleRunes)
+	if utf8.RuneCountInString(rule) > MaxRuleRunes {
+		return nil, fmt.Errorf("%s: %s is longer than %d characters", toolProposeGet, fieldRule, MaxRuleRunes)
 	}
 	summary := fmt.Sprintf("Mint a one-time access link for `$%s`.", token)
 	if rule != "" {
 		// The rule may make the link reusable; say so before anyone approves.
-		summary = fmt.Sprintf("Mint an access link for `$%s` with the access rule %q. The link follows that rule, so it may open more than once.", token, rule)
+		summary = fmt.Sprintf("Mint an access link for `$%s` with the access rule %q. The link follows that rule, which may let it open more than once.", token, rule)
 	}
 	return &Proposal{
 		Action:  ActionGet,

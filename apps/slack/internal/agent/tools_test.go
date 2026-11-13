@@ -61,7 +61,7 @@ func TestParseProposal(t *testing.T) {
 			wantOK:     true,
 			wantAction: ActionGet,
 			check: func(t *testing.T, p *Proposal) {
-				if p.Rule != "Team only" || !strings.Contains(p.Summary, `access rule "Team only"`) || !strings.Contains(p.Summary, "may open more than once") {
+				if p.Rule != "Team only" || !strings.Contains(p.Summary, `access rule "Team only"`) || !strings.Contains(p.Summary, "may let it open more than once") {
 					t.Errorf("got %+v", p)
 				}
 			},
@@ -69,7 +69,7 @@ func TestParseProposal(t *testing.T) {
 		{
 			name:    "get refuses an over-long rule",
 			tool:    toolProposeGet,
-			input:   map[string]any{fieldToken: testSlugSigil, fieldRule: strings.Repeat("x", maxRuleRunes+1)},
+			input:   map[string]any{fieldToken: testSlugSigil, fieldRule: strings.Repeat("x", MaxRuleRunes+1)},
 			wantOK:  true,
 			wantErr: true,
 		},

@@ -163,7 +163,7 @@ it burns on first open. Add `dm:true` to receive the link privately, or
 `reason:"…"` to note why you minted it in the audit log.
 
 Add `rule:"…"` to share with an access rule instead, by name or ID (such as
-`rule:once`): one of the Default access rules (`Anyone with the link`,
+`rule:once`; use the ID for a name with a `"` in it): one of the Default access rules (`Anyone with the link`,
 `One-time link`) or a saved rule ("Your rules"). Saved rules are the ones on
 the qURL account that connected this workspace, so every member of the
 workspace shares them; they are managed in qURL Desktop or the qURL CLI. The

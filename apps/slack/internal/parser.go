@@ -8,6 +8,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/crid"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 )
 
 // Subcommand is a recognized verb after the `/qurl` slash command.
@@ -158,11 +160,6 @@ func (c *Command) Reason() string {
 	}
 	return c.Flags["reason"]
 }
-
-// maxRuleRunes is the longest access rule name the service accepts; keep in
-// sync with agent.maxRuleRunes. TODO(upstream-contract): qurl-service's
-// access rule name limit.
-const maxRuleRunes = 120
 
 // Rule returns the parsed `rule:"..."` flag on `get`: an access rule's
 // name or ID, empty when unset.
@@ -841,8 +838,8 @@ func applyFlag(cmd *Command, tok string) error {
 			return fmt.Errorf("%w: `%s` (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, truncateForError(tok))
 		}
 		// No rule name is longer (the agent's propose_get has the same cap).
-		if utf8.RuneCountInString(val) > maxRuleRunes {
-			return fmt.Errorf("%w: `rule` is longer than %d characters", ErrInvalidFlag, maxRuleRunes)
+		if utf8.RuneCountInString(val) > agent.MaxRuleRunes {
+			return fmt.Errorf("%w: `rule` is longer than %d characters", ErrInvalidFlag, agent.MaxRuleRunes)
 		}
 		cmd.Flags[key] = val
 		return nil

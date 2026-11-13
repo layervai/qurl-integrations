@@ -219,7 +219,8 @@ func TestHandleGet_RuleSaved(t *testing.T) {
 	if mint == nil || mint["expires_in"] != "2h" || mint["one_time_use"] != true || mint["session_duration"] != "30m" {
 		t.Fatalf("mint = %v; reply %q", mint, reply)
 	}
-	if !strings.Contains(reply, "one-time use · link expires in 2h") {
+	// The service's expiry wins over the rule's text when it reports one.
+	if !strings.Contains(reply, "one-time use · link expires <!date^1794648600^") {
 		t.Errorf("reply = %q", reply)
 	}
 	audit := findAuditRecord(logs, slackaudit.QURLMintRule)
