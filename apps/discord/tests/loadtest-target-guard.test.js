@@ -487,8 +487,10 @@ describe('loadtest target guard — the names read from the outside world', () =
 const fs = require('fs');
 const path = require('path');
 const parser = require('@babel/parser');
-const traverseModule = require('@babel/traverse');
-const traverse = traverseModule.default || traverseModule;
+let traverse;
+beforeAll(async () => {
+  ({ default: traverse } = await import('@babel/traverse'));
+});
 
 describe('loadtest script — mintLinks call shape', () => {
   const parseFile = (...segments) =>
