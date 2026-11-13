@@ -1880,7 +1880,7 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 		command = commandUser
 	}
 	purgeIDs := slashUninstallPurgeWorkspaceIDs(values, teamID)
-	respondSlackBlocks(w, uninstallConfirmFallbackText, uninstallConfirmBlocks(command, purgeIDs))
+	respondSlackBlocks(w, uninstallConfirmFallbackText, uninstallConfirmBlocks(command, purgeIDs, h.now()))
 }
 
 func slashUninstallPurgeWorkspaceIDs(values url.Values, teamID string) []string {
