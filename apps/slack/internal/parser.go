@@ -130,10 +130,9 @@ type Command struct {
 	// *caller* — the user who typed the command); this field holds the
 	// *target* of the verb (the user being added or removed).
 	UserID string
-	// Flags holds optional `key:value` flags. Only `dm` and `reason`
-	// are recognized today (on `get`). One-time use is unconditional
-	// for `get` — there is no `once` flag (the link always burns on
-	// first redemption), so it isn't a flag here.
+	// Flags holds optional `key:value` flags. Only `dm`, `reason` and
+	// `rule` are recognized today (on `get` and `crid`). Without `rule`
+	// the link is one-time use; there is no `once` flag.
 	Flags map[string]string
 	// Raw is the original trimmed text, kept for diagnostics.
 	Raw string
@@ -157,6 +156,15 @@ func (c *Command) Reason() string {
 		return ""
 	}
 	return c.Flags["reason"]
+}
+
+// Rule returns the parsed `rule:"..."` flag on `get`: an access rule's
+// name or ID, empty when unset.
+func (c *Command) Rule() string {
+	if c == nil {
+		return ""
+	}
+	return c.Flags["rule"]
 }
 
 // ErrEmptyResource is returned when a subcommand expects a `$alias`
@@ -754,7 +762,7 @@ func hasASCIIPrefixFold(s, prefix string) bool {
 }
 
 // applyFlag parses a single `key:value` token into [Command.Flags]. Only
-// the recognized keys (`dm`, `reason`) survive — unknown keys
+// the recognized keys (`dm`, `reason`, `rule`) survive — unknown keys
 // are an error so a typo doesn't silently no-op. The key half is
 // case-folded so `DM:true` and `Reason:foo` work the way users on
 // mobile clients (with auto-capitalize) expect; the value half is
@@ -818,7 +826,7 @@ func applyFlag(cmd *Command, tok string) error {
 		}
 		cmd.Flags[key] = val
 		return nil
-	case "reason":
+	case "reason", "rule":
 		cmd.Flags[key] = val
 		return nil
 	case "once":

@@ -1012,7 +1012,7 @@ func TestResourceLinkExpiryConstsInSync(t *testing.T) {
 func TestRenderGetSuccess(t *testing.T) {
 	t.Parallel()
 	const link = "https://qurl.link/enter-me"
-	fallback, blocks := renderGetSuccess(link)
+	fallback, blocks := renderGetSuccess(link, oneTimeUseNotice())
 
 	if !strings.Contains(fallback, link) {
 		t.Errorf("fallback missing link: %q", fallback)

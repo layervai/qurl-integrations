@@ -417,22 +417,20 @@ func oneTimeUseNotice() string {
 	return "one-time use · link expires in " + resourceLinkExpiryHuman
 }
 
-// renderGetSuccess builds the two renderings of a minted one-time link: the
+// renderGetSuccess builds the two renderings of a minted link: the
 // Block Kit blocks (headline section + primary "Enter Portal" URL button) and
 // the plain-text fallback. The link rides in the button's `url` rather than as
 // raw prose, so it's one tap and Slack never link-unfurls it (an unfurl fetch
 // could brush a one-time link). The fallback KEEPS the raw URL so a non-block
-// client still has something actionable. Both strings here are static templates —
-// no user or LLM input — so the mrkdwn headline carries no injection surface.
-func renderGetSuccess(link string) (fallbackText string, blocks []any) {
+// client still has something actionable. notice is oneTimeUseNotice or
+// ruleLinkNotice, which escapes the one rule-sourced value it carries.
+func renderGetSuccess(link, notice string) (fallbackText string, blocks []any) {
 	button := primaryURLButtonElement(enterPortalButtonLabel, enterPortalActionID, link)
-	// sectionBlock renders mrkdwn (bold + :emoji:); the text is a static template
-	// with no user/LLM input, so the mrkdwn carries no injection surface.
 	blocks = []any{
-		sectionBlock(":link: *qURL ready* — " + oneTimeUseNotice()),
+		sectionBlock(":link: *qURL ready* — " + notice),
 		actionsBlock(button),
 	}
-	return enterPortalFallbackText(link), blocks
+	return enterPortalFallbackText(link, notice), blocks
 }
 
 // enterPortalFallbackText is the notification / non-block-client fallback for a
@@ -442,8 +440,8 @@ func renderGetSuccess(link string) (fallbackText string, blocks []any) {
 // one-time URL still transits the notification channel — same exposure as the
 // pre-button prose message, and out of scope for the button's in-body privacy win.
 // A link-less fallback for notification-capable clients is tracked in #922.
-func enterPortalFallbackText(link string) string {
-	return ":link: qURL ready: " + link + " (" + oneTimeUseNotice() + ")"
+func enterPortalFallbackText(link, notice string) string {
+	return ":link: qURL ready: " + link + " (" + notice + ")"
 }
 
 // slackButtonURLMaxLen is Slack's hard cap on a Block Kit button `url`; a longer
@@ -571,6 +569,14 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 		return getResult{}, &userError{msg: authErrorMessage(err)}
 	}
 
+	notice := oneTimeUseNotice()
+	if selector := args.cmd.Rule(); selector != "" {
+		if err := resolveAccessRule(ctx, log, c, input, selector); err != nil {
+			return getResult{}, err
+		}
+		notice = ruleLinkNotice(input)
+	}
+
 	out, err := c.Create(ctx, input)
 	if err != nil {
 		return getResult{}, mapMintError(ctx, log, err)
@@ -622,7 +628,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	// plain-text fallback. The one-time-use / admit-window suffix rides in the
 	// headline: that window is tight, so a recipient who taps after it lapses
 	// gets a dead portal, and the copy tells them why.
-	fallbackText, blocks := renderGetSuccess(out.QURLLink)
+	fallbackText, blocks := renderGetSuccess(out.QURLLink, notice)
 	if args.cmd.DM() {
 		// deliverGetDM posts the Enter Portal blocks to the user's DM and returns
 		// the plain-text ":incoming_envelope: Sent to your DM." status. The link

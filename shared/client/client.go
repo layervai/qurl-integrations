@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-go/crid"
+	"github.com/layervai/qurl-go/qurl"
 )
 
 const (
@@ -493,9 +494,11 @@ type createQurlBody struct {
 // the same reason — the resource already owns it).
 type createForResourceBody struct {
 	// `label` per CreateQurlForResourceRequest (not `description`).
-	Label           string        `json:"label,omitempty"`
-	ExpiresIn       string        `json:"expires_in,omitempty"`
-	OneTimeUse      bool          `json:"one_time_use,omitempty"`
+	Label     string `json:"label,omitempty"`
+	ExpiresIn string `json:"expires_in,omitempty"`
+	// Always sent: the service defaults an omitted one_time_use to true on a
+	// tunnel, so false must be explicit for a reusable link.
+	OneTimeUse      bool          `json:"one_time_use"`
 	MaxSessions     int           `json:"max_sessions,omitempty"`
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
@@ -1329,6 +1332,30 @@ func (c *Client) GetQuota(ctx context.Context) (*QuotaOutput, error) {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// ErrInvalidAccessRules is returned when GET /v1/me/access-rules answers
+// without a rule list.
+var ErrInvalidAccessRules = errors.New("access rules: response has no items")
+
+// AccessRules returns the saved access rules of the qURL account that owns
+// the API key (GET /v1/me/access-rules). Rules keep fields this client does
+// not model, so HasUnknownFields reports a rule that is unsafe to apply.
+func (c *Client) AccessRules(ctx context.Context) ([]qurl.AccessRule, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/me/access-rules", http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var out struct {
+		Items []qurl.AccessRule `json:"items"`
+	}
+	if _, err := c.do(req, &out, "GET /v1/me/access-rules"); err != nil {
+		return nil, err
+	}
+	if out.Items == nil {
+		return nil, ErrInvalidAccessRules
+	}
+	return out.Items, nil
 }
 
 // --- Error types (RFC 7807) ---

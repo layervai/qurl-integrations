@@ -860,6 +860,49 @@ func TestCreateResourceIDFlow(t *testing.T) {
 	if _, ok := raw["target_url"]; ok {
 		t.Errorf("target_url must NOT appear in body on resource-scoped mint; body=%s", gotBody)
 	}
+	// A tunnel defaults an omitted one_time_use to true, so false is sent.
+	if got, ok := raw["one_time_use"]; !ok || got != false {
+		t.Errorf("one_time_use = %v (present %v), want an explicit false; body=%s", got, ok, gotBody)
+	}
+}
+
+func TestAccessRules(t *testing.T) {
+	t.Parallel()
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.Method + " " + r.URL.Path
+		apiEnvelope(t, w, map[string]any{
+			"account_id": "acct", "version": 3, "built_ins": []any{},
+			"items": []any{
+				map[string]any{"id": "r1", "name": "Team only", "mode": "public", "link_limits": map[string]any{"expires_in": "1h"}},
+				map[string]any{"id": "r2", "name": "Newer", "mode": "public", "future": true},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	rules, err := testClient(srv.URL, "test-key").AccessRules(context.Background())
+	if err != nil {
+		t.Fatalf("AccessRules: %v", err)
+	}
+	if gotPath != "GET /v1/me/access-rules" {
+		t.Errorf("request = %q", gotPath)
+	}
+	if len(rules) != 2 || rules[0].Name != "Team only" || rules[0].LinkLimits.ExpiresIn != "1h" || rules[0].HasUnknownFields() || !rules[1].HasUnknownFields() {
+		t.Errorf("rules = %+v", rules)
+	}
+}
+
+func TestAccessRulesMissingItems(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apiEnvelope(t, w, map[string]any{"account_id": "acct", "version": 0})
+	}))
+	defer srv.Close()
+
+	if _, err := testClient(srv.URL, "test-key").AccessRules(context.Background()); !errors.Is(err, ErrInvalidAccessRules) {
+		t.Fatalf("err = %v, want ErrInvalidAccessRules", err)
+	}
 }
 
 func TestCreateTargetURLOnlyOmitsResourceID(t *testing.T) {

@@ -66,6 +66,8 @@ jobs:
               # Source of truth for Slack-impacting paths on PR and main push events.
               - 'apps/slack/**'
               - 'origins/s3-static-connector/**'
+              # Slack's Default access rules are tested against the CLI's catalog copy.
+              - 'apps/cli/internal/accessrules/testdata/catalog.v1.json'
               - 'shared/**'
               - 'go.mod'
               - 'go.sum'

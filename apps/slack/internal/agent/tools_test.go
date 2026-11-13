@@ -55,6 +55,18 @@ func TestParseProposal(t *testing.T) {
 			},
 		},
 		{
+			name:       "get keeps the access rule and names it on the card",
+			tool:       toolProposeGet,
+			input:      map[string]any{fieldToken: testSlugSigil, fieldRule: " Team only "},
+			wantOK:     true,
+			wantAction: ActionGet,
+			check: func(t *testing.T, p *Proposal) {
+				if p.Rule != "Team only" || !strings.Contains(p.Summary, `access rule "Team only"`) {
+					t.Errorf("got %+v", p)
+				}
+			},
+		},
+		{
 			name:    "get requires token",
 			tool:    toolProposeGet,
 			input:   map[string]any{},

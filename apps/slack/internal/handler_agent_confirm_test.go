@@ -885,7 +885,7 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 	// shared history and the card-replace can't overwrite it. A text-only payload (a
 	// get FAILURE detail; blocks nil) routes through the original text seams.
 	const mintedLink = "https://qurl.link/abc123"
-	fallback, blocks := renderGetSuccess(mintedLink)
+	fallback, blocks := renderGetSuccess(mintedLink, oneTimeUseNotice())
 	const (
 		failureText  = ":warning: mint failed for $staging"
 		dmThreadTS   = "1700.9"
@@ -2050,5 +2050,33 @@ func TestPostAgentConfirm_BlankSummaryFallsBack(t *testing.T) {
 	}
 	if len(*hc.posts) != 1 || (*hc.posts)[0].text != agentErrorReply {
 		t.Fatalf("blank summary should fall back to the error reply, got %+v", *hc.posts)
+	}
+}
+
+// TestConfirm_GetCarriesAccessRule fences that an approved get applies the
+// proposal's access rule: a rule Slack can't apply is refused privately, with
+// no mint (the backend stub would fail a mint without the default limits).
+func TestConfirm_GetCarriesAccessRule(t *testing.T) {
+	names := defaultTestTableNames()
+	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
+		names.channelPolicy: {seedChannelPolicySet("T1", "D1", "", []string{testAgentGetResourceID})},
+	})
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Rule: "People you invite", Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+
+	if len(hc.blocks.calls) != 0 {
+		t.Fatalf("a refused rule must not deliver a link, got %+v", hc.blocks.calls)
+	}
+	private := make([]string, 0, len(*hc.posts))
+	for _, p := range *hc.posts {
+		private = append(private, p.text)
+	}
+	if !strings.Contains(strings.Join(private, "\n"), "Slack can't set") {
+		t.Fatalf("private reply = %q, want the rule refusal", private)
+	}
+	_, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !strings.Contains(card, agentConfirmGetFailedReply) || strings.Contains(card, "People you invite") {
+		t.Fatalf("public card = %q", card)
 	}
 }

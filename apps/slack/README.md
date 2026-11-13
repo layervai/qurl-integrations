@@ -57,6 +57,7 @@ personal data out of the repository.
 | `/qurl get <$id\|$alias>` | Mint a one-time qURL link for a resource in this channel. |
 | `/qurl get <$id\|$alias> dm:true` | Mint the link and DM it to you instead of posting it in the channel. |
 | `/qurl get <$id\|$alias> reason:"…"` | Mint the link and record a reason in the audit log. |
+| `/qurl get <$id\|$alias> rule:"…"` | Mint the link with an access rule: `Anyone with the link`, `One-time link`, or one of your saved rules. |
 | `/qurl crid <CRID>` | Mint a one-time qURL link for a resource in this channel, by its permanent CRID. |
 | `/qurl crid <CRID> dm:true` | Mint the CRID's link and DM it to you instead of posting it in the channel. |
 | `/qurl crid <CRID> reason:"…"` | Mint the CRID's link and record a reason in the audit log. |
@@ -160,6 +161,16 @@ current channel (pass a resource `$id` or a channel `$alias`). The reply
 includes how long the link stays valid. Every link is single-use: it burns on
 first open. Add `dm:true` to receive the link privately, or `reason:"…"` to
 note why you minted it in the audit log.
+
+Add `rule:"…"` to share with an access rule instead, by name: one of the
+Default access rules (`Anyone with the link`, `One-time link`) or one of your
+saved rules ("Your rules"). Saved rules are the ones on the qURL account that
+connected this workspace, managed in qURL Desktop or the qURL CLI. The link
+then follows the rule's limits, so an `Anyone with the link` link can be
+opened more than once. Slack mints links on existing resources only, so it
+refuses a rule that decides who can open the resource (`People you invite`,
+`People you approve`, email, device or paid rules) and a rule with settings
+from a newer qURL app; share with those from qURL Desktop or the qURL CLI.
 
 `/qurl crid <CRID>` is the same command addressed by a resource's permanent
 CRID instead of a `$id` or `$alias`. It is channel-scoped exactly like
