@@ -117,6 +117,8 @@ func TestApplyAccessRule(t *testing.T) {
 	for _, tc := range append(refusedPresets, []testCase{
 		{name: "anyone with the link", rule: byID["builtin.public"], want: client.CreateInput{}},
 		{name: "one-time link", rule: byID["once"], want: client.CreateInput{OneTimeUse: true, ExpiresIn: "30d", SessionDuration: "24h"}},
+		// The SDK and CLI read a missing one_time_use as false.
+		{name: "limits without one_time_use", rule: qurl.AccessRule{Name: "Hour", Mode: accessRuleModePublic, LinkLimits: &qurl.AccessRuleLinkLimits{ExpiresIn: "1h"}}, want: client.CreateInput{ExpiresIn: "1h"}},
 		{name: "saved public rule", rule: qurl.AccessRule{Name: "Quick", Mode: accessRuleModePublic, LinkLimits: &qurl.AccessRuleLinkLimits{ExpiresIn: "1h", OneTimeUse: new(false)}}, want: client.CreateInput{ExpiresIn: "1h"}},
 		{name: "work email", rule: qurl.AccessRule{Name: "Team", Mode: "email_domain", EmailDomain: "example.com"}, refusal: "Slack can't set"},
 		{name: "paid", rule: qurl.AccessRule{Name: "Paid", Mode: "contract", Payment: &qurl.AccessRulePayment{PriceID: "price_1"}}, refusal: "Slack can't set"},

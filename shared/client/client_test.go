@@ -888,7 +888,7 @@ func TestAccessRules(t *testing.T) {
 	if gotPath != "GET /v1/me/access-rules" {
 		t.Errorf("request = %q", gotPath)
 	}
-	if len(rules) != 2 || rules[0].Name != "Team only" || rules[0].LinkLimits.ExpiresIn != "1h" || rules[0].HasUnknownFields() || !rules[1].HasUnknownFields() {
+	if len(rules) != 2 || rules[0].Name != "Team only" || rules[0].LinkLimits == nil || rules[0].LinkLimits.ExpiresIn != "1h" || rules[0].HasUnknownFields() || !rules[1].HasUnknownFields() {
 		t.Errorf("rules = %+v", rules)
 	}
 }

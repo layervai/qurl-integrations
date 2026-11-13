@@ -126,12 +126,14 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 	rule, err := findAccessRule(selector, saved)
 	switch {
 	case err != nil:
+		log.Info("get: access rule is ambiguous")
 		return nil, &userError{msg: fmt.Sprintf("*%s* matches more than one access rule. Rename your saved rule in qURL Desktop or the qURL CLI.", escapeMrkdwnText(truncateForError(selector)))}
 	case loadErr != nil && (rule == nil || !strings.EqualFold(rule.ID, selector)):
 		// With no saved rules read, only a Default rule's exact ID is unambiguous.
 		log.Warn("get: saved access rules read failed", "error", loadErr)
 		return nil, &userError{msg: "Couldn't read your saved access rules. Please try again. " + accessRuleChoicesHint}
 	case rule == nil:
+		log.Info("get: access rule not found", "saved_rules", len(saved))
 		return nil, &userError{msg: fmt.Sprintf("No access rule is named *%s*. %s", escapeMrkdwnText(truncateForError(selector)), accessRuleChoicesHint)}
 	}
 	return rule, applyAccessRule(input, rule)
