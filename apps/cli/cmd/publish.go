@@ -200,15 +200,11 @@ owns the share and turns it off when it exits.`,
 					return err
 				}
 			}
-			access.UseHomepageTitle = target.kind == publishTargetRemote &&
-				strings.HasPrefix(target.original, "https://") &&
-				strings.TrimRight(opts.resolvedEndpoint, "/") == "https://api.layerv.xyz" &&
-				!cmd.Flags().Changed("name")
+			access.UseHomepageTitle = sandboxHomepageName(opts.resolvedEndpoint, target, cmd.Flags().Changed("name"))
 			if !access.UseHomepageTitle {
-				access.Name, err = publishName(opts, cmd, name, connectorID, target)
-			}
-			if err != nil {
-				return err
+				if access.Name, err = publishName(opts, cmd, name, connectorID, target); err != nil {
+					return err
+				}
 			}
 			if target.kind == publishTargetLocal {
 				return publishNameError(runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access))
@@ -995,7 +991,15 @@ func (o *globalOpts) applyPublishRule(cmd *cobra.Command, access *qurlapi.Publis
 	return nil
 }
 
-// publishName returns the public name a publish sends, checked against the
+// sandboxHomepageName matches the Sandbox API that accepts use_homepage_title.
+// TODO(upstream-contract): Keep this in sync with the service's Sandbox gate.
+func sandboxHomepageName(endpoint string, target *publishTarget, hasName bool) bool {
+	return !hasName && target.kind == publishTargetRemote &&
+		strings.HasPrefix(strings.ToLower(target.original), "https://") &&
+		strings.EqualFold(strings.TrimRight(endpoint, "/"), "https://api.layerv.xyz")
+}
+
+// publishName returns the public name when Sandbox automatic naming does not apply, checked against the
 // service's rules so the create is never refused for it. --name wins. A local
 // app defaults to its configured Connector ID, else, in a terminal only, the
 // name of the directory the command runs in (its project) unless that is the

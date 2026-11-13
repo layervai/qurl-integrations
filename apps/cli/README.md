@@ -1057,7 +1057,7 @@ credential or making a network request.
 
 | Flag | Description |
 |------|-------------|
-| `--name` | Public name recipients see, up to 100 characters. Required to create a remote URL resource; a local app defaults to its Connector ID or directory name |
+| `--name` | Public name recipients see, up to 100 characters. Sandbox HTTPS URLs default to the homepage title or hostname. Local apps default to the Connector ID or directory name |
 | `--public` | Let anyone who has the CRID open the resource. Without it the resource is private |
 | `--allow-device-key <public-key>` | Allow a recipient's device to open the private resource (repeatable) |
 | `--allow-requests` | Let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you |

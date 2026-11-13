@@ -494,7 +494,7 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	}
 
 	if res.Name != "" && !foundExisting(res) {
-		ew.printf("\nChoose a different app name with --name.\n")
+		ew.printf("\nTo rename this app, run qurl preview set %s --name \"New name\".\n", res.CRID)
 	}
 
 	// The note says the existing CRID is shown, so it may only appear when
