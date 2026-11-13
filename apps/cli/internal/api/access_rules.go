@@ -12,6 +12,8 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 )
 
+const accessRulesPath = "/v1/me/access-rules"
+
 // AccessRules exposes only the canonical account's versioned preset library.
 func (c *client) AccessRules() accessrules.Remote { return accountAccessRules{client: c} }
 
@@ -34,7 +36,7 @@ func (a accountAccessRules) Replace(ctx context.Context, version int64, items []
 }
 func (a accountAccessRules) request(ctx context.Context, method string, body any) (accessrules.AccountLibrary, error) {
 	// Version CAS, rather than replay keys, owns recovery from an uncertain PUT.
-	reply, err := a.client.doRESTOnce(ctx, method, "/v1/me/access-rules", body)
+	reply, err := a.client.doRESTOnce(ctx, method, accessRulesPath, body)
 	if err != nil {
 		return accessrules.AccountLibrary{}, err
 	}

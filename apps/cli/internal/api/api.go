@@ -589,7 +589,8 @@ func (c *client) MintLimitedLink(ctx context.Context, crid string, limits access
 	if oneBrowser {
 		use = qurl.OneTimeUse()
 	}
-	opts := []qurl.PortalOption{qurl.ValidFor(expiresIn), use, qurl.MaxSessions(0)}
+	// Existing account rules can contain fractions. Round down so the link never lasts longer.
+	opts := []qurl.PortalOption{qurl.ValidFor(expiresIn.Truncate(time.Second)), use, qurl.MaxSessions(0)}
 	if limits.SessionDuration != nil {
 		session, ok := accessrules.SessionLength.Parse(*limits.SessionDuration)
 		if !ok {

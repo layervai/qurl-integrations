@@ -171,6 +171,16 @@ func (l LinkLimits) Validate() error {
 	return nil
 }
 
+// ValidateNewExpiry checks the link expiry on a new or edited rule. Existing
+// service rules can have fractions, which the mint path rounds down.
+func (l LinkLimits) ValidateNewExpiry() error {
+	d, ok := LinkExpiry.Parse(l.ExpiresIn)
+	if !ok || len(l.ExpiresIn) > 16 || d%time.Second != 0 {
+		return errors.New("--expires-in must be from 1m to 30d in whole seconds, such as 1h or 7d")
+	}
+	return nil
+}
+
 func (d *Definition) validateSettings() error {
 	if l := d.LinkLimits; l != nil {
 		if d.Mode != ModePublic {

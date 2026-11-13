@@ -140,3 +140,27 @@ func TestAccessRulesKeepQuickShareOutOfSavesAndCarryPayment(t *testing.T) {
 		t.Fatalf("save %+v %v", saved, err)
 	}
 }
+
+func TestAccessRulesReadsLargeEscapedLibrary(t *testing.T) {
+	items := make([]accessrules.Definition, 14)
+	for i := range items {
+		items[i] = accessrules.Definition{
+			ID:   fmt.Sprintf("%08d-0000-4000-8000-000000000000", i),
+			Name: "Team", Mode: "email_domain", EmailDomain: "example.com",
+		}
+		for j := range 240 {
+			items[i].AllowedEmails = append(items[i].AllowedEmails, fmt.Sprintf("%03d%s@x.co", j, strings.Repeat("&", 60)))
+		}
+	}
+	if err := accessrules.ValidateItems(items); err != nil {
+		t.Fatal(err)
+	}
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, accessRulesPath, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, accessrules.AccountLibrary{AccountID: "one", Version: 1, Items: items}, nil)
+	})
+	got, err := newTestClient(t, srv, nil).AccessRules().Load(t.Context())
+	if err != nil || !accessrules.EqualItems(got.Items, items) {
+		t.Fatalf("read %d rules: %v", len(got.Items), err)
+	}
+}
