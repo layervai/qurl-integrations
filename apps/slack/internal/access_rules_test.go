@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,6 +85,7 @@ func TestFindAccessRule(t *testing.T) {
 		{selector: "Nobody"},
 		{selector: "people who pay", wantID: "paid"},
 		{selector: "builtin.review", wantID: "builtin.review"},
+		{selector: "Once", wantID: "once"},
 	} {
 		got, err := findAccessRule(tc.selector, saved)
 		gotID := ""
@@ -104,13 +106,17 @@ func TestApplyAccessRule(t *testing.T) {
 		want    client.CreateInput
 		refusal string
 	}
-	refusedPresets := make([]testCase, 0, len(defaultAccessRules)-2)
-	for _, r := range defaultAccessRules[2:] {
-		refusedPresets = append(refusedPresets, testCase{name: r.Name, rule: r, refusal: "Slack can't set"})
+	byID := map[string]qurl.AccessRule{}
+	var refusedPresets []testCase
+	for _, r := range defaultAccessRules {
+		byID[r.ID] = r
+		if r.Mode != accessRuleModePublic {
+			refusedPresets = append(refusedPresets, testCase{name: r.Name, rule: r, refusal: "Slack can't set"})
+		}
 	}
 	for _, tc := range append(refusedPresets, []testCase{
-		{name: "anyone with the link", rule: defaultAccessRules[0], want: client.CreateInput{}},
-		{name: "one-time link", rule: defaultAccessRules[1], want: client.CreateInput{OneTimeUse: true, ExpiresIn: "30d", SessionDuration: "24h"}},
+		{name: "anyone with the link", rule: byID["builtin.public"], want: client.CreateInput{}},
+		{name: "one-time link", rule: byID["once"], want: client.CreateInput{OneTimeUse: true, ExpiresIn: "30d", SessionDuration: "24h"}},
 		{name: "saved public rule", rule: qurl.AccessRule{Name: "Quick", Mode: accessRuleModePublic, LinkLimits: &qurl.AccessRuleLinkLimits{ExpiresIn: "1h", OneTimeUse: new(false)}}, want: client.CreateInput{ExpiresIn: "1h"}},
 		{name: "work email", rule: qurl.AccessRule{Name: "Team", Mode: "email_domain", EmailDomain: "example.com"}, refusal: "Slack can't set"},
 		{name: "paid", rule: qurl.AccessRule{Name: "Paid", Mode: "contract", Payment: &qurl.AccessRulePayment{PriceID: "price_1"}}, refusal: "Slack can't set"},
@@ -213,7 +219,7 @@ func TestHandleGet_RuleSaved(t *testing.T) {
 	audit := findAuditRecord(logs, slackaudit.QURLMintRule)
 	for k, want := range map[string]any{
 		"team_id": testAdminTeamID, "channel_id": "C_test", "user_id": testAdminUserID, "resource_id": testResourceIDFix,
-		"rule_id": "11111111-1111-4111-8111-111111111111", "one_time_use": true, "expires_in": "2h",
+		"rule_id": "11111111-1111-4111-8111-111111111111", "one_time_use": true, "expires_in": "2h", "session_duration": "30m",
 	} {
 		if audit[k] != want {
 			t.Errorf("audit[%s] = %#v, want %#v; audit=%#v", k, audit[k], want, audit)
@@ -287,5 +293,34 @@ func TestHandleGet_RuleRefusedBeforeMint(t *testing.T) {
 		if mint != nil || !strings.Contains(reply, tc.want) {
 			t.Errorf("%s: mint = %v, reply = %q, want %q", tc.flags, mint, reply, tc.want)
 		}
+	}
+}
+
+// TestHandleGet_RuleAndRateLimit pins the quota order: a refused rule uses no
+// quota, and an over-quota user is refused before a rule link mints.
+func TestHandleGet_RuleAndRateLimit(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer(http.MethodGet, accessRulesPath, func(w http.ResponseWriter, _ *http.Request) { writeAccessRules(t, w) })
+	var mints atomic.Int32
+	ts.addCustomer(http.MethodPost, mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mints.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	enableAdminStoreRateLimit(t, h, 1)
+
+	for _, step := range []struct{ text, want string }{
+		{`get $prod-db rule:"People you approve"`, "Slack can't set"},
+		{"get $prod-db rule:once", "https://qurl.link/abc"}, // the refusal left the one allowed mint
+		{"get $prod-db rule:once", "Rate limit hit"},
+	} {
+		if _, _, reply := newAdminSlashInvoker(t, h).invokeAdminAsync(step.text, testAdminTeamID, testAdminUserID); !strings.Contains(reply, step.want) {
+			t.Fatalf("%s: reply = %q, want %q", step.text, reply, step.want)
+		}
+	}
+	if got := mints.Load(); got != 1 {
+		t.Fatalf("mints = %d, want 1", got)
 	}
 }

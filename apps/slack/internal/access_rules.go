@@ -48,15 +48,15 @@ const accessRuleChoicesHint = "Slack can share with *Anyone with the link*, *One
 
 var errAccessRuleAmbiguous = errors.New("more than one access rule matches")
 
-// findAccessRule returns the Default or saved rule whose ID is selector, or
-// whose name is selector ignoring case and surrounding space; nil if none.
+// findAccessRule returns the Default or saved rule whose ID or name is
+// selector, ignoring case and the name's surrounding space; nil if none.
 // Matches on different rules, an ID and a name included, are ambiguous.
 func findAccessRule(selector string, saved []qurl.AccessRule) (*qurl.AccessRule, error) {
 	var match *qurl.AccessRule
 	for _, list := range [][]qurl.AccessRule{defaultAccessRules, saved} {
 		for i := range list {
 			r := &list[i]
-			if r.ID != selector && !strings.EqualFold(strings.TrimSpace(r.Name), selector) {
+			if !strings.EqualFold(r.ID, selector) && !strings.EqualFold(strings.TrimSpace(r.Name), selector) {
 				continue
 			}
 			if match != nil {
@@ -91,7 +91,9 @@ func applyAccessRule(input *client.CreateInput, r *qurl.AccessRule) error {
 
 // onlyLinkLimits reports whether r is a public rule whose only settings are
 // the three link limits Slack applies. It allows fields rather than listing
-// private ones, so a field a newer SDK models is refused, never dropped.
+// private ones, so a field a newer SDK models is refused, never dropped. It
+// relies on the SDK leaving unset fields nil (not empty), which
+// TestHandleGet_RuleSaved checks end to end.
 func onlyLinkLimits(r *qurl.AccessRule) bool {
 	rest := *r
 	rest.ID, rest.Name, rest.Mode, rest.LinkLimits = "", "", "", nil
@@ -125,7 +127,7 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 	switch {
 	case err != nil:
 		return nil, &userError{msg: fmt.Sprintf("*%s* matches more than one access rule. Rename your saved rule in qURL Desktop or the qURL CLI.", escapeMrkdwnText(truncateForError(selector)))}
-	case loadErr != nil && (rule == nil || rule.ID != selector):
+	case loadErr != nil && (rule == nil || !strings.EqualFold(rule.ID, selector)):
 		// With no saved rules read, only a Default rule's exact ID is unambiguous.
 		log.Warn("get: saved access rules read failed", "error", loadErr)
 		return nil, &userError{msg: "Couldn't read your saved access rules. Please try again. " + accessRuleChoicesHint}

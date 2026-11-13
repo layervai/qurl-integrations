@@ -568,8 +568,9 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 
 	// Rate-limit AFTER a successful resolution: only a request that resolved to
 	// a real, channel-authorized resource and an access rule Slack can apply —
-	// i.e. an actual mint attempt — counts against the user's quota. A `rule:`
-	// request reads the saved rules first, bounded like alias resolution below.
+	// i.e. an actual mint attempt — counts against the user's quota. The API key
+	// lookup and, for `rule:`, the saved-rules read come first, bounded like the
+	// alias resolution reads above.
 	// The dm:true delivery guard above runs first so an undeliverable privacy
 	// request consumes nothing either. (Resolution work for unknown aliases is
 	// instead bounded by Slack's own per-user slash-command throttle, not by
@@ -620,7 +621,7 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	}
 	notice := oneTimeUseNotice()
 	if rule != nil {
-		slackaudit.LogQURLMintRule(log, args.teamID, args.channelID, args.userID, input.ResourceID, rule.ID, input.OneTimeUse, input.ExpiresIn)
+		slackaudit.LogQURLMintRule(log, args.teamID, args.channelID, args.userID, input.ResourceID, rule.ID, input.OneTimeUse, input.ExpiresIn, input.SessionDuration)
 		notice = ruleLinkNotice(input, out.ExpiresAt)
 	}
 	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
