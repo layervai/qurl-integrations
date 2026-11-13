@@ -13,6 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/layervai/qurl-go/crid"
+
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -161,13 +163,19 @@ func cleanupAfterDeleteFailure(ctx context.Context, opts *globalOpts, client qur
 // cleanupDeletedLocalShare converges local desired state after the service has
 // committed deletion. It signals an existing daemon through IPC but never
 // installs or starts one.
-func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) error {
+func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) (err error) {
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
 		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
 			return nil
 		}
 		return err
+	}
+	if crid.Validate(id) == nil {
+		// A deleted share's link limits are never used again; forgetting them
+		// never blocks the cleanup below, and callers report a cleanup error
+		// as a warning after the committed delete.
+		defer func() { err = errors.Join(err, forgetLinkLimits(ctx, stateDir, id)) }()
 	}
 	registry, local, err := findDeletedLocalShare(ctx, opts, stateDir, id)
 	if err != nil {
@@ -250,17 +258,23 @@ func retireDeletedConnectorBinding(ctx context.Context, stateDir, id string, loc
 // confirmDelete asks on the terminal. Without a terminal it refuses instead
 // of hanging a pipeline: non-interactive deletion requires --yes.
 func confirmDelete(opts *globalOpts, id string) (bool, error) {
+	return confirmOnTerminal(opts, "delete", fmt.Sprintf("Delete %s? This cannot be undone. [y/N] ", id))
+}
+
+// confirmOnTerminal asks prompt and reads a yes; without a terminal it refuses
+// instead of hanging a pipeline, so non-interactive runs require --yes.
+func confirmOnTerminal(opts *globalOpts, action, prompt string) (bool, error) {
 	if !opts.streams.InIsTTY {
 		return false, exitcode.UsageError(errors.New(msgNeedsYes))
 	}
 	// The prompt is conversation, not data: it goes to stderr.
-	if _, err := fmt.Fprintf(opts.streams.Err, "Delete %s? This cannot be undone. [y/N] ", id); err != nil {
+	if _, err := fmt.Fprint(opts.streams.Err, prompt); err != nil {
 		return false, err
 	}
 	scanner := bufio.NewScanner(opts.streams.In)
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
-			return false, fmt.Errorf("read delete confirmation: %w", err)
+			return false, fmt.Errorf("read %s confirmation: %w", action, err)
 		}
 		return false, nil
 	}
