@@ -522,7 +522,7 @@ than switching in place.
 | `qurl approve <CRID> <code>` | Approve one person's request for access to a private resource |
 | `qurl deny <CRID> <device id>` | Refuse one person's request for access to a private resource |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
-| `qurl list` | List your published resources |
+| `qurl list` | List your active published resources |
 | `qurl start <CRID>` | Turn on a previously published local share |
 | `qurl stop <CRID>` | Turn off a local share without deleting it |
 | `qurl restart <CRID>` | Rotate and restart a local share, or move it to a new loopback target with `--target` |
@@ -1500,15 +1500,18 @@ be checked against the advertised CRID.
 
 ### qurl list
 
-`qurl list` prints one row per resource published under your account. Text,
-JSON, and `--quiet` all carry the full CRID. The text table can be wide because
-it does not shorten identifiers or local targets.
+`qurl list` prints one row per active resource published under your account.
+Use `qurl list --status revoked` to see deleted resources, or pass
+`--status active,revoked` to include both in scripts that need a full inventory.
+An empty `--status` uses the API default. Text, JSON, and
+`--quiet` all carry the full CRID. The text table can be wide because it does
+not shorten identifiers or local targets.
 
 | Flag | Description |
 |------|-------------|
 | `--limit <n>` | Maximum resources per page, 1–100 (default: service decides) |
 | `--cursor <cursor>` | Continue from a previous page's cursor |
-| `--status <status>` | Only resources with this status, e.g. `active` |
+| `--status <status>` | Resource statuses to list: `active` (default), `revoked`, or `active,revoked` |
 | `--type <kind>` | Only resources of this kind: `url` or `tunnel` |
 
 When more results exist, text mode says so on stderr with the `--cursor`
