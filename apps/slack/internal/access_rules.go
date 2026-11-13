@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -141,8 +142,8 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 	case err != nil:
 		log.Info("get: access rule is ambiguous")
 		msg := fmt.Sprintf("*%s* matches more than one access rule. Rename the saved rule in qURL Desktop or the qURL CLI", escapeMrkdwnText(truncateRunes(selector, 40)))
-		if isDefaultRuleID(selector) {
-			msg += `, or pick the Default access rule by name, such as rule:"One-time link"`
+		if d := defaultRuleWithID(selector); d != nil {
+			msg += `, or pick the Default access rule by name: rule:` + strconv.Quote(d.Name)
 		} else {
 			msg += ", or pick a Default access rule by ID (`rule:builtin.public`, `rule:once`)"
 		}
@@ -172,20 +173,24 @@ func defaultRuleByID(log *slog.Logger, selector string, readErr error) (*qurl.Ac
 	} else {
 		log.Warn("get: saved access rules read failed", "error", readErr)
 	}
-	for i := range defaultAccessRules {
-		if r := &defaultAccessRules[i]; strings.EqualFold(r.ID, selector) {
-			if err := refuseAccessRule(r); err != nil {
-				return nil, err
-			}
-			return r, nil
-		}
+	r := defaultRuleWithID(selector)
+	if r == nil {
+		return nil, &userError{msg: msg}
 	}
-	return nil, &userError{msg: msg}
+	if err := refuseAccessRule(r); err != nil {
+		return nil, err
+	}
+	return r, nil
 }
 
-// isDefaultRuleID reports whether selector is a Default access rule's ID.
-func isDefaultRuleID(selector string) bool {
-	return slices.ContainsFunc(defaultAccessRules, func(r qurl.AccessRule) bool { return strings.EqualFold(r.ID, selector) })
+// defaultRuleWithID returns the Default access rule whose ID is selector, or nil.
+func defaultRuleWithID(selector string) *qurl.AccessRule {
+	for i := range defaultAccessRules {
+		if strings.EqualFold(defaultAccessRules[i].ID, selector) {
+			return &defaultAccessRules[i]
+		}
+	}
+	return nil
 }
 
 // ruleLinkNotice describes a rule-shared link for the success reply, with

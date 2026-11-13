@@ -292,8 +292,8 @@ func TestHandleGet_RuleRefusedBeforeMint(t *testing.T) {
 		{flags: "rule:Newer", want: "newer qURL app", saved: map[string]any{"name": "Newer", "mode": "public", "max_opens": 2}},
 		{flags: "rule:Quick", want: "newer qURL app", saved: map[string]any{"name": "Quick", "mode": "public", "link_limits": map[string]any{"expires_in": "1h", "max_opens": 3}}},
 		{flags: `rule:"one-time link"`, want: "or pick a Default access rule by ID", saved: map[string]any{"name": "One-time link", "mode": "invite_only"}},
-		{flags: "rule:once", want: `by name, such as rule:"One-time link"`, saved: map[string]any{"name": "once", "mode": "invite_only"}},
-		{flags: "rule:builtin.public", want: "matches more than one access rule", saved: map[string]any{"name": "builtin.public", "mode": "review"}},
+		{flags: "rule:once", want: `by name: rule:"One-time link"`, saved: map[string]any{"name": "once", "mode": "invite_only"}},
+		{flags: "rule:builtin.public", want: `by name: rule:"Anyone with the link"`, saved: map[string]any{"name": "builtin.public", "mode": "review"}},
 	} {
 		var items []map[string]any
 		if tc.saved != nil {

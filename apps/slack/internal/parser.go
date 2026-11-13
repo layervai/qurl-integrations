@@ -853,7 +853,7 @@ func applyFlag(cmd *Command, tok string) error {
 		// but with a transitional hint instead of the generic
 		// "unknown flag", since some users have `once:true` in saved
 		// slash-command recipes and deserve to know it's now redundant.
-		return fmt.Errorf("%w: `once` is no longer needed — every `/qurl get` or `/qurl crid` link is one-time use by default (`rule:once` picks the One-time link rule)", ErrInvalidFlag)
+		return fmt.Errorf("%w: `once` is no longer needed — every `/qurl get` or `/qurl crid` link is one-time use by default", ErrInvalidFlag)
 	default:
 		return fmt.Errorf("%w: unknown flag `%s`", ErrInvalidFlag, truncateForError(key))
 	}
