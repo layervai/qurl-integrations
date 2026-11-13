@@ -714,8 +714,8 @@ func (o *globalOpts) resolveClientProduct() string {
 	return ""
 }
 
-// maxAgentRegistrationVersionRunes is the service's limit on the agent
-// registration version.
+// maxAgentRegistrationVersionRunes is the service's limit, in runes, on the
+// agent registration version.
 const maxAgentRegistrationVersionRunes = 64
 
 // agentRegistrationVersion appends the host product to the CLI version as
