@@ -289,8 +289,8 @@ describe('POST /webhooks/qurl — payload handling', () => {
     expect(mockRecordQurlView).not.toHaveBeenCalled();
   });
 
-  it('returns 200 invalid-payload when qurl_id missing (no retry — payload is malformed, not transient)', async () => {
-    const payload = { id: 'evt-1', type: 'qurl.accessed', owner_id: 'usr_test', data: { access_count: 1 } };
+  it.each(['qurl.accessed', 'qurl.expired'])('%s with missing qurl_id logs only a resource reference and does not retry', async (type) => {
+    const payload = { id: 'evt-1', type, owner_id: 'usr_test', data: { access_count: 1, resource_id: 'private-resource-fixture' } };
     const raw = JSON.stringify(payload);
     const res = await request(app)
       .post('/webhooks/qurl')
@@ -300,6 +300,12 @@ describe('POST /webhooks/qurl — payload handling', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'invalid-payload' });
     expect(mockRecordQurlView).not.toHaveBeenCalled();
+    const logger = require('../src/logger');
+    const warning = logger.warn.mock.calls.find(([message]) => message === `qURL webhook ${type} missing qurl_id`);
+    expect(warning).toBeDefined();
+    expect(warning[1].resource_ref).toBe(require('../src/utils/resource-id').resourceIdLogRef('private-resource-fixture'));
+    expect(warning[1]).not.toHaveProperty('resource_id');
+    expect(JSON.stringify(warning)).not.toContain('private-resource-fixture');
   });
 
   it('returns 200 invalid-payload when access_count is negative', async () => {
