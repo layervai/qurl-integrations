@@ -24,7 +24,7 @@ func TestPublishConsumerPolicyRequiresConfirmation(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Fatal(err)
 				}
-				if body.ConsumerAccess == nil || *body.ConsumerAccess != *policy || body.Private == nil || !*body.Private || body.AccessRequests {
+				if body.ConsumerAccess == nil || !body.ConsumerAccess.Equal(*policy) || body.Private == nil || !*body.Private || body.AccessRequests {
 					t.Fatalf("unsafe create: %+v", body)
 				}
 				row := map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true}
@@ -35,7 +35,7 @@ func TestPublishConsumerPolicyRequiresConfirmation(t *testing.T) {
 			})
 			result, err := newTestClient(t, srv, nil).Publish(t.Context(), existingTarget, PublishOptions{ConsumerAccess: policy, KeepExistingPublic: true})
 			if confirmed {
-				if err != nil || result.ConsumerAccess == nil || *result.ConsumerAccess != *policy {
+				if err != nil || result.ConsumerAccess == nil || !result.ConsumerAccess.Equal(*policy) {
 					t.Fatalf("result=%+v error=%v", result, err)
 				}
 			} else if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
@@ -45,6 +45,16 @@ func TestPublishConsumerPolicyRequiresConfirmation(t *testing.T) {
 				t.Fatalf("unexpected fallback: %v", sentRequests(srv))
 			}
 		})
+	}
+}
+
+func TestConsumerPolicyConfirmationComparesPayment(t *testing.T) {
+	requested := &qurl.ConsumerAccessPolicy{Mode: "contract", Version: 1, ContractID: "sale", Payment: &qurl.CRIDPaymentPolicy{AccountID: "acct_one", PriceID: "price_one", AccessSeconds: 3600}}
+	same, other := *requested, *requested
+	same.Payment = &qurl.CRIDPaymentPolicy{AccountID: "acct_one", PriceID: "price_one", AccessSeconds: 3600}
+	other.Payment = &qurl.CRIDPaymentPolicy{AccountID: "acct_one", PriceID: "price_two", AccessSeconds: 3600}
+	if !consumerPolicyConfirmed(requested, &same, nil) || consumerPolicyConfirmed(requested, &other, nil) {
+		t.Fatal("payment policy not compared by value")
 	}
 }
 
@@ -145,11 +155,11 @@ func TestExistingConsumerPolicyMismatchIsAConflict(t *testing.T) {
 
 func TestConsumerContractRejectsPadding(t *testing.T) {
 	for _, contract := range []string{" acme", "acme ", "\tacme", "acme\n"} {
-		if ValidateConsumerPolicyFields("contract", contract) == nil {
+		if ValidateConsumerPolicyFields("contract", contract, "") == nil {
 			t.Fatalf("accepted %q", contract)
 		}
 	}
-	if err := ValidateConsumerPolicyFields("contract", "acme"); err != nil {
+	if err := ValidateConsumerPolicyFields("contract", "acme", ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -237,5 +247,52 @@ func TestEveryConsumerManagementMethodMapsAPIErrors(t *testing.T) {
 		if err := call(); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
 			t.Errorf("%s error = %v (%T), want *Error with status 409", name, err, err)
 		}
+	}
+}
+
+func TestPublishDomainSnapshotMismatchNeverEditsExistingResource(t *testing.T) {
+	srv := apitest.NewServer(t)
+	requested := &qurl.ConsumerAccessPolicy{Mode: "email_domain", Version: 1, EmailDomain: "example.com", AllowedEmails: []string{"Partner@outside.com"}}
+	actual := *requested
+	actual.AllowedEmails = []string{"Different@outside.com"}
+	actual.Version = 4
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "consumer_access": actual}, map[string]any{"found_existing": true})
+	})
+	_, err := newTestClient(t, srv, nil).Publish(t.Context(), existingTarget, PublishOptions{ConsumerAccess: requested})
+	if !errors.Is(err, ErrPublishAccessConflict) {
+		t.Fatalf("mismatch accepted: %v", err)
+	}
+	if len(srv.Requests()) != 1 {
+		t.Fatal("snapshot selection mutated existing resource")
+	}
+}
+
+func TestPublishEmailDomainRequiresExactConfirmation(t *testing.T) {
+	for _, domain := range []string{"example.com", "other.example", ""} {
+		t.Run(domain, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			wanted := &qurl.ConsumerAccessPolicy{Mode: "email_domain", Version: 1, EmailDomain: "example.com"}
+			srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+				var body publishRequest
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Private == nil || !*body.Private || body.AccessRequests || body.ConsumerAccess == nil || body.ConsumerAccess.EmailDomain != "example.com" {
+					t.Fatalf("unsafe publish=%+v error=%v", body, err)
+				}
+				actual := *wanted
+				actual.EmailDomain = domain
+				apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "consumer_access": actual}, nil)
+			})
+			got, err := newTestClient(t, srv, nil).Publish(t.Context(), existingTarget, PublishOptions{ConsumerAccess: wanted})
+			if domain == "example.com" {
+				if err != nil || got.ConsumerAccess.EmailDomain != domain {
+					t.Fatalf("result=%+v error=%v", got, err)
+				}
+			} else if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+				t.Fatalf("unconfirmed domain error=%v", err)
+			}
+			if len(sentRequests(srv)) != 1 {
+				t.Fatalf("unexpected fallback: %v", sentRequests(srv))
+			}
+		})
 	}
 }
