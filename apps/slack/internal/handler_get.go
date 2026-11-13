@@ -45,7 +45,8 @@ const getUsageMessage = "Usage: `/qurl get <$id|$alias>` to create a qURL for a 
 // they are separate constants rather than one shared knob.
 const getReasonAuditMaxRunes = 240
 
-// Access limits applied to every `/qurl get` mint. Raw URLs are unsupported
+// Access limits applied to every `/qurl get` mint without `rule:` (an access
+// rule replaces all four; see resolveAccessRule). Raw URLs are unsupported
 // (see urlNotSupportedGetMessage), but existing URL resources can be minted by
 // their listed `$alias`. These limits bound a shared Slack-created link to a
 // single short-lived viewer:
@@ -536,24 +537,9 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 		return getResult{}, errDMNotConfigured
 	}
 
-	// Rate-limit AFTER a successful resolution: only a request that resolved to a
-	// real, channel-authorized resource — i.e. an actual mint attempt — counts
-	// against the user's quota. The dm:true delivery guard above runs first
-	// so an undeliverable privacy request consumes nothing either. (Resolution
-	// work for unknown aliases is instead bounded by Slack's own per-user
-	// slash-command throttle, not by spending the user's mint quota on typos.)
-	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
-	if err != nil {
-		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
-		return getResult{}, &userError{msg: rateLimitErrorMessage(err)}
-	}
-	if !ok {
-		return getResult{}, &userError{msg: rateLimitMessage(retry, "")}
-	}
-
 	input := &client.CreateInput{
-		// One-time use is the only mode for `/qurl get` — there is no
-		// `once` flag; every minted link burns on first redemption.
+		// One-time use unless an access rule says otherwise; there is no
+		// `once` flag.
 		OneTimeUse: true,
 		// Slack-created resource access limits — see the const block above.
 		ExpiresIn:       resourceLinkExpiry,
@@ -575,6 +561,22 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 			return getResult{}, err
 		}
 		notice = ruleLinkNotice(input)
+	}
+
+	// Rate-limit AFTER a successful resolution: only a request that resolved to a
+	// real, channel-authorized resource and an access rule Slack can apply — i.e.
+	// an actual mint attempt — counts
+	// against the user's quota. The dm:true delivery guard above runs first
+	// so an undeliverable privacy request consumes nothing either. (Resolution
+	// work for unknown aliases is instead bounded by Slack's own per-user
+	// slash-command throttle, not by spending the user's mint quota on typos.)
+	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
+	if err != nil {
+		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
+		return getResult{}, &userError{msg: rateLimitErrorMessage(err)}
+	}
+	if !ok {
+		return getResult{}, &userError{msg: rateLimitMessage(retry, "")}
 	}
 
 	out, err := c.Create(ctx, input)

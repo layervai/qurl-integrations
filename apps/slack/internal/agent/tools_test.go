@@ -67,6 +67,13 @@ func TestParseProposal(t *testing.T) {
 			},
 		},
 		{
+			name:    "get refuses an over-long rule",
+			tool:    toolProposeGet,
+			input:   map[string]any{fieldToken: testSlugSigil, fieldRule: strings.Repeat("x", maxRuleRunes+1)},
+			wantOK:  true,
+			wantErr: true,
+		},
+		{
 			name:    "get requires token",
 			tool:    toolProposeGet,
 			input:   map[string]any{},

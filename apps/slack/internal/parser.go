@@ -778,7 +778,7 @@ func hasASCIIPrefixFold(s, prefix string) bool {
 // against "true", so any non-"true" value silently returns false —
 // exactly the typo class the rest of the parser rejects). `reason`
 // accepts any non-empty prose because the handler in PR-3c.3+ uses it
-// for audit text where the user's exact wording is the point.
+// for audit text where the user's exact wording is the point; so does `rule`.
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
 	if colonIdx < 0 {
@@ -826,7 +826,14 @@ func applyFlag(cmd *Command, tok string) error {
 		}
 		cmd.Flags[key] = val
 		return nil
-	case "reason", "rule":
+	case "reason":
+		cmd.Flags[key] = val
+		return nil
+	case "rule":
+		// A blank name would otherwise mint with Slack's default, not a rule.
+		if strings.TrimSpace(val) == "" {
+			return fmt.Errorf("%w: `%s` (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, truncateForError(tok))
+		}
 		cmd.Flags[key] = val
 		return nil
 	case "once":

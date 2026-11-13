@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -43,20 +44,12 @@ func TestDefaultAccessRulesMatchCatalog(t *testing.T) {
 		want[b.ID] = b
 	}
 	for _, d := range catalog.Defaults {
-		if d.ID == "once" {
-			want[d.ID] = qurl.AccessRule{ID: d.ID, Name: d.Label, Mode: d.Mode, LinkLimits: d.LinkLimits}
-		}
+		want[d.ID] = qurl.AccessRule{ID: d.ID, Name: d.Label, Mode: d.Mode, LinkLimits: d.LinkLimits}
 	}
 	for _, got := range defaultAccessRules {
 		w, ok := want[got.ID]
-		if !ok || got.Name != w.Name || got.Mode != w.Mode {
+		if !ok || got.Name != w.Name || got.Mode != w.Mode || !reflect.DeepEqual(got.LinkLimits, w.LinkLimits) {
 			t.Errorf("default rule %+v does not match catalog %+v", got, w)
-			continue
-		}
-		if (got.LinkLimits == nil) != (w.LinkLimits == nil) {
-			t.Errorf("%s link limits = %+v, catalog %+v", got.ID, got.LinkLimits, w.LinkLimits)
-		} else if l := got.LinkLimits; l != nil && (l.ExpiresIn != w.LinkLimits.ExpiresIn || l.SessionDuration != w.LinkLimits.SessionDuration || *l.OneTimeUse != *w.LinkLimits.OneTimeUse) {
-			t.Errorf("%s link limits = %+v, catalog %+v", got.ID, l, w.LinkLimits)
 		}
 	}
 }
@@ -71,49 +64,55 @@ func TestFindAccessRule(t *testing.T) {
 		selector, wantID string
 		wantErr          bool
 	}{
-		{selector: "team ONLY ", wantID: saved[0].ID},
+		{selector: "team ONLY", wantID: saved[0].ID},
 		{selector: saved[1].ID, wantID: saved[1].ID},
 		{selector: "once", wantID: "once"},
 		{selector: "Anyone with the link", wantID: "builtin.public"},
 		{selector: "one-time link", wantErr: true}, // a saved rule shares the preset's name
 		{selector: "Nobody"},
+		{selector: "people who pay", wantID: "paid"},
 	} {
-		got, found, err := findAccessRule(tc.selector, saved)
-		if (err != nil) != tc.wantErr || (tc.wantID != "") != found || got.ID != tc.wantID {
-			t.Errorf("findAccessRule(%q) = %q, %v, %v; want %q (err %v)", tc.selector, got.ID, found, err, tc.wantID, tc.wantErr)
+		got, err := findAccessRule(tc.selector, saved)
+		gotID := ""
+		if got != nil {
+			gotID = got.ID
+		}
+		if (err != nil) != tc.wantErr || gotID != tc.wantID {
+			t.Errorf("findAccessRule(%q) = %q, %v; want %q (err %v)", tc.selector, gotID, err, tc.wantID, tc.wantErr)
 		}
 	}
 }
 
 func TestApplyAccessRule(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
+	type testCase struct {
 		name    string
 		rule    qurl.AccessRule
 		want    client.CreateInput
 		refusal string
-	}{
+	}
+	refusedPresets := make([]testCase, 0, len(defaultAccessRules)-2)
+	for _, r := range defaultAccessRules[2:] {
+		refusedPresets = append(refusedPresets, testCase{name: r.Name, rule: r, refusal: "Slack can't set"})
+	}
+	for _, tc := range append(refusedPresets, []testCase{
 		{name: "anyone with the link", rule: defaultAccessRules[0], want: client.CreateInput{}},
 		{name: "one-time link", rule: defaultAccessRules[1], want: client.CreateInput{OneTimeUse: true, ExpiresIn: "30d", SessionDuration: "24h"}},
 		{name: "saved public rule", rule: qurl.AccessRule{Name: "Quick", Mode: accessRuleModePublic, LinkLimits: &qurl.AccessRuleLinkLimits{ExpiresIn: "1h", OneTimeUse: new(false)}}, want: client.CreateInput{ExpiresIn: "1h"}},
-		{name: "people you invite", rule: defaultAccessRules[2], refusal: "Slack can't set"},
-		{name: "people you approve", rule: defaultAccessRules[3], refusal: "Slack can't set"},
 		{name: "work email", rule: qurl.AccessRule{Name: "Team", Mode: "email_domain", EmailDomain: "example.com"}, refusal: "Slack can't set"},
 		{name: "paid", rule: qurl.AccessRule{Name: "Paid", Mode: "contract", Payment: &qurl.AccessRulePayment{PriceID: "price_1"}}, refusal: "Slack can't set"},
 		{name: "unknown mode", rule: qurl.AccessRule{Name: "Future", Mode: "future_mode"}, refusal: "Slack can't set"},
 		{name: "public with a private setting", rule: qurl.AccessRule{Name: "Odd", Mode: accessRuleModePublic, AllowedEmails: []string{"a@example.com"}}, refusal: "Slack can't set"},
 		{name: "unknown field", rule: qurl.AccessRule{Name: "*Newer*", Mode: accessRuleModePublic, Unknown: map[string]json.RawMessage{"geo": []byte(`"us"`)}}, refusal: "newer qURL app"},
 		{name: "unknown link-limit field", rule: qurl.AccessRule{Name: "Newer", Mode: accessRuleModePublic, LinkLimits: &qurl.AccessRuleLinkLimits{ExpiresIn: "1h", Unknown: map[string]json.RawMessage{"max_opens": []byte("2")}}}, refusal: "newer qURL app"},
-	} {
+	}...) {
 		// Start from Slack's default limits: an applied rule replaces all of them.
 		input := client.CreateInput{OneTimeUse: true, ExpiresIn: resourceLinkExpiry, SessionDuration: resourceSessionDuration, MaxSessions: resourceMaxSessions}
 		err := applyAccessRule(&input, &tc.rule)
 		if tc.refusal != "" {
-			if err == nil || !strings.Contains(err.Error(), tc.refusal) {
-				t.Errorf("%s: err = %v, want refusal %q", tc.name, err, tc.refusal)
-			}
-			if strings.Contains(err.Error(), "**Newer**") {
-				t.Errorf("%s: rule name not escaped: %v", tc.name, err)
+			// "**Newer**" would mean the name's own markup reached the reply.
+			if err == nil || !strings.Contains(err.Error(), tc.refusal) || strings.Contains(err.Error(), "**Newer**") {
+				t.Errorf("%s: err = %v, want an escaped refusal %q", tc.name, err, tc.refusal)
 			}
 			continue
 		}
@@ -136,14 +135,10 @@ func TestRuleLinkNotice(t *testing.T) {
 // writeAccessRules serves GET /v1/me/access-rules with items.
 func writeAccessRules(t *testing.T, w http.ResponseWriter, items ...map[string]any) {
 	t.Helper()
-	w.Header().Set("Content-Type", "application/json")
 	if items == nil {
 		items = []map[string]any{}
 	}
-	body := map[string]any{testKeyData: map[string]any{"account_id": "acct", "version": 1, "items": items, "built_ins": []any{}}}
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
+	respondRawQURLEnvelope(t, w, map[string]any{"account_id": "acct", "version": 1, "items": items, "built_ins": []any{}})
 }
 
 const accessRulesPath = "/v1/me/access-rules"
@@ -223,22 +218,12 @@ func TestHandleGet_RuleReadFailure(t *testing.T) {
 	if mint != nil || !strings.Contains(reply, "Couldn't read your saved access rules") {
 		t.Fatalf("mint = %v, reply = %q", mint, reply)
 	}
-	// A Default access rule never depends on the read.
-	if reply, mint := ruleGet(t, `rule:"One-time link"`, failing); mint == nil {
-		t.Fatalf("One-time link did not mint; reply %q", reply)
+	// A Default rule's name could be an unread saved rule's too; only its ID mints.
+	if reply, mint := ruleGet(t, `rule:"One-time link"`, failing); mint != nil {
+		t.Fatalf("One-time link by name minted without the saved rules; reply %q", reply)
 	}
-}
-
-func TestHandleGet_RuleRefusedBeforeMint(t *testing.T) {
-	reply, mint := ruleGet(t, `rule:"People you approve"`, func(w http.ResponseWriter, _ *http.Request) { writeAccessRules(t, w) })
-	if mint != nil || !strings.Contains(reply, "Slack can't set") {
-		t.Fatalf("mint = %v, reply = %q", mint, reply)
-	}
-	reply, mint = ruleGet(t, `rule:Newer`, func(w http.ResponseWriter, _ *http.Request) {
-		writeAccessRules(t, w, map[string]any{"id": "33333333-3333-4333-8333-333333333333", "name": "Newer", "mode": "public", "max_opens": 2})
-	})
-	if mint != nil || !strings.Contains(reply, "newer qURL app") {
-		t.Fatalf("mint = %v, reply = %q", mint, reply)
+	if reply, mint := ruleGet(t, "rule:once", failing); mint == nil {
+		t.Fatalf("rule:once did not mint; reply %q", reply)
 	}
 }
 
@@ -250,5 +235,29 @@ func TestHandleGet_WithoutRuleSkipsRulesRead(t *testing.T) {
 	})
 	if mint == nil || mint["one_time_use"] != true || mint["expires_in"] != resourceLinkExpiry {
 		t.Fatalf("mint = %v; reply %q", mint, reply)
+	}
+}
+
+// TestHandleGet_RuleRefusedBeforeMint covers each refusal through the
+// handler, saved rules decoded end to end.
+func TestHandleGet_RuleRefusedBeforeMint(t *testing.T) {
+	for _, tc := range []struct {
+		flags, want string
+		saved       map[string]any
+	}{
+		{flags: `rule:"People you approve"`, want: "Slack can't set"},
+		{flags: "rule:Newer", want: "newer qURL app", saved: map[string]any{"name": "Newer", "mode": "public", "max_opens": 2}},
+		{flags: "rule:Quick", want: "newer qURL app", saved: map[string]any{"name": "Quick", "mode": "public", "link_limits": map[string]any{"expires_in": "1h", "max_opens": 3}}},
+		{flags: `rule:"one-time link"`, want: "More than one access rule", saved: map[string]any{"name": "One-time link", "mode": "invite_only"}},
+	} {
+		var items []map[string]any
+		if tc.saved != nil {
+			tc.saved["id"] = "33333333-3333-4333-8333-333333333333"
+			items = append(items, tc.saved)
+		}
+		reply, mint := ruleGet(t, tc.flags, func(w http.ResponseWriter, _ *http.Request) { writeAccessRules(t, w, items...) })
+		if mint != nil || !strings.Contains(reply, tc.want) {
+			t.Errorf("%s: mint = %v, reply = %q, want %q", tc.flags, mint, reply, tc.want)
+		}
 	}
 }

@@ -1349,7 +1349,8 @@ func (c *Client) AccessRules(ctx context.Context) ([]qurl.AccessRule, error) {
 	var out struct {
 		Items []qurl.AccessRule `json:"items"`
 	}
-	if _, err := c.do(req, &out, "GET /v1/me/access-rules"); err != nil {
+	// One attempt: it sits on a slash command's deadline, and callers retry.
+	if _, err := c.doOnce(req, &out, "GET /v1/me/access-rules"); err != nil {
 		return nil, err
 	}
 	if out.Items == nil {

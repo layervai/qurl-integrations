@@ -305,6 +305,7 @@ func TestParse_GetFlagErrors(t *testing.T) {
 		{name: "empty bare value", text: "get $prod-db reason:", wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
 		{name: "empty quoted value", text: `get $prod-db reason:""`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
 		{name: "empty rule", text: `get $prod-db rule:""`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
+		{name: "blank rule", text: `get $prod-db rule:"  "`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
 		// Strict-posture on dm: only `true` / `false` (case-folded)
 		// accepted. Without these rejections, `dm:yes` / `dm:1`
 		// would parse fine and then silently return false on

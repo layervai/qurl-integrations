@@ -7,6 +7,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Tool names. Read tools execute inline; propose_* tools only describe a
@@ -42,6 +43,9 @@ const (
 	fieldPort   = "port"
 	fieldRule   = "rule"
 )
+
+// maxRuleRunes is the longest access rule name the service accepts.
+const maxRuleRunes = 120
 
 // stringProp is a small helper for a JSON-Schema string property.
 func stringProp(desc string) map[string]any {
@@ -271,6 +275,10 @@ func proposalGet(f map[string]string) (*Proposal, error) {
 		return nil, errEmptyField(toolProposeGet, fieldToken)
 	}
 	rule := strings.TrimSpace(f[fieldRule])
+	// No rule name is longer; a longer value would only overflow the confirm card.
+	if utf8.RuneCountInString(rule) > maxRuleRunes {
+		return nil, fmt.Errorf("%s: %s is longer than %d characters", toolProposeGet, fieldRule, maxRuleRunes)
+	}
 	summary := fmt.Sprintf("Mint a one-time access link for `$%s`.", token)
 	if rule != "" {
 		summary = fmt.Sprintf("Mint an access link for `$%s` with the access rule %q.", token, rule)

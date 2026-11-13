@@ -363,3 +363,22 @@ func TestHandleCRID_DenialSanitizesLogIDs(t *testing.T) {
 		return
 	}
 }
+
+// TestHandleCRID_Rule pins that `/qurl crid` applies `rule:` like `/qurl get`.
+func TestHandleCRID_Rule(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel", []string{testResourceIDFix, testTunnelResourceID})
+	ts.addCustomer(http.MethodGet, accessRulesPath, func(w http.ResponseWriter, _ *http.Request) { writeAccessRules(t, w) })
+	var body map[string]any
+	ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		writeCreateFixture(t, w, "https://qurl.link/crid", testTunnelResourceID)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("crid "+testTunnelCRID+` rule:"Anyone with the link"`, testAdminTeamID, testAdminUserID)
+	if body["one_time_use"] != false || body["expires_in"] != nil || !strings.Contains(async, "anyone with the link can open it") {
+		t.Fatalf("mint body = %#v, reply = %q", body, async)
+	}
+}

@@ -2061,7 +2061,7 @@ func TestConfirm_GetCarriesAccessRule(t *testing.T) {
 	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
 		names.channelPolicy: {seedChannelPolicySet("T1", "D1", "", []string{testAgentGetResourceID})},
 	})
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Rule: "People you invite", Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Rule: "builtin.invite_only", Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
 	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
 	hc.h.Wait()
 
@@ -2076,7 +2076,7 @@ func TestConfirm_GetCarriesAccessRule(t *testing.T) {
 		t.Fatalf("private reply = %q, want the rule refusal", private)
 	}
 	_, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
-	if !strings.Contains(card, agentConfirmGetFailedReply) || strings.Contains(card, "People you invite") {
+	if !strings.Contains(card, agentConfirmGetFailedReply) || strings.Contains(card, "invite") {
 		t.Fatalf("public card = %q", card)
 	}
 }
