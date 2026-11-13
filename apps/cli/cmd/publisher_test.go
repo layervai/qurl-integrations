@@ -56,7 +56,8 @@ func TestShareFromOlderServiceRendersUnverified(t *testing.T) {
 		}
 		want := fixtureShareLink + "\n\n" +
 			"  " + wantUnnamedPublisherRow + "\n" +
-			"  Expires in 5m (single use)\n"
+			"  Expires in 5m (single use)\n\n" +
+			"Only the first person can open this link. Run qurl share " + srv.Key.CRID + " for a new link.\n"
 		if got := res.stdout.String(); got != want {
 			t.Errorf("terminal share =\n%s\nwant\n%s", got, want)
 		}
@@ -221,9 +222,11 @@ func TestOwnerReadsOmitAZeroDate(t *testing.T) {
 	// How each format shows the mock's real date, a day before the test clock.
 	shown := map[string]string{"text": "1d ago", "json": `"created_at": "2026-03-01T00:00:00Z"`}
 	for name, command := range map[string]func(*apitest.Server) []string{
-		"status":  func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
-		"list":    func(*apitest.Server) []string { return []string{"list"} },
-		"publish": func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+		"status": func(srv *apitest.Server) []string { return []string{"status", srv.Key.CRID} },
+		"list":   func(*apitest.Server) []string { return []string{"list"} },
+		"publish": func(*apitest.Server) []string {
+			return []string{"publish", "https://example.com/data", "--name", "Example"}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			for _, format := range []string{"text", "json"} {
@@ -510,7 +513,7 @@ func TestLocalPublishCarriesThePublisherInJSONOnly(t *testing.T) {
 			now:            func() time.Time { return fixedNow },
 		}
 		local := &connectorstate.LocalShare{CRID: "<CRID>", ResourceID: "rid", TargetURL: "http://127.0.0.1:3000"}
-		if err := printLocalPublishServing(opts, &agent.ResolvedResource{}, local, sharing); err != nil {
+		if err := printLocalPublishServing(opts, &agent.ResolvedResource{}, local, nil, sharing); err != nil {
 			t.Fatal(err)
 		}
 		if stderr.Len() != 0 {
