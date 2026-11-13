@@ -1709,9 +1709,9 @@ function decryptDefaultOwnerGuildApiKey(ciphertext) {
 
 // Webhook attributes the default-owner conversion must see unchanged.
 const DEFAULT_OWNER_CAS_FIELDS = [
-  ['webhook_secret', ':storedSecret'],
-  ['webhook_id', ':storedWebhookId'],
-  ['webhook_owner_id', ':storedOwner'],
+  ['webhook_secret', ':storedSecret', '#storedSecret'],
+  ['webhook_id', ':storedWebhookId', '#storedWebhookId'],
+  ['webhook_owner_id', ':storedOwner', '#storedOwner'],
 ];
 
 function defaultOwnerKeyChangedError() {
@@ -1772,26 +1772,34 @@ async function setGuildDefaultWebhookOwner(
   // authorize deletion for the prior owner, and sibling guilds may still share
   // it. A reference-aware reconciler is tracked in #1380.
 
-  const conditions = ['qurl_api_key = :storedApiKey'];
+  const names = { '#apiKey': 'qurl_api_key', '#updatedAt': 'updated_at' };
   const values = {
     ':woid': webhookOwnerId,
     ':u': nowIso(),
     ':storedApiKey': row.qurl_api_key,
+    ':present': true,
+    ':absent': false,
   };
-  for (const [field, placeholder] of DEFAULT_OWNER_CAS_FIELDS) {
-    if (Object.hasOwn(row, field)) {
-      conditions.push(`${field} = ${placeholder}`);
-      values[placeholder] = row[field];
-    } else {
-      conditions.push(`attribute_not_exists(${field})`);
-    }
+  for (const [field, placeholder, name] of DEFAULT_OWNER_CAS_FIELDS) {
+    const present = Object.hasOwn(row, field);
+    names[name] = field;
+    values[placeholder] = present ? row[field] : null;
+    values[`${placeholder}Present`] = present;
   }
 
   const update = {
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
-    ConditionExpression: conditions.join(' AND '),
-    UpdateExpression: 'REMOVE webhook_id, webhook_secret SET webhook_owner_id = :woid, updated_at = :u',
+    // Presence flags distinguish absence from stored null without interpolating attribute names.
+    ConditionExpression: '#apiKey = :storedApiKey AND ' +
+      '((:storedSecretPresent = :present AND #storedSecret = :storedSecret) OR ' +
+      '(:storedSecretPresent = :absent AND attribute_not_exists(#storedSecret))) AND ' +
+      '((:storedWebhookIdPresent = :present AND #storedWebhookId = :storedWebhookId) OR ' +
+      '(:storedWebhookIdPresent = :absent AND attribute_not_exists(#storedWebhookId))) AND ' +
+      '((:storedOwnerPresent = :present AND #storedOwner = :storedOwner) OR ' +
+      '(:storedOwnerPresent = :absent AND attribute_not_exists(#storedOwner)))',
+    UpdateExpression: 'REMOVE #storedWebhookId, #storedSecret SET #storedOwner = :woid, #updatedAt = :u',
+    ExpressionAttributeNames: names,
     ExpressionAttributeValues: values,
   };
   try {
