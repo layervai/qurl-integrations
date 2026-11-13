@@ -168,10 +168,11 @@ type PublishOptions struct {
 	ConnectorID string
 	// Name is the public name recipients see; the service requires it to
 	// create a resource and ignores it when the target is already published.
-	Name        string
-	Description string
-	Tags        []string
-	Alias       string
+	Name             string
+	UseHomepageTitle bool
+	Description      string
+	Tags             []string
+	Alias            string
 	// OriginHeader is the header the gateway adds to every request it
 	// forwards to the target URL, for a URL resource only. Publish requires
 	// the answer to name it. A target that is already published with
@@ -207,6 +208,7 @@ type Published struct {
 	CRID       string
 	ResourceID string
 	TargetURL  string
+	Name       string
 	Status     string
 	CreatedAt  *time.Time
 	ExpiresAt  *time.Time

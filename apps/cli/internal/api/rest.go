@@ -39,6 +39,7 @@ type resourceRow struct {
 	ResourceID        string       `json:"resource_id"`
 	CRID              string       `json:"crid"`
 	TargetURL         string       `json:"target_url"`
+	Name              string       `json:"name"`
 	Type              string       `json:"type"`
 	Status            string       `json:"status"`
 	DesiredState      DesiredState `json:"desired_state"`
@@ -232,10 +233,11 @@ type publishRequest struct {
 	TargetURL      string `json:"target_url,omitempty"`
 	// Name is the public name recipients see. The service requires it to
 	// create a resource and ignores it when the target is already published.
-	Name        string   `json:"name,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Alias       string   `json:"alias,omitempty"`
+	Name             string   `json:"name,omitempty"`
+	UseHomepageTitle bool     `json:"use_homepage_title,omitempty"`
+	Description      string   `json:"description,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
+	Alias            string   `json:"alias,omitempty"`
 	// OriginHeader is sent only when the publisher asked for one. Omitted,
 	// the service reuses an existing resource with the header it has.
 	OriginHeader *originHeaderWire `json:"origin_header,omitempty"`
@@ -336,6 +338,8 @@ func newPublishRequest(targetURL string, opts *PublishOptions, wantPrivate bool)
 		body.Type = "tunnel"
 		body.Slug = opts.ConnectorID
 		body.FindOrCreate = true
+	} else {
+		body.UseHomepageTitle = opts.UseHomepageTitle && opts.Name == ""
 	}
 	return body
 }
@@ -388,6 +392,7 @@ func publishedFromReply(reply *restReply) (*Published, []string, error) {
 		CRID:           env.Data.CRID,
 		ResourceID:     env.Data.ResourceID,
 		TargetURL:      env.Data.TargetURL,
+		Name:           env.Data.Name,
 		Status:         env.Data.Status,
 		CreatedAt:      knownTime(env.Data.CreatedAt),
 		ExpiresAt:      knownTime(env.Data.ExpiresAt),
