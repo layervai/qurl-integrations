@@ -55,6 +55,7 @@ func accountCmd(opts *globalOpts) *cobra.Command {
 			if err := client.LinkAccount(cmd.Context(), token, id.OwnerID); err != nil {
 				return err
 			}
+			opts.reconcileRulesAfterLink(cmd.Context())
 			return opts.printer().Account(id.OwnerID, "linked", msgAccountLinked)
 		},
 	})
@@ -109,6 +110,7 @@ func accountRecoverCmd(opts *globalOpts) *cobra.Command {
 				return errors.New("registered-device enrollment returned no client identity")
 			}
 			opts.registeredClient, opts.registeredIdentity = client, deviceIdentity
+			opts.reconcileRulesAfterLink(cmd.Context())
 			return opts.printer().Account(deviceIdentity.OwnerID, "recovered", msgAccountRecovered)
 		},
 	}

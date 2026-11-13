@@ -502,6 +502,30 @@ func TestPublishSendsPinnedWireShape(t *testing.T) {
 	}
 }
 
+func TestPublishHomepageTitleRoundTrip(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			UseHomepageTitle bool   `json:"use_homepage_title"`
+			Name             string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || !body.UseHomepageTitle || body.Name != "" {
+			t.Errorf("automatic name request = %+v, decode error = %v", body, err)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true,
+			"target_url": "https://example.com/data", "name": "Example Domain",
+		}, nil)
+	})
+	res, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{UseHomepageTitle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Name != "Example Domain" {
+		t.Fatalf("published name = %q", res.Name)
+	}
+}
+
 func TestPublishRejectsCRIDThatDoesNotCommitToResourceID(t *testing.T) {
 	srv := apitest.NewServer(t)
 	other := apitest.GenerateResourceKey(t)
