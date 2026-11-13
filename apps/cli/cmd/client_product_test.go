@@ -142,6 +142,7 @@ func TestAgentRegistrationVersion(t *testing.T) {
 		{name: "existing build metadata", version: "4.1.0+abc", product: "qurl-desktop/0.5.1", want: "4.1.0+abc.desktop"},
 		{name: "fits exactly", version: long, want: long + "+cli"},
 		{name: "overlong", version: long, product: "qurl-desktop/0.5.1", want: long},
+		{name: "overlong with build metadata", version: long + "+ab", product: "qurl-desktop/0.5.1", want: long + "+ab"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := agentRegistrationVersion(tc.version, tc.product); got != tc.want {

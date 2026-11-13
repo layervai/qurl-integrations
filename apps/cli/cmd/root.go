@@ -714,12 +714,18 @@ func (o *globalOpts) resolveClientProduct() string {
 	return ""
 }
 
+// maxAgentRegistrationVersionRunes is the service's limit on the agent
+// registration version.
+const maxAgentRegistrationVersionRunes = 64
+
 // agentRegistrationVersion appends the host product to the CLI version as
 // SemVer build metadata in the agent registration version: +cli without a
 // host product, +desktop for qURL Desktop, +other for any other host. An
 // overlong result keeps the bare version.
-// TODO(upstream-contract): qurl-service caps this field at 64 runes and
-// recognizes the desktop, cli, and other identifiers.
+//
+// TODO(upstream-contract): qurl-service caps this field at
+// maxAgentRegistrationVersionRunes and recognizes the desktop, cli, and other
+// identifiers.
 func agentRegistrationVersion(version, clientProduct string) string {
 	host := "other"
 	switch name, _, _ := strings.Cut(clientProduct, "/"); name {
@@ -732,7 +738,7 @@ func agentRegistrationVersion(version, clientProduct string) string {
 	if strings.Contains(version, "+") {
 		sep = "."
 	}
-	if tagged := version + sep + host; utf8.RuneCountInString(tagged) <= 64 {
+	if tagged := version + sep + host; utf8.RuneCountInString(tagged) <= maxAgentRegistrationVersionRunes {
 		return tagged
 	}
 	return version
