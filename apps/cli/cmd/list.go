@@ -21,14 +21,15 @@ func listCmd(opts *globalOpts) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List your published resources",
-		Long: `List the resources published under your account, one row per resource.
+		Short: "List your active published resources",
+		Long: `List active resources published under your account, one row per resource.
+Use --status revoked to list deleted resources.
 
 The text table always prints the full CRID. Local tunnel rows include their
 loopback target and durable desired state. Observed tunnel state is shown as
 unknown in this paged view; use qurl status <CRID> for an authoritative live
 observation. Pages continue with --cursor when there are more results.`,
-		Example: `  qurl list --status active
+		Example: `  qurl list --status revoked
   qurl list --quiet | xargs -n1 qurl share --quiet`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -59,7 +60,7 @@ observation. Pages continue with --cursor when there are more results.`,
 
 	cmd.Flags().IntVar(&limit, "limit", 0, "maximum resources per page, 1-100 (default: service decides)")
 	cmd.Flags().StringVar(&cursor, "cursor", "", "continue from a previous page's cursor")
-	cmd.Flags().StringVar(&status, "status", "", "only resources with this status, e.g. active")
+	cmd.Flags().StringVar(&status, "status", "active", "resource statuses to list: active, revoked, or active,revoked")
 	cmd.Flags().StringVar(&resType, "type", "", "only resources of this kind: url or tunnel")
 
 	return cmd
