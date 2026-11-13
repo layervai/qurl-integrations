@@ -36,7 +36,8 @@ func getCmd(opts *globalOpts) *cobra.Command {
 		Short: "Fetch what a CRID points to",
 		Long: `Fetch the content behind a CRID.
 
-get uses this device's identity. It works on the resource owner's devices
+get uses this device's identity and ignores link limits saved by a rule;
+qurl share uses them. It works on the resource owner's devices
 and, for a private resource, on the devices the publisher allowed; any other
 device gets "not found".
 

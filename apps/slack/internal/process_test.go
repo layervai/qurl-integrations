@@ -570,14 +570,8 @@ func TestHandle_AsyncGetSurfaces5xxCorrelationHandle(t *testing.T) {
 // instantly rather than queueing or unbounded-spawning. Two concurrent
 // long-running workers fill the pool; the third request must drop.
 func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
+	logs := captureDefaultSlog(t)
 	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
-	// Failure path: a t.Fatalf before the explicit releaseAll below
-	// would otherwise leave the parked worker goroutines blocked,
-	// hanging h.Wait() in t.Cleanup. sync.Once makes the explicit
-	// close + the cleanup safe to both call.
-	t.Cleanup(releaseAll)
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		<-release
 		w.Header().Set("Content-Type", "application/json")
@@ -599,7 +593,8 @@ func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
 	seedGetAliasBinding(t, h, "T123")
-	t.Cleanup(h.Wait)
+	// Release HTTP workers before waiting, including assertion failures.
+	t.Cleanup(func() { close(release); h.Wait() })
 
 	send := func(triggerID string) string {
 		body := getTokenCommandBody("T123", triggerID, rec.URL)
@@ -622,7 +617,13 @@ func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 		// gives the race detector + a busy CI runner enough headroom.
 		return len(h.sem) == 2
 	})
+	if logs.contains(`"event":"async_pool_rejected"`) {
+		t.Fatal("unsaturated pool emitted async_pool_rejected")
+	}
 	third := send("trig-3")
+	if !logs.contains(`"event":"async_pool_rejected"`) {
+		t.Fatal("saturated pool omitted async_pool_rejected")
+	}
 
 	if first != ackWorkingOnIt || second != ackWorkingOnIt {
 		t.Errorf("first/second acks should be working-on-it; got %q / %q", first, second)
@@ -630,9 +631,6 @@ func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 	if third != ackBusy {
 		t.Errorf("third (saturated) ack = %q, want %q", third, ackBusy)
 	}
-
-	// Release the parked workers so h.Wait() drains.
-	releaseAll()
 }
 
 // TestHandle_PanicInAsyncWorkRecovers fences the panic-recovery defer

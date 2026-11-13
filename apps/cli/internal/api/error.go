@@ -100,6 +100,9 @@ func CustomerMessages() []string {
 		msgRequestCodeNotFound, msgRequestDeviceNotFound, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
 		msgRemovedThenKeysFailed, msgRemovedThenUnexplained, msgRemovedThenListNotRead, msgRemovedButStillListed, msgAnsweredButStillListed, msgRemovalListMissingAfter, msgRemovalListNeverSaid, msgNothingMoreFromService,
 		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed, msgRemovalListNotSaid,
+		msgOriginHeaderNameLength, msgOriginHeaderNameToken, msgOriginHeaderNameReserved,
+		msgOriginHeaderValueLength, msgOriginHeaderValueUTF8, msgOriginHeaderValueSpace, msgOriginHeaderValueControl,
+		msgOriginHeaderMismatch, msgOriginHeaderUnconfirmed, msgOriginHeaderChangeUnconfirmed,
 	}
 }
 

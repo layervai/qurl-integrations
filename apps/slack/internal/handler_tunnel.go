@@ -713,7 +713,9 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		Type:         client.ResourceTypeTunnel,
 		Slug:         args.Slug,
 		FindOrCreate: true,
-		Description:  defaultTunnelDisplayName(args.Slug),
+		// The admin-chosen Connector ID is already public in the link host.
+		Name:        args.Slug,
+		Description: defaultTunnelDisplayName(args.Slug),
 	})
 	if err != nil {
 		log.Error("tunnel install: create/find resource failed", withAPIErrorAttrs(err, "error", err, "slug", sanitizeLogValue(args.Slug))...)

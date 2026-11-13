@@ -157,8 +157,10 @@ replace or clear it before reusing the Connector ID with different credentials.
 An overlay has at most 2,000 routes and a 64 KiB request-body limit.
 A route carries at most 16 headers and 1,024 aggregate
 name-and-value bytes. Re-registration may interrupt in-flight requests. During
-session rotation the retiring session retains old headers until replacement
-promotion and drain; a header update is not immediate revocation.
+session rotation the retiring session can keep active requests and their old
+headers until those requests finish or their original authorization expires.
+A header update is not immediate revocation; remove the route or stop the
+publisher to close its old work.
 
 ## Scale and limits
 
