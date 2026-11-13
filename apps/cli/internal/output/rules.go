@@ -21,7 +21,8 @@ func (p *Printer) AccessRuleCapabilities() error {
 // are offered only when creating a rule.
 func (p *Printer) AccessRules(snapshot *accessrules.Snapshot) error {
 	if p.format == FormatJSON {
-		return p.writeJSON(snapshot)
+		// Keep escaped mailbox characters from expanding the Desktop bridge snapshot.
+		return p.writeJSONWith(snapshot, false)
 	}
 	ew := &errWriter{w: p.out}
 	if p.quiet {

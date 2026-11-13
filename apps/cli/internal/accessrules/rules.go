@@ -81,7 +81,11 @@ func (d *Definition) HasUnknownFields() bool { return d.raw != nil }
 func (d Definition) MarshalJSON() ([]byte, error) { //nolint:gocritic // A value receiver marshals every copy, so none drops its unknown fields.
 	type plain Definition
 	if d.raw == nil {
-		return json.Marshal(plain(d))
+		var out bytes.Buffer
+		enc := json.NewEncoder(&out)
+		enc.SetEscapeHTML(false)
+		err := enc.Encode(plain(d))
+		return out.Bytes(), err
 	}
 	var read Definition
 	if json.Unmarshal(d.raw, &read) != nil || !EqualItems([]Definition{read}, []Definition{d}) {
