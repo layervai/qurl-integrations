@@ -30,15 +30,17 @@
     "discord-api-types": "^0.38.33",
     "discord.js": "14.27.0",
     "express": "~5.2.1",
-    "helmet": "~7.2.0",
+    "helmet": "~8.3.0",
     "jose": "~6.2.13"
   },
   "devDependencies": {
     "@aws-sdk/client-ssm": "^3.1036.0",
     "@babel/parser": "^7.29.0",
     "@babel/traverse": "^7.29.0",
+    "@eslint/js": "10.0.1",
     "aws-sdk-client-mock": "^4.1.0",
-    "eslint": "^8.57.1",
+    "eslint": "^10.13.0",
+    "globals": "17.14.0",
     "jest": "~30.5.2",
     "supertest": "^7.2.2"
   },
@@ -46,7 +48,7 @@
     "node": ">=22.19.0"
   },
   "overrides": {
-    "undici": "^6.28.0",
+    "undici": "^6.29.0",
     "lodash": "^4.17.21"
   }
 }
