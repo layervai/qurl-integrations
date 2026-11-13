@@ -42,14 +42,9 @@ const (
 	// the cell reply is the assigned-cell PublicExchanges SuccessBodyJSON. The
 	// recovery grant is test-local; only its qrg1. prefix is contract.
 	//
-	// TODO(upstream-contract): these values, the recover-mode fields added in
-	// nativeRecoveryHubReply, and the usrData.recovery_grant and
-	// usrData.credential request fields read by nativeRecoveryUserData mirror
-	// the private agent-credential-recovery vectors, as do the assumptions that a
-	// refresh reply may advance assignment_generation past the recover reply and
-	// that the native runtime releases agent state synchronously on Close, which
-	// lets this test reopen the store in-process.
-	// Nothing here fails when that platform contract moves (#1483).
+	// The private platform suite checks the released Connector against its
+	// recovery vectors. This test checks CLI orchestration with local fixtures;
+	// it does not own the recovery wire contract.
 	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	connectorIntegrationRecoveryGrant      = "qrg1.integration-recovery-grant-0001"
 	connectorIntegrationRecoveredKeyID     = "key_RcV8mP3qTn5W"
@@ -287,7 +282,7 @@ func nativeRecoveryHubReply(
 		}
 		// The recover reply is the public refresh reply plus the recovery grant,
 		// so both modes start from it. Recover mode is locally assembled, not
-		// vector-backed; see TODO(upstream-contract) above.
+		// vector-backed; the authoritative Connector check stays in the private suite.
 		var body map[string]any
 		if err := json.Unmarshal([]byte(assignment.RefreshAssignment.Result.BodyJSON), &body); err != nil {
 			return nil, err
