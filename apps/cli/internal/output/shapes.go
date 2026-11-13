@@ -27,14 +27,15 @@ type publishJSON struct {
 	// can ask for access. ResourceURL is the resource's address on the link
 	// site for private access requests or a consumer policy, when this install
 	// knows that site.
-	AccessRequests *bool      `json:"access_requests,omitempty"`
-	ResourceURL    string     `json:"resource_url,omitempty"`
-	CRID           string     `json:"crid,omitempty"`
-	ResourceID     string     `json:"resource_id"`
-	TargetURL      string     `json:"target_url"`
-	Status         string     `json:"status,omitempty"`
-	CreatedAt      *time.Time `json:"created_at,omitempty"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	AccessRequests *bool             `json:"access_requests,omitempty"`
+	Name           escapedJSONString `json:"name,omitempty"`
+	ResourceURL    string            `json:"resource_url,omitempty"`
+	CRID           string            `json:"crid,omitempty"`
+	ResourceID     string            `json:"resource_id"`
+	TargetURL      string            `json:"target_url"`
+	Status         string            `json:"status,omitempty"`
+	CreatedAt      *time.Time        `json:"created_at,omitempty"`
+	ExpiresAt      *time.Time        `json:"expires_at,omitempty"`
 	// FoundExisting mirrors the text-mode already-published note for scripts.
 	// Known remote and local outcomes emit true or false; an uncertain local
 	// reconciliation omits the field rather than claiming a fresh publish.
@@ -255,6 +256,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			KeptPublic:       res.KeptPublic,
 			AccessRequests:   res.AccessRequests,
 			ResourceURL:      requestAddress(res),
+			Name:             escapedJSONString(res.Name),
 			CRID:             res.CRID,
 			ResourceID:       res.ResourceID,
 			TargetURL:        res.TargetURL,
@@ -469,6 +471,9 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
+	if res.Name != "" {
+		twe.printf("  %s\t%s\n", p.bold("App name:"), p.previewText(res.Name))
+	}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
 	p.publishAccessRows(twe, res)
 	if res.OriginHeaderName != "" {
@@ -486,6 +491,10 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	p.limitedLinkRows(twe, res.LimitedLink)
 	if err := twe.flush(tw); err != nil {
 		return err
+	}
+
+	if res.Name != "" && !foundExisting(res) {
+		ew.printf("\nTo rename this app, run qurl preview set %s --name \"New name\".\n", res.CRID)
 	}
 
 	// The note says the existing CRID is shown, so it may only appear when

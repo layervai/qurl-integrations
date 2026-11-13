@@ -75,10 +75,13 @@ For a remote URL, qURL registers it, prints the CRID, and exits:
 
   qurl publish https://api.example.com/reports --name "Reports API"
 
+In Sandbox, omit --name for a remote HTTPS URL to use its homepage title.
+Use --name to choose a different public name.
+
 Every new resource needs a public name: recipients see it on the link page
 and in the passkey they save. Set it with --name. A local app defaults to its
 --id, else, in a terminal, the name of the directory you run the command in;
-qURL shows the name before it publishes. A remote URL has no default, because its address may be private:
+qURL shows the name before it publishes. Outside Sandbox a remote URL has no default:
 a terminal asks for the name, and a script must pass --name to create a
 resource. Publishing a target again needs no name and keeps the one it has;
 change it with "qurl preview set --name".
@@ -197,8 +200,11 @@ owns the share and turns it off when it exits.`,
 					return err
 				}
 			}
-			if access.Name, err = publishName(opts, cmd, name, connectorID, target); err != nil {
-				return err
+			access.UseHomepageTitle = sandboxHomepageName(opts.resolvedEndpoint, target, cmd.Flags().Changed("name"))
+			if !access.UseHomepageTitle {
+				if access.Name, err = publishName(opts, cmd, name, connectorID, target); err != nil {
+					return err
+				}
 			}
 			if target.kind == publishTargetLocal {
 				return publishNameError(runLocalPublish(cmd.Context(), opts, target, connectorID, foreground, &access))
@@ -226,7 +232,7 @@ owns the share and turns it off when it exits.`,
 	}
 	cmd.Flags().StringArrayVar(&allowedDeviceKeys, "allow-device-key", nil, "recipient public key allowed to open the private resource (repeatable)")
 	cmd.Flags().BoolVar(&allowRequests, "allow-requests", false, "let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you")
-	cmd.Flags().StringVar(&name, "name", "", "public name recipients see, up to 100 characters; required to create a resource (default for a local app: --id, else in a terminal the current directory's name)")
+	cmd.Flags().StringVar(&name, "name", "", "public name recipients see, up to 100 characters (default in Sandbox for HTTPS URLs: homepage title; local app: --id or current directory name in a terminal)")
 	cmd.Flags().StringVar(&description, "description", "", "human-readable description stored with the resource")
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tag stored with the resource (repeatable)")
 	cmd.Flags().StringVar(&alias, "alias", "", "memorable handle stored with the resource")
@@ -985,7 +991,15 @@ func (o *globalOpts) applyPublishRule(cmd *cobra.Command, access *qurlapi.Publis
 	return nil
 }
 
-// publishName returns the public name a publish sends, checked against the
+// sandboxHomepageName matches the Sandbox API that accepts use_homepage_title.
+// TODO(upstream-contract): Keep this in sync with the service's Sandbox gate.
+func sandboxHomepageName(endpoint string, target *publishTarget, hasName bool) bool {
+	return !hasName && target.kind == publishTargetRemote &&
+		strings.HasPrefix(strings.ToLower(target.original), "https://") &&
+		strings.EqualFold(strings.TrimRight(endpoint, "/"), "https://api.layerv.xyz")
+}
+
+// publishName returns the public name when Sandbox automatic naming does not apply, checked against the
 // service's rules so the create is never refused for it. --name wins. A local
 // app defaults to its configured Connector ID, else, in a terminal only, the
 // name of the directory the command runs in (its project) unless that is the
