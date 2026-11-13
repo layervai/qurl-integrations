@@ -1948,6 +1948,24 @@ async function executeSendPipeline(interaction, {
   // callers and the picker happy path.
   recipientMode,
 }) {
+  const params = {
+    apiKey, resourceType, attachment, locationUrl, locationName, recipients,
+    expiresIn, selfDestructSeconds, personalMessage, sendNonce, recipientMode,
+  };
+  const prepared = await prepareSendResources(interaction, params);
+  if ('reply' in prepared) return prepared.reply;
+  const send = { ...params, ...prepared };
+  const persisted = await persistSendBatch(interaction, send);
+  if ('reply' in persisted) return persisted.reply;
+  return dispatchAndMonitor(interaction, { ...send, ...persisted });
+}
+
+// Both pre-dispatch phases return success fields or { reply }; the driver observes pending replies.
+// Keep error replies pending so mint cleanup does not wait for Discord.
+async function prepareSendResources(interaction, {
+  apiKey, resourceType, attachment, locationUrl, locationName, recipients,
+  expiresIn, selfDestructSeconds, personalMessage, sendNonce,
+}) {
   // Shared cancel-edit for every entry gate. Fire-and-forget — the
   // throw is the load-bearing signal (test pins + logger.error in
   // handleCommand's outer catch). The outer catch will still append
@@ -2089,10 +2107,10 @@ async function executeSendPipeline(interaction, {
         logger.warn('File send rejected at slot-claim: concurrency cap reached', {
           activeFileSends, sendId, sendNonce, userId: interaction.user.id,
         });
-        return interaction.editReply({
+        return { reply: interaction.editReply({
           content: 'The bot is processing too many file sends right now. Please try again in a moment.',
           components: [],
-        });
+        }) };
       }
       activeFileSends++;
       fileSendSlotClaimed = true;
@@ -2145,7 +2163,7 @@ async function executeSendPipeline(interaction, {
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
         clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
+        return { reply: interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` }) };
       }
 
       qurlLinks = recipients.map((r, i) => ({
@@ -2185,7 +2203,7 @@ async function executeSendPipeline(interaction, {
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected for location', { expected: recipients.length, got: allLinks.length });
         clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
+        return { reply: interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` }) };
       }
 
       qurlLinks = recipients.map((r, i) => ({
@@ -2227,11 +2245,11 @@ async function executeSendPipeline(interaction, {
     if (error.apiCode === 'quota_exceeded') {
       const isFile = resourceType === RESOURCE_TYPES.FILE;
       const verb = isFile ? 're-upload the file' : 'edit the location query and resend';
-      return interaction.editReply({
+      return { reply: interaction.editReply({
         content: `Couldn't create more links — this ${isFile ? 'file' : 'location'} has hit its share limit (${TOKENS_PER_RESOURCE} per upload). To send to more recipients, ${verb}.`,
-      });
+      }) };
     }
-    return interaction.editReply({ content: 'Failed to create links. Please try again.' });
+    return { reply: interaction.editReply({ content: 'Failed to create links. Please try again.' }) };
   } finally {
     // Release the file-concurrency slot as soon as the mint+batch phase is
     // done — we no longer hold the 25 MB buffer past this point.
@@ -2240,9 +2258,16 @@ async function executeSendPipeline(interaction, {
 
   if (qurlLinks.length === 0) {
     clearCooldown(interaction.user.id);
-    return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
+    return { reply: interaction.editReply({ content: 'Failed to create any links. Please try again.' }) };
   }
 
+  return { sendId, qurlLinks, connectorResourceId };
+}
+
+async function persistSendBatch(interaction, {
+  sendId, qurlLinks, resourceType, expiresIn, apiKey, connectorResourceId,
+  attachment, locationUrl, locationName, personalMessage, selfDestructSeconds,
+}) {
   // Compute the absolute expiry instant once for this dispatch (Unix
   // seconds — Discord's <t:N:R> format requires seconds, not millis).
   // Using send-time + duration rather than reading from the API mint
@@ -2267,6 +2292,28 @@ async function executeSendPipeline(interaction, {
   // single uncaught error at the function level, not as N
   // `DISPATCH_FAILED` audit emissions. Closes #352.
   const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+
+  // Establish the config fence before any recipient row becomes visible.
+  // Final initial persistence clears preparation atomically; failures keep Add blocked.
+  try {
+    await db.saveSendConfig({
+      sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
+      actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
+      attachmentName: attachment?.name || null,
+      attachmentContentType: attachment?.contentType || null,
+      attachmentUrl: attachment?.url || null,
+      selfDestructSeconds, initialSend: true,
+    });
+  } catch (err) {
+    if (err?.code === 'INITIAL_SEND_CONFIG_EXISTS') {
+      logger.info('Initial send configuration already exists; no DMs sent', { sendId });
+    } else {
+      logger.error('Failed to establish the initial send configuration; no DMs sent', { sendId, errorName: err?.name, errorCode: err?.code });
+    }
+    clearCooldown(interaction.user.id);
+    await cleanupFreshSendResources(qurlLinks, apiKey, sendId, { reason: 'initial_persistence', rowsMayHavePersisted: false });
+    return { reply: interaction.editReply({ content: 'Could not prepare this send safely. No DMs were sent. Please try again.', components: [] }) };
+  }
 
   // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
   // still exist on the QURL side but there's no local record to revoke them
@@ -2301,7 +2348,7 @@ async function executeSendPipeline(interaction, {
       // guildId threaded into the mint above. Non-null here (entry points
       // DM-reject). Sparse write — see recordQURLSendBatch.
       guildId: interaction.guildId,
-    })));
+    })), { initialSend: true });
   } catch (err) {
     // Log only non-secret identifiers so an operator can manually revoke the
     // orphaned qURLs. qurlLink carries its live access token in the fragment
@@ -2309,7 +2356,8 @@ async function executeSendPipeline(interaction, {
     // bot's child revoke (revokeMintedLinks) needs to reconcile each orphan.
     // Scrub err.message even for AWS service exceptions: validation messages
     // can echo offending request values, but contain useful failure details.
-    logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
+    const level = err?.code === 'SEND_CONFIG_REVOKED' ? 'warn' : 'error';
+    logger[level]('recordQURLSendBatch failed; aborting send to keep state consistent', {
       sendId,
       errorName: err?.name,
       errorCode: err?.code,
@@ -2321,11 +2369,22 @@ async function executeSendPipeline(interaction, {
       orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
     });
     clearCooldown(interaction.user.id);
-    return interaction.editReply({
+    // A lost final response may already have cleared preparation. No confirmation
+    // or Add control is published on this error path, even if rows committed.
+    await cleanupFreshSendResources(qurlLinks, apiKey, sendId, { reason: 'initial_persistence' });
+    return { reply: interaction.editReply({
       content: 'Failed to save link records. Links were not sent. Please try again.',
-    });
+    }) };
   }
 
+  return { expiresAt };
+}
+
+async function dispatchAndMonitor(interaction, {
+  apiKey, resourceType, recipients,
+  expiresIn, selfDestructSeconds, personalMessage, recipientMode,
+  sendId, qurlLinks, expiresAt,
+}) {
   // Send DMs. `expiresAt` is Unix seconds, computed above the DDB
   // write — see the #352 hoist comment near recordQURLSendBatch for
   // the clock-drift caveat that was previously documented here.
@@ -2384,28 +2443,6 @@ async function executeSendPipeline(interaction, {
         failedUsers.push({ id: null, username: 'unknown' });
       }
     }
-  }
-
-  // Save send config for "Add Recipients" reuse. For file sends, also stash
-  // the Discord CDN URL + content type so we can re-download + re-upload when
-  // adding recipients (the original resource's 10-token pool may be drained).
-  // Logged-and-swallowed: a failure here doesn't block DM delivery (already
-  // done above) but it disables future Add Recipients / revoke-via-ui for
-  // this send. The per-link rows in qurl_sends persisted above, so /qurl
-  // revoke by sendId still works even if this row is missing.
-  try {
-    await db.saveSendConfig({
-      sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
-      actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
-      attachmentName: attachment?.name || null,
-      attachmentContentType: attachment?.contentType || null,
-      attachmentUrl: attachment?.url || null,
-      selfDestructSeconds,
-    });
-  } catch (err) {
-    logger.error('saveSendConfig failed; Add Recipients will be unavailable for this send', {
-      sendId, error: err.message,
-    });
   }
 
   // Ephemeral confirmation with Add Recipients + Revoke buttons.
@@ -2644,6 +2681,7 @@ async function executeSendPipeline(interaction, {
     let revokeResultFinalizationFailed = false;
     let revokeShowAll = false;
     let revokeInFlight = false;
+    let revokeAttempted = false;
     let revokeSucceeded = false;
     let revokeResultKnown = false;
 
@@ -2711,6 +2749,8 @@ async function executeSendPipeline(interaction, {
         // collector-setup block; the guard above already proved truthy.
         let revoking;
         try {
+          // A stopped card must never reopen Add, even if the durable revoke write fails.
+          revokeAttempted = true;
           monitor.stop();
           await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
           let persistedSendConfig;
@@ -2826,10 +2866,12 @@ async function executeSendPipeline(interaction, {
         // FIRST (before any cap check), then verify remaining capacity and
         // release on rejection. That way a future refactor that adds an
         // `await` in the remaining check can't reopen a racy window.
-        if (revokingSendLocks.has(revokeLockKey) || revokeSucceeded) {
+        if (revokingSendLocks.has(revokeLockKey) || revokeSucceeded || revokeAttempted) {
           // Durable revoking_at/revoked_at state keeps stale Add clicks
           // disabled even after this collector-local lock is released.
-          let content = ALREADY_REVOKING_SEND_MSG;
+          let content = revokingSendLocks.has(revokeLockKey)
+            ? ALREADY_REVOKING_SEND_MSG
+            : 'This management card is closed after a revoke attempt. Add Recipients is disabled; retry `/qurl revoke`.';
           if (revokeSucceeded) {
             if (!revokeResultKnown) {
               content = 'This send is no longer revocable. Add Recipients is disabled.';
@@ -3027,26 +3069,12 @@ async function executeSendPipeline(interaction, {
   }
 }
 
-async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, options = {}) {
+async function cleanupFreshSendResources(batchSends, apiKey, sendId, options = {}) {
   const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
-  const txnActionCount = ddbSendConfigGuardActionCount(batchSends);
-  if (rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
-    // Unreachable by construction for today's Add Recipients flow: oversized
-    // batches fail before DDB, and revoked errors only come from a single
-    // transaction. If a future caller violates that invariant, still revoke
-    // the freshly minted qURLs; rows may point at revoked links, but no DMs
-    // have been sent and the grants fail closed.
-    logger.error('Cleaning up oversized Add Recipients batch after possible persistence', {
-      sendId,
-      send_count: batchSends.length,
-      txn_actions: txnActionCount,
-    });
-  }
-
-  // Called when no recipient rows landed, or when a terminal guarded
-  // transaction failure is ambiguous enough that revoking freshly minted qURLs
-  // is the fail-closed outcome (no DMs have been sent yet).
+  const cleanupLabel = cleanupReason === 'initial_persistence' ? 'initial-send' : 'Add Recipients';
+  // No fresh grants have been dispatched. Earlier recipient chunks can remain
+  // as audit references while this bounded cleanup revokes their fresh grants.
   const qurlIdsByResource = new Map();
   let unidentifiedCount = 0;
   for (const s of batchSends) {
@@ -3094,7 +3122,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     }
   });
   if (failed.length > 0 || unidentifiedCount > 0) {
-    logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
+    logger.error(`Failed to clean up freshly minted ${cleanupLabel} qURL resources`, {
       sendId,
       reason: cleanupReason,
       failed_count: failed.length,
@@ -3103,7 +3131,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
       failures: failed,
     });
   } else {
-    logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
+    logger.info(`Cleaned up freshly minted ${cleanupLabel} qURL resources`, {
       sendId,
       reason: cleanupReason,
       total: resourceIds.length,
@@ -3138,6 +3166,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       msg: 'Cannot add recipients — revocation is pending; retry `/qurl revoke`.',
       newLinks: [], delivered: 0, failed: 0, newRecipients: [],
     };
+  }
+  if (Object.hasOwn(sendConfig, 'initial_persistence_pending')) {
+    return { msg: 'Cannot add recipients — the original send has not finished saving.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
   // #352 entry gate. Shares the same `EXPIRY_LABELS` membership
@@ -3463,7 +3494,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       send_count: batchSends.length,
       txn_actions: ddbSendConfigGuardActionCount(batchSends),
     });
-    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+    await cleanupFreshSendResources(batchSends, apiKey, sendId, {
       rowsMayHavePersisted: false,
       reason: 'pre_persistence_oversized_batch',
     });
@@ -3478,13 +3509,13 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // abort BEFORE any DMs go out. The revoked-race branch below also deletes
   // freshly minted resources because those rows deliberately never land.
   try {
-    await db.recordQURLSendBatch(batchSends, { requireSendConfigUnrevoked: true });
+    await db.recordQURLSendBatch(batchSends);
   } catch (err) {
     if (err?.code === 'SEND_CONFIG_REVOKED') {
       logger.warn('recordQURLSendBatch refused Add Recipients for revoked send', {
         sendId, error: err.message, linkCount: batchSends.length,
       });
-      await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId);
+      await cleanupFreshSendResources(batchSends, apiKey, sendId);
       return {
         msg: 'Cannot add recipients — this send has already been revoked.',
         newLinks: [], newRecipients: [],
@@ -3499,7 +3530,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // retry actually committed but its response was lost, this cleanup can
     // leave rows pointing at deleted resources; that is still fail-closed
     // because no DMs were sent and the qURLs no longer grant access.
-    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+    await cleanupFreshSendResources(batchSends, apiKey, sendId, {
       reason: 'guarded_transaction_failed',
     });
     return {
@@ -10068,13 +10099,16 @@ module.exports = {
       mintLinksInBatches,
       // Fresh-mint cleanup's defensive unidentified-id branch is unreachable
       // through validated mint output, so pin it directly.
-      cleanupFreshAddRecipientResources,
+      cleanupFreshAddRecipientResources: cleanupFreshSendResources,
       activeMonitors,
       // The top-level back-half driver. Exported here so PR 7b's
       // tests (and the follow-up direct unit spec in #278) can pin
       // its contract against a constructed param object — without
       // re-driving the full /qurl send + /qurl map confirm-card flow.
       executeSendPipeline,
+      prepareSendResources,
+      persistSendBatch,
+      dispatchAndMonitor,
       // Test-only file-concurrency hooks. The slot counter is module-
       // private (live state) and exposing a setter lets the cap branch
       // be tested without a parallel-send harness.
