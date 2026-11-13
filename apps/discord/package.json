@@ -37,8 +37,10 @@
     "@aws-sdk/client-ssm": "^3.1036.0",
     "@babel/parser": "^7.29.0",
     "@babel/traverse": "^7.29.0",
+    "@eslint/js": "10.0.1",
     "aws-sdk-client-mock": "^4.1.0",
-    "eslint": "^8.57.1",
+    "eslint": "^10.13.0",
+    "globals": "17.14.0",
     "jest": "~30.3.0",
     "supertest": "^7.2.2"
   },
