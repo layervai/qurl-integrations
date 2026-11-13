@@ -60,7 +60,7 @@ observation. Pages continue with --cursor when there are more results.`,
 
 	cmd.Flags().IntVar(&limit, "limit", 0, "maximum resources per page, 1-100 (default: service decides)")
 	cmd.Flags().StringVar(&cursor, "cursor", "", "continue from a previous page's cursor")
-	cmd.Flags().StringVar(&status, "status", "active", "resource statuses to list: active, revoked, or active,revoked")
+	cmd.Flags().StringVar(&status, "status", "active", "comma-separated resource statuses, e.g. revoked or active,revoked")
 	cmd.Flags().StringVar(&resType, "type", "", "only resources of this kind: url or tunnel")
 
 	return cmd

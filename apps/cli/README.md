@@ -1501,7 +1501,9 @@ be checked against the advertised CRID.
 ### qurl list
 
 `qurl list` prints one row per active resource published under your account.
-Use `qurl list --status revoked` to see deleted resources. Text, JSON, and
+Use `qurl list --status revoked` to see deleted resources, or pass
+`--status active,revoked` to include both in scripts that need a full inventory.
+An empty `--status` uses the API default. Text, JSON, and
 `--quiet` all carry the full CRID. The text table can be wide because it does
 not shorten identifiers or local targets.
 
