@@ -2,7 +2,7 @@
   "name": "@layervai/qurl-teams",
   "version": "0.0.0",
   "private": true,
-  "description": "qURL\u2122 Microsoft Teams Bot and OAuth integration",
+  "description": "qURL™ Microsoft Teams Bot and OAuth integration",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -41,7 +41,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.0",
     "@types/express": "^5.0.6",
-    "@types/node": "^22.19.0",
+    "@types/node": "^26.6.6",
     "@vitest/coverage-v8": "5.0.5",
     "eslint": "^10.14.0",
     "typescript": "^6.0.2",
