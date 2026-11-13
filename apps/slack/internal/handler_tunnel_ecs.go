@@ -77,6 +77,48 @@ const (
 	ecsRestartAttemptPeriodSeconds  = 60
 )
 
+// TODO(upstream-contract): EFS access points select per-slug roots; ECS rootDirectory must stay "/".
+const ecsFargateVolumesJSON = `{
+  "volumes": [
+    {
+      "name": "qurl-agent-state",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "<fs-id>",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "<fsap-agent-state-id>",
+          "iam": "ENABLED"
+        }
+      }
+    },
+    {
+      "name": "qurl-config",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "<fs-id>",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "<fsap-config-id>",
+          "iam": "ENABLED"
+        }
+      }
+    },
+    {
+      "name": "qurl-bootstrap",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "<fs-id>",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "<fsap-bootstrap-id>",
+          "iam": "ENABLED"
+        }
+      }
+    }
+  ]
+}`
+
 func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (string, error) {
 	containerJSON, err := renderECSSidecarContainerJSON(args, image)
 	if err != nil {
@@ -94,22 +136,26 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 	if err != nil {
 		return "", err
 	}
+	volumesBlock, err := slackCodeBlock(ecsFargateVolumesJSON)
+	if err != nil {
+		return "", err
+	}
 	intro := strings.Join([]string{
 		"Use this as an " + ecsFargateChecklistText + ".",
-		"Write the temporary enrollment token delivered separately by DM to `enrollment-token` on a read-only `qurl-bootstrap` EFS access point. Do not place it in the task definition, environment, or command line.",
 		ecsFargateRegionPlaceholderNote,
 		"Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.",
-		"Configure qurl-agent-state for POSIX UID/GID `" + ecsConnectorUser + "`; qURL creates its owner-only nested state directory. Mount qurl-config and qurl-bootstrap read-only with share.yaml and enrollment-token respectively.",
 		"The generated sidecar drops every Linux capability.",
 		"Its ECS restart policy retries the non-essential qURL container indefinitely after the 60-second minimum run window without restarting the target application container.",
 	}, " ")
 	return intro + "\n\n" +
-		"1. Store the enrollment token from the separate DM as the read-only `enrollment-token` file on the qurl-bootstrap EFS access point. This message intentionally does not contain the token.\n\n" +
-		"2. Put share.yaml at `/etc/qurl/share.yaml` on the read-only qurl-config EFS access point:\n\n" +
+		"1. Use a dedicated EFS file system for this example. Do not replace a shared file system policy; shared reuse needs its policy owner to review and merge scoped rules while preserving other clients. Create three EFS access points with separate root directories `/qurl/" + args.Slug + "/state`, `/qurl/" + args.Slug + "/config`, and `/qurl/" + args.Slug + "/bootstrap`. Set each access point enforced user and root-directory owner to POSIX UID/GID `" + ecsConnectorUser + "` with mode `0700`. For existing root directories, verify that ownership and mode first: access-point CreationInfo does not repair them. Merge this volumes block into the task definition and replace every file-system/access-point placeholder. Keep ECS rootDirectory `/`; each access point selects its own root:\n\n" +
+		volumesBlock + "\n\n" +
+		"2. Configure EFS permissions before mounting. EFS’s default file system policy permits anonymous network clients; task-role allows alone do not restrict that access. Attach a file system policy allowing only the task and provisioning roles through these access points and denying non-TLS access. Explicitly deny the task role mounts outside these three access points and writes outside the state access point. Grant the task role elasticfilesystem:ClientMount on all three and elasticfilesystem:ClientWrite only on state, using elasticfilesystem:AccessPointArn conditions. Give a separate provisioning role ClientMount and ClientWrite through config/bootstrap for file creation and token deletion. See <https://docs.aws.amazon.com/efs/latest/ug/iam-access-control-nfs-efs.html|EFS IAM policies>. Permit NFS port 2049 between the task and EFS mount-target security groups.\n\n" +
+		"3. Mount config/bootstrap from an EC2 NFS client or one-off ECS task using the provisioning role and the EFS mount helper with IAM. Store the enrollment token from the separate DM as `enrollment-token` at the root of the bootstrap access point. Do not place the token in the task definition, environment, or command line; this message intentionally does not contain the token. Put share.yaml at the root of the qurl-config access point, mounted read-only at `/etc/qurl`; the sidecar reads `/etc/qurl/share.yaml`. The bootstrap mount is also read-only, at `/run/secrets/qurl`. Use this share.yaml:\n\n" +
 		configBlock + "\n\n" +
-		"3. Add this non-essential qURL sidecar container to the same task definition as the target container:\n\n" +
+		"4. Add this non-essential qURL sidecar container to the same task definition as the target container:\n\n" +
 		containerBlock + "\n\n" +
-		"4. Add EFS-backed volumes named qurl-agent-state, qurl-config, and qurl-bootstrap. Do not share qurl-agent-state across concurrently running sidecars. Stop the old task before a replacement mounts the same state (for an ECS service, use deployment maximumPercent 100 and minimumHealthyPercent 0). After the task logs show qURL connected, deploy a warm-start revision without `--enrollment-token-file` or the qurl-bootstrap mount; verify it reconnects from qurl-agent-state, then delete the enrollment-token file.", nil
+		"5. This task definition supports one active task: set service desiredCount: 1. Do not share qurl-agent-state across concurrently running sidecars. Additional active Connectors need separate installations, enrollment tokens, task definitions and state access points/root directories. Writable state is under `/var/lib/qurl-volume/state` (`state/state` beneath the EFS installation root). Stop the old task before a replacement mounts the same state (use deployment maximumPercent 100 and minimumHealthyPercent 0). After the task logs show qURL connected, deploy a warm-start revision without `--enrollment-token-file`, the qurl-bootstrap mount or its volume; verify it reconnects from qurl-agent-state, then use the provisioning role to delete the enrollment-token file and remove its bootstrap access point and policy grants.", nil
 }
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (string, error) {

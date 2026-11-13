@@ -15,6 +15,12 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 
 	for _, want := range []string{
 		ecsFargateChecklistText,
+		"desiredCount: 1",
+		"dedicated EFS file system",
+		"Do not replace a shared file system policy",
+		"default file system policy permits anonymous",
+		"Explicitly deny the task role mounts outside",
+		"separate provisioning role",
 		"non-essential qURL sidecar container",
 		"Fargate's awsvpc network mode",
 		ecsFargateRegionPlaceholderNote,
@@ -28,7 +34,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"Store the enrollment token from the separate DM",
 		"message intentionally does not contain the token",
 		testTunnelImageRef,
-		"Put share.yaml at `/etc/qurl/share.yaml`",
+		"Put share.yaml at the root of the qurl-config access point",
 		testTunnelLocalPort9090Line,
 		"crid: '" + testTunnelCRID + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
@@ -56,8 +62,8 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	if strings.Contains(got, `\u003c`) || strings.Contains(got, `\u003e`) {
 		t.Fatalf("ECS instructions escaped placeholder angle brackets:\n%s", got)
 	}
-	if gotFenceCount := strings.Count(got, "```"); gotFenceCount != 4 {
-		t.Fatalf("ECS instructions rendered %d code fences, want 4 for two independently copyable artifacts:\n%s", gotFenceCount, got)
+	if gotFenceCount := strings.Count(got, "```"); gotFenceCount != 6 {
+		t.Fatalf("ECS instructions rendered %d code fences, want 6 for three independently copyable artifacts:\n%s", gotFenceCount, got)
 	}
 
 	containerJSON, err := renderECSSidecarContainerJSON(args, testTunnelImageRef)
@@ -98,5 +104,75 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	}
 	if _, ok := env["LAYERV_KNOCK_RESOURCE_ID"]; ok {
 		t.Fatal("ECS environment rendered the advanced knock-resource override")
+	}
+}
+
+func TestECSFargateVolumesMatchSidecarMounts(t *testing.T) {
+	t.Parallel()
+	args := testTunnelInstallArgs()
+	instructions := mustRenderECSFargateTunnelInstructions(t, args, testTunnelImageRef)
+	storeAt := strings.Index(instructions, "Store the enrollment token")
+	accessPointsAt := strings.Index(instructions, "Create three EFS access points")
+	policyAt := strings.Index(instructions, "Attach a file system policy")
+	if storeAt < 0 || accessPointsAt < 0 || policyAt < 0 || accessPointsAt > storeAt || policyAt > storeAt {
+		t.Fatal("file creation precedes EFS access-point/policy provisioning")
+	}
+	// Parse the artifact actually delivered to Slack, not a separately built fixture.
+	blocks := strings.Split(instructions, "```")
+	var task struct {
+		Volumes []struct {
+			Name string `json:"name"`
+			EFS  struct {
+				FileSystemID      string `json:"fileSystemId"`
+				RootDirectory     string `json:"rootDirectory"`
+				TransitEncryption string `json:"transitEncryption"`
+				Authorization     struct {
+					AccessPointID string `json:"accessPointId"`
+					IAM           string `json:"iam"`
+				} `json:"authorizationConfig"`
+			} `json:"efsVolumeConfiguration"`
+		} `json:"volumes"`
+	}
+	if len(blocks) != 7 {
+		t.Fatalf("artifact blocks = %d, want 7", len(blocks))
+	}
+	if err := json.Unmarshal([]byte(blocks[1]), &task); err != nil {
+		t.Fatalf("task volumes JSON: %v", err)
+	}
+	var container ecsContainerDefinition
+	if err := json.Unmarshal([]byte(blocks[5]), &container); err != nil {
+		t.Fatalf("container JSON: %v", err)
+	}
+	if len(task.Volumes) != len(container.MountPoints) {
+		t.Fatalf("volumes = %d, mounts = %d", len(task.Volumes), len(container.MountPoints))
+	}
+	seenNames, seenAccessPoints := map[string]bool{}, map[string]bool{}
+	for _, volume := range task.Volumes {
+		if seenNames[volume.Name] || seenAccessPoints[volume.EFS.Authorization.AccessPointID] {
+			t.Fatalf("duplicate volume or shared access point: %+v", volume)
+		}
+		seenNames[volume.Name] = true
+		seenAccessPoints[volume.EFS.Authorization.AccessPointID] = true
+		if volume.EFS.FileSystemID != "<fs-id>" || volume.EFS.RootDirectory != "/" ||
+			volume.EFS.TransitEncryption != "ENABLED" || volume.EFS.Authorization.IAM != "ENABLED" ||
+			volume.EFS.Authorization.AccessPointID == "" {
+			t.Fatalf("unsafe EFS volume contract: %+v", volume)
+		}
+	}
+	for _, mount := range container.MountPoints {
+		if !seenNames[mount.SourceVolume] {
+			t.Fatalf("mount has no task volume: %+v", mount)
+		}
+		if mount.SourceVolume == "qurl-agent-state" && mount.ReadOnly {
+			t.Fatalf("state mount is read-only: %+v", mount)
+		}
+		if mount.SourceVolume != "qurl-agent-state" && !mount.ReadOnly {
+			t.Fatalf("config/bootstrap mount is writable: %+v", mount)
+		}
+	}
+	for _, path := range []string{"/state", "/config", "/bootstrap"} {
+		if !strings.Contains(instructions, "/qurl/"+args.Slug+path) {
+			t.Fatalf("missing isolated access-point root %s", path)
+		}
 	}
 }
