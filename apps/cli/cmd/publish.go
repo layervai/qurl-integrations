@@ -157,6 +157,9 @@ owns the share and turns it off when it exits.`,
 			if err := validateRuleSelectionFlags(cmd); err != nil {
 				return err
 			}
+			if ruleFile == "-" && cmd.Flags().Changed("origin-header") {
+				return exitcode.UsageError(errors.New("--rule-file - and --origin-header both read standard input; use --rule <id-or-name>"))
+			}
 			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
 				return exitcode.UsageError(err)
 			}
@@ -1016,7 +1019,7 @@ func publishName(opts *globalOpts, cmd *cobra.Command, flag, connectorID string,
 	if _, err := fmt.Fprint(opts.streams.Err, msgPublishNamePrompt); err != nil {
 		return "", err
 	}
-	// The command reads nothing else from stdin, so buffering past the line is safe.
+	// The name is the last input, so buffering past the line is safe.
 	scanner := bufio.NewScanner(opts.streams.In)
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {

@@ -776,7 +776,7 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 
 func (p *Printer) notefMore(cursor string) {
 	if cursor != "" {
-		p.Notef("More results available: add --cursor %s", cursor)
+		p.Notef("More results available: repeat the command with the same filters and add --cursor %s", cursor)
 		return
 	}
 	p.Notef("More results available.")
