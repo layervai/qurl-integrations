@@ -1,12 +1,18 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 type memoryStateStore struct {
@@ -134,5 +140,45 @@ func TestLoadStateWithLegacyFallbackPropagatesAvailabilityError(t *testing.T) {
 		return VerifiedState{}, storeErr
 	}); !errors.Is(err, storeErr) {
 		t.Fatalf("loadStateWithLegacyFallback error = %v, want store error", err)
+	}
+}
+
+func TestStatePutTelemetryHasNoStatePayload(t *testing.T) {
+	for _, tc := range []struct {
+		name, result string
+		err          error
+	}{
+		{name: "success", result: "success"},
+		{name: "error", result: "error", err: errors.New("private-state-error")},
+		{name: "timeout", result: "timeout", err: fmt.Errorf("wrapped: %w", context.DeadlineExceeded)},
+		{name: "canceled", result: "canceled", err: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(observability.NewRedactingJSONHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			handle, err := MintStoredStateWithEmailMode(context.Background(), &unavailableStateStore{err: tc.err}, "T_PRIVATE", "U_PRIVATE", "private@example.invalid", SetupModeReuse, time.Now())
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("returned error changed: %v", err)
+			}
+			var record map[string]any
+			if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+				t.Fatal(err)
+			}
+			// Deliberate privacy tripwire: new global or state attributes need review.
+			if len(record) != 5 || record["msg"] != "oauth state put" || record["result"] != tc.result {
+				t.Fatalf("unexpected telemetry fields: %v", record)
+			}
+			elapsed, ok := record["duration_ms"].(float64)
+			if !ok || elapsed < 0 {
+				t.Fatalf("invalid elapsed value: %v", record["duration_ms"])
+			}
+			for _, secret := range []string{"T_PRIVATE", "U_PRIVATE", "private@example.invalid", "private-state-error", handle} {
+				if secret != "" && strings.Contains(logs.String(), secret) {
+					t.Fatal("telemetry contains state or error data")
+				}
+			}
+		})
 	}
 }
