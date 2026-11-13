@@ -1035,6 +1035,45 @@ describe('qurl sends', () => {
     expect(input.ExpressionAttributeValues[':s']).toBe('sent');
   });
 
+  test.each(['single', 'batch', 'guarded'])('%s send writes a collision-free guild/sender index key', async (mode) => {
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(BatchWriteCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
+    const send = {
+      sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
+      resourceId: 'resource', resourceType: 'file', qurlLink: 'link',
+      expiresIn: '24h', channelId: 'channel', targetType: 'user', guildId: 'guild',
+    };
+    async function write(row) {
+      if (mode === 'single') {
+        await store.recordQURLSend(row);
+        return ddbMock.commandCalls(PutCommand).at(-1).args[0].input.Item;
+      }
+      await store.recordQURLSendBatch([row], { requireSendConfigUnrevoked: mode === 'guarded' });
+      if (mode === 'batch') {
+        return ddbMock.commandCalls(BatchWriteCommand).at(-1).args[0].input
+          .RequestItems['test-prefix-qurl-sends'][0].PutRequest.Item;
+      }
+      return ddbMock.commandCalls(TransactWriteCommand).at(-1).args[0].input
+        .TransactItems.find(item => item.Put).Put.Item;
+    }
+    const first = await write(send);
+    expect(first.guild_sender_id).toBe(JSON.stringify(['guild', 'sender']));
+    expect(first.guild_id).toBe('guild');
+    expect((await write({ ...send, guildId: 'other-guild' })).guild_sender_id)
+      .not.toBe(first.guild_sender_id);
+    expect((await write({ ...send, senderDiscordId: 'other-sender' })).guild_sender_id)
+      .not.toBe(first.guild_sender_id);
+    const left = await write({ ...send, guildId: 'a#b', senderDiscordId: 'c' });
+    const right = await write({ ...send, guildId: 'a', senderDiscordId: 'b#c' });
+    expect(left.guild_sender_id).not.toBe(right.guild_sender_id);
+    for (const guildId of [undefined, null, '']) {
+      const legacy = await write({ ...send, guildId });
+      expect(legacy.guild_sender_id).toBe('[null,"sender"]');
+      expect(legacy).not.toHaveProperty('guild_id');
+    }
+  });
+
   test('getRecentSends: uses base-table Query per send for accurate recipient_count', async () => {
     ddbMock.on(QueryCommand).callsFake((input) => {
       const cmd = input;

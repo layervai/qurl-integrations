@@ -296,6 +296,50 @@ the qURLs just minted for the new recipients. Successful cleanup can leave
 residue during status/revoke triage. If cleanup fails or exceeds its wait
 budget, revocation is unconfirmed. Check the grants before manual row cleanup.
 
+## Guild-scoped revoke history migration (#83)
+
+The send writer now adds `guild_sender_id = JSON.stringify([guildId, senderDiscordId])`
+using the shared `utils/guild-sender-key` encoder. New sends with no recorded
+guild use `[null, senderId]`, the same explicit legacy bucket as the backfill.
+This is an additive preparation step. The current
+revoke reader still uses the existing sender index, so old records remain visible.
+
+The infrastructure change must add `guild_sender_id-created_at-index` with the
+same metadata projection as `sender_discord_id-created_at-index`. Deploy the
+writer to every send path, including Add Recipients, before the backfill's final
+verification. DynamoDB indexes rows that already carry the tuple automatically;
+the offline backfill only needs rows that predate writer adoption and lack it.
+A paginated offline backfill must derive the tuple from each row's
+stored `guild_id` and `sender_discord_id`, and condition its update on both source
+fields still matching. It must neither overwrite a different existing tuple nor
+infer a guild for an unscoped historical row. Missing, NULL or empty guilds
+use the separate `[null, senderId]` tuple without changing their stored guild. Check remaining unindexed and
+ambiguous rows before switching the reader. Preserve a deliberate recovery path
+for any legacy revocable records; do not use a bounded cross-guild scan as the
+normal guild-scoped query. Index creation, backfill, reader cutover and a two-guild
+Sandbox revoke journey are still required before closing #83.
+
+Run the offline audit from `apps/discord` with the approved environment's AWS
+profile and explicit region/table. It defaults to dry-run:
+
+```sh
+AWS_PROFILE=layerv-integrations AWS_REGION=us-east-2 node scripts/backfill-guild-sender-index.js qurl-bot-discord-sandbox-qurl-sends
+```
+
+Only add `--apply` in the authorized migration window. The scan reads at most 100
+rows per page and projects identity/index fields, never links. It uses constant
+page memory but scans the whole table, so budget the offline read/write cost.
+Each update is conditional on the row, guild, sender and creation time still
+matching, with no existing tuple. Interrupted runs can be repeated. A concurrent
+writer, invalid identity/timestamp or conflicting tuple is counted and left
+unchanged; these unresolved counts cause exit 2. The `unscoped` count reports
+legacy rows; these can be indexed in the explicit legacy bucket. Other failures stop the
+run with exit 1. A dry-run can exit 0 with `candidates > 0`: it does not establish
+migration completion. After all writers are adopted, rerun the audit until
+`candidates`, `invalid`, `conflicting` and `raced` are zero. Verify both the
+current-guild and explicit legacy recovery queries before the reader cutover. An indexed-row count
+does not verify that the GSI is ACTIVE, IAM is refreshed, or index reads work.
+
 ## License
 
 [MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.

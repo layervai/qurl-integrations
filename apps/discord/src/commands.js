@@ -56,6 +56,7 @@ const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { getIdentity } = require('./qurl');
 const { resourceIdLogRef } = require('./utils/resource-id');
 const { qurlApiErrorStatus } = require('./utils/qurl-errors');
+const { guildSenderKey } = require('./utils/guild-sender-key');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
@@ -1973,6 +1974,13 @@ async function executeSendPipeline(interaction, {
     throw new ErrorCtor(msg);
   }
 
+  // Validate the future index identity before minting any live links.
+  try {
+    guildSenderKey(interaction.guildId === '' ? null : interaction.guildId ?? null, interaction.user.id);
+  } catch (error) {
+    failGate(TypeError, error.message);
+  }
+
   // Defense-in-depth SSRF re-check. `/qurl send`'s front-half
   // validates attachment.url against isAllowedSourceUrl BEFORE
   // calling the pipeline; this gate catches a future caller that
@@ -3117,6 +3125,11 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
 // user's send.
 async function handleAddRecipients(sendId, usersCollection, originalInteraction, apiKey) {
   const senderDiscordId = originalInteraction.user.id;
+  try {
+    guildSenderKey(originalInteraction.guildId === '' ? null : originalInteraction.guildId ?? null, senderDiscordId);
+  } catch {
+    return { msg: 'Cannot add recipients — sender identity is invalid.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
+  }
   const sendConfig = await db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
     return { msg: 'Send configuration not found.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
