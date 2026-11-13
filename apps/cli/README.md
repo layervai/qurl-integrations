@@ -43,6 +43,15 @@ Using another package format? See [Install](#install).
 
 ### 2. Start your app, then publish it
 
+The first `publish` or `share` shows the LayerV Terms notice on stderr.
+With `-o json`, the result carries `terms_notice` instead; agents must relay
+that notice to the user. It needs no prompt and keeps bare stdout unchanged,
+including under `--quiet`. The private user state records the shown Terms
+version (currently 2.0). A new version, or a reset state directory, shows it
+again. If notice state is unavailable, the command still runs and the notice
+can repeat. Text mode records the notice when stderr accepts it, even if a
+later API call fails. A failed JSON result does not mark an unseen notice as shown.
+
 No account, API key, or browser sign-in is required. The first command creates
 and registers a device identity automatically. Keep its local state to keep
 control of your resources. <!-- TODO(upstream-contract): qurl-service owns the anonymous resource and link caps. -->
@@ -101,7 +110,7 @@ instead, see [Private CRIDs](#private-crids).
 Your app still listens only on your machine. The CLI connects outward to qURL;
 you do not need public DNS, a public IP, or custom Connector configuration.
 
-Publishing a remote URL instead? `qurl publish https://api.example.com/reports`
+Publishing a remote URL instead? `qurl publish https://api.example.com/reports --name "Reports API"`
 prints its CRID and exits immediately.
 
 ### If the first run fails
@@ -409,6 +418,27 @@ commands and `QURL_CONNECTOR_RUNTIME_DIR` (environment-only) selects the
 directory that holds its control socket; see
 [External supervision](#external-supervision).
 
+`QURL_CLIENT_PRODUCT` (environment-only) lets a host app bundling the CLI
+identify its product/version, for example `qurl-desktop/1.2.3`. Set it in the
+environment that runs the CLI. Native background jobs carry
+the validated value from installation, including an explicit empty value.
+Setting a valid product or an explicit empty value changes or clears the
+managed daemon on the next publish/start. An unset or invalid value preserves
+a running native daemon's installed attribution.
+External supervisors set it in their own daemon environment; CLI invocations
+can name a different product without restarting that external daemon.
+A terminal with no product variable can use the host app's running daemon
+without replacing it. An explicit native product change replaces the job and
+briefly restarts its desired-on shares.
+It must be a single RFC 9110
+`name/version` product with nonempty token-only parts, at most 64 bytes in
+total, and not named `qurl-cli` (case-insensitive). Valid values prefix the User-Agent:
+`qurl-desktop/1.2.3 qurl-cli/<version>`. Unset, empty, or invalid values leave
+the CLI User-Agent unchanged; invalid values produce a one-line note only with
+`--verbose`. Use only a product name and version, no user or device
+identifiers. Only the CLI's own qURL API client sends it; the connector
+runtime's own requests do not carry it.
+
 Also honored: `QURL_DEPLOYMENT` (a sandbox or custom deployment settings file;
 production settings are included in releases; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
 `QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the
@@ -487,12 +517,13 @@ than switching in place.
 | `qurl publish <target-url>` | Publish a remote URL or serve a local app, and get its CRID |
 | `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl grants <CRID>` | Show or change the devices and people allowed to open a private resource |
+| `qurl rules list`, `create`, `save`, `delete`, `sync`, `resolve` | Manage saved access rules; works locally before account linking |
 | `qurl access <action> <CRID> [<decision-id>]` | Manage private consumer policies, invitations, and grants |
 | `qurl requests [<CRID>]` | List access requests, or turn them on or off for a private resource |
 | `qurl approve <CRID> <code>` | Approve one person's request for access to a private resource |
 | `qurl deny <CRID> <device id>` | Refuse one person's request for access to a private resource |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
-| `qurl list` | List your published resources |
+| `qurl list` | List your active published resources |
 | `qurl start <CRID>` | Turn on a previously published local share |
 | `qurl stop <CRID>` | Turn off a local share without deleting it |
 | `qurl restart <CRID>` | Rotate and restart a local share, or move it to a new loopback target with `--target` |
@@ -505,6 +536,7 @@ than switching in place.
 | `qurl login` | Enroll this device with a one-time account key, from a supervisor's enrollment token file, or anonymously for a supervisor |
 | `qurl whoami` | Show which account this registered device belongs to |
 | `qurl publisher` | Show the publisher name shown with your CRIDs; `set <name>` and `clear` change it |
+| `qurl origin-header set <CRID> <name>` | Set or rotate the secret header qURL adds to requests to a remote URL; `clear <CRID>` removes it |
 | `qurl request METHOD PATH` | Make a device-authorized JSON request for a supervising app (see [Supervised installs](#supervised-installs)) |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
@@ -686,13 +718,46 @@ state path is long, an app container for example, needs.
 Name a directory qURL owns. Startup creates missing directories with mode
 `0700`. An existing directory must be owned by the caller, must not be a
 symlink, and must already have mode `0700`; startup rejects it otherwise
-without changing its permissions. Use a separate
-dedicated directory for each state namespace; the socket address is the
-directory alone, so two namespaces sharing one runtime directory resolve to
-the same socket and lifecycle commands for one will address the other's
-daemon. Set the variable identically for the daemon and for every command that
-addresses the same state directory — a command run without it resolves a
-different address and reports the daemon absent.
+without changing its permissions. Use a separate directory for each state
+namespace. New control requests identify their namespace and refuse a daemon
+serving another one, before reloading it or replacing a native job.
+
+After binding, the daemon saves its runtime directory in the owner-only
+`daemon-runtime-dir.json` file in its state directory. A later command without
+`QURL_CONNECTOR_RUNTIME_DIR` recovers that address, so a plain terminal can
+reach a daemon started by Desktop. An explicit runtime directory still takes
+precedence. An invalid or unsafe marker is an error; the command does not fall
+back to another address and install a competing job. At startup, the namespace
+owner can replace a corrupt regular marker; unsafe file types still fail.
+This recovery requires
+the daemon to have started with this CLI version. Older clients omit the new
+namespace header and retain their existing control behavior; use this CLI
+version for namespace isolation. A running native job at an unknown socket is
+never replaced automatically. A native job that refuses its arguments reports
+its ownership without opening routes, so the next start, restart, or publish
+can replace it safely. Wait for startup, or restart the owning app
+with the updated CLI. Commands wait up to three seconds for a starting native
+job, and read its runtime hint again before deciding it is unreachable.
+
+An older daemon using a pinned runtime directory needs an owner-controlled
+stop before the updated CLI can install its replacement. This includes an
+older binary holding a refused job without IPC, or a job at a moved socket.
+`qurl restart` is a
+resource command and cannot bypass this ownership check. Quit the app that
+started a foreground daemon. For a native job, first inspect its arguments
+in launchd, systemd, or Task Scheduler and confirm `--state-dir` names your
+namespace. Then stop that exact job through the same service manager. Retry
+`qurl start <resource>` or publish with the updated CLI. The stopped job can
+be replaced; a running job with unverified ownership cannot.
+A refused native job also keeps the namespace lease: foreground mode cannot
+take over until that owner stops. Use a background start/publish to replace
+a verified refused job, or stop its owner before foreground mode.
+
+The saved runtime hint persists after shutdown or a reboot. A deleted runtime
+directory is recreated by its owner. Unsetting the environment variable does
+not clear the saved choice. To return to automatic address selection, stop the
+verified owner, remove only `daemon-runtime-dir.json` from its state directory,
+then start the owner again without an explicit runtime directory.
 
 Windows named pipes have no length limit, so the pipe address ignores this
 variable entirely: a value left in the environment there has no effect and is
@@ -762,10 +827,79 @@ reconcile. Stopping a share retains its headers until the next overlay
 replacement. Republishing the same Connector ID reuses them; replace or clear
 the entry before reusing that ID with different credentials. Changing a route's headers re-registers only that route on the
 live session; its siblings are untouched. Re-registration may interrupt
-in-flight requests. During session rotation the retiring session can retain
-old headers until replacement promotion and drain, so an update is not
-immediate revocation. See
+in-flight requests. During renewal, a retired session can keep active requests
+and their original headers until those requests finish or their original
+authorization expires. A header update is not immediate revocation; remove the
+route or stop the publisher to close its old work. See
 [docs/session-groups.md](../../docs/session-groups.md#runtime-request-headers).
+
+### Saved access rules
+
+Access rules are named presets for future shares. They work before account
+linking; `qurl rules sync` merges them with your linked account (`login`,
+`account setup` and `account recover` also sync, uploading rules saved before
+linking), and different edits to the same rule need
+`qurl rules resolve <id-or-name> --use local|account` (until then no pending
+edit is uploaded). A sync that stays local
+exits 0; read the JSON `sync` field. Changing or deleting a rule never changes
+existing shares.
+
+```sh
+qurl rules create Reviewers --mode review --approvals-last 7d
+qurl publish http://127.0.0.1:3000 --rule Reviewers
+qurl publish http://127.0.0.1:8080 --rule once
+```
+
+| Flag | Applies to | Values |
+|------|------------|--------|
+| `--expires-in` | public | `1m` to `30d` (required with any link limit) |
+| `--once` (alias `--one-browser`) | public | only the first person to open the link gets in |
+| `--stays-open-for` (alias `--session-length`) | public | `1s` to `24h` |
+| `--approvals-last` | review, keys | `1d`, `7d`, `30d`, `90d` or `never` (default) |
+| `--stripe-price` | contract | a Stripe price ID such as `price_123`; makes the rule People who pay |
+| `--payment-access-seconds` | contract with `--stripe-price` | `0` (default, the resource lifetime) to `315360000`; subscriptions require `0` |
+
+A paid rule saves `"payment": {"price_id": "price_123", "access_seconds": 0}`
+(both members required, contract mode only) and never a Stripe account.
+Sharing with it reads the account connected now, like `qurl payments account`,
+and publishes the same payment policy as `--stripe-account`/`--stripe-price`,
+including when you publish the same target again; if a different Stripe
+account is connected by then, that publish fails as a conflict (exit 7)
+without changing the item. With no connected account
+it fails (exit 8) before publishing or changing access; run
+`qurl payments connect`. If the account cannot be checked, such as while
+payments are unavailable, it fails with exit 11.
+
+```sh
+qurl payments connect
+qurl rules create Buyers --mode contract --contract buyers --stripe-price price_123
+qurl publish http://127.0.0.1:3000 --rule Buyers
+```
+
+A public rule with link limits makes `publish` mint a temporary link (`Link:`,
+JSON `link`) and keeps the limits for later `qurl share <CRID>` links on this
+device. Link limits shape the links this device makes; they are not access
+control, and the CRID still opens a public item. Approvals last is part of the resource policy and the service enforces
+it. Publishing again to an existing item with a different access policy fails
+without changing it. If this device has no saved limits for an existing public
+item, an explicit rule saves its link limits and mints a link. This also recovers
+a first publish whose response or local save was lost. Existing saved limits
+and approval lifetimes are kept; when they differ from the requested rule,
+JSON reports `"settings_differ": true`. A successfully minted limited link
+explicitly reports `"settings_differ": false` when the requested settings apply.
+
+If publication succeeds but a requested limited link cannot be created or
+verified, `-o json` emits the confirmed `crid`, `resource_id`, `private` and
+`found_existing` (when known), plus `settings_differ` and
+`"error":"link_creation_failed"`, and exits non-zero. The IDs name the confirmed resource; there is no usable
+link in this result. For local origins, link creation runs after serving starts; this result does not report serving status.
+Keep checking the exit code; do not treat this document as a successful share.
+
+Supervising apps call `qurl rules capabilities -o json` (offline), read and edit
+with `rules list|save|delete|sync|resolve -o json` (`save` reads one rule from
+`--file -` and needs `--version <local_version>`), and pass a complete rule on
+standard input with `publish --rule-file -` or
+`access configure <CRID> --rule-file - --version <policy_version>`.
 
 ### qurl publish
 
@@ -776,10 +910,25 @@ immediate revocation. See
 | `http://127.0.0.1:3000` | qURL starts the background share, waits for serving, prints its CRID, and exits |
 | `https://api.example.com/reports` | qURL registers the remote URL, prints its CRID, and exits |
 
+Every new resource needs a public name, set with `--name` (one line, up to
+100 characters). Recipients see it on the link page and in the passkey they
+save, so it is public. A local app defaults to its Connector ID. In a terminal
+only, it otherwise defaults to the name of the directory you run `qurl publish`
+in, and the terminal shows `Name for a new resource: <name> (change with --name)`
+first. A script without `--name` or a Connector ID sends no name: publishing an
+existing app works, and creating one asks for `--name`. A remote URL has no
+default, because its address may be private: an interactive terminal asks for
+the name, and a script must pass `--name` to create a resource. Publishing a
+target again needs no name and keeps the one it has; change it with
+`qurl preview set <CRID> --name`.
+
 #### Private consumer policies
 
 On a deployment that supports consumer policies, choose private access with
-`--access invite_only`, `email_capture`, `review`, `keys`, or `contract`.
+`--access invite_only`, `email_capture`, `email_domain`, `review`, `keys`, or `contract`.
+For a company mailbox domain, use `--access email_domain --email-domain example.com`.
+The domain must be lowercase and exact: it does not include subdomains or other domains.
+Consumers verify their mailbox before access.
 Contract mode also needs `--contract <identifier>`. These flags cannot be
 combined with `--public`, legacy access requests, or legacy device allowlists.
 The reply must confirm `private: true` and the requested `consumer_access` policy.
@@ -791,6 +940,22 @@ qurl publish http://127.0.0.1:3000 --access invite_only -o json
 qurl access invite <CRID> --email ana@example.com -o json
 qurl access list_invitations <CRID> -o json
 ```
+
+For everyone with a verified company mailbox:
+
+```bash
+qurl publish http://127.0.0.1:8080 --access email_domain --email-domain example.com -o json
+```
+
+To change an existing private resource, read its current policy version first:
+
+```bash
+qurl access configure <CRID> --mode email_domain --email-domain example.com --version <current-version>
+```
+
+Publishing the same origin again must confirm the same email domain; it never
+silently changes an existing policy. Publishing a URL also does not close its
+public origin. Keep the application private and remove alternate public routes.
 
 An accepted email delivery is not proof that the recipient has enrolled.
 The recipient must verify mailbox control and bind a credential. Invite-only
@@ -807,11 +972,41 @@ qurl access revoke_grant <CRID> <decision-id> --version <current-version> -o jso
 
 Email capture and review disclose the consumer's verified email to the
 publisher; they are not anonymous access. Mailbox verification does not prove
-legal identity. Contract grants use an opaque consumer reference. Approve
-contract access only from a trusted publisher backend receipt and expiration;
-these commands do not verify payment with a payment processor.
+legal identity. Contract grants use an opaque consumer reference. Without a
+Stripe payment policy, approve contract access only from a trusted publisher
+backend receipt and expiration; these commands do not verify payment.
 The publisher backend can subscribe to `consumer.subscribed` webhooks.
 If its notification is pending, repeat the same receipt, expiry and version.
+
+Publish your app, then set a price on the returned CRID:
+
+```bash
+qurl payments setup <CRID> --price 5.00
+```
+
+Complete Stripe setup in your browser when prompted. qURL creates the price on
+your Stripe account and prints the paid link. It uses the public CRID name for
+checkout. Use `--name` to set a different name. This setup makes the CRID private.
+Add `--interval month` or `--interval year` for a subscription. For a one-time
+payment, `--payment-access-seconds` sets the access duration. Zero lasts for the
+resource lifetime. Subscription access lasts for the paid invoice period.
+LayerV verifies the payment and collects 3%, including on renewals.
+
+If you already have a fixed Stripe price, you can use `--stripe-account` and
+`--stripe-price` when publishing or configuring contract access.
+
+Run `qurl payments account -o json` to check whether Stripe has enabled charges and payouts.
+Adding payment with `qurl access configure` makes an existing public CRID private.
+Removing payment keeps it private. Publishing the same target again does not
+change its payment policy.
+
+`qurl payments disconnect` stops every subscription from renewing, then removes
+LayerV from the Stripe account. Buyers keep access until their paid period ends
+and are not charged again. New purchases stop until you connect the same or a
+different account. It asks first; scripts pass `--yes`. If it reports that it
+did not finish, run it again: LayerV stays connected until every renewal has stopped. Scripts should read `outcome` in `-o json`: with `--yes` no status is read, so
+`disconnected: true` only means nothing is connected any more, and
+`released_revoked` means subscriptions must still be canceled in Stripe.
 
 `qurl access --help` lists all owner actions. Changes require the current
 version. If session removal is pending, retry the exact removal and version;
@@ -821,9 +1016,10 @@ returns a pending-session error, retry the same update. Do not invent a newer
 version or fall back to public or legacy access.
 
 <!-- TODO(upstream-contract): email backup follows qurl-service consumer access. -->
-When consumer access is enabled, the hosted preview card always offers
-**Email me an access link** as a backup to passkeys. Publishers cannot disable
-this option. The recipient verifies the mailbox and consents to disclose it to
+When consumer access is enabled, the hosted preview card offers
+**Email me an access link** as a backup to passkeys, except for Stripe paid
+contracts, which require a passkey. Publishers cannot disable the backup for
+other policies. The recipient verifies the mailbox and consents to disclose it to
 the publisher. Invitations, approval, entitlement, expiry, and revocation still
 apply. Email-backed grants are separate from passkey-backed grants; first use
 must pass the configured invitation, approval, or entitlement checks. Revoke
@@ -856,12 +1052,13 @@ addresses. It intentionally rejects HTTPS, paths, queries, fragments,
 credentials, wildcard listeners, and localhost subdomains. These restrictions
 keep the one-command path unambiguous. `--foreground` runs the same production
 daemon engine in the current process for CI and debugging. Scripts can use
-`--quiet` to read only the full CRID.
+`--quiet` to read the full CRID on the first line; an item shared with link
+limits adds its new link on a second line.
 
 #### Remote URLs
 
 ```bash
-qurl publish https://api.example.com/reports
+qurl publish https://api.example.com/reports --name "Reports API"
 ```
 
 Remote targets must use HTTP or HTTPS, include a host and valid port, and must
@@ -870,17 +1067,47 @@ credential or making a network request.
 
 | Flag | Description |
 |------|-------------|
+| `--name` | Public name recipients see, up to 100 characters. Sandbox HTTPS URLs default to the homepage title or hostname. Local apps default to the Connector ID or directory name |
 | `--public` | Let anyone who has the CRID open the resource. Without it the resource is private |
 | `--allow-device-key <public-key>` | Allow a recipient's device to open the private resource (repeatable) |
 | `--allow-requests` | Let people ask you for access to the private resource, also when the target is already published; you approve each person by a code they give you |
 | `--description <text>` | Human-readable description stored with the resource |
 | `--tag <tag>` | Tag stored with the resource (repeatable) |
 | `--alias <name>` | Memorable handle stored with the resource |
+| `--origin-header <name>` | Header qURL adds to every request it forwards to the target; the secret value is read from stdin or a hidden prompt, never from an argument |
 | `--id <id>` | Connector ID for a local publish; local-only |
 
-Description, tags, and alias apply only to remote resources. `--id` applies
+Description, tags, alias, and origin header apply only to remote resources. `--id` applies
 only to a local publish. Mixing those options fails loudly instead of being
 silently ignored.
+
+#### Origin headers
+
+An origin that admits only requests carrying a secret header, such as a
+Vercel deployment with Deployment Protection, can be published so that qURL
+adds the header to every request it forwards:
+
+```bash
+printf '%s' "$VERCEL_BYPASS_SECRET" | \
+  qurl publish https://app.example.vercel.app --name App --origin-header x-vercel-protection-bypass
+```
+
+The value is a secret: it is read from standard input or typed at a hidden
+prompt, never passed as an argument, and no command shows it again. Output
+shows only the header name, in canonical form (`X-Vercel-Protection-Bypass`).
+`Authorization` is allowed for basic or bearer origins and replaces the
+visitor's own; headers qURL manages itself (`Host`, `Cookie`,
+`X-Forwarded-*`, and the like) are refused.
+
+Publishing a target again without `--origin-header` keeps the header it has.
+Publishing it again with another header name or value (a new secret
+included), or with a header for a target that has none, is refused and
+changes nothing. Change it with `qurl origin-header set <CRID> <name>` (the
+value again from stdin or a hidden prompt) and remove it with
+`qurl origin-header clear <CRID>`; `qurl status <CRID>` shows its name. To
+rotate without an outage, add the new secret at the origin first, then set it
+in qURL, then remove the old secret from the origin a few minutes later: qURL
+may keep sending the old value for about a minute.
 
 #### Private or public
 
@@ -933,8 +1160,8 @@ The warning is part of the text output, and goes to stderr with `-o json` and
 stays as it is until you delete it. A publish never turns a public resource
 private, and it never makes a new public resource unless you pass `--public`.
 
-In either mode, the CRID is last and alone on its line; `--quiet` prints only
-the CRID. Publishing the same target again does not create a duplicate while
+In either mode, the CRID is last and alone on its line; `--quiet` prints the
+CRID first, then any link minted with saved or rule link limits. Publishing the same target again does not create a duplicate while
 its resource is active: the existing CRID is returned and the output says so.
 JSON reports a known outcome as `found_existing: true` or `false`; if recovery
 cannot prove which happened, it omits the field rather than guessing. Delete
@@ -1165,7 +1392,7 @@ knows about a person is the name they typed. An agent that runs these commands
 for you must approve only codes you passed on to it.
 
 ```bash
-qurl publish https://wiki.example.com/team --allow-requests
+qurl publish https://wiki.example.com/team --name "Team wiki" --allow-requests
 qurl requests                    # pending requests of all your resources
 qurl requests <CRID>             # pending requests of one resource
 qurl requests <CRID> --on        # let people ask; prints what to send them
@@ -1353,15 +1580,18 @@ be checked against the advertised CRID.
 
 ### qurl list
 
-`qurl list` prints one row per resource published under your account. Text,
-JSON, and `--quiet` all carry the full CRID. The text table can be wide because
-it does not shorten identifiers or local targets.
+`qurl list` prints one row per active resource published under your account.
+Use `qurl list --status revoked` to see deleted resources, or pass
+`--status active,revoked` to include both in scripts that need a full inventory.
+An empty `--status` uses the API default. Text, JSON, and
+`--quiet` all carry the full CRID. The text table can be wide because it does
+not shorten identifiers or local targets.
 
 | Flag | Description |
 |------|-------------|
 | `--limit <n>` | Maximum resources per page, 1–100 (default: service decides) |
 | `--cursor <cursor>` | Continue from a previous page's cursor |
-| `--status <status>` | Only resources with this status, e.g. `active` |
+| `--status <status>` | Resource statuses to list: `active` (default), `revoked`, or `active,revoked` |
 | `--type <kind>` | Only resources of this kind: `url` or `tunnel` |
 
 When more results exist, text mode says so on stderr with the `--cursor`
@@ -1851,9 +2081,10 @@ see [qurl requests, approve and deny](#qurl-requests-approve-and-deny).
 ### CRID preview metadata
 
 Each CRID has its own optional description and up to four media items. Description
-is public preview text, separate from private owner notes. The optional app
-name is public, with a limit of 100 characters. Omitted text fields stay
-unchanged; an empty string removes that field. Media needs a verified
+is public preview text, separate from private owner notes. The name is
+public and required, with a limit of 100 characters: `qurl publish` sets it,
+and `--name` changes it but cannot remove it. Omitted text fields stay
+unchanged; an empty `--description` removes the description. Media needs a verified
 publisher. Use the same registered device identity as other publisher commands:
 
 ```sh
@@ -1865,7 +2096,7 @@ qurl preview remove "$CRID" "$MEDIA_ID"
 qurl preview clear "$CRID"
 ```
 
-`clear` removes name, description and media and cancels pending uploads. Upload streams
+`clear` removes description and media and cancels pending uploads; the name stays. Upload streams
 directly to private storage without the API credential. Processing is asynchronous;
 read `preview get` again to check it. A failed replacement keeps the current item.
 

@@ -1,21 +1,8 @@
 /**
- * Smoke for the auto-destruct UPLOAD path (qurl-integrations#283).
- *
- * Pins the upload-time `session_duration` contract the 2026-05-13 incident
- * broke: the connector forwards an upload's `viewer_ttl_seconds` to
- * qurl-service as `session_duration` (connector.js `appendViewerTtl`), and a
- * sub-floor value was rejected for hours, un-caught, because the only smoke
- * took the no-TTL "use server default" branch. This sends a TTL'd upload
- * (must be accepted) plus a no-TTL control. Full incident write-up + design
- * rationale are in the PR description and #283.
- *
- * Honest boundary: catches a floor regression only IF qurl-service enforces
- * the floor at upload (CreateQURL). The bot also forwards session_duration
- * at MINT; pinning that needs a connector-mint helper + live run — #631.
- * `30` is a future-regression guard kept clear of today's 1s
- * `MinSessionDuration` floor (tighten to 1 once #631's live run confirms 1 is
- * accepted). Does NOT catch: mint-time floor (#631), per-recipient
- * view-window (Traefik), or the UI countdown.
+ * Upload- and mint-time session_duration floor probes (#283, #631).
+ * The connector must accept 1s at both boundaries. A successful request does
+ * not prove that the duration was enforced by the served view. The live run
+ * must identify the rejecting step if either boundary regresses.
  */
 
 import * as fs from 'fs';
@@ -33,7 +20,7 @@ describe('Smoke: /qurl send with viewer_ttl_seconds (Snapchat path)', () => {
   // Per-test unique fixture content to avoid the connector's md5
   // content-addressed dedup shortcut. If both tests uploaded the
   // same bytes, the second call would short-circuit to the cached
-  // resource from the first call (uploaded WITH viewer_ttl_seconds=30)
+  // resource from the first call (uploaded WITH viewer_ttl_seconds=1)
   // and the "control" no-TTL case would silently fail to exercise
   // the "use server default" branch it's supposed to pin.
   const tempFiles: string[] = [];
@@ -62,28 +49,28 @@ describe('Smoke: /qurl send with viewer_ttl_seconds (Snapchat path)', () => {
     }
   });
 
-  // Name says "accepts", not "forwards": the assertion only observes a 2xx
-  // upload (resource_id). A connector that silently DROPPED viewer_ttl_seconds
-  // would still pass — forwarding is verified only transitively, when
-  // qurl-service rejects a sub-floor session_duration (which today's 1s floor
-  // doesn't, for 30).
-  //
-  // Contract verified against the connector source (qurl-s3-connector
-  // internal/handler/handler.go): /api/upload parses viewer_ttl_seconds →
-  // session_duration → CreateQURL, and a CreateQURL rejection surfaces as
-  // HTTP 200 + success:true + an `error` string + NO resource_id (the file
-  // uploaded; the mint failed). So the regression is caught by uploadFile's
-  // throw-on-missing-resource_id (not a 4xx) — exactly the 2026-05-13 shape.
-  test('connector accepts upload with viewer_ttl_seconds=30', async () => {
-    const tempFile = freshFixture('ttl30');
+  // Acceptance pins the floor; enforcement by the viewer is a separate journey.
+  test('connector accepts upload with viewer_ttl_seconds=1', async () => {
+    const tempFile = freshFixture('ttl1');
     const result = await qurl.uploadFile(
       env.UPLOAD_API_URL,
       tempFile,
       env.QURL_API_KEY,
-      { viewerTtlSeconds: 30 },
+      { viewerTtlSeconds: 1 },
     );
     tracked.track(result.resource_id); // afterAll revoke
     expect(result.resource_id).toBeTruthy();
+  });
+
+  test('connector accepts mint-time session_duration=1s after a no-TTL upload', async () => {
+    const upload = await qurl.uploadFile(env.UPLOAD_API_URL, freshFixture('mint-ttl1'), env.QURL_API_KEY);
+    tracked.track(upload.resource_id);
+    const child = await qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+      sessionDurationSeconds: 1,
+    });
+    tracked.trackChild(child.qurl_id);
+    expect(child.qurl_link).toBeTruthy();
   });
 
   test('connector accepts no viewer_ttl_seconds (control case)', async () => {

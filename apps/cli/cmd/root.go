@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -79,6 +80,9 @@ type globalOpts struct {
 	// openBrowser launches the user's browser at an already-verified link;
 	// tests inject a recorder so no real browser ever starts under test.
 	openBrowser func(ctx context.Context, link string) error
+	// readHidden reads one line from the terminal without echo, for a
+	// secret typed at a prompt; tests inject the typed text.
+	readHidden func() ([]byte, error)
 	// Browser authentication is injected separately from command wiring tests.
 	signInAccount func(context.Context, *qurlapi.Config, func(context.Context, string) error) (string, error)
 	// httpClient is the HTTP client every qURL API client sends with. Nil is
@@ -148,6 +152,9 @@ type globalOpts struct {
 	newShareDaemon       func(string, string) (shareDaemonController, error)
 	preflightTarget      func(context.Context, string, int) error
 	resolveShareStateDir func(string) (string, error)
+	pendingTermsNotice   string
+	termsNoticeHandled   bool
+	saveTermsNotice      func()
 	resolveLocalResource localResourceResolver
 	resolveHubBootstrap  func() (qurl.HubBootstrap, error)
 	resolveSessionConfig func(string) (connectorshare.NativeSessionOperationAuthority, error)
@@ -197,6 +204,10 @@ type globalOpts struct {
 	// resolvedSupervision is the lifecycle contract every mutating command
 	// checks against the namespace's policy marker before it acts.
 	resolvedSupervision connectorstate.RuntimeSupervision
+	// resolvedClientProduct is the validated QURL_CLIENT_PRODUCT, or empty. It
+	// is set by resolveSettings, so build API configs only after it has run.
+	resolvedClientProduct         string
+	resolvedClientProductExplicit bool
 }
 
 // rootOption is a test hook for injecting process context.
@@ -216,6 +227,15 @@ func Main(version string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	root, opts := newRoot(version, output.Detect(), lookForSavedSkill)
+	if command, _, err := root.Find(os.Args[1:]); err == nil {
+		for current := command; current != nil; current = current.Parent() {
+			if current.Name() == daemonCommandName {
+				// Include daemon subcommands while keeping normal command diagnostics unchanged.
+				slog.SetDefault(slog.New(slog.NewTextHandler(opts.streams.Err, nil)))
+				break
+			}
+		}
+	}
 	return run(ctx, root, opts)
 }
 
@@ -282,7 +302,7 @@ automatically. Use "qurl account setup" to enable recovery and other devices.
 Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		Example: "  qurl publish http://127.0.0.1:3000\n" +
 			"  qurl get " + exampleCRID + "\n" +
-			"  qurl publish https://api.example.com/reports",
+			"  qurl publish https://api.example.com/reports --name \"Reports API\"",
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -302,7 +322,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 			// Task Scheduler starts `daemon run` directly. Redirect before
 			// settings resolution so a malformed profile or environment value is
 			// present in the durable log on the first background start.
-			if cmd.Name() == "run" && cmd.Parent() != nil && cmd.Parent().Name() == "daemon" {
+			if cmd.Name() == "run" && cmd.Parent() != nil && cmd.Parent().Name() == daemonCommandName {
 				stdoutPath, err := cmd.Flags().GetString("job-stdout-log")
 				if err != nil {
 					return err
@@ -340,10 +360,12 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 
 	cmd.AddCommand(
 		accountCmd(opts),
+		rulesCmd(opts),
 		publishCmd(opts),
 		shareCmd(opts),
 		grantsCmd(opts),
 		consumerAccessCmd(opts),
+		paymentsCmd(opts),
 		requestsCmd(opts),
 		approveCmd(opts),
 		denyCmd(opts),
@@ -360,6 +382,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		whoamiCmd(opts),
 		publisherCmd(opts),
 		previewCmd(opts),
+		originHeaderCmd(opts),
 		requestCmd(opts),
 		versionCmd(opts),
 		completionCmd(),
@@ -378,6 +401,8 @@ func (o *globalOpts) nativeShareDaemon(stateDir, logDir string) (shareDaemonCont
 	if err != nil {
 		return nil, err
 	}
+	controller.ClientProduct = o.resolvedClientProduct
+	controller.ClientProductExplicit = o.resolvedClientProductExplicit
 	return controller, nil
 }
 
@@ -419,6 +444,9 @@ func (o *globalOpts) applyDefaults() {
 	if o.openBrowser == nil {
 		launcher := &consume.Launcher{LookupEnv: o.lookupEnv, GOOS: runtime.GOOS}
 		o.openBrowser = launcher.Open
+	}
+	if o.readHidden == nil {
+		o.readHidden = readTerminalHidden
 	}
 	o.applyLinkDefaults()
 	if o.redirectFRPLogs == nil {
@@ -520,6 +548,7 @@ func (o *globalOpts) resolveSettings() error {
 		return exitcode.UsageError(err)
 	}
 	o.resolvedSupervision = mode
+	o.resolvedClientProduct = o.resolveClientProduct()
 	o.resolved = true
 	return nil
 }
@@ -548,7 +577,9 @@ func (o *globalOpts) requireRuntimeSupervisionIfNamespace() error {
 
 // printer builds the per-invocation Printer from the resolved settings.
 func (o *globalOpts) printer() *output.Printer {
-	return output.New(o.streams, o.resolvedFormat, o.quiet, o.outColor, o.ascii, o.now)
+	printer := output.New(o.streams, o.resolvedFormat, o.quiet, o.outColor, o.ascii, o.now)
+	printer.TermsNotice = o.pendingTermsNotice
+	return printer
 }
 
 // insecureEndpointWarning returns a warning when the endpoint would carry an
@@ -663,18 +694,44 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 	return qurlapi.New(o.accountConfig(key, ""))
 }
 
-func (o *globalOpts) accountConfig(key, owner string) *qurlapi.Config {
-	return &qurlapi.Config{
-		OwnerID:      owner,
-		BaseURL:      o.resolvedEndpoint,
-		APIKey:       key,
-		Version:      o.version,
-		Verbose:      o.verboseLogger(),
-		Sleep:        o.sleep,
-		NewRequestID: o.newRequestID,
-		HTTPClient:   o.httpClient,
-		Now:          o.now,
+// clientProductEnv is the environment-only variable naming the host product.
+const clientProductEnv = "QURL_CLIENT_PRODUCT"
+
+// resolveClientProduct returns the environment-only QURL_CLIENT_PRODUCT, or
+// empty. Explicit empty clears installed attribution; unset or invalid values
+// preserve a running native daemon's product. Invalid values get a
+// verbose-only note.
+func (o *globalOpts) resolveClientProduct() string {
+	value, present := o.lookupEnv(clientProductEnv)
+	o.resolvedClientProductExplicit = present && (value == "" || qurlapi.ValidClientProduct(value))
+	if value == "" || qurlapi.ValidClientProduct(value) {
+		return value
 	}
+	if log := o.verboseLogger(); log != nil {
+		log("ignoring invalid %s: expected %s", clientProductEnv, qurlapi.ClientProductRule)
+	}
+	return ""
+}
+
+// apiConfig is the transport configuration every API client shares. Build
+// qurlapi.Config only here so each client carries the host product.
+func (o *globalOpts) apiConfig(baseURL string) *qurlapi.Config {
+	return &qurlapi.Config{
+		BaseURL:       baseURL,
+		Version:       o.version,
+		ClientProduct: o.resolvedClientProduct,
+		Verbose:       o.verboseLogger(),
+		Sleep:         o.sleep,
+		NewRequestID:  o.newRequestID,
+		HTTPClient:    o.httpClient,
+		Now:           o.now,
+	}
+}
+
+func (o *globalOpts) accountConfig(key, owner string) *qurlapi.Config {
+	cfg := o.apiConfig(o.resolvedEndpoint)
+	cfg.APIKey, cfg.OwnerID = key, owner
+	return cfg
 }
 
 // registeredAccountBootstrap owns the account-key capability only during one
@@ -1112,15 +1169,7 @@ func requireExternalOwnerScopedAgentState(ctx context.Context, store qurl.AgentS
 // openRegisteredDeviceClient builds the narrow REST client around the durable
 // device credential held in store.
 func (o *globalOpts) openRegisteredDeviceClient(ctx context.Context, origin string, store qurl.AgentStateStore) (qurlapi.Client, error) {
-	return qurlapi.NewRegistered(ctx, &qurlapi.Config{
-		BaseURL:      origin,
-		Version:      o.version,
-		Verbose:      o.verboseLogger(),
-		Sleep:        o.sleep,
-		NewRequestID: o.newRequestID,
-		HTTPClient:   o.httpClient,
-		Now:          o.now,
-	}, store)
+	return qurlapi.NewRegistered(ctx, o.apiConfig(origin), store)
 }
 
 // bindDeviceOwner records the authenticated owner in the namespace's registry,

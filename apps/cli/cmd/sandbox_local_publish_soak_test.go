@@ -54,7 +54,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 2*time.Minute)
 	assertSandboxLocalRoute(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.marker, 2*time.Minute)
 
-	startFDs, startRSS := sandboxProcessUsage(t)
+	startFDs, startRSS := -1, int64(-1)
 	started := time.Now()
 	// Fail fast on broken crash recovery; the remaining soak still crosses the
 	// one-hour authorization lifetime while the credential-free daemon serves.
@@ -95,6 +95,11 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 			if resumed == nil || resumed.AgentID != initialAgent.AgentID || resumed.DeviceAPIKeyID != initialAgent.DeviceAPIKeyID {
 				t.Fatalf("warm daemon restart changed durable agent identity: before=%s/%s after=%v", initialAgent.AgentID, initialAgent.DeviceAPIKeyID, resumed)
 			}
+			var err error
+			startFDs, startRSS, err = sandboxProcessUsage(warmDaemon.cmd.Process.Pid)
+			if err != nil {
+				t.Fatalf("read warm daemon baseline usage: %v", err)
+			}
 			crashRestartDone = true
 		}
 		if !epochRestartDone && !time.Now().Before(epochRestartAt) {
@@ -126,7 +131,10 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	if requestCount < 3 {
 		t.Fatalf("soak completed only %d public-route requests", requestCount)
 	}
-	endFDs, endRSS := sandboxProcessUsage(t)
+	endFDs, endRSS, err := sandboxProcessUsage(warmDaemon.cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("read warm daemon final usage: %v", err)
+	}
 	if startFDs >= 0 && endFDs-startFDs > 32 {
 		t.Errorf("file descriptors grew from %d to %d during soak", startFDs, endFDs)
 	}
@@ -209,6 +217,7 @@ func startCredentialFreeSandboxDaemon(t *testing.T, fixture *sandboxLocalFixture
 }
 
 func TestExactWarmDaemonProcessContract(t *testing.T) {
+	t.Run("process usage", assertSandboxProcessUsageReadsRequestedProcess)
 	stateDir := connectorStateTestDir(t)
 	deployment := filepath.Join(t.TempDir(), "deployment.json")
 	if err := os.WriteFile(deployment, []byte("{}\n"), 0o600); err != nil {
@@ -343,27 +352,25 @@ func (p *sandboxExactDaemonProcess) forceStop(t *testing.T) {
 	}
 }
 
-func sandboxProcessUsage(t *testing.T) (fds int, rssBytes int64) {
-	t.Helper()
+func sandboxProcessUsage(pid int) (fds int, rssBytes int64, err error) {
+	if pid <= 0 {
+		return -1, -1, errors.New("process ID must be positive")
+	}
 	if runtime.GOOS != "linux" {
-		return -1, -1
+		return -1, -1, nil
 	}
-	entries, err := os.ReadDir("/proc/self/fd")
+	root := "/proc/" + strconv.Itoa(pid)
+	entries, err := os.ReadDir(filepath.Join(root, "fd"))
 	if err != nil {
-		t.Logf("read fd usage: %v", err)
-		fds = -1
-	} else {
-		fds = len(entries)
+		return -1, -1, fmt.Errorf("read fd usage: %w", err)
 	}
-	file, err := os.Open("/proc/self/status")
+	fds = len(entries)
+	file, err := os.Open(filepath.Join(root, "status")) //nolint:gosec // A positive integer PID selects only its fixed procfs status file.
 	if err != nil {
-		t.Logf("read rss usage: %v", err)
-		return fds, -1
+		return -1, -1, fmt.Errorf("read rss usage: %w", err)
 	}
 	defer func() {
-		if err := file.Close(); err != nil {
-			t.Logf("close process status: %v", err)
-		}
+		err = errors.Join(err, file.Close())
 	}()
 	rssBytes = -1
 	scanner := bufio.NewScanner(file)
@@ -371,18 +378,61 @@ func sandboxProcessUsage(t *testing.T) (fds int, rssBytes int64) {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) == 3 && fields[0] == "VmRSS:" && fields[2] == "kB" {
 			kb, parseErr := strconv.ParseInt(fields[1], 10, 64)
-			if parseErr != nil {
-				t.Logf("parse rss usage: %v", parseErr)
-				break
+			if parseErr != nil || kb <= 0 || kb > (1<<63-1)/1024 {
+				return -1, -1, fmt.Errorf("invalid process VmRSS %q", fields[1])
 			}
 			rssBytes = kb * 1024
 			break
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		t.Logf("scan rss usage: %v", err)
+		return -1, -1, fmt.Errorf("scan rss usage: %w", err)
 	}
-	return fds, rssBytes
+	if rssBytes < 0 {
+		return -1, -1, errors.New("process status has no VmRSS")
+	}
+	return fds, rssBytes, nil
+}
+
+func assertSandboxProcessUsageReadsRequestedProcess(t *testing.T) {
+	if _, _, err := sandboxProcessUsage(0); err == nil {
+		t.Fatal("usage accepted a missing process ID")
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("process usage requires Linux procfs")
+	}
+	// Make the harness visibly different from the child; self reads must fail.
+	for range 32 {
+		file, err := os.Open(os.DevNull)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = file.Close() })
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	child := exec.CommandContext(ctx, "sleep", "60")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		_ = child.Wait()
+	})
+	childFDs, childRSS, err := sandboxProcessUsage(child.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfFDs, _, err := sandboxProcessUsage(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childRSS <= 0 || childFDs+24 > selfFDs {
+		t.Fatalf("child usage fd=%d rss=%d, harness fd=%d; want the child's own usage", childFDs, childRSS, selfFDs)
+	}
+	if _, _, err := sandboxProcessUsage(1 << 30); err == nil {
+		t.Fatal("missing process silently disabled the usage check")
+	}
 }
 
 func TestSandboxSoakDurationContract(t *testing.T) {
