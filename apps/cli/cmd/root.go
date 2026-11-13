@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
@@ -713,6 +714,30 @@ func (o *globalOpts) resolveClientProduct() string {
 	return ""
 }
 
+// agentRegistrationVersion appends the host product to the CLI version as
+// SemVer build metadata in the agent registration version: +cli without a
+// host product, +desktop for qURL Desktop, +other for any other host. An
+// overlong result keeps the bare version.
+// TODO(upstream-contract): qurl-service caps this field at 64 runes and
+// recognizes the desktop, cli, and other identifiers.
+func agentRegistrationVersion(version, clientProduct string) string {
+	host := "other"
+	switch name, _, _ := strings.Cut(clientProduct, "/"); name {
+	case "":
+		host = "cli"
+	case "qurl-desktop":
+		host = "desktop"
+	}
+	sep := "+"
+	if strings.Contains(version, "+") {
+		sep = "."
+	}
+	if tagged := version + sep + host; utf8.RuneCountInString(tagged) <= 64 {
+		return tagged
+	}
+	return version
+}
+
 // apiConfig is the transport configuration every API client shares. Build
 // qurlapi.Config only here so each client carries the host product.
 func (o *globalOpts) apiConfig(baseURL string) *qurlapi.Config {
@@ -1000,7 +1025,7 @@ func (o *globalOpts) openNativeRegisteredClient(
 		AgentID:                      connectorstate.ConfiguredAgentID(),
 		Hub:                          hubBootstrap,
 		Hostname:                     hostname,
-		Version:                      o.version,
+		Version:                      agentRegistrationVersion(o.version, o.resolvedClientProduct),
 		ClientBaseURL:                origin,
 		EnrollmentCredentialProvider: bootstrap.enrollmentCredential,
 		RecoveryCredentialProvider:   bootstrap.recoveryCredential,
@@ -1083,7 +1108,7 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 		AgentID:                      connectorstate.ConfiguredAgentID(),
 		Hub:                          hubBootstrap,
 		Hostname:                     hostname,
-		Version:                      o.version,
+		Version:                      agentRegistrationVersion(o.version, o.resolvedClientProduct),
 		ClientBaseURL:                origin,
 		EnrollmentCredentialProvider: enroll,
 		RecoveryCredentialProvider:   recovery,

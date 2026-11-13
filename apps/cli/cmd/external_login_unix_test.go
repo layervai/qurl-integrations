@@ -81,7 +81,7 @@ func TestExternalLoginEnrollsFreshNamespaceFromTheTokenFile(t *testing.T) {
 				t.Fatalf("runtime opened before the external policy was established: %v", err)
 			}
 			if cfg.StateDir != stateDir || cfg.ClientBaseURL != srv.URL || cfg.AgentID != connectorstate.ConfiguredAgentID() ||
-				cfg.Hostname == "" || cfg.Version != "test" || cfg.RefreshMode != connectorRefreshModeAuto ||
+				cfg.Hostname == "" || cfg.Version != "test+cli" || cfg.RefreshMode != connectorRefreshModeAuto ||
 				cfg.EnrollmentCredential != "" || cfg.EnrollmentCredentialProvider == nil || cfg.RecoveryCredentialProvider != nil {
 				t.Fatalf("external native runtime config = %+v", cfg)
 			}

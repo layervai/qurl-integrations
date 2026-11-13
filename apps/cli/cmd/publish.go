@@ -595,7 +595,7 @@ func prepareLocalPublishResource(
 	}
 	cfg := &connectorshare.NativeRuntimeConfig{
 		StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
-		Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
+		Hostname: hostname, Version: agentRegistrationVersion(opts.version, opts.resolvedClientProduct), ClientBaseURL: origin,
 		EnrollmentCredentialProvider: enrollment.credential,
 		RecoveryCredentialProvider:   enrollment.recoveryCredential,
 		RefreshMode:                  connectorRefreshModeAuto,

@@ -132,3 +132,21 @@ func TestInvalidEncodedProductInNativeJobUsesRefusalHold(t *testing.T) {
 		t.Fatalf("invalid installed product = %d holds=%v stderr=%s", res.code, *holds, res.stderr.String())
 	}
 }
+
+func TestAgentRegistrationVersion(t *testing.T) {
+	long := strings.Repeat("9", 60)
+	for _, tc := range []struct{ name, version, product, want string }{
+		{name: "standalone", version: "4.1.0", want: "4.1.0+cli"},
+		{name: "desktop", version: "4.1.0", product: "qurl-desktop/0.5.1", want: "4.1.0+desktop"},
+		{name: "other host", version: "4.1.0", product: "myapp/1.2.3", want: "4.1.0+other"},
+		{name: "existing build metadata", version: "4.1.0+abc", product: "qurl-desktop/0.5.1", want: "4.1.0+abc.desktop"},
+		{name: "fits exactly", version: long, want: long + "+cli"},
+		{name: "overlong", version: long, product: "qurl-desktop/0.5.1", want: long},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := agentRegistrationVersion(tc.version, tc.product); got != tc.want {
+				t.Errorf("agentRegistrationVersion(%q, %q) = %q, want %q", tc.version, tc.product, got, tc.want)
+			}
+		})
+	}
+}
