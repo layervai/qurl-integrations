@@ -153,7 +153,9 @@ func resolveAccessRule(ctx context.Context, log *slog.Logger, c *client.Client, 
 	case err != nil:
 		log.Info("get: access rule is ambiguous")
 		msg := fmt.Sprintf("*%s* matches more than one access rule. Rename the saved rule in qURL Desktop or the qURL CLI", escapeMrkdwnText(truncateRunes(selector, 40)))
-		if !slices.ContainsFunc(defaultAccessRules, func(r qurl.AccessRule) bool { return strings.EqualFold(r.ID, selector) }) {
+		if slices.ContainsFunc(defaultAccessRules, func(r qurl.AccessRule) bool { return strings.EqualFold(r.ID, selector) }) {
+			msg += `, or pick the Default access rule by name, such as rule:"One-time link"`
+		} else {
 			msg += ", or pick a Default access rule by ID (`rule:builtin.public`, `rule:once`)"
 		}
 		return nil, &userError{msg: msg + "."}

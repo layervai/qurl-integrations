@@ -327,10 +327,12 @@ type CreateInput struct {
 	// `description` — the resource-level `description` lives on the Update /
 	// Resource bodies and on the GET response (QurlData.description).
 	// TODO(upstream-rebrand): keep aligned with qurl-service's openapi.
-	Label       string `json:"label,omitempty"`
-	ExpiresIn   string `json:"expires_in,omitempty"`
-	OneTimeUse  bool   `json:"one_time_use,omitempty"`
-	MaxSessions int    `json:"max_sessions,omitempty"`
+	Label     string `json:"label,omitempty"`
+	ExpiresIn string `json:"expires_in,omitempty"`
+	// OneTimeUse is always sent on a resource mint: leaving it false mints a
+	// reusable link, not the service's one-time tunnel default.
+	OneTimeUse  bool `json:"one_time_use,omitempty"`
+	MaxSessions int  `json:"max_sessions,omitempty"`
 	// SessionDuration is the per-qURL session lifetime (e.g. "1h"): how
 	// long access lasts after a visitor reaches the content, distinct
 	// from ExpiresIn (the link's own expiry). Server-side it maps to
