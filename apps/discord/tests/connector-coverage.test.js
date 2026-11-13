@@ -137,6 +137,43 @@ describe('Connector client — coverage boost', () => {
       ['Connector re-upload', (c) => c.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain'), []],
       ['Connector JSON upload', (c) => c.uploadJsonToConnector({ type: 'google-map' }, 'loc.json'), []],
     ];
+    it.each(uploaders)('%s classifies an upload-size 400 without exposing the body', async (label, run, pre) => {
+      const body = JSON.stringify({ success: false, error: 'File too large, max 7MB', token: 'raw-upstream-secret' });
+      const f = jest.fn();
+      for (const r of pre) f.mockResolvedValueOnce(r());
+      f.mockResolvedValueOnce({ ok: false, status: 400, text: async () => body });
+      globalThis.fetch = f;
+      const err = await run(connector).catch(e => e);
+      expect(err).toMatchObject({ message: `${label} failed (400)`, status: 400, apiCode: 'upload_too_large', apiDetail: null });
+      expect(JSON.stringify(err)).not.toContain('raw-upstream-secret');
+      const logger = require('../src/logger');
+      expect(JSON.stringify([logger.info.mock.calls, logger.warn.mock.calls, logger.error.mock.calls]))
+        .not.toContain('raw-upstream-secret');
+    });
+
+    it('recognizes the bare JSON size error without a reported cap', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false, status: 400, text: async () => JSON.stringify({ success: false, error: 'File too large' }),
+      });
+      await expect(connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain'))
+        .rejects.toMatchObject({ apiCode: 'upload_too_large', status: 400, apiDetail: null });
+    });
+
+    it.each([
+      [400, '<html>File too large</html>'],
+      [400, '{broken JSON'],
+      [400, 'null'],
+      [400, JSON.stringify({ success: false, error: { message: 'File too large' } })],
+      [400, JSON.stringify({ success: true, error: 'File too large, max 7MB' })],
+      [400, JSON.stringify({ success: false, error: 'File too large, max 7MB raw-upstream-secret' })],
+      [500, JSON.stringify({ success: false, error: 'File too large, max 7MB' })],
+    ])('keeps unrecognized size responses generic (%s, %s)', async (status, body) => {
+      globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status, text: async () => body });
+      const err = await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain').catch(e => e);
+      expect(err).toMatchObject({ message: `Connector re-upload failed (${status})`, status, apiCode: null, apiDetail: null });
+      expect(err.message).not.toContain(body);
+    });
+
     function mockUploadReply(pre, body) {
       const f = jest.fn();
       for (const r of pre) f.mockResolvedValueOnce(r());
