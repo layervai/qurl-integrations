@@ -63,6 +63,21 @@ static_resources:
                   cluster: s3
                   timeout: 30s
           http_filters:
+          # Intercepted errors can be cached before nginx evaluates proxy_no_cache.
+          - name: envoy.filters.http.lua
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              default_source_code:
+                inline_string: |
+                  function envoy_on_response(handle)
+                    local headers = handle:headers()
+                    local status = tonumber(headers:get(":status"))
+                    if status == nil or (status ~= 304 and (status < 200 or status >= 300)) then
+                      headers:remove("expires")
+                      headers:remove("x-accel-expires")
+                      headers:replace("cache-control", "no-store")
+                    end
+                  end
           - name: envoy.filters.http.aws_request_signing
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.aws_request_signing.v3.AwsRequestSigning
