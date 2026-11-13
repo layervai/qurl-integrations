@@ -1856,11 +1856,9 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //     payload reaching the gate produces a generic "Internal
 //     error" cancel without leaking the SSRF detail.
 //
-//   - `recipients` is MUTATED in-place on the Add Recipients post-
-//     send branch (deduped push of new IDs). Treat as transferred
-//     ownership for the lifetime of the call, not as a snapshot.
-//     A caller that reuses the same array across retries will see
-//     silent double-adds.
+//   - `recipients` is validated and shallow-copied before the first
+//     await. Add Recipients extends only the pipeline-owned array;
+//     callers can keep their input as a snapshot.
 //
 // Required `interaction` surface (fail loudly at the corresponding
 // call site if missing):
@@ -1931,9 +1929,7 @@ async function executeSendPipeline(interaction, {
   attachment,
   locationUrl,
   locationName,
-  // MUTATES: the Add Recipients post-send branch dedupe-pushes into
-  // this array (see docstring's "transferred ownership" note). The
-  // initial `recipients` is already deduped + bot-filtered by
+  // The initial `recipients` is already deduped + bot-filtered by
   // partitionRecipients (see contract pin at commands.js:~3552):
   // upstream owns dedup, this function does NOT re-dedup the initial set.
   // Sender CAN appear in `recipients` — self-send is supported.
@@ -2037,6 +2033,15 @@ async function executeSendPipeline(interaction, {
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
     failGate(RangeError, `executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
   }
+  for (const [index, recipient] of recipients.entries()) {
+    if (!recipient || typeof recipient !== 'object' || Array.isArray(recipient)
+      || typeof recipient.id !== 'string' || !recipient.id) {
+      failGate(TypeError, `executeSendPipeline: recipients[${index}] must be an object with a non-empty string id`);
+    }
+  }
+  // Copy before the first await: Add Recipients must not extend the caller's list.
+  recipients = recipients.slice();
+
   // Operator-visibility hook for big sends. Fires when a single send
   // crosses `largeSendThreshold()` so the operational cost (qurl-
   // service re-uploads + DM fan-out duration at Discord's per-bot
