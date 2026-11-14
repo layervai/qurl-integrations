@@ -556,6 +556,14 @@ type Resource struct {
 	// distinct from the public-key ResourceID and must be passed to connectors
 	// verbatim rather than derived client-side.
 	ConnectorRoutingID string `json:"connector_routing_id,omitempty"`
+	// CRID is the resource's permanent public identifier.
+	CRID string `json:"crid,omitempty"`
+	// ConsumerAccessVersion is the revision of the resource's consumer access
+	// policy; zero means it never had one. A resource that has or had one
+	// issues no bearer links: recipients enter by its CRID and verify there.
+	// TODO(upstream-contract): qurl-service `consumer_access_version`, and its
+	// rule that a resource that has or had a policy never mints a bearer link.
+	ConsumerAccessVersion int64 `json:"consumer_access_version,omitempty"`
 }
 
 // SharingState is the account-authorized lifecycle state for one tunnel.
@@ -1022,6 +1030,21 @@ func (c *Client) doSharing(ctx context.Context, method, resourceID string, input
 	return &out, nil
 }
 
+// ResourceKeyDER decodes a resource_id to the DER public key that its CRID
+// fingerprints, so a caller can check a CRID with crid.KeyMatches. ok is false
+// when the value is not canonical unpadded base64url, such as a URL; other bytes
+// that decode, such as some legacy ids, simply fail crid.KeyMatches.
+//
+// TODO(upstream-contract): qurl-service encodes resource_id as unpadded
+// base64url.
+func ResourceKeyDER(resourceID string) (der []byte, ok bool) {
+	der, err := base64.RawURLEncoding.Strict().DecodeString(resourceID)
+	if err != nil || len(der) == 0 || base64.RawURLEncoding.EncodeToString(der) != resourceID {
+		return nil, false
+	}
+	return der, true
+}
+
 func validateSharingState(requestResourceID string, sharing *SharingState) error {
 	if sharing == nil || sharing.ResourceID != requestResourceID {
 		return errors.New("sharing response identity does not match request")
@@ -1029,8 +1052,8 @@ func validateSharingState(requestResourceID string, sharing *SharingState) error
 	if sharing.CRID == "" {
 		return errors.New("sharing response CRID is missing")
 	}
-	der, err := base64.RawURLEncoding.Strict().DecodeString(sharing.ResourceID)
-	if err != nil {
+	der, ok := ResourceKeyDER(sharing.ResourceID)
+	if !ok {
 		return errors.New("sharing response resource identity is invalid")
 	}
 	matched, err := crid.KeyMatches(sharing.CRID, der)

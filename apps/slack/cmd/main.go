@@ -192,6 +192,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	linkOrigin, linkSiteAccessURL, err := readLinkSiteConfig()
+	if err != nil {
+		return err
+	}
+	// An unset QURL_LINK_ORIGIN means production's link site, so name it here.
+	slog.Info("CRID entry pages configured", "link_origin", linkOrigin, "link_site_unlock", linkSiteAccessURL != "")
 
 	// DDBProvider reads the workspace_state table populated by
 	// /oauth/qurl/callback. Missing WORKSPACE_STATE_TABLE fails
@@ -360,6 +366,8 @@ func run() error {
 		TunnelHub:                      tunnelHub,
 		S3OriginImage:                  s3OriginImage,
 		ConnectorAPIURL:                connectorAPIURL,
+		LinkOrigin:                     linkOrigin,
+		LinkSiteAccessURL:              linkSiteAccessURL,
 		PostFeedback:                   postFeedback,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
@@ -546,6 +554,41 @@ func registerOptionalSetupRoutes(ctx context.Context, rootMux *http.ServeMux, pr
 	}
 	slog.Info("registered /oauth/slack/{install,callback} routes")
 	return nil
+}
+
+// defaultLinkOrigin is production's qURL link site.
+const defaultLinkOrigin = "https://qurl.link"
+
+// readLinkSiteConfig reads QURL_LINK_ORIGIN (default: production's link site)
+// and the optional QURL_LINK_SITE_ACCESS_URL, which unlocks a private link site.
+// Both reach users as links, so each must be an absolute https URL without
+// credentials, and the origin has no path, query or fragment.
+func readLinkSiteConfig() (origin, accessURL string, err error) {
+	origin = strings.TrimRight(strings.TrimSpace(os.Getenv("QURL_LINK_ORIGIN")), "/")
+	if origin == "" {
+		origin = defaultLinkOrigin
+	}
+	accessURL = strings.TrimSpace(os.Getenv("QURL_LINK_SITE_ACCESS_URL"))
+	// The fallback text carries both values raw: Slack reads <, >, | and & as
+	// markup, and a space ends the link (url.Parse allows < and > in a host and a
+	// space in a path).
+	for _, v := range [...]struct{ name, value string }{{"QURL_LINK_ORIGIN", origin}, {"QURL_LINK_SITE_ACCESS_URL", accessURL}} {
+		if strings.ContainsAny(v.value, "<>|& ") {
+			return "", "", fmt.Errorf("%s must not contain <, >, |, & or a space", v.name)
+		}
+	}
+	// Only a bare origin round-trips as https:// + host: credentials, a path, a
+	// query or a fragment (even an empty `?` or `#`) all break the equality. An
+	// empty port survives it, so the trailing colon is checked on its own.
+	if u, parseErr := url.Parse(origin); parseErr != nil || "https://"+u.Host != origin || strings.HasSuffix(origin, ":") {
+		return "", "", errors.New("QURL_LINK_ORIGIN must be an https:// origin without a path, query or fragment")
+	}
+	if accessURL != "" {
+		if u, parseErr := url.Parse(accessURL); parseErr != nil || u.Scheme != "https" || u.Host == "" || strings.HasSuffix(u.Host, ":") || u.User != nil {
+			return "", "", errors.New("QURL_LINK_SITE_ACCESS_URL must be an absolute https URL without credentials or an empty port")
+		}
+	}
+	return origin, accessURL, nil
 }
 
 func connectorAPIURLFromEndpoint(raw string) (endpoint, apiURL string, err error) {
