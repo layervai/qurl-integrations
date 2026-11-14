@@ -306,7 +306,7 @@ func logProductionRestartStage(t *testing.T, stateDir string) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return
