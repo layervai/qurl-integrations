@@ -266,6 +266,16 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	}
 	cmd.Stdin = strings.NewReader(input)
 	// Never print command output: it can contain bearer links or credentials.
+	var daemonLog string
+	var daemonLogOffset int64
+	if args[0] == "restart" && runtime.GOOS == "linux" {
+		if dir, err := connectordaemon.DefaultLogDir(env[connectorstate.EnvStateDirPrimary]); err == nil {
+			daemonLog = filepath.Join(dir, "share-daemon.err.log")
+			if info, err := os.Stat(daemonLog); err == nil {
+				daemonLogOffset = info.Size()
+			}
+		}
+	}
 	raw, err := cmd.Output()
 	if ctx.Err() != nil {
 		t.Fatal("production candidate command timed out")
@@ -277,8 +287,8 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	if errors.As(err, &exit) {
 		t.Logf("production candidate failure class: %s", productionFailureClass(exit.Stderr))
 		if args[0] == "restart" {
-			if runtime.GOOS == "linux" {
-				logProductionRestartStage(t, env[connectorstate.EnvStateDirPrimary])
+			if daemonLog != "" {
+				logProductionRestartStage(t, daemonLog, daemonLogOffset)
 			}
 			for _, pattern := range productionRestartDiagnostics {
 				if detail := pattern.FindSubmatch(exit.Stderr); len(detail) == 2 {
@@ -296,23 +306,19 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 }
 
 // Read a bounded tail of the fixture daemon log and emit only a fixed label.
-func logProductionRestartStage(t *testing.T, stateDir string) {
+func logProductionRestartStage(t *testing.T, path string, offset int64) {
 	t.Helper()
-	dir, err := connectordaemon.DefaultLogDir(stateDir)
-	if err != nil {
-		return
-	}
-	f, err := os.Open(filepath.Join(dir, "share-daemon.err.log")) //nolint:gosec // Proof-owned daemon state.
+	f, err := os.Open(path) //nolint:gosec // Proof-owned daemon state.
 	if err != nil {
 		return
 	}
 	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() {
+	if err != nil || !info.Mode().IsRegular() || info.Size() < offset {
 		return
 	}
 	const maxTail = 64 << 10
-	if _, err := f.Seek(max(0, info.Size()-maxTail), io.SeekStart); err != nil {
+	if _, err := f.Seek(max(offset, info.Size()-maxTail), io.SeekStart); err != nil {
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, maxTail))
@@ -328,6 +334,7 @@ func productionRestartStage(log string) string {
 		if !strings.Contains(line, "share daemon session group attempt failed; retrying") {
 			continue
 		}
+		// TODO(upstream-contract): Match the recovery stages reported by qurl-connector.
 		switch {
 		case strings.Contains(line, "recover prior native session operation before replacement:"):
 			return "recover_operation"
