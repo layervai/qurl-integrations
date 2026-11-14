@@ -277,6 +277,9 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	if errors.As(err, &exit) {
 		t.Logf("production candidate failure class: %s", productionFailureClass(exit.Stderr))
 		if args[0] == "restart" {
+			if runtime.GOOS == "linux" {
+				logProductionRestartStage(t, env[connectorstate.EnvStateDirPrimary])
+			}
 			for _, pattern := range productionRestartDiagnostics {
 				if detail := pattern.FindSubmatch(exit.Stderr); len(detail) == 2 {
 					t.Logf("production restart diagnostic: %s", detail[1])
@@ -290,6 +293,64 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	}
 	t.Fatal("production candidate could not start")
 	return nil, -1
+}
+
+// Read a bounded tail of the fixture daemon log and emit only a fixed label.
+func logProductionRestartStage(t *testing.T, stateDir string) {
+	t.Helper()
+	dir, err := connectordaemon.DefaultLogDir(stateDir)
+	if err != nil {
+		return
+	}
+	f, err := os.Open(filepath.Join(dir, "share-daemon.err.log")) //nolint:gosec // Proof-owned daemon state.
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	const maxTail = 64 << 10
+	if _, err := f.Seek(max(0, info.Size()-maxTail), io.SeekStart); err != nil {
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxTail))
+	if err == nil {
+		t.Logf("production restart daemon recovery stage: %s", productionRestartStage(string(raw)))
+	}
+}
+
+func productionRestartStage(log string) string {
+	lines := strings.Split(log, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := lines[i]
+		if !strings.Contains(line, "share daemon session group attempt failed; retrying") {
+			continue
+		}
+		switch {
+		case strings.Contains(line, "recover prior native session operation before replacement:"):
+			return "recover_operation"
+		case strings.Contains(line, "retire prior native NHP session before replacement:"):
+			return "retire_session"
+		default:
+			return "unclassified"
+		}
+	}
+	return "no_group_retry"
+}
+
+func TestProductionRestartStage(t *testing.T) {
+	for _, tt := range []struct{ log, want string }{
+		{"unrelated recover prior native session operation before replacement: private", "no_group_retry"},
+		{"share daemon session group attempt failed; retrying error=private", "unclassified"},
+		{"share daemon session group attempt failed; retrying error=recover prior native session operation before replacement: private", "recover_operation"},
+		{"share daemon session group attempt failed; retrying error=retire prior native NHP session before replacement: private", "retire_session"},
+	} {
+		if got := productionRestartStage(tt.log); got != tt.want {
+			t.Errorf("stage = %q, want %q", got, tt.want)
+		}
+	}
 }
 
 // Capture only the structured fields emitted by the CLI. Raw stderr can
