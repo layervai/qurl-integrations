@@ -268,7 +268,8 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	// Never print command output: it can contain bearer links or credentials.
 	var daemonLog string
 	var daemonLogOffset int64
-	if args[0] == "restart" && runtime.GOOS == "linux" {
+	sharingDiagnostic := args[0] == "restart" || (args[0] == "start" && runtime.GOOS == "linux")
+	if sharingDiagnostic && runtime.GOOS == "linux" {
 		if dir, err := connectordaemon.DefaultLogDir(env[connectorstate.EnvStateDirPrimary]); err == nil {
 			daemonLog = filepath.Join(dir, "share-daemon.err.log")
 			if info, err := os.Stat(daemonLog); err == nil {
@@ -286,13 +287,13 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
 		t.Logf("production candidate failure class: %s", productionFailureClass(exit.Stderr))
-		if args[0] == "restart" {
+		if sharingDiagnostic {
 			if daemonLog != "" {
-				logProductionRestartStage(t, daemonLog, daemonLogOffset)
+				logProductionRestartStage(t, args[0], daemonLog, daemonLogOffset)
 			}
 			for _, pattern := range productionRestartDiagnostics {
 				if detail := pattern.FindSubmatch(exit.Stderr); len(detail) == 2 {
-					t.Logf("production restart diagnostic: %s", detail[1])
+					t.Logf("production %s diagnostic: %s", args[0], detail[1])
 				}
 			}
 		}
@@ -306,7 +307,7 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 }
 
 // Read a bounded tail of the fixture daemon log and emit only a fixed label.
-func logProductionRestartStage(t *testing.T, path string, offset int64) {
+func logProductionRestartStage(t *testing.T, command, path string, offset int64) {
 	t.Helper()
 	f, err := os.Open(path) //nolint:gosec // Proof-owned daemon state.
 	if err != nil {
@@ -323,7 +324,7 @@ func logProductionRestartStage(t *testing.T, path string, offset int64) {
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, maxTail))
 	if err == nil {
-		t.Logf("production restart daemon recovery stage: %s", productionRestartStage(string(raw)))
+		t.Logf("production %s daemon recovery stage: %s", command, productionRestartStage(string(raw)))
 	}
 }
 
