@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.2](https://github.com/layervai/qurl-integrations/compare/slack-v0.6.1...slack-v0.6.2) (2026-11-14)
+
+
+### Features
+
+* **slack:** send a public name when creating resources ([#1993](https://github.com/layervai/qurl-integrations/issues/1993)) ([f00097a](https://github.com/layervai/qurl-integrations/commit/f00097a3be7efeac354a77f538a3250a0ab6fc2c))
+
+
+### Bug Fixes
+
+* **cli:** hide revoked resources from the default list ([#2017](https://github.com/layervai/qurl-integrations/issues/2017)) ([aa85e77](https://github.com/layervai/qurl-integrations/commit/aa85e7799c24475f2e9b5f92eb5d323ef6786981))
+* patch Go security and align sandbox fixtures ([#1611](https://github.com/layervai/qurl-integrations/issues/1611)) ([05ea8df](https://github.com/layervai/qurl-integrations/commit/05ea8df07d58362bdecf5260ca5981f4936e4622))
+* **slack:** align client and operational contracts ([#1898](https://github.com/layervai/qurl-integrations/issues/1898)) ([2b35702](https://github.com/layervai/qurl-integrations/commit/2b3570268eed01e08dc2c1b79af8a4b2c18b1209))
+* **slack:** preserve rate budgets across clock skew ([#1899](https://github.com/layervai/qurl-integrations/issues/1899)) ([aaa971c](https://github.com/layervai/qurl-integrations/commit/aaa971c1ad853ddafaaa90f9b055fd70c2f05509))
+* **slack:** prevent concurrent setup key overwrites ([#1881](https://github.com/layervai/qurl-integrations/issues/1881)) ([5e5efdb](https://github.com/layervai/qurl-integrations/commit/5e5efdb1f0a48da477a8f8bf112511f69c8592ef))
+
 ## [0.6.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.6.0...slack-v0.6.1) (2026-10-09)
 
 
