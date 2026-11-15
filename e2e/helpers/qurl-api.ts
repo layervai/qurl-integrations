@@ -162,6 +162,7 @@ export const CREATE_QURL_ALLOWED_KEYS = [
  * plus the helper's defaults. */
 function mintBody(opts: { target_url?: string; expires_in?: string; label?: string }): Record<string, unknown> {
   const body: Record<string, unknown> = {
+    // TODO(upstream-contract): qurl-service requires a public resource name on create.
     name: 'E2E test resource',
     expires_in: opts.expires_in ?? '1h',
     // Tags mints from these suites so a leaked sandbox resource is
