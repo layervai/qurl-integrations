@@ -1246,12 +1246,12 @@ from a script, use `qurl get <CRID> --file <path>`.
 | `--not-before <timestamp>` | Future start time for a scheduled link. Requires `--expires-at`. |
 | `--expires-at <timestamp>` | End time for the link and active sessions. Requires `--not-before`. |
 | `--one-time-use` | Allow one successful use of a scheduled link. Defaults to the saved rule or true. |
+| `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
 Use RFC 3339 timestamps at whole seconds for both scheduled link flags. An
 early open shows the start time and does not consume a single-use link.
-| `--yes` | Proceed without confirmation, including sending a test CRID to production |
-
-Link expiry and session duration are separate: an expired link does not end an already admitted session.
+For a scheduled link, the effective expiry also ends active sessions. For
+other links, the session duration controls when an active session ends.
 
 Production share verification needs no extra settings. Sandbox and custom
 deployments use the settings described under `qurl get`.
