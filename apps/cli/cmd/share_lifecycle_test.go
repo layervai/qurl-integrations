@@ -2529,10 +2529,8 @@ func TestPublishTargetChangeReconcilesAmbiguousRestart(t *testing.T) {
 	}
 }
 
-// sharingRequests returns what one local publish sent after its first
-// request. The first is always the create request that states the resource's
-// privacy, and the test fails if it is anything else. FRP can send its close
-// callback to the same mock during cancellation, outside the sharing API.
+// sharingRequests verifies the initial resource create and returns the
+// subsequent requests, excluding the FRP close callback.
 func sharingRequests(t *testing.T, srv *apitest.Server) []apitest.RecordedRequest {
 	t.Helper()
 	requests := srv.Requests()
@@ -2540,8 +2538,12 @@ func sharingRequests(t *testing.T, srv *apitest.Server) []apitest.RecordedReques
 		t.Fatalf("local publish did not begin with the create request that states privacy: %#v", requests)
 	}
 	return slices.DeleteFunc(requests[1:], func(request apitest.RecordedRequest) bool {
-		return request.Method == http.MethodPost && request.Path == "/" &&
-			strings.HasPrefix(request.Query, "op=CloseProxy&")
+		// TODO(upstream-contract): FRP teardown sends this plugin callback to the shared mock.
+		if request.Method != http.MethodPost || request.Path != "/" {
+			return false
+		}
+		query, err := url.ParseQuery(request.Query)
+		return err == nil && query.Get("op") == "CloseProxy"
 	})
 }
 
