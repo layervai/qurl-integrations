@@ -56,7 +56,10 @@ func validateSandboxStoppedCommandResult(code int, stdout, stderr, stoppedRefusa
 	if stoppedRefusal == "" {
 		return errors.New("stopped-route refusal contract is empty")
 	}
-	if code != exitcode.Unavailable || stdout != "" || stderr != stoppedRefusal {
+	// TODO(upstream-contract): qurl-service #2147 changed share's typed
+	// connector_stopped response from HTTP 503 to 409. Both deployments
+	// must still return this exact guidance and no output.
+	if (code != exitcode.Conflict && code != exitcode.Unavailable) || stdout != "" || stderr != stoppedRefusal {
 		return fmt.Errorf("get did not return the exact stopped-resource refusal: exit=%d stdout-bytes=%d stderr-bytes=%d", code, len(stdout), len(stderr))
 	}
 	return nil
