@@ -19,14 +19,14 @@ import (
 
 func consumerAccessCmd(opts *globalOpts) *cobra.Command {
 	var email, emailDomain, mode, contract, cursor, kind, credentialID, key, entitlement, expiry, ruleSelector, ruleFile string
-	var version int64
+	var version, creditPrice int64
 	var stripeAccount, stripePrice string
 	var paymentAccessSeconds int64
 	var yes bool
 	allowed := map[string][]string{
 		consumerInvite: {"email"}, consumerListInvitations: {consumerCursor}, consumerListGrants: {consumerCursor},
 		consumerResend: {consumerVersion}, consumerRevokeInvitation: {consumerVersion}, consumerDeny: {consumerVersion}, consumerRevokeGrant: {consumerVersion},
-		consumerConfigure: {modeFlag, consumerEmailDomainFlag, consumerContract, consumerVersion, ruleFlag, ruleFileFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag},
+		consumerConfigure: {modeFlag, consumerEmailDomainFlag, consumerContract, consumerVersion, ruleFlag, ruleFileFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag, creditPriceFlag},
 		consumerApprove:   {consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at"},
 	}
 	cmd := &cobra.Command{
@@ -38,15 +38,18 @@ Read the version from a listing before a decision. Use --version with that
 version. The first policy on an existing resource uses --version 0.
 A key opt-in uses decision-id new and --version 0. An approval or key opt-in
 lasts as long as the resource's policy says (Approvals last); the service sets
-its end. --expires-at may end it sooner, never later. Contracts without a Stripe
-payment policy require a trusted publisher entitlement receipt and expiry.
+its end. --expires-at may end it sooner, never later. Manual contracts require
+a trusted publisher entitlement receipt and expiry.
 For a Stripe payment policy, the service verifies payment and grants access;
 manual approval is unavailable. LayerV collects 3%, including renewals.
 Mailbox verification proves email control, not legal identity.
 If a contract notification is pending, repeat the same receipt, expiry and version.
 A removal is complete only when connection cleanup says complete. If pending,
 repeat the same removal and version. Invitations send email on your request.
-Use --access when you publish to choose the initial policy.`,
+Use --access when you publish to choose the initial policy.
+Set a credit price with "qurl access configure <CRID> --credit-price 2".
+The CLI reads the current policy version unless you pass --version.
+Changing the policy can end access granted under the previous version.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.RangeArgs(2, 3)(cmd, args); err != nil {
 				return exitcode.UsageError(err)
@@ -64,14 +67,10 @@ Use --access when you publish to choose the initial policy.`,
 			if err := validateConsumerActionFlags(cmd, input.action, allowed); err != nil {
 				return err
 			}
-			if err := validateConsumerDecision(&input); err != nil {
-				return err
+			if cmd.Flags().Changed(creditPriceFlag) {
+				return opts.configureCreditPrice(cmd, args, creditPrice, version, yes)
 			}
-			// After the flag checks, so a rejected flag reads no stdin or rule state.
-			if err := opts.applyConsumerRule(cmd, &input, ruleSelector, ruleFile); err != nil {
-				return err
-			}
-			if err := validateConsumerFields(&input); err != nil {
+			if err := opts.prepareConsumerAccess(cmd, &input, ruleSelector, ruleFile); err != nil {
 				return err
 			}
 			assessment, err := cridux.Assess(args[1])
@@ -100,6 +99,7 @@ Use --access when you publish to choose the initial policy.`,
 			return opts.printer().ConsumerManagement(result)
 		},
 	}
+	cmd.Flags().Int64Var(&creditPrice, creditPriceFlag, 0, "price in credits for one hour of access (1–10)")
 	cmd.Flags().StringVar(&ruleSelector, ruleFlag, "", "saved private access rule ID or exact name")
 	cmd.Flags().StringVar(&ruleFile, ruleFileFlag, "", "use - to apply the private rule snapshot from standard input")
 	cmd.Flags().StringVar(&stripeAccount, stripeAccountFlag, "", "connected publisher Stripe account")
@@ -160,12 +160,22 @@ func validateConsumerActionFlags(cmd *cobra.Command, action string, allowed map[
 	if !ok {
 		return exitcode.UsageError(errors.New("unknown access action"))
 	}
-	for _, name := range []string{"email", modeFlag, consumerEmailDomainFlag, ruleFlag, ruleFileFlag, consumerContract, consumerCursor, consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at", stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
+	for _, name := range []string{"email", modeFlag, consumerEmailDomainFlag, ruleFlag, ruleFileFlag, consumerContract, consumerCursor, consumerVersion, "credential-kind", "credential-id", "credential-key", "entitlement", "expires-at", stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag, creditPriceFlag} {
 		if cmd.Flags().Changed(name) && !slices.Contains(flags, name) {
 			return exitcode.UsageError(fmt.Errorf("--%s does not apply to %s", name, action))
 		}
 	}
 	return nil
+}
+
+func (o *globalOpts) prepareConsumerAccess(cmd *cobra.Command, input *consumerAccessInput, ruleSelector, ruleFile string) error {
+	if err := validateConsumerDecision(input); err != nil {
+		return err
+	}
+	if err := o.applyConsumerRule(cmd, input, ruleSelector, ruleFile); err != nil {
+		return err
+	}
+	return validateConsumerFields(input)
 }
 
 func validateConsumerDecision(input *consumerAccessInput) error {

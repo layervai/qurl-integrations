@@ -1008,8 +1008,22 @@ did not finish, run it again: LayerV stays connected until every renewal has sto
 `disconnected: true` only means nothing is connected any more, and
 `released_revoked` means subscriptions must still be canceled in Stripe.
 
-`qurl access --help` lists all owner actions. Changes require the current
-version. If session removal is pending, retry the exact removal and version;
+To charge pilot credits for a private URL, sign in with a publisher account in
+the environment that serves the CRID. For Sandbox, run:
+
+```sh
+qurl --endpoint https://api.layerv.xyz publish https://example.com/reports --name "Reports" --credit-price 2
+qurl --endpoint https://api.layerv.xyz access configure "$CRID" --credit-price 2
+```
+
+Set a whole number from 1 to 10 for one hour of access. The configure command
+reads the current policy version. A price change creates a new policy version
+and can end access granted under the old version. If the API reports that
+session cleanup is pending, repeat the command with `--version` and the policy
+version in the error.
+
+`qurl access --help` lists all owner actions. Other policy and decision changes
+require the current version. If session removal is pending, retry the exact removal and version;
 report it as complete only when `session_cleanup` is `complete`. A policy
 change uses `access configure` with the current policy version. If that update
 returns a pending-session error, retry the same update. Do not invent a newer

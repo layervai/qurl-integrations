@@ -61,6 +61,7 @@ type Client interface {
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
 	// Resource returns one owner-visible resource by CRID or public resource ID.
 	Resource(ctx context.Context, id string) (*ResourceSummary, error)
+	SetCreditPrice(ctx context.Context, crid string, credits, version int64) (*ConsumerManagementResult, error)
 	// SetDeviceGrants replaces the complete private-resource device grant
 	// list. The CLI calls it only with an empty list, to clear the grants; a
 	// single device is allowed or removed with EditDeviceGrants.
@@ -133,6 +134,7 @@ type AccountClient interface {
 
 // PublishOptions carries creation policy and optional metadata.
 type PublishOptions struct {
+	CreditPrice    int64
 	ConsumerAccess *qurl.ConsumerAccessPolicy
 	// Public asks for a resource that anyone who has its CRID can open. The
 	// zero value asks for a private one, limited to its owner and the devices
@@ -202,6 +204,7 @@ type ListOptions struct {
 
 // Published is the repo-owned result of Publish.
 type Published struct {
+	CreditPrice    int64
 	ConsumerAccess *qurl.ConsumerAccessPolicy
 	// Private is the privacy the service confirmed. Publish never returns a
 	// result without it. Nil means privacy was not returned or queried, never
@@ -335,6 +338,7 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
+	CreditPrice           int64
 	ConsumerAccess        *qurl.ConsumerAccessPolicy
 	ConsumerAccessVersion int64
 
