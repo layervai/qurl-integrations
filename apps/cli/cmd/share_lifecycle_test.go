@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2530,15 +2531,18 @@ func TestPublishTargetChangeReconcilesAmbiguousRestart(t *testing.T) {
 
 // sharingRequests returns what one local publish sent after its first
 // request. The first is always the create request that states the resource's
-// privacy, and the test fails if it is anything else; the rest are the sharing
-// lifecycle requests these tests count.
+// privacy, and the test fails if it is anything else. FRP can send its close
+// callback to the same mock during cancellation, outside the sharing API.
 func sharingRequests(t *testing.T, srv *apitest.Server) []apitest.RecordedRequest {
 	t.Helper()
 	requests := srv.Requests()
 	if len(requests) == 0 || requests[0].Method != http.MethodPost || requests[0].Path != "/v1/resources" {
 		t.Fatalf("local publish did not begin with the create request that states privacy: %#v", requests)
 	}
-	return requests[1:]
+	return slices.DeleteFunc(requests[1:], func(request apitest.RecordedRequest) bool {
+		return request.Method == http.MethodPost && request.Path == "/" &&
+			strings.HasPrefix(request.Query, "op=CloseProxy&")
+	})
 }
 
 func sharingResponse(t *testing.T, srv *apitest.Server, desired string, epoch uint64, connection string) http.HandlerFunc {
