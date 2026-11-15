@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.3.0](https://github.com/layervai/qurl-integrations/compare/v4.2.0...v4.3.0) (2026-11-15)
+
+
+### Features
+
+* **cli:** support scheduled invitations ([#2033](https://github.com/layervai/qurl-integrations/issues/2033)) ([b2313bc](https://github.com/layervai/qurl-integrations/commit/b2313bc05c0abb57a35d4b77ddd3ae55a9e3a670))
+
 ## [4.2.0](https://github.com/layervai/qurl-integrations/compare/v4.1.0...v4.2.0) (2026-11-13)
 
 
