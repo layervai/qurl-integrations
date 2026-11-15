@@ -24,11 +24,10 @@ import (
 // a hard cutover with no alias.
 func shareCmd(opts *globalOpts) *cobra.Command {
 	var (
-		ttl                  time.Duration
-		sessionDuration      time.Duration
-		yes                  bool
-		notBefore, expiresAt string
-		oneTimeUse           bool
+		ttl             time.Duration
+		sessionDuration time.Duration
+		yes             bool
+		schedule        shareSchedule
 	)
 
 	cmd := &cobra.Command{
@@ -89,34 +88,13 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 
 			// Fails closed even for a CRID without limits: an unreadable file
 			// could hold this one's, and a default link must not replace them.
-			scheduled := cmd.Flags().Changed("not-before") || cmd.Flags().Changed("expires-at")
-			var start, end time.Time
-			if scheduled {
-				if cmd.Flags().Changed("ttl") {
-					return exitcode.UsageError(errors.New("--ttl cannot be combined with --not-before or --expires-at"))
-				}
-				var startErr, endErr error
-				start, startErr = time.Parse(time.RFC3339, notBefore)
-				end, endErr = time.Parse(time.RFC3339, expiresAt)
-				if startErr != nil || endErr != nil || start.Nanosecond() != 0 || end.Nanosecond() != 0 ||
-					!start.After(time.Now()) || !end.After(start) {
-					return exitcode.UsageError(errors.New("--not-before and --expires-at require whole-second RFC 3339 timestamps with a future start and a later end"))
-				}
-			} else if cmd.Flags().Changed("one-time-use") {
-				return exitcode.UsageError(errors.New("--one-time-use requires --not-before and --expires-at"))
-			}
 			limits, err := opts.savedLinkLimits(cmd.Context(), assessment.Input)
 			if err != nil {
 				return err
 			}
-			if scheduled {
-				if limits == nil {
-					limits = &accessrules.LinkLimits{OneTimeUse: new(true)}
-				}
-				limits.NotBefore, limits.ExpiresAt = start, end
-				if cmd.Flags().Changed("one-time-use") {
-					limits.OneTimeUse = &oneTimeUse
-				}
+			limits, err = schedule.apply(cmd, limits)
+			if err != nil {
+				return err
 			}
 			if limits != nil {
 				if err := applyShareFlagsToLimits(cmd, limits, ttl, sessionDuration); err != nil {
@@ -150,12 +128,44 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 
 	cmd.Flags().DurationVar(&ttl, "ttl", 0, "requested link lifetime, e.g. 5m or 1h (service may grant less; 1m to 720h with saved link limits)")
 	cmd.Flags().DurationVar(&sessionDuration, "session-duration", 0, "session lifetime after access starts, e.g. 5m or 1h (default: service policy)")
-	cmd.Flags().StringVar(&notBefore, "not-before", "", "scheduled start time (RFC 3339, requires --expires-at)")
-	cmd.Flags().StringVar(&expiresAt, "expires-at", "", "scheduled end time (RFC 3339, requires --not-before)")
-	cmd.Flags().BoolVar(&oneTimeUse, "one-time-use", true, "allow one successful use of a scheduled link (default: saved rule or true)")
+	cmd.Flags().StringVar(&schedule.notBefore, "not-before", "", "scheduled start time (RFC 3339, requires --expires-at)")
+	cmd.Flags().StringVar(&schedule.expiresAt, "expires-at", "", "scheduled end time (RFC 3339, requires --not-before)")
+	cmd.Flags().BoolVar(&schedule.oneTimeUse, "one-time-use", true, "allow one successful use of a scheduled link (default: saved rule or true)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
 	return cmd
+}
+
+type shareSchedule struct {
+	notBefore, expiresAt string
+	oneTimeUse           bool
+}
+
+func (s shareSchedule) apply(cmd *cobra.Command, limits *accessrules.LinkLimits) (*accessrules.LinkLimits, error) {
+	flags := cmd.Flags()
+	if !flags.Changed("not-before") && !flags.Changed("expires-at") {
+		if flags.Changed("one-time-use") {
+			return nil, exitcode.UsageError(errors.New("--one-time-use requires --not-before and --expires-at"))
+		}
+		return limits, nil
+	}
+	if flags.Changed("ttl") {
+		return nil, exitcode.UsageError(errors.New("--ttl cannot be combined with --not-before or --expires-at"))
+	}
+	start, startErr := time.Parse(time.RFC3339, s.notBefore)
+	end, endErr := time.Parse(time.RFC3339, s.expiresAt)
+	if startErr != nil || endErr != nil || start.Nanosecond() != 0 || end.Nanosecond() != 0 ||
+		!start.After(time.Now()) || !end.After(start) {
+		return nil, exitcode.UsageError(errors.New("--not-before and --expires-at require whole-second RFC 3339 timestamps with a future start and a later end"))
+	}
+	if limits == nil {
+		limits = &accessrules.LinkLimits{OneTimeUse: new(true)}
+	}
+	limits.Window = &accessrules.AccessWindow{Start: start, End: end}
+	if flags.Changed("one-time-use") {
+		limits.OneTimeUse = &s.oneTimeUse
+	}
+	return limits, nil
 }
 
 // applyCRIDGuards requires a valid CRID and applies the environment guard.

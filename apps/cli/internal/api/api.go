@@ -585,8 +585,8 @@ func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*Shar
 // always sent, because a Connector link is single-use when they are omitted.
 func (c *client) MintLimitedLink(ctx context.Context, crid string, limits accessrules.LinkLimits) (*ShareLink, error) {
 	var expiry qurl.PortalOption
-	if !limits.NotBefore.IsZero() {
-		expiry = qurl.WithAccessWindow(limits.NotBefore, limits.ExpiresAt)
+	if limits.Window != nil {
+		expiry = qurl.WithAccessWindow(limits.Window.Start, limits.Window.End)
 	} else {
 		expiresIn, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn)
 		if !ok {
