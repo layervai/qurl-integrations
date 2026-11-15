@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.4.0](https://github.com/layervai/qurl-integrations/compare/v4.3.1...v4.4.0) (2026-11-15)
+
+
+### Features
+
+* **cli:** set CRID credit prices ([#2040](https://github.com/layervai/qurl-integrations/issues/2040)) ([afb7422](https://github.com/layervai/qurl-integrations/commit/afb7422e3f287f660e1aa477b34a13c11de989fb))
+
 ## [4.3.1](https://github.com/layervai/qurl-integrations/compare/v4.3.0...v4.3.1) (2026-11-15)
 
 
