@@ -1870,6 +1870,10 @@ Homebrew installs the bash/zsh/fish completions for you.
 and its shape is a stable contract, so scripts may parse it
 (`qurl version | awk '{print $3}'`).
 
+If Go is installed, run `go version -m "$(command -v qurl)"` in a POSIX shell
+to check the modules in the installed binary. The
+`github.com/layervai/qurl-connector` entry shows the bundled Connector version.
+
 `qurl version`, `qurl completion`, and `qurl help` deliberately read no
 configuration, credentials, or network: a broken config file can never
 brick shell startup or a version check.
