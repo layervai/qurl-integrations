@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.3.1](https://github.com/layervai/qurl-integrations/compare/v4.3.0...v4.3.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **cli:** accept the stopped Connector conflict in release checks ([#2036](https://github.com/layervai/qurl-integrations/issues/2036)) ([deb373f](https://github.com/layervai/qurl-integrations/commit/deb373f00c4c6ea40710d7f8ca28e2513e70ad88))
+
 ## [4.3.0](https://github.com/layervai/qurl-integrations/compare/v4.2.0...v4.3.0) (2026-11-15)
 
 
