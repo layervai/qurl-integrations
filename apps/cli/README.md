@@ -1243,9 +1243,15 @@ from a script, use `qurl get <CRID> --file <path>`.
 |------|-------------|
 | `--ttl <duration>` | Requested link lifetime in whole seconds (e.g. `5m`, `1h`). The service may grant less; a shorter grant is reported on stderr, never silent. Sub-second or negative values are refused rather than rounded. |
 | `--session-duration <duration>` | Lifetime of each admitted session, e.g. `5m` or `1h`. Zero or omission uses the service default. The service enforces resource limits. |
+| `--not-before <timestamp>` | Future start time for a scheduled link. Requires `--expires-at`. |
+| `--expires-at <timestamp>` | End time for the link and active sessions. Requires `--not-before`. |
+| `--one-time-use` | Allow one successful use of a scheduled link. Defaults to the saved rule or true. Use `--one-time-use=false` for a reusable scheduled link. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
-Link expiry and session duration are separate: an expired link does not end an already admitted session.
+Use RFC 3339 timestamps at whole seconds for both scheduled link flags. An
+early open shows the start time and does not consume a single-use link.
+For a scheduled link, the effective expiry also ends active sessions. For
+other links, the session duration controls when an active session ends.
 
 Production share verification needs no extra settings. Sandbox and custom
 deployments use the settings described under `qurl get`.

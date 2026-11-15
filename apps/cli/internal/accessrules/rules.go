@@ -108,9 +108,17 @@ const validationAccount = "acct_rule"
 // LinkLimits bounds one minted temporary link. Durations use the service's
 // expires_in and session_duration grammar; nil one_time_use is false.
 type LinkLimits struct {
-	ExpiresIn       string  `json:"expires_in"`
-	OneTimeUse      *bool   `json:"one_time_use,omitempty"`
-	SessionDuration *string `json:"session_duration,omitempty"`
+	// Share command overrides are never persisted as part of an access rule.
+	Window          *AccessWindow `json:"-"`
+	ExpiresIn       string        `json:"expires_in"`
+	OneTimeUse      *bool         `json:"one_time_use,omitempty"`
+	SessionDuration *string       `json:"session_duration,omitempty"`
+}
+
+// AccessWindow is a per-link override from the share command.
+type AccessWindow struct {
+	Start time.Time
+	End   time.Time
 }
 
 // Bounds is an inclusive duration range.
