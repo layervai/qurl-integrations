@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.4.1](https://github.com/layervai/qurl-integrations/compare/v4.4.0...v4.4.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **cli:** use Connector v0.14.6 ([#2042](https://github.com/layervai/qurl-integrations/issues/2042)) ([115b6a0](https://github.com/layervai/qurl-integrations/commit/115b6a013d662eaf90e112ffe4e61d64f10e46fc))
+
 ## [4.4.0](https://github.com/layervai/qurl-integrations/compare/v4.3.1...v4.4.0) (2026-11-15)
 
 
