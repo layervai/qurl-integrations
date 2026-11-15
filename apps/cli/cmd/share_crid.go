@@ -64,6 +64,7 @@ When stdout is not a terminal the command prints the bare link on stdout,
 ready to hand out or open, and reports the publisher in one line on stderr.
 --quiet prints only the link.`,
 		Example: "  qurl share " + exampleCRID + "\n" +
+			"  qurl share " + exampleCRID + " --not-before 2030-01-02T16:00:00Z --expires-at 2030-01-02T17:00:00Z\n" +
 			"  qurl get " + exampleCRID + " --file report.pdf   # download instead of linking",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
