@@ -584,17 +584,23 @@ func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*Shar
 // it can set one_time_use. one_time_use and an unlimited max_sessions are
 // always sent, because a Connector link is single-use when they are omitted.
 func (c *client) MintLimitedLink(ctx context.Context, crid string, limits accessrules.LinkLimits) (*ShareLink, error) {
-	expiresIn, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn)
-	if !ok {
-		return nil, errors.New("access rule link expiry is out of range")
+	var expiry qurl.PortalOption
+	if !limits.NotBefore.IsZero() {
+		expiry = qurl.WithAccessWindow(limits.NotBefore, limits.ExpiresAt)
+	} else {
+		expiresIn, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn)
+		if !ok {
+			return nil, errors.New("access rule link expiry is out of range")
+		}
+		// Saved rules can contain fractions. Round down so a link never lasts longer.
+		expiry = qurl.ValidFor(expiresIn.Truncate(time.Second))
 	}
 	oneBrowser := limits.OneTimeUse != nil && *limits.OneTimeUse
 	use := qurl.Reusable()
 	if oneBrowser {
 		use = qurl.OneTimeUse()
 	}
-	// Existing account rules can contain fractions. Round down so the link never lasts longer.
-	opts := []qurl.PortalOption{qurl.ValidFor(expiresIn.Truncate(time.Second)), use, qurl.MaxSessions(0)}
+	opts := []qurl.PortalOption{expiry, use, qurl.MaxSessions(0)}
 	if limits.SessionDuration != nil {
 		session, ok := accessrules.SessionLength.Parse(*limits.SessionDuration)
 		if !ok {
