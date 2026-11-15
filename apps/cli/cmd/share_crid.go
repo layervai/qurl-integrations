@@ -45,6 +45,8 @@ device gets "not found".
 The link expires on its own; share again whenever you need a fresh one.
 A resource you published on this device with an access rule's link limits
 gets links with those limits; --ttl and --session-duration override them.
+Use --not-before and --expires-at to share a link for a future access window.
+The effective expiry also ends active sessions for scheduled links.
 
 Before anything is printed, the CLI verifies that the link belongs
 to the CRID you asked for — a mismatched answer is discarded and the
@@ -130,7 +132,7 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 	cmd.Flags().DurationVar(&sessionDuration, "session-duration", 0, "session lifetime after access starts, e.g. 5m or 1h (default: service policy)")
 	cmd.Flags().StringVar(&schedule.notBefore, "not-before", "", "scheduled start time (RFC 3339, requires --expires-at)")
 	cmd.Flags().StringVar(&schedule.expiresAt, "expires-at", "", "scheduled end time (RFC 3339, requires --not-before)")
-	cmd.Flags().BoolVar(&schedule.oneTimeUse, "one-time-use", true, "allow one successful use of a scheduled link (default: saved rule or true)")
+	cmd.Flags().BoolVar(&schedule.oneTimeUse, "one-time-use", false, "allow one successful use of a scheduled link (default: saved rule or true; use =false for reusable links)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
 	return cmd
@@ -269,7 +271,7 @@ func applyShareFlagsToLimits(cmd *cobra.Command, limits *accessrules.LinkLimits,
 	if cmd.Flags().Changed("session-duration") {
 		limits.SessionDuration = new(fmt.Sprintf("%ds", int64(sessionDuration/time.Second)))
 		if !accessrules.ValidSessionLength(*limits.SessionDuration) {
-			return exitcode.UsageError(errors.New("--session-duration must be from 1s to 24h for this item's link limits"))
+			return exitcode.UsageError(errors.New("--session-duration must be from 1s to 24h when minting a link with explicit limits"))
 		}
 	}
 	return nil

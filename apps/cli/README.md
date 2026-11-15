@@ -1245,7 +1245,7 @@ from a script, use `qurl get <CRID> --file <path>`.
 | `--session-duration <duration>` | Lifetime of each admitted session, e.g. `5m` or `1h`. Zero or omission uses the service default. The service enforces resource limits. |
 | `--not-before <timestamp>` | Future start time for a scheduled link. Requires `--expires-at`. |
 | `--expires-at <timestamp>` | End time for the link and active sessions. Requires `--not-before`. |
-| `--one-time-use` | Allow one successful use of a scheduled link. Defaults to the saved rule or true. |
+| `--one-time-use` | Allow one successful use of a scheduled link. Defaults to the saved rule or true. Use `--one-time-use=false` for a reusable scheduled link. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
 Use RFC 3339 timestamps at whole seconds for both scheduled link flags. An
