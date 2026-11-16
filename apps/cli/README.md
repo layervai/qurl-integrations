@@ -124,6 +124,9 @@ prints its CRID and exits immediately.
 | `This Connector needs its qURL platform assignment refreshed` | Upgrade qURL. Current releases refresh stale assignments automatically with bounded backoff; no approval flag is required. |
 | The route is rejected or times out | Run the command once more; if it repeats, contact LayerV support |
 
+For direct UDP access to qURL resources, use CLI 4.4.2 or later. The CLI
+completes the server's cookie challenge automatically.
+
 ## Install
 
 **Homebrew** (macOS / Linux):
