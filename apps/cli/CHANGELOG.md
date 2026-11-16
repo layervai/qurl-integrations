@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.4.3](https://github.com/layervai/qurl-integrations/compare/v4.4.2...v4.4.3) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cli:** document Go dependency verification for release builds ([#2060](https://github.com/layervai/qurl-integrations/issues/2060)) ([acbe159](https://github.com/layervai/qurl-integrations/commit/acbe15942be409337a674d1064e961f170c31e01))
+
 ## [4.4.2](https://github.com/layervai/qurl-integrations/compare/v4.4.1...v4.4.2) (2026-11-16)
 
 
