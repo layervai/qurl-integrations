@@ -124,6 +124,9 @@ prints its CRID and exits immediately.
 | `This Connector needs its qURL platform assignment refreshed` | Upgrade qURL. Current releases refresh stale assignments automatically with bounded backoff; no approval flag is required. |
 | The route is rejected or times out | Run the command once more; if it repeats, contact LayerV support |
 
+For direct UDP access to qURL resources, use CLI 4.4.2 or later. The CLI
+completes the server's cookie challenge automatically.
+
 ## Install
 
 **Homebrew** (macOS / Linux):
@@ -134,6 +137,8 @@ brew install layervai/tap/qurl
 
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
+
+To verify Go dependencies in a source checkout, run `go mod verify` from the repository root.
 
 **Install script** (macOS / Linux, no Homebrew or `sudo` needed):
 
@@ -1008,8 +1013,22 @@ did not finish, run it again: LayerV stays connected until every renewal has sto
 `disconnected: true` only means nothing is connected any more, and
 `released_revoked` means subscriptions must still be canceled in Stripe.
 
-`qurl access --help` lists all owner actions. Changes require the current
-version. If session removal is pending, retry the exact removal and version;
+To charge pilot credits for a private URL, sign in with a publisher account in
+the environment that serves the CRID. For Sandbox, run:
+
+```sh
+qurl --endpoint https://api.layerv.xyz publish https://example.com/reports --name "Reports" --credit-price 2
+qurl --endpoint https://api.layerv.xyz access configure "$CRID" --credit-price 2
+```
+
+Set a whole number from 1 to 10 for one hour of access. The configure command
+reads the current policy version. A price change creates a new policy version
+and can end access granted under the old version. If the API reports that
+session cleanup is pending, repeat the command with `--version` and the policy
+version in the error.
+
+`qurl access --help` lists all owner actions. Other policy and decision changes
+require the current version. If session removal is pending, retry the exact removal and version;
 report it as complete only when `session_cleanup` is `complete`. A policy
 change uses `access configure` with the current policy version. If that update
 returns a pending-session error, retry the same update. Do not invent a newer
@@ -1243,9 +1262,15 @@ from a script, use `qurl get <CRID> --file <path>`.
 |------|-------------|
 | `--ttl <duration>` | Requested link lifetime in whole seconds (e.g. `5m`, `1h`). The service may grant less; a shorter grant is reported on stderr, never silent. Sub-second or negative values are refused rather than rounded. |
 | `--session-duration <duration>` | Lifetime of each admitted session, e.g. `5m` or `1h`. Zero or omission uses the service default. The service enforces resource limits. |
+| `--not-before <timestamp>` | Future start time for a scheduled link. Requires `--expires-at`. |
+| `--expires-at <timestamp>` | End time for the link and active sessions. Requires `--not-before`. |
+| `--one-time-use` | Allow one successful use of a scheduled link. Defaults to the saved rule or true. Use `--one-time-use=false` for a reusable scheduled link. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
-Link expiry and session duration are separate: an expired link does not end an already admitted session.
+Use RFC 3339 timestamps at whole seconds for both scheduled link flags. An
+early open shows the start time and does not consume a single-use link.
+For a scheduled link, the effective expiry also ends active sessions. For
+other links, the session duration controls when an active session ends.
 
 Production share verification needs no extra settings. Sandbox and custom
 deployments use the settings described under `qurl get`.
@@ -1849,6 +1874,10 @@ Homebrew installs the bash/zsh/fish completions for you.
 `qurl version` prints one line — `qurl version <version> (<os>/<arch>)` —
 and its shape is a stable contract, so scripts may parse it
 (`qurl version | awk '{print $3}'`).
+
+If Go is installed, run `go version -m "$(command -v qurl)"` in a POSIX shell
+to check the modules in the installed binary. The
+`github.com/layervai/qurl-connector` entry shows the bundled Connector version.
 
 `qurl version`, `qurl completion`, and `qurl help` deliberately read no
 configuration, credentials, or network: a broken config file can never

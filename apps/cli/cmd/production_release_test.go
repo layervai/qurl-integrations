@@ -266,6 +266,17 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	}
 	cmd.Stdin = strings.NewReader(input)
 	// Never print command output: it can contain bearer links or credentials.
+	var daemonLog string
+	var daemonLogOffset int64
+	sharingDiagnostic := args[0] == "restart" || (args[0] == "start" && runtime.GOOS == "linux")
+	if sharingDiagnostic && runtime.GOOS == "linux" {
+		if dir, err := connectordaemon.DefaultLogDir(env[connectorstate.EnvStateDirPrimary]); err == nil {
+			daemonLog = filepath.Join(dir, "share-daemon.err.log")
+			if info, err := os.Stat(daemonLog); err == nil {
+				daemonLogOffset = info.Size()
+			}
+		}
+	}
 	raw, err := cmd.Output()
 	if ctx.Err() != nil {
 		t.Fatal("production candidate command timed out")
@@ -276,10 +287,13 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
 		t.Logf("production candidate failure class: %s", productionFailureClass(exit.Stderr))
-		if args[0] == "restart" {
+		if sharingDiagnostic {
+			if daemonLog != "" {
+				logProductionRestartStage(t, args[0], daemonLog, daemonLogOffset)
+			}
 			for _, pattern := range productionRestartDiagnostics {
 				if detail := pattern.FindSubmatch(exit.Stderr); len(detail) == 2 {
-					t.Logf("production restart diagnostic: %s", detail[1])
+					t.Logf("production %s diagnostic: %s", args[0], detail[1])
 				}
 			}
 		}
@@ -290,6 +304,61 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	}
 	t.Fatal("production candidate could not start")
 	return nil, -1
+}
+
+// Read a bounded tail of the fixture daemon log and emit only a fixed label.
+func logProductionRestartStage(t *testing.T, command, path string, offset int64) {
+	t.Helper()
+	f, err := os.Open(path) //nolint:gosec // Proof-owned daemon state.
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() < offset {
+		return
+	}
+	const maxTail = 64 << 10
+	if _, err := f.Seek(max(offset, info.Size()-maxTail), io.SeekStart); err != nil {
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxTail))
+	if err == nil {
+		t.Logf("production %s daemon recovery stage: %s", command, productionRestartStage(string(raw)))
+	}
+}
+
+func productionRestartStage(log string) string {
+	lines := strings.Split(log, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := lines[i]
+		if !strings.Contains(line, "share daemon session group attempt failed; retrying") {
+			continue
+		}
+		// TODO(upstream-contract): Match the recovery stages reported by qurl-connector.
+		switch {
+		case strings.Contains(line, "recover prior native session operation before replacement:"):
+			return "recover_operation"
+		case strings.Contains(line, "retire prior native NHP session before replacement:"):
+			return "retire_session"
+		default:
+			return "unclassified"
+		}
+	}
+	return "no_group_retry"
+}
+
+func TestProductionRestartStage(t *testing.T) {
+	for _, tt := range []struct{ log, want string }{
+		{"unrelated recover prior native session operation before replacement: private", "no_group_retry"},
+		{"share daemon session group attempt failed; retrying error=private", "unclassified"},
+		{"share daemon session group attempt failed; retrying error=recover prior native session operation before replacement: private", "recover_operation"},
+		{"share daemon session group attempt failed; retrying error=retire prior native NHP session before replacement: private", "retire_session"},
+	} {
+		if got := productionRestartStage(tt.log); got != tt.want {
+			t.Errorf("stage = %q, want %q", got, tt.want)
+		}
+	}
 }
 
 // Capture only the structured fields emitted by the CLI. Raw stderr can

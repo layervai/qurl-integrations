@@ -251,7 +251,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
 			TermsNotice:      p.TermsNotice,
-			ConsumerAccess:   policyDocument(res.ConsumerAccess),
+			ConsumerAccess:   policyDocumentWithCredits(res.ConsumerAccess, res.CreditPrice),
 			Private:          res.Private,
 			KeptPublic:       res.KeptPublic,
 			AccessRequests:   res.AccessRequests,
@@ -386,7 +386,7 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(resourceStatusJSON{
-			ConsumerAccess:    policyDocument(resource.ConsumerAccess),
+			ConsumerAccess:    policyDocumentWithCredits(resource.ConsumerAccess, resource.CreditPrice),
 			AllowedDeviceKeys: append([]string{}, resource.AllowedDeviceKeys...),
 			Private:           resource.Private,
 			CRID:              resource.CRID, ResourceID: resource.ResourceID,
@@ -418,6 +418,9 @@ func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSu
 	ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
 	if resource.Private != nil {
 		ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
+	}
+	if resource.CreditPrice > 0 {
+		ew.printf("%s\t%d per hour\n", p.bold("Credit price:"), resource.CreditPrice)
 	}
 	if resource.ConsumerAccess != nil {
 		ew.printf("%s\t%s (version %d)\n", p.bold("Policy:"), resource.ConsumerAccess.Mode, resource.ConsumerAccess.Version)
@@ -540,6 +543,9 @@ func (p *Printer) publishAccessRows(twe *errWriter, res *qurlapi.Published) {
 			}
 		}
 		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
+	}
+	if res.CreditPrice > 0 {
+		twe.printf("  %s\t%d per hour\n", p.bold("Credit price:"), res.CreditPrice)
 	}
 	if res.ConsumerAccess != nil {
 		twe.printf("  %s\t%s (version %d)\n", p.bold("Policy:"), res.ConsumerAccess.Mode, res.ConsumerAccess.Version)
@@ -710,7 +716,7 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 				servingEpoch = &epoch
 			}
 			out.Resources = append(out.Resources, listItemJSON{
-				ConsumerAccess:    policyDocument(item.ConsumerAccess),
+				ConsumerAccess:    policyDocumentWithCredits(item.ConsumerAccess, item.CreditPrice),
 				AllowedDeviceKeys: append([]string{}, item.AllowedDeviceKeys...),
 				CRID:              item.CRID,
 				ResourceID:        item.ResourceID,
