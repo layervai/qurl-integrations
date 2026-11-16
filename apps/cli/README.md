@@ -359,7 +359,9 @@ opens it. It reads no account key from anywhere and refuses to run while
 Create the file in an owner-only directory and delete it on every exit path,
 including failures. The path must be absolute and clean, and the file must be
 a regular file — never a symlink — that you own, with exactly one hard link
-and mode `0400` or `0600`, holding one non-empty token without whitespace, at
+and, on Unix, mode `0400` or `0600`. Windows requires a protected ACL granting
+access only to your user, SYSTEM and Administrators, and refuses reparse points.
+The file holds one non-empty token without whitespace, at
 most 16 KiB, and at most one trailing line ending. This reader is stricter than the
 projected-secret reader behind `qurl daemon run --enrollment-token-file` in
 [headless deployments](#headless-deployments): links and group access are
@@ -500,7 +502,8 @@ with `-o json`).
 the TPM: without a usable one it exits 3, and with one that is not responding
 it exits 11. The other providers seal the state under a key held elsewhere. With
 `local-key`, the 32-byte wrapping key arrives on the inherited descriptor
-named by `LAYERV_LOCAL_KEY_FD`, on macOS and Linux. There is deliberately no
+named by `LAYERV_LOCAL_KEY_FD`. Windows supervisors use Node.js/libuv’s inherited
+CRT pipe table; Unix supervisors use an anonymous pipe or socketpair. There is deliberately no
 flag: the supervisor that owns the key (for example qURL Desktop) sets the
 environment. A namespace sealed by such a provider requires `--supervision
 external`, because the background job `qurl` installs under native
@@ -656,8 +659,8 @@ JSON
 ```
 
 On Windows, supply the canonical `http+npipe` target to the same command.
-Private Unix origins and external `--enrollment-token-file` handoff still require
-Unix; ordinary account-API-key login remains available on Windows.
+Private Unix origins require Unix; Windows external enrollment uses a protected
+credential file and the inherited wrapping-key pipe described above.
 
 The command uses the normal profile/state-directory settings. It requires an
 existing externally supervised namespace and matching durable owner, reserves

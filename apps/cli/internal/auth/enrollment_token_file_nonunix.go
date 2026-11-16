@@ -1,4 +1,4 @@
-//go:build !unix
+//go:build !unix && !windows
 
 package auth
 
@@ -11,10 +11,12 @@ func openExternalEnrollmentTokenNoFollow(string) (*os.File, error) {
 	return nil, errors.New("external enrollment token files are unsupported on this platform")
 }
 
-func validateOpenExternalEnrollmentToken(os.FileInfo) error {
+func validateOpenExternalEnrollmentToken(*os.File, os.FileInfo) error {
 	return errors.New("external enrollment token files are unsupported on this platform")
 }
 
 func validateExternalEnrollmentTokenPlatform() error {
 	return errors.New("external enrollment token files are unsupported on this platform")
 }
+
+func validExternalEnrollmentTokenMode(os.FileMode) bool { return false }

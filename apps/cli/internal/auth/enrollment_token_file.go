@@ -55,7 +55,7 @@ func ReadExternalEnrollmentTokenFile(path string) (string, error) { //nolint:goc
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(before, opened) || !validExternalEnrollmentTokenInfo(opened) ||
 		opened.Mode() != before.Mode() || opened.Size() != before.Size() || !opened.ModTime().Equal(before.ModTime()) ||
-		validateOpenExternalEnrollmentToken(opened) != nil {
+		validateOpenExternalEnrollmentToken(file, opened) != nil {
 		return "", errors.New("external enrollment token changed while opening")
 	}
 	current, err := statExternalEnrollmentTokenPath(path)
@@ -74,7 +74,7 @@ func ReadExternalEnrollmentTokenFile(path string) (string, error) { //nolint:goc
 		openedAfter.Mode() != opened.Mode() || openedAfter.Size() != opened.Size() || !openedAfter.ModTime().Equal(opened.ModTime()) ||
 		after.Mode() != before.Mode() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) ||
 		!validExternalEnrollmentTokenInfo(openedAfter) || !validExternalEnrollmentTokenInfo(after) ||
-		validateOpenExternalEnrollmentToken(openedAfter) != nil {
+		validateOpenExternalEnrollmentToken(file, openedAfter) != nil {
 		return "", errors.New("external enrollment token changed while reading")
 	}
 	if !utf8.Valid(raw) {
@@ -115,6 +115,5 @@ func validExternalEnrollmentTokenInfo(info os.FileInfo) bool {
 	if info == nil || !info.Mode().IsRegular() || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 		return false
 	}
-	permission := info.Mode().Perm()
-	return permission == 0o400 || permission == 0o600
+	return validExternalEnrollmentTokenMode(info.Mode())
 }
