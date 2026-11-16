@@ -138,6 +138,8 @@ brew install layervai/tap/qurl
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
 
+To verify Go dependencies in a source checkout, run `go mod verify` from the repository root.
+
 **Install script** (macOS / Linux, no Homebrew or `sudo` needed):
 
 ```bash
