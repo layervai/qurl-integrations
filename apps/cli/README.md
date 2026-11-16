@@ -113,6 +113,10 @@ you do not need public DNS, a public IP, or custom Connector configuration.
 Publishing a remote URL instead? `qurl publish https://api.example.com/reports --name "Reports API"`
 prints its CRID and exits immediately.
 
+Sharing a local app with qURL for the first time?
+[Volunteer for a short pilot](https://github.com/layervai/qurl-integrations/discussions/2062)
+and tell us where the steps were clear or where you got stuck.
+
 ### If the first run fails
 
 | What you see | What to do |
