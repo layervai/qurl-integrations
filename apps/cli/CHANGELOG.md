@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.4.2](https://github.com/layervai/qurl-integrations/compare/v4.4.1...v4.4.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cli:** release direct UDP compatibility ([#2047](https://github.com/layervai/qurl-integrations/issues/2047)) ([080d407](https://github.com/layervai/qurl-integrations/commit/080d407c3349f6f89aa43939f5f4c63699f8ec85))
+
 ## [4.4.1](https://github.com/layervai/qurl-integrations/compare/v4.4.0...v4.4.1) (2026-11-15)
 
 
