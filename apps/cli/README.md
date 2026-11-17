@@ -1078,6 +1078,33 @@ daemon engine in the current process for CI and debugging. Scripts can use
 `--quiet` to read the full CRID on the first line; an item shared with link
 limits adds its new link on a second line.
 
+#### Streamlit widgets stay on the loading screen
+
+Streamlit 1.67.0 can serve its page through qURL but reject the widget WebSocket
+because the browser's origin differs from the forwarded host. Check the Streamlit
+log for `Rejecting WebSocket connection with disallowed Origin or Host header`.
+A page load alone does not prove that widgets work.
+
+Keep Streamlit bound to `127.0.0.1`. After opening an authorized link, copy only
+the browser origin (`https://q-<session>.qurl.site`, without a path or access
+link fragment). Add that exact origin to the app's `.streamlit/config.toml`:
+
+```toml
+[server]
+corsAllowedOrigins = ["https://q-REPLACE-WITH-YOUR-SESSION.qurl.site"]
+```
+
+Replace the example with the origin shown in your browser. Restart Streamlit
+from the app directory and reload that same session. Keep any existing trusted
+origins in the list. If a later link opens a different origin, update the list;
+remove ended review-session origins when done. Do not allow all `qurl.site`
+subdomains or disable CORS/XSRF protection to make the preview load.
+
+With qURL CLI 4.4.3 and Streamlit 1.67.0, an approved-device-issued browser link
+loaded the app and a button updated server-side session state with this exact
+origin setting. This check did not cover uploads, custom components, or older
+Streamlit versions. Device approval and the browser link's limits still apply.
+
 #### Remote URLs
 
 ```bash
