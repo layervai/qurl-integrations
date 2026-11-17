@@ -82,6 +82,28 @@ func TestWindowsDaemonPipeNameIsCaseInsensitiveAndPathScoped(t *testing.T) {
 	}
 }
 
+// TODO(upstream-contract): Desktop mirrors Go Unicode 15 simple lowercasing.
+// Keep these wire hashes in sync with qurl-desktop cli-paths.test.ts; a Go
+// Unicode upgrade must not silently change an existing profile's pipe name.
+func TestWindowsDaemonPipeNameUnicodeWireContract(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		path   string
+		digest string
+	}{
+		{"TurkishAndGreek", `C:\Users\İpek\ΟΣ\state\daemon.sock`, "ff6fffc0cdd17367ee83b0e1d00ac7eec2d89519becdfa44666fac9b2829117b"},
+		{"NewerUnicodeLetters", `C:\Users\ᲉꟋꟌ꟎꟒꟔ꟚꟜ𐵐𖺠\state\daemon.sock`, "7efd5756e27a12a2e7e021cd9d71168692f408ed5ccba17aea161822650b9c25"},
+		{"SharpSKelvinAndDeseret", `C:\Users\ẞK𐐀\state\daemon.sock`, "860493d1a89cc91ebbd7cd22f96be188cd6d1d109b322cea34268c13a8acb65d"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := `\\.\pipe\layerv-qurl-share-daemon-` + tc.digest
+			if got := windowsDaemonPipeName(tc.path); got != want {
+				t.Fatalf("Windows Unicode pipe contract changed: got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestWindowsIPCSecurityDescriptorAndUnavailableClassification(t *testing.T) {
 	descriptor, err := currentWindowsIPCSecurityDescriptor()
 	if err != nil {
