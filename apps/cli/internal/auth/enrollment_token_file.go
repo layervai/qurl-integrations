@@ -54,9 +54,11 @@ func ReadExternalEnrollmentTokenFile(path string) (string, error) { //nolint:goc
 	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(before, opened) || !validExternalEnrollmentTokenInfo(opened) ||
-		opened.Mode() != before.Mode() || opened.Size() != before.Size() || !opened.ModTime().Equal(before.ModTime()) ||
-		validateOpenExternalEnrollmentToken(file, opened) != nil {
+		opened.Mode() != before.Mode() || opened.Size() != before.Size() || !opened.ModTime().Equal(before.ModTime()) {
 		return "", errors.New("external enrollment token changed while opening")
+	}
+	if validateOpenExternalEnrollmentToken(file, opened) != nil {
+		return "", errors.New("external enrollment token must be owned by the current user with protected private access and exactly one link")
 	}
 	current, err := statExternalEnrollmentTokenPath(path)
 	if err != nil || !os.SameFile(opened, current) || !validExternalEnrollmentTokenInfo(current) {

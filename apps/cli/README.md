@@ -502,8 +502,11 @@ with `-o json`).
 the TPM: without a usable one it exits 3, and with one that is not responding
 it exits 11. The other providers seal the state under a key held elsewhere. With
 `local-key`, the 32-byte wrapping key arrives on the inherited descriptor
-named by `LAYERV_LOCAL_KEY_FD`. Windows supervisors use Node.js/libuv’s inherited
-CRT pipe table; Unix supervisors use an anonymous pipe or socketpair. There is deliberately no
+named by `LAYERV_LOCAL_KEY_FD`. Unix supervisors use an anonymous pipe or
+socketpair. Windows support is not yet available with the pinned connector:
+it requires [qurl-connector#162](https://github.com/layervai/qurl-connector/pull/162)
+to be released and the CLI dependency bumped. That implementation uses
+Node.js/libuv's inherited CRT pipe table. There is deliberately no
 flag: the supervisor that owns the key (for example qURL Desktop) sets the
 environment. A namespace sealed by such a provider requires `--supervision
 external`, because the background job `qurl` installs under native
@@ -659,8 +662,9 @@ JSON
 ```
 
 On Windows, supply the canonical `http+npipe` target to the same command.
-Private Unix origins require Unix; Windows external enrollment uses a protected
-credential file and the inherited wrapping-key pipe described above.
+Private Unix origins require Unix. The Windows enrollment-token reader accepts
+protected credential files, but complete Windows external enrollment remains
+blocked on the connector release and dependency bump described above.
 
 The command uses the normal profile/state-directory settings. It requires an
 existing externally supervised namespace and matching durable owner, reserves
@@ -1813,7 +1817,10 @@ It must supply a one-time token minted for `target=agent`, set
 `LAYERV_KEY_PROVIDER=local-key`, and pass the 32-byte wrapping key through the
 inherited descriptor named by `LAYERV_LOCAL_KEY_FD`. Do not set `QURL_API_KEY`
 or `QURL_API_KEY_FILE` for this form. Token-file login is tested on macOS and
-Linux. Non-Unix platforms, including Windows, reject it before changing local state.
+Linux. Windows has protected credential-file validation, but the pinned connector
+does not yet support the required Windows `local-key` provider; complete Windows
+enrollment requires the connector release and dependency bump described in
+[Key storage](#key-storage). Other non-Unix platforms reject token-file login.
 
 The token file must be an owner-owned regular file with one hard link and
 mode `0400` or `0600`. The CLI reads it only when enrollment needs it. The

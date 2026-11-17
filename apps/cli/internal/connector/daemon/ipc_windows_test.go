@@ -95,6 +95,7 @@ func TestWindowsDaemonPipeNameUnicodeWireContract(t *testing.T) {
 		digest string
 	}{
 		{"TurkishAndGreek", `C:\Users\İpek\ΟΣ\state\daemon.sock`, "ff6fffc0cdd17367ee83b0e1d00ac7eec2d89519becdfa44666fac9b2829117b"},
+		// These newer letters intentionally remain uncased under Go Unicode 15.
 		{"NewerUnicodeLetters", `C:\Users\ᲉꟋꟌ꟎꟒꟔ꟚꟜ𐵐𖺠\state\daemon.sock`, "7efd5756e27a12a2e7e021cd9d71168692f408ed5ccba17aea161822650b9c25"},
 		{"SharpSKelvinAndDeseret", `C:\Users\ẞK𐐀\state\daemon.sock`, "860493d1a89cc91ebbd7cd22f96be188cd6d1d109b322cea34268c13a8acb65d"},
 	} {
