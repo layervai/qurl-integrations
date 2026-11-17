@@ -12,6 +12,7 @@ import (
 
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
+	"golang.org/x/sys/windows"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
@@ -39,6 +40,15 @@ func TestWindowsExternalLoginRejectsInheritedTokenACL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "enrollment-token")
 	const token = "one-shot-windows-token"
 	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Elevated runners may otherwise assign Administrators as the owner.
+	// Change only ownership, preserving the inherited DACL under test.
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, user.User.Sid, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	called := false

@@ -19,13 +19,12 @@ var statExternalEnrollmentTokenPath = os.Lstat // Tests that replace this must n
 // one exact private file. It is intentionally stricter than the headless
 // projected-secret reader: symlinks and group access are never accepted.
 //
-// What the guarantee is and is not: O_NOFOLLOW protects the final component
-// only, and ValidateExternalEnrollmentTokenPath is a string check, so an
-// intermediate directory symlink is still followed. The euid-ownership,
-// single-link and 0400/0600 checks mean a substitution within the caller's own
-// account is refused rather than read, and the path is supervisor-supplied,
-// so the guarantee is "this exact private file, or an error" - not "no part of
-// this path was ever redirected".
+// The final component cannot be a symlink or Windows reparse point; ancestor
+// redirects remain possible. The open handle and path must identify the same
+// single-link regular file throughout the read. Unix requires the current euid
+// and mode 0400/0600; Windows requires the current user as owner and a protected
+// ACL allowing only that user, SYSTEM and Administrators. The supervisor supplies
+// the path, so this does not promise that every ancestor was free of redirects.
 func ReadExternalEnrollmentTokenFile(path string) (string, error) { //nolint:gocyclo // One descriptor-pinning security decision stays together.
 	if err := ValidateExternalEnrollmentTokenPath(path); err != nil {
 		return "", err

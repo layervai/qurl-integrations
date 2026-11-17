@@ -75,6 +75,27 @@ func TestWindowsExternalEnrollmentTokenRejectsInheritedACL(t *testing.T) {
 	if err := os.WriteFile(path, []byte("one-shot-token"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Elevated runners may otherwise assign Administrators as the owner.
+	// Change only ownership, preserving the inherited DACL under test.
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, user.User.Sid, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	file, err := openExternalEnrollmentTokenNoFollow(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if err := validateWindowsAPIKeyFile(file); err == nil || !strings.Contains(err.Error(), "protected from inheritance") {
+		t.Fatalf("expected inherited DACL rejection: %v", err)
+	}
 	if _, err := ReadExternalEnrollmentTokenFile(path); err == nil || !strings.Contains(err.Error(), "protected private access and exactly one link") {
 		t.Fatalf("inherited-ACL token rejection: %v", err)
 	}

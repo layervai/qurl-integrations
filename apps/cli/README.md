@@ -1823,8 +1823,10 @@ enrollment requires the connector release and dependency bump described in
 [Key storage](#key-storage). Other non-Unix platforms reject token-file login.
 
 The token file must be an owner-owned regular file with one hard link and
-mode `0400` or `0600`. The CLI reads it only when enrollment needs it. The
-supervisor must remove it after the command exits, including on failure.
+mode `0400` or `0600` on Unix. Windows requires a protected ACL allowing only
+the current user, SYSTEM and Administrators. The supervisor must finish writing
+and close the file before invoking the CLI, which reads it only when enrollment
+needs it. Remove the file after the command exits, including on failure.
 An enrolled device can log in again with the same path after the file is
 removed. Invalid command options return exit code 2; an unusable token file
 returns 4; incompatible encrypted-state settings return 3. Correct a token
