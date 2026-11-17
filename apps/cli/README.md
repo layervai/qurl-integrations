@@ -666,6 +666,15 @@ Private Unix origins require Unix. The Windows enrollment-token reader accepts
 protected credential files, but complete Windows external enrollment remains
 blocked on the connector release and dependency bump described above.
 
+The Windows CI matrix also tests the combined source using an immutable
+Connector candidate and a temporary module replacement. This nonshipping check
+proves Node's inherited key pipe, the protected one-shot token reader, and
+reopening sealed device state through the CLI after process restart. It seeds
+the registered device, so it does not claim live cold enrollment. The shipped
+module remains unchanged. When the real Connector release is pinned, remove
+the candidate checkout and replacement, remove the `connectorpreview` test tag,
+and replace the unsupported-provider regression with the supported journey.
+
 The command uses the normal profile/state-directory settings. It requires an
 existing externally supervised namespace and matching durable owner, reserves
 the daemon IPC endpoint and lifetime lock, and atomically retargets every saved
