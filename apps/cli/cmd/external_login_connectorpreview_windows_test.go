@@ -57,6 +57,9 @@ func TestWindowsNodeSupervisedLoginChild(t *testing.T) {
 	if phase == "" {
 		return
 	}
+	// TestMain pins the file provider to keep ordinary tests off the host TPM.
+	// Restore this fixture's provider; Node's inherited descriptor stays intact.
+	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
 	stateDir := os.Getenv("QURL_TEST_SUPERVISED_STATE")
 	tokenPath := filepath.Join(stateDir, "enrollment-token")
 	state := bootstrapRegisteredState(t)
