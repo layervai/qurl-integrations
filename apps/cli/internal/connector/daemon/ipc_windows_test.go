@@ -4,12 +4,15 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
@@ -101,6 +104,21 @@ func TestWindowsDaemonPipeNameUnicodeWireContract(t *testing.T) {
 				t.Fatalf("Windows Unicode pipe contract changed: got %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestWindowsDaemonPipeUnicodeScalarContract(t *testing.T) {
+	digest := sha256.New()
+	for code := rune(0); code <= unicode.MaxRune; code++ {
+		if code >= 0xd800 && code <= 0xdfff {
+			continue
+		}
+		_, _ = digest.Write([]byte(string(unicode.ToLower(code))))
+	}
+	// Mirrors Desktop's exhaustive scalar test, not the current Go table.
+	const want = "137590953b837f1ec8b7c02b3a0425d0789df789a59ad256e7a63416f9fc4c11"
+	if got := fmt.Sprintf("%x", digest.Sum(nil)); got != want {
+		t.Fatalf("Windows pipe Unicode casing contract changed: got %s, want %s", got, want)
 	}
 }
 
