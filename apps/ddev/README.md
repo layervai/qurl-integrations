@@ -1,12 +1,40 @@
 # Private DDEV review with qURL
 
-This preview requires the graceful provider shutdown in
-[DDEV PR 9139](https://github.com/ddev/ddev/pull/9139).
-
 qURL™ checks the reviewer's identity before connecting them to the app. This
-add-on uses DDEV's loopback HTTP port and prints a private request address.
+workflow uses DDEV's loopback HTTP port and a private request address.
 The reviewer asks for access in their browser. Give access only after the
 reviewer gives you their displayed code through a conversation you trust.
+
+## Review an app with the released DDEV
+
+Install the [qURL CLI](../cli/README.md#install), version 4.4.3 or later.
+Start your DDEV project, then run `ddev describe`. Find its web service's
+loopback HTTP address, such as `http://127.0.0.1:32781`.
+
+Publish that address in another terminal. Use a new local ID for this review:
+
+```sh
+qurl publish http://127.0.0.1:32781 --id ddev-review-1 --name "DDEV review" --allow-requests --foreground -o json
+```
+
+Keep the command running. Check `private: true`, `found_existing: false`,
+and `access_requests: true` in the JSON. Send `resource_url` to the reviewer.
+When they give you the code from their screen, approve it in another terminal:
+
+```sh
+qurl approve <CRID> <code>
+```
+
+Ask them to press **Open** and confirm that the app loads. End the review
+with `qurl delete <CRID>`, then stop the publishing command with Ctrl+C.
+Do this before stopping or restarting the DDEV project.
+
+This direct CLI workflow does not use `ddev share` or need its shutdown fix.
+
+## Add-on preview
+
+The `ddev share --provider=qurl` add-on requires the graceful shutdown in
+[DDEV PR 9139](https://github.com/ddev/ddev/pull/9139).
 
 Requirements: Linux or macOS, Python 3, qURL CLI 4.4.3 or later, and a DDEV
 build with PR 9139. The add-on does not change the default share provider.
