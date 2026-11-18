@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.4.4](https://github.com/layervai/qurl-integrations/compare/v4.4.3...v4.4.4) (2026-11-18)
+
+
+### Bug Fixes
+
+* **cli:** return confirmed identity when local publish setup fails ([#2070](https://github.com/layervai/qurl-integrations/issues/2070)) ([bce911c](https://github.com/layervai/qurl-integrations/commit/bce911c97492e7da1b167f42f5beb4522d2f568b))
+
 ## [4.4.3](https://github.com/layervai/qurl-integrations/compare/v4.4.2...v4.4.3) (2026-11-16)
 
 
