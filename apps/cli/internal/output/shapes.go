@@ -214,6 +214,7 @@ func (p *Printer) PublishLinkFailure(res *qurlapi.Published) error {
 }
 
 // PublishSetupFailure names a confirmed resource without claiming it serves.
+// TODO(upstream-contract): Keep publication_setup_failed in sync with Desktop recovery.
 func (p *Printer) PublishSetupFailure(res *qurlapi.Published) error {
 	if p.format != FormatJSON {
 		p.Warnf("The resource exists. Check it with `qurl status %s` before retrying.", res.CRID)

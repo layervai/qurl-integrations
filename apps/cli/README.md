@@ -2204,7 +2204,6 @@ A revision conflict never retries automatically. The API owns verification and
 all limits. Supervisors may also GET/PATCH `/v1/resources/{id}/preview` and POST
 `/v1/resources/{id}/preview/uploads` through the existing `qurl request` command.
 
-
 ### A local publish that fails after creation
 
 If local setup fails after the API confirms a resource, `qurl publish -o json`

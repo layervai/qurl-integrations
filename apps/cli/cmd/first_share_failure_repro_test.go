@@ -127,3 +127,19 @@ func TestFirstShareDaemonFailureKeepsKnownIdentity(t *testing.T) {
 		t.Fatal("daemon setup failure did not report the known resource")
 	}
 }
+
+func TestFirstShareResourceMismatchRecoversOnlyConfirmedCreate(t *testing.T) {
+	srv := apitest.NewServer(t)
+	other := apitest.NewServer(t)
+	resolver := resolvedLocalResource(other, true)
+	result := runCLI(t, localPublish(t, srv, resolver, "-o", "json"))
+	var receipt map[string]any
+	if result.code == 0 || json.Unmarshal(result.stdout.Bytes(), &receipt) != nil || receipt["crid"] != srv.Key.CRID || receipt["resource_id"] != srv.Key.ResourceID || receipt["error"] != "publication_setup_failed" {
+		t.Fatal("resource mismatch lost the confirmed API identity")
+	}
+	for _, request := range srv.Requests() {
+		if request.Method == http.MethodDelete {
+			t.Fatal("resource mismatch deleted a resource")
+		}
+	}
+}

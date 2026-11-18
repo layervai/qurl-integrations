@@ -381,7 +381,9 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	servingConfirmed := false
 	defer func() {
 		if retErr != nil && !servingConfirmed && enrollment.published != nil {
-			retErr = errors.Join(retErr, opts.printer().PublishSetupFailure(enrollment.published))
+			if err := opts.printer().PublishSetupFailure(enrollment.published); err != nil {
+				retErr = errors.Join(retErr, err)
+			}
 		}
 	}()
 	// The registered REST client is open and cached before resource discovery
@@ -420,6 +422,7 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return compensate(err)
 	}
+	// Both serving paths call this only after serving; later link failures own their receipt.
 	mintLink := func() error {
 		servingConfirmed = true
 		return opts.mintRuleLink(ctx, client, access.Rule, shared, limits)
@@ -487,7 +490,7 @@ type localEnrollment struct {
 	opts        *globalOpts
 	target      *publishTarget
 	requestedID string
-	published   *qurlapi.Published
+	published   *qurlapi.Published // Written only by the synchronous resource-discovery callback.
 
 	mu                 sync.Mutex
 	mintedID           string
