@@ -728,6 +728,9 @@ def reconcile_run(
 ) -> None:
     description = run_description(args)
     credential_names = run_credential_names(args)
+    enrollment_name = run_credential_name(
+        args.run_id, args.run_attempt, args.lane, "enrollment"
+    ) if args.profile == "production" else None
     device_key_names = run_device_key_names(args)
     connector_ids = run_connector_ids(args)
     endpoint, automation_key = authenticated
@@ -757,7 +760,8 @@ def reconcile_run(
                 continue
             is_customer = row_name in credential_names
             is_device = row_name in device_key_names
-            if not is_customer and not is_device:
+            is_enrollment = row_name == enrollment_name
+            if not is_customer and not is_device and not is_enrollment:
                 continue
             # TODO(upstream-contract): qurl-service list rows always include
             # status, even when the request already filters status=active.
@@ -772,6 +776,14 @@ def reconcile_run(
                     key_ids.append(key_id)
             if is_device:
                 if row.get("kind") != "device" or row.get("scopes") != DEVICE_SCOPES:
+                    record_failure("credential_shape")
+                elif status == "active":
+                    key_ids.append(key_id)
+            if is_enrollment:
+                if (row.get("kind") != "enrollment_token"
+                    or row.get("target") != "agent"
+                    or row.get("claims") not in (None, [])
+                    or row.get("scopes") != ["qurl:agent"]):
                     record_failure("credential_shape")
                 elif status == "active":
                     key_ids.append(key_id)

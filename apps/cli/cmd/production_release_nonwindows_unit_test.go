@@ -2,7 +2,17 @@
 
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
+
+func productionWriteEnrollment(t *testing.T, path, token string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal("write protected production enrollment token")
+	}
+}
 
 func productionStateDir(t *testing.T) string {
 	t.Helper()

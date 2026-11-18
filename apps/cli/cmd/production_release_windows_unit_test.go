@@ -17,6 +17,14 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func productionWriteEnrollment(t *testing.T, path, token string) {
+	t.Helper()
+	createProtectedWindowsDaemonLogForTest(t, path)
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal("write protected Windows production enrollment token")
+	}
+}
+
 func TestProductionProofWindowsCredentialFile(t *testing.T) {
 	key := "lv_test_" + "012345678901234567890123456789012345678901234"
 	path := filepath.Join(t.TempDir(), "api-key-env")

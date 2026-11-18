@@ -1136,7 +1136,9 @@ jobs:
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >>"$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >>"$GITHUB_ENV"
       - name: Compile the production journey harness
-        run: go test -c -trimpath -tags=clisandbox,cliproduction -o "$RUNNER_TEMP/production-journey.test.exe" ./apps/cli/cmd
+        run: |
+          node --version
+          go test -c -trimpath -tags=clisandbox,cliproduction -o "$RUNNER_TEMP/production-journey.test.exe" ./apps/cli/cmd
       - name: Verify the Windows production credential reader
         if: runner.os == 'Windows'
         run: '"$RUNNER_TEMP/production-journey.test.exe" -test.run "^TestProductionProofWindowsCredentialFile$" -test.count=1'

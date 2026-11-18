@@ -64,6 +64,11 @@ func TestProductionReleaseJourney(t *testing.T) {
 	if key == "" || owner == "" {
 		t.Fatal("production proof requires disposable credentials and their expected owner")
 	}
+	if !t.Run("supervised cold and warm login", func(t *testing.T) {
+		productionSupervisedLogin(t, binary, key, owner)
+	}) {
+		return
+	}
 	namespace, err := sandboxNamespace("smoke")
 	if err != nil {
 		t.Fatal(err)
