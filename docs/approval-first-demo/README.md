@@ -5,6 +5,9 @@ invisibility: an unapproved visitor cannot reach this app through its private
 share. This small demo lets you check actual app requests before and after
 approval. It runs two static pages with Python's built-in HTTP server.
 
+Have a CLI-enabled AI agent with its own device identity? You can use the
+[agent review](AGENT.md) instead; it does not require a second person.
+
 ## Before you start
 
 Use Python 3.7 or later and the [qURL CLI](../../apps/cli/README.md#install), version 4.4.3
