@@ -13,6 +13,7 @@ resource owner's devices and, for a private resource, on the devices the
 publisher allowed; any other device gets "not found".
 
 [Publish localhost in 60 seconds](#publish-localhost-in-60-seconds) ·
+[Agent setup](#let-a-coding-agent-share-your-app) ·
 [Command reference](#commands) · [Scripting](#scripting-contract)
 
 ## Publish localhost in 60 seconds
@@ -130,6 +131,31 @@ and tell us where the steps were clear or where you got stuck.
 
 For direct UDP access to qURL resources, use CLI 4.4.2 or later. The CLI
 completes the server's cookie challenge automatically.
+
+## Let a coding agent share your app
+
+If you use the `skills` installer, you can add the existing public qURL skill
+to your project. This installs instructions and reference files, not the qURL
+CLI, and does not publish an app. Install the CLI using the steps above first.
+
+<!-- TODO(upstream-contract): skills 1.9.0 needs Node.js >=22.20 and supports GitHub tree sources plus project-local --agent/--copy installation. -->
+This tested example needs Node.js 22.20 or later and installs for Claude Code
+in the current project, without changing your global agent setup:
+
+```bash
+npx --yes skills@1.9.0 add https://github.com/layervai/website/tree/production/public/skills/qurl \
+  --agent claude-code --skill qurl --yes --copy
+```
+
+Review `.claude/skills/qurl/SKILL.md` and its references, then ask your agent:
+
+> Use the qURL skill to help me share a local app with one reviewer. Ask which
+> app to share and get my approval before publishing it privately.
+
+The installer has its own anonymous install telemetry; set
+`DISABLE_TELEMETRY=1` to opt out. See the [installer documentation](https://skills.sh/docs/cli)
+for other agents and options. Installing a skill is not a successful share:
+confirm that your intended reviewer can load the actual app.
 
 ## Install
 
