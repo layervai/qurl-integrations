@@ -1,7 +1,7 @@
 # Review the demo with your own AI agent
 
 You can test an approved agent without finding a second person. Use a CLI-enabled
-agent with its own qURL device identity, such as an agent on a second computer or
+agent with its own qURL™ device identity, such as an agent on a second computer or
 in its own environment. The agent must be able to run the qURL CLI and reach
 LayerV's service. A cloud agent cannot publish an app on your computer, but it
 can review the app you publish for its device.
@@ -11,7 +11,8 @@ rendering and a browser action. Keep the app's own login and permissions.
 
 ## 1. Start the app and identify the reviewer
 
-Use Python 3.7+ and qURL CLI 4.4.3+. Start the loopback server from step 1 of
+Use Python 3.7+ on the publisher computer and qURL CLI 4.4.3+ in both the
+publisher and reviewer environments. Start the loopback server from step 1 of
 the [browser demo](README.md#1-start-the-local-app). Serve only the included
 non-sensitive pages. Keep its request log visible; do not make local HTTP
 health checks during the observation.
@@ -28,9 +29,9 @@ must differ. Do not copy publisher credentials or state to the agent. If both
 commands use the same device identity, this is an owner fetch, not this test.
 Do not publish full command output, keys or access links in a public thread.
 
-Before access, choose a non-sensitive string from the demo page for the agent
-to find. Do not give that string to the agent in its request; ask it to return
-the page's title. Check the response against the local file yourself.
+Before access, note the page's `<title>` from `site/index.html`. Do not include
+it in your request. Ask the agent to return the title from the app response,
+then compare it with the local file yourself.
 
 ## 2. Publish for that device
 
@@ -38,7 +39,7 @@ Replace `REVIEWER_PUBLIC_KEY` with the intended agent's public key. On
 macOS/Linux, use a fresh local ID:
 
 ```sh
-qurl publish http://127.0.0.1:8765 --id "agent-demo-$(date +%s)" --name "Private agent review" --allow-device-key 'REVIEWER_PUBLIC_KEY' --foreground -o json
+qurl publish http://127.0.0.1:8765 --id "agent-demo-$(date +%s)" --name "Private agent review" --allow-device-key "REVIEWER_PUBLIC_KEY" --foreground -o json
 ```
 
 On Windows, choose a new ID rather than using `$(date +%s)`. Keep the publisher
@@ -65,12 +66,17 @@ successful GET. A link, an access page, a tool listing or the agent saying it
 is ready is not proof that it received the app. For your own app, choose an
 agreed non-sensitive task and verify its result.
 
+If you have a third, unapproved device, its `qurl get CRID --file -` should
+fail with exit code 5 and add no app request. The publisher is not a negative
+test: the owner can fetch its own resource.
+
 ## 4. Remove access
 
 Follow [step 4 of the browser demo](README.md#4-remove-access): delete only this
 owned resource with `qurl delete CRID --yes` before stopping or reusing its port.
 Deletion is permanent. Ask the same agent to repeat the fetch; it should fail
-without returning app bytes. Then stop the publisher and Python server.
+without returning app bytes. `Resource Revoked` is the expected error, rather
+than an unrelated network failure. Then stop the publisher and Python server.
 Do not report cleanup as confirmed if deletion fails.
 
 The publisher computer and app must stay running during the review. This test
