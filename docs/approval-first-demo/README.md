@@ -23,6 +23,8 @@ From the repository root, run:
 python3 -u -m http.server 8765 --bind 127.0.0.1 --directory docs/approval-first-demo/site
 ```
 
+On Windows, use `py -3` if `python3` is not available.
+
 Keep this terminal visible. It logs each HTTP request. Do not open the app
 locally or run an HTTP health check during the observation: those requests would
 also appear. A TCP connection alone is not an HTTP request.
@@ -79,12 +81,12 @@ Deletion cannot be undone.
 qurl delete CRID --yes
 ```
 
-Check deletion succeeds. `qurl get CRID --file -` should then fail with
-`Resource Revoked`, rather than return the app. Then stop the publisher and Python
+Check deletion succeeds. `qurl get CRID --file -` should then fail rather than
+return the app; `Resource Revoked` is the expected error for this demo. Then stop the publisher and Python
 server with Ctrl+C. If deletion fails, report cleanup as unconfirmed and resolve it.
 
 This checks HTTP requests for these two pages, rather than every app or network
 packet. Python serves only loopback here; qURL does not close other tunnels you
 may have opened. The publisher computer and app must stay running during the review.
 
-[Share your actual app with a reviewer](https://qurl.link/share-without-deploying?utm_source=approval-first-demo&utm_medium=referral&utm_campaign=first-share-pilot)
+[Share your actual app with a reviewer](https://qurl.link/share-without-deploying/?utm_source=approval-first-demo&utm_medium=referral&utm_campaign=first-share-pilot)

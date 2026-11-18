@@ -22,6 +22,7 @@ protected resources. Start with the guide for the task you want to complete:
 | --- | --- |
 | Share a local web app or API with a temporary link | [qURL CLI quickstart](apps/cli/README.md#publish-localhost-in-60-seconds) |
 | Let Claude Code help with a first local-app share | [Agent skill setup](apps/cli/README.md#let-a-coding-agent-share-your-app) |
+| Check app requests before and after reviewer approval | [Approval-first browser demo](docs/approval-first-demo/README.md) |
 | Share internal resources from a Slack channel | [qURL for Slack](apps/slack/README.md) |
 | Send one-time file or location links in Discord | [qURL Discord bot](apps/discord/README.md) |
 | Share files in Gmail through expiring links | [Browser extension for Gmail](apps/chrome-extension/README.md) |
@@ -270,10 +271,6 @@ lifetime. The quickstart requests both limits; the service enforces them.
 Use limits depend on the link and issuing workflow. A link is an access
 credential, so share it privately. It does not replace your app's login or
 prove a recipient's identity merely because you sent it to a named person.
-
-## Try a private review
-
-[Watch the app request log before and after reviewer approval](docs/approval-first-demo/README.md) with a small Python-served demo.
 
 ## Structure
 
