@@ -2203,3 +2203,19 @@ video only after Play. Use `-o json` for structured revision, media and job stat
 A revision conflict never retries automatically. The API owns verification and
 all limits. Supervisors may also GET/PATCH `/v1/resources/{id}/preview` and POST
 `/v1/resources/{id}/preview/uploads` through the existing `qurl request` command.
+
+
+### A local publish that fails after creation
+
+If local setup fails after the API confirms a resource, `qurl publish -o json`
+keeps its nonzero exit and prints one recovery receipt. It contains `crid`,
+`resource_id`, `error: "publication_setup_failed"`, the confirmed `private`
+setting, `settings_differ`, and `found_existing` when the service knows it.
+It contains no share link or successful serving status. Check the exit code
+before treating any publish output as success. Text and quiet modes keep stdout
+empty and put the recovery hint on stderr.
+
+The receipt identifies a resource to inspect; it does not authorize automatic
+deletion. Existing or uncertain resources stay unchanged. An unconfirmed create
+returns no recovery identity. The separate `link_creation_failed` receipt means
+setup reached serving but link creation failed; that valid publication remains.
