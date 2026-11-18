@@ -13,6 +13,7 @@ resource owner's devices and, for a private resource, on the devices the
 publisher allowed; any other device gets "not found".
 
 [Publish localhost in 60 seconds](#publish-localhost-in-60-seconds) ·
+[Agent setup](#let-a-coding-agent-share-your-app) ·
 [Command reference](#commands) · [Scripting](#scripting-contract)
 
 ## Publish localhost in 60 seconds
@@ -130,6 +131,36 @@ and tell us where the steps were clear or where you got stuck.
 
 For direct UDP access to qURL resources, use CLI 4.4.2 or later. The CLI
 completes the server's cookie challenge automatically.
+
+## Let a coding agent share your app
+
+If you use the `skills` installer, you can add the existing public qURL skill
+to your project. This installs the main instructions, not the qURL CLI, and
+does not publish an app.
+[Install the CLI](#install) first.
+
+<!-- TODO(upstream-contract): skills 1.9.0 needs Node.js >=22.20 and supports public SKILL.md downloads plus project-local --agent/--copy installation. -->
+This tested example needs Node.js 22.20 or later. The installer writes to
+`.claude/skills/qurl` in the current project for Claude Code:
+
+```bash
+DISABLE_TELEMETRY=1 npx --yes skills@1.9.0 add https://layerv.ai/skills/qurl/SKILL.md \
+  --agent claude-code --skill qurl --yes --copy
+```
+
+The URL follows the latest public skill, so later installs can receive updated
+instructions. Review `.claude/skills/qurl/SKILL.md` before use. The skill explains
+how to fetch its public reference files when needed; this single-file download
+does not install them. Then ask your agent:
+
+> Use the qURL skill to help me share a local app with one reviewer. Ask which
+> app to share and get my approval before publishing it privately.
+
+The `DISABLE_TELEMETRY=1` prefix disables the installer's telemetry and remote
+audit requests. Remove it to use the installer's defaults. See the
+[installer documentation](https://skills.sh/docs/cli)
+for other agents and options. Installing a skill is not a successful share:
+confirm that your intended reviewer can load the actual app.
 
 ## Install
 

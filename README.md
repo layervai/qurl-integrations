@@ -21,6 +21,7 @@ protected resources. Start with the guide for the task you want to complete:
 | Task | Guide |
 | --- | --- |
 | Share a local web app or API with a temporary link | [qURL CLI quickstart](apps/cli/README.md#publish-localhost-in-60-seconds) |
+| Let Claude Code help with a first local-app share | [Agent skill setup](apps/cli/README.md#let-a-coding-agent-share-your-app) |
 | Share internal resources from a Slack channel | [qURL for Slack](apps/slack/README.md) |
 | Send one-time file or location links in Discord | [qURL Discord bot](apps/discord/README.md) |
 | Share files in Gmail through expiring links | [Browser extension for Gmail](apps/chrome-extension/README.md) |
