@@ -13,19 +13,20 @@ import (
 	"testing"
 	"time"
 
+	conformance "github.com/layervai/qurl-conformance"
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"golang.org/x/sys/windows"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
-	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 // This source-only gate uses the reviewed Connector candidate. After its real
 // release is pinned, remove the preview tag and run this in the normal suite.
-// Device registration is seeded; live cold enrollment remains a release gate.
-func TestWindowsNodeSupervisedCredentialAndWarmLogin(t *testing.T) {
+// Registration uses real client code with local protocol fixtures; live cold
+// enrollment and packaged Desktop qualification remain separate release gates.
+func TestWindowsNodeSupervisedColdAndWarmLogin(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Fatal("supervised CLI integration requires Node.js")
@@ -41,7 +42,7 @@ child.stdio[3].on('error',()=>{});
 child.stdio[3].end(Buffer.alloc(32,process.argv[3]==='wrong-key'?0x7b:0x7a));
 child.on('error',()=>{clearTimeout(watchdog);process.exit(1)});
 child.on('exit',code=>{clearTimeout(watchdog);process.exit(code??1)});`
-	for _, phase := range []string{"seed", "warm", "wrong-key", "warm"} {
+	for _, phase := range []string{"cold", "warm", "wrong-key", "warm"} {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		command := exec.CommandContext(ctx, node, "-e", script, "--", os.Args[0], stateDir, phase) // #nosec G204 G702 -- Resolved Node runs a fixed fixture and this test executable, without a shell.
 		output, err := command.CombinedOutput()
@@ -62,49 +63,94 @@ func TestWindowsNodeSupervisedLoginChild(t *testing.T) {
 	t.Setenv(connectoragentstate.EnvKeyProvider, connectoragentstate.KeyProviderLocalKey)
 	stateDir := os.Getenv("QURL_TEST_SUPERVISED_STATE")
 	tokenPath := filepath.Join(stateDir, "enrollment-token")
-	state := bootstrapRegisteredState(t)
-	if phase == "seed" {
-		seedWindowsSupervisedIdentity(t, stateDir, tokenPath, state)
-	}
-	if _, err := os.Stat(tokenPath); !errors.Is(err, os.ErrNotExist) {
+	if phase == "cold" {
+		writeWindowsSupervisedEnrollmentToken(t, tokenPath)
+	} else if _, err := os.Stat(tokenPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("warm command must run without its consumed token file: %v", err)
 	}
 	sealedPath := filepath.Join(stateDir, connectoragentstate.SealedAgentStateFile)
 	sealedBefore, err := os.ReadFile(sealedPath) // #nosec G304 -- Test-owned sealed state path.
-	if err != nil {
+	if phase == "cold" && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("cold login must start without a sealed identity")
+	}
+	if phase != "cold" && err != nil {
 		t.Fatal(err)
 	}
 	srv := apitest.NewServer(t)
+	var deviceKey string
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "--supervision", "external", "login", "--enrollment-token-file", tokenPath},
 		env:  externalLoginEnv(), shareStateDir: stateDir,
 		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
-			return connectorshare.OpenNativeRuntime(ctx, cfg)
+			// Warm login must stay offline; no UDP target is allowed here.
+			route := nativeRecoveryRoute{}
+			cfg.UDPOptions = []qurl.AgentRuntimeUDPOption{qurl.WithAgentRuntimeUDPResolver(route), qurl.WithAgentRuntimeUDPDialer(route)}
+			open := connectorshare.OpenNativeRuntime
+			if phase == "cold" {
+				open = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (*connectorshare.NativeRuntime, error) {
+					return openNativeEnrollmentFixture(ctx, t, &cfg)
+				}
+			}
+			runtime, err := open(ctx, cfg)
+			if err != nil {
+				return nil, err
+			}
+			if phase != "cold" && runtime.OpenKind != connectorshare.NativeOpenWarm {
+				t.Fatal("warm login attempted registration or assignment recovery")
+			}
+			store, err := runtime.Handoff()
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := store.LoadAgentState(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.RegisteredAt == nil || state.PendingActivation != nil || state.EnrollmentCredentialKind != "bootstrap" || state.DeviceAPIKey == "" {
+				t.Fatal("external registration did not persist a completed owner-scoped identity")
+			}
+			deviceKey = state.DeviceAPIKey
+			return runtime, nil
 		},
 	})
+	if strings.Contains(res.stdout.String()+res.stderr.String(), conformance.AgentAssignmentBootstrapCredentialFixture) {
+		t.Fatal("enrollment credential reached command output")
+	}
 	if phase == "wrong-key" {
 		if res.code != 3 || len(srv.Requests()) != 0 {
 			t.Fatalf("wrong wrapping key was not rejected before network access: exit=%d stderr=%s", res.code, res.stderr.String())
 		}
 	} else {
 		if res.code != 0 {
-			t.Fatalf("real Windows warm login exit=%d stderr=%s", res.code, res.stderr.String())
+			t.Fatalf("real Windows %s login exit=%d stderr=%s", phase, res.code, res.stderr.String())
 		}
-		assertLoginIdentityAndRuleRead(t, srv.Requests(), state.DeviceAPIKey)
+		assertLoginIdentityAndRuleRead(t, srv.Requests(), deviceKey)
 	}
 	sealedAfter, err := os.ReadFile(sealedPath) // #nosec G304 -- Test-owned sealed state path.
-	if err != nil || !bytes.Equal(sealedBefore, sealedAfter) {
+	if err != nil || len(sealedAfter) == 0 {
+		t.Fatalf("sealed identity is missing: %v", err)
+	}
+	if phase != "cold" && !bytes.Equal(sealedBefore, sealedAfter) {
 		t.Fatalf("warm login rewrote sealed identity: %v", err)
+	}
+	if bytes.Contains(sealedAfter, []byte(conformance.AgentAssignmentBootstrapCredentialFixture)) ||
+		(deviceKey != "" && bytes.Contains(sealedAfter, []byte(deviceKey))) {
+		t.Fatal("credential appears in plaintext in the sealed identity")
+	}
+	if phase == "cold" {
+		// Desktop removes the one-shot token after the enrollment process exits.
+		if err := os.Remove(tokenPath); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, connectoragentstate.AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("plaintext agent state exists: %v", err)
 	}
 }
 
-func seedWindowsSupervisedIdentity(t *testing.T, stateDir, tokenPath string, state *qurl.AgentState) {
+func writeWindowsSupervisedEnrollmentToken(t *testing.T, tokenPath string) {
 	t.Helper()
-	const token = "supervised-windows-test-enrollment"
-	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(tokenPath, []byte(conformance.AgentAssignmentBootstrapCredentialFixture+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
@@ -120,29 +166,6 @@ func seedWindowsSupervisedIdentity(t *testing.T, stateDir, tokenPath string, sta
 		t.Fatal(err)
 	}
 	if err := windows.SetNamedSecurityInfo(tokenPath, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, user.User.Sid, nil, acl, nil); err != nil {
-		t.Fatal(err)
-	}
-	provider := oneShotEnrollmentToken(tokenPath)
-	credential, err := provider(context.Background(), qurl.AgentEnrollmentCredentialRequest{})
-	if err != nil || credential != token {
-		t.Fatalf("supervised credential was not accepted: %v", err)
-	}
-	if err := os.Remove(tokenPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), stateDir); err != nil {
-		t.Fatal(err)
-	}
-	store, err := connectoragentstate.NewSDKStore(stateDir, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = store.Close() }()
-	sdk, err := store.Handoff()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sdk.SaveAgentState(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
 }

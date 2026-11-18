@@ -606,7 +606,7 @@ jobs:
             $source = (Resolve-Path '.connector-preview').Path
             & go mod edit "-modfile=$modfile" "-replace=github.com/layervai/qurl-connector=$source"
             if ($LASTEXITCODE -ne 0) { throw 'test-only Connector replacement failed' }
-            $testName = 'TestWindowsNodeSupervisedCredentialAndWarmLogin'
+            $testName = 'TestWindowsNodeSupervisedColdAndWarmLogin'
             & go test "-modfile=$modfile" -tags=connectorpreview -count=1 -json -run "^${testName}$" ./apps/cli/cmd |
               Tee-Object -FilePath $eventsPath
             if ($LASTEXITCODE -ne 0) { throw 'supervised CLI integration failed' }

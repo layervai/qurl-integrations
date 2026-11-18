@@ -25,7 +25,7 @@ func TestWindowsConnectorPreviewCannotReplaceTheShippingDependency(t *testing.T)
 	if check.If != "runner.os == 'Windows'" || check.Shell != "pwsh" || check.ContinueOnError != nil {
 		t.Fatal("Connector preview must be a mandatory native Windows check")
 	}
-	for _, required := range []string{"-modfile=$modfile", "-tags=connectorpreview", "TestWindowsNodeSupervisedCredentialAndWarmLogin", "$passed.Count -ne 1", "$skipped.Count -ne 0", "git diff --exit-code -- go.mod go.sum"} {
+	for _, required := range []string{"-modfile=$modfile", "-tags=connectorpreview", "TestWindowsNodeSupervisedColdAndWarmLogin", "$passed.Count -ne 1", "$skipped.Count -ne 0", "git diff --exit-code -- go.mod go.sum"} {
 		if !strings.Contains(check.Run, required) {
 			t.Errorf("source-only integration is missing %q", required)
 		}
