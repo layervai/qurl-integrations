@@ -1,3 +1,5 @@
+//go:build unix || (windows && connectorpreview)
+
 package main
 
 import (
