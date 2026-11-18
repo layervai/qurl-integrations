@@ -7,7 +7,7 @@ approval. It runs two static pages with Python's built-in HTTP server.
 
 ## Before you start
 
-Use Python 3 and the [qURL CLI](../../apps/cli/README.md#install), version 4.4.3
+Use Python 3.7 or later and the [qURL CLI](../../apps/cli/README.md#install), version 4.4.3
 or later, on the publisher computer. The reviewer needs a browser and a passkey.
 No qURL publisher account, API key, deployment or DNS setup is needed.
 
@@ -20,7 +20,7 @@ security controls when you later share it. This fixture has no application login
 From the repository root, run:
 
 ```sh
-python3 -u -m http.server 8765 --bind 127.0.0.1 --directory examples/approval-first/site
+python3 -u -m http.server 8765 --bind 127.0.0.1 --directory docs/approval-first-demo/site
 ```
 
 Keep this terminal visible. It logs each HTTP request. Do not open the app
@@ -36,7 +36,11 @@ each run; wait at least a second before repeating it:
 qurl publish http://127.0.0.1:8765 --id "approval-demo-$(date +%s)" --name "Private app review" --allow-requests --foreground -o json
 ```
 
-Keep this terminal running. Before sending its `resource_url`, check the JSON:
+On Windows, choose a new local ID instead of the `$(date +%s)` expression.
+
+Keep this terminal running. Note the returned JSON `crid` value: use it for
+`CRID` in the approval and deletion commands below. Before sending its
+`resource_url`, check the JSON:
 `private` must be `true`, `found_existing` must be `false`, and
 `access_requests` must be `true`. Otherwise stop and inspect the resource;
 do not send the link or delete a resource from an earlier review.
@@ -68,15 +72,16 @@ the real log rather than assuming there must be exactly two.
 When the review ends, delete this demo's resource before stopping or reusing the
 app port. Replace `CRID` with the resource created above:
 
+`--yes` confirms permanent deletion of this owned resource without another prompt.
+Deletion cannot be undone.
+
 ```sh
 qurl delete CRID --yes
 ```
 
 Check deletion succeeds. `qurl get CRID --file -` should then fail with
 `Resource Revoked`, rather than return the app. Then stop the publisher and Python
-server with Ctrl+C.
-`--yes` confirms deletion of that owned resource without another prompt; deletion
-cannot be undone. If it fails, report cleanup as unconfirmed and resolve it.
+server with Ctrl+C. If deletion fails, report cleanup as unconfirmed and resolve it.
 
 This checks HTTP requests for these two pages, rather than every app or network
 packet. Python serves only loopback here; qURL does not close other tunnels you

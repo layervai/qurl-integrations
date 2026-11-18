@@ -271,6 +271,10 @@ Use limits depend on the link and issuing workflow. A link is an access
 credential, so share it privately. It does not replace your app's login or
 prove a recipient's identity merely because you sent it to a named person.
 
+## Try a private review
+
+[Watch the app request log before and after reviewer approval](docs/approval-first-demo/README.md) with a small Python-served demo.
+
 ## Structure
 
 ```
@@ -306,10 +310,6 @@ Language SDKs and the qURL MCP server live in standalone repositories:
 | TypeScript SDK | `npm install @layervai/qurl` | [layervai/qurl-typescript](https://github.com/layervai/qurl-typescript) |
 | Go SDK | `go get github.com/layervai/qurl-go/qurl` | [layervai/qurl-go](https://github.com/layervai/qurl-go) |
 | MCP server | `npx @layervai/qurl-mcp` | [layervai/qurl-mcp](https://github.com/layervai/qurl-mcp) |
-
-## Try a private review
-
-[Watch the app request log before and after reviewer approval](examples/approval-first/README.md) with a small Python-served demo.
 
 ## Configuration
 
