@@ -1,9 +1,12 @@
 # Private DDEV review with qURL
 
-qURL™ checks the reviewer's identity before connecting them to the app. This
-workflow uses DDEV's loopback HTTP port and a private request address.
-The reviewer asks for access in their browser. Give access only after the
-reviewer gives you their displayed code through a conversation you trust.
+Identity first, then connection. qURL™ uses cryptographic invisibility to keep
+the app unreachable through qURL until you approve the reviewer. OpenNHP is
+its core protocol. Your app stays on its loopback HTTP port; no public inbound
+app port, qURL account or domain setup is needed.
+
+The reviewer asks for access in their browser. Give access only after they
+give you their displayed code through a conversation you trust.
 
 ## Review an app with the released DDEV
 
