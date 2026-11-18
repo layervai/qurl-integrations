@@ -14,6 +14,7 @@
 Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-python](https://github.com/layervai/qurl-python), [qurl-typescript](https://github.com/layervai/qurl-typescript).
 
 - `apps/slack/`, `apps/cli/` — Go (`cmd/` + `internal/`)
+- `apps/ddev/` — DDEV share-provider add-on (Python 3 standard library and a Bash launcher; no release track)
 - `apps/discord/` — Node.js (CommonJS, `src/*.js`)
 - `apps/chrome-extension/` — shared Chrome and Edge MV3 extension source
 - `apps/edge-extension/` — Edge version and store documents

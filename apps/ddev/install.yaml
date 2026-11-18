@@ -1,0 +1,17 @@
+name: qurl
+# shortcut: release is held for DDEV 9139; add its released minimum version before publication.
+project_files:
+  - share-providers/qurl.sh
+  - share-providers/qurl.py
+pre_install_actions:
+  - |
+    case "$(uname -s)" in
+      Linux|Darwin) ;;
+      *) echo "This add-on requires Linux or macOS." >&2; exit 1 ;;
+    esac
+    command -v qurl >/dev/null && command -v python3 >/dev/null || {
+      echo "Install qURL CLI 4.4.3 or later and Python 3 before this add-on." >&2
+      exit 1
+    }
+post_install_actions:
+  - chmod +x share-providers/qurl.sh

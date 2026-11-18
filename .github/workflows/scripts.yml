@@ -81,6 +81,14 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: python3 scripts/test-cli-production-proof.py
 
+      - name: Lint DDEV share provider
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: shellcheck apps/ddev/share-providers/qurl.sh
+
+      - name: Test DDEV share provider
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 -m unittest discover -s apps/ddev -v
+
       # The pruner deletes draft releases, which cannot be undone, and runs
       # only after a CLI release is published. Its selection rules and its
       # refusals are exercised here because nothing else runs it before then.

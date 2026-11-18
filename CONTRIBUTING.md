@@ -37,6 +37,7 @@ apps/
   chrome-extension/  # Shared Chrome and Edge MV3 extension source
   edge-extension/    # Edge version and store documents
   cli/               # CLI tool
+  ddev/              # Private DDEV share provider (Python 3 standard library)
   teams/             # Microsoft Teams OAuth core (TypeScript, not yet shipped)
 origins/
   s3-static-connector/ # Reusable private S3 static origin image
