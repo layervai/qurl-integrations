@@ -210,6 +210,20 @@ func publishSettingsDiffer(res *qurlapi.Published) *bool {
 // PublishLinkFailure reports the resource that exists when its link failed.
 // Outside JSON mode this writes nothing; stderr remains the failure diagnostic.
 func (p *Printer) PublishLinkFailure(res *qurlapi.Published) error {
+	return p.publishFailure(res, "link_creation_failed")
+}
+
+// PublishSetupFailure names a confirmed resource without claiming it serves.
+// TODO(upstream-contract): Keep publication_setup_failed in sync with Desktop recovery.
+func (p *Printer) PublishSetupFailure(res *qurlapi.Published) error {
+	if p.format != FormatJSON {
+		p.Warnf("The resource exists. Check it with `qurl status %s` before retrying.", res.CRID)
+		return nil
+	}
+	return p.publishFailure(res, "publication_setup_failed")
+}
+
+func (p *Printer) publishFailure(res *qurlapi.Published, reason string) error {
 	if p.format != FormatJSON {
 		return nil
 	}
@@ -220,7 +234,7 @@ func (p *Printer) PublishLinkFailure(res *qurlapi.Published) error {
 		Private        *bool  `json:"private,omitempty"`
 		FoundExisting  *bool  `json:"found_existing,omitempty"`
 		SettingsDiffer bool   `json:"settings_differ"`
-	}{CRID: res.CRID, ResourceID: res.ResourceID, Error: "link_creation_failed", Private: res.Private, FoundExisting: res.FoundExisting, SettingsDiffer: res.OtherSettings})
+	}{CRID: res.CRID, ResourceID: res.ResourceID, Error: reason, Private: res.Private, FoundExisting: res.FoundExisting, SettingsDiffer: res.OtherSettings})
 }
 
 // Publish renders a publish result. Text mode says in one row who can open
