@@ -307,6 +307,10 @@ Language SDKs and the qURL MCP server live in standalone repositories:
 | Go SDK | `go get github.com/layervai/qurl-go/qurl` | [layervai/qurl-go](https://github.com/layervai/qurl-go) |
 | MCP server | `npx @layervai/qurl-mcp` | [layervai/qurl-mcp](https://github.com/layervai/qurl-mcp) |
 
+## Try a private review
+
+[Watch the app request log before and after reviewer approval](examples/approval-first/README.md) with a small Python-served demo.
+
 ## Configuration
 
 The Slack, Discord, and CLI apps connect to the qURL API:
