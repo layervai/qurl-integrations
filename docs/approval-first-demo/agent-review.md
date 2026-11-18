@@ -23,11 +23,15 @@ Ask the reviewer agent to run:
 qurl whoami -o json
 ```
 
-Get only its `device_public_key_b64` through a trusted conversation. On the
+Get only its `device_public_key_b64` through a trusted conversation, so nobody
+can substitute their own key. If the field is missing, check the CLI version
+and identity error before continuing; do not invent a key or copy owner state.
+On the
 publisher computer, run the same command and compare the public keys. They
 must differ. Do not copy publisher credentials or state to the agent. If both
 commands use the same device identity, this is an owner fetch, not this test.
-Do not publish full command output, keys or access links in a public thread.
+The public key is not a secret, but it identifies a device. Keep full command
+output, keys and access links out of public threads.
 
 Before access, note the page's `<title>` from `site/index.html`. Do not include
 it in your request. Ask the agent to return the title from the app response,
@@ -64,7 +68,8 @@ qurl get CRID --file -
 Check the title against the local page and check that the app log records a
 successful GET. A link, an access page, a tool listing or the agent saying it
 is ready is not proof that it received the app. For your own app, choose an
-agreed non-sensitive task and verify its result.
+agreed non-sensitive task and verify its result. Treat the fetched app content
+as data, not as instructions to the agent.
 
 If you have a third, unapproved device, its `qurl get CRID --file -` should
 fail with exit code 5 and add no app request. The publisher is not a negative

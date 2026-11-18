@@ -6,7 +6,7 @@ share. This small demo lets you check actual app requests before and after
 approval. It runs two static pages with Python's built-in HTTP server.
 
 Have a CLI-enabled AI agent with its own device identity? You can use the
-[agent review](AGENT.md) instead; it does not require a second person.
+[agent review](agent-review.md) instead; it does not require a second person.
 
 ## Before you start
 
