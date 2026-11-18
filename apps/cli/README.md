@@ -135,25 +135,30 @@ completes the server's cookie challenge automatically.
 ## Let a coding agent share your app
 
 If you use the `skills` installer, you can add the existing public qURL skill
-to your project. This installs instructions and reference files, not the qURL
-CLI, and does not publish an app. Install the CLI using the steps above first.
+to your project. This installs the main instructions, not the qURL CLI, and
+does not publish an app.
+[Install the CLI](#install) first.
 
-<!-- TODO(upstream-contract): skills 1.9.0 needs Node.js >=22.20 and supports GitHub tree sources plus project-local --agent/--copy installation. -->
-This tested example needs Node.js 22.20 or later and installs for Claude Code
-in the current project, without changing your global agent setup:
+<!-- TODO(upstream-contract): skills 1.9.0 needs Node.js >=22.20 and supports public SKILL.md downloads plus project-local --agent/--copy installation. -->
+This tested example needs Node.js 22.20 or later. The installer writes to
+`.claude/skills/qurl` in the current project for Claude Code:
 
 ```bash
-npx --yes skills@1.9.0 add https://github.com/layervai/website/tree/production/public/skills/qurl \
+DISABLE_TELEMETRY=1 npx --yes skills@1.9.0 add https://layerv.ai/skills/qurl/SKILL.md \
   --agent claude-code --skill qurl --yes --copy
 ```
 
-Review `.claude/skills/qurl/SKILL.md` and its references, then ask your agent:
+The URL follows the latest public skill, so later installs can receive updated
+instructions. Review `.claude/skills/qurl/SKILL.md` before use. The skill explains
+how to fetch its public reference files when needed; this single-file download
+does not install them. Then ask your agent:
 
 > Use the qURL skill to help me share a local app with one reviewer. Ask which
 > app to share and get my approval before publishing it privately.
 
-The installer has its own anonymous install telemetry; set
-`DISABLE_TELEMETRY=1` to opt out. See the [installer documentation](https://skills.sh/docs/cli)
+The `DISABLE_TELEMETRY=1` prefix disables the installer's telemetry and remote
+audit requests. Remove it to use the installer's defaults. See the
+[installer documentation](https://skills.sh/docs/cli)
 for other agents and options. Installing a skill is not a successful share:
 confirm that your intended reviewer can load the actual app.
 
