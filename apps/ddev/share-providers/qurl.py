@@ -65,6 +65,8 @@ def main():
             else:
                 raise TimeoutError("qURL did not publish within 45 seconds")
             crid = new_crid(document)
+            if "error" in document:
+                raise RuntimeError("qURL reported a failed publication; no review address is available")
             address = document.get("resource_url")
             if not crid or document.get("private") is not True or document.get("access_requests") is not True:
                 raise ValueError("qURL did not confirm a new private request-enabled resource")

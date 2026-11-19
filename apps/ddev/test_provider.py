@@ -17,6 +17,7 @@ with open(os.environ['QURL_STUB_LOG'], 'a') as f:
     f.write(json.dumps(sys.argv[1:]) + '\n')
 if sys.argv[1] == 'publish':
     print(os.environ['QURL_STUB_DOCUMENT'], flush=True)
+    if os.environ.get('QURL_STUB_PUBLISH_EXIT'): sys.exit(int(os.environ['QURL_STUB_PUBLISH_EXIT']))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     while True: time.sleep(.1)
 elif sys.argv[1] == 'delete':
@@ -85,6 +86,36 @@ class ProviderTests(unittest.TestCase):
 
     def test_unexpected_address_is_removed_without_advertising(self):
         self.document["resource_url"] = "https://example.com/"
+        proc = self.start()
+        out, _ = proc.communicate(timeout=5)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(out, "")
+        self.assertEqual(self.calls()[-1], ["delete", CRID, "--yes"])
+
+    def test_setup_failure_receipt_preserves_existing_or_unknown_resources(self):
+        for found_existing in (False, True, None):
+            with self.subTest(found_existing=found_existing):
+                self.log.write_text("")
+                self.document = {"crid": CRID, "resource_id": "fixture-public-key",
+                                 "error": "publication_setup_failed", "private": True,
+                                 "settings_differ": False}
+                if found_existing is not None:
+                    self.document["found_existing"] = found_existing
+                self.env["QURL_STUB_PUBLISH_EXIT"] = "1"
+                proc = self.start()
+                out, err = proc.communicate(timeout=5)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertEqual(out, "", "a failed setup must never advertise a share")
+                self.assertNotIn("qurl approve", err)
+                if found_existing is False:
+                    self.assertEqual(len(self.calls()), 2)
+                    self.assertEqual(self.calls()[-1], ["delete", CRID, "--yes"])
+                else:
+                    self.assertEqual(len(self.calls()), 1, "never delete existing or unknown resources")
+
+    def test_failure_document_with_address_is_never_advertised(self):
+        self.document["error"] = "publication_setup_failed"
+        self.env["QURL_STUB_PUBLISH_EXIT"] = "1"
         proc = self.start()
         out, _ = proc.communicate(timeout=5)
         self.assertNotEqual(proc.returncode, 0)
