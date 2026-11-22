@@ -12,10 +12,11 @@ import (
 // ErrSignedIdentityUnsupported refuses an older service that does not report the setting.
 var ErrSignedIdentityUnsupported = &resourceSettingUnconfirmedError{message: "this service does not report signed identity support"}
 
+// SetSignedIdentity changes only the owner's saved identity requirement, without replay.
+//
 // TODO(upstream-contract): PATCH signed_identity returns 200 with a flat data resource
 // row and the confirmed boolean. GET returns it under data.resource. Keep these
 // fields, issuer/JWKS profile and README verification limits in sync with qurl-service.
-// SetSignedIdentity changes only the owner's saved identity requirement, without replay.
 func (c *client) SetSignedIdentity(ctx context.Context, id string, enabled bool) (*ResourceSummary, error) {
 	id, path, err := deviceGrantsPath(id)
 	if err != nil {
@@ -40,7 +41,7 @@ func (c *client) SetSignedIdentity(ctx context.Context, id string, enabled bool)
 		return nil, err
 	}
 	if env.Data.SignedIdentity == nil || *env.Data.SignedIdentity != enabled {
-		return nil, &resourceSettingUnconfirmedError{message: fmt.Sprintf("the service did not confirm the signed identity setting; run qurl identity status %s", id)}
+		return nil, &resourceSettingUnconfirmedError{message: "the service did not confirm the signed identity setting; run qurl identity status " + id}
 	}
 	return summarizeResourceRow(&env.Data, "signed identity change")
 }

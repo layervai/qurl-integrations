@@ -6,6 +6,11 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
 
+const (
+	identityActionEnable = "enable"
+	identityActionStatus = "status"
+)
+
 func identityCmd(opts *globalOpts) *cobra.Command {
 	root := &cobra.Command{
 		Use: "identity", Short: "Require signed consumer identity at your app origin",
@@ -20,8 +25,8 @@ refuse requests. Issued assertions remain valid until their short expiry.
 Your app still controls its own permissions.`,
 		Example: "  qurl identity enable <CRID>\n  qurl identity status <CRID>\n  qurl identity disable <CRID>",
 	}
-	shorts := map[string]string{"enable": "Require signed identity for a resource", "disable": "Stop sending signed identity for a resource", "status": "Show whether a resource requires signed identity"}
-	for _, action := range []string{"enable", "disable", "status"} {
+	shorts := map[string]string{identityActionEnable: "Require signed identity for a resource", "disable": "Stop sending signed identity for a resource", identityActionStatus: "Show whether a resource requires signed identity"}
+	for _, action := range []string{identityActionEnable, "disable", identityActionStatus} {
 		root.AddCommand(&cobra.Command{
 			Use: action + " <CRID>", Short: shorts[action], Long: root.Long, Args: exactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
@@ -29,7 +34,7 @@ Your app still controls its own permissions.`,
 				if err != nil {
 					return err
 				}
-				if action == "status" {
+				if action == identityActionStatus {
 					resource, err := client.Resource(cmd.Context(), args[0])
 					if err != nil {
 						return err
@@ -39,7 +44,7 @@ Your app still controls its own permissions.`,
 					}
 					return opts.printer().SignedIdentity(resource)
 				}
-				resource, err := client.SetSignedIdentity(cmd.Context(), args[0], action == "enable")
+				resource, err := client.SetSignedIdentity(cmd.Context(), args[0], action == identityActionEnable)
 				if err != nil {
 					return err
 				}
