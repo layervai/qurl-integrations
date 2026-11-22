@@ -31,7 +31,6 @@ const schemeHTTPS = "https"
 
 // Client is what commands program against.
 type Client interface {
-	SetSignedIdentity(ctx context.Context, id string, enabled bool) (*ResourceSummary, error)
 	AccessRules() accessrules.Remote
 	ConsumerManagement() ConsumerManagementClient
 	// PublisherStripe is part of Client so the registered wrapper keeps it.
@@ -123,6 +122,8 @@ type Client interface {
 	// or removes it when header is nil, and returns the resource as the
 	// service confirmed it. The answer names the header, never its value.
 	SetOriginHeader(ctx context.Context, id string, header *OriginHeader) (*ResourceSummary, error)
+	// SetSignedIdentity changes the saved app identity requirement, without replay.
+	SetSignedIdentity(ctx context.Context, id string, enabled bool) (*ResourceSummary, error)
 }
 
 // AccountClient adds the one account-authorized bootstrap operation. The CLI

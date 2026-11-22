@@ -31,6 +31,7 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
+	// TODO(upstream-contract): signed_identity is the owner setting; absent means an older reader.
 	SignedIdentity        *bool               `json:"signed_identity"`
 	ConsumerAccess        *consumerPolicyWire `json:"consumer_access,omitempty"`
 	ConsumerAccessVersion int64               `json:"consumer_access_version"`

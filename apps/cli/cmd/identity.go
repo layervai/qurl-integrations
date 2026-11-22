@@ -1,9 +1,9 @@
 package main
 
 import (
-	"errors"
-
 	"github.com/spf13/cobra"
+
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
 
 func identityCmd(opts *globalOpts) *cobra.Command {
@@ -20,9 +20,10 @@ refuse requests. Issued assertions remain valid until their short expiry.
 Your app still controls its own permissions.`,
 		Example: "  qurl identity enable <CRID>\n  qurl identity status <CRID>\n  qurl identity disable <CRID>",
 	}
+	shorts := map[string]string{"enable": "Require signed identity for a resource", "disable": "Stop sending signed identity for a resource", "status": "Show whether a resource requires signed identity"}
 	for _, action := range []string{"enable", "disable", "status"} {
 		root.AddCommand(&cobra.Command{
-			Use: action + " <CRID>", Short: action + " signed app identity", Args: exactArgs(1),
+			Use: action + " <CRID>", Short: shorts[action], Long: root.Long, Args: exactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				client, err := opts.newClient(cmd.Context())
 				if err != nil {
@@ -34,7 +35,7 @@ Your app still controls its own permissions.`,
 						return err
 					}
 					if resource.SignedIdentity == nil {
-						return errors.New("this service does not report signed identity support")
+						return qurlapi.ErrSignedIdentityUnsupported
 					}
 					return opts.printer().SignedIdentity(resource)
 				}

@@ -41,7 +41,10 @@ func TestSignedIdentityRefusesMissingOrWrongConfirmation(t *testing.T) {
 	for _, kind := range []string{"missing", "wrong", "wrong resource", "unavailable"} {
 		t.Run(kind, func(t *testing.T) {
 			srv := apitest.NewServer(t)
+			other := apitest.GenerateResourceKey(t)
+			calls := 0
 			srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				calls++
 				if kind == "unavailable" {
 					http.Error(w, "unavailable", http.StatusServiceUnavailable)
 					return
@@ -51,11 +54,15 @@ func TestSignedIdentityRefusesMissingOrWrongConfirmation(t *testing.T) {
 					row["signed_identity"] = kind != "wrong"
 				}
 				if kind == "wrong resource" {
-					row["crid"] = "invalid"
+					row["crid"] = other.CRID
+					row["resource_id"] = other.ResourceID
 				}
 				apitest.WriteEnvelope(t, w, http.StatusOK, row, nil)
 			})
 			res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "identity", "enable", srv.Key.CRID}})
+			if calls != 1 {
+				t.Fatalf("requests=%d; want one", calls)
+			}
 			if res.code == 0 || res.stdout.Len() != 0 {
 				t.Fatalf("claimed success: %s", res.stdout.String())
 			}
