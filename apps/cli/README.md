@@ -2235,10 +2235,12 @@ qurl --endpoint https://api.layerv.xyz publish https://your-app.example.com \
 CRID='your-crid'
 qurl --endpoint https://api.layerv.xyz identity enable "$CRID"
 qurl --endpoint https://api.layerv.xyz identity status "$CRID"
-qurl --endpoint https://api.layerv.xyz share "$CRID"
+printf 'https://qurl.link.layerv.xyz/%s\n' "$CRID"
 ```
 
-The visitor opens the link and completes email verification. qURL sends a fresh,
+Share the printed CRID address. It opens the existing email-access page;
+`qurl share` creates device-authorized links and does not bypass consumer access.
+The visitor opens the address and completes email verification. qURL sends a fresh,
 short-lived signed JWT on each authorized app request, including static assets.
 Email is included only with verified mailbox control and disclosure consent.
 
