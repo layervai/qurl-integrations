@@ -31,6 +31,7 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
+	SignedIdentity        *bool               `json:"signed_identity"`
 	ConsumerAccess        *consumerPolicyWire `json:"consumer_access,omitempty"`
 	ConsumerAccessVersion int64               `json:"consumer_access_version"`
 
@@ -769,6 +770,7 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		CreatedAt: knownTime(row.CreatedAt), ExpiresAt: knownTime(row.ExpiresAt),
 		Publisher:        row.Publisher.publisher(),
 		OriginHeaderName: row.OriginHeaderName,
+		SignedIdentity:   row.SignedIdentity,
 	}, nil
 }
 

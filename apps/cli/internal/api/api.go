@@ -31,6 +31,7 @@ const schemeHTTPS = "https"
 
 // Client is what commands program against.
 type Client interface {
+	SetSignedIdentity(ctx context.Context, id string, enabled bool) (*ResourceSummary, error)
 	AccessRules() accessrules.Remote
 	ConsumerManagement() ConsumerManagementClient
 	// PublisherStripe is part of Client so the registered wrapper keeps it.
@@ -338,6 +339,7 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
+	SignedIdentity        *bool
 	CreditPrice           int64
 	ConsumerAccess        *qurl.ConsumerAccessPolicy
 	ConsumerAccessVersion int64
