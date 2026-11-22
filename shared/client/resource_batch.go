@@ -16,6 +16,9 @@ import (
 // metadata, and 200 data:[] for unknown/foreign IDs; no qURL history or counts.
 const ResourceBatchGetMaxIDs = 100
 
+// ResourceBatchGetMaxIDBytes mirrors the producer's per-ID byte limit.
+const ResourceBatchGetMaxIDBytes = 214
+
 // BatchGetResources reads metadata by resource_id public keys, without qURL history.
 func (c *Client) BatchGetResources(ctx context.Context, ids []string) ([]Resource, error) {
 	if len(ids) == 0 || len(ids) > ResourceBatchGetMaxIDs {
@@ -23,8 +26,8 @@ func (c *Client) BatchGetResources(ctx context.Context, ids []string) ([]Resourc
 	}
 	requested := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
-		if id == "" || strings.TrimSpace(id) != id {
-			return nil, errors.New("resource metadata lookup has an empty or padded ID")
+		if id == "" || strings.TrimSpace(id) != id || len(id) > ResourceBatchGetMaxIDBytes {
+			return nil, errors.New("resource metadata lookup has an empty, padded, or oversized ID")
 		}
 		if _, duplicate := requested[id]; duplicate {
 			return nil, errors.New("resource metadata lookup has a duplicate ID")

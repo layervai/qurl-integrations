@@ -642,8 +642,19 @@ func (h *Handler) fetchAllowedResources(ctx context.Context, log *slog.Logger, c
 		return []client.Resource{}, nil
 	}
 	ids := make([]string, 0, len(allowed))
+	invalid := 0
 	for id := range allowed {
+		if id == "" || strings.TrimSpace(id) != id || len(id) > client.ResourceBatchGetMaxIDBytes {
+			invalid++
+			continue
+		}
 		ids = append(ids, id)
+	}
+	if invalid > 0 {
+		log.Warn("list: ignored malformed stored resource bindings", "count", invalid)
+	}
+	if len(ids) == 0 {
+		return []client.Resource{}, nil
 	}
 	sort.Strings(ids)
 	firstEnd := min(len(ids), client.ResourceBatchGetMaxIDs)
@@ -653,7 +664,7 @@ func (h *Handler) fetchAllowedResources(ctx context.Context, log *slog.Logger, c
 		// TODO(upstream-contract): batch-get returns 200 [] for missing IDs;
 		// only absent routes use 404/405. Auth and store errors fail closed.
 		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusMethodNotAllowed) {
-			log.Debug("list: metadata route unavailable; using bounded catalog lookup", "status", apiErr.StatusCode)
+			log.Warn("list: metadata route unavailable; using bounded catalog lookup", "status", apiErr.StatusCode)
 			return h.fetchAllowedResourcesLegacy(ctx, log, c, allowed)
 		}
 		return nil, err
@@ -693,7 +704,7 @@ launch:
 	for _, resources := range results {
 		matched = append(matched, resources...)
 	}
-	log.Debug("list: resource metadata lookup complete", "requested", len(ids), "returned", len(matched))
+	log.Info("list: resource metadata lookup complete", "requested", len(ids), "returned", len(matched), "batches", batches)
 	return filterListableResources(matched), nil
 }
 

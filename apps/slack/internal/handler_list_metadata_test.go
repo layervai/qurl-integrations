@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -70,6 +71,45 @@ func TestHandleListMetadataGhostDoesNotScanOrPrune(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, after) || metadataHits.Load() != 2 || catalogHits.Load() != 0 {
 		t.Fatalf("bindings changed or scan repeated: metadata=%d catalog=%d", metadataHits.Load(), catalogHits.Load())
+	}
+}
+
+func TestFetchAllowedMetadataPreservesMalformedBindings(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		t.Run(strconv.FormatBool(live), func(t *testing.T) {
+			paddedID := " known "
+			allowed := map[string]struct{}{"": {}, paddedID: {}, strings.Repeat("x", client.ResourceBatchGetMaxIDBytes+1): {}}
+			if live {
+				allowed["known"] = struct{}{}
+			}
+			before := maps.Clone(allowed)
+			hits := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				var body struct {
+					IDs []string `json:"resource_ids"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				if r.URL.Path != "/v1/resources/batch-get" || !reflect.DeepEqual(body.IDs, []string{"known"}) {
+					t.Error("malformed stored binding reached the API")
+				}
+				writeMetadataFixture(t, w, []client.Resource{{ResourceID: "known", Type: client.ResourceTypeTunnel, Slug: "live"}})
+			}))
+			defer server.Close()
+			rows, err := (&Handler{}).fetchAllowedResources(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), client.New(server.URL, "key", client.WithRetry(0)), allowed)
+			if err != nil || !maps.Equal(before, allowed) {
+				t.Fatalf("bindings changed or lookup failed: %v", err)
+			}
+			want := 0
+			if live {
+				want = 1
+			}
+			if hits != want || len(rows) != want {
+				t.Fatalf("requests=%d rows=%d want=%d", hits, len(rows), want)
+			}
+		})
 	}
 }
 

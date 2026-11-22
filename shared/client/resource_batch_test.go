@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -39,7 +40,7 @@ func TestBatchGetResourcesWireAndBoundaries(t *testing.T) {
 	if err != nil || len(got) != 1 {
 		t.Fatalf("result=%v err=%v", got, err)
 	}
-	for _, invalid := range [][]string{nil, {}, {""}, {" x"}, {"x", "x"}, append(ids, "extra")} {
+	for _, invalid := range [][]string{nil, {}, {""}, {" x"}, {strings.Repeat("x", ResourceBatchGetMaxIDBytes+1)}, {"x", "x"}, append(ids, "extra")} {
 		if _, err := c.BatchGetResources(context.Background(), invalid); err == nil {
 			t.Error("invalid input accepted")
 		}
