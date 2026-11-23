@@ -1664,3 +1664,23 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 		}
 	})
 }
+
+func TestCheckAdminRejectsRemovedMembership(t *testing.T) {
+	store := newStore(&stubDDB{
+		getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			item := map[string]ddbtypes.AttributeValue{
+				attrSlackTeamID: stringAttr("T"),
+				attrOwnerID:     stringAttr(testOwnerSlackID),
+			}
+			// An eventual read may still see membership from before removal.
+			if !aws.ToBool(in.ConsistentRead) {
+				item[attrAdminSlackUserIDs] = &ddbtypes.AttributeValueMemberSS{Value: []string{testCallerSlackID}}
+			}
+			return &dynamodb.GetItemOutput{Item: item}, nil
+		},
+	})
+	isAdmin, _, err := store.CheckAdmin(context.Background(), "T", testCallerSlackID)
+	if err != nil || isAdmin {
+		t.Fatalf("removed admin authorized: isAdmin=%v err=%v", isAdmin, err)
+	}
+}

@@ -191,7 +191,7 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 	}
 	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:      aws.String(s.WorkspaceMappingsName),
-		ConsistentRead: aws.Bool(false), // eventual is fine for admin check
+		ConsistentRead: aws.Bool(true), // Authorization must observe removed roles.
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
