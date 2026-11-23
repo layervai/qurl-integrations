@@ -21,6 +21,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacklog"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -1780,7 +1781,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		defer gateCancel()
 		_, ownerID, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
 		if err != nil {
-			slog.Error("/qurl setup: owner check failed", "error", err, "team_id", teamID, "caller_user_id", userID)
+			slog.Error("/qurl setup: owner check failed", "error", err, "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID))
 			respondSlack(w, ":warning: could not verify who connected qURL to this workspace (upstream error; see logs). Try again in a moment.")
 			return
 		}
@@ -1821,7 +1822,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 			// shape guard as admin renders, so a malformed value can't break out of
 			// the mention surface.
 			if slackdata.LooksLikeSlackUserID(ownerID) {
-				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
+				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "owner_user_id", slacklog.ID(ownerID))
 				respondSlack(w, fmt.Sprintf("`/qurl setup <email>` can only be re-run by the person who first connected qURL to this workspace (<@%s>). This stops anyone else from re-pointing it at a different qURL account, so ask them to re-run it. For admin tasks that don't need re-connecting, use the `/qurl-admin` commands.", ownerID))
 				return
 			}
@@ -1835,11 +1836,11 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 			// workspace). Log loudly so the legacy reclaim is grep-able.
 			if setupCmd.mode.Explicit() {
 				flag := setupModeFlag(setupCmd.mode)
-				slog.Warn("/qurl setup: explicit mode refused for shape-bad legacy owner_id — require plain setup reclaim first", "team_id", teamID, "caller_user_id", userID, "mode", string(setupCmd.mode), "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
+				slog.Warn("/qurl setup: explicit mode refused for shape-bad legacy owner_id — require plain setup reclaim first", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "mode", string(setupCmd.mode), "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 				respondSlack(w, fmt.Sprintf("`/qurl setup <email> %s` cannot run until this legacy workspace ownership record is reclaimed. Run `/qurl setup <email>` without `%s` first, then the recorded workspace owner can re-run it.", flag, flag))
 				return
 			}
-			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
+			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 		}
 	}
 	// This is deliberately a minting throttle, not a general slash-command
@@ -1851,7 +1852,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 	// bound.
 	now := h.now()
 	if ok, retry := h.setupLinkRateLimiter.allow(teamID, userID, now); !ok {
-		slog.Info("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
+		slog.Info("/qurl setup: setup-link mint rate limited", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "retry_after", retry.String())
 		retryCommand := "`/qurl setup <email>`"
 		if setupCmd.mode.Explicit() {
 			retryCommand = fmt.Sprintf("`/qurl setup <email> %s`", setupModeFlag(setupCmd.mode))
@@ -1928,7 +1929,7 @@ func (h *Handler) requireUninstallAvailableAndAuthorized(w http.ResponseWriter, 
 	// Any provider that can delete must have AdminStore wired so this
 	// destructive command is owner/admin-gated.
 	if h.cfg.AdminStore == nil {
-		slog.Error("/qurl uninstall: owner gate unavailable for mutable auth provider", "team_id", teamID, "caller_user_id", userID)
+		slog.Error("/qurl uninstall: owner gate unavailable for mutable auth provider", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID))
 		respondUninstallUnavailable(w, uninstallUnavailableOwnerVerification)
 		return "", "", false
 	}
@@ -2015,7 +2016,7 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 		// auth.DDBProvider's clock so the stamp and cutoff share one injectable
 		// clock; tests/fallback providers use the handler clock.
 		purgeCutoff := workspaceStatePurgeCutoff(h.cfg.AuthProvider, h.now)
-		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason, "workspace_ids", ids, "purge_cutoff", purgeCutoff.UTC().Format(time.RFC3339))
+		purgeLog := slog.With("surface", "uninstall", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "reason", reason, "workspace_ids", slacklog.IDs(ids), "purge_cutoff", purgeCutoff.UTC().Format(time.RFC3339))
 		h.Go(func() {
 			baseCtx := h.baseCtx
 			if baseCtx == nil {
@@ -2047,7 +2048,7 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 				// The row's qURL columns were already cleared (concurrent uninstall
 				// / partial row), but this call did revoke the upstream key — report
 				// success, not the contradictory "isn't currently connected".
-				slog.Info("/qurl uninstall: upstream key revoked; local row already cleared", "team_id", teamID, "caller_user_id", userID)
+				slog.Info("/qurl uninstall: upstream key revoked; local row already cleared", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID))
 				schedulePurge("qurl_key_already_cleared_after_revoke")
 				return revokedReply, true
 			}
@@ -2056,12 +2057,12 @@ func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID st
 		case errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported):
 			return uninstallUnsupportedMessage, false
 		default:
-			slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID, "caller_user_id", userID)
+			slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID))
 			return ":warning: could not disconnect qURL from this workspace. Try again in a moment.", false
 		}
 	}
 	schedulePurge("delete_api_key_succeeded")
-	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
+	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "upstream_revoked", revoked)
 	if revoked {
 		return revokedReply, true
 	}
@@ -2099,11 +2100,11 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 		// partial-row-cleanup messaging, so fall through to it.
 		return false, nil
 	case err != nil:
-		slog.Error("/qurl uninstall: could not read stored qURL key id before revoke", "error", err, "team_id", teamID, "caller_user_id", userID)
+		slog.Error("/qurl uninstall: could not read stored qURL key id before revoke", "error", err, "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID))
 		return false, err
 	}
 	if keyID == "" {
-		slog.Warn("/qurl uninstall: legacy workspace row has no qURL key id — local-only disconnect", "team_id", teamID, "caller_user_id", userID)
+		slog.Warn("/qurl uninstall: legacy workspace row has no qURL key id — local-only disconnect", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID))
 		return false, nil
 	}
 
@@ -2119,7 +2120,7 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 			// not-connected authority.
 			return false, nil
 		}
-		slog.Error("/qurl uninstall: could not build client to revoke upstream key", "error", err, "team_id", teamID, "caller_user_id", userID)
+		slog.Error("/qurl uninstall: could not build client to revoke upstream key", "error", err, "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID))
 		return false, err
 	}
 	// For a live key this DELETE always 403s → local-only degrade (by design, see
@@ -2127,7 +2128,7 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 	if err := c.RevokeAPIKey(ctx, keyID); err != nil {
 		return classifyUninstallRevokeError(err, teamID, userID, keyID)
 	}
-	slog.Info("/qurl uninstall: revoked upstream qURL API key", "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
+	slog.Info("/qurl uninstall: revoked upstream qURL API key", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "key_id", keyID)
 	return true, nil
 }
 
@@ -2189,18 +2190,18 @@ func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string)
 	if errors.As(revokeErr, &apiErr) {
 		switch apiErr.StatusCode {
 		case http.StatusNotFound:
-			slog.Info("/qurl uninstall: upstream qURL key already absent — treating as revoked", "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
+			slog.Info("/qurl uninstall: upstream qURL key already absent — treating as revoked", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "key_id", keyID)
 			return true, nil
 		case http.StatusUnauthorized, http.StatusForbidden:
 			// Expected, by-design path: qurl-service forbids API-key self-revoke
 			// (403) and rejects an already-revoked key (401). Warn, not Error —
 			// the `status` field distinguishes the still-live 403 from the
 			// already-dead 401 for operators (see operating.md).
-			slog.Warn("/qurl uninstall: upstream qURL key not revoked — local-only disconnect", "status", apiErr.StatusCode, "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
+			slog.Warn("/qurl uninstall: upstream qURL key not revoked — local-only disconnect", "status", apiErr.StatusCode, "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "key_id", keyID)
 			return false, nil
 		}
 	}
-	slog.Error("/qurl uninstall: upstream qURL key revoke failed — aborting to preserve key id", "error", revokeErr, "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
+	slog.Error("/qurl uninstall: upstream qURL key revoke failed — aborting to preserve key id", "error", revokeErr, "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "key_id", keyID)
 	return false, revokeErr
 }
 
@@ -2252,7 +2253,7 @@ func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, us
 	defer cancel()
 	isAdmin, ownerID, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
 	if err != nil {
-		slog.Error("/qurl uninstall: owner check failed", "error", err, "team_id", teamID, "caller_user_id", userID)
+		slog.Error("/qurl uninstall: owner check failed", "error", err, "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID))
 		respondSlack(w, ":warning: failed to verify who connected qURL to this workspace (upstream error; see logs). Try again in a moment.")
 		return false
 	}
@@ -2264,13 +2265,13 @@ func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, us
 		// Missing or legacy owner metadata should not strand an explicit admin
 		// from this recoverable local disconnect; log it for operator cleanup.
 		if ownerID == "" {
-			slog.Warn("/qurl uninstall: admin allowed with missing owner_id", "team_id", teamID, "caller_user_id", userID)
+			slog.Warn("/qurl uninstall: admin allowed with missing owner_id", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID))
 		} else if !slackdata.LooksLikeSlackUserID(ownerID) {
-			slog.Warn("/qurl uninstall: admin allowed with shape-bad owner_id", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
+			slog.Warn("/qurl uninstall: admin allowed with shape-bad owner_id", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "owner_id_len", len(ownerID))
 		}
 		return true
 	}
-	slog.Warn("/qurl uninstall: non-admin denied", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
+	slog.Warn("/qurl uninstall: non-admin denied", "team_id", slacklog.ID(teamID), "caller_user_id", slacklog.ID(userID), "owner_id_len", len(ownerID))
 	respondSlack(w, "`/qurl uninstall` can only be run by a qURL workspace admin or by the person who connected qURL to this workspace.")
 	return false
 }
@@ -2603,6 +2604,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		}
 		lines = append(lines,
 			"• `/qurl get <$id|$alias> reason:\"…\"` — Create a qURL, recording a reason in the audit log",
+			"• `/qurl get <$id|$alias> rule:\"…\"` — Create a qURL with an access rule: `Anyone with the link`, `One-time link`, or a rule saved on this workspace's qURL account",
 			"• `/qurl crid <CRID>` — Create a qURL for a resource in this channel by its CRID (same flags as `/qurl get`)",
 		)
 	}
