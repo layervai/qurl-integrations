@@ -84,6 +84,9 @@ func qurlBackendServer(t *testing.T) *httptest.Server {
 			if input.Alias != "" {
 				t.Errorf("agent URL upsert must not send a resource alias; Slack binds the channel alias separately, got %q", input.Alias)
 			}
+			if input.Name == "" {
+				t.Errorf("agent URL upsert must send the channel alias as the public name")
+			}
 			respondQURLEnvelope(t, w, map[string]any{
 				testKeyResourceID: testAgentCreatedURLResourceID,
 				testKeyTargetURL:  input.TargetURL,
