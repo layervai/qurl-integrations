@@ -98,7 +98,8 @@ invalidate the links from any previous send.
 
 ## Child revocation rollout
 
-This release upgrades `@layervai/qurl` from 0.6.x to 2.x. Detect uses CRIDs
+This release uses `@layervai/qurl` 4.3.1. Native detect completes the NHP
+cookie proof instead of treating its first challenge as platform busy. It uses CRIDs
 and binds the signed link to the expected CRID. The image omits the optional
 native state store; the bot does not use producer state.
 
