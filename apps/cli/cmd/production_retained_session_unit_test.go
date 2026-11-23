@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type retainedSessionRoundTrip func(*http.Request) (*http.Response, error)
@@ -89,6 +90,76 @@ func TestProductionRetainedSessionUsesOriginalCapability(t *testing.T) {
 	cookie, err := request.Cookie("qurl_vsession")
 	if err != nil || cookie.Value != "original-capability" {
 		t.Fatal("saved request changed")
+	}
+}
+
+func TestProductionRetainedSessionReadinessKeepsOriginalGrant(t *testing.T) {
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/original", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability"})
+	calls := 0
+	transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
+		calls++
+		cookie, cookieErr := r.Cookie("qurl_vsession")
+		if cookieErr != nil || cookie.Value != "original-capability" || r.URL.String() != request.URL.String() {
+			t.Fatal("readiness changed the original request authority")
+		}
+		if calls == 1 {
+			return nil, io.EOF
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Set-Cookie": []string{"qurl_vsession=replacement"}}, Body: io.NopCloser(strings.NewReader("marker")), Request: r}, nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := productionWaitRetainedSession(ctx, request, "marker", transport); err != nil || calls != 2 {
+		t.Fatalf("same-grant readiness = %v, calls = %d", err, calls)
+	}
+}
+
+func TestProductionRetainedSessionReadinessDoesNotRetryResponses(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"refusal", http.StatusForbidden, "private"},
+		{"redirect", http.StatusFound, "private"},
+		{"wrong content", http.StatusOK, "wrong"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/original", http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: test.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(test.body)), Request: r}, nil
+			})
+			if err := productionWaitRetainedSession(t.Context(), request, "marker", transport); err == nil || calls != 1 {
+				t.Fatalf("response was accepted or retried: error = %v, calls = %d", err, calls)
+			}
+		})
+	}
+}
+
+func TestProductionRetainedSessionReadinessStopsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://fixture.invalid/original", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	transport := retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) {
+		calls++
+		cancel()
+		return nil, io.EOF
+	})
+	if err := productionWaitRetainedSession(ctx, request, "marker", transport); !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("cancelled readiness = %v, calls = %d", err, calls)
 	}
 }
 

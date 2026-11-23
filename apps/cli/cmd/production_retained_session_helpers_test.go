@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,23 @@ import (
 	"net/url"
 	"time"
 )
+
+var errRetainedSessionTransport = errors.New("retained production session request failed")
+
+// A current tunnel registration can take up to five seconds to replace a cached route.
+func productionWaitRetainedSession(ctx context.Context, original *http.Request, marker string, transport http.RoundTripper) error {
+	for {
+		err := productionRetainedSessionFetch(original.Clone(ctx), marker, transport)
+		if !errors.Is(err, errRetainedSessionTransport) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
 
 // productionRetainedSessionFetch reuses an already authorized request. It has
 // no opener, resolver, cookie jar, or redirect path that can replace its grant.
@@ -35,7 +53,7 @@ func productionRetainedSessionFetch(original *http.Request, marker string, trans
 		if errors.As(err, &requestError) {
 			err = requestError.Err
 		}
-		return fmt.Errorf("retained production session request failed (%T)", err)
+		return fmt.Errorf("%w (%T)", errRetainedSessionTransport, err)
 	}
 	defer func() {
 		if err := response.Body.Close(); err != nil && resultErr == nil {

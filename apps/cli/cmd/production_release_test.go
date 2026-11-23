@@ -176,7 +176,14 @@ func TestProductionReleaseJourney(t *testing.T) {
 						t.Fatal("original production session expired before the continuity assertion")
 					}
 					before := hits.Load()
-					retainedErr := productionRetainedSessionFetch(oldRequest, marker, nil)
+					var retainedErr error
+					if command == "start" {
+						readyCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+						retainedErr = productionWaitRetainedSession(readyCtx, oldRequest, marker, nil)
+						cancel()
+					} else {
+						retainedErr = productionRetainedSessionFetch(oldRequest, marker, nil)
+					}
 					if !time.Now().Before(oldSessionDeadline) {
 						t.Fatal("original production session expired during the continuity assertion")
 					}
