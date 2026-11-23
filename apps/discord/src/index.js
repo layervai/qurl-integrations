@@ -639,6 +639,7 @@ let httpServer = null;
 let gatewayHeartbeatTimer = null;
 let activeGuildCountTimer = null;
 let isShuttingDown = false;
+let identifyFatalRequested = false;
 
 async function gracefulShutdownTeardown({
   awaitControlChannelServer = true,
@@ -754,6 +755,7 @@ async function gracefulShutdown(code = 0, {
 } = {}) {
   return runGracefulShutdown({
     code,
+    isFatalRequested: () => identifyFatalRequested,
     claimShutdown: () => {
       if (isShuttingDown) return false;
       isShuttingDown = true;
@@ -769,6 +771,7 @@ async function gracefulShutdown(code = 0, {
 }
 
 function gatewayFatalShutdown() {
+  identifyFatalRequested = true;
   return runGatewayFatalShutdown({
     gracefulShutdown,
     getConnectionWatchdog: () => connectionWatchdog,
@@ -796,6 +799,7 @@ async function pushHandoffShutdown(code = 0) {
   isShuttingDown = true;
   await runPushHandoffShutdown({
     code, gatewayLeader, connectionWatchdog, eventPublisher, logger,
+    isFatalRequested: () => identifyFatalRequested,
   });
 }
 
