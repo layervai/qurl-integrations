@@ -1,0 +1,85 @@
+const js = require('@eslint/js');
+const globals = require('globals');
+
+module.exports = [
+  js.configs.recommended,
+  {
+    linterOptions: { reportUnusedDisableDirectives: 'off' },
+    languageOptions: { ecmaVersion: 2022, sourceType: 'commonjs', globals: { ...globals.node, ...globals.jest } },
+    rules: {
+      'no-useless-assignment': 'off',
+      'preserve-caught-error': 'off',
+    "no-unused-vars": [
+      "warn",
+      {
+        "argsIgnorePattern": "^_",
+          "caughtErrorsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_"
+      }
+    ],
+    "no-console": [
+      "error",
+      {
+        "allow": [
+          "warn",
+          "error"
+        ]
+      }
+    ],
+    "no-empty": [
+      "error",
+      {
+        "allowEmptyCatch": true
+      }
+    ],
+    "no-prototype-builtins": "error",
+    "no-case-declarations": "error",
+    "eqeqeq": [
+      "error",
+      "smart"
+    ],
+    "no-undef": "error"
+  },
+  },
+  {
+    "files": [
+      "tests/**/*.js"
+    ],
+    "rules": {
+      "no-unused-vars": "off"
+    }
+  },
+  {
+    "files": [
+      "src/**/*.js"
+    ],
+    "rules": {
+      "no-restricted-syntax": [
+        "error",
+        {
+          "selector": "ObjectPattern > Property[key.name='deleteLink'], MemberExpression[property.name='deleteLink'], MemberExpression[property.value='deleteLink']",
+          "message": "Bot code must revoke children (connector.revokeMintedLinks); whole-resource deleteLink misses watermarked children and breaks sends sharing a deduplicated parent. It is kept for scripts/loadtest-standalone.js only."
+        }
+      ]
+    },
+    "ignores": [
+      "src/qurl.js"
+    ]
+  },
+  {
+    "files": [
+      "src/logger.js"
+    ],
+    "rules": {
+      "no-console": "off"
+    }
+  },
+  {
+    "files": [
+      "scripts/**/*.js"
+    ],
+    "rules": {
+      "no-console": "off"
+    }
+  },
+];
