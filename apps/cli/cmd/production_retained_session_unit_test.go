@@ -9,6 +9,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/layervai/qurl-go/qurl"
 )
 
 type retainedSessionRoundTrip func(*http.Request) (*http.Response, error)
@@ -92,8 +95,78 @@ func TestProductionRetainedSessionUsesOriginalCapability(t *testing.T) {
 	}
 }
 
+func TestProductionRetainedSessionReadinessKeepsOriginalGrant(t *testing.T) {
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/original", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	calls := 0
+	transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
+		calls++
+		cookie, cookieErr := r.Cookie("qurl_vsession")
+		if cookieErr != nil || cookie.Value != "original-capability" || r.URL.String() != request.URL.String() {
+			t.Fatal("readiness changed the original request authority")
+		}
+		if calls == 1 {
+			return nil, io.EOF
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Set-Cookie": []string{"qurl_vsession=replacement"}}, Body: io.NopCloser(strings.NewReader("marker")), Request: r}, nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := productionWaitRetainedSession(ctx, request, "marker", transport); err != nil || calls != 2 {
+		t.Fatalf("same-grant readiness = %v, calls = %d", err, calls)
+	}
+}
+
+func TestProductionRetainedSessionReadinessDoesNotRetryResponses(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"refusal", http.StatusForbidden, "private"},
+		{"redirect", http.StatusFound, "private"},
+		{"wrong content", http.StatusOK, "wrong"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/original", http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: test.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(test.body)), Request: r}, nil
+			})
+			if err := productionWaitRetainedSession(t.Context(), request, "marker", transport); err == nil || calls != 1 {
+				t.Fatalf("response was accepted or retried: error = %v, calls = %d", err, calls)
+			}
+		})
+	}
+}
+
+func TestProductionRetainedSessionReadinessStopsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://fixture.invalid/original", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	transport := retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) {
+		calls++
+		cancel()
+		return nil, io.EOF
+	})
+	if err := productionWaitRetainedSession(ctx, request, "marker", transport); !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("canceled readiness = %v, calls = %d", err, calls)
+	}
+}
+
 func TestProductionRetainedSessionRejectsNonContentStatuses(t *testing.T) {
-	for _, status := range []int{http.StatusFound, http.StatusForbidden, http.StatusNotFound, http.StatusGone, http.StatusInternalServerError} {
+	for _, status := range []int{http.StatusFound, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone, http.StatusInternalServerError} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://fixture.invalid/content", http.NoBody)
 			if err != nil {
@@ -111,6 +184,10 @@ func TestProductionRetainedSessionRejectsNonContentStatuses(t *testing.T) {
 			if err == nil || err.Error() != fmt.Sprintf("original production session did not serve content (HTTP %d)", status) || strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "foreign") {
 				t.Fatal("wrong status classification or private diagnostic exposed")
 			}
+			wantRefusal := status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusNotFound
+			if errors.Is(err, errRetainedSessionRefused) != wantRefusal {
+				t.Fatal("non-refusal response classified as session refusal")
+			}
 		})
 	}
 }
@@ -122,7 +199,7 @@ func TestProductionRetainedSessionSanitizesTransportFailure(t *testing.T) {
 	}
 	transport := retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) { return nil, errors.New("secret transport diagnostic") })
 	err = productionRetainedSessionFetch(request, "marker", transport)
-	if err == nil || err.Error() != "retained production session request failed" {
+	if err == nil || err.Error() != "retained production session request failed (*errors.errorString)" {
 		t.Fatal("transport diagnostic leaked")
 	}
 }
@@ -167,9 +244,36 @@ func TestProductionRetainedSessionClassifiesTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport := retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) { return nil, context.DeadlineExceeded })
-	err = productionRetainedSessionFetch(request, "marker", transport)
-	if err == nil || err.Error() != "retained production session request timed out" {
+	calls := 0
+	transport := retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, context.DeadlineExceeded
+	})
+	err = productionWaitRetainedSession(t.Context(), request, "marker", transport)
+	if err == nil || err.Error() != "retained production session request timed out" || calls != 1 {
 		t.Fatal("timeout classification missing or contains private context")
+	}
+}
+
+func TestProductionRetainedSessionReadsAllActivePages(t *testing.T) {
+	calls := 0
+	transport := retainedSessionRoundTrip(func(request *http.Request) (*http.Response, error) {
+		calls++
+		body := `{"data":[],"meta":{"has_more":true,"next_cursor":"next"}}`
+		if calls == 2 {
+			if request.URL.Query().Get("cursor") != "next" {
+				t.Fatal("session reader lost the empty page's cursor")
+			}
+			body = `{"data":[{"session_id":"qs_original"}],"meta":{"has_more":false}}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})
+	client, err := qurl.NewClient(qurl.CredentialProviderFunc(func(context.Context, *http.Request) error { return nil }), qurl.WithBaseURL("https://fixture.invalid"), qurl.WithHTTPClient(&http.Client{Transport: transport}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := productionActiveSessionIDs(t.Context(), client, "ahpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw3o3qdq2a")
+	if err != nil || calls != 2 || len(ids) != 1 || !ids["qs_original"] {
+		t.Fatalf("complete active session read = %v, calls = %d, count = %d", err, calls, len(ids))
 	}
 }

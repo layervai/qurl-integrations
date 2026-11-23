@@ -101,9 +101,9 @@ func turnContextLines(tc *TurnContext) string {
 	b.WriteString(orUnknown(tc.UserID))
 	b.WriteString("\n")
 	if tc.CallerIsAdmin {
-		b.WriteString("- This user is a workspace admin: admin-gated actions (protect, revoke, set-alias) are available to them. The confirmation step still re-checks this.\n")
+		b.WriteString("- This user is a workspace admin: admin-gated actions (protect, revoke, set-alias, access-rule selection) are available to them. The confirmation step still re-checks this.\n")
 	} else {
-		b.WriteString("- This user is NOT a workspace admin: admin-gated actions (protect, revoke, set-alias) will be refused at confirmation. You may still explain what they'd do.\n")
+		b.WriteString("- This user is NOT a workspace admin: admin-gated actions (protect, revoke, set-alias, access-rule selection) will be refused at confirmation. You may still explain what they'd do.\n")
 	}
 	return b.String()
 }

@@ -1,8 +1,11 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -460,6 +463,11 @@ func TestHandleList_NoRevokeButtonForNonAdmin(t *testing.T) {
 // Revoke (after the confirm) acks 200 and revokes the row's resource via
 // DELETE /v1/resources/{id}, posting the confirmation to response_url.
 func TestHandleListRevokeClick_Revokes(t *testing.T) {
+	// This test changes the default logger and must remain sequential.
+	var logs bytes.Buffer
+	previousLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLog) })
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	addRevokeResourceRead(t, ts, testRevokeResourceID, client.ResourceTypeURL)
@@ -485,6 +493,22 @@ func TestHandleListRevokeClick_Revokes(t *testing.T) {
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
 	if !strings.Contains(async, "Revoked") || !strings.Contains(async, testRevokeAlias) {
 		t.Errorf("async reply missing revoke confirmation: %q", async)
+	}
+	h.Wait()
+	for _, key := range []string{"team_id", "user_id", "resource_id"} {
+		if !bytes.Contains(logs.Bytes(), []byte(`"`+key+`":`)) {
+			t.Fatalf("missing click identity field %s", key)
+		}
+	}
+	if logs.Len() == 0 {
+		t.Fatal("revoke click emitted no log records")
+	}
+	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		for _, key := range []string{"team_id", "user_id", "resource_id"} {
+			if bytes.Count(line, []byte(`"`+key+`":`)) > 1 {
+				t.Fatalf("duplicate click log field %s", key)
+			}
+		}
 	}
 	if hits.Load() != 1 {
 		t.Errorf("DELETE fired %d times, want 1", hits.Load())
@@ -643,63 +667,142 @@ func TestRevokeResource_PurgesOnReadGone(t *testing.T) {
 // TestRevokeResource_ReadAuthRejected fences the read-side 401/403 arm: setup
 // guidance, no DELETE, and bindings kept (auth failure proves nothing is gone).
 func TestRevokeResource_ReadAuthRejected(t *testing.T) {
-	ts := newAdminTestServers(t)
-	seedRevokeAlias(t, ts)
-	ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(revokeUnauthorizedBody))
-	})
-	refuseRevokeDelete(t, ts, testRevokeResourceID, "after the read was auth-rejected")
-	h := newAdminTestHandler(t, ts)
-
-	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
-	if !strings.Contains(msg, "API key was rejected") {
-		t.Errorf("read 401 message = %q, want setup guidance", msg)
-	}
-	if !revokeAliasBound(t, h) {
-		t.Errorf("alias %q purged after an auth-rejected read", testRevokeAlias)
-	}
-}
-
-// TestRevokeResource_MalformedReadFailsClosed fences a 200 read with no
-// data.resource: the admin gets the generic inspect failure and no DELETE runs.
-func TestRevokeResource_MalformedReadFailsClosed(t *testing.T) {
-	ts := newAdminTestServers(t)
-	seedRevokeAlias(t, ts)
-	ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
-		respondQURLEnvelope(t, w, map[string]any{"qurls": []any{}})
-	})
-	refuseRevokeDelete(t, ts, testRevokeResourceID, "after a malformed resource read")
-	h := newAdminTestHandler(t, ts)
-
-	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
-	if !strings.Contains(msg, "Failed to inspect") {
-		t.Errorf("malformed read message = %q, want the inspect failure", msg)
-	}
-	if strings.Contains(msg, "data.resource") {
-		t.Errorf("malformed read message leaked the raw contract error: %q", msg)
-	}
-	// Unlike read-404, a malformed read proves nothing is gone, so bindings stay.
-	if !revokeAliasBound(t, h) {
-		t.Errorf("alias %q purged after a malformed read", testRevokeAlias)
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			seedRevokeAlias(t, ts)
+			ts.addCustomer(http.MethodGet, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(revokeUnauthorizedBody))
+			})
+			ts.addCustomer(http.MethodPut, "/v1/resources/"+testRevokeResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+				t.Error("sharing attempted after read auth rejection")
+				w.WriteHeader(http.StatusForbidden)
+			})
+			refuseRevokeDelete(t, ts, testRevokeResourceID, "after the read was auth-rejected")
+			h := newAdminTestHandler(t, ts)
+			result := h.revokeResourceResult(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+			if result.audit.success || !strings.Contains(result.cardText, "API key was rejected") {
+				t.Errorf("read auth rejection result = %+v, want failure and setup guidance", result)
+			}
+			if !revokeAliasBound(t, h) {
+				t.Error("alias purged after auth-rejected read")
+			}
+		})
 	}
 }
 
-// TestRevokeResource_UnknownTypeRefusesDelete pins the current default arm: an
-// unrecognized resource type refuses the revoke rather than guessing teardown.
-func TestRevokeResource_UnknownTypeRefusesDelete(t *testing.T) {
-	ts := newAdminTestServers(t)
-	seedRevokeAlias(t, ts)
-	addRevokeResourceRead(t, ts, testRevokeResourceID, "future_type")
-	refuseRevokeDelete(t, ts, testRevokeResourceID, "for an unrecognized resource type")
-	h := newAdminTestHandler(t, ts)
+const testRevokeUnknownType = "future_type"
 
-	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
-	if !strings.Contains(msg, "not recognized") {
-		t.Errorf("unknown type message = %q, want the unrecognized-type failure", msg)
-	}
-	if !revokeAliasBound(t, h) {
-		t.Errorf("alias %q purged after a refused revoke", testRevokeAlias)
+// Typed rows use a valid detail envelope (readStatus is unused); otherwise it selects the
+// malformed/error response, with zero simulating a lost connection.
+// Inspection is advisory for an authorized revoke; DELETE decides success.
+func TestRevokeResource_InspectionFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name, resourceType                      string
+		readStatus, sharingStatus, deleteStatus int
+	}{
+		{"future type", testRevokeUnknownType, 200, 200, 204},
+		{"transit type", "transit", 200, 200, 204},
+		{"malformed read", "", 200, 200, 204},
+		{"read unavailable", "", 500, 200, 204},
+		{"read and sharing unavailable", "", 500, 500, 204},
+		{"read unavailable then delete not found", "", 500, 200, 404},
+		{"read unavailable then delete gone", "", 500, 200, 410},
+		{"read rate limited", "", 429, 200, 204},
+		{"read transport failure", "", 0, 200, 204},
+		{"best effort sharing failure", testRevokeUnknownType, 200, 500, 204},
+		{"unknown type has no sharing endpoint", "transit", 200, 404, 204},
+		{"optional sharing unauthorized", testRevokeUnknownType, 200, 401, 204},
+		{"optional sharing forbidden", "transit", 200, 403, 204},
+		{"delete failed", testRevokeUnknownType, 200, 200, 500},
+		{"delete unauthorized", testRevokeUnknownType, 200, 200, 401},
+		{"delete forbidden", testRevokeUnknownType, 200, 200, 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testRevokeAlias: testTunnelResourceID})
+			if tc.resourceType != "" {
+				addRevokeResourceRead(t, ts, testTunnelResourceID, tc.resourceType)
+			} else {
+				ts.addCustomer(http.MethodGet, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, _ *http.Request) {
+					if tc.readStatus == 0 {
+						hj, ok := w.(http.Hijacker)
+						if !ok {
+							t.Error("test server does not support connection hijacking")
+							return
+						}
+						conn, _, err := hj.Hijack()
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						_ = conn.Close()
+						return
+					}
+					if tc.readStatus == http.StatusOK {
+						respondQURLEnvelope(t, w, map[string]any{"qurls": []any{}})
+						return
+					}
+					w.WriteHeader(tc.readStatus)
+					_, _ = w.Write([]byte(`{"error":{"title":"Upstream","detail":"private-upstream-detail"}}`))
+				})
+			}
+			var sharing, deletes atomic.Int32
+			ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, r *http.Request) {
+				var in struct {
+					DesiredState string `json:"desired_state"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.DesiredState != "off" {
+					t.Errorf("sharing request = %+v (%v), want off", in, err)
+				}
+				sharing.Add(1)
+				if tc.sharingStatus != 200 {
+					w.WriteHeader(tc.sharingStatus)
+					return
+				}
+				respondQURLEnvelope(t, w, map[string]any{
+					"resource_id": testTunnelResourceID, "crid": testTunnelCRID,
+					"desired_state": "off", "serving_epoch": 1, "connection_state": "stopped",
+				})
+			})
+			ts.addCustomer(http.MethodDelete, "/v1/resources/"+testTunnelResourceID, func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer test-key" {
+					t.Error("DELETE omitted workspace authentication")
+				}
+				if sharing.Load() == 0 {
+					t.Error("DELETE preceded the best-effort sharing stop")
+				}
+				deletes.Add(1)
+				w.WriteHeader(tc.deleteStatus)
+				if tc.deleteStatus == 500 {
+					_, _ = w.Write([]byte(`{"error":{"title":"Upstream","detail":"private-upstream-detail"}}`))
+				}
+			})
+			h := newAdminTestHandler(t, ts)
+			result := h.revokeResourceResult(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testTunnelResourceID, testRevokeAlias)
+			if sharing.Load() == 0 || deletes.Load() == 0 {
+				t.Errorf("sharing calls=%d, deletes=%d; want both", sharing.Load(), deletes.Load())
+			}
+			wantSuccess := tc.deleteStatus == http.StatusNoContent
+			if result.audit.success != wantSuccess {
+				t.Errorf("audit success=%v, want %v", result.audit.success, wantSuccess)
+			}
+			if wantSuccess && (!strings.Contains(result.cardText, "Revoked") || !strings.Contains(result.cardText, "Lifecycle checks were incomplete") || !strings.Contains(result.audit.display, "Lifecycle checks were incomplete")) {
+				t.Errorf("missing degraded success: card=%q, audit=%q", result.cardText, result.audit.display)
+			}
+			if strings.Contains(result.cardText, "private-upstream-detail") || strings.Contains(result.cardText, "data.resource") {
+				t.Errorf("reply leaked upstream detail: %q", result.cardText)
+			}
+			gone := tc.deleteStatus == http.StatusNotFound || tc.deleteStatus == http.StatusGone
+			if gone && (!strings.Contains(result.cardText, "not found") || strings.Contains(result.cardText, "Lifecycle checks")) {
+				t.Errorf("gone resource reply = %q, want not-found without lifecycle note", result.cardText)
+			}
+			if bound := revokeAliasBound(t, h); bound != (!wantSuccess && !gone) {
+				t.Errorf("alias bound=%v after success=%v, gone=%v", bound, wantSuccess, gone)
+			}
+		})
 	}
 }
 
@@ -765,5 +868,126 @@ func TestRevokeResource_PurgesOnAlreadyGone(t *testing.T) {
 	}
 	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testRevokeAlias); err != nil || found {
 		t.Errorf("alias %q still bound after revoking an already-gone resource (found=%v, err=%v) — the orphan must be swept on the 404 path too", testRevokeAlias, found, err)
+	}
+}
+
+// TestRevokeResource_AdvisoryTimeoutsReserveDeleteBudget checks the request
+// contexts without sleeping through real timeouts on every CI run.
+func TestRevokeResource_AdvisoryTimeoutsReserveDeleteBudget(t *testing.T) {
+	ts := newAdminTestServers(t)
+	seedRevokeAlias(t, ts)
+	h := newAdminTestHandler(t, ts)
+	ctx, cancel := context.WithTimeout(t.Context(), asyncWorkTimeout)
+	defer cancel()
+	workerDeadline, _ := ctx.Deadline()
+	var probes, deletes int
+	h.cfg.NewClient = func(key string) *client.Client {
+		return client.New(ts.customerServer.URL, key, client.WithRetry(0), client.WithHTTPClient(&http.Client{
+			Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				deadline, ok := req.Context().Deadline()
+				if req.Method == http.MethodDelete {
+					deletes++
+					if !ok || !deadline.Equal(workerDeadline) || req.Context().Err() != nil {
+						t.Error("DELETE did not retain the live worker context")
+					}
+					return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Header: make(http.Header)}, nil
+				}
+				probes++
+				if !ok || time.Until(deadline) > asyncWorkTimeout/4 {
+					t.Error("advisory request can consume the authoritative DELETE budget")
+				}
+				return nil, context.DeadlineExceeded
+			}),
+		}))
+	}
+	result := h.revokeResourceResult(ctx, slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if probes != 2 || deletes != 1 || !result.audit.success || revokeAliasBound(t, h) {
+		t.Errorf("probes=%d, deletes=%d, success=%v; want two bounded failures followed by confirmed revoke and cleanup", probes, deletes, result.audit.success)
+	}
+}
+
+func TestRevokeResourceEscapesUntrustedLogFields(t *testing.T) {
+	for name, tc := range map[string]struct {
+		readFails    bool
+		deleteStatus int
+	}{
+		"read failure":              {true, http.StatusInternalServerError},
+		"unknown type":              {false, http.StatusInternalServerError},
+		"read failure with cleanup": {true, http.StatusNoContent},
+		"unknown type with cleanup": {false, http.StatusNoContent},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			const resourceID = "r_probe\r\nforged"
+			path := "/v1/resources/" + resourceID
+			upstreamFailure := func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"title": "upstream\r\nforged", "status": 500}})
+			}
+			ts.addCustomer(http.MethodGet, path, func(w http.ResponseWriter, r *http.Request) {
+				if tc.readFails {
+					upstreamFailure(w, r)
+					return
+				}
+				respondQURLEnvelope(t, w, map[string]any{"resource": map[string]any{"resource_id": resourceID, "type": "future\r\nforged"}})
+			})
+			ts.addCustomer(http.MethodPut, path+"/sharing", upstreamFailure)
+			var deletes atomic.Int32
+			ts.addCustomer(http.MethodDelete, path, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != path {
+					t.Error("log escaping changed the resource identity")
+				}
+				deletes.Add(1)
+				if tc.deleteStatus == http.StatusNoContent {
+					w.WriteHeader(tc.deleteStatus)
+					return
+				}
+				upstreamFailure(w, r)
+			})
+			h := newAdminTestHandler(t, ts)
+			ts.ddb.SetQueryErr(ts.tableNames.channelPolicy, errors.New("sweep\r\nforged"))
+			var logs bytes.Buffer
+			log := slog.New(slog.NewJSONHandler(&logs, nil)).With(
+				"team_id", sanitizeLogValue("T_probe\r\nforged"),
+				"user_id", sanitizeLogValue("U_probe\r\nforged"),
+			)
+			result := h.revokeResourceResult(t.Context(), log, "T_probe\r\nforged", "U_probe\r\nforged", resourceID, testRevokeAlias)
+			if result.audit.success != (tc.deleteStatus == http.StatusNoContent) || deletes.Load() != 1 {
+				t.Fatalf("success=%v, DELETE calls=%d", result.audit.success, deletes.Load())
+			}
+			for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+				for _, key := range []string{"team_id", "user_id", "resource_id"} {
+					if bytes.Count(line, []byte(`"`+key+`":`)) > 1 {
+						t.Fatalf("duplicate log field %s", key)
+					}
+				}
+			}
+			decoder := json.NewDecoder(&logs)
+			entries := 0
+			sawSweep := false
+			for {
+				var entry map[string]any
+				if err := decoder.Decode(&entry); err == io.EOF {
+					break
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				entries++
+				if entry["msg"] == "revoke: channel-binding sweep failed; an orphaned alias may remain" {
+					sawSweep = true
+				}
+				for key, value := range entry {
+					if text, ok := value.(string); ok && strings.ContainsAny(text, "\r\n") {
+						t.Fatalf("log field %s contains raw control bytes: %q", key, text)
+					}
+				}
+			}
+			if tc.deleteStatus == http.StatusNoContent && !sawSweep {
+				t.Fatal("successful revoke did not exercise binding cleanup")
+			}
+			if entries < 3 {
+				t.Fatalf("log entries=%d, want read/type, sharing, and DELETE failures", entries)
+			}
+		})
 	}
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.6.0](https://github.com/layervai/qurl-integrations/compare/v4.5.0...v4.6.0) (2026-11-23)
+
+
+### Features
+
+* **cli:** report host product in agent registration version ([#2029](https://github.com/layervai/qurl-integrations/issues/2029)) ([f1f0a1b](https://github.com/layervai/qurl-integrations/commit/f1f0a1b364f903b88c1d0a034344be4c2593833f))
+
+
+### Bug Fixes
+
+* **ci:** match CLI production proof to visitor restart behavior ([#2085](https://github.com/layervai/qurl-integrations/issues/2085)) ([9d386fc](https://github.com/layervai/qurl-integrations/commit/9d386fcffbe14d8379bd0fbb99599fc4f2fcfe6e))
+* **cli:** forget limits for confirmed resource tombstones ([#1954](https://github.com/layervai/qurl-integrations/issues/1954)) ([322a47e](https://github.com/layervai/qurl-integrations/commit/322a47e7cb424e41e488092861682f9bbbe46593))
+* **cli:** report server lifetime for limited links ([#1953](https://github.com/layervai/qurl-integrations/issues/1953)) ([4fd8ae6](https://github.com/layervai/qurl-integrations/commit/4fd8ae639ea22843b02d3fef1afd821413c63c3c))
+
 ## [4.5.0](https://github.com/layervai/qurl-integrations/compare/v4.4.4...v4.5.0) (2026-11-23)
 
 

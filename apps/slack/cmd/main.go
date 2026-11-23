@@ -30,6 +30,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackinstall"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacklog"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 	"github.com/layervai/qurl-integrations/shared/observability"
@@ -592,40 +593,28 @@ func readLinkSiteConfig() (origin, accessURL string, err error) {
 }
 
 func connectorAPIURLFromEndpoint(raw string) (endpoint, apiURL string, err error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
+	endpoint, apiURL, err = internal.ParseConnectorEndpoint(raw)
+	if err == nil {
+		return endpoint, apiURL, nil
+	}
+	switch {
+	case errors.Is(err, internal.ConnectorURLMissing):
 		return "", "", errors.New("QURL_ENDPOINT is required")
-	}
-	endpoint = strings.TrimRight(trimmed, "/")
-	if endpoint == "" {
+	case errors.Is(err, internal.ConnectorURLOrigin):
 		return "", "", errors.New("QURL_ENDPOINT must be an absolute URL origin")
+	case errors.Is(err, internal.ConnectorURLCredentials):
+		return "", "", errors.New("QURL_ENDPOINT must not include credentials")
+	case errors.Is(err, internal.ConnectorURLQuery):
+		return "", "", errors.New("QURL_ENDPOINT must not include a query")
+	case errors.Is(err, internal.ConnectorURLFragment):
+		return "", "", errors.New("QURL_ENDPOINT must not include a fragment")
+	case errors.Is(err, internal.ConnectorURLVersion):
+		return "", "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
+	case errors.Is(err, internal.ConnectorURLPath):
+		return "", "", errors.New("QURL_ENDPOINT must not include a path")
+	default:
+		return "", "", fmt.Errorf("QURL_ENDPOINT is invalid: %w", err)
 	}
-	// These pre-checks add operator-specific messages. ValidateConnectorAPIURL
-	// remains the canonical security and endpoint-shape validator.
-	if parsed, parseErr := url.Parse(endpoint); parseErr == nil && parsed.IsAbs() && parsed.Host != "" {
-		if parsed.User != nil {
-			return "", "", errors.New("QURL_ENDPOINT must not include credentials")
-		}
-		if parsed.RawQuery != "" {
-			return "", "", errors.New("QURL_ENDPOINT must not include a query")
-		}
-		if parsed.Fragment != "" {
-			return "", "", errors.New("QURL_ENDPOINT must not include a fragment")
-		}
-		// Give the common already-versioned value a migration-specific error;
-		// every other non-empty path is rejected by the general shape check.
-		if strings.EqualFold(strings.Trim(parsed.Path, "/"), "v1") {
-			return "", "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
-		}
-		if parsed.Path != "" {
-			return "", "", errors.New("QURL_ENDPOINT must not include a path")
-		}
-	}
-	apiURL = endpoint + "/v1"
-	if validateErr := internal.ValidateConnectorAPIURL(apiURL); validateErr != nil {
-		return "", "", fmt.Errorf("QURL_ENDPOINT is invalid: %w", validateErr)
-	}
-	return endpoint, apiURL, nil
 }
 
 func lameduckForSignal(sig os.Signal) time.Duration {
@@ -938,7 +927,7 @@ func (c *workspaceSlackTokenLookupCache) warnLegacySlackBotTokenFallback(ctx con
 		ctx,
 		slog.LevelWarn,
 		"legacy SLACK_BOT_TOKEN fallback is serving workspace without Slack install token",
-		slog.String("team_id", slackOwnerLogID(teamID)),
+		slog.String("team_id", slacklog.ID(teamID)),
 	)
 }
 

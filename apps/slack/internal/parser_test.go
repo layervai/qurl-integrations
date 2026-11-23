@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 )
 
 // dmRejectSubstr is the load-bearing substring in `applyFlag`'s
@@ -304,6 +306,10 @@ func TestParse_GetFlagErrors(t *testing.T) {
 		{name: "malformed flag (no colon) surfaces as unexpected arg", text: "get $prod-db reasontruly", wantSentnl: ErrUnexpectedArgument, wantSubstr: "unexpected argument"},
 		{name: "empty bare value", text: "get $prod-db reason:", wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
 		{name: "empty quoted value", text: `get $prod-db reason:""`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
+		{name: "empty rule", text: `get $prod-db rule:""`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
+		{name: "blank rule", text: `get $prod-db rule:"  "`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
+		{name: "repeated rule", text: "get $prod-db rule:once rule:builtin.public", wantSentnl: ErrInvalidFlag, wantSubstr: "more than once"},
+		{name: "over-long rule", text: "get $prod-db rule:" + strings.Repeat("x", agent.MaxRuleRunes+1), wantSentnl: ErrInvalidFlag, wantSubstr: "longer than"},
 		// Strict-posture on dm: only `true` / `false` (case-folded)
 		// accepted. Without these rejections, `dm:yes` / `dm:1`
 		// would parse fine and then silently return false on
@@ -642,5 +648,28 @@ func TestCommand_Reason(t *testing.T) {
 				t.Errorf("Reason() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCommand_Rule fences the rule flag on get and crid, quoted names with
+// spaces included.
+func TestCommand_Rule(t *testing.T) {
+	t.Parallel()
+	for text, want := range map[string]string{
+		"get $prod-db":                                     "",
+		`get $prod-db rule:"Team only" dm:true`:            "Team only",
+		"get $prod-db Rule:once":                           "once",
+		"crid " + testTunnelCRID + ` rule:"One-time link"`: "One-time link",
+	} {
+		cmd, err := Parse(text)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", text, err)
+		}
+		if got := cmd.Rule(); got != want {
+			t.Errorf("Parse(%q).Rule() = %q, want %q", text, got, want)
+		}
+	}
+	if got := (*Command)(nil).Rule(); got != "" {
+		t.Errorf("nil Rule() = %q", got)
 	}
 }
