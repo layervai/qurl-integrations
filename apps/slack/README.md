@@ -1,12 +1,22 @@
 # qURL for Slack
 
-Share internal resources from Slack as secure, one-time links — without
-leaving the channel. Admins protect a resource once; anyone in the channel
-mints a fresh, expiring link with a single slash command.
+**Share a private internal link from any Slack channel with one command.**
+An admin protects an internal service (through the qURL™ Connector) or an
+existing URL once, from Slack. After that, anyone in the channel runs
+`/qurl get` and receives a fresh qURL link. The link works for the first
+person who opens it, then burns, and it expires on its own. The person who
+gets it just clicks.
 
-A **qURL™** is a one-time-use access link: it works for the first person who
-opens it, then burns. Links also expire on their own, so nothing stays live
-longer than it needs to.
+## Common tasks
+
+| You want to… | How |
+| --- | --- |
+| Connect your workspace | `/qurl setup you@company.com` |
+| Protect an internal service or URL in this channel | `/qurl-admin protect` (guided form) |
+| Get a one-time link | `/qurl get $docs` |
+| Get the link privately instead of in the channel | `/qurl get $docs dm:true` |
+| See what this channel can reach | `/qurl list` |
+| Shut a resource and all of its links off | `/qurl-admin revoke $docs` |
 
 ## Quickstart
 
@@ -26,6 +36,23 @@ Marketplace submission owners should fill and exercise the
 [Slack Marketplace reviewer test path](docs/marketplace-reviewer-test-path.md)
 before giving Slack reviewer instructions. Keep credentials and reviewer
 personal data out of the repository.
+
+### For AI agents and tools
+
+- Slash commands: `/qurl` for everyone, `/qurl-admin` for the owner and admins
+- Install: the workspace install link from your qURL operator, then
+  `/qurl setup <email>`; the first person to complete setup becomes the owner
+- Core flow: `/qurl-admin protect` → `/qurl get <$id|$alias>` → a one-time
+  link that burns on first open
+- `/qurl crid <CRID>` mints a fresh link by a resource's permanent CRID
+  (slash command only; agent tools use aliases)
+- Resources are channel-scoped: `/qurl list`, `/qurl aliases`, and `/qurl get`
+  show only what the current channel can reach
+- `/qurl help` and `/qurl-admin help` list the exact commands your workspace has enabled
+- Running it yourself: [docs/operating.md](docs/operating.md)
+- Other ways to share: [qURL CLI](../cli/README.md) ·
+  [Discord](../discord/README.md) · [Gmail extension](../chrome-extension/README.md) ·
+  [MCP server](https://github.com/layervai/qurl-mcp)
 
 ## Concepts
 
@@ -57,12 +84,14 @@ personal data out of the repository.
 | `/qurl get <$id\|$alias>` | Mint a one-time qURL link for a resource in this channel. |
 | `/qurl get <$id\|$alias> dm:true` | Mint the link and DM it to you instead of posting it in the channel. |
 | `/qurl get <$id\|$alias> reason:"…"` | Mint the link and record a reason in the audit log. |
+| `/qurl get <$id\|$alias> rule:"…"` | Owner/admin only: mint the link with an access rule: `Anyone with the link`, `One-time link`, or a rule saved on the workspace's qURL account. |
 | `/qurl crid <CRID>` | Mint a one-time qURL link for a resource in this channel, by its permanent CRID. |
 | `/qurl crid <CRID> dm:true` | Mint the CRID's link and DM it to you instead of posting it in the channel. |
 | `/qurl crid <CRID> reason:"…"` | Mint the CRID's link and record a reason in the audit log. |
+| `/qurl crid <CRID> rule:"…"` | Owner/admin only: mint the CRID's link with an access rule, as for `/qurl get`. |
 | `/qurl list` | List the resources available to you in this channel. |
 | `/qurl aliases` | List this channel's aliases and the resource each one points to. |
-| `/qurl uninstall` | Owner/admin-gated: shows a confirmation card. Click **Disconnect qURL** and confirm to disconnect Slack commands and clear the admin list, channel access, and aliases. Reconnecting requires setting up channel access and aliases again. This is a **local-only disconnect** — it does **not** revoke the workspace's qURL API key outside Slack (an API key can't revoke itself), so if you're disconnecting because the key may be exposed, revoke it through qURL key management or your operator. |
+| `/qurl uninstall` | Owner/admin-gated: shows a confirmation card that expires after five minutes. Click **Disconnect qURL** and confirm to disconnect Slack commands and clear the admin list, channel access, and aliases. Reconnecting requires setting up channel access and aliases again. This is a **local-only disconnect** — it does **not** revoke the workspace's qURL API key outside Slack (an API key can't revoke itself), so if you're disconnecting because the key may be exposed, revoke it through qURL key management or your operator. |
 | `/qurl feedback` | Send a bug report or feature request to the qURL team. |
 | `/qurl help` | Show the user command help. |
 
@@ -157,9 +186,27 @@ immediately available for `/qurl get` in the channel.
 
 `/qurl get $id` mints a one-time qURL link for any resource available in the
 current channel (pass a resource `$id` or a channel `$alias`). The reply
-includes how long the link stays valid. Every link is single-use: it burns on
-first open. Add `dm:true` to receive the link privately, or `reason:"…"` to
-note why you minted it in the audit log.
+includes how long the link stays valid. By default every link is single-use:
+it burns on first open. Add `dm:true` to receive the link privately, or
+`reason:"…"` to note why you minted it in the audit log.
+
+A workspace owner or admin can add `rule:"…"` to share with an access rule
+instead, by name or ID (such as `rule:once`; use the ID for a name with a
+`"` in it): one of the Default access rules (`Anyone with the link`,
+`One-time link`) or a saved rule ("Your rules"). Saved rules are the ones on
+the qURL account that connected this workspace; they are managed in qURL
+Desktop or the qURL CLI. The link then follows only the rule's limits,
+without the default single-session cap, so an owner or admin can mint an
+`Anyone with the link` link that opens more than once, by more than one person. Like every `/qurl get` reply, the link is
+shown only to the member who ran the command (or sent by DM with `dm:true`).
+If the saved rules can't be read, only a Default access rule's ID applies
+(`rule:builtin.public` or `rule:once`), since a name could belong to a saved
+rule. Slack mints links on existing resources only, so it refuses a rule that decides
+who can open the resource (`People you invite`, `People you approve`, email,
+device or paid rules) and a rule with settings from a newer qURL app; share
+with those from qURL Desktop or the qURL CLI.
+Other members keep the default one-time, one-minute link flow. Agent rule
+requests recheck the owner/admin role when the user confirms.
 
 `/qurl crid <CRID>` is the same command addressed by a resource's permanent
 CRID instead of a `$id` or `$alias`. It is channel-scoped exactly like

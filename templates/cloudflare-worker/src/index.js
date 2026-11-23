@@ -44,8 +44,6 @@ export default {
 		try {
 			const client = new QURLClient({
 				apiKey,
-				// TODO(upstream-contract): remove once the pinned SDK includes layervai/qurl-typescript#342.
-				fetch: globalThis.fetch.bind(globalThis),
 				timeout: 10_000,
 				maxRetries: 0,
 			});

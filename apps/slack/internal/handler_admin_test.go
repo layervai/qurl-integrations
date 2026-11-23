@@ -3,6 +3,7 @@ package internal
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacklog"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -1473,4 +1475,33 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 			t.Errorf("added admin: reply missing owner mention <@%s>, got: %q", owner, got)
 		}
 	})
+}
+
+func TestAdminDenialLogIDs(t *testing.T) {
+	for _, tc := range []struct{ name, team, user string }{
+		{name: "valid", team: "T123ABC", user: "U123ABC"},
+		{name: "malformed", team: "T\nFORGED", user: "U\rFORGED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureDefaultSlog(t)
+			h := newAdminTestHandler(t, newAdminTestServers(t))
+			if h.requireAdminSync(httptest.NewRecorder(), tc.team, tc.user, AdminTransferOwnership) {
+				t.Fatal("non-admin allowed")
+			}
+			decoder := json.NewDecoder(strings.NewReader(logs.String()))
+			for {
+				var record map[string]any
+				if err := decoder.Decode(&record); err != nil {
+					t.Fatalf("admin denial record missing: %v", err)
+				}
+				if record["msg"] != "admin command denied: non-admin" {
+					continue
+				}
+				if record["team_id"] != slacklog.ID(tc.team) || record["user_id"] != slacklog.ID(tc.user) {
+					t.Fatalf("unexpected correlation values: %v", record)
+				}
+				return
+			}
+		})
+	}
 }

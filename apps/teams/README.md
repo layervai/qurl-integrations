@@ -1,7 +1,54 @@
-# qURL Teams integration
+# qURL for Microsoft Teams
+
+**Share private internal links from a Microsoft Teams channel.**
+qURL™ for Teams lets an admin protect an internal URL, or a service behind the
+qURL Connector, right from a team channel. After that, anyone in the channel
+mentions the bot with `get` and receives a fresh one-time link, posted in
+place or sent to them privately. The person who gets the link just clicks.
+
+This directory holds the Teams bot. Your operator builds the app package for
+the deployment, and a tenant admin uploads it as a custom app; see
+[App package (sideloading)](#app-package-sideloading).
+
+## Common tasks
+
+Open a personal chat with the bot first. Then, in a team channel, mention
+the bot and type the command:
+
+| You want to… | How |
+| --- | --- |
+| Connect your tenant to qURL | `setup you@company.com` |
+| Protect an internal URL (admin) | `protect-url url:https://internal.example.com as:$docs` |
+| Protect a service with the qURL Connector (admin) | `protect-connector internal-web env:compose service:web port:8080 alias:$web` |
+| Get a one-time link | `get $docs` |
+| Get the link in a private chat instead | `get $docs dm:true` |
+| See what this channel can reach | `list` |
+
+Setup links, Connector enrollment tokens, and `dm:true` links arrive in your
+personal chat with the bot, so open that chat first.
+
+### For AI agents and tools
+
+- Commands: `help`, `setup <email>`, `list`, `aliases`,
+  `get $<crid|alias> [dm:true] [reason:"..."]`
+- Admin commands: `protect-url`, `protect-connector`, `set-alias`,
+  `unset-alias`, `set-display-name`, `unset-display-name`, `revoke`,
+  `add @user`, `remove @user`, `admins`, `uninstall`
+- Resource commands run in team channels; the personal-chat menu lists `help`,
+  `setup`, and `admins`
+- The first member to complete `setup <email>` becomes the tenant owner
+- Resources are visible per channel; `revoke $<crid>` revokes tenant-wide
+- Connector installs: Docker, Docker Compose, ECS/Fargate, and Kubernetes
+- Build and run: Node.js 22, `npm ci && npm run build`; entrypoint
+  `qurl-teams`; [Configuration](#configuration) · [Deployment](#deployment)
+- Other ways to share: [qURL for Slack](../slack/README.md) ·
+  [qURL CLI](../cli/README.md) · [Discord](../discord/README.md) ·
+  [MCP server](https://github.com/layervai/qurl-mcp)
+
+## Architecture
 
 This package is the deployable, dependency-injected TypeScript implementation
-for the qURL™ Microsoft Teams integration. It implements opaque one-shot state,
+for the qURL Microsoft Teams integration. It implements opaque one-shot state,
 PKCE S256, OIDC nonce binding, a hardened confidential-client token exchange,
 ID-token verification, and a production provider-binding adapter.
 
