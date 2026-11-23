@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +26,9 @@ import (
 // --- pure-unit coverage ---
 
 func TestAdminGatedFor(t *testing.T) {
+	if !adminGatedFor(agent.ActionGet, "once") {
+		t.Fatal("rule selection must require admin status")
+	}
 	gated := map[agent.ActionKind]bool{
 		agent.ActionGet:              false,
 		agent.ActionInspect:          false,
@@ -35,7 +40,7 @@ func TestAdminGatedFor(t *testing.T) {
 		agent.ActionKind("mystery"):  true, // unknown kinds fail closed (gated)
 	}
 	for kind, want := range gated {
-		if got := adminGatedFor(kind); got != want {
+		if got := adminGatedFor(kind, ""); got != want {
 			t.Errorf("adminGatedFor(%q) = %v, want %v", kind, got, want)
 		}
 	}
@@ -885,7 +890,7 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 	// shared history and the card-replace can't overwrite it. A text-only payload (a
 	// get FAILURE detail; blocks nil) routes through the original text seams.
 	const mintedLink = "https://qurl.link/abc123"
-	fallback, blocks := renderGetSuccess(mintedLink)
+	fallback, blocks := renderGetSuccess(mintedLink, oneTimeUseNotice())
 	const (
 		failureText  = ":warning: mint failed for $staging"
 		dmThreadTS   = "1700.9"
@@ -1258,6 +1263,66 @@ func TestConfirm_SetAliasOnApprove(t *testing.T) {
 	}
 	if text == agentConfirmUnsupportedReply || text == "" {
 		t.Fatalf("set-alias must run the alias core, not the unsupported default; got %q", text)
+	}
+}
+
+func TestConfirm_RevokeThroughQURLClient(t *testing.T) {
+	names := defaultTestTableNames()
+	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
+		names.channelPolicy: {seedChannelPolicySet("T1", "C1", testRevokeAlias, []string{testTunnelResourceID})},
+	})
+	// Only the HTTP backend is reused; workspace and alias state stay in hc.
+	ts := newAdminTestServers(t)
+	hc.h.cfg.NewClient = func(apiKey string) *client.Client {
+		return client.New(ts.customerServer.URL, apiKey, client.WithRetry(0))
+	}
+	requireWorkspaceKey := func(r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Error("qURL request did not use the workspace credential")
+		}
+	}
+	var reads, stops, deletes atomic.Int32
+	path := "/v1/resources/" + testTunnelResourceID
+	ts.addCustomer(http.MethodGet, path, func(w http.ResponseWriter, r *http.Request) {
+		requireWorkspaceKey(r)
+		reads.Add(1)
+		respondQURLEnvelope(t, w, map[string]any{"resource": map[string]any{
+			"resource_id": testTunnelResourceID, "type": client.ResourceTypeTunnel,
+			"slug": testRevokeAlias, "status": client.StatusActive,
+		}, "qurls": []any{}})
+	})
+	ts.addCustomer(http.MethodPut, path+"/sharing", func(w http.ResponseWriter, r *http.Request) {
+		requireWorkspaceKey(r)
+		var body struct {
+			DesiredState string `json:"desired_state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.DesiredState != "off" || reads.Load() != 1 || deletes.Load() != 0 {
+			t.Errorf("sharing stop before DELETE: state=%q, reads=%d, err=%v", body.DesiredState, reads.Load(), err)
+		}
+		stops.Add(1)
+		respondQURLEnvelope(t, w, map[string]any{
+			"resource_id": testTunnelResourceID, "crid": testTunnelCRID,
+			"desired_state": "off", "serving_epoch": 1, "connection_state": "stopped",
+		})
+	})
+	ts.addCustomer(http.MethodDelete, path, func(w http.ResponseWriter, r *http.Request) {
+		requireWorkspaceKey(r)
+		if reads.Load() != 1 || stops.Load() != 1 {
+			t.Error("DELETE reached before the resource read and sharing stop")
+		}
+		deletes.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionRevoke, Token: testRevokeAlias, ChannelID: "C1", Asker: "Uadmin"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+	replaced, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !replaced || !hc.claimed(id) || !strings.HasPrefix(text, "Revoked `$"+testRevokeAlias+"` and all its qURLs.") {
+		t.Fatalf("approved revoke did not replace its claimed card with success: replace=%v, text=%q", replaced, text)
+	}
+	if reads.Load() != 1 || stops.Load() != 1 || deletes.Load() != 1 {
+		t.Fatalf("resource reads/sharing stops/deletes = %d/%d/%d, want 1/1/1", reads.Load(), stops.Load(), deletes.Load())
 	}
 }
 
@@ -2050,5 +2115,134 @@ func TestPostAgentConfirm_BlankSummaryFallsBack(t *testing.T) {
 	}
 	if len(*hc.posts) != 1 || (*hc.posts)[0].text != agentErrorReply {
 		t.Fatalf("blank summary should fall back to the error reply, got %+v", *hc.posts)
+	}
+}
+
+// TestConfirm_GetCarriesAccessRule fences that an approved get applies the
+// proposal's access rule: a rule Slack can't apply is refused privately, with
+// no mint and a neutral public card.
+func TestConfirm_GetCarriesAccessRule(t *testing.T) {
+	mint, hc := confirmRuleGet(t, "builtin.invite_only")
+	if mint != nil || len(hc.blocks.calls) != 0 {
+		t.Fatalf("mint = %v, deliveries = %+v; want a refusal", mint, hc.blocks.calls)
+	}
+	if private := postedTexts(hc); !strings.Contains(private, "Slack can't set") {
+		t.Fatalf("private reply = %q, want the rule refusal", private)
+	}
+	_, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !strings.Contains(card, agentConfirmGetFailedReply) || strings.Contains(card, "invite") {
+		t.Fatalf("public card = %q", card)
+	}
+}
+
+// TestAgentConfirmCardRendersRuleLiterally pins that a model-supplied rule
+// name can't ping a channel or format the card: the card is plain_text and the
+// fallback is escaped.
+func TestAgentConfirmCardRendersRuleLiterally(t *testing.T) {
+	t.Parallel()
+	summary := fmt.Sprintf("Mint an access link for `$x` with the access rule %q.", "<!channel> *hi*")
+	section, ok := buildAgentConfirmBlocks(summary, "", "id")[0].(map[string]any)
+	if !ok {
+		t.Fatal("first block is not a section")
+	}
+	if text, _ := section[blockKitFieldText].(map[string]any); text["type"] != "plain_text" {
+		t.Fatalf("summary block = %+v, want plain_text", section)
+	}
+	if fallback := agentConfirmFallbackText(summary, ""); strings.Contains(fallback, "<!channel>") {
+		t.Fatalf("fallback carries a live mention: %q", fallback)
+	}
+}
+
+// confirmRuleGet approves an agent get with rule against a qURL stub serving
+// saved, and returns the mint body (nil when nothing minted) and the harness.
+func confirmRuleGet(t *testing.T, rule string, saved ...map[string]any) (map[string]any, *confirmHarness) {
+	t.Helper()
+	names := defaultTestTableNames()
+	hc := newConfirmHarnessWithSeed(t, testAskerUserID, map[string][]map[string]ddbtypes.AttributeValue{
+		names.channelPolicy: {seedChannelPolicySet("T1", "D1", "", []string{testAgentGetResourceID})},
+	})
+	backend := qurlBackendServer(t)
+	var mint map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/me/access-rules":
+			writeAccessRules(t, w, saved...)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/"+testAgentGetResourceID+"/qurls":
+			if err := json.NewDecoder(r.Body).Decode(&mint); err != nil {
+				t.Errorf("decode mint body: %v", err)
+			}
+			respondRawQURLEnvelope(t, w, map[string]any{testKeyResourceID: testAgentGetResourceID, "qurl_link": testAgentGetQURLLink})
+		default:
+			// Token resolution reuses the shared backend stub.
+			backend.Config.Handler.ServeHTTP(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	hc.h.cfg.NewClient = func(apiKey string) *client.Client { return client.New(srv.URL, apiKey, client.WithRetry(0)) }
+
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Rule: rule, Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+	return mint, hc
+}
+
+// TestConfirm_GetWithRuleMintsWithItsLimits fences the approved-get success
+// path with a rule: the One-time link limits reach the mint and the notice
+// reaches the private delivery.
+func TestConfirm_GetWithRuleMintsWithItsLimits(t *testing.T) {
+	mint, hc := confirmRuleGet(t, "One-time link")
+	if mint["one_time_use"] != true || mint["expires_in"] != "30d" || mint["session_duration"] != "24h" {
+		t.Fatalf("mint body = %v, want the One-time link limits", mint)
+	}
+	if calls := hc.blocks.calls; len(calls) != 1 || !strings.Contains(calls[0].fallback, "one-time use · link expires in 30d") {
+		t.Fatalf("private delivery = %+v", calls)
+	}
+}
+
+// TestConfirm_GetWithNewerSavedRuleRefused pins that an approved get re-reads
+// the saved rule and refuses one with fields this app does not model.
+func TestConfirm_GetWithNewerSavedRuleRefused(t *testing.T) {
+	mint, hc := confirmRuleGet(t, "Newer", map[string]any{"id": "33333333-3333-4333-8333-333333333333", "name": "Newer", "mode": "public", "max_opens": 2})
+	if mint != nil || len(hc.blocks.calls) != 0 {
+		t.Fatalf("mint = %v, deliveries = %+v; want a refusal", mint, hc.blocks.calls)
+	}
+	private := postedTexts(hc)
+	if !strings.Contains(private, "newer qURL app") {
+		t.Fatalf("private reply = %q, want the newer-app refusal", private)
+	}
+}
+
+// postedTexts joins the harness's private text posts.
+func postedTexts(hc *confirmHarness) string {
+	texts := make([]string, 0, len(*hc.posts))
+	for _, p := range *hc.posts {
+		texts = append(texts, p.text)
+	}
+	return strings.Join(texts, "\n")
+}
+
+func TestConfirm_RuleSelectionRechecksAdminBeforeClaim(t *testing.T) {
+	for _, mode := range []string{"member", "removed admin", "lookup failure"} {
+		t.Run(mode, func(t *testing.T) {
+			admin := "Uadmin"
+			if mode == "removed admin" {
+				admin = testAskerUserID
+			}
+			if mode == "lookup failure" {
+				admin = ""
+			}
+			hc := newConfirmHarness(t, admin)
+			id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Rule: "once", Asker: testAskerUserID, ChannelID: "C1"})
+			if mode == "removed admin" {
+				if err := hc.h.cfg.AdminStore.RemoveAdmin(context.Background(), "T1", testAskerUserID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", testAskerUserID, hc.respURL, id), id, true, time.Now())
+			replaced, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+			if replaced || hc.claimed(id) {
+				t.Fatal("unauthorized rule selection claimed the action")
+			}
+		})
 	}
 }

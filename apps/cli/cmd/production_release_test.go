@@ -94,6 +94,13 @@ func TestProductionReleaseJourney(t *testing.T) {
 		t.Fatal("fresh production login did not confirm the expected enrolled owner")
 	}
 	productionCLI(t, binary, env, "", "whoami", "-o", "json")
+	ownerClient, err := qurl.NewClient(qurl.CredentialProviderFunc(func(_ context.Context, request *http.Request) error {
+		request.Header.Set("Authorization", "Bearer "+key)
+		return nil
+	}), qurl.WithBaseURL(productionProofEndpoint))
+	if err != nil {
+		t.Fatal("could not configure the production session reader")
+	}
 
 	for _, test := range []struct {
 		name, label string
@@ -152,7 +159,27 @@ func TestProductionReleaseJourney(t *testing.T) {
 			if reused.CRID != published.CRID || reused.ResourceID != published.ResourceID || reused.FoundExisting == nil || !*reused.FoundExisting || reused.Private == nil || *reused.Private != test.private {
 				t.Fatal("repeat publication did not reuse the same resource and privacy")
 			}
+			priorSessions, err := productionActiveSessionIDs(t.Context(), ownerClient, published.CRID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			oldRequest, oldSessionDeadline := productionRetainSession(t, shared.QURL, marker)
+			admittedSessions, err := productionActiveSessionIDs(t.Context(), ownerClient, published.CRID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var originalSessionID string
+			for id := range admittedSessions {
+				if !priorSessions[id] {
+					if originalSessionID != "" {
+						t.Fatal("original production admission created multiple session rows")
+					}
+					originalSessionID = id
+				}
+			}
+			if originalSessionID == "" {
+				t.Fatal("original production admission has no active session row")
+			}
 			for _, command := range []string{"stop", "start", "restart"} {
 				next := productionSharing(t, binary, env, command, published)
 				if command != "stop" && next <= epoch {
@@ -170,21 +197,41 @@ func TestProductionReleaseJourney(t *testing.T) {
 						t.Fatal("stopped production route wrote a download")
 					}
 				} else {
-					// The admitted browser session survives a temporary Connector stop.
-					// This is separate from the replaced native controller session.
+					// TODO(upstream-contract): the API preserves visitors on start and ends them on explicit restart.
 					productionGet(t, binary, env, published.CRID, marker, false)
-					if !time.Now().Before(oldSessionDeadline) {
-						t.Fatal("original production session expired before the continuity assertion")
-					}
-					before := hits.Load()
-					if err := productionRetainedSessionFetch(oldRequest, marker, nil); err != nil {
+					activeSessions, err := productionActiveSessionIDs(t.Context(), ownerClient, published.CRID)
+					if err != nil {
 						t.Fatal(err)
 					}
-					if !time.Now().Before(oldSessionDeadline) {
-						t.Fatal("original production session expired during the continuity assertion")
+					if activeSessions[originalSessionID] != (command == "start") {
+						t.Fatal("production visitor session state does not match the lifecycle command")
 					}
-					if hits.Load() <= before {
-						t.Fatal("original production session did not reach the backend")
+					if !time.Now().Before(oldSessionDeadline) {
+						t.Fatal("original production session expired before the lifecycle assertion")
+					}
+					before := hits.Load()
+					var retainedErr error
+					if command == "start" {
+						readyCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+						retainedErr = productionWaitRetainedSession(readyCtx, oldRequest, marker, nil)
+						cancel()
+					} else {
+						retainedErr = productionRetainedSessionFetch(oldRequest, marker, nil)
+					}
+					if !time.Now().Before(oldSessionDeadline) {
+						t.Fatal("original production session expired during the lifecycle assertion")
+					}
+					if command == "restart" {
+						if (!errors.Is(retainedErr, errRetainedSessionRefused) && !errors.Is(retainedErr, errRetainedSessionTransport)) || hits.Load() != before {
+							t.Fatal("explicit production restart did not end the original visitor session")
+						}
+					} else {
+						if retainedErr != nil {
+							t.Fatal(retainedErr)
+						}
+						if hits.Load() <= before {
+							t.Fatal("original production session did not reach the backend")
+						}
 					}
 					productionGet(t, binary, env, published.CRID, marker, false)
 				}
@@ -464,7 +511,8 @@ func productionCLI(t *testing.T, binary string, env map[string]string, input str
 	t.Helper()
 	raw, code := productionCommand(t, binary, env, input, args...)
 	if code != 0 {
-		t.Fatalf("production candidate %s failed with exit %d", args[0], code)
+		reason := readSandboxDaemonLocalStateReason(env[connectorstate.EnvStateDirPrimary])
+		t.Fatalf("production candidate %s failed with exit %d; possible daemon reason from logs %s", args[0], code, reason)
 	}
 	return raw
 }

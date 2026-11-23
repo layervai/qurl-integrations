@@ -3,7 +3,6 @@ package internal
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"log/slog"
@@ -13,6 +12,7 @@ import (
 	"github.com/layervai/qurl-go/crid"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slacklog"
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // cridUsageMessage is separate from getUsageMessage because CRIDs are pasted
@@ -81,13 +81,10 @@ func (h *Handler) cridWork(ctx context.Context, log *slog.Logger, args *getWorkA
 // lookup. keyCandidates is a complete count only on a miss.
 // Any other entry (a legacy id or URL) either fails to decode or
 // decodes to bytes whose digest cannot match.
-//
-// TODO(upstream-contract): mirrors qurl-service's unpadded base64url
-// resource_id encoding (same decode as shared/client validateSharingState).
 func resourceIDForCRID(allowed map[string]struct{}, cridValue string) (resourceID string, keyCandidates int) {
 	for id := range allowed {
-		der, err := base64.RawURLEncoding.Strict().DecodeString(id)
-		if err != nil || base64.RawURLEncoding.EncodeToString(der) != id {
+		der, ok := client.ResourceKeyDER(id)
+		if !ok {
 			continue
 		}
 		keyCandidates++
