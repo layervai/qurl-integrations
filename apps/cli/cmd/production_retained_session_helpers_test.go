@@ -17,7 +17,7 @@ var errRetainedSessionTransport = errors.New("retained production session reques
 var errRetainedSessionRefused = errors.New("original production session did not serve content")
 
 // productionWaitRetainedSession retries transport failures; responses and timeouts are final.
-// TODO(upstream-contract): traefik-plugins activeTunnelCacheTTLCap is five seconds.
+// TODO(upstream-contract): the gateway caches active tunnel routes for at most five seconds.
 func productionWaitRetainedSession(ctx context.Context, original *http.Request, marker string, transport http.RoundTripper) error {
 	for {
 		err := productionRetainedSessionFetch(original.Clone(ctx), marker, transport)

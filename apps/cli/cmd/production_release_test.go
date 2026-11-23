@@ -197,7 +197,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 						t.Fatal("stopped production route wrote a download")
 					}
 				} else {
-					// TODO(upstream-contract): qurl-service#2176 preserves visitors on start and ends them on explicit restart.
+					// TODO(upstream-contract): the API preserves visitors on start and ends them on explicit restart.
 					productionGet(t, binary, env, published.CRID, marker, false)
 					activeSessions, err := productionActiveSessionIDs(t.Context(), ownerClient, published.CRID)
 					if err != nil {
