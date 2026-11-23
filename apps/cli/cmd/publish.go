@@ -378,6 +378,14 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 		return err
 	}
 	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID, access: *access}
+	servingConfirmed := false
+	defer func() {
+		if retErr != nil && !servingConfirmed && enrollment.published != nil {
+			if err := opts.printer().PublishSetupFailure(enrollment.published); err != nil {
+				retErr = errors.Join(retErr, err)
+			}
+		}
+	}()
 	// The registered REST client is open and cached before resource discovery
 	// can request a Connector enrollment credential. Resource discovery can
 	// therefore reuse it without a nested native-runtime open. The separate
@@ -414,7 +422,11 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return compensate(err)
 	}
-	mintLink := func() error { return opts.mintRuleLink(ctx, client, access.Rule, shared, limits) }
+	// Both serving paths call this only after serving; later link failures own their receipt.
+	mintLink := func() error {
+		servingConfirmed = true
+		return opts.mintRuleLink(ctx, client, access.Rule, shared, limits)
+	}
 	return finishLocalPublish(ctx, opts, client, registry, resolved, local, shared, mintLink, stateDir, foreground, compensate)
 }
 
@@ -478,6 +490,7 @@ type localEnrollment struct {
 	opts        *globalOpts
 	target      *publishTarget
 	requestedID string
+	published   *qurlapi.Published // Written only by the synchronous resource-discovery callback.
 
 	mu                 sync.Mutex
 	mintedID           string
@@ -627,6 +640,7 @@ func prepareLocalPublishResource(
 		if err != nil {
 			return "", err
 		}
+		enrollment.published = precreated
 		return id, nil
 	})
 	if err != nil {

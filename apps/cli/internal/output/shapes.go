@@ -171,6 +171,7 @@ type SharingInspection struct {
 }
 
 type resourceStatusJSON struct {
+	SignedIdentity    *bool               `json:"signed_identity,omitempty"`
 	ConsumerAccess    *consumerAccessJSON `json:"consumer_access,omitempty"`
 	AllowedDeviceKeys []string            `json:"allowed_device_keys"`
 	Private           *bool               `json:"private,omitempty"`
@@ -210,6 +211,20 @@ func publishSettingsDiffer(res *qurlapi.Published) *bool {
 // PublishLinkFailure reports the resource that exists when its link failed.
 // Outside JSON mode this writes nothing; stderr remains the failure diagnostic.
 func (p *Printer) PublishLinkFailure(res *qurlapi.Published) error {
+	return p.publishFailure(res, "link_creation_failed")
+}
+
+// PublishSetupFailure names a confirmed resource without claiming it serves.
+// TODO(upstream-contract): Keep publication_setup_failed in sync with Desktop recovery.
+func (p *Printer) PublishSetupFailure(res *qurlapi.Published) error {
+	if p.format != FormatJSON {
+		p.Warnf("The resource exists. Check it with `qurl status %s` before retrying.", res.CRID)
+		return nil
+	}
+	return p.publishFailure(res, "publication_setup_failed")
+}
+
+func (p *Printer) publishFailure(res *qurlapi.Published, reason string) error {
 	if p.format != FormatJSON {
 		return nil
 	}
@@ -220,7 +235,7 @@ func (p *Printer) PublishLinkFailure(res *qurlapi.Published) error {
 		Private        *bool  `json:"private,omitempty"`
 		FoundExisting  *bool  `json:"found_existing,omitempty"`
 		SettingsDiffer bool   `json:"settings_differ"`
-	}{CRID: res.CRID, ResourceID: res.ResourceID, Error: "link_creation_failed", Private: res.Private, FoundExisting: res.FoundExisting, SettingsDiffer: res.OtherSettings})
+	}{CRID: res.CRID, ResourceID: res.ResourceID, Error: reason, Private: res.Private, FoundExisting: res.FoundExisting, SettingsDiffer: res.OtherSettings})
 }
 
 // Publish renders a publish result. Text mode says in one row who can open
@@ -394,6 +409,7 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
 			Publisher:        publisherDocument(resource.Publisher),
 			OriginHeaderName: resource.OriginHeaderName,
+			SignedIdentity:   resource.SignedIdentity,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, resource.CRID)
@@ -416,6 +432,9 @@ func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSu
 	}
 	ew.printf("%s\t%s\n", p.bold("Type:"), resource.Type)
 	ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
+	if resource.SignedIdentity != nil {
+		ew.printf("%s\t%t\n", p.bold("Signed identity:"), *resource.SignedIdentity)
+	}
 	if resource.Private != nil {
 		ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
 	}

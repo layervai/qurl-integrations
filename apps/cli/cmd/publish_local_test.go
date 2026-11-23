@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -321,7 +322,14 @@ func TestLocalPublishReuseConflictExplainsDeleteRecovery(t *testing.T) {
 					t.Fatalf("reuse conflict lacks %q: %s", want, res.stderr.String())
 				}
 			}
-			mustEmptyStdout(t, res)
+			if configured {
+				var receipt map[string]any
+				if err := json.Unmarshal(res.stdout.Bytes(), &receipt); err != nil || receipt["error"] != "publication_setup_failed" || receipt["crid"] != srv.Key.CRID {
+					t.Fatal("identity conflict lost the confirmed create receipt")
+				}
+			} else {
+				mustEmptyStdout(t, res)
+			}
 		})
 	}
 }
