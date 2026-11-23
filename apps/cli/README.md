@@ -2241,3 +2241,55 @@ The receipt identifies a resource to inspect; it does not authorize automatic
 deletion. Existing or uncertain resources stay unchanged. An unconfirmed create
 returns no recovery identity. The separate `link_creation_failed` receipt means
 setup reached serving but link creation failed; that valid publication remains.
+
+## Signed identity for your app
+
+In an environment that offers signed identity, you can require it for your own
+private URL or Connector resource. No per-resource operator enablement is needed.
+Production is not enabled yet. The Sandbox endpoint is `https://api.layerv.xyz`.
+
+First make your HTTPS origin refuse requests without your secret origin header,
+and verify `X-QURL-Identity` on every request. Then publish with email access:
+
+```sh
+qurl --endpoint https://api.layerv.xyz publish https://your-app.example.com \
+  --name "My app" --access email_capture --origin-header X-Origin-Secret
+# Enter the origin secret at the hidden prompt. Save the returned CRID.
+CRID='your-crid'
+qurl --endpoint https://api.layerv.xyz identity enable "$CRID"
+qurl --endpoint https://api.layerv.xyz identity status "$CRID"
+printf 'https://qurl.link.layerv.xyz/%s\n' "$CRID"
+```
+
+Share the printed CRID address. It opens the existing email-access page;
+`qurl share` creates device-authorized links and does not bypass consumer access.
+The visitor opens the address and completes email verification. qURL sends a fresh,
+short-lived signed JWT on each authorized app request, including static assets.
+Email is included only with verified mailbox control and disclosure consent.
+
+Pin the Sandbox issuer `https://qurl.link.layerv.xyz`, your CRID as both audience
+and `crid`, and your resource owner ID as `tenant_id`. Use public keys from
+`https://api.layerv.xyz/.well-known/jwks.json`. Require `alg=Ed25519` (not legacy
+`EdDSA`) and `typ=qurl-identity+jwt`; verify the signature, required claims and
+`iat`/`nbf`/`exp`. Lifetime is at most 60 seconds, with at most 15 seconds of clock
+leeway. Check `auth_time` against your app's authentication-age requirement.
+Require exactly one identity header on every request, even with an app session.
+Map users by verified issuer plus subject, not email alone. Your app still
+controls permissions and CSRF protection. Never log or reflect an assertion.
+
+Cache JWKS for 60 seconds. Permit one bounded refresh for an unknown key ID,
+limit refresh frequency, and fail closed if the key cannot be resolved. Never
+use a key URL from a token. Keep the origin reachable only through your trusted
+qURL path; an assertion is a bearer credential until expiry, not a single-use token.
+
+To stop new assertions:
+
+```sh
+qurl --endpoint https://api.layerv.xyz identity disable "$CRID"
+```
+
+Your app will refuse requests while it still requires signed identity. Disabling
+does not revoke already-issued assertions before their short expiry. Setting
+identity does not change grants or login state; an older session may need fresh
+email verification. CLI settings are confirmed by the API; an older service that
+ignores the field is reported as an error, never as successful enablement.

@@ -1,9 +1,20 @@
-# Watch a private app review
+# Prove approval before app requests
 
 Identity first, then connection. qURL™ uses OpenNHP for cryptographic
 invisibility: an unapproved visitor cannot reach this app through its private
 share. This small demo lets you check actual app requests before and after
 approval. It runs two static pages with Python's built-in HTTP server.
+
+Already using ngrok, Cloudflare Tunnel or another reverse tunnel, and concerned
+about unauthorized people or AI scanners reaching your app? Use this demo to
+inspect qURL's protected-app boundary: zero app requests before authorization,
+a successful approved app action, then refused access after deletion. The app
+listens only on loopback and needs no public inbound port. qURL's public access
+service remains reachable; it is not the protected app.
+
+Use the actual request log as evidence for this fixture. This is not a claim
+that every competing configuration admits unauthorized app requests, or that
+qURL closes any other public route to your app.
 
 Have a CLI-enabled AI agent with its own device identity? You can use the
 [agent review](agent-review.md) instead; it does not require a second person.
