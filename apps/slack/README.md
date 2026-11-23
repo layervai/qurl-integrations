@@ -1,12 +1,22 @@
 # qURL for Slack
 
-Share internal resources from Slack as secure, one-time links — without
-leaving the channel. Admins protect a resource once; anyone in the channel
-mints a fresh, expiring link with a single slash command.
+**Share a private internal link from any Slack channel with one command.**
+An admin protects an internal service (through the qURL™ Connector) or an
+existing URL once, from Slack. After that, anyone in the channel runs
+`/qurl get` and receives a fresh qURL link. The link works for the first
+person who opens it, then burns, and it expires on its own. The person who
+gets it just clicks.
 
-A **qURL™** is a one-time-use access link by default: it works for the first
-person who opens it, then burns. Links also expire on their own, so nothing
-stays live longer than it needs to.
+## Common tasks
+
+| You want to… | How |
+| --- | --- |
+| Connect your workspace | `/qurl setup you@company.com` |
+| Protect an internal service or URL in this channel | `/qurl-admin protect` (guided form) |
+| Get a one-time link | `/qurl get $docs` |
+| Get the link privately instead of in the channel | `/qurl get $docs dm:true` |
+| See what this channel can reach | `/qurl list` |
+| Shut a resource and all of its links off | `/qurl-admin revoke $docs` |
 
 ## Quickstart
 
@@ -26,6 +36,23 @@ Marketplace submission owners should fill and exercise the
 [Slack Marketplace reviewer test path](docs/marketplace-reviewer-test-path.md)
 before giving Slack reviewer instructions. Keep credentials and reviewer
 personal data out of the repository.
+
+### For AI agents and tools
+
+- Slash commands: `/qurl` for everyone, `/qurl-admin` for the owner and admins
+- Install: the workspace install link from your qURL operator, then
+  `/qurl setup <email>`; the first person to complete setup becomes the owner
+- Core flow: `/qurl-admin protect` → `/qurl get <$id|$alias>` → a one-time
+  link that burns on first open
+- `/qurl crid <CRID>` mints a fresh link by a resource's permanent CRID
+  (slash command only; agent tools use aliases)
+- Resources are channel-scoped: `/qurl list`, `/qurl aliases`, and `/qurl get`
+  show only what the current channel can reach
+- `/qurl help` and `/qurl-admin help` list the exact commands your workspace has enabled
+- Running it yourself: [docs/operating.md](docs/operating.md)
+- Other ways to share: [qURL CLI](../cli/README.md) ·
+  [Discord](../discord/README.md) · [Gmail extension](../chrome-extension/README.md) ·
+  [MCP server](https://github.com/layervai/qurl-mcp)
 
 ## Concepts
 
