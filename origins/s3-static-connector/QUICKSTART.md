@@ -147,10 +147,22 @@ points on the same file system, with transit encryption and IAM authorization:
 | `qurl-config` | Generated `share.yaml`, readable by UID 65532; mounted read-only. |
 | `qurl-bootstrap` | `enrollment-token`, readable only by UID 65532; mounted read-only. |
 
-The task role needs `elasticfilesystem:ClientMount` for those access points
-and `elasticfilesystem:ClientWrite` for state. Scope the EFS policy to this
-file system and these access points. Do not grant state access to another
-running Connector. A shared EFS access point is not a multi-replica identity.
+Set each access point's POSIX user and root owner to `65532:65532`. Use a
+separate provisioning role to place `share.yaml` at the config access-point
+root and `enrollment-token` at the bootstrap root before launching the task.
+Make both files readable by UID 65532; keep the token owner-only (`0400`).
+
+Set an explicit EFS file-system resource policy: the
+[default policy permits anonymous mount-target clients](https://docs.aws.amazon.com/efs/latest/ug/iam-access-control-nfs-efs.html).
+Require TLS and bind the task role's client actions to these
+[access-point ARNs](https://docs.aws.amazon.com/efs/latest/ug/access-points-iam-policy.html).
+Grant `elasticfilesystem:ClientMount` on all three and
+`elasticfilesystem:ClientWrite` only on state. Give the provisioning role the
+separate config/bootstrap write access needed for setup and token removal.
+An allow in either an identity or file-system policy can grant access; check
+both for broader grants and use explicit denies where needed to enforce these
+boundaries. Do not grant state access to another running Connector. A shared
+EFS access point is not a multi-replica identity.
 
 Save this task definition as `task.json`. Replace every angle-bracket value
 with your account's values and both images with the verified digest references.
@@ -218,8 +230,9 @@ Fargate has no writable `/tmp` in this read-only container.
 After successful enrollment and the smoke, register a warm-start revision
 without the enrollment-token flag/path, bootstrap mount and bootstrap volume.
 Update the service, verify the replacement connects from state, repeat the
-smoke, then delete the bootstrap token from EFS. Keep the state/config access
-points and their task-role permissions.
+smoke, then use the provisioning role to delete the bootstrap token from EFS.
+Remove the bootstrap access point and its policy grants. Keep the state/config
+access points and their task-role permissions.
 
 ## Kubernetes
 
