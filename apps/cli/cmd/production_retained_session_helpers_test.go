@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -30,7 +31,11 @@ func productionRetainedSessionFetch(original *http.Request, marker string, trans
 		if errors.As(err, &networkError) && networkError.Timeout() {
 			return errors.New("retained production session request timed out")
 		}
-		return errors.New("retained production session request failed")
+		var requestError *url.Error
+		if errors.As(err, &requestError) {
+			err = requestError.Err
+		}
+		return fmt.Errorf("retained production session request failed (%T)", err)
 	}
 	defer func() {
 		if err := response.Body.Close(); err != nil && resultErr == nil {

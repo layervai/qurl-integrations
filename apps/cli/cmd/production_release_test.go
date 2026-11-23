@@ -170,21 +170,27 @@ func TestProductionReleaseJourney(t *testing.T) {
 						t.Fatal("stopped production route wrote a download")
 					}
 				} else {
-					// The admitted browser session survives a temporary Connector stop.
-					// This is separate from the replaced native controller session.
+					// Stop/start preserves visitor sessions; explicit restart ends them.
 					productionGet(t, binary, env, published.CRID, marker, false)
 					if !time.Now().Before(oldSessionDeadline) {
 						t.Fatal("original production session expired before the continuity assertion")
 					}
 					before := hits.Load()
-					if err := productionRetainedSessionFetch(oldRequest, marker, nil); err != nil {
-						t.Fatal(err)
-					}
+					retainedErr := productionRetainedSessionFetch(oldRequest, marker, nil)
 					if !time.Now().Before(oldSessionDeadline) {
 						t.Fatal("original production session expired during the continuity assertion")
 					}
-					if hits.Load() <= before {
-						t.Fatal("original production session did not reach the backend")
+					if command == "restart" {
+						if retainedErr == nil || hits.Load() != before {
+							t.Fatal("explicit production restart did not end the original visitor session")
+						}
+					} else {
+						if retainedErr != nil {
+							t.Fatal(retainedErr)
+						}
+						if hits.Load() <= before {
+							t.Fatal("original production session did not reach the backend")
+						}
 					}
 					productionGet(t, binary, env, published.CRID, marker, false)
 				}

@@ -122,7 +122,7 @@ func TestProductionRetainedSessionSanitizesTransportFailure(t *testing.T) {
 	}
 	transport := retainedSessionRoundTrip(func(*http.Request) (*http.Response, error) { return nil, errors.New("secret transport diagnostic") })
 	err = productionRetainedSessionFetch(request, "marker", transport)
-	if err == nil || err.Error() != "retained production session request failed" {
+	if err == nil || err.Error() != "retained production session request failed (*errors.errorString)" {
 		t.Fatal("transport diagnostic leaked")
 	}
 }
