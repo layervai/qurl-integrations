@@ -113,9 +113,11 @@ func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interaction
 	// The uninstall confirmation is checked before the resource buttons: its
 	// action_id is distinct, and routing it early keeps the destructive path
 	// obvious to a reader scanning this dispatch.
-	if act, ok := findActionByID(payload.Actions, uninstallConfirmActionID); ok {
-		h.handleUninstallConfirmClick(w, payload, act)
-		return
+	for _, id := range []string{uninstallConfirmActionID, uninstallLocalOnlyConfirmActionID} {
+		if act, ok := findActionByID(payload.Actions, id); ok {
+			h.handleUninstallConfirmClick(w, payload, act)
+			return
+		}
 	}
 	// `/qurl-admin protect` chooser buttons open a guided modal; checked first
 	// (distinct action_ids) so a click routes to the opener, not a list mint.
