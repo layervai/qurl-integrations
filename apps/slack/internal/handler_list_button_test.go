@@ -1,10 +1,8 @@
 package internal
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -439,37 +437,39 @@ func TestHandleBlockActions_UnknownActionIgnored(t *testing.T) {
 // parallel test reading the default. Race-safe too: the no-op path is synchronous
 // (spawns no worker), so the buffer is only ever touched on this goroutine.
 func TestHandleBlockActions_EnterPortalNoOp(t *testing.T) {
-	var logBuf bytes.Buffer
-	prevDefault := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+	// The link-site unlock button of a CRID entry reply is the same kind of URL button.
+	for _, actionID := range []string{enterPortalActionID, linkSiteAccessActionID} {
+		t.Run(actionID, func(t *testing.T) {
+			logs := captureDefaultSlog(t)
 
-	ts := newAdminTestServers(t)
-	var mintHits atomic.Int32
-	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
-		mintHits.Add(1)
-		w.WriteHeader(http.StatusOK)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
+			ts := newAdminTestServers(t)
+			var mintHits atomic.Int32
+			ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+				mintHits.Add(1)
+				w.WriteHeader(http.StatusOK)
+			})
+			h := newAdminTestHandler(t, ts)
+			inv := newAdminSlashInvoker(t, h)
 
-	// A URL button carries no value; the empty value is irrelevant — the no-op
-	// branch matches on action_id and returns before reading it.
-	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, "C_test", inv.responseU.URL, enterPortalActionID, "")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+			// A URL button carries no value; the empty value is irrelevant — the no-op
+			// branch matches on action_id and returns before reading it.
+			body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, "C_test", inv.responseU.URL, actionID, "")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
 
-	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "{}" {
-		t.Fatalf("Enter Portal ack = %d %q, want 200 and {}", w.Code, w.Body.String())
-	}
-	if strings.Contains(logBuf.String(), "no recognized action") {
-		t.Fatalf("Enter Portal click must not fire the unrecognized-action breadcrumb; logs=%q", logBuf.String())
-	}
-	// No async worker is started for the no-op; the brief wait gives a (buggy)
-	// one a chance to fire so the negative assertion bites.
-	time.Sleep(50 * time.Millisecond)
-	if mintHits.Load() != 0 {
-		t.Errorf("Enter Portal no-op must not reach the mint (hits = %d)", mintHits.Load())
+			if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "{}" {
+				t.Fatalf("URL button ack = %d %q, want 200 and {}", w.Code, w.Body.String())
+			}
+			if logs.contains("no recognized action") {
+				t.Fatal("URL button click must not fire the unrecognized-action breadcrumb")
+			}
+			// No async worker is started for the no-op; the brief wait gives a (buggy)
+			// one a chance to fire so the negative assertion bites.
+			time.Sleep(50 * time.Millisecond)
+			if mintHits.Load() != 0 {
+				t.Errorf("URL button no-op must not reach the mint (hits = %d)", mintHits.Load())
+			}
+		})
 	}
 }
 
