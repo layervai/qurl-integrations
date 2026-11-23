@@ -68,7 +68,7 @@ func TestPublishEmailDomain(t *testing.T) {
 		}
 		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true, "consumer_access": body.Policy}, nil)
 	})
-	got := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/site", "--access", "email_domain", "--email-domain", "example.com", "-o", "json"}})
+	got := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/site", "--name", "Example", "--access", "email_domain", "--email-domain", "example.com", "-o", "json"}})
 	if got.code != 0 {
 		t.Fatalf("exit=%d: %s", got.code, got.stderr.String())
 	}

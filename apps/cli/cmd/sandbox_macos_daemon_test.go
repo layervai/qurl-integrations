@@ -247,7 +247,7 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 		// backend. Linux and Windows keep the exact retained-grant fence proof;
 		// this lane still proves the macOS customer route with fresh qurl get
 		// commands before and after every lifecycle transition below.
-		grantedBeforeDelete = prepareSandboxGrantedRoute(t, cliEnv, sharedBeforeDelete.stdout, marker, backendHits.Load)
+		grantedBeforeDelete = prepareSandboxGrantedRoute(t, cliEnv, sharedBeforeDelete.stdout, marker, backendHits.Load, "")
 	}
 
 	deleted := runExternalSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")

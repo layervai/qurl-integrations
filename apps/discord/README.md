@@ -158,7 +158,7 @@ setup) means required to use that feature.
 | `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete OAuth setup (defaults to `http://localhost:3000`). Local customer-install testing must use `localhost` or HTTPS because its `__Host-` session cookie is always `Secure`. |
 | `AUTH0_EMAIL_CONNECTION` | No | Auth0 connection pinned on setup/install authorize redirects (e.g. `email`). Unset or `PLACEHOLDER` sends no pin; a malformed value blocks every `/qurl setup` entry path until corrected. |
 | `RATE_LIMIT_INSTALL_MAX_REQUESTS` | No | Per-IP ceiling for the public `/oauth/discord/install` page per rate-limit window (default 120). Completed installs are still bounded by `RATE_LIMIT_MAX_REQUESTS` (two callback slots per install). Both limits are per bot task, not global. |
-| `KEY_ENCRYPTION_KEY` | Production | 32 random bytes, base64 — encrypts stored keys at rest |
+| `KEY_ENCRYPTION_KEY` | Production and guild setup | 32 random bytes, base64 — encrypts stored keys at rest |
 | `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
 | `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |
 | `DETECT_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl detect` (default off) |
@@ -239,8 +239,8 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
 In production the process refuses to boot without `KEY_ENCRYPTION_KEY` and
-`METRICS_TOKEN`. In local development, leaving `KEY_ENCRYPTION_KEY` unset stores
-keys in plaintext with a loud warning.
+`METRICS_TOKEN`. Guild setup also requires `KEY_ENCRYPTION_KEY` in local development.
+Without it, the bot refuses to store a guild API key.
 
 The bot's Discord application must have the **Server Members Intent** privileged
 gateway intent enabled (Developer Portal → Bot → Privileged Gateway Intents).

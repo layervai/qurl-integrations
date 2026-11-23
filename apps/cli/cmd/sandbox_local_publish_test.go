@@ -1609,8 +1609,10 @@ func TestValidateSandboxRouteFence(t *testing.T) {
 				}
 			})
 		}
-		if err := validateSandboxStoppedRouteRefusal(sandboxRouteResult(exitcode.Unavailable, "", stoppedRefusal), stoppedRefusal); err != nil {
-			t.Fatalf("exact stopped-route refusal: %v", err)
+		for _, code := range []int{exitcode.Conflict, exitcode.Unavailable} {
+			if err := validateSandboxStoppedRouteRefusal(sandboxRouteResult(code, "", stoppedRefusal), stoppedRefusal); err != nil {
+				t.Fatalf("exact stopped-route refusal for exit %d: %v", code, err)
+			}
 		}
 		if err := validateSandboxStoppedRouteRefusal(sandboxRouteResult(exitcode.Unavailable, "", stoppedRefusal), ""); err == nil {
 			t.Fatal("empty stopped-route refusal contract accepted")
@@ -1894,6 +1896,7 @@ func TestRegisterSandboxDeviceCredentialCleanup(t *testing.T) {
 	if err := store.SaveAgentState(context.Background(), &qurl.AgentState{
 		AgentID:        "agent-cleanup-test",
 		DeviceAPIKeyID: "key/test",
+		PrivateKeyB64:  base64.StdEncoding.EncodeToString(make([]byte, 32)),
 	}); err != nil {
 		_ = store.Close()
 		t.Fatalf("save test agent state: %v", err)

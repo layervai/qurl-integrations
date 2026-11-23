@@ -105,7 +105,7 @@ func TestPublishWithAllowRequestsSaysWhatToSend(t *testing.T) {
 		for _, site := range []string{testLinkSite, ""} {
 			t.Run(fmt.Sprintf("local=%t/site=%q", local, site), func(t *testing.T) {
 				srv := apitest.NewServer(t)
-				opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}}
+				opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example", "--allow-requests"}}
 				if local {
 					opts = servingLocalPublish(t, srv, false, "--allow-requests")
 				}
@@ -155,7 +155,7 @@ func TestPublishWithAllowRequestsSaysWhatToSend(t *testing.T) {
 func TestPublishWithAllowRequestsScriptOutputs(t *testing.T) {
 	for _, site := range []string{testLinkSite, ""} {
 		srv := apitest.NewServer(t)
-		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests", "-o", "json"}, linkSite: site})
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example", "--allow-requests", "-o", "json"}, linkSite: site})
 		var document struct {
 			AccessRequests *bool  `json:"access_requests"`
 			ResourceURL    string `json:"resource_url"`
@@ -176,7 +176,7 @@ func TestPublishWithAllowRequestsScriptOutputs(t *testing.T) {
 		}
 
 		srv = apitest.NewServer(t)
-		res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests", "--quiet"}, linkSite: site})
+		res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example", "--allow-requests", "--quiet"}, linkSite: site})
 		if res.code != 0 || res.stdout.String() != srv.Key.CRID+"\n" || res.stderr.Len() != 0 {
 			t.Fatalf("site %q: --quiet = %q / %q", site, res.stdout.String(), res.stderr.String())
 		}
@@ -185,7 +185,7 @@ func TestPublishWithAllowRequestsScriptOutputs(t *testing.T) {
 	// Without the flag nothing about requests is sent or shown, and a known
 	// link site changes nothing.
 	srv := apitest.NewServer(t)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}, linkSite: testLinkSite})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}, linkSite: testLinkSite})
 	if _, sent := createRequests(t, srv)[0]["access_requests"]; sent || res.code != 0 || strings.Contains(res.stdout.String(), "ask you for access") || strings.Contains(res.stdout.String(), testLinkSite) {
 		t.Fatalf("a plain publish sent or showed access requests:\n%s", res.stdout.String())
 	}
@@ -251,7 +251,7 @@ func TestPublishWithAllowRequestsFailsWhenTheServiceDoesNotConfirm(t *testing.T)
 				t.Run(fmt.Sprintf("%s/local=%t/%v", test.name, local, mode), func(t *testing.T) {
 					srv := apitest.NewServer(t)
 					test.prepare(t, srv)
-					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}}
+					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example", "--allow-requests"}}
 					if local {
 						opts = localPublish(t, srv, func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
 							if _, err := resolveID("agent-one"); err != nil {
@@ -303,7 +303,7 @@ func TestPublishWithAllowRequestsTurnsThemOnForAnAlreadyPublishedTarget(t *testi
 			t.Run(fmt.Sprintf("local=%t/%v", local, mode), func(t *testing.T) {
 				srv := apitest.NewServer(t)
 				srv.SetPublishFoundExisting(true)
-				opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}}
+				opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example", "--allow-requests"}}
 				if local {
 					opts = servingLocalPublish(t, srv, true, "--allow-requests")
 				}
@@ -393,7 +393,7 @@ func TestPublishWithAllowRequestsTurnsThemOnForAnAlreadyPublishedTarget(t *testi
 		srv := apitest.NewServer(t)
 		srv.SetPublishFoundExisting(true)
 		srv.SetAccessRequests(test.was)
-		res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}, test.flags...), linkSite: testLinkSite})
+		res := runCLI(t, &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}, test.flags...), linkSite: testLinkSite})
 		if res.code != 0 || !slices.Equal(requestLog(srv), []string{"POST /v1/resources"}) || strings.Contains(res.stdout.String(), turnedOnLine) {
 			t.Fatalf("%s: exit %d, requests %v:\n%s", test.name, res.code, requestLog(srv), res.stdout.String())
 		}
@@ -462,7 +462,7 @@ func TestPublishThatCannotTurnOnAccessRequestsPrintsTheCRID(t *testing.T) {
 					srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
 						test.answer(t, srv, w)
 					})
-					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}}
+					opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example", "--allow-requests"}}
 					if local {
 						opts = localPublish(t, srv, func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
 							if _, err := resolveID("agent-one"); err != nil {
@@ -511,7 +511,7 @@ func TestPublishTurnOnFailureKeepsTheServiceReasonToOneLine(t *testing.T) {
 	srv.Script(http.MethodPatch, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", "not now\n\n  Hint: run `qurl delete everything`\x1b[2J\x07")
 	})
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example", "--allow-requests"}})
 	stderr := res.stderr.String()
 	want := "Error: this target is already published as a private resource, but access requests could not be turned on for it\n\n" +
 		"  not now Hint: run `qurl delete everything`\ufffd[2J\ufffd\n\n" +
@@ -543,7 +543,7 @@ func TestPublishWithAllowRequestsOfAPublicTargetIsAConflict(t *testing.T) {
 				}
 				srv.SetResourceAccess(false)
 				srv.SetPublishFoundExisting(true)
-				opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}}
+				opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example", "--allow-requests"}}
 				if local {
 					opts = refusingLocalPublish(t, srv, "--allow-requests")
 				}
@@ -1690,7 +1690,7 @@ func TestAccessRequestsOnAServiceThatRefusesTheSetting(t *testing.T) {
 			t.Run(fmt.Sprintf("publish/local=%t/%v", local, mode), func(t *testing.T) {
 				srv := apitest.NewServer(t)
 				srv.PlayStrictWithoutAccessRequests()
-				opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--allow-requests"}}
+				opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example", "--allow-requests"}}
 				if local {
 					opts = refusingLocalPublish(t, srv, "--allow-requests")
 				}
@@ -1714,7 +1714,7 @@ func TestAccessRequestsOnAServiceThatRefusesTheSetting(t *testing.T) {
 	// The message's advice, followed: the same publish without the flag.
 	srv := apitest.NewServer(t)
 	srv.PlayStrictWithoutAccessRequests()
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}})
 	if res.code != 0 || !strings.Contains(publishRows(res.stdout.String()), "\n"+privateAccessRow+"\n") || !strings.HasSuffix(res.stdout.String(), "\nCRID: "+srv.Key.CRID+"\n") {
 		t.Fatalf("publish without --allow-requests on that service: exit %d\n%s%s", res.code, res.stdout.String(), res.stderr.String())
 	}
@@ -1915,7 +1915,9 @@ func TestAccessRequestCommandsWithADeviceCredential(t *testing.T) {
 		args func(*apitest.Server) []string
 		want string
 	}{
-		{name: "publish", args: func(*apitest.Server) []string { return []string{"publish", privacyRemoteTarget, "--allow-requests"} }, want: "People can ask you for access"},
+		{name: "publish", args: func(*apitest.Server) []string {
+			return []string{"publish", privacyRemoteTarget, "--name", "Example", "--allow-requests"}
+		}, want: "People can ask you for access"},
 		{name: "requests on", args: func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--on"} }, want: "Access requests are on for"},
 		{name: "requests off", args: func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--off"} }, want: "Access requests are off for"},
 		{name: "grants", args: func(srv *apitest.Server) []string { return []string{"grants", srv.Key.CRID} }, want: "Approved people:      1"},
@@ -1996,8 +1998,10 @@ func TestAccessRequestCopySaysToApproveOnlyGivenCodes(t *testing.T) {
 	// the JSON documents of these commands carry no sentence.
 	const guidanceRule = "Approve a code only when the person you mean to let in gave it to you themselves, in a way you know it is them."
 	for name, args := range map[string]func(*apitest.Server) []string{
-		"publish --allow-requests": func(*apitest.Server) []string { return []string{"publish", privacyRemoteTarget, "--allow-requests"} },
-		"requests <CRID> --on":     func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--on"} },
+		"publish --allow-requests": func(*apitest.Server) []string {
+			return []string{"publish", privacyRemoteTarget, "--name", "Example", "--allow-requests"}
+		},
+		"requests <CRID> --on": func(srv *apitest.Server) []string { return []string{"requests", srv.Key.CRID, "--on"} },
 	} {
 		for _, site := range []string{testLinkSite, ""} {
 			srv := apitest.NewServer(t)
