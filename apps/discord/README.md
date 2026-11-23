@@ -113,6 +113,16 @@ share a process-local guard for each sender and send. The guard remains active
 after the 13-minute result wait while revocation continues. Store checks still
 enforce ownership and prevent new recipients across processes.
 
+Guild setup verifies the key owner through `/v1/me` and saves `qurl_owner_id`
+with the encrypted key in the same update. The subscription registry also
+publishes the verified fallback owner in `__default_owner__`; it refuses to
+change that owner automatically. Deploy this binding producer and reconcile
+existing configured guilds before enabling connector guild-owner enforcement.
+During a default-owner cutover, drain old replicas before updating the marker.
+Historical attribution without a verified owner stays retained but must not
+identify recipients. The coordinated rollout is tracked in infrastructure
+issue #1555 and the #1664 rollout ledger.
+
 Before deployment, configure alarms for `Connector mint_link returned a link
 without a valid qurl_id`, `Connector mint_link over-minted`, `Connector mint_link
 returned more partial links than requested`, `Minted link revoke incomplete`,

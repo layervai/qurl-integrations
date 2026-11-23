@@ -397,6 +397,7 @@ async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
   // counter to the tick so link traffic cannot defer its escalation. A scan
   // already in flight with failed discovery can overwrite the follow-up cache
   // entry; the next tick restores it (bounded, self-healing).
+  await db.setDefaultGuildOwner(ownerId);
   defaultOwnerId = ownerId;
 
   const candidateOwnerId = apiKey === config.QURL_API_KEY
@@ -514,6 +515,9 @@ async function scanOnce() {
     }
 
     if (discoveredOwner) {
+      if (discoveryResult.ok && discoveryResult.fired) {
+        await db.setDefaultGuildOwner(discoveredOwner);
+      }
       defaultOwnerId = discoveredOwner;
       // Collision case: a BYOK guild that linked using the bot's OWN
       // default API key has webhook_owner_id === discoveredOwner. The

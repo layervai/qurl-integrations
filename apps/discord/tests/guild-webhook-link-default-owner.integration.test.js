@@ -10,6 +10,7 @@ const mockPropagateGuildWebhookSubscription = jest.fn();
 
 jest.mock('../src/store', () => ({
   scanGuildSubscriptions: mockScanGuildSubscriptions,
+  setDefaultGuildOwner: jest.fn().mockResolvedValue(undefined),
   setGuildDefaultWebhookOwner: mockSetGuildDefaultWebhookOwner,
   setGuildWebhookSubscription: mockSetGuildWebhookSubscription,
   propagateGuildWebhookSubscription: mockPropagateGuildWebhookSubscription,

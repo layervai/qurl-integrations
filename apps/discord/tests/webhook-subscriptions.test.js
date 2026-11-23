@@ -4,6 +4,7 @@ const realFetch = global.fetch;
 const mockScan = jest.fn();
 jest.mock('../src/store', () => ({
   scanGuildSubscriptions: mockScan,
+  setDefaultGuildOwner: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../src/logger', () => ({

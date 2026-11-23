@@ -1672,7 +1672,10 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
   beforeEach(() => {
     mockDeleteFlow.mockResolvedValue({ deleted: true });
-    global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200,
+      json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key',
+        api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }),
+    });
   });
   afterAll(() => {
     global.fetch = originalFetch;
@@ -1711,7 +1714,7 @@ describe('handleSetupModal (dispatcher path)', () => {
     );
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(mockDb.setGuildApiKey).toHaveBeenCalledWith(
-      'guild-1', VALID_KEY, 'user-1', 'paste',
+      'guild-1', VALID_KEY, 'user-1', 'paste', 'owner-verified',
     );
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({

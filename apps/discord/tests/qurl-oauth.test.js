@@ -300,7 +300,7 @@ describe('qurl-oauth routes', () => {
         .mockResolvedValueOnce({
           ok: true, status: 201,
           json: () => Promise.resolve({ data: { key_id: 'key-1', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
-        });
+        }).mockResolvedValueOnce({ ok: true, json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key', api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }) });
       const res = await request(app)
         .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
         .set('Cookie', cookieFor(state));
@@ -346,7 +346,7 @@ describe('qurl-oauth routes', () => {
         .mockResolvedValueOnce({
           ok: true, status: 201,
           json: () => Promise.resolve({ data: { key_id: 'key-1', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
-        });
+        }).mockResolvedValueOnce({ ok: true, json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key', api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }) });
       globalThis.fetch = fetchSpy;
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
@@ -448,7 +448,7 @@ describe('qurl-oauth routes', () => {
               name: 'Discord guild guild-1', status: 'active',
             },
           }),
-        });
+        }).mockResolvedValueOnce({ ok: true, json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key', api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }) });
       const fetchMock = globalThis.fetch;
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
@@ -457,7 +457,7 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain('qURL is connected');
       expect(res.text).toContain('/qurl send is ready');
       expect(res.text).not.toContain('/qurl map');
-      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', 'oauth');
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', 'oauth', 'owner-verified');
       expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
         guild_id: 'guild-1',
         configured_by: 'admin-2',
@@ -504,7 +504,7 @@ describe('qurl-oauth routes', () => {
           json: () => Promise.resolve({
             data: { key_id: 'key-123', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' },
           }),
-        });
+        }).mockResolvedValueOnce({ ok: true, json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key', api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }) });
 
       let res;
       try {
@@ -524,7 +524,7 @@ describe('qurl-oauth routes', () => {
         'guild-1',
         'lv_live_abc',
         'admin-2',
-        'oauth',
+        'oauth', 'owner-verified',
       );
       expect(logger.audit).toHaveBeenCalledWith(
         AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
@@ -554,7 +554,7 @@ describe('qurl-oauth routes', () => {
           json: () => Promise.resolve({
             data: { key_id: 'key-123', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' },
           }),
-        });
+        }).mockResolvedValueOnce({ ok: true, json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key', api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }) });
 
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
@@ -562,7 +562,7 @@ describe('qurl-oauth routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
-      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc', 'admin-2', 'oauth');
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc', 'admin-2', 'oauth', 'owner-verified');
       expect(discord.sendDM).toHaveBeenCalledWith(
         'admin-2', expect.stringContaining('qURL is connected'),
       );
@@ -591,7 +591,7 @@ describe('qurl-oauth routes', () => {
         .mockResolvedValueOnce({
           ok: true, status: 201,
           json: () => Promise.resolve({ data: { key_id: 'key-orphan-1', api_key: 'lv_live_abc123', key_prefix: 'lv_live_abc1' } }),
-        })
+        }).mockResolvedValueOnce({ ok: true, json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key', api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }) })
         .mockImplementationOnce(async () => {
           resolveDeleteFired();
           return { ok: true, status: 204, text: () => Promise.resolve('') };
@@ -625,7 +625,7 @@ describe('qurl-oauth routes', () => {
         .mockResolvedValueOnce({
           ok: true, status: 201,
           json: () => Promise.resolve({ data: { key_id: 'key-123', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
-        });
+        }).mockResolvedValueOnce({ ok: true, json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key', api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }) });
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
       ).set('Cookie', cookieFor(state));
@@ -650,7 +650,7 @@ describe('qurl-oauth routes', () => {
         .mockResolvedValueOnce({
           ok: true, status: 201,
           json: () => Promise.resolve({ data: { key_id: 'key-123', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
-        });
+        }).mockResolvedValueOnce({ ok: true, json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key', api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }) });
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
       ).set('Cookie', cookieFor(state));
@@ -692,7 +692,7 @@ describe('qurl-oauth routes', () => {
         .mockResolvedValueOnce({
           ok: true, status: 201,
           json: () => Promise.resolve({ data: { key_id: 'key-1', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
-        });
+        }).mockResolvedValueOnce({ ok: true, json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key', api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }) });
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
       ).set('Cookie', cookieFor(state));
@@ -825,7 +825,7 @@ describe('qurl-oauth — MAP_COMMAND_ENABLED=true', () => {
           .mockResolvedValueOnce({
             ok: true, status: 201,
             json: () => Promise.resolve({ data: { key_id: 'key-1', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
-          });
+          }).mockResolvedValueOnce({ ok: true, json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key', api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }) });
 
         const res = await supertest(freshApp)
           .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
