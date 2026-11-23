@@ -42,9 +42,10 @@ const (
 	// the cell reply is the assigned-cell PublicExchanges SuccessBodyJSON. The
 	// recovery grant is test-local; only its qrg1. prefix is contract.
 	//
-	// The private platform suite checks the released Connector against its
-	// recovery vectors. This test checks CLI orchestration with local fixtures;
-	// it does not own the recovery wire contract.
+	// TODO(upstream-contract): these local fixtures mirror recovery request/reply
+	// shapes; the private platform suite owns wire conformance against the
+	// released Connector. This test checks CLI orchestration, including generation
+	// advancement and synchronous state release on Close so the store can reopen.
 	connectorIntegrationRecoveryCredential = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	connectorIntegrationRecoveryGrant      = "qrg1.integration-recovery-grant-0001"
 	connectorIntegrationRecoveredKeyID     = "key_RcV8mP3qTn5W"
