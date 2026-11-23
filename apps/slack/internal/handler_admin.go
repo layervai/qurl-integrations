@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacklog"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -72,7 +73,7 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 		// reply intentionally OMITS cmd.AdminAction; a future parser drift could
 		// land an arbitrary string here, and echoing it back risks confusing copy
 		// on already-confused input.
-		slog.Warn("admin dispatcher: unknown action reached default arm — parser drift?", "team_id", teamID, "user_id", userID, "action", string(cmd.AdminAction))
+		slog.Warn("admin dispatcher: unknown action reached default arm — parser drift?", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(userID), "action", string(cmd.AdminAction))
 		respondSlack(w, "Unknown admin command. Try `/qurl-admin help`.")
 	}
 }
@@ -88,7 +89,7 @@ func (h *Handler) requireTransferOwnerSync(ctx context.Context, w http.ResponseW
 	defer cancel()
 	_, ownerID, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
 	if err != nil {
-		slog.Error("owner check failed", "error", err, "team_id", teamID, "user_id", userID, "action", string(AdminTransferOwnership))
+		slog.Error("owner check failed", "error", err, "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(userID), "action", string(AdminTransferOwnership))
 		respondSlack(w, ":warning: failed to verify owner status (upstream error; see logs).")
 		return false
 	}
@@ -97,12 +98,12 @@ func (h *Handler) requireTransferOwnerSync(ctx context.Context, w http.ResponseW
 		return false
 	}
 	if !slackdata.LooksLikeSlackUserID(ownerID) {
-		slog.Warn("owner command denied: legacy shape-bad owner_id requires setup refresh", "team_id", teamID, "user_id", userID, "action", string(AdminTransferOwnership), "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
+		slog.Warn("owner command denied: legacy shape-bad owner_id requires setup refresh", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(userID), "action", string(AdminTransferOwnership), "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 		respondSlack(w, ":warning: qURL is connected with a legacy workspace ownership record. Run `/qurl setup <email>` to refresh it, then retry `/qurl-admin transfer-ownership @user`.")
 		return false
 	}
 	if ownerID != userID {
-		slog.Warn("owner command denied", "team_id", teamID, "user_id", userID, "action", string(AdminTransferOwnership))
+		slog.Warn("owner command denied", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(userID), "action", string(AdminTransferOwnership))
 		respondSlack(w, ":warning: this command is owner-only")
 		return false
 	}
@@ -192,7 +193,7 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string,
 	defer cancel()
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
 	if err != nil {
-		slog.Error("admin check failed", "error", err, "team_id", teamID, "user_id", userID, "action", string(action))
+		slog.Error("admin check failed", "error", err, "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(userID), "action", string(action))
 		respondSlack(w, ":warning: failed to verify admin status (upstream error; see logs).")
 		return false
 	}
@@ -203,7 +204,7 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string,
 		// without scanning every admin command. `action` lets the
 		// filter distinguish e.g. "probed admin revoke" from
 		// "probed admin list".
-		slog.Warn("admin command denied: non-admin", "team_id", teamID, "user_id", userID, "action", string(action))
+		slog.Warn("admin command denied: non-admin", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(userID), "action", string(action))
 		respondSlack(w, ":warning: That command is admin-only. Ask a workspace qURL admin to run it.")
 		return false
 	}
@@ -226,12 +227,12 @@ func (h *Handler) requireAdminForClick(log *slog.Logger, responseURL, teamID, us
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
 	cancel()
 	if err != nil {
-		log.Error("admin click gate: check failed", "error", err, "team_id", teamID, "user_id", userID)
+		log.Error("admin click gate: check failed", "error", err, "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(userID))
 		_ = h.postResponse(log, responseURL, ":warning: failed to verify admin status (upstream error; see logs).")
 		return false
 	}
 	if !isAdmin {
-		log.Warn("admin click gate: non-admin denied", "team_id", teamID, "user_id", userID)
+		log.Warn("admin click gate: non-admin denied", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(userID))
 		_ = h.postResponse(log, responseURL, ":warning: "+adminOnlyMsg)
 		return false
 	}
@@ -282,7 +283,7 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 				// GetItem. Warn (not Error) so dashboards tied to
 				// level=ERROR don't page on a user-recoverable
 				// "please retry" surface.
-				slog.Warn("add admin: conditional fired but disambiguation read can't confirm membership", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+				slog.Warn("add admin: conditional fired but disambiguation read can't confirm membership", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "target_user_id", slacklog.ID(target))
 				respondSlack(w, ":warning: couldn't confirm admin add — please retry. If this persists, contact your Slack admin.")
 				return
 			case se.StatusCode == http.StatusNotFound && se.Code == slackdata.ErrCodeWorkspaceNotBound:
@@ -293,11 +294,11 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 				return
 			}
 		}
-		slog.Error("add admin failed", "error", err, "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+		slog.Error("add admin failed", "error", err, "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "target_user_id", slacklog.ID(target))
 		respondSlack(w, ":warning: failed to add admin (upstream error; see logs).")
 		return
 	}
-	slog.Info("admin add succeeded", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+	slog.Info("admin add succeeded", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "target_user_id", slacklog.ID(target))
 	respondSlack(w, fmt.Sprintf("Added <@%s> as an admin.", target))
 }
 
@@ -347,11 +348,11 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 				return
 			}
 		}
-		slog.Error("remove admin failed", "error", err, "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+		slog.Error("remove admin failed", "error", err, "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "target_user_id", slacklog.ID(target))
 		respondSlack(w, ":warning: failed to remove admin (upstream error; see logs).")
 		return
 	}
-	slog.Info("admin remove succeeded", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+	slog.Info("admin remove succeeded", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "target_user_id", slacklog.ID(target))
 	respondSlack(w, fmt.Sprintf("Removed <@%s> from admins.", target))
 }
 
@@ -380,7 +381,7 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 			respondSlack(w, workspaceUnboundReply)
 			return
 		}
-		slog.Error("list admins failed", "error", err, "team_id", teamID, "user_id", callerUserID)
+		slog.Error("list admins failed", "error", err, "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID))
 		respondSlack(w, ":warning: failed to list admins (upstream error; see logs).")
 		return
 	}
@@ -397,7 +398,7 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	if slackdata.LooksLikeSlackUserID(ownerID) {
 		ownerCopy = fmt.Sprintf("<@%s>", ownerID)
 	} else {
-		slog.Error("admin list: workspace_mappings row missing or shape-bad owner_id (storage corruption)", "team_id", teamID, "user_id", callerUserID, "owner_id_len", len(ownerID))
+		slog.Error("admin list: workspace_mappings row missing or shape-bad owner_id (storage corruption)", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "owner_id_len", len(ownerID))
 	}
 	// Filter the owner out of the admins line so it doesn't duplicate
 	// the owner line. The owner is on the admin set by construction
@@ -435,7 +436,7 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	// the user-visible "Admins:" line (after owner + shape filters).
 	// Owner is always rendered on its own line; "displayed" would be
 	// misleading because both counts contribute to the final reply.
-	slog.Info("admin list succeeded", "team_id", teamID, "user_id", callerUserID, "admin_set_size_raw", len(admins), "non_owner_admin_count", len(otherAdmins))
+	slog.Info("admin list succeeded", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "admin_set_size_raw", len(admins), "non_owner_admin_count", len(otherAdmins))
 	respondSlack(w, body)
 }
 
@@ -458,7 +459,7 @@ func (h *Handler) handleAdminTransferOwnership(w http.ResponseWriter, teamID, en
 		return
 	}
 	if h.cfg.SlackUserLookup == nil {
-		slog.Error("transfer ownership: Slack user lookup is not configured", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+		slog.Error("transfer ownership: Slack user lookup is not configured", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "target_user_id", slacklog.ID(target))
 		respondSlack(w, ":warning: couldn't verify that target Slack user. Contact your Slack admin.")
 		return
 	}
@@ -474,12 +475,12 @@ func (h *Handler) handleAdminTransferOwnership(w http.ResponseWriter, teamID, en
 			respondSlack(w, ":warning: couldn't verify that target Slack user. Reinstall the Slack app (or configure legacy `SLACK_BOT_TOKEN`), then retry.")
 			return
 		}
-		slog.Error("transfer ownership: target user lookup failed", "error", lookupErr, "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+		slog.Error("transfer ownership: target user lookup failed", "error", lookupErr, "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "target_user_id", slacklog.ID(target))
 		respondSlack(w, ":warning: couldn't verify that target Slack user. Retry in a moment.")
 		return
 	}
 	if !targetOK {
-		slog.Warn("transfer ownership: target user lookup rejected target", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+		slog.Warn("transfer ownership: target user lookup rejected target", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "target_user_id", slacklog.ID(target))
 		respondSlack(w, fmt.Sprintf(":warning: couldn't verify <@%s> as an active Slack user visible to this app.", target))
 		return
 	}
@@ -498,14 +499,14 @@ func (h *Handler) handleAdminTransferOwnership(w http.ResponseWriter, teamID, en
 			}
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			slog.Error("transfer ownership deadline reached after mutation attempt", "error", err, "context_error", ctxErr, "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+			slog.Error("transfer ownership deadline reached after mutation attempt", "error", err, "context_error", ctxErr, "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "target_user_id", slacklog.ID(target))
 			respondSlack(w, ":warning: couldn't confirm whether ownership transfer completed before the deadline. Run `/qurl-admin admins` to confirm the current owner before retrying.")
 			return
 		}
-		slog.Error("transfer ownership failed", "error", err, "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+		slog.Error("transfer ownership failed", "error", err, "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "target_user_id", slacklog.ID(target))
 		respondSlack(w, ":warning: failed to transfer ownership (upstream error; run `/qurl-admin admins` to confirm current owner before retrying).")
 		return
 	}
-	slog.Info("admin transfer ownership succeeded", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+	slog.Info("admin transfer ownership succeeded", "team_id", slacklog.ID(teamID), "user_id", slacklog.ID(callerUserID), "target_user_id", slacklog.ID(target))
 	respondSlack(w, fmt.Sprintf("Transferred qURL workspace ownership to <@%s>. They can now run `/qurl setup`; the qURL account/key will not change until they do.", target))
 }

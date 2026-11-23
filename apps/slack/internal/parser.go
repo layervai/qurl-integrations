@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/crid"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 )
 
 // Subcommand is a recognized verb after the `/qurl` slash command.
@@ -130,10 +133,9 @@ type Command struct {
 	// *caller* — the user who typed the command); this field holds the
 	// *target* of the verb (the user being added or removed).
 	UserID string
-	// Flags holds optional `key:value` flags. Only `dm` and `reason`
-	// are recognized today (on `get`). One-time use is unconditional
-	// for `get` — there is no `once` flag (the link always burns on
-	// first redemption), so it isn't a flag here.
+	// Flags holds optional `key:value` flags. Only `dm`, `reason` and
+	// `rule` are recognized today (on `get` and `crid`). Without `rule`
+	// the link is one-time use; there is no `once` flag.
 	Flags map[string]string
 	// Raw is the original trimmed text, kept for diagnostics.
 	Raw string
@@ -157,6 +159,15 @@ func (c *Command) Reason() string {
 		return ""
 	}
 	return c.Flags["reason"]
+}
+
+// Rule returns the parsed `rule:"..."` flag on `get` and `crid`: an access rule's
+// name or ID, empty when unset.
+func (c *Command) Rule() string {
+	if c == nil {
+		return ""
+	}
+	return c.Flags["rule"]
 }
 
 // ErrEmptyResource is returned when a subcommand expects a `$alias`
@@ -469,7 +480,7 @@ func tokenize(text string) []string {
 }
 
 // parseGet extracts the positional argument (a tunnel `$<slug>` or a
-// channel `$<alias>`) and the optional `dm:` / `reason:` flags. A raw
+// channel `$<alias>`) and the optional `dm:` / `reason:` / `rule:` flags. A raw
 // `http(s)://` first positional is rejected with [ErrURLNotSupportedGet];
 // otherwise the token must start with `$` and validate as an alias-shaped
 // name via [parseAliasToken]. Get mints from a tunnel slug or a channel
@@ -514,7 +525,7 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 	return applyMintFlags(cmd, rest[1:])
 }
 
-// applyMintFlags applies the trailing `dm:` / `reason:` flags shared by `get`
+// applyMintFlags applies the trailing `dm:` / `reason:` / `rule:` flags shared by `get`
 // and `crid`.
 func applyMintFlags(cmd *Command, toks []string) (*Command, error) {
 	for _, tok := range toks {
@@ -754,7 +765,7 @@ func hasASCIIPrefixFold(s, prefix string) bool {
 }
 
 // applyFlag parses a single `key:value` token into [Command.Flags]. Only
-// the recognized keys (`dm`, `reason`) survive — unknown keys
+// the recognized keys (`dm`, `reason`, `rule`) survive — unknown keys
 // are an error so a typo doesn't silently no-op. The key half is
 // case-folded so `DM:true` and `Reason:foo` work the way users on
 // mobile clients (with auto-capitalize) expect; the value half is
@@ -770,7 +781,7 @@ func hasASCIIPrefixFold(s, prefix string) bool {
 // against "true", so any non-"true" value silently returns false —
 // exactly the typo class the rest of the parser rejects). `reason`
 // accepts any non-empty prose because the handler in PR-3c.3+ uses it
-// for audit text where the user's exact wording is the point.
+// for audit text where the user's exact wording is the point; so does `rule`.
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
 	if colonIdx < 0 {
@@ -819,6 +830,21 @@ func applyFlag(cmd *Command, tok string) error {
 		cmd.Flags[key] = val
 		return nil
 	case "reason":
+		cmd.Flags[key] = val
+		return nil
+	case "rule":
+		// A blank name would otherwise mint with Slack's default, not a rule.
+		if strings.TrimSpace(val) == "" {
+			return fmt.Errorf("%w: `%s` (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, truncateForError(tok))
+		}
+		// It changes the link's limits, so a second rule: is an error, not last-wins.
+		if _, dup := cmd.Flags[key]; dup {
+			return fmt.Errorf("%w: `rule` given more than once", ErrInvalidFlag)
+		}
+		// No rule name is longer (the agent's propose_get has the same cap).
+		if utf8.RuneCountInString(val) > agent.MaxRuleRunes {
+			return fmt.Errorf("%w: `rule` is longer than %d characters", ErrInvalidFlag, agent.MaxRuleRunes)
+		}
 		cmd.Flags[key] = val
 		return nil
 	case "once":

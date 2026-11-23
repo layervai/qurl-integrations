@@ -6,6 +6,7 @@
 const express = require('express');
 const config = require('../config');
 const db = require('../store');
+const { qurlKeyOwner } = require('../utils/qurl-key-owner');
 const logger = require('../logger');
 const { AUDIT_EVENTS, SETUP_VIA } = require('../constants');
 const { sendDM } = require('../discord');
@@ -422,13 +423,23 @@ router.get('/callback', rateLimit, async (req, res) => {
   // 3. Persist the key. setGuildApiKey is idempotent (upsert) — the
   //    previous key (if any) remains valid on qurl-service until the
   //    admin manually revokes it via layerv.ai.
-  // TODO(#1366): persist the verified qURL owner identity and reject a
-  // setup re-run that would silently repoint this guild to another owner.
+  // TODO(#1366): require explicit confirmation when setup changes a guild's owner.
   try {
-    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH);
+    const identity = await fetch(`${config.QURL_ENDPOINT}/v1/me`, {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
+    });
+    if (!identity.ok) {
+      const error = new Error('Could not verify the provisioned key owner');
+      error.code = 'QURL_KEY_OWNER_UNAVAILABLE';
+      error.status = identity.status;
+      throw error;
+    }
+    const ownerId = qurlKeyOwner(await identity.json());
+    await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH, ownerId);
   } catch (err) {
-    logger.error('Failed to persist guild API key after successful mint', {
-      error: err?.message, guildId, discordUserId, keyId,
+    logger.error('Failed to verify or persist guild API key after successful mint', {
+      error: err?.message, error_code: err?.code, identity_status: err?.status, guildId, discordUserId, keyId,
     });
     // Key was minted but not stored. Best-effort delete on qurl-service
     // so retries don't pile up orphan keys under the admin's account.

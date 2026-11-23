@@ -1672,7 +1672,10 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
   beforeEach(() => {
     mockDeleteFlow.mockResolvedValue({ deleted: true });
-    global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200,
+      json: async () => ({ data: { owner_id: 'owner-verified', auth_type: 'api_key',
+        api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] } } }),
+    });
   });
   afterAll(() => {
     global.fetch = originalFetch;
@@ -1711,13 +1714,26 @@ describe('handleSetupModal (dispatcher path)', () => {
     );
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(mockDb.setGuildApiKey).toHaveBeenCalledWith(
-      'guild-1', VALID_KEY, 'user-1', 'paste',
+      'guild-1', VALID_KEY, 'user-1', 'paste', 'owner-verified',
     );
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining('qURL is now configured'),
       }),
     );
+  });
+
+  it('rejects a read-only key with an actionable setup message', async () => {
+    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ data: {
+      owner_id: 'owner-verified', auth_type: 'api_key',
+      api_key: { kind: 'api_key', scopes: ['qurl:read'] },
+    } }) });
+    const interaction = makeModalInteraction();
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: expect.stringContaining('read and write access'),
+    });
   });
 
   it('skips work when deleteFlow loses dedup race', async () => {
