@@ -1,25 +1,25 @@
 # qURL browser extension for Gmail
 
-**Send files from Gmail as private links instead of attachments.**
+**Send files from Gmail as expiring access links instead of attachments.**
 The qURL™ extension uploads files from Gmail's compose window and drops a link
 for each one into your draft. Only the short link travels in the email, and
 each link expires, so a file you share today won't stay reachable forever.
 Your recipient just clicks.
 
-## What you can do in two minutes
+## Common tasks
 
 | You want to… | How |
 | --- | --- |
 | Put a file link in an email | **Compose** → **qURL Agent** icon → **Browse files** → **Upload to qURL** |
 | Share several files at once | Pick more than one file in **Browse files** |
 | Paste a link yourself | Click **Copy the qURL link** in the popup |
-| Upload to your organization's own qURL server | Gear icon → **qURL server** → **Save** |
+| Upload to your organization's own qURL server | Gear icon → **qURL server** → **Save** → confirm the server and browser permission prompts |
 
 ## Quickstart
 
 1. **Install** the extension (see [Installing](#installing) below).
 2. Open **Gmail** and click **Compose**.
-3. Click the **qURL** extension icon in the browser toolbar.
+3. Click the **qURL Agent** extension icon in the browser toolbar.
 4. Click **Browse files**, pick one or more, and click **Upload to qURL**.
 5. The secure links appear at the bottom of your draft. Keep writing and send
    as normal.
