@@ -2446,7 +2446,7 @@ describe('connector webhook metadata', () => {
     ddbMock.on(GetCommand).resolves({});
     expect(await store.getConnectorWebhookBinding()).toBeNull();
   });
-  it.each([{ qurl_api_key: 'key' }, { qurl_owner_id: 'usr' }, { webhook_secret: '' }, { webhook_secret: 'plaintext' }])(
+  it.each([{ qurl_api_key: 'key' }, { qurl_api_key: '' }, { qurl_owner_id: null }, { qurl_owner_id: 'usr' }, { webhook_secret: '' }, { webhook_secret: 'plaintext' }])(
     'rejects invalid protected metadata: %j', async (invalid) => {
       ddbMock.on(GetCommand).resolves({ Item: {
         webhook_owner_id: 'usr_connector', webhook_id: 'wh_connector', webhook_secret: mockCiphertext('secret'), ...invalid,

@@ -1694,7 +1694,7 @@ async function getConnectorWebhookBinding() {
     ConsistentRead: true,
   }));
   if (!row) return null;
-  if (row.qurl_api_key || row.qurl_owner_id
+  if (Object.hasOwn(row, 'qurl_api_key') || Object.hasOwn(row, 'qurl_owner_id')
       || ![row.webhook_owner_id, row.webhook_id, row.webhook_secret]
         .every(value => typeof value === 'string' && value.length)) {
     throw new Error('Invalid connector webhook binding');
