@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -274,7 +275,21 @@ func MintStoredStateWithEmailMode(ctx context.Context, store StateStore, teamID,
 	}
 	storeCtx, cancel := context.WithTimeout(ctx, stateStoreMintTimeout)
 	defer cancel()
-	if err := store.PutState(storeCtx, handle, state); err != nil {
+	started := time.Now()
+	err = store.PutState(storeCtx, handle, state)
+	result := "success"
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		result = "timeout"
+	case errors.Is(err, context.Canceled):
+		result = "canceled"
+	case err != nil:
+		result = "error"
+	}
+	// TODO(upstream-contract): infra materializes this duration for the setup ack budget.
+	// Keep fields fixed: no handle, state, identifiers, or error text.
+	slog.Info("oauth state put", "duration_ms", time.Since(started).Seconds()*1000, "result", result)
+	if err != nil {
 		return "", err
 	}
 	return handle, nil

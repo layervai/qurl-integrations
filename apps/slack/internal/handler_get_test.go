@@ -1012,7 +1012,7 @@ func TestResourceLinkExpiryConstsInSync(t *testing.T) {
 func TestRenderGetSuccess(t *testing.T) {
 	t.Parallel()
 	const link = "https://qurl.link/enter-me"
-	fallback, blocks := renderGetSuccess(link)
+	fallback, blocks := renderGetSuccess(link, oneTimeUseNotice())
 
 	if !strings.Contains(fallback, link) {
 		t.Errorf("fallback missing link: %q", fallback)
@@ -1827,4 +1827,45 @@ func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
 			t.Errorf("admin should mint a tunnel exposed in this channel: %q", async)
 		}
 	})
+}
+
+// TestHandleGet_DMWithRuleCarriesRuleNotice pins that dm:true delivers a
+// rule link with the rule's notice, not the default one.
+func TestHandleGet_DMWithRuleCarriesRuleNotice(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer(http.MethodGet, accessRulesPath, func(w http.ResponseWriter, _ *http.Request) { writeAccessRules(t, w) })
+	ts.addCustomer(http.MethodPost, mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/dm-rule", testResourceIDFix)
+	})
+	var dmText string
+	h := newAdminTestHandler(t, ts)
+	h.cfg.PostDMBlocks = func(_ context.Context, _, _, _ string, _ []any, fallbackText string) error {
+		dmText = fallbackText
+		return nil
+	}
+	newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db rule:once dm:true", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(dmText, "one-time use · link expires in 30d") {
+		t.Errorf("DM fallback = %q, want the One-time link notice", dmText)
+	}
+}
+
+func TestGetClientSanitizesAuthFailureLog(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+	h := &Handler{cfg: Config{AuthProvider: failingAuthProvider{err: errors.New("backend\r\nforged entry")}}}
+	c, err := h.getClient(t.Context(), log, testAdminTeamID)
+	if c != nil || err == nil || err.Error() != authFailureMessage {
+		t.Fatalf("auth failure = %v, %v", c, err)
+	}
+	var entry struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Error != `backend\r\nforged entry` {
+		t.Fatalf("log error = %q, want escaped control bytes", entry.Error)
+	}
 }
