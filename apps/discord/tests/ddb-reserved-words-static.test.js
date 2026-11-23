@@ -2,8 +2,10 @@
 const fs = require('fs');
 const path = require('path');
 const parser = require('@babel/parser');
-const traverseModule = require('@babel/traverse');
-const traverse = traverseModule.default || traverseModule;
+let traverse;
+beforeAll(async () => {
+  ({ default: traverse } = await import('@babel/traverse'));
+});
 
 const RESERVED_WORDS = (() => {
   const json = JSON.parse(

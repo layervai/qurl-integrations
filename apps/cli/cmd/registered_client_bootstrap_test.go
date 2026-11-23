@@ -853,7 +853,7 @@ func TestPublishDefaultsToDeviceEnrollment(t *testing.T) {
 					return runtime, nil
 				}
 			})
-			args := []string{"publish", "https://example.test", "--endpoint", srv.URL, "--supervision", tc.supervision}
+			args := []string{"publish", "https://example.test", "--name", "Example", "--endpoint", srv.URL, "--supervision", tc.supervision}
 			if tc.quiet {
 				args = append(args, "--quiet")
 			}

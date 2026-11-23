@@ -109,9 +109,9 @@ func TestPublishIsPrivateUnlessPublic(t *testing.T) {
 		for _, local := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/local=%t", test.name, local), func(t *testing.T) {
 				srv := apitest.NewServer(t)
-				opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}, test.flags...)}
+				opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}, test.flags...)}
 				if local {
-					opts = servingLocalPublish(t, srv, false, test.flags...)
+					opts = servingLocalPublish(t, srv, false, append([]string{"--name", "Example"}, test.flags...)...)
 				}
 				res := runCLI(t, opts)
 				if res.code != 0 {
@@ -120,6 +120,10 @@ func TestPublishIsPrivateUnlessPublic(t *testing.T) {
 				creates := createRequests(t, srv)
 				if len(creates) != 1 {
 					t.Fatalf("publish sent %d create requests, want one", len(creates))
+				}
+				// The local Connector pre-create carries the name too.
+				if name := string(creates[0]["name"]); name != `"Example"` {
+					t.Fatalf("create request name = %s, want \"Example\"", name)
 				}
 				stated, present := creates[0]["private"]
 				if want := strconv.FormatBool(test.wantPrivate); !present || string(stated) != want {
@@ -155,7 +159,7 @@ func TestPublishJSONAndQuietKeepTheirDocuments(t *testing.T) {
 				run := func(extra ...string) *runResult {
 					t.Helper()
 					srv := apitest.NewServer(t)
-					opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}, flags...)}
+					opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}, flags...)}
 					if local {
 						opts = servingLocalPublish(t, srv, false, flags...)
 					}
@@ -199,7 +203,7 @@ func TestPublishDoesNotDependOnTheServiceDefault(t *testing.T) {
 		t.Run(fmt.Sprintf("local=%t", local), func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			srv.PlayPublicByDefault()
-			opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}}
+			opts := &runOpts{args: []string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}}
 			if local {
 				opts = servingLocalPublish(t, srv, false)
 			}
@@ -239,7 +243,7 @@ func TestPublishFailsClosedWhenPrivacyIsNotConfirmed(t *testing.T) {
 						}
 						apitest.WriteEnvelope(t, w, http.StatusCreated, data, map[string]any{"found_existing": false})
 					})
-					opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}, test.flags...)}
+					opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}, test.flags...)}
 					connectorRequests := 0
 					if local {
 						opts = localPublish(t, srv, func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
@@ -316,7 +320,7 @@ func TestPublishOfATargetWithTheOtherPrivacyIsAConflict(t *testing.T) {
 					}
 					srv.SetResourceAccess(test.existingPrivate)
 					srv.SetPublishFoundExisting(true)
-					opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}, test.flags...)}
+					opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}, test.flags...)}
 					if local {
 						opts = localPublish(t, srv, func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
 							if _, err := resolveID("agent-one"); err != nil {

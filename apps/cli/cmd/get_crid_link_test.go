@@ -1620,7 +1620,7 @@ func TestShareNeverAsksWithTheCRIDAlone(t *testing.T) {
 // compared with.
 func todaysMint(ctx context.Context, opts *globalOpts, assessment *cridux.Assessment, options qurlapi.ShareOptions) (*qurlapi.ShareLink, error) {
 	link, err := opts.shareResource(ctx, assessment.Input, options)
-	if err := verifyShareLink(assessment, link, err); err != nil {
+	if err := verifyShareLink(assessment.Input, link, err); err != nil {
 		return nil, err
 	}
 	return link, nil

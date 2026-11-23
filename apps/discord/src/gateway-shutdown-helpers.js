@@ -175,6 +175,7 @@ async function stopGatewayHotStandby({
 // tests rather than relying on source-shape assertions in index.js.
 async function runGracefulShutdown({
   code = 0,
+  isFatalRequested = () => false,
   claimShutdown,
   teardown,
   logger,
@@ -189,7 +190,7 @@ async function runGracefulShutdown({
   const exitOnce = (exitCode) => {
     if (exited) return;
     exited = true;
-    exit(exitCode);
+    exit(isFatalRequested() ? 1 : exitCode);
   };
   const hardExit = scheduleHardExit(() => {
     try {
@@ -316,6 +317,7 @@ function runGatewayFatalShutdown({
 // unit-testable without process.exit side effects.
 async function runPushHandoffShutdown({
   code = 0,
+  isFatalRequested = () => false,
   gatewayLeader,
   // Optional for boot-race and flag-off callers. stop() must flip its running
   // flag synchronously; its returned settlement promise is observed for
@@ -394,13 +396,17 @@ async function runPushHandoffShutdown({
   // hard-exit timer above).
   let handoffThrew = false;
   try {
-    const result = await gatewayLeader.pushHandoff();
-    logBestEffort(logger, 'info', 'pushHandoff complete', {
-      transferred: result?.transferred,
-      pushAcked: result?.pushAcked,
-      reason: result?.reason,
-      pushReason: result?.pushReason,
-    });
+    // A fatal can arrive after SIGTERM claims the shutdown gate. An already
+    // started transfer cannot be undone, but it must never report a clean exit.
+    if (!isFatalRequested()) {
+      const result = await gatewayLeader.pushHandoff();
+      logBestEffort(logger, 'info', 'pushHandoff complete', {
+        transferred: result?.transferred,
+        pushAcked: result?.pushAcked,
+        reason: result?.reason,
+        pushReason: result?.pushReason,
+      });
+    }
   } catch (err) {
     handoffThrew = true;
     logBestEffort(logger, 'error', 'pushHandoff threw — exiting anyway so the standby can cold-acquire', {
@@ -419,7 +425,7 @@ async function runPushHandoffShutdown({
   // wrappers) would observe a spurious second exit-code-1 ~12 s
   // later without this clear.
   clearHardExit(hardExit);
-  exitOnce(handoffThrew ? forcedExitCode : code);
+  exitOnce(handoffThrew || isFatalRequested() ? forcedExitCode : code);
 }
 
 module.exports = {
