@@ -121,8 +121,12 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
   // this also works on gateway-only processes and in the backfill script,
   // neither of which starts the HTTP registry scan.
   let matchedDefaultOwnerId;
+  let connectorBinding;
   try {
-    matchedDefaultOwnerId = await subs.resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl: bridgeUrl() });
+    connectorBinding = await subs.resolveConnectorOwnerForApiKey(guildId, apiKey, bridgeUrl());
+    if (!connectorBinding) {
+      matchedDefaultOwnerId = await subs.resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl: bridgeUrl() });
+    }
   } catch (err) {
     logger.warn('Per-guild webhook owner resolution failed', {
       error: err?.message, guildId,
@@ -132,6 +136,26 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       error_code: err?.code || err?.name || 'unknown',
     });
     return { ok: false, reason: LINK_RESULTS.REGISTER_FAILED };
+  }
+
+  if (connectorBinding) {
+    try {
+      await db.setGuildDefaultWebhookOwner(guildId, {
+        webhookOwnerId: connectorBinding.ownerId,
+        expectedDefaultWebhookSecret: connectorBinding.webhookSecret,
+        expectedApiKey: apiKey,
+      });
+      subs.upsertGuild({ guildId, ...connectorBinding });
+    } catch (err) {
+      auditLinkFailure(guildId, LINK_RESULTS.PERSIST_FAILED, {
+        stage: 'connector-owner-persist', error_code: err?.code || err?.name || 'unknown',
+      });
+      return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };
+    }
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED, {
+      guild_id: guildId, action: WEBHOOK_ACTIONS.REUSED, connector_owner: true,
+    });
+    return { ok: true, action: WEBHOOK_ACTIONS.REUSED };
   }
 
   if (matchedDefaultOwnerId) {
