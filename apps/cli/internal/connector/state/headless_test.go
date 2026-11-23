@@ -66,15 +66,22 @@ func TestPinnedFilesRequireAbsoluteCleanPaths(t *testing.T) {
 
 func TestReadOnlyProjectedFilesAndCredentialSafety(t *testing.T) {
 	dir := t.TempDir()
-	target := filepath.Join(dir, "..data-token")
+	revision := filepath.Join(dir, "..2026_11_23_00_00_00")
+	if err := os.Mkdir(revision, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(revision, "enrollment-token")
 	if err := os.WriteFile(target, []byte("enrollment-value\n"), 0o440); err != nil { // #nosec G306 -- projected dedicated-group secret fixture.
 		t.Fatal(err)
 	}
 	if err := os.Chmod(target, 0o440); err != nil { // #nosec G302 -- exact projected-secret mode under the test umask.
 		t.Fatal(err)
 	}
+	if err := os.Symlink(filepath.Base(revision), filepath.Join(dir, "..data")); err != nil {
+		t.Fatal(err)
+	}
 	link := filepath.Join(dir, "enrollment-token")
-	if err := os.Symlink(target, link); err != nil {
+	if err := os.Symlink(filepath.Join("..data", "enrollment-token"), link); err != nil {
 		t.Fatal(err)
 	}
 	got, err := ReadEnrollmentCredential(link)

@@ -157,7 +157,7 @@ Set an explicit EFS file-system resource policy: the
 Require TLS and scope client permissions to this file system, using
 [`elasticfilesystem:AccessPointArn` conditions](https://docs.aws.amazon.com/efs/latest/ug/access-points-iam-policy.html)
 for the three access points.
-Grant `elasticfilesystem:ClientMount` on all three and
+Grant the task role `elasticfilesystem:ClientMount` on all three and
 `elasticfilesystem:ClientWrite` only on state. Give the provisioning role the
 separate config/bootstrap write access needed for setup and token removal.
 An allow in either an identity or file-system policy can grant access; check
@@ -364,7 +364,8 @@ the smoke. Then delete `qurl-s3-bootstrap` and the local token file. Keep the PV
 1. Check origin logs for startup/preflight failures and Connector logs for a
    connected route. These are checks of setup, not proof of viewer access.
 2. In the same Slack channel, run `/qurl get $docs-site` (substitute the alias
-   chosen during setup). Open the returned link through the normal qURL
+   chosen during setup; `$` is part of the Slack alias syntax). Open the
+   returned link through the normal qURL
    browser flow. Complete the access step, then verify the expected unique
    content of your private `index.html` and one nested asset.
 3. Request a known missing path through that authenticated site. It must return
