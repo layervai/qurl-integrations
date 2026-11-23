@@ -171,6 +171,7 @@ type SharingInspection struct {
 }
 
 type resourceStatusJSON struct {
+	SignedIdentity    *bool               `json:"signed_identity,omitempty"`
 	ConsumerAccess    *consumerAccessJSON `json:"consumer_access,omitempty"`
 	AllowedDeviceKeys []string            `json:"allowed_device_keys"`
 	Private           *bool               `json:"private,omitempty"`
@@ -408,6 +409,7 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
 			Publisher:        publisherDocument(resource.Publisher),
 			OriginHeaderName: resource.OriginHeaderName,
+			SignedIdentity:   resource.SignedIdentity,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, resource.CRID)
@@ -430,6 +432,9 @@ func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSu
 	}
 	ew.printf("%s\t%s\n", p.bold("Type:"), resource.Type)
 	ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
+	if resource.SignedIdentity != nil {
+		ew.printf("%s\t%t\n", p.bold("Signed identity:"), *resource.SignedIdentity)
+	}
 	if resource.Private != nil {
 		ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
 	}
