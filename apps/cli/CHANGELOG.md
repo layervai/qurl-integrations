@@ -1,5 +1,54 @@
 # Changelog
 
+## [4.4.4](https://github.com/layervai/qurl-integrations/compare/v4.4.3...v4.4.4) (2026-11-18)
+
+
+### Bug Fixes
+
+* **cli:** return confirmed identity when local publish setup fails ([#2070](https://github.com/layervai/qurl-integrations/issues/2070)) ([bce911c](https://github.com/layervai/qurl-integrations/commit/bce911c97492e7da1b167f42f5beb4522d2f568b))
+
+## [4.4.3](https://github.com/layervai/qurl-integrations/compare/v4.4.2...v4.4.3) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cli:** document Go dependency verification for release builds ([#2060](https://github.com/layervai/qurl-integrations/issues/2060)) ([acbe159](https://github.com/layervai/qurl-integrations/commit/acbe15942be409337a674d1064e961f170c31e01))
+
+## [4.4.2](https://github.com/layervai/qurl-integrations/compare/v4.4.1...v4.4.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cli:** release direct UDP compatibility ([#2047](https://github.com/layervai/qurl-integrations/issues/2047)) ([080d407](https://github.com/layervai/qurl-integrations/commit/080d407c3349f6f89aa43939f5f4c63699f8ec85))
+
+## [4.4.1](https://github.com/layervai/qurl-integrations/compare/v4.4.0...v4.4.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **cli:** use Connector v0.14.6 ([#2042](https://github.com/layervai/qurl-integrations/issues/2042)) ([115b6a0](https://github.com/layervai/qurl-integrations/commit/115b6a013d662eaf90e112ffe4e61d64f10e46fc))
+
+## [4.4.0](https://github.com/layervai/qurl-integrations/compare/v4.3.1...v4.4.0) (2026-11-15)
+
+
+### Features
+
+* **cli:** set CRID credit prices ([#2040](https://github.com/layervai/qurl-integrations/issues/2040)) ([afb7422](https://github.com/layervai/qurl-integrations/commit/afb7422e3f287f660e1aa477b34a13c11de989fb))
+
+## [4.3.1](https://github.com/layervai/qurl-integrations/compare/v4.3.0...v4.3.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **cli:** accept the stopped Connector conflict in release checks ([#2036](https://github.com/layervai/qurl-integrations/issues/2036)) ([deb373f](https://github.com/layervai/qurl-integrations/commit/deb373f00c4c6ea40710d7f8ca28e2513e70ad88))
+
+## [4.3.0](https://github.com/layervai/qurl-integrations/compare/v4.2.0...v4.3.0) (2026-11-15)
+
+
+### Features
+
+* **cli:** support scheduled invitations ([#2033](https://github.com/layervai/qurl-integrations/issues/2033)) ([b2313bc](https://github.com/layervai/qurl-integrations/commit/b2313bc05c0abb57a35d4b77ddd3ae55a9e3a670))
+
 ## [4.2.0](https://github.com/layervai/qurl-integrations/compare/v4.1.0...v4.2.0) (2026-11-13)
 
 

@@ -87,6 +87,7 @@ func (m consumerManagement) UpdateConsumerAccess(ctx context.Context, crid strin
 
 // ConsumerManagementResult is internal; output uses explicit fields to omit secrets.
 type ConsumerManagementResult struct {
+	CreditPrice int64
 	Action      string
 	CRID        string
 	Policy      *qurl.ConsumerAccessPolicy

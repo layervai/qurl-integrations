@@ -125,7 +125,7 @@ func TestUnconfirmedConsumerPolicyExplainsRecovery(t *testing.T) {
 	requested := &qurl.ConsumerAccessPolicy{Mode: "review", Version: 1}
 	for _, existing := range []bool{false, true} {
 		published := &Published{FoundExisting: &existing, ConsumerAccess: &qurl.ConsumerAccessPolicy{Mode: "invite_only", Version: 1}}
-		err := confirmPublishConsumerPolicy(requested, published)
+		err := confirmPublishConsumerPolicy(requested, 0, published)
 		wantError := qurl.ErrInvalidAPIResponse
 		if existing {
 			wantError = ErrPublishAccessConflict
@@ -147,7 +147,7 @@ func TestExistingConsumerPolicyMismatchIsAConflict(t *testing.T) {
 	existing := true
 	requested := &qurl.ConsumerAccessPolicy{Mode: "contract", Version: 1, ContractID: "expected-contract"}
 	actual := &Published{FoundExisting: &existing, ConsumerAccess: &qurl.ConsumerAccessPolicy{Mode: "contract", Version: 1, ContractID: "different-contract"}}
-	err := confirmPublishConsumerPolicy(requested, actual)
+	err := confirmPublishConsumerPolicy(requested, 0, actual)
 	if !errors.Is(err, ErrPublishAccessConflict) || errors.Is(err, qurl.ErrInvalidAPIResponse) {
 		t.Fatalf("existing policy mismatch = %v", err)
 	}

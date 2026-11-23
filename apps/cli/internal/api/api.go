@@ -61,6 +61,7 @@ type Client interface {
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
 	// Resource returns one owner-visible resource by CRID or public resource ID.
 	Resource(ctx context.Context, id string) (*ResourceSummary, error)
+	SetCreditPrice(ctx context.Context, crid string, credits, version int64) (*ConsumerManagementResult, error)
 	// SetDeviceGrants replaces the complete private-resource device grant
 	// list. The CLI calls it only with an empty list, to clear the grants; a
 	// single device is allowed or removed with EditDeviceGrants.
@@ -121,6 +122,8 @@ type Client interface {
 	// or removes it when header is nil, and returns the resource as the
 	// service confirmed it. The answer names the header, never its value.
 	SetOriginHeader(ctx context.Context, id string, header *OriginHeader) (*ResourceSummary, error)
+	// SetSignedIdentity changes the saved app identity requirement, without replay.
+	SetSignedIdentity(ctx context.Context, id string, enabled bool) (*ResourceSummary, error)
 }
 
 // AccountClient adds the one account-authorized bootstrap operation. The CLI
@@ -133,6 +136,7 @@ type AccountClient interface {
 
 // PublishOptions carries creation policy and optional metadata.
 type PublishOptions struct {
+	CreditPrice    int64
 	ConsumerAccess *qurl.ConsumerAccessPolicy
 	// Public asks for a resource that anyone who has its CRID can open. The
 	// zero value asks for a private one, limited to its owner and the devices
@@ -202,6 +206,7 @@ type ListOptions struct {
 
 // Published is the repo-owned result of Publish.
 type Published struct {
+	CreditPrice    int64
 	ConsumerAccess *qurl.ConsumerAccessPolicy
 	// Private is the privacy the service confirmed. Publish never returns a
 	// result without it. Nil means privacy was not returned or queried, never
@@ -335,6 +340,8 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
+	SignedIdentity        *bool
+	CreditPrice           int64
 	ConsumerAccess        *qurl.ConsumerAccessPolicy
 	ConsumerAccessVersion int64
 
@@ -584,17 +591,23 @@ func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*Shar
 // it can set one_time_use. one_time_use and an unlimited max_sessions are
 // always sent, because a Connector link is single-use when they are omitted.
 func (c *client) MintLimitedLink(ctx context.Context, crid string, limits accessrules.LinkLimits) (*ShareLink, error) {
-	expiresIn, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn)
-	if !ok {
-		return nil, errors.New("access rule link expiry is out of range")
+	var expiry qurl.PortalOption
+	if limits.Window != nil {
+		expiry = qurl.WithAccessWindow(limits.Window.Start, limits.Window.End)
+	} else {
+		expiresIn, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn)
+		if !ok {
+			return nil, errors.New("access rule link expiry is out of range")
+		}
+		// Saved rules can contain fractions. Round down so a link never lasts longer.
+		expiry = qurl.ValidFor(expiresIn.Truncate(time.Second))
 	}
 	oneBrowser := limits.OneTimeUse != nil && *limits.OneTimeUse
 	use := qurl.Reusable()
 	if oneBrowser {
 		use = qurl.OneTimeUse()
 	}
-	// Existing account rules can contain fractions. Round down so the link never lasts longer.
-	opts := []qurl.PortalOption{qurl.ValidFor(expiresIn.Truncate(time.Second)), use, qurl.MaxSessions(0)}
+	opts := []qurl.PortalOption{expiry, use, qurl.MaxSessions(0)}
 	if limits.SessionDuration != nil {
 		session, ok := accessrules.SessionLength.Parse(*limits.SessionDuration)
 		if !ok {

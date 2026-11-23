@@ -38,6 +38,7 @@ func publishCmd(opts *globalOpts) *cobra.Command {
 		stripePrice          string
 		paymentAccessSeconds int64
 		contractID           string
+		creditPrice          int64
 		name                 string
 		description          string
 		tags                 []string
@@ -74,6 +75,7 @@ Old links remain invalid.
 For a remote URL, qURL registers it, prints the CRID, and exits:
 
   qurl publish https://api.example.com/reports --name "Reports API"
+  qurl publish https://api.example.com/reports --name "Reports API" --credit-price 2
 
 In Sandbox, omit --name for a remote HTTPS URL to use its homepage title.
 Use --name to choose a different public name.
@@ -164,14 +166,14 @@ owns the share and turns it off when it exits.`,
 			if ruleFile == "-" && cmd.Flags().Changed("origin-header") {
 				return exitcode.UsageError(errors.New("--rule-file - and --origin-header both read standard input; use --rule <id-or-name>"))
 			}
-			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys); err != nil {
+			if err := validatePublishAccessFlags(cmd, public, private, allowRequests, allowedDeviceKeys, creditPrice); err != nil {
 				return exitcode.UsageError(err)
 			}
 			// Before the publish, so a foreground publish says it too.
 			opts.noteOutdatedSkill()
 			named := publishAccessFlags(cmd)
 			access := qurlapi.PublishOptions{
-				Public: public, AllowedDeviceKeys: allowedDeviceKeys, AllowRequests: allowRequests,
+				Public: public, AllowedDeviceKeys: allowedDeviceKeys, AllowRequests: allowRequests, CreditPrice: creditPrice,
 				KeepExistingPublic: len(named) == 0, NamedAccessFlags: named,
 			}
 			if err := setPublishConsumerPolicy(&access, consumerMode, contractID, emailDomain); err != nil {
@@ -220,6 +222,7 @@ owns the share and turns it off when it exits.`,
 	cmd.Flags().StringVar(&stripePrice, stripePriceFlag, "", "Stripe price for paid contract access; LayerV collects 3%")
 	cmd.Flags().Int64Var(&paymentAccessSeconds, paymentAccessSecondsFlag, 0, "one-time access duration; zero lasts for the resource lifetime; subscriptions require zero")
 	cmd.Flags().StringVar(&emailDomain, consumerEmailDomainFlag, "", "exact lowercase email domain for email_domain access")
+	cmd.Flags().Int64Var(&creditPrice, creditPriceFlag, 0, "price in credits for one hour of access to a private URL (1–10)")
 	cmd.Flags().StringVar(&consumerMode, "access", "", "private access mode: keys, invite_only, email_capture, email_domain, review or contract")
 	cmd.Flags().StringVar(&contractID, "contract", "", "publisher contract identifier for contract access")
 	cmd.Flags().BoolVar(&public, "public", false, "let anyone who has the CRID open the resource (default: private, only you and the devices you allow)")
@@ -273,7 +276,7 @@ func (o *globalOpts) runRemotePublish(ctx context.Context, target string, access
 // resource.
 func publishAccessFlags(cmd *cobra.Command) []string {
 	var named []string
-	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerEmailDomainFlag, consumerContract, ruleFlag, ruleFileFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag} {
+	for _, name := range []string{"public", "private", "allow-device-key", "allow-requests", accessFlag, consumerEmailDomainFlag, consumerContract, ruleFlag, ruleFileFlag, stripeAccountFlag, stripePriceFlag, paymentAccessSecondsFlag, creditPriceFlag} {
 		flag := cmd.Flags().Lookup(name)
 		if flag == nil || !flag.Changed {
 			continue
@@ -293,7 +296,7 @@ func publishAccessFlags(cmd *cobra.Command) []string {
 // false form is refused instead of ignored: read literally it asks for a
 // public resource, and a private one must never be the silent answer to that,
 // nor a public one to anything but --public.
-func validatePublishAccessFlags(cmd *cobra.Command, public, private, allowRequests bool, allowedDeviceKeys []string) error {
+func validatePublishAccessFlags(cmd *cobra.Command, public, private, allowRequests bool, allowedDeviceKeys []string, creditPrice int64) error {
 	for _, name := range []string{"access", "contract"} {
 		if cmd.Flags().Changed(name) && strings.TrimSpace(cmd.Flags().Lookup(name).Value.String()) == "" {
 			return fmt.Errorf("--%s requires a non-empty value", name)
@@ -312,6 +315,9 @@ func validatePublishAccessFlags(cmd *cobra.Command, public, private, allowReques
 	}
 	if public && allowRequests {
 		return errors.New(msgAllowRequestsWithPublic)
+	}
+	if cmd.Flags().Changed(creditPriceFlag) {
+		return validateCreditPriceFlags(cmd, creditPrice, accessFlag, "allow-device-key", "allow-requests", "public")
 	}
 	return validateAllowedDeviceKeys(allowedDeviceKeys)
 }
@@ -372,6 +378,14 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 		return err
 	}
 	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID, access: *access}
+	servingConfirmed := false
+	defer func() {
+		if retErr != nil && !servingConfirmed && enrollment.published != nil {
+			if err := opts.printer().PublishSetupFailure(enrollment.published); err != nil {
+				retErr = errors.Join(retErr, err)
+			}
+		}
+	}()
 	// The registered REST client is open and cached before resource discovery
 	// can request a Connector enrollment credential. Resource discovery can
 	// therefore reuse it without a nested native-runtime open. The separate
@@ -408,7 +422,11 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return compensate(err)
 	}
-	mintLink := func() error { return opts.mintRuleLink(ctx, client, access.Rule, shared, limits) }
+	// Both serving paths call this only after serving; later link failures own their receipt.
+	mintLink := func() error {
+		servingConfirmed = true
+		return opts.mintRuleLink(ctx, client, access.Rule, shared, limits)
+	}
 	return finishLocalPublish(ctx, opts, client, registry, resolved, local, shared, mintLink, stateDir, foreground, compensate)
 }
 
@@ -472,6 +490,7 @@ type localEnrollment struct {
 	opts        *globalOpts
 	target      *publishTarget
 	requestedID string
+	published   *qurlapi.Published // Written only by the synchronous resource-discovery callback.
 
 	mu                 sync.Mutex
 	mintedID           string
@@ -621,6 +640,7 @@ func prepareLocalPublishResource(
 		if err != nil {
 			return "", err
 		}
+		enrollment.published = precreated
 		return id, nil
 	})
 	if err != nil {
@@ -958,6 +978,9 @@ func validateDeviceKeys(flag string, keys []string) error {
 }
 
 func setPublishConsumerPolicy(access *qurlapi.PublishOptions, mode, contract, emailDomain string) error {
+	if access.CreditPrice != 0 {
+		mode, contract = consumerContract, qurlapi.CreditContractID
+	}
 	if mode == "" {
 		if contract != "" || emailDomain != "" {
 			return exitcode.UsageError(errors.New("--contract or --email-domain requires a matching --access mode"))
@@ -1104,7 +1127,7 @@ func validatePublishTargetFlags(cmd *cobra.Command, target *publishTarget) error
 		if cmd.Flags().Changed("origin-header") {
 			return exitcode.UsageError(errOriginHeaderLocal)
 		}
-		for _, flag := range []string{"description", "tag", "alias"} {
+		for _, flag := range []string{"description", "tag", "alias", creditPriceFlag} {
 			if cmd.Flags().Changed(flag) {
 				return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", flag))
 			}
