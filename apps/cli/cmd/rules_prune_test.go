@@ -82,6 +82,14 @@ func TestTombstoneFreesFullLinkLimitStoreForNextPublish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Seed the protected Windows ACL before replacing the fixture contents in bulk.
+	store, err := connectorstate.OpenShareRules(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set(t.Context(), srv.Key.CRID, &accessrules.LinkLimits{ExpiresIn: "1h"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "share_rules.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
