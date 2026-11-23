@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -21,6 +22,12 @@ const revokeUsageMessage = "Usage: `/qurl-admin revoke $<id>` — revoke a prote
 // the resolve step. Defensive — [Handler.resolveTokenForGet] always returns a
 // *userError — but a future refactor mustn't leak an internal error to Slack.
 const commonRevokeFailedMessage = "Failed to revoke the resource. Please try again."
+
+// revokeLifecycleUncertainNote qualifies a confirmed revoke with incomplete inspection.
+const revokeLifecycleUncertainNote = ":warning: Lifecycle checks were incomplete. Follow the workload teardown steps above."
+
+// Two advisory calls must leave most of the async worker budget for DELETE.
+const revokeAdvisoryTimeout = 3 * time.Second
 
 // revokeTeardownNote is appended only to successful revoke replies. It LEADS
 // with what revoke did do — qurl-service flips the resource to revoked (new
@@ -180,45 +187,71 @@ func (h *Handler) revokeResource(ctx context.Context, log *slog.Logger, teamID, 
 	return h.revokeResourceResult(ctx, log, teamID, userID, resourceID, displayToken).cardText
 }
 
+// Callers supply escaped workspace/user log fields; this core adds the resource.
 func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, teamID, userID, resourceID, displayToken string) actionCoreResult {
+	log = log.With("resource_id", sanitizeLogValue(resourceID))
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("revoke: failed to get API key", "error", err, "team_id", teamID, "user_id", userID)
+		log.Error("revoke: failed to get API key", "error", sanitizeLogValue(err.Error()))
 		return newActionCoreResult(false, authErrorMessage(err), "Workspace API key was not available.")
 	}
-	resource, err := c.GetResource(ctx, resourceID)
+	readCtx, cancelRead := context.WithTimeout(ctx, revokeAdvisoryTimeout)
+	resource, err := c.GetResource(readCtx, resourceID)
+	cancelRead()
+	resourceType := ""
+	if resource != nil {
+		resourceType = resource.Type
+	}
+	degradedReason := ""
 	if err != nil {
 		var apiErr *client.APIError
 		if errors.As(err, &apiErr) {
 			switch apiErr.StatusCode {
 			case http.StatusNotFound, http.StatusGone:
-				log.Info("revoke: resource not found before lifecycle teardown", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				log.Info("revoke: resource not found before lifecycle teardown")
 				h.purgeResourceBindings(ctx, log, teamID, resourceID)
 				return newActionCoreResult(false, fmt.Sprintf("`$%s` not found — already revoked, or check the id.", escapeMrkdwnCode(displayToken)), "Resource was not found or was already revoked.")
 			case http.StatusUnauthorized, http.StatusForbidden:
-				log.Warn("revoke: upstream auth rejected", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				log.Warn("revoke: upstream auth rejected", "status", apiErr.StatusCode)
 				return newActionCoreResult(false, "This workspace's API key was rejected by the qURL service — re-run `/qurl setup <email>` to reconnect.", "Workspace API key was rejected.")
 			}
 		}
-		log.Error("read resource before revoke failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
-		return newActionCoreResult(false, ":warning: "+sanitizeAPIError(err, fmt.Sprintf("Failed to inspect `$%s` before revoke", escapeMrkdwnCode(displayToken))), "Resource could not be inspected before revoke.")
-	}
-	switch resource.Type {
-	case client.ResourceTypeTunnel:
-		if _, err := c.SetSharing(ctx, resourceID, "off"); err != nil {
-			var apiErr *client.APIError
-			if !errors.As(err, &apiErr) || (apiErr.StatusCode != http.StatusNotFound && apiErr.StatusCode != http.StatusGone) {
-				log.Error("stop tunnel sharing before revoke failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
-				return newActionCoreResult(false, ":warning: "+sanitizeAPIError(err, fmt.Sprintf("Failed to stop sharing `$%s` before revoke", escapeMrkdwnCode(displayToken))), "Sharing could not be stopped before revoke.")
-			}
-			// A concurrent delete already achieved the desired fail-closed state;
-			// continue into idempotent DELETE so cleanup/reply behavior converges.
+		degradedReason = "read_failed"
+		log.Error("read resource before revoke failed; proceeding to delete", "error", sanitizeLogValue(err.Error()))
+	} else {
+		switch resourceType {
+		case client.ResourceTypeURL, client.ResourceTypeTunnel:
+			// Known types use the normal lifecycle path below.
+		default:
+			degradedReason = "unknown_type"
+			log.Error("revoke: unknown resource type; proceeding to delete", "type", sanitizeLogValue(resourceType))
 		}
-	case client.ResourceTypeURL:
-		// URL resources have no Connector lifecycle state.
-	default:
-		log.Error("revoke: resource response has unknown type", "type", resource.Type, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
-		return newActionCoreResult(false, ":warning: Failed to revoke the resource because its type was not recognized.", "Resource type was not recognized.")
+	}
+	// Prefer revoking viewer access to leaving it granted when inspection fails,
+	// even if a real tunnel's sharing stop also fails. Connector plumbing can remain;
+	// revokeTeardownNote explains manual teardown. Recognized tunnels still stop
+	// first to quiesce their serving state before DELETE.
+	// TODO(upstream-contract): qurl-service rejects non-tunnel sharing writes; DELETE authorizes independently.
+	var sharingErr error
+	switch {
+	case degradedReason != "":
+		sharingCtx, cancelSharing := context.WithTimeout(ctx, revokeAdvisoryTimeout)
+		_, sharingErr = c.SetSharing(sharingCtx, resourceID, "off")
+		cancelSharing()
+	case resourceType == client.ResourceTypeTunnel:
+		_, sharingErr = c.SetSharing(ctx, resourceID, "off")
+	}
+	if sharingErr != nil {
+		var apiErr *client.APIError
+		if !errors.As(sharingErr, &apiErr) || (apiErr.StatusCode != http.StatusNotFound && apiErr.StatusCode != http.StatusGone) {
+			if degradedReason == "" {
+				log.Error("stop tunnel sharing before revoke failed", "error", sanitizeLogValue(sharingErr.Error()))
+				return newActionCoreResult(false, ":warning: "+sanitizeAPIError(sharingErr, fmt.Sprintf("Failed to stop sharing `$%s` before revoke", escapeMrkdwnCode(displayToken))), "Sharing could not be stopped before revoke.")
+			}
+			log.Warn("optional sharing stop failed; proceeding to revoke", "error", sanitizeLogValue(sharingErr.Error()), "degraded_reason", degradedReason)
+		}
+		// A 404/410 may be a concurrent delete. With degraded metadata, other
+		// stop failures are advisory too; DELETE still authorizes the revoke.
 	}
 	if err := c.DeleteResource(ctx, resourceID); err != nil {
 		var apiErr *client.APIError
@@ -229,7 +262,7 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 				// alias-charset (parseAliasToken / a list-rendered slug), but
 				// route it through escapeMrkdwnCode anyway — cheap insurance
 				// against a code-span break-out if the charset ever widens.
-				log.Info("revoke: resource not found (already revoked or typo'd)", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				log.Info("revoke: resource not found (already revoked or typo'd)")
 				// Confirmed gone upstream — the out-of-band-delete case where an
 				// orphaned `$alias` is MOST likely (some other surface deleted the
 				// resource without sweeping the bot's channel policies). Sweep here
@@ -240,14 +273,14 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 			case http.StatusUnauthorized, http.StatusForbidden:
 				// API key rejected — point at /qurl setup so the admin has
 				// a concrete reconnect path rather than a generic error.
-				log.Warn("revoke: upstream auth rejected", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				log.Warn("revoke: upstream auth rejected", "status", apiErr.StatusCode)
 				return newActionCoreResult(false, "This workspace's API key was rejected by the qURL service — re-run `/qurl setup <email>` to reconnect.", "Workspace API key was rejected.")
 			}
 		}
-		log.Error("revoke resource failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+		log.Error("revoke resource failed", "error", sanitizeLogValue(err.Error()))
 		return newActionCoreResult(false, ":warning: "+sanitizeAPIError(err, fmt.Sprintf("Failed to revoke `$%s`", escapeMrkdwnCode(displayToken))), "Resource could not be revoked.")
 	}
-	log.Info("revoke succeeded", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+	log.Info("revoke succeeded")
 	// Cascade the delete into the bot's channel policies: a destroyed resource
 	// must not leave an orphaned `$alias` behind (one that still reports "already
 	// bound" yet lists no resource). Best-effort and post-success — the resource
@@ -261,7 +294,14 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 	// names may well still be running. The 404 branch means "never owned, or a
 	// typo'd id", where this workspace has no confirmation it ever ran anything,
 	// so pointing the admin at teardown would be a guess.
-	return newActionCoreResult(true, fmt.Sprintf("Revoked `$%s` and all its qURLs.\n\n%s", escapeMrkdwnCode(displayToken), revokeTeardownNote), "Resource and all of its qURLs were revoked.")
+	cardText := fmt.Sprintf("Revoked `$%s` and all its qURLs.\n\n%s", escapeMrkdwnCode(displayToken), revokeTeardownNote)
+	auditDisplay := "Resource and all of its qURLs were revoked."
+	if degradedReason != "" {
+		log.Warn("revoke succeeded with incomplete lifecycle checks", "degraded_reason", degradedReason)
+		cardText += "\n\n" + revokeLifecycleUncertainNote
+		auditDisplay += " Lifecycle checks were incomplete."
+	}
+	return newActionCoreResult(true, cardText, auditDisplay)
 }
 
 // purgeResourceBindings removes the just-revoked resourceID from every channel
@@ -276,6 +316,7 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 // Best-effort: an AdminStore-nil deployment has no channel policies to sweep, and
 // any read/write failure is logged and skipped rather than surfaced — the revoke
 // already succeeded upstream, and a missed binding is recoverable.
+// The caller supplies the escaped workspace/resource log context.
 func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, teamID, resourceID string) {
 	if h.cfg.AdminStore == nil {
 		return
@@ -283,19 +324,19 @@ func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, t
 	channels, err := h.cfg.AdminStore.ChannelsForResource(ctx, teamID, resourceID)
 	if err != nil {
 		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "revoke: channel-binding sweep failed; an orphaned alias may remain",
-			"error", err, "team_id", teamID, "resource_id", resourceID)
+			"error", sanitizeLogValue(err.Error()))
 		return
 	}
 	for _, channelID := range channels {
 		unbound, err := h.cfg.AdminStore.PurgeResourceFromChannel(ctx, teamID, channelID, resourceID)
 		if err != nil {
 			log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "revoke: failed to purge resource from a channel; an orphaned alias may remain",
-				"error", err, "team_id", teamID, "channel_id", channelID, "resource_id", resourceID)
+				"error", sanitizeLogValue(err.Error()), "channel_id", sanitizeLogValue(channelID))
 			continue
 		}
 		if len(unbound) > 0 {
 			log.Info("revoke: unbound orphaned channel aliases",
-				"team_id", teamID, "channel_id", channelID, "resource_id", resourceID, "aliases", unbound)
+				"channel_id", sanitizeLogValue(channelID), "aliases", unbound)
 		}
 	}
 }
@@ -316,9 +357,9 @@ func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, t
 func (h *Handler) handleListRevokeClick(w http.ResponseWriter, payload *interactionPayload, action interactionAction) {
 	log := slog.With(
 		"command", "list_revoke_tunnel",
-		"team_id", payload.Team.ID,
-		"channel_id", payload.Channel.ID,
-		"user_id", payload.User.ID,
+		"team_id", sanitizeLogValue(payload.Team.ID),
+		"user_id", sanitizeLogValue(payload.User.ID),
+		"channel_id", sanitizeLogValue(payload.Channel.ID),
 	)
 	responseURL := payload.ResponseURL
 
