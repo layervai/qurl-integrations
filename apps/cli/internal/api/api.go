@@ -623,6 +623,9 @@ func (c *client) MintLimitedLink(ctx context.Context, crid string, limits access
 	if portal.ExpiresAt != nil {
 		link.ExpiresAt = *portal.ExpiresAt
 	}
+	if portal.ExpiresInSeconds != nil {
+		link.ExpiresInSeconds = *portal.ExpiresInSeconds
+	}
 	return link, nil
 }
 

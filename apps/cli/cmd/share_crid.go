@@ -255,7 +255,9 @@ func (opts *globalOpts) shareResource(ctx context.Context, id string, options qu
 	if err != nil {
 		return nil, fmt.Errorf(msgShareNeedsDevice, err)
 	}
-	return client.Share(ctx, id, options)
+	link, err := client.Share(ctx, id, options)
+	opts.forgetTombstonedLinkLimits(ctx, id, err)
+	return link, err
 }
 
 // applyShareFlagsToLimits lets --ttl and --session-duration override saved
@@ -286,6 +288,7 @@ func (opts *globalOpts) shareWithLimits(cmd *cobra.Command, id string, limits ac
 		return nil, fmt.Errorf(msgShareNeedsDevice, err)
 	}
 	link, err := client.MintLimitedLink(cmd.Context(), id, limits)
+	opts.forgetTombstonedLinkLimits(cmd.Context(), id, err)
 	if err != nil {
 		return nil, err
 	}
