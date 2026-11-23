@@ -1,13 +1,13 @@
 # qURL for Slack
 
 **Share a private internal link from any Slack channel with one command.**
-An admin protects an internal service (through the qURL Connector) or an
+An admin protects an internal service (through the qURL™ Connector) or an
 existing URL once, from Slack. After that, anyone in the channel runs
-`/qurl get` and receives a fresh qURL™ link. The link works for the first
+`/qurl get` and receives a fresh qURL link. The link works for the first
 person who opens it, then burns, and it expires on its own. The person who
 gets it just clicks.
 
-## What you can do in two minutes
+## Common tasks
 
 | You want to… | How |
 | --- | --- |
@@ -41,10 +41,11 @@ personal data out of the repository.
 
 - Slash commands: `/qurl` for everyone, `/qurl-admin` for the owner and admins
 - Install: the workspace install link from your qURL operator, then
-  `/qurl setup <email>`; the first person to run it becomes the owner
+  `/qurl setup <email>`; the first person to complete setup becomes the owner
 - Core flow: `/qurl-admin protect` → `/qurl get <$id|$alias>` → a one-time
   link that burns on first open
-- `/qurl crid <CRID>` mints the same link by a resource's permanent CRID
+- `/qurl crid <CRID>` mints a fresh link by a resource's permanent CRID
+  (slash command only; agent tools use aliases)
 - Resources are channel-scoped: `/qurl list`, `/qurl aliases`, and `/qurl get`
   show only what the current channel can reach
 - `/qurl help` and `/qurl-admin help` list the exact commands your workspace has enabled
