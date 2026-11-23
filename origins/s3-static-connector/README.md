@@ -1,10 +1,24 @@
-# s3-static-connector
+# s3-static-connector (AWS S3 pilot)
 
-Reusable origin image for a **private S3 static site behind qURL™ Connector**.
+Pilot origin image for a **private S3 static site behind qURL™ Connector**.
 It serves a private S3 bucket over plain HTTP on **loopback only**, so the qURL
 Connector (running as a sidecar in the same network namespace) is the sole
 reachable path and applies access control before any traffic reaches the
 origin.
+
+## Pilot compatibility
+
+The pilot supports non-dotted buckets in standard AWS commercial regions,
+with ordinary object paths and standard AWS S3 responses. It is not a generic
+S3-compatible origin. Keep external deployments within this contract.
+
+| Area | Pilot contract | Outside the pilot contract |
+| --- | --- | --- |
+| Bucket names | DNS-compatible, non-dotted names, 3–63 characters, using lowercase letters, numbers, and hyphens. | Dotted bucket names are not accepted. |
+| Partition and region | Standard AWS commercial S3 virtual-hosted endpoints: `<bucket>.s3.<region>.amazonaws.com`. | China, GovCloud, ISO/ISO-B, FIPS, dualstack, and VPC endpoint hostnames are not supported. `S3_ENDPOINT_ADDR` changes the dial target only; it does not change the signed Host or SNI. |
+| Object paths | Only the ASCII key forms listed in the [Behavior contract](#behavior-contract), under optional `S3_PREFIX`, using `INDEX_DOCUMENT` clean-URL rules. | Other key forms, including Unicode, are outside the pilot; [#854](https://github.com/layervai/qurl-integrations/issues/854) tracks the required image-level qualification. Configurable error documents are not supported. |
+| S3-compatible services | Standard AWS S3 behavior. | Custom S3-compatible endpoints are not supported by this signed-host contract. Their cacheable 4xx responses also need separate hardening; see [#874](https://github.com/layervai/qurl-integrations/issues/874). |
+| Readiness evidence | The behavior contract and internal stats/dashboard dogfood cover the pilot path. | Fixture tests and internal dogfood do not establish external customer readiness. Complete the paired-Connector deployment and protected-object smoke test in the target environment first; see [customer quickstart #892](https://github.com/layervai/qurl-integrations/issues/892). |
 
 Published image:
 
@@ -60,7 +74,7 @@ This contract is frozen — additive only once published.
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `S3_BUCKET` | Yes | none | Private bucket to serve from. Must be a non-dotted, DNS-compatible 3-63 character name using lowercase letters, numbers, and hyphens. |
-| `S3_PREFIX` | No | empty | Key prefix; normalized to a single leading slash, no trailing slash; empty internal path segments (`//`) are rejected. |
+| `S3_PREFIX` | No | empty | Key prefix using only ASCII letters, numbers, dots, underscores, hyphens and slashes; `.`/`..` segments are rejected. Normalized to a single leading slash, no trailing slash; empty internal path segments (`//`) are rejected. |
 | `LISTEN_ADDR` | No | `127.0.0.1:8080` | nginx listen address; matches `protect-connector`'s default `port:8080`. Must be loopback unless `ALLOW_NON_LOOPBACK_LISTEN=true`. |
 | `ENVOY_LISTEN_ADDR` | No | `127.0.0.1:9090` | Internal signer listener; never exposed outside the container. Must be loopback unless `ALLOW_NON_LOOPBACK_LISTEN=true`. |
 | `ALLOW_NON_LOOPBACK_LISTEN` | No | `false` | Explicit local-test/diagnostic escape hatch for binding either listener off-loopback. Do not set in protected deployments. |
@@ -82,10 +96,8 @@ The shared nginx cache key zone is fixed at `s3cache:10m` (roughly 80k keys).
 That is sized for small static sites; consumers with very large object counts
 should add key-zone tuning before reusing the image for that keyspace.
 
-This image targets standard AWS commercial-partition S3 virtual-hosted
-endpoints (`<bucket>.s3.<region>.amazonaws.com`). China, GovCloud, FIPS,
-dualstack, and VPC endpoint hostnames need a future signed-host/SNI override;
-`S3_ENDPOINT_ADDR` changes only the dial target, not the Host Envoy signs.
+See [Pilot compatibility](#pilot-compatibility) for the supported partition,
+region and signed-host/SNI contract.
 
 ## AWS credentials
 
