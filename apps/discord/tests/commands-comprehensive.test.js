@@ -1723,6 +1723,19 @@ describe('handleSetupModal (dispatcher path)', () => {
     );
   });
 
+  it('rejects a read-only key with an actionable setup message', async () => {
+    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ data: {
+      owner_id: 'owner-verified', auth_type: 'api_key',
+      api_key: { kind: 'api_key', scopes: ['qurl:read'] },
+    } }) });
+    const interaction = makeModalInteraction();
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: expect.stringContaining('read and write access'),
+    });
+  });
+
   it('skips work when deleteFlow loses dedup race', async () => {
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     const interaction = makeModalInteraction();

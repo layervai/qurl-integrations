@@ -247,7 +247,7 @@ function removeGuild({ guildId, ownerId }) {
 // passes its bridge URL so "reuse the default subscription" is never claimed
 // for a subscription that delivers somewhere else (a shared qURL account
 // across environments).
-async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows = false, requiredUrl = null } = {}) {
+async function discoverOwnerId(apiKey, { subject = 'DEFAULT', requiredUrl = null } = {}) {
   if (!apiKey || !config.QURL_ENDPOINT) return null;
   // Walk the same bounded surface the registrar can select from. Validating
   // only page 1 would let it mutate a malformed default subscription on a
@@ -313,9 +313,6 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', skipMalformedRows 
       // Strict per row: skipping a malformed subscription could let the
       // registrar rotate that row using an owner inferred from a valid sibling.
       if (typeof webhook?.owner_id !== 'string' || !webhook.owner_id.length) {
-        // Receiver priming performs no mutation; a valid sibling may still
-        // identify the default owner. Linking must reject every malformed row.
-        if (skipMalformedRows) continue;
         const err = new Error('discoverOwnerId: non-empty qurl-service response omitted owner_id');
         err.code = ownerErrorCode(subject, 'CONTRACT');
         throw err;
@@ -370,6 +367,17 @@ async function discoverDefaultOwnerId(options) {
 // targets it — the BYOK path gets the same guarantee from the registrar's
 // URL match, and skipping it here would report `reused` for a subscription
 // that delivers to another deployment.
+async function persistDefaultGuildOwner(ownerId) {
+  try {
+    await db.setDefaultGuildOwner(ownerId);
+  } catch (cause) {
+    const err = new Error('Default qURL owner binding is unavailable', { cause });
+    err.code = cause?.name === 'ConditionalCheckFailedException'
+      ? 'DEFAULT_WEBHOOK_OWNER_MARKER_CONFLICT' : 'DEFAULT_WEBHOOK_OWNER_MARKER_UNAVAILABLE';
+    throw err;
+  }
+}
+
 async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
   if (!config.QURL_WEBHOOK_SECRET) {
     if (config.QURL_WEBHOOK_PURE_BYOK) return null;
@@ -397,7 +405,7 @@ async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
   // counter to the tick so link traffic cannot defer its escalation. A scan
   // already in flight with failed discovery can overwrite the follow-up cache
   // entry; the next tick restores it (bounded, self-healing).
-  await db.setDefaultGuildOwner(ownerId);
+  await persistDefaultGuildOwner(ownerId);
   defaultOwnerId = ownerId;
 
   const candidateOwnerId = apiKey === config.QURL_API_KEY
@@ -455,7 +463,7 @@ async function scanOnce() {
     // retries); BYOK guilds resolve from the DDB rows normally.
     const needsDefaultDiscovery = !!config.QURL_WEBHOOK_SECRET && !defaultOwnerId;
     const discoveryPromise = needsDefaultDiscovery
-      ? discoverDefaultOwnerId({ skipMalformedRows: true }).then(
+      ? discoverDefaultOwnerId().then(
         (owner) => ({ ok: true, owner, fired: true }),
         (err) => ({ ok: false, error: err, fired: true }),
       )
@@ -474,7 +482,7 @@ async function scanOnce() {
       // lose any prior-discovery-failure escalation on the next no-op
       // tick. Currently no such hot-reload path exists, but the
       // semantic should match the variable's name.
-      if (discoveryResult.fired) discoveryConsecutiveFailures = 0;
+
     } else {
       discoveredOwner = defaultOwnerId; // keep prior value (likely null pre-first-success)
       discoveryConsecutiveFailures += 1;
@@ -516,16 +524,23 @@ async function scanOnce() {
 
     if (discoveredOwner) {
       if (discoveryResult.ok && discoveryResult.fired) {
-        await db.setDefaultGuildOwner(discoveredOwner);
+        try {
+          await persistDefaultGuildOwner(discoveredOwner);
+          discoveryConsecutiveFailures = 0;
+        } catch (err) {
+          logger.warn('default-key owner marker unavailable (BYOK path unaffected)', { error_code: err.code });
+          discoveredOwner = defaultOwnerId;
+          discoveryConsecutiveFailures += 1;
+        }
       }
-      defaultOwnerId = discoveredOwner;
+      if (discoveredOwner) defaultOwnerId = discoveredOwner;
       // Collision case: a BYOK guild that linked using the bot's OWN
       // default API key has webhook_owner_id === discoveredOwner. The
       // BYOK row already populated `next`; don't clobber its guildIds
       // / webhookId with the synthetic default-key shape. A legacy row's
       // secret may be the only value matching qurl-service after the old
       // link path rotated it, so the complete DDB entry remains authoritative.
-      if (config.QURL_WEBHOOK_SECRET && !next.has(discoveredOwner)) {
+      if (discoveredOwner && config.QURL_WEBHOOK_SECRET && !next.has(discoveredOwner)) {
         // String sentinel — receiver only reads webhookSecret, never
         // compares webhookId. Bracketed underscores can't collide
         // with `wh_...` qurl-service IDs or decimal Discord

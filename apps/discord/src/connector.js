@@ -572,7 +572,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
     const { parsed } = parseConnectorBody(bodyText);
     const retryAfter = response.headers?.get?.('retry-after')?.trim() ?? '';
     if (response.status !== 429 || parsed?.success !== false
-        || parsed.code !== 'request_admission_rejected'
+        || !['request_admission_rejected', 'tenant_admission_rejected'].includes(parsed.code)
         || !Array.isArray(parsed.links) || parsed.links.length !== 0
         || !/^[0-2]$/.test(retryAfter) || attempt >= 5) break;
     await delay(Math.max(Number(retryAfter), 2 ** attempt) * 1000, undefined, { signal: budget });
@@ -657,8 +657,8 @@ async function discardBody(response) {
 }
 
 // POST one revoke chunk. A 429 from the connector's local admission gate
-// (Retry-After: 1) is retried once, so /qurl revoke's own 5-resource fan-out
-// does not fail itself; a second 429 is returned for the caller to fail closed.
+// (Retry-After: 1) is retried once. The caller fans out two resources per owner;
+// a second 429 is returned for the caller to fail closed.
 // Both attempts share one REVOKE_LINKS_TIMEOUT_MS budget.
 async function postRevokeLinks(resourceId, batchIds, apiKey) {
   const signal = AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS);

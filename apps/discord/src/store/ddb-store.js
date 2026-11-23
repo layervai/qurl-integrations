@@ -170,7 +170,10 @@ async function countAll(TableName) {
   let total = 0;
   let ExclusiveStartKey;
   do {
-    const res = await ddb.send(new ScanCommand({ TableName, Select: 'COUNT', ExclusiveStartKey }));
+    const res = await ddb.send(new ScanCommand({ TableName, Select: 'COUNT', ExclusiveStartKey,
+      // Owner metadata and health sentinels are not configured Discord servers.
+      ...(TableName === TABLES.guild_configs ? { FilterExpression: 'attribute_exists(qurl_api_key)' } : {}),
+    }));
     total += res.Count || 0;
     ExclusiveStartKey = res.LastEvaluatedKey;
   } while (ExclusiveStartKey);
@@ -1575,6 +1578,7 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
 
 // `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
 async function setGuildApiKey(guildId, apiKey, configuredBy, via, verifiedOwnerId) {
+  if (guildId === '__default_owner__') throw new Error('Reserved guild owner metadata key');
   if (verifiedOwnerId !== undefined && (typeof verifiedOwnerId !== 'string'
       || !verifiedOwnerId.length || verifiedOwnerId.length > 512)) {
     throw new Error('Invalid verified qURL owner');
@@ -1627,6 +1631,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via, verifiedOwnerI
 }
 
 async function setDefaultGuildOwner(verifiedOwnerId) {
+  // Subscription scans require webhook fields; stats require qurl_api_key, so this row is excluded.
   if (typeof verifiedOwnerId !== 'string' || !verifiedOwnerId.length || verifiedOwnerId.length > 512) {
     throw new Error('Invalid verified default qURL owner');
   }

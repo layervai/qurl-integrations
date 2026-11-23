@@ -102,8 +102,12 @@ This release upgrades `@layervai/qurl` from 0.6.x to 2.x. Detect uses CRIDs
 and binds the signed link to the expected CRID. The image omits the optional
 native state store; the bot does not use producer state.
 
-Deploy and validate the connector revoke endpoint before deploying this
-consumer. Until that endpoint is enabled, ordinary children use the SDK
+For feature activation, deploy and validate the connector revoke endpoint
+before enabling consumer revocation. A preparation deployment may replace the
+legacy caller while the connector endpoint remains off. Keep existing grants
+and callbacks, drain every old replica, and reconcile historical sends before
+changing owners or enabling the endpoint. This preparation does not qualify
+production revocation. Until that endpoint is enabled, ordinary children use the SDK
 fallback. Watermarked children cannot be confirmed through that fallback;
 the send stays available for retry. Legacy send rows with no usable `qurl_id`
 also remain unconfirmed after endpoint activation; deleting their shared parent
@@ -133,7 +137,8 @@ token identity`, and `resource_ref`. The load-test warning now says
 `carried no usable resource identifier`.
 
 Each mint request allows 65 seconds for the connector’s 55-second deadline
-and response transport. Only the connector’s `request_admission_rejected` 429
+and response transport. Only the connector’s `request_admission_rejected` or
+`tenant_admission_rejected` 429
 with `success: false` and an empty `links` array is retried, up to five times,
 with bounded backoff and a 100-second total mint budget. Other errors and
 partial results are never retried. A failing mint and its cleanup can take

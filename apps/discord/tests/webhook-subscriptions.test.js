@@ -38,6 +38,19 @@ afterAll(() => {
 });
 
 describe('webhook-subscriptions registry — priming + lookup', () => {
+  it('keeps BYOK delivery primed when the default owner marker cannot be saved', async () => {
+    const db = require('../src/store');
+    db.setDefaultGuildOwner.mockRejectedValueOnce(Object.assign(new Error('conflict'), { name: 'ConditionalCheckFailedException' }));
+    mockScan.mockResolvedValueOnce([{ guildId: 'g1', webhookId: 'wh_g1', webhookSecret: 'byok-secret', webhookOwnerId: 'owner-byok' }]);
+    await subs.scanOnce();
+    expect(subs.isPrimed()).toBe(true);
+    expect(subs.getSecretForOwner('owner-byok')).toBe('byok-secret');
+    expect(subs.getSecretForOwner('usr_default')).toBeNull();
+    expect(require('../src/logger').warn).toHaveBeenCalledWith(
+      'default-key owner marker unavailable (BYOK path unaffected)',
+      { error_code: 'DEFAULT_WEBHOOK_OWNER_MARKER_CONFLICT' },
+    );
+  });
   it('returns null + isPrimed()=false before any scan completes', () => {
     expect(subs.isPrimed()).toBe(false);
     expect(subs.getSecretForOwner('usr_test')).toBeNull();
@@ -470,14 +483,14 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     expect(global.fetch.mock.calls[2][1].headers.Authorization).toBe('Bearer lv_alias');
   });
 
-  it('primes the receiver from valid rows while linking still rejects a malformed sibling', async () => {
+  it('refuses a persistent default binding from a malformed owner listing', async () => {
     mockScan.mockResolvedValueOnce([]);
     global.fetch = jest.fn(async () => ({
       ok: true, status: 200,
       text: async () => JSON.stringify({ data: [{}, { owner_id: 'usr_default' }] }),
     }));
     await subs.scanOnce();
-    expect(subs.getSecretForOwner('usr_default')).toBe('whsec_default_key_secret_value');
+    expect(subs.getSecretForOwner('usr_default')).toBeNull();
     await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
       .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_CONTRACT' });
   });

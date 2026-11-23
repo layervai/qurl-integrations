@@ -579,6 +579,32 @@ describe('qurl-oauth routes', () => {
       );
     });
 
+    it('cleans up the minted key when its owner cannot be verified', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      let deleted;
+      const cleanup = new Promise((resolve) => { deleted = resolve; });
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'jwt-xyz' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: {
+          key_id: 'key-unverified', api_key: 'lv_live_abc123',
+        } }) })
+        .mockResolvedValueOnce({ ok: false, status: 503 })
+        .mockImplementationOnce(async () => {
+          deleted();
+          return { ok: true, status: 204, text: async () => '' };
+        });
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      ).set('Cookie', cookieFor(state));
+      expect(res.status).toBe(500);
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
+      await cleanup;
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/v1/api-keys/key-unverified'),
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+    });
+
     it('500s when persist fails after successful mint, and best-effort deletes the orphan key', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       let resolveDeleteFired;

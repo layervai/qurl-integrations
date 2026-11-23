@@ -81,6 +81,11 @@ afterAll(async () => {
 });
 
 describe('guild configs', () => {
+  test('guild key setup cannot overwrite the default owner marker', async () => {
+    await expect(store.setGuildApiKey('__default_owner__', 'key', 'admin', SETUP_VIA.PASTE, 'owner'))
+      .rejects.toThrow('Reserved');
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
   test('saves verified owner atomically with the key; legacy writers clear the binding', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('guild-a', 'key-a', 'admin', SETUP_VIA.PASTE, 'owner-a');
@@ -2290,6 +2295,7 @@ describe('stats', () => {
     ddbMock.on(ScanCommand).callsFake((input) => {
       pages[input.TableName] += 1;
       if (input.TableName === 'test-prefix-guild-configs') {
+        expect(input.FilterExpression).toBe('attribute_exists(qurl_api_key)');
         return pages[input.TableName] === 1
           ? Promise.resolve({ Count: 75, LastEvaluatedKey: { guild_id: 'p1' } })
           : Promise.resolve({ Count: 50 });
