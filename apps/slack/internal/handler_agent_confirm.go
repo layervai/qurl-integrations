@@ -14,6 +14,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacklog"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -439,9 +440,9 @@ func (h *Handler) handleAgentConfirmClick(w http.ResponseWriter, payload *intera
 	triggerReceivedAt := h.now()
 	log := slog.With(
 		"surface", "agent_confirm",
-		"team_id", sanitizeLogValue(payload.Team.ID),
-		"channel_id", sanitizeLogValue(payload.Channel.ID),
-		"user_id", sanitizeLogValue(payload.User.ID),
+		"team_id", slacklog.ID(payload.Team.ID),
+		"channel_id", slacklog.ID(payload.Channel.ID),
+		"user_id", slacklog.ID(payload.User.ID),
 		"approve", approve,
 	)
 

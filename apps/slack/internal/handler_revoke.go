@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacklog"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -357,9 +358,9 @@ func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, t
 func (h *Handler) handleListRevokeClick(w http.ResponseWriter, payload *interactionPayload, action interactionAction) {
 	log := slog.With(
 		"command", "list_revoke_tunnel",
-		"team_id", sanitizeLogValue(payload.Team.ID),
-		"user_id", sanitizeLogValue(payload.User.ID),
-		"channel_id", sanitizeLogValue(payload.Channel.ID),
+		"team_id", slacklog.ID(payload.Team.ID),
+		"user_id", slacklog.ID(payload.User.ID),
+		"channel_id", slacklog.ID(payload.Channel.ID),
 	)
 	responseURL := payload.ResponseURL
 
