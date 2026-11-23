@@ -1618,6 +1618,15 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
     updatedAt: prior.updated_at,
     hadKey: 'qurl_api_key' in prior,
   }, { guildId, configuredBy, door });
+  if ('qurl_api_key' in prior) {
+    bestEffortLog(() => logger.audit(AUDIT_EVENTS.QURL_SETUP_KEY_ROTATED, {
+      guild_id: guildId,
+      configured_by: configuredBy ? String(configuredBy) : null,
+      via: door,
+      prior_configured_at: prior.configured_at ?? null,
+      prior_updated_at: prior.updated_at ?? null,
+    }));
+  }
 }
 
 // Raw delete. No qurl-service subscription teardown. Today there is no
@@ -1631,6 +1640,12 @@ async function _removeGuildApiKeyRaw(guildId) {
     Key: { guild_id: guildId },
     ReturnValues: 'ALL_OLD',
   }));
+  if (res.Attributes) {
+    bestEffortLog(() => logger.audit(AUDIT_EVENTS.QURL_SETUP_CONFIG_DELETED, {
+      guild_id: guildId,
+      configured_by: res.Attributes.configured_by ? String(res.Attributes.configured_by) : null,
+    }));
+  }
   return !!res.Attributes;
 }
 

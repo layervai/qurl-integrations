@@ -39,19 +39,34 @@ async function main() {
     }))).Item;
     await store.setGuildApiKey('smoke-guild', 'smoke-key-one', 'admin-one', 'oauth');
     const first = await read();
+    assert.equal(lines.length, 0, 'First setup must not emit a replacement event');
     await store.setGuildApiKey('smoke-guild', 'smoke-key-two', 'admin-one', 'paste');
     const prior = await read();
-    assert.equal(lines.length, 0, 'First setup and same-admin re-key must be silent');
+    assert.equal(lines.length, 1, 'Same-admin re-key must emit history without paging');
+    assert.deepEqual(JSON.parse(lines[0]).audit, {
+      event: 'qurl_setup_key_rotated', agent: 'discord', guild_id: 'smoke-guild',
+      configured_by: 'admin-one', via: 'paste',
+      prior_configured_at: first.configured_at, prior_updated_at: first.updated_at,
+    });
     assert.equal(prior.configured_at, first.configured_at);
     await store.setGuildApiKey('smoke-guild', 'smoke-key-three', 'admin-two', 'oauth');
-    assert.equal(lines.length, 1, 'Admin change must emit exactly one audit');
-    assert.deepEqual(JSON.parse(lines[0]).audit, {
+    assert.equal(lines.length, 3, 'Admin change must emit a page event and replacement history');
+    assert.deepEqual(JSON.parse(lines[1]).audit, {
       event: 'qurl_setup_admin_changed', agent: 'discord', guild_id: 'smoke-guild',
       old_admin_id: 'admin-one', new_admin_id: 'admin-two', prior_had_key: true,
       via: 'oauth', prior_configured_at: first.configured_at, prior_updated_at: prior.updated_at,
     });
     assert.equal(await store.getGuildApiKey('smoke-guild'), 'smoke-key-three');
-    assert(!lines[0].includes('smoke-key'));
+    assert.equal(await store._removeGuildApiKeyRaw('smoke-guild'), true);
+    assert.deepEqual(JSON.parse(lines[3]).audit, {
+      event: 'qurl_setup_config_deleted', agent: 'discord', guild_id: 'smoke-guild', configured_by: 'admin-two',
+    });
+    assert.equal(await read(), undefined);
+    assert.equal(await store._removeGuildApiKeyRaw('smoke-guild'), false);
+    assert.equal(lines.length, 4, 'Deleting an absent row must not emit another event');
+    await store.setGuildApiKey('smoke-guild', 'smoke-key-four', 'admin-three', 'paste');
+    assert.equal(lines.length, 4, 'The preceding delete audit preserves the delete-then-setup history');
+    for (const line of lines) assert(!line.includes('smoke-key'));
   } finally {
     console.log = log;
     try {

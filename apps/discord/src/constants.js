@@ -472,14 +472,11 @@ const AUDIT_EVENTS = {
   // admin. TODO(upstream-contract): keep the infra repo's
   // qurl_setup_admin_changed CloudWatch filter/alarm in sync with this string
   // (pinned literally in ddb-store.test.js). Scope: an administrator change
-  // only; a same-admin key replacement (e.g. a compromised admin session
-  // swapping in another key) is not covered (see #1455). Best-effort, with
-  // three known blind spots: (1) deleting the configuration first (a whole-row
-  // delete, _removeGuildApiKeyRaw, with no production caller today) leaves no
-  // prior administrator to compare (#1455); (2) a retried or double-submitted
+  // only; key replacements and whole-row deletions have separate events below.
+  // Best-effort, with two known blind spots: (1) a retried or double-submitted
   // write that already landed reads the new admin back as the old one, and the
   // SDK's own retries on throttling or dropped connections make this
-  // infrastructure-driven, not only user-driven; (3) a damaged row that lost
+  // infrastructure-driven, not only user-driven; (2) a damaged row that lost
   // configured_by, rebound by a caller that also omits configuredBy, compares
   // null to null and stays silent. Guild/admin IDs are forensic fields, never
   // CloudWatch metric dimensions. Only human setup flows may call
@@ -488,6 +485,17 @@ const AUDIT_EVENTS = {
   // writer should get its own non-auditing SETUP_VIA door that
   // auditSetupAdminChange skips.
   QURL_SETUP_ADMIN_CHANGED: 'qurl_setup_admin_changed',
+
+  // Successful deletion of an existing guild configuration. TODO(upstream-contract):
+  // keep the infra qurl_setup_config_deleted filter/alarm in sync. All guild-config
+  // deletion paths must emit this event; IDs remain log-only fields.
+  QURL_SETUP_CONFIG_DELETED: 'qurl_setup_config_deleted',
+  // Every successful replacement of an existing key, including same-admin
+  // writes. Forensic log only: retries also replace the key, so do not page.
+  // configured_by is the write's supplied actor, not a readback of stored state.
+  // TODO(upstream-contract): keep the infra setup-deletion runbook's history
+  // event name in sync; no metric filter is intended for this event.
+  QURL_SETUP_KEY_ROTATED: 'qurl_setup_key_rotated',
 
   // qURL webhook receiver — feeds CloudWatch metric filters +
   // alarms managed in the deploying organization's infrastructure
