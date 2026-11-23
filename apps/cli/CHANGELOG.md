@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.5.0](https://github.com/layervai/qurl-integrations/compare/v4.4.4...v4.5.0) (2026-11-23)
+
+
+### Features
+
+* **cli:** manage signed app identity per resource ([#2080](https://github.com/layervai/qurl-integrations/issues/2080)) ([b0c852a](https://github.com/layervai/qurl-integrations/commit/b0c852a541a0d5e8468961d147f0f0fac756ccc5))
+
+
+### Bug Fixes
+
+* **cli:** explain hourly invitation email limits ([#2016](https://github.com/layervai/qurl-integrations/issues/2016)) ([0cfdee1](https://github.com/layervai/qurl-integrations/commit/0cfdee16280174ad8b454e0ab8045104e2b0edd4))
+
 ## [4.4.4](https://github.com/layervai/qurl-integrations/compare/v4.4.3...v4.4.4) (2026-11-18)
 
 
