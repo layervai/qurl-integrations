@@ -698,8 +698,14 @@ type CreateResourceInput struct {
 	// can't distinguish "unset" from "empty" without an extra sentinel,
 	// and the create surface accepts the silent-no-alias semantic so
 	// callers can pass an optional alias literal.)
-	Alias        string        `json:"alias,omitempty"`
-	CustomDomain string        `json:"custom_domain,omitempty"`
+	Alias        string `json:"alias,omitempty"`
+	CustomDomain string `json:"custom_domain,omitempty"`
+	// Name is the public name recipients see (link page, previews, their
+	// saved passkey). The service requires it to create a URL or tunnel
+	// resource and ignores it when find-or-create reuses one. Never derive
+	// it from TargetURL or Description: that would publish a hidden origin.
+	// TODO(upstream-contract): qurl-service CreateResourceRequest.name.
+	Name         string        `json:"name,omitempty"`
 	Description  string        `json:"description,omitempty"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 }
