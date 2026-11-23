@@ -115,7 +115,8 @@ func TestSlackSharedLintVerifyExplicitConfig(t *testing.T) {
 		workflow := readWorkflow(t, filename)
 		actions := 0
 		for jobID, job := range workflow.Jobs {
-			for _, step := range job.Steps {
+			for i := range job.Steps {
+				step := &job.Steps[i]
 				if !strings.HasPrefix(step.Uses, "golangci/golangci-lint-action@") {
 					continue
 				}
