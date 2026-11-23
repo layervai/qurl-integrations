@@ -1,0 +1,32 @@
+name: Edge templates
+
+on:
+  pull_request:
+    paths:
+      - "templates/**"
+      - ".github/workflows/edge-templates.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-templates-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Install exact template dependencies
+        run: |
+          for platform in cloudflare-worker netlify-edge vercel-edge; do
+            (cd "templates/$platform" && npm ci --ignore-scripts --omit=optional --no-audit)
+          done
+      - name: Test handlers with the published SDK
+        run: node --test templates/edge-templates.test.mjs

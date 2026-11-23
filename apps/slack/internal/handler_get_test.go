@@ -28,6 +28,10 @@ const (
 )
 
 func TestRateLimitErrorMessage(t *testing.T) {
+	clockSkew := &slackdata.Error{StatusCode: http.StatusServiceUnavailable, Code: slackdata.ErrCodeRateLimitClockSkew}
+	if got := rateLimitErrorMessage(clockSkew); got != "Rate limiting needs an operator check. Please contact the bot administrator." {
+		t.Fatalf("clock-state copy = %q", got)
+	}
 	notBound := &slackdata.Error{
 		StatusCode: http.StatusNotFound,
 		Code:       slackdata.ErrCodeWorkspaceNotBound,
@@ -1338,6 +1342,15 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 				StatusCode: http.StatusForbidden,
 				Code:       "connector_disabled",
 				RequestID:  "req_connector_disabled",
+			},
+			wantAudit: false,
+		},
+		{
+			name: "consumer_access_required 403 is a policy refusal, not an auth failure",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       errCodeConsumerAccessRequired,
+				RequestID:  "req_consumer_access",
 			},
 			wantAudit: false,
 		},

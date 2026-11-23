@@ -113,12 +113,18 @@ export async function mintConnectorView(
   uploadUrl: string,
   resourceId: string,
   apiKey: string,
-  opts: { expiresAt: string; oneTimeUse?: boolean },
+  opts: { expiresAt: string; oneTimeUse?: boolean; sessionDurationSeconds?: number },
 ): Promise<{ qurl_link: string; qurl_id: string; expires_at: string }> {
+  const seconds = opts.sessionDurationSeconds;
+  // TODO(upstream-contract): connector and qurl-service accept whole seconds, 1s–24h.
+  if (seconds !== undefined && (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400)) {
+    throw new RangeError('sessionDurationSeconds must be an integer from 1 to 86400');
+  }
   const res = await fetchWithTransientRetry(`${uploadUrl}/mint_link/${encodeURIComponent(resourceId)}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ n: 1, expires_at: opts.expiresAt, one_time_use: opts.oneTimeUse ?? true }),
+    body: JSON.stringify({ n: 1, expires_at: opts.expiresAt, one_time_use: opts.oneTimeUse ?? true,
+      ...(seconds !== undefined && { session_duration: `${seconds}s` }) }),
   });
   if (!res.ok) throw new Error(`mint_link failed: ${res.status} ${await res.text()}`);
   const data = (await res.json()) as {
@@ -141,6 +147,7 @@ export async function mintConnectorView(
 export const CREATE_QURL_ALLOWED_KEYS = [
   'type',
   'target_url',
+  'name',
   'expires_in',
   'one_time_use',
   'max_sessions',
@@ -155,6 +162,8 @@ export const CREATE_QURL_ALLOWED_KEYS = [
  * plus the helper's defaults. */
 function mintBody(opts: { target_url?: string; expires_in?: string; label?: string }): Record<string, unknown> {
   const body: Record<string, unknown> = {
+    // TODO(upstream-contract): qurl-service requires a public resource name on create.
+    name: 'E2E test resource',
     expires_in: opts.expires_in ?? '1h',
     // Tags mints from these suites so a leaked sandbox resource is
     // identifiable. Carried over from the old `description` default, now on
@@ -397,7 +406,7 @@ function parseResourceStatus(value: unknown, id: string): ResourceStatus | null 
 }
 
 /** A typed HTTP failure from the qURL management lookup. */
-class StatusCheckError extends Error {
+export class StatusCheckError extends Error {
   constructor(readonly status: number) {
     super(`qURL lookup failed: ${status}`);
     this.name = 'StatusCheckError';

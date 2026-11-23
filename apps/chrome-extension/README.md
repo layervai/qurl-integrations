@@ -1,25 +1,56 @@
 # qURL browser extension for Gmail
 
-Upload files straight from Gmail's compose window and drop secure, expiring
-links into your draft — no need to attach them to the email itself. Your
-files go to qURL™, and only a short link travels in the message.
+**Send files from Gmail as expiring access links instead of attachments.**
+The qURL™ extension uploads files from Gmail's compose window and drops a link
+for each one into your draft. Only the short link travels in the email, and
+each link expires, so a file you share today won't stay reachable forever.
+Your recipient just clicks.
 
-A **qURL** is a secure access link to an uploaded file. Links carry an
-expiry, so a file you share today won't stay reachable forever.
+## Common tasks
+
+| You want to… | How |
+| --- | --- |
+| Put a file link in an email | **Compose** → **qURL Agent** icon → **Browse files** → **Upload to qURL** |
+| Share several files at once | Pick more than one file in **Browse files** |
+| Paste a link yourself | Click **Copy the qURL link** in the popup |
+| Upload to your organization's own qURL server | Gear icon → **qURL server** → **Save** → confirm the server and browser permission prompts |
 
 ## Quickstart
 
 1. **Install** the extension (see [Installing](#installing) below).
 2. Open **Gmail** and click **Compose**.
-3. Click the **qURL** extension icon in the browser toolbar.
+3. Click the **qURL Agent** extension icon in the browser toolbar.
 4. Click **Browse files**, pick one or more, and click **Upload to qURL**.
 5. The secure links appear at the bottom of your draft. Keep writing and send
    as normal.
 
+### For AI agents and tools
+
+- Extension: **qURL Agent** on the [Chrome Web Store](https://chromewebstore.google.com/detail/qurl-agent/icmdbkclledmbhbcjcjmckcokkgikjem);
+  the [Edge build](../edge-extension/README.md) uses this same source
+- Works in Gmail's compose window; Gmail must be the active tab when the popup opens
+- Core flow: **Browse files** → **Upload to qURL** → links appended to the end of the draft
+- Files up to 100 MB each; keep the popup open until uploads finish
+- Uploads go to qURL's hosted server unless the **qURL server** setting points elsewhere
+- Building and the upload API: [developer guide](docs/development.md)
+- Other ways to share: [qURL CLI](../cli/README.md) ·
+  [Slack](../slack/README.md) · [Discord](../discord/README.md) ·
+  [MCP server](https://github.com/layervai/qurl-mcp)
+
 ## Installing
 
-The extension is distributed by your qURL operator. Install the build they
-give you:
+[**Install from the Chrome Web Store**](https://chromewebstore.google.com/detail/qurl-agent/icmdbkclledmbhbcjcjmckcokkgikjem),
+then pin the **qURL Agent** icon in your toolbar.
+
+The store currently lists version **1.0.3** (checked November 1, 2026). This
+source tree is version **1.1.0**. The usage and settings below describe the
+source build; the store build can have different controls and behavior.
+Check the listing for its current version and instructions.
+
+### Developer or operator-provided build
+
+To test this source version, or install an unpacked build from your qURL
+operator:
 
 1. Download or build the extension folder your operator provides (the
    unpacked `release/` directory).
@@ -47,7 +78,15 @@ Building the extension yourself is covered in the
 A few things worth knowing:
 
 - **Keep the popup open while uploading.** Clicking elsewhere or switching
-  windows closes the popup and cancels any upload still in progress.
+  windows closes the popup and cancels any upload still in progress. This is
+  a deliberate constraint for the current popup uploader. A background-worker
+  relay alone does not guarantee completion: [Chrome can stop a worker when
+  a fetch response takes more than 30 seconds](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle).
+- **Late insertion confirmation.** If the current draft insertion succeeds
+  after a timeout, an open popup corrects its status and asks you to check the
+  draft before inserting again. A completion from an older upload cannot
+  change the current upload's status. Closing the popup loses this live status;
+  check the draft before uploading the same file again.
 - **Gmail must be the active tab** in the focused window when you open the
   popup. A Gmail tab in a different window won't be picked up.
 - **Files are capped at 100 MB each.** Larger files are reported individually

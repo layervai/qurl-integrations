@@ -55,6 +55,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -80,10 +81,10 @@ const (
 )
 
 func main() {
-	os.Exit(run(context.Background(), os.Stdout, os.Stderr, os.Args[1:], os.Getenv, time.Now))
+	os.Exit(run(context.Background(), os.Stdout, os.Stderr, os.Args[1:], os.Getenv, time.Now, nil))
 }
 
-func run(ctx context.Context, stdout, stderr io.Writer, args []string, getenv func(string) string, now func() time.Time) int {
+func run(ctx context.Context, stdout, stderr io.Writer, args []string, getenv func(string) string, now func() time.Time, transport http.RoundTripper) int {
 	// A nil config is the stop signal, not the exit code: -h parses fine and exits 0
 	// while having nothing to run, so keying off the code alone runs the scan on a nil
 	// config.
@@ -94,6 +95,9 @@ func run(ctx context.Context, stdout, stderr io.Writer, args []string, getenv fu
 	cfg.Token = getenv(tokenEnv)
 	cfg.StartedAt = now().UTC()
 	cfg.HTTPClient = slacksmoke.NewHTTPClient(budget.Request)
+	if transport != nil {
+		cfg.HTTPClient.Transport = transport
+	}
 
 	if err := prepareScanConfig(cfg); err != nil {
 		writeConfigValidationError(stderr, tokenEnv, err)

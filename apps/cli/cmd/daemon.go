@@ -32,6 +32,8 @@ var openShareNativeRuntime = connectorshare.OpenNativeRuntime
 
 type nativeRegisteredIdentityReader func(context.Context, *connectorshare.NativeRuntime, *qurlapi.Config) (*qurlapi.Identity, error)
 
+const daemonCommandName = "daemon"
+
 func readNativeRegisteredIdentity(ctx context.Context, runtime *connectorshare.NativeRuntime, config *qurlapi.Config) (*qurlapi.Identity, error) {
 	store, err := runtime.Handoff()
 	if err != nil {
@@ -229,7 +231,7 @@ var headlessNativeRetryJitter = func(window time.Duration) time.Duration {
 // let publish/start manage the native per-user background job.
 func daemonCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "daemon",
+		Use:   daemonCommandName,
 		Short: "Run the local sharing daemon",
 		Long: `Run the local sharing daemon directly.
 
@@ -617,7 +619,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	openFactory := func(initCtx context.Context) (connectordaemon.GroupFactory, error) {
 		return buildNativeSessionFactory(initCtx, connectorshare.NativeRuntimeConfig{
 			StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
-			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
+			Hostname: hostname, Version: agentRegistrationVersion(opts.version, opts.resolvedClientProduct), ClientBaseURL: origin,
 			EnrollmentCredential: enrollmentCredential, RefreshMode: connectorRefreshModeAuto,
 			SessionOperations: sessionOperations,
 		}, common, opts.apiConfig(origin), verifyOwner, configured)

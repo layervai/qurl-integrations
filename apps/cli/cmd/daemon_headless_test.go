@@ -5,6 +5,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -365,6 +368,9 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 		}
 		if apiConfig.ClientProduct != "qurl-desktop/1.2.3" {
 			t.Fatalf("headless registered-client ClientProduct = %q, want %q", apiConfig.ClientProduct, "qurl-desktop/1.2.3")
+		}
+		if cfg.Version != "test+desktop" {
+			t.Fatalf("headless registration version = %q, want %q", cfg.Version, "test+desktop")
 		}
 		if cfg.EnrollmentCredential != credential {
 			t.Fatalf("attempt %d enrollment credential = %q", attempts.Load()+1, cfg.EnrollmentCredential)
@@ -731,7 +737,11 @@ func writeHeadlessAgentState(t *testing.T, stateDir string, complete bool) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	state := &qurl.AgentState{AgentID: "headless-test-agent"}
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &qurl.AgentState{AgentID: "headless-test-agent", PrivateKeyB64: base64.StdEncoding.EncodeToString(key.Bytes()), PublicKeyB64: base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())}
 	if complete {
 		registeredAt := time.Now().UTC()
 		state.RegisteredAt = &registeredAt

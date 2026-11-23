@@ -40,7 +40,8 @@ async function loadCleanupConfig(): Promise<CleanupConfig> {
         process.env.QURL_PUBLIC_CONFIG_URL !== 'https://qurl.link.layerv.xyz/') throw new Error();
     const modulePath = process.env.QURL_NATIVE_CLEANUP_PORTAL_MODULE;
     if (!modulePath || !isAbsolute(modulePath)) throw new Error();
-    const sdk = require(modulePath) as PortalSDK;
+    // Jest's loader cannot bridge the SDK's CJS export to its ESM crypto dependencies.
+    const sdk = process.getBuiltinModule('module').createRequire(modulePath)(modulePath) as PortalSDK;
     if (typeof sdk.observeQurlV2SessionCleanup !== 'function' || typeof sdk.ServerDenyError !== 'function') throw new Error();
     const html = (await readPublicBody(process.env.QURL_PUBLIC_CONFIG_URL)).toString('utf8');
     const config = parseNativeCleanupConfig(html);
