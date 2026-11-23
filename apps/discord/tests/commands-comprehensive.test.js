@@ -1653,6 +1653,7 @@ describe('handleSetupModal (dispatcher path)', () => {
 
   function makeModalInteraction(overrides = {}) {
     return {
+      id: 'setup-modal-123',
       user: { id: 'user-1' },
       guildId: 'guild-1',
       channelId: 'ch-1',
@@ -1711,13 +1712,25 @@ describe('handleSetupModal (dispatcher path)', () => {
     );
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(mockDb.setGuildApiKey).toHaveBeenCalledWith(
-      'guild-1', VALID_KEY, 'user-1', 'paste',
+      'guild-1', VALID_KEY, 'user-1', 'paste', 'setup-modal-123',
     );
+    const logger = require('../src/logger');
+    expect(logger.info).toHaveBeenCalledWith('Guild API key configured', expect.objectContaining({
+      setup_session_id: 'setup-modal-123',
+    }));
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining('qURL is now configured'),
       }),
     );
+  });
+
+  it('distinguishes separate modal submissions that reuse the same flow slot', async () => {
+    const params = { flow_id: '0:1#guild-1#ch-1#user-1' };
+    await handleSetupModal(makeModalInteraction({ id: 'setup-modal-first' }), params);
+    await handleSetupModal(makeModalInteraction({ id: 'setup-modal-second' }), params);
+    expect(mockDb.setGuildApiKey.mock.calls.map(call => call[4]))
+      .toEqual(['setup-modal-first', 'setup-modal-second']);
   });
 
   it('skips work when deleteFlow loses dedup race', async () => {

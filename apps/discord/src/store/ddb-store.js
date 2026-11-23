@@ -1536,7 +1536,7 @@ function bestEffortLog(emit) {
 // Emits qurl_setup_admin_changed when a landed setGuildApiKey write rebinds an
 // already-configured guild. `prior` holds only non-secret fields derived from
 // the write's UPDATED_OLD attributes. It never throws.
-function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
+function auditSetupAdminChange(prior, { guildId, configuredBy, door, setupSessionId }) {
   // The write has landed: nothing here may surface as a write failure (or
   // qurl-oauth.js would revoke the key it just stored), and any failure,
   // including an ID coercion, leaves an error line instead of vanishing.
@@ -1559,6 +1559,8 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
       // healthy rebind when old_admin_id or prior_configured_at is null.
       prior_had_key: priorHadKey,
       via: door,
+      // Paste interaction ID or OAuth minted key_id; correlation only, never a metric dimension.
+      setup_session_id: typeof setupSessionId === 'string' ? setupSessionId : null,
       // configured_at is the guild's stable first-setup time. updated_at is the
       // last write of any kind (webhook writes stamp it too), not the binding's
       // age; it is a control: always overwritten here, so non-null with a null
@@ -1573,8 +1575,8 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
   }
 }
 
-// `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
-async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
+// `via` names the setup door; setupSessionId is the modal interaction ID or minted key ID.
+async function setGuildApiKey(guildId, apiKey, configuredBy, via, setupSessionId) {
   const door = normalizeSetupVia(via);
   // Validate on every call so caller drift (including a forgotten argument)
   // shows up on first setups too; such doors audit as unknown.
@@ -1617,7 +1619,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
     configuredAt: prior.configured_at,
     updatedAt: prior.updated_at,
     hadKey: 'qurl_api_key' in prior,
-  }, { guildId, configuredBy, door });
+  }, { guildId, configuredBy, door, setupSessionId });
 }
 
 // Raw delete. No qurl-service subscription teardown. Today there is no

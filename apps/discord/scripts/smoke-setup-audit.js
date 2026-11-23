@@ -43,12 +43,12 @@ async function main() {
     const prior = await read();
     assert.equal(lines.length, 0, 'First setup and same-admin re-key must be silent');
     assert.equal(prior.configured_at, first.configured_at);
-    await store.setGuildApiKey('smoke-guild', 'smoke-key-three', 'admin-two', 'oauth');
+    await store.setGuildApiKey('smoke-guild', 'smoke-key-three', 'admin-two', 'oauth', 'smoke-session-three');
     assert.equal(lines.length, 1, 'Admin change must emit exactly one audit');
     assert.deepEqual(JSON.parse(lines[0]).audit, {
       event: 'qurl_setup_admin_changed', agent: 'discord', guild_id: 'smoke-guild',
       old_admin_id: 'admin-one', new_admin_id: 'admin-two', prior_had_key: true,
-      via: 'oauth', prior_configured_at: first.configured_at, prior_updated_at: prior.updated_at,
+      via: 'oauth', setup_session_id: 'smoke-session-three', prior_configured_at: first.configured_at, prior_updated_at: prior.updated_at,
     });
     assert.equal(await store.getGuildApiKey('smoke-guild'), 'smoke-key-three');
     assert(!lines[0].includes('smoke-key'));
