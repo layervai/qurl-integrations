@@ -1346,6 +1346,15 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 			wantAudit: false,
 		},
 		{
+			name: "consumer_access_required 403 is a policy refusal, not an auth failure",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       errCodeConsumerAccessRequired,
+				RequestID:  "req_consumer_access",
+			},
+			wantAudit: false,
+		},
+		{
 			name: "expected api_key_limit 403 stays quiet",
 			apiErr: &client.APIError{
 				StatusCode: http.StatusForbidden,

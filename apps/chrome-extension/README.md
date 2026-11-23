@@ -1,20 +1,41 @@
 # qURL browser extension for Gmail
 
-Upload files straight from Gmail's compose window and drop secure, expiring
-links into your draft — no need to attach them to the email itself. Your
-files go to qURL™, and only a short link travels in the message.
+**Send files from Gmail as expiring access links instead of attachments.**
+The qURL™ extension uploads files from Gmail's compose window and drops a link
+for each one into your draft. Only the short link travels in the email, and
+each link expires, so a file you share today won't stay reachable forever.
+Your recipient just clicks.
 
-A **qURL** is a secure access link to an uploaded file. Links carry an
-expiry, so a file you share today won't stay reachable forever.
+## Common tasks
+
+| You want to… | How |
+| --- | --- |
+| Put a file link in an email | **Compose** → **qURL Agent** icon → **Browse files** → **Upload to qURL** |
+| Share several files at once | Pick more than one file in **Browse files** |
+| Paste a link yourself | Click **Copy the qURL link** in the popup |
+| Upload to your organization's own qURL server | Gear icon → **qURL server** → **Save** → confirm the server and browser permission prompts |
 
 ## Quickstart
 
 1. **Install** the extension (see [Installing](#installing) below).
 2. Open **Gmail** and click **Compose**.
-3. Click the **qURL** extension icon in the browser toolbar.
+3. Click the **qURL Agent** extension icon in the browser toolbar.
 4. Click **Browse files**, pick one or more, and click **Upload to qURL**.
 5. The secure links appear at the bottom of your draft. Keep writing and send
    as normal.
+
+### For AI agents and tools
+
+- Extension: **qURL Agent** on the [Chrome Web Store](https://chromewebstore.google.com/detail/qurl-agent/icmdbkclledmbhbcjcjmckcokkgikjem);
+  the [Edge build](../edge-extension/README.md) uses this same source
+- Works in Gmail's compose window; Gmail must be the active tab when the popup opens
+- Core flow: **Browse files** → **Upload to qURL** → links appended to the end of the draft
+- Files up to 100 MB each; keep the popup open until uploads finish
+- Uploads go to qURL's hosted server unless the **qURL server** setting points elsewhere
+- Building and the upload API: [developer guide](docs/development.md)
+- Other ways to share: [qURL CLI](../cli/README.md) ·
+  [Slack](../slack/README.md) · [Discord](../discord/README.md) ·
+  [MCP server](https://github.com/layervai/qurl-mcp)
 
 ## Installing
 
