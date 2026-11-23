@@ -131,6 +131,7 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 			"settings are built from.", missing)
 	}
 	return map[string]string{
+		"HOME":            t.TempDir(),
 		"QURL_API_KEY":    key,
 		"QURL_ENDPOINT":   endpoint,
 		"QURL_DEPLOYMENT": journeyDeploymentFile(t, issuerKey, relayURL),
@@ -328,7 +329,10 @@ type journeyPublishDoc struct {
 	TargetURL     string `json:"target_url"`
 	FoundExisting bool   `json:"found_existing"`
 	// Private is always written: it is the privacy the service confirmed.
-	Private *bool `json:"private"`
+	Private   *bool `json:"private"`
+	Publisher *struct {
+		Verified *bool `json:"verified"`
+	} `json:"publisher"`
 }
 
 // confirmedPrivate reports whether the publish document says the resource is
@@ -716,7 +720,7 @@ func TestSandboxCRIDJourney(t *testing.T) {
 
 	assertRemoteStatusAndInspect(ctx, t, cliEnv, pub)
 	assertListFindsCRID(ctx, t, cliEnv, pub.CRID, description)
-	link := assertShareJourney(ctx, t, cliEnv, pub.CRID)
+	link := assertShareJourney(ctx, t, cliEnv, pub)
 	// The link value never reaches the log: CI logs are public, and a
 	// minted link carries the sandbox hostname and a live qURL credential.
 	t.Logf("shared %s -> a verified %d-byte https link", pub.CRID, len(link))
@@ -842,16 +846,16 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 // stdout not a terminal the command emits the bare link and nothing else on
 // stdout, so `link="$(qurl share <CRID>)"` captures it cleanly (the link opens
 // in a browser — downloading is get's job), and stderr carries exactly the
-// one UNVERIFIED publisher notice. Exit 0 here IS the verification
+// one publisher notice matching the published status. Exit 0 here IS the verification
 // evidence — the CLI discards any answer that fails CRID verification before
 // printing (exit 12), so a printed link is a verified link. It also holds
 // the environment-guard case: the sandbox is the test environment, so its
 // 'q'-prefixed CRID at this non-production endpoint must produce no guard
 // warning — any stderr beyond the publisher notice fails the validator.
-func assertShareJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) string {
+func assertShareJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, pub journeyPublishDoc) string {
 	t.Helper()
-	res := runSandboxCLI(ctx, t, cliEnv, "share", id, "--session-duration", "5m")
-	link, err := validateSandboxShareCommandResult("share", res.code, res.stdout.String(), res.stderr.String())
+	res := runSandboxCLI(ctx, t, cliEnv, "share", pub.CRID, "--session-duration", "5m")
+	link, err := validateSandboxShareCommandResult("share", res.code, res.stdout.String(), res.stderr.String(), pub.publisherVerified(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -965,4 +969,12 @@ func reclaimSandboxResource(t *testing.T, cliEnv map[string]string, id string) {
 		t.Errorf("cleanup: delete %s exit = %d — the throwaway resource may be leaked on the sandbox tenancy\nstderr: %s",
 			id, res.code, res.stderr.String())
 	}
+}
+
+func (doc journeyPublishDoc) publisherVerified(t *testing.T) bool {
+	t.Helper()
+	if doc.Publisher == nil || doc.Publisher.Verified == nil {
+		t.Fatal("publish response has no publisher verification status")
+	}
+	return *doc.Publisher.Verified
 }
