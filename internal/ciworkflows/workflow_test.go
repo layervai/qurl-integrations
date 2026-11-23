@@ -2803,7 +2803,7 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	}
 	download := archiveSteps["Download the staged Windows release archive"]
 	windows := archiveSteps["Validate the exact Windows archive command roster"]
-	if download == nil || download.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" ||
+	if download == nil || download.Uses != "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333" ||
 		download.With["digest-mismatch"] != "error" || windows == nil {
 		t.Fatal("Windows release archive validation is not exact and fail closed")
 	}
