@@ -10,6 +10,8 @@ const mockPropagateGuildWebhookSubscription = jest.fn();
 
 jest.mock('../src/store', () => ({
   scanGuildSubscriptions: mockScanGuildSubscriptions,
+  getConnectorWebhookBinding: jest.fn(),
+  getGuildConfigWithApiKey: jest.fn(),
   setDefaultGuildOwner: jest.fn().mockResolvedValue(undefined),
   setGuildDefaultWebhookOwner: mockSetGuildDefaultWebhookOwner,
   setGuildWebhookSubscription: mockSetGuildWebhookSubscription,
@@ -32,6 +34,7 @@ process.env.AWS_REGION = 'us-east-2';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 
 const logger = require('../src/logger');
+const db = require('../src/store');
 const { AUDIT_EVENTS } = require('../src/constants');
 const subscriptions = require('../src/webhook-subscriptions');
 const { linkGuildWebhookSubscription } = require('../src/guild-webhook-link');
@@ -51,6 +54,7 @@ beforeEach(() => {
   subscriptions._resetForTesting();
   jest.clearAllMocks();
   requests.length = 0;
+  db.getConnectorWebhookBinding.mockResolvedValue(null);
   mockScanGuildSubscriptions.mockResolvedValue([]);
   mockSetGuildDefaultWebhookOwner.mockResolvedValue();
   mockSetGuildWebhookSubscription.mockResolvedValue();
@@ -262,4 +266,45 @@ it('reuses the default owner while unprimed and lets the first scan publish its 
   await subscriptions.scanOnce();
   expect(subscriptions.isPrimed()).toBe(true);
   expect(subscriptions.getSecretForOwner('usr_default')).toBe('whsec_default');
+});
+
+
+describe('connector callback survives a different bot default owner', () => {
+  const binding = { ownerId: 'usr_other', webhookId: 'wh_other', webhookSecret: 'whsec_connector' };
+  beforeEach(() => {
+    db.getConnectorWebhookBinding.mockResolvedValue(binding);
+    db.getGuildConfigWithApiKey.mockResolvedValue({ qurl_api_key: 'lv_other', qurl_owner_id: 'usr_other' });
+    mockScanGuildSubscriptions.mockResolvedValue([{ guildId: '__connector_webhook__', webhookOwnerId: binding.ownerId, webhookId: binding.webhookId, webhookSecret: binding.webhookSecret }]);
+  });
+  it('keeps both receiver owners without rotating the connector subscription', async () => {
+    await subscriptions.scanOnce();
+    requests.length = 0;
+    expect(await linkGuildWebhookSubscription({ guildId: 'g_connector', apiKey: 'lv_other' }))
+      .toEqual({ ok: true, action: 'reused' });
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests.every(request => request.method === 'GET')).toBe(true);
+    expect(mockSetGuildDefaultWebhookOwner).toHaveBeenCalledWith('g_connector', {
+      webhookOwnerId: 'usr_other', expectedDefaultWebhookSecret: 'whsec_connector', expectedApiKey: 'lv_other',
+    });
+    expect(mockSetGuildWebhookSubscription).not.toHaveBeenCalled();
+    expect(subscriptions.getSecretForOwner('usr_other')).toBe('whsec_connector');
+    expect(subscriptions.getSecretForOwner('usr_default')).toBe('whsec_default');
+  });
+  it.each(['missing subscription', 'changed key', 'missing verified owner', 'conflicting secret', 'changed subscription'])(
+    'fails closed without webhook mutations: %s', async (failure) => {
+      await subscriptions.scanOnce();
+      if (failure === 'missing subscription') global.fetch.mockResolvedValue(jsonResponse({ data: [] }));
+      if (failure === 'changed key') db.getGuildConfigWithApiKey.mockResolvedValue({ qurl_api_key: 'lv_new', qurl_owner_id: 'usr_other' });
+      if (failure === 'missing verified owner') db.getGuildConfigWithApiKey.mockResolvedValue({ qurl_api_key: 'lv_other' });
+      if (failure === 'changed subscription') db.getConnectorWebhookBinding.mockResolvedValue({ ...binding, webhookId: 'wh_replaced' });
+      if (failure === 'conflicting secret') db.getConnectorWebhookBinding.mockResolvedValue({ ...binding, webhookSecret: 'whsec_wrong' });
+      requests.length = 0;
+      expect(await linkGuildWebhookSubscription({ guildId: 'g_connector', apiKey: 'lv_other' }))
+        .toEqual({ ok: false, reason: 'register-failed' });
+      expect(requests.every(request => request.method === 'GET')).toBe(true);
+      expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
+      expect(mockSetGuildWebhookSubscription).not.toHaveBeenCalled();
+      expect(subscriptions.getSecretForOwner('usr_other')).toBe('whsec_connector');
+    },
+  );
 });

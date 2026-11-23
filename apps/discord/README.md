@@ -131,6 +131,20 @@ Historical attribution without a verified owner stays retained but must not
 identify recipients. The coordinated rollout is tracked in infrastructure
 issue #1555 and the #1664 rollout ledger.
 
+When the connector keeps the previous owner's shared-tunnel children, preserve
+its existing Discord webhook before changing the bot default key. After the
+updated callers deploy and old callers drain, store one operator-managed
+`__connector_webhook__` row in `guild_configs`: `webhook_owner_id`, `webhook_id`,
+and `webhook_secret` encrypted with the existing application key. Do not store
+`qurl_api_key` or `qurl_owner_id` in this row. Verify the exact owner, webhook ID,
+canonical callback URL, and current secret first. This metadata keeps the
+receiver's connector-owner entry while the new default owner is discovered.
+Guild setup for an alias of the connector owner reuses this subscription with
+read-only discovery; it cannot rotate its secret. Missing or conflicting
+bindings fail closed. Drain old-owner send writers and reconcile active sends
+before the default-key cutover; preserve the connector key and shared parent.
+
+
 Before deployment, configure alarms for `Connector mint_link returned a link
 without a valid qurl_id`, `Connector mint_link over-minted`, `Connector mint_link
 returned more partial links than requested`, `Minted link revoke incomplete`,

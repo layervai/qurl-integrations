@@ -247,7 +247,7 @@ function removeGuild({ guildId, ownerId }) {
 // passes its bridge URL so "reuse the default subscription" is never claimed
 // for a subscription that delivers somewhere else (a shared qURL account
 // across environments).
-async function discoverOwnerId(apiKey, { subject = 'DEFAULT', requiredUrl = null } = {}) {
+async function discoverOwnerId(apiKey, { subject = 'DEFAULT', requiredUrl = null, requiredWebhookId = null } = {}) {
   if (!apiKey || !config.QURL_ENDPOINT) return null;
   // Walk the same bounded surface the registrar can select from. Validating
   // only page 1 would let it mutate a malformed default subscription on a
@@ -323,7 +323,8 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', requiredUrl = null
         throw err;
       }
       ownerId = webhook.owner_id;
-      if (targetUrl && canonicalUrl(webhook.url) === targetUrl) targetFound = true;
+      if (targetUrl && canonicalUrl(webhook.url) === targetUrl
+          && (!requiredWebhookId || webhook.webhook_id === requiredWebhookId)) targetFound = true;
     }
     // TODO(upstream-contract): qurl-service paginates GET /v1/webhooks via
     // `meta.next_cursor` (same shape findExistingSubscriptions walks).
@@ -426,6 +427,24 @@ async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
     ? ownerId
     : await discoverOwnerId(apiKey, { subject: 'CANDIDATE' });
   return candidateOwnerId === ownerId ? ownerId : null;
+}
+
+// Only GET the protected subscription; alias keys must never rotate its secret.
+async function resolveConnectorOwnerForApiKey(guildId, apiKey, bridgeUrl) {
+  const binding = await db.getConnectorWebhookBinding();
+  if (!binding) return null;
+  const guild = await db.getGuildConfigWithApiKey(guildId);
+  if (!guild || guild.qurl_api_key !== apiKey || !guild.qurl_owner_id) {
+    throw new Error('Verified guild key binding is required');
+  }
+  if (guild.qurl_owner_id !== binding.ownerId) return null;
+  const owner = await discoverOwnerId(apiKey, { subject: 'CONNECTOR', requiredUrl: bridgeUrl, requiredWebhookId: binding.webhookId });
+  if (owner !== binding.ownerId) throw new Error('Connector webhook owner could not be verified');
+  const cached = subscriptions.get(owner);
+  if (cached && cached.webhookSecret !== binding.webhookSecret) {
+    throw new Error('Connector webhook secret conflicts with receiver cache');
+  }
+  return binding;
 }
 
 // One refresh pass. Rebuilds the per-owner map from `guild_configs`
@@ -698,6 +717,7 @@ module.exports = {
   stop,
   getSecretForOwner,
   resolveDefaultOwnerForApiKey,
+  resolveConnectorOwnerForApiKey,
   isPrimed,
   isWithinSiblingLagWindow,
   upsertGuild,

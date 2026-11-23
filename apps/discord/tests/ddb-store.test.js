@@ -2429,3 +2429,34 @@ describe('ddb-store boot-time AWS_REGION validation', () => {
     expect(result.stderr).not.toMatch(/AWS_REGION/);
   });
 });
+
+
+describe('connector webhook metadata', () => {
+  it('reads the protected secret consistently without an API key', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: {
+      guild_id: '__connector_webhook__', webhook_owner_id: 'usr_connector',
+      webhook_id: 'wh_connector', webhook_secret: mockCiphertext('secret'),
+    } });
+    expect(await store.getConnectorWebhookBinding()).toEqual({
+      ownerId: 'usr_connector', webhookId: 'wh_connector', webhookSecret: 'secret',
+    });
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
+  });
+  it('allows absent metadata before the owner cutover', async () => {
+    ddbMock.on(GetCommand).resolves({});
+    expect(await store.getConnectorWebhookBinding()).toBeNull();
+  });
+  it.each([{ qurl_api_key: 'key' }, { qurl_owner_id: 'usr' }, { webhook_secret: '' }, { webhook_secret: 'plaintext' }])(
+    'rejects invalid protected metadata: %j', async (invalid) => {
+      ddbMock.on(GetCommand).resolves({ Item: {
+        webhook_owner_id: 'usr_connector', webhook_id: 'wh_connector', webhook_secret: mockCiphertext('secret'), ...invalid,
+      } });
+      await expect(store.getConnectorWebhookBinding()).rejects.toThrow();
+    },
+  );
+  it('rejects setup at the reserved metadata key', async () => {
+    await expect(store.setGuildApiKey('__connector_webhook__', 'key', 'admin', 'paste', 'usr'))
+      .rejects.toThrow('Reserved');
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+});
