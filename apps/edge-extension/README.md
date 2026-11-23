@@ -1,12 +1,12 @@
 # qURL for Microsoft Edge
 
-**Send files from Gmail in Microsoft Edge as private links instead of attachments.**
+**Send files from Gmail in Microsoft Edge as expiring access links instead of attachments.**
 This is the Edge build of the [qURL™ extension for Gmail](../chrome-extension/README.md).
 It uploads files from Gmail's compose window and drops a link for each one
 into your draft, and your recipient just clicks. It is built from the same
 source as the Chrome extension and works the same way.
 
-## What you can do in two minutes
+## Common tasks
 
 | You want to… | How |
 | --- | --- |
@@ -17,7 +17,7 @@ source as the Chrome extension and works the same way.
 
 Once it is loaded, use it exactly as the
 [Gmail extension quickstart](../chrome-extension/README.md#quickstart) shows:
-**Compose** → the qURL toolbar icon → **Browse files** → **Upload to qURL**.
+**Compose** → the **qURL File Upload for Edge** toolbar icon → **Browse files** → **Upload to qURL**.
 
 ### For AI agents and tools
 
