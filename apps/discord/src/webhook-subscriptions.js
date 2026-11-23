@@ -348,6 +348,30 @@ async function discoverDefaultOwnerId(options) {
   return discoverOwnerId(config.QURL_API_KEY, options);
 }
 
+async function persistDefaultGuildOwner(ownerId) {
+  try {
+    await db.setDefaultGuildOwner(ownerId);
+  } catch (cause) {
+    const err = new Error('Default qURL owner binding is unavailable', { cause });
+    err.code = cause?.name === 'ConditionalCheckFailedException'
+      ? 'DEFAULT_WEBHOOK_OWNER_MARKER_CONFLICT' : 'DEFAULT_WEBHOOK_OWNER_MARKER_UNAVAILABLE';
+    throw err;
+  }
+}
+
+
+function recordDefaultDiscoveryFailure(message, fields) {
+  discoveryConsecutiveFailures += 1;
+  const level = discoveryConsecutiveFailures >= REFRESH_FAIL_ESCALATE_AT ? 'error' : 'warn';
+  logger[level](message, { ...fields, consecutiveFailures: discoveryConsecutiveFailures });
+  if (discoveryConsecutiveFailures === REFRESH_FAIL_ESCALATE_AT) {
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_DEFAULT_DISCOVERY_FAIL, {
+      consecutive_failures: discoveryConsecutiveFailures,
+      ...(fields.error_code ? { error_code: fields.error_code } : {}),
+    });
+  }
+}
+
 // Resolve whether a guild API key belongs to the bot's default owner. This is
 // lazy because gateway-only processes and the one-shot backfill never start
 // the HTTP receiver's registry scan. When a default subscription is expected
@@ -367,16 +391,6 @@ async function discoverDefaultOwnerId(options) {
 // targets it — the BYOK path gets the same guarantee from the registrar's
 // URL match, and skipping it here would report `reused` for a subscription
 // that delivers to another deployment.
-async function persistDefaultGuildOwner(ownerId) {
-  try {
-    await db.setDefaultGuildOwner(ownerId);
-  } catch (cause) {
-    const err = new Error('Default qURL owner binding is unavailable', { cause });
-    err.code = cause?.name === 'ConditionalCheckFailedException'
-      ? 'DEFAULT_WEBHOOK_OWNER_MARKER_CONFLICT' : 'DEFAULT_WEBHOOK_OWNER_MARKER_UNAVAILABLE';
-    throw err;
-  }
-}
 
 async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
   if (!config.QURL_WEBHOOK_SECRET) {
@@ -475,30 +489,13 @@ async function scanOnce() {
     let discoveredOwner;
     if (discoveryResult.ok) {
       discoveredOwner = discoveryResult.owner;
-      // Only reset the failure counter when a discovery attempt
-      // actually fired AND succeeded. A no-op tick (defaultOwnerId
-      // already cached) must NOT reset — otherwise a future hot-
-      // reload of QURL_API_KEY that invalidates defaultOwnerId would
-      // lose any prior-discovery-failure escalation on the next no-op
-      // tick. Currently no such hot-reload path exists, but the
-      // semantic should match the variable's name.
-
+      // An empty successful discovery also ends the previous outage burst.
+      if (discoveryResult.fired && !discoveredOwner) discoveryConsecutiveFailures = 0;
     } else {
-      discoveredOwner = defaultOwnerId; // keep prior value (likely null pre-first-success)
-      discoveryConsecutiveFailures += 1;
-      const level = discoveryConsecutiveFailures >= REFRESH_FAIL_ESCALATE_AT ? 'error' : 'warn';
-      logger[level]('default-key discovery failed (BYOK path unaffected)', {
+      discoveredOwner = defaultOwnerId;
+      recordDefaultDiscoveryFailure('default-key discovery failed (BYOK path unaffected)', {
         error: discoveryResult.error.message,
-        consecutiveFailures: discoveryConsecutiveFailures,
       });
-      if (discoveryConsecutiveFailures === REFRESH_FAIL_ESCALATE_AT) {
-        // Alarm-once at threshold so CloudWatch metric filters fire
-        // a single page per outage burst, not on every subsequent
-        // failed tick. Reset on success above.
-        logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_DEFAULT_DISCOVERY_FAIL, {
-          consecutive_failures: discoveryConsecutiveFailures,
-        });
-      }
     }
 
     // Tiebreaker: when sibling rows for one owner disagree on
@@ -528,9 +525,8 @@ async function scanOnce() {
           await persistDefaultGuildOwner(discoveredOwner);
           discoveryConsecutiveFailures = 0;
         } catch (err) {
-          logger.warn('default-key owner marker unavailable (BYOK path unaffected)', { error_code: err.code });
+          recordDefaultDiscoveryFailure('default-key owner marker unavailable (BYOK path unaffected)', { error_code: err.code });
           discoveredOwner = defaultOwnerId;
-          discoveryConsecutiveFailures += 1;
         }
       }
       if (discoveredOwner) defaultOwnerId = discoveredOwner;

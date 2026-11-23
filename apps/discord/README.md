@@ -120,7 +120,10 @@ enforce ownership and prevent new recipients across processes.
 Guild setup verifies the key owner through `/v1/me` and saves `qurl_owner_id`
 with the encrypted key in the same update. The subscription registry also
 publishes the verified fallback owner in `__default_owner__`; it refuses to
-change that owner automatically. Deploy this binding producer and reconcile
+change that owner automatically. Default discovery is strict: malformed upstream
+rows or a marker conflict keep default delivery closed while BYOK stays
+available. Persistent discovery or marker failures emit
+`qurl_webhook_default_discovery_fail` once per outage at the third failed scan. Deploy this binding producer and reconcile
 existing configured guilds before enabling connector guild-owner enforcement.
 During a default-owner cutover, drain old replicas before updating the marker.
 Historical attribution without a verified owner stays retained but must not

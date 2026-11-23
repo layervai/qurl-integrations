@@ -429,12 +429,17 @@ router.get('/callback', rateLimit, async (req, res) => {
       headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
       signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
     });
-    if (!identity.ok) throw new Error('Could not verify the provisioned key owner');
+    if (!identity.ok) {
+      const error = new Error('Could not verify the provisioned key owner');
+      error.code = 'QURL_KEY_OWNER_UNAVAILABLE';
+      error.status = identity.status;
+      throw error;
+    }
     const ownerId = qurlKeyOwner(await identity.json());
     await db.setGuildApiKey(guildId, apiKey, discordUserId, SETUP_VIA.OAUTH, ownerId);
   } catch (err) {
-    logger.error('Failed to persist guild API key after successful mint', {
-      error: err?.message, guildId, discordUserId, keyId,
+    logger.error('Failed to verify or persist guild API key after successful mint', {
+      error: err?.message, error_code: err?.code, identity_status: err?.status, guildId, discordUserId, keyId,
     });
     // Key was minted but not stored. Best-effort delete on qurl-service
     // so retries don't pile up orphan keys under the admin's account.

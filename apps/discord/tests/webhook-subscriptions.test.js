@@ -48,9 +48,32 @@ describe('webhook-subscriptions registry — priming + lookup', () => {
     expect(subs.getSecretForOwner('usr_default')).toBeNull();
     expect(require('../src/logger').warn).toHaveBeenCalledWith(
       'default-key owner marker unavailable (BYOK path unaffected)',
-      { error_code: 'DEFAULT_WEBHOOK_OWNER_MARKER_CONFLICT' },
+      { error_code: 'DEFAULT_WEBHOOK_OWNER_MARKER_CONFLICT', consecutiveFailures: 1 },
     );
   });
+  it('pages once for persistent marker failure and resets after empty discovery', async () => {
+    const db = require('../src/store');
+    const logger = require('../src/logger');
+    logger.audit.mockClear();
+    mockScan.mockResolvedValue([]);
+    for (let i = 0; i < 4; i++) {
+      db.setDefaultGuildOwner.mockRejectedValueOnce(Object.assign(new Error('conflict'), { name: 'ConditionalCheckFailedException' }));
+      // eslint-disable-next-line no-await-in-loop
+      await subs.scanOnce();
+    }
+    const pages = () => logger.audit.mock.calls.filter(([event]) => event === 'qurl_webhook_default_discovery_fail');
+    expect(pages()).toHaveLength(1);
+    expect(pages()[0][1].error_code).toBe('DEFAULT_WEBHOOK_OWNER_MARKER_CONFLICT');
+    global.fetch.mockResolvedValueOnce({ ok: true, text: async () => JSON.stringify({ data: [] }) });
+    await subs.scanOnce();
+    for (let i = 0; i < 3; i++) {
+      global.fetch = jest.fn(async () => ({ ok: false, status: 503, text: async () => '' }));
+      // eslint-disable-next-line no-await-in-loop
+      await subs.scanOnce();
+    }
+    expect(pages()).toHaveLength(2);
+  });
+
   it('returns null + isPrimed()=false before any scan completes', () => {
     expect(subs.isPrimed()).toBe(false);
     expect(subs.getSecretForOwner('usr_test')).toBeNull();
