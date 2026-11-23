@@ -1,7 +1,6 @@
 package state
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -587,22 +586,8 @@ func loadLocalShares(dir string) (localSharesState, error) {
 }
 
 func decodeLocalShares(data []byte) (localSharesState, error) {
-	if !utf8.Valid(data) {
-		return localSharesState{}, errors.New("local share registry is not valid UTF-8")
-	}
-	if err := rejectDuplicateResourceFields(data); err != nil {
-		return localSharesState{}, err
-	}
-	if err := rejectUnpairedJSONSurrogates(data); err != nil {
-		return localSharesState{}, err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	var state localSharesState
-	if err := decoder.Decode(&state); err != nil {
-		return localSharesState{}, err
-	}
-	if err := rejectTrailingJSON(decoder); err != nil {
+	if err := DecodeStrictJSON(data, &state); err != nil {
 		return localSharesState{}, err
 	}
 	if err := validateLocalSharesState(state); err != nil {
