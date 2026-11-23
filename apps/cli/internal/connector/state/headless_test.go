@@ -133,7 +133,7 @@ func TestReadOnlyProjectedFilesAndCredentialSafety(t *testing.T) {
 	if err := os.WriteFile(credential, []byte("secret"), 0o400); err != nil { // #nosec G306 -- secure file inside an intentionally unsafe parent.
 		t.Fatal(err)
 	}
-	if err := os.Chmod(unsafeParent, 0o777); err != nil { // #nosec G302 -- intentionally unsafe parent fixture.
+	if err := os.Chmod(unsafeParent, 0o777|os.ModeSticky); err != nil { // #nosec G302 -- intentionally sticky/world-writable projected-volume root.
 		t.Fatal(err)
 	}
 	if _, err := ReadEnrollmentCredential(credential); err == nil || !strings.Contains(err.Error(), "parent directory") {

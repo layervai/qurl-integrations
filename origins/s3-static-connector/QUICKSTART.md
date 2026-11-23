@@ -143,9 +143,9 @@ points on the same file system, with transit encryption and IAM authorization:
 
 | Access point | Contents and POSIX access |
 | --- | --- |
-| `qurl-state` | Dedicated writable root owned by `65532:65532`; qurl creates its owner-only `state` directory here. |
-| `qurl-config` | Generated `share.yaml`, readable by UID 65532; mounted read-only. |
-| `qurl-bootstrap` | `enrollment-token`, readable only by UID 65532; mounted read-only. |
+| `qurl-state` | Dedicated root with mode `0700`, owned by `65532:65532`; qurl creates its owner-only `state` directory here. |
+| `qurl-config` | Root mode `0700`, owner `65532:65532`; generated `share.yaml` readable by UID 65532; mounted read-only. |
+| `qurl-bootstrap` | Root mode `0700`, owner `65532:65532`; `enrollment-token` readable only by UID 65532; mounted read-only. |
 
 Set each access point's POSIX user and root owner to `65532:65532`. Use a
 separate provisioning role to place `share.yaml` at the config access-point
@@ -241,13 +241,18 @@ Use one pod, a dedicated PVC, and a service account already configured for
 bucket access through EKS Pod Identity or IRSA. Name it `qurl-s3-site` below.
 The pod's containers [share localhost](https://kubernetes.io/docs/concepts/services-networking/).
 Do not create a Service or Ingress for the origin, use `hostNetwork`, or scale
-this single identity above one replica. The cluster needs a default StorageClass
-that supports the PVC and the `fsGroup` ownership used below.
+this single identity above one replica. This recipe requires a StorageClass with kubelet-managed `fsGroup` ownership
+and `OnRootMismatch`; it must preserve private state modes across restarts.
+[CSI-managed group ownership](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#delegating-volume-permission-and-ownership-change-to-csi-driver)
+can ignore that policy and is not qualified by this recipe.
 
-The headless runtime accepts the projected Secret as `root:65532` with mode
-`0440`: a dedicated readable process group is allowed, while world access or
-group write is rejected. Only qurl mounts this Secret. Keep the local source
-file owner-only.
+Mount the Secret as a single file with `subPath`, as below. Its target is
+`root:65532` with mode `0440`; the runtime allows a dedicated readable process
+group and refuses world access, group write or a writable parent directory.
+A read-only directory mount does not change the Secret root's permission bits.
+Only qurl mounts this Secret. Keep the local source file owner-only. Both
+file `subPath` mounts are snapshots; restart the pod after replacing either
+Secret or generated config.
 
 Create these objects from your local generated config and token. Set the
 intended namespace explicitly in your kubectl context first:
@@ -257,8 +262,9 @@ kubectl create configmap qurl-s3-config --from-file=share.yaml
 kubectl create secret generic qurl-s3-bootstrap --from-file=enrollment-token
 ```
 
-Save the following as `site.yaml`, replace both image values, the bucket,
-region and prefix, then apply it with `kubectl apply -f site.yaml`:
+Save the following as `site.yaml`, replace all image placeholders with the
+two verified references, set the bucket, region and prefix, then apply it
+with `kubectl apply -f site.yaml`:
 
 ```yaml
 apiVersion: v1
@@ -291,6 +297,23 @@ spec:
       securityContext:
         fsGroup: 65532
         fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: prepare-qurl-state
+          image: <ORIGIN_IMAGE>
+          command: [/bin/sh, -ec]
+          args: ["umask 077; test ! -L /volume/state; mkdir -p /volume/state"]
+          securityContext:
+            runAsUser: 65532
+            runAsGroup: 65532
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - {name: state, mountPath: /volume}
       containers:
         - name: origin
           image: <ORIGIN_IMAGE>
@@ -327,8 +350,8 @@ spec:
             - {name: QURL_ENDPOINT, value: "https://api.layerv.ai"}
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
-            - {name: state, mountPath: /var/lib/qurl-volume}
-            - {name: bootstrap, mountPath: /run/secrets/qurl, readOnly: true}
+            - {name: state, mountPath: /var/lib/qurl-volume/state, subPath: state}
+            - {name: bootstrap, mountPath: /run/secrets/qurl/enrollment-token, subPath: enrollment-token, readOnly: true}
             - {name: config, mountPath: /etc/qurl/share.yaml, subPath: share.yaml, readOnly: true}
       volumes:
         - name: tmp
@@ -349,8 +372,12 @@ spec:
 `Recreate` avoids overlapping deployments of the stateful Connector. Do not
 force-delete a pod that may still run on an unreachable node; wait for that
 node to be fenced before starting a replacement against the same PVC.
-`fsGroup` makes the PVC root writable, and qurl creates its private nested
-state directory as UID 65532. No HTTP readiness/liveness probe can reach an
+`fsGroup` makes the PVC root writable for the non-root init container. That
+container reuses the origin image's shell to create one owner-only `state`
+subdirectory; it does not chmod or repair existing state. qurl mounts only
+that private subdirectory, so the group-writable PVC root is not a state-path
+ancestor. Do not replace this with a mount of the whole PVC root. Complete the
+warm-start check before accepting the StorageClass. No HTTP probe can reach an
 origin bound only to pod loopback from the node; do not add a port exposure to
 make such a probe work.
 
