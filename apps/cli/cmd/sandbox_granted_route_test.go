@@ -7,10 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -31,8 +35,9 @@ var (
 	errSandboxGrantedRouteUnexpectedSuccess    = errors.New("granted route returned an unexpected successful response")
 	errSandboxGrantedRouteMissingAuthorization = errors.New("granted route omitted application authorization")
 	errSandboxGrantedRouteAuthorization        = errors.New("granted route authorization failed")
+	errSandboxGrantedRouteCrossOrigin          = errors.New("custom domain redirected outside the granted origin")
 	errSandboxGrantedRouteConfiguration        = errors.New("granted route probe configuration is invalid")
-	errSandboxGrantedRouteTransport            = errors.New("granted route transport failed")
+	errSandboxGrantedRouteTransport            = sandboxGrantedRouteTransportFailure("other transport failure")
 )
 
 type sandboxGrantedRouteProbeState uint8
@@ -45,11 +50,12 @@ const (
 // sandboxGrantedRoute retains one working access path across delete. The URL
 // carries access authority, so this type and every diagnostic keep it private.
 type sandboxGrantedRoute struct {
-	url         string
-	marker      string
-	backendHits func() uint64
-	expiresAt   time.Time
-	authorize   func(*http.Request) error
+	url            string
+	marker         string
+	backendHits    func() uint64
+	expiresAt      time.Time
+	authorize      func(*http.Request) error
+	sameOriginOnly bool
 }
 
 func prepareSandboxGrantedRoute(
@@ -58,6 +64,7 @@ func prepareSandboxGrantedRoute(
 	shareLink string,
 	marker string,
 	backendHits func() uint64,
+	customHost string,
 ) *sandboxGrantedRoute {
 	t.Helper()
 	link := strings.TrimSpace(shareLink)
@@ -78,12 +85,19 @@ func prepareSandboxGrantedRoute(
 			sandboxGrantedRouteAccessFailureCategory(err),
 		)
 	}
+	if customHost != "" {
+		target, err := url.Parse(grant.ContentURL)
+		if err != nil || target.Scheme != "https" || target.Hostname() != customHost {
+			t.Fatal("Sandbox admission did not return the exact HTTPS custom hostname")
+		}
+	}
 	route := &sandboxGrantedRoute{
-		url:         grant.ContentURL,
-		marker:      marker,
-		backendHits: backendHits,
-		expiresAt:   grantStartedAt.Add(time.Duration(grant.OpenSeconds) * time.Second),
-		authorize:   grant.AuthorizeContentRequest,
+		url:            grant.ContentURL,
+		sameOriginOnly: customHost != "",
+		marker:         marker,
+		backendHits:    backendHits,
+		expiresAt:      grantStartedAt.Add(time.Duration(grant.OpenSeconds) * time.Second),
+		authorize:      grant.AuthorizeContentRequest,
 	}
 	readyCtx, cancelReady := context.WithTimeout(ctx, sandboxGrantedRouteReadyWindow)
 	defer cancelReady()
@@ -148,6 +162,8 @@ func waitSandboxGrantedRouteReady(
 		switch {
 		case errors.Is(probeErr, errSandboxGrantedRouteMissingAuthorization):
 			return fmt.Errorf("pre-delete granted Connector route is invalid: access grant omitted application authorization: %w", errSandboxGrantedRouteMissingAuthorization)
+		case errors.Is(probeErr, errSandboxGrantedRouteCrossOrigin):
+			return errSandboxGrantedRouteCrossOrigin
 		case errors.Is(probeErr, errSandboxGrantedRouteConfiguration):
 			return fmt.Errorf("pre-delete granted Connector route is invalid: probe configuration is invalid: %w", errSandboxGrantedRouteConfiguration)
 		}
@@ -209,6 +225,9 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 			}
 		}
 		if !consume.SameHTTPOrigin(grantedURL, redirectReq.URL) {
+			if r.sameOriginOnly {
+				return errSandboxGrantedRouteCrossOrigin
+			}
 			return nil
 		}
 		if err := r.authorize(redirectReq); err != nil {
@@ -225,7 +244,10 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		if errors.Is(err, errSandboxGrantedRouteAuthorization) {
 			return 0, errSandboxGrantedRouteAuthorization
 		}
-		return 0, errSandboxGrantedRouteTransport
+		if errors.Is(err, errSandboxGrantedRouteCrossOrigin) {
+			return 0, errSandboxGrantedRouteCrossOrigin
+		}
+		return 0, sandboxGrantedRouteRequestFailure(err, grantedURL)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, int64(len(r.marker)+1)))
@@ -233,7 +255,7 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return 0, ctxErr
 		}
-		return 0, errors.New("read granted-route response")
+		return 0, "response body: " + sandboxGrantedRouteTransportCategory(err)
 	}
 	if resp.StatusCode/100 != 2 {
 		return sandboxGrantedRouteRefused, nil
@@ -242,6 +264,72 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		return sandboxGrantedRouteServed, nil
 	}
 	return 0, errSandboxGrantedRouteUnexpectedSuccess
+}
+
+type sandboxGrantedRouteTransportFailure string
+
+const sandboxGrantedRouteHTTP2PeerReset sandboxGrantedRouteTransportFailure = "HTTP/2 peer reset"
+
+func (failure sandboxGrantedRouteTransportFailure) Error() string { return string(failure) }
+
+// Report only fixed categories. Transport errors may include a grant URL.
+func sandboxGrantedRouteTransportCategory(err error) sandboxGrantedRouteTransportFailure {
+	var dnsError *net.DNSError
+	var requestError *url.Error
+	if errors.As(err, &requestError) && requestError != nil && requestError.Err != nil {
+		err = requestError.Err
+	}
+	switch {
+	case isSandboxGrantedRouteHTTP2Reset(err):
+		return sandboxGrantedRouteHTTP2PeerReset
+	case errors.As(err, &dnsError):
+		return "DNS lookup failed"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection reset"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "peer closed the connection"
+	default:
+		// The Go type is safe to log. The error value can include the grant URL.
+		return sandboxGrantedRouteTransportFailure(fmt.Sprintf("transport error (%T)", err))
+	}
+}
+
+// The edge can deny by resetting the stream before sending headers. Only the
+// granted origin can supply this refusal. A body read error never counts.
+func sandboxGrantedRouteRequestFailure(err error, grantedURL *url.URL) sandboxGrantedRouteTransportFailure {
+	category := sandboxGrantedRouteTransportCategory(err)
+	if category != sandboxGrantedRouteHTTP2PeerReset {
+		return category
+	}
+	requestError, ok := err.(*url.Error) //nolint:errorlint // Only Client.Do's direct error qualifies.
+	if ok && requestError != nil {
+		target, parseErr := url.Parse(requestError.URL)
+		if parseErr == nil && consume.SameHTTPOrigin(grantedURL, target) {
+			return category
+		}
+	}
+	return "HTTP/2 reset outside the granted request"
+}
+
+// TODO(upstream-contract): shortcut: Go's HTTP/2 error type is private. Check
+// this shape against qurl-service's denial smoke when the Go toolchain changes.
+func isSandboxGrantedRouteHTTP2Reset(err error) bool {
+	if err == nil {
+		return false
+	}
+	const prefix, suffix = "stream error: stream ID ", "; INTERNAL_ERROR; received from peer"
+	id, ok := strings.CutPrefix(err.Error(), prefix)
+	if !ok {
+		return false
+	}
+	id, ok = strings.CutSuffix(id, suffix)
+	if !ok {
+		return false
+	}
+	stream, parseErr := strconv.ParseUint(id, 10, 31)
+	return parseErr == nil && stream%2 == 1 && strconv.FormatUint(stream, 10) == id
 }
 
 // newSandboxGrantedRouteHTTPClient matches the hermetic customer process used
@@ -264,9 +352,8 @@ func classifySandboxGrantedRouteProbe(
 	switch {
 	case errors.Is(probeErr, errSandboxGrantedRouteUnexpectedSuccess):
 		return 0, false, true
-	case errors.Is(probeErr, context.DeadlineExceeded) && outerErr == nil:
-		// A live outer bound plus an expired per-probe bound is an observed
-		// blackhole. Deletion may deny with a response or silently drop.
+	case outerErr == nil && (errors.Is(probeErr, context.DeadlineExceeded) || errors.Is(probeErr, sandboxGrantedRouteHTTP2PeerReset)):
+		// The edge can drop the request or reset its HTTP/2 stream after refusing it.
 		return sandboxGrantedRouteRefused, false, false
 	default:
 		return state, probeErr != nil, false
@@ -369,6 +456,8 @@ func assertSandboxGrantedRouteFenced(t *testing.T, route *sandboxGrantedRoute) {
 		settle:     sandboxDeletedRouteRequiredQuiet,
 		stableHits: baseline,
 	}
+	failedProbes := make(map[string]int)
+	refusals := 0
 	for {
 		probeStartedAt := time.Now()
 		hitsBefore := route.backendHits()
@@ -381,6 +470,21 @@ func assertSandboxGrantedRouteFenced(t *testing.T, route *sandboxGrantedRoute) {
 			outerErr = context.DeadlineExceeded
 		}
 		state, probeFailed, unexpectedSuccess := classifySandboxGrantedRouteProbe(state, probeErr, outerErr)
+		if probeFailed {
+			category := "other probe failure"
+			var transportFailure sandboxGrantedRouteTransportFailure
+			switch {
+			case errors.As(probeErr, &transportFailure):
+				category = string(transportFailure)
+			case errors.Is(probeErr, context.DeadlineExceeded):
+				category = "probe deadline exceeded"
+			case errors.Is(probeErr, errSandboxGrantedRouteAuthorization):
+				category = "probe authorization failed"
+			}
+			failedProbes[category]++
+		} else if state == sandboxGrantedRouteRefused {
+			refusals++
+		}
 		if unexpectedSuccess {
 			// Before deletion, a transient non-matching 2xx is a readiness state.
 			// After the convergence grace, any 2xx on this protected content route
@@ -397,11 +501,11 @@ func assertSandboxGrantedRouteFenced(t *testing.T, route *sandboxGrantedRoute) {
 			return
 		}
 		if outerErr != nil {
-			t.Fatalf("deleted Connector route did not stay fenced for %s within the %s bound", sandboxDeletedRouteRequiredQuiet, sandboxDeletedRouteProbeWindow)
+			t.Fatalf("deleted Connector route did not stay fenced for %s within the %s bound (refusals: %d; probe failures: %v)", sandboxDeletedRouteRequiredQuiet, sandboxDeletedRouteProbeWindow, refusals, failedProbes)
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("deleted Connector route did not stay fenced for %s within the %s bound", sandboxDeletedRouteRequiredQuiet, sandboxDeletedRouteProbeWindow)
+			t.Fatalf("deleted Connector route did not stay fenced for %s within the %s bound (refusals: %d; probe failures: %v)", sandboxDeletedRouteRequiredQuiet, sandboxDeletedRouteProbeWindow, refusals, failedProbes)
 		case <-ticker.C:
 		}
 	}
@@ -572,6 +676,11 @@ func TestSandboxGrantedRouteProbeAllowsCrossOriginWithoutSendingBearer(t *testin
 		t.Fatalf("cross-origin probe = state %d, error %v, destination requests %d, authorizations %d, leaked %t",
 			state, err, destinationRequests.Load(), authorizations.Load(), leaked.Load())
 	}
+	route.sameOriginOnly = true
+	state, err = route.probe(t.Context())
+	if state != 0 || !errors.Is(err, errSandboxGrantedRouteCrossOrigin) || destinationRequests.Load() != 1 {
+		t.Fatalf("origin-bound probe = state %d, error %v, total destination requests %d", state, err, destinationRequests.Load())
+	}
 }
 
 func TestSandboxGrantedRouteProbeRejectsMissingAuthorization(t *testing.T) {
@@ -633,6 +742,50 @@ func TestSandboxGrantedRouteAccessFailureCategories(t *testing.T) {
 	const secret = "https://access.invalid/#qv3.unknown-secret"
 	if got := sandboxGrantedRouteAccessFailureCategory(errors.New(secret)); got != "unclassified access failure" || strings.Contains(got, secret) {
 		t.Fatalf("unknown category = %q", got)
+	}
+}
+
+func TestSandboxGrantedRouteTransportCategoryUnwrapsURLError(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want sandboxGrantedRouteTransportFailure
+	}{
+		{"TCP reset", syscall.ECONNRESET, "connection reset"},
+		{"HTTP/2 peer reset", errors.New("stream error: stream ID 3; INTERNAL_ERROR; received from peer"), "HTTP/2 peer reset"},
+		{"HTTP/2 other failure", errors.New("stream error: stream ID 3; CANCEL; received from peer"), "transport error (*errors.errorString)"},
+		{"unclassified private detail", errors.New("https://example.test/private-grant"), "transport error (*errors.errorString)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := &url.Error{Op: "Get", URL: "https://example.test/private-grant", Err: test.err}
+			if got := sandboxGrantedRouteTransportCategory(err); got != test.want {
+				t.Fatalf("transport category = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSandboxGrantedRoutePeerRefusalRequiresGrantedOrigin(t *testing.T) {
+	origin := &url.URL{Scheme: "https", Host: "granted.test"}
+	reset := errors.New("stream error: stream ID 1; INTERNAL_ERROR; received from peer")
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"granted origin", &url.Error{URL: "https://granted.test/private", Err: reset}, true},
+		{"redirected origin", &url.Error{URL: "https://other.test/private", Err: reset}, false},
+		{"body read", reset, false},
+		{"TCP reset", &url.Error{URL: "https://granted.test/private", Err: syscall.ECONNRESET}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			failure := sandboxGrantedRouteRequestFailure(test.err, origin)
+			state, probeFailed, unexpectedSuccess := classifySandboxGrantedRouteProbe(0, failure, nil)
+			refused := state == sandboxGrantedRouteRefused && !probeFailed && !unexpectedSuccess
+			if refused != test.want {
+				t.Fatalf("peer refusal = %t, want %t", refused, test.want)
+			}
+		})
 	}
 }
 
@@ -741,6 +894,17 @@ func TestSandboxGrantedRouteFenceValidator(t *testing.T) {
 		probeState, failed, fatal = classifySandboxGrantedRouteProbe(0, errSandboxGrantedRouteTransport, nil)
 		if probeState != 0 || !failed || fatal {
 			t.Fatalf("transport-failure classification = state %d, failed %v, fatal %v", probeState, failed, fatal)
+		}
+	})
+
+	t.Run("accepts the edge peer reset only within the outer bound", func(t *testing.T) {
+		state, failed, fatal := classifySandboxGrantedRouteProbe(0, sandboxGrantedRouteHTTP2PeerReset, nil)
+		if state != sandboxGrantedRouteRefused || failed || fatal {
+			t.Fatalf("live peer reset = state %d, failed %v, fatal %v", state, failed, fatal)
+		}
+		state, failed, fatal = classifySandboxGrantedRouteProbe(0, sandboxGrantedRouteHTTP2PeerReset, context.Canceled)
+		if state != 0 || !failed || fatal {
+			t.Fatalf("canceled peer reset = state %d, failed %v, fatal %v", state, failed, fatal)
 		}
 	})
 

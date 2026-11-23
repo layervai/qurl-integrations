@@ -396,7 +396,8 @@ func TestPerShareManagerRefusedShareReKnocksOnlyItsOwnGroup(t *testing.T) {
 	}
 	manager.configure = func(group *Manager) {
 		group.retryDelay = func(int) time.Duration { return 20 * time.Millisecond }
-		group.refusalDelay = group.retryDelay
+		// Keep the diagnostic observable until the test expires this deadline.
+		group.refusalDelay = func(int) time.Duration { return time.Hour }
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -421,6 +422,17 @@ func TestPerShareManagerRefusedShareReKnocksOnlyItsOwnGroup(t *testing.T) {
 	}
 	// A lifecycle command reconciles while b is withheld.
 	manager.Trigger()
+	manager.mu.Lock()
+	refusedGroup := manager.groups["b"].manager
+	manager.mu.Unlock()
+	waitManagerCondition(t, func() bool { return !refusedGroup.groupIsRunning() }, "refused group stopped")
+	// Expire only b's backoff after checking its diagnostic and retained intent.
+	refusedGroup.mu.Lock()
+	tracked := refusedGroup.tracked["b"]
+	tracked.retryAt = time.Now().Add(-time.Second)
+	refusedGroup.tracked["b"] = tracked
+	refusedGroup.mu.Unlock()
+	refusedGroup.Trigger()
 	// After its backoff b is re-admitted on a fresh session of its own and
 	// registers under a fresh proxy name; the refused session has ended.
 	waitPerShareServing(t, manager, "b")

@@ -513,7 +513,7 @@ jobs:
       # uploads artifacts to the release release-please just created and
       # keeps its notes.
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           version: "~> v2"
           args: release --clean
@@ -638,7 +638,7 @@ jobs:
           done
 
       - name: Set up QEMU for qurl image smoke
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -873,7 +873,7 @@ jobs:
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
     steps:
       - name: Download the staged Homebrew bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: qurl-homebrew-validation-${{ needs.cli-release-gate.outputs.source_sha }}
           path: ${{ runner.temp }}/qurl-homebrew-validation
@@ -901,6 +901,7 @@ jobs:
           echo "QURL_HOMEBREW_TAP_LINK=$tap_link" >>"$GITHUB_ENV"
 
           token=layervaici/qurl-release-gate/qurl
+          brew trust --cask "$token"
           brew audit --cask "$token"
           case "$(uname -m)" in
             arm64) archive="$RUNNER_TEMP/qurl-homebrew-validation/qurl_${release_version}_darwin_arm64.tar.gz" ;;
@@ -972,6 +973,7 @@ jobs:
         if: always()
         run: |
           brew uninstall --cask layervaici/qurl-release-gate/qurl 2>/dev/null || true
+          brew untrust --cask layervaici/qurl-release-gate/qurl
           [[ -z "${QURL_HOMEBREW_TAP_LINK:-}" || ! -L "$QURL_HOMEBREW_TAP_LINK" ]] || unlink "$QURL_HOMEBREW_TAP_LINK"
           [[ -z "${QURL_HOMEBREW_CACHE_PATH:-}" || ! -f "$QURL_HOMEBREW_CACHE_PATH" ]] || unlink "$QURL_HOMEBREW_CACHE_PATH"
 
@@ -992,7 +994,7 @@ jobs:
       QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
     steps:
       - name: Download the staged Windows release archive
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: qurl-homebrew-validation-${{ needs.cli-release-gate.outputs.source_sha }}
           path: ${{ runner.temp }}/qurl-release-archive-validation
@@ -1114,7 +1116,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Download the exact draft release candidate
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cli-production-candidate-${{ needs.cli-release-gate.outputs.source_sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/production-candidate
@@ -1300,7 +1302,7 @@ jobs:
           }
 
       - name: Download the production proof receipts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: cli-production-proof-${{ needs.cli-release-gate.outputs.source_sha }}-${{ github.run_attempt }}-*
           path: ${{ runner.temp }}/production-proof
@@ -1425,7 +1427,7 @@ jobs:
       CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
     steps:
       - name: Download the audited Homebrew cask
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: qurl-homebrew-validated-${{ needs.cli-release-gate.outputs.source_sha }}
           path: ${{ runner.temp }}/qurl-homebrew-validated
