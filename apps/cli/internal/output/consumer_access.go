@@ -56,12 +56,7 @@ func (p *Printer) consumerManagementText(result *qurlapi.ConsumerManagementResul
 		return err
 	}
 	if result.Policy != nil {
-		policy := result.Policy.Mode
-		if result.Policy.ContractID != "" {
-			policy += " " + result.Policy.ContractID
-		}
-		_, err := fmt.Fprintf(p.out, "Access: private (%s)\nVersion: %d\n", consumerTerminalText(policy), result.Policy.Version)
-		return err
+		return p.consumerPolicyText(result.Policy, result.CreditPrice)
 	}
 	if result.Invitation != nil {
 		value := result.Invitation
@@ -160,7 +155,7 @@ func consumerManagementDocument(result *qurlapi.ConsumerManagementResult) any {
 		Invitations *[]*consumerInvitationJSON `json:"invitations,omitempty"`
 		Grants      *[]*consumerGrantJSON      `json:"grants,omitempty"`
 		NextCursor  string                     `json:"next_cursor,omitempty"`
-	}{Action: result.Action, CRID: result.CRID, Policy: policyDocument(result.Policy), Invitation: invitationDocument(result.Invitation), Grant: grantDocument(result.Grant), NextCursor: result.NextCursor}
+	}{Action: result.Action, CRID: result.CRID, Policy: policyDocumentWithCredits(result.Policy, result.CreditPrice), Invitation: invitationDocument(result.Invitation), Grant: grantDocument(result.Grant), NextCursor: result.NextCursor}
 	if result.Action == consumerActionListInvitations || len(result.Invitations) > 0 {
 		values := make([]*consumerInvitationJSON, 0, len(result.Invitations))
 		for i := range result.Invitations {
@@ -179,21 +174,35 @@ func consumerManagementDocument(result *qurlapi.ConsumerManagementResult) any {
 }
 
 type consumerAccessJSON struct {
+	Credits       int64                   `json:"credits,omitempty"`
 	Mode          string                  `json:"mode"`
 	Version       int64                   `json:"version"`
+	EmailDomain   string                  `json:"email_domain,omitempty"`
 	ContractID    string                  `json:"contract_id,omitempty"`
 	Payment       *qurl.CRIDPaymentPolicy `json:"payment,omitempty"`
-	EmailDomain   string                  `json:"email_domain,omitempty"`
 	AllowedEmails []string                `json:"allowed_emails,omitempty"`
 	// ApprovalExpiresIn is how long each approval lasts; the service enforces it.
 	ApprovalExpiresIn string `json:"approval_expires_in,omitempty"`
 }
 
-func policyDocument(policy *qurl.ConsumerAccessPolicy) *consumerAccessJSON {
+func policyDocumentWithCredits(policy *qurl.ConsumerAccessPolicy, credits int64) *consumerAccessJSON {
 	if policy == nil {
 		return nil
 	}
-	return &consumerAccessJSON{Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID, Payment: policy.Payment, EmailDomain: policy.EmailDomain, AllowedEmails: policy.AllowedEmails, ApprovalExpiresIn: policy.ApprovalExpiresIn}
+	return &consumerAccessJSON{Credits: credits, Mode: policy.Mode, Version: policy.Version, ContractID: policy.ContractID, Payment: policy.Payment, EmailDomain: policy.EmailDomain, AllowedEmails: policy.AllowedEmails, ApprovalExpiresIn: policy.ApprovalExpiresIn}
+}
+
+func (p *Printer) consumerPolicyText(policy *qurl.ConsumerAccessPolicy, credits int64) error {
+	if credits > 0 {
+		_, err := fmt.Fprintf(p.out, "Credit price: %d per hour\nVersion: %d\n", credits, policy.Version)
+		return err
+	}
+	label := strings.TrimSpace(policy.Mode + " " + policy.EmailDomain)
+	if policy.ContractID != "" {
+		label += " " + policy.ContractID
+	}
+	_, err := fmt.Fprintf(p.out, "Access: private (%s)\nVersion: %d\n", consumerTerminalText(label), policy.Version)
+	return err
 }
 
 func (p *Printer) consumerGrantText(value *qurl.ConsumerGrant) error {

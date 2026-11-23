@@ -21,6 +21,8 @@ protected resources. Start with the guide for the task you want to complete:
 | Task | Guide |
 | --- | --- |
 | Share a local web app or API with a temporary link | [qURL CLI quickstart](apps/cli/README.md#publish-localhost-in-60-seconds) |
+| Let Claude Code help with a first local-app share | [Agent skill setup](apps/cli/README.md#let-a-coding-agent-share-your-app) |
+| Check app requests before and after reviewer approval | [Approval-first browser demo](docs/approval-first-demo/README.md) |
 | Share internal resources from a Slack channel | [qURL for Slack](apps/slack/README.md) |
 | Send one-time file or location links in Discord | [qURL Discord bot](apps/discord/README.md) |
 | Share files in Gmail through expiring links | [Browser extension for Gmail](apps/chrome-extension/README.md) |
@@ -34,7 +36,7 @@ lists its own setup requirements. Teams deployment is managed outside this
 repository; the presence of its source does not establish a public rollout.
 
 [Localhost quickstart](#share-a-localhost-web-app) ·
-[File sharing](#share-files-and-documents) · [Sharing comparison](#choose-how-to-share-an-app-or-file) ·
+[File sharing](#share-files-and-documents) · [Vercel deployments](#protect-a-vercel-deployment) · [Sharing comparison](#choose-how-to-share-an-app-or-file) ·
 [Sharing questions](#localhost-and-file-sharing-questions) ·
 [Product overview](https://layerv.ai/qurl/) · [Private links](https://qurl.link/)
 
@@ -113,6 +115,81 @@ file service. Opening or testing a single-use link can consume it; create a
 fresh recipient link when needed. Use each integration's guide for its actual
 revocation support and file-size limits.
 
+## Protect a Vercel deployment
+
+qURL can put a Vercel app behind short-lived qURL links with nothing installed
+on Vercel. Vercel's [Deployment Protection](https://vercel.com/docs/deployment-protection)
+refuses requests that lack the project's *Protection Bypass for Automation*
+secret. You give that secret to qURL as the resource's **origin header**, and
+qURL adds it to every request it forwards to the app. Visitors never see it,
+and if a visitor sends that header themselves, qURL replaces it.
+
+1. In the Vercel project, open *Settings → Deployment Protection*. Choose the
+   [**All Deployments**](https://vercel.com/docs/deployment-protection#all-deployments)
+   scope, which Vercel offers on every plan: *Standard Protection* leaves
+   production domains, such as `my-app.vercel.app`, open to everyone.
+   Then
+   create a *Protection Bypass for Automation* secret, and check that a direct
+   request is refused: `curl -sI https://my-app.vercel.app` should answer
+   `401` or redirect to Vercel's login page.
+2. Protect the deployment URL with that secret. With the CLI (4.1.0 or later),
+   which reads the secret from stdin or a hidden prompt, never from an
+   argument (here `VERCEL_AUTOMATION_BYPASS_SECRET` is a variable you set in
+   your own shell):
+
+   ```bash
+   CRID=$(printf '%s' "$VERCEL_AUTOMATION_BYPASS_SECRET" | qurl publish https://my-app.vercel.app --name "Preview app" --origin-header x-vercel-protection-bypass --quiet) &&
+     qurl share "$CRID"
+   ```
+
+   If the URL is already published, publishing it again with
+   `--origin-header` is refused and changes nothing: use `qurl origin-header set <CRID> x-vercel-protection-bypass`.
+
+   Or use the
+   [TypeScript SDK](https://github.com/layervai/qurl-typescript#protect-a-vercel-app):
+
+   ```typescript
+   const resource = await client.protectUrl('https://my-app.vercel.app', {
+     name: 'Preview app',
+     originHeader: {
+       name: 'x-vercel-protection-bypass',
+       value: process.env.VERCEL_AUTOMATION_BYPASS_SECRET!,
+     },
+   });
+   const portal = await resource.createPortal({ validFor: '15m' });
+   ```
+
+   or the REST API: `POST /v1/resources` with
+   `"origin_header": {"name": "x-vercel-protection-bypass", "value": "<secret>"}`.
+3. Share the link (`qurl share` prints it; in the SDK it is `portal.link`).
+   Requests through it reach the app; direct requests to the app's hostnames
+   are refused by Vercel.
+
+The secret is write-only: qURL shows only the header name
+(`origin_header_name` in the API), never the value.
+
+<!-- TODO(upstream-contract): Vercel plan availability of All Deployments and Protection Bypass for Automation; the qurl-router route cache TTL (60 s in production). -->
+
+**Rotate or remove the secret.** qURL's gateways keep a resource's settings for
+up to 60 seconds, so rotate in this order: add the new secret in Vercel, give
+it to qURL, then remove the old secret in Vercel a few minutes later.
+
+| | CLI | REST |
+| --- | --- | --- |
+| Rotate | `qurl origin-header set <CRID> x-vercel-protection-bypass` (reads the new secret like `publish`) | `PATCH /v1/resources/{id}` with a new `origin_header` |
+| Remove | `qurl origin-header clear <CRID>` | `PATCH /v1/resources/{id}` with `"origin_header": null` |
+
+In the REST paths, `{id}` is the CRID or the resource ID.
+
+The same works for any origin that admits requests by one secret header, such
+as an `Authorization` header for HTTP basic auth. An origin that needs two
+headers, such as a Cloudflare Access service token, is not supported.
+
+What this does and does not hide: the app is reachable only through qURL, but
+Vercel's edge still answers on the public hostname, so the deployment's
+existence is visible. A backend you run yourself can be fully hidden, answering
+no one, by publishing it through qURL Connector instead.
+
 ## Choose how to share an app or file
 
 A live preview, an internal API, and an uploaded report have different sharing requirements. Start with where the content should run and how the recipient should be authorized. qURL can connect these workflows through resource access links, while the publishing and file-upload components have their own setup and lifecycle.
@@ -179,7 +256,10 @@ serve the preview.
 ### Does a qURL make an existing public URL private?
 
 Creating a qURL adds an access path. Close or restrict any separate public
-route if access should be available only through qURL.
+route if access should be available only through qURL. For an origin that
+can refuse requests without a secret header, such as a
+[Vercel deployment](#protect-a-vercel-deployment), set an origin header so
+qURL is the only path that carries it.
 
 ### Does the link's expiry end an open session?
 

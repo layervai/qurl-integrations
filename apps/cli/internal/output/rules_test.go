@@ -31,7 +31,8 @@ func TestAccessModesMatchCatalog(t *testing.T) {
 	if err = json.Unmarshal(raw, &catalog); err != nil {
 		t.Fatal(err)
 	}
-	if len(catalog.Presentation) != len(accessModes) {
+	// One presentation entry per mode, plus the People who pay preset.
+	if len(catalog.Presentation) != len(accessModes)+1 {
 		t.Fatalf("catalog has %d modes, CLI %d", len(catalog.Presentation), len(accessModes))
 	}
 	for _, m := range accessModes {
@@ -49,6 +50,17 @@ func TestAccessModesMatchCatalog(t *testing.T) {
 	}
 }
 
+func TestAccessRulesJSONKeepsMailboxCharacters(t *testing.T) {
+	var out, stderr bytes.Buffer
+	snapshot := accessrules.Snapshot{Items: []accessrules.Definition{{AllowedEmails: []string{"a&b@example.com"}}}}
+	if err := newTestPrinter(&out, &stderr, FormatJSON, false, false, false).AccessRules(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "a&b@example.com") {
+		t.Fatalf("mailbox was escaped: %s", out.String())
+	}
+}
+
 func TestAccessRulesListShowsDefaultsThenSavedRules(t *testing.T) {
 	var out, stderr bytes.Buffer
 	snapshot := accessrules.Snapshot{BuiltIns: accessrules.BuiltIns(), Items: []accessrules.Definition{{ID: "11111111-1111-4111-8111-111111111111", Name: "Acme team", Mode: "email_domain", EmailDomain: "acme.com"}}, LocalVersion: 2, Sync: "local"}
@@ -56,10 +68,10 @@ func TestAccessRulesListShowsDefaultsThenSavedRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `Default access rules
-  Anyone with the link   Anyone who gets the link can open it.
-  Only the first person  The first person to open it within 1 hour gets in. Then it’s used up.
+  One-time link          The first person to open it gets in. Then it’s used up.
   People you invite      Only the email addresses you add can open it.
   People you approve     They confirm their email and ask. You approve each person.
+  People who pay         They pay your price, then it opens for them.
 
 Your rules
   11111111-1111-4111-8111-111111111111  "Acme team"  People at acme.com

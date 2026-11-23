@@ -27,6 +27,7 @@ func shareCmd(opts *globalOpts) *cobra.Command {
 		ttl             time.Duration
 		sessionDuration time.Duration
 		yes             bool
+		schedule        shareSchedule
 	)
 
 	cmd := &cobra.Command{
@@ -44,6 +45,8 @@ device gets "not found".
 The link expires on its own; share again whenever you need a fresh one.
 A resource you published on this device with an access rule's link limits
 gets links with those limits; --ttl and --session-duration override them.
+Use --not-before and --expires-at to share a link for a future access window.
+The effective expiry also ends active sessions for scheduled links.
 
 Before anything is printed, the CLI verifies that the link belongs
 to the CRID you asked for — a mismatched answer is discarded and the
@@ -61,6 +64,7 @@ When stdout is not a terminal the command prints the bare link on stdout,
 ready to hand out or open, and reports the publisher in one line on stderr.
 --quiet prints only the link.`,
 		Example: "  qurl share " + exampleCRID + "\n" +
+			"  qurl share " + exampleCRID + " --not-before 2030-01-02T16:00:00Z --expires-at 2030-01-02T17:00:00Z\n" +
 			"  qurl get " + exampleCRID + " --file report.pdf   # download instead of linking",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -85,13 +89,26 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 				return exitcode.UsageError(fmt.Errorf("--session-duration %s must be a positive whole number of seconds", sessionDuration))
 			}
 
+			// Fails closed even for a CRID without limits: an unreadable file
+			// could hold this one's, and a default link must not replace them.
 			limits, err := opts.savedLinkLimits(cmd.Context(), assessment.Input)
 			if err != nil {
 				return err
 			}
+			limits, err = schedule.apply(cmd, limits)
+			if err != nil {
+				return err
+			}
+			if limits != nil {
+				if err := applyShareFlagsToLimits(cmd, limits, ttl, sessionDuration); err != nil {
+					return err
+				}
+			}
+			opts.beginTermsNotice()
+			printer = opts.printer()
 			var link *qurlapi.ShareLink
 			if limits != nil {
-				link, err = opts.shareWithLimits(cmd, assessment.Input, *limits, ttl, sessionDuration)
+				link, err = opts.shareWithLimits(cmd, assessment.Input, *limits)
 			} else {
 				link, err = opts.shareResource(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
 					TTLSeconds: int(ttl.Seconds()), SessionDurationSeconds: int(sessionDuration / time.Second),
@@ -108,15 +125,50 @@ ready to hand out or open, and reports the publisher in one line on stderr.
 			if err := printer.ShareLink(link); err != nil {
 				return err
 			}
-			return printer.WorksOnce(link)
+			return opts.finishTermsNotice(printer.WorksOnce(link))
 		},
 	}
 
 	cmd.Flags().DurationVar(&ttl, "ttl", 0, "requested link lifetime, e.g. 5m or 1h (service may grant less; 1m to 720h with saved link limits)")
 	cmd.Flags().DurationVar(&sessionDuration, "session-duration", 0, "session lifetime after access starts, e.g. 5m or 1h (default: service policy)")
+	cmd.Flags().StringVar(&schedule.notBefore, "not-before", "", "scheduled start time (RFC 3339, requires --expires-at)")
+	cmd.Flags().StringVar(&schedule.expiresAt, "expires-at", "", "scheduled end time (RFC 3339, requires --not-before)")
+	cmd.Flags().BoolVar(&schedule.oneTimeUse, "one-time-use", false, "allow one successful use of a scheduled link (default: saved rule or true; use =false for reusable links)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
 	return cmd
+}
+
+type shareSchedule struct {
+	notBefore, expiresAt string
+	oneTimeUse           bool
+}
+
+func (s shareSchedule) apply(cmd *cobra.Command, limits *accessrules.LinkLimits) (*accessrules.LinkLimits, error) {
+	flags := cmd.Flags()
+	if !flags.Changed("not-before") && !flags.Changed("expires-at") {
+		if flags.Changed("one-time-use") {
+			return nil, exitcode.UsageError(errors.New("--one-time-use requires --not-before and --expires-at"))
+		}
+		return limits, nil
+	}
+	if flags.Changed("ttl") {
+		return nil, exitcode.UsageError(errors.New("--ttl cannot be combined with --not-before or --expires-at"))
+	}
+	start, startErr := time.Parse(time.RFC3339, s.notBefore)
+	end, endErr := time.Parse(time.RFC3339, s.expiresAt)
+	if startErr != nil || endErr != nil || start.Nanosecond() != 0 || end.Nanosecond() != 0 ||
+		!start.After(time.Now()) || !end.After(start) {
+		return nil, exitcode.UsageError(errors.New("--not-before and --expires-at require whole-second RFC 3339 timestamps with a future start and a later end"))
+	}
+	if limits == nil {
+		limits = &accessrules.LinkLimits{OneTimeUse: new(true)}
+	}
+	limits.Window = &accessrules.AccessWindow{Start: start, End: end}
+	if flags.Changed("one-time-use") {
+		limits.OneTimeUse = &s.oneTimeUse
+	}
+	return limits, nil
 }
 
 // applyCRIDGuards requires a valid CRID and applies the environment guard.
@@ -206,24 +258,41 @@ func (opts *globalOpts) shareResource(ctx context.Context, id string, options qu
 	return client.Share(ctx, id, options)
 }
 
-// shareWithLimits mints a link with the limits the share was published with;
-// --ttl and --session-duration replace their parts.
-func (opts *globalOpts) shareWithLimits(cmd *cobra.Command, id string, limits accessrules.LinkLimits, ttl, sessionDuration time.Duration) (*qurlapi.ShareLink, error) {
+// applyShareFlagsToLimits lets --ttl and --session-duration override saved
+// limits, within the bounds those limits allow.
+func applyShareFlagsToLimits(cmd *cobra.Command, limits *accessrules.LinkLimits, ttl, sessionDuration time.Duration) error {
 	if cmd.Flags().Changed("ttl") {
-		limits.ExpiresIn = ttl.String()
+		// Whole seconds in the service's own grammar, not Go's "1h0m0s";
+		// share already refused a --ttl with a fraction of a second.
+		limits.ExpiresIn = fmt.Sprintf("%ds", int64(ttl/time.Second))
 		if _, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn); !ok {
-			return nil, exitcode.UsageError(errors.New("--ttl must be from 1m to 720h for this item's link limits"))
+			return exitcode.UsageError(errors.New("--ttl must be from 1m to 720h for this item's link limits"))
 		}
 	}
 	if cmd.Flags().Changed("session-duration") {
-		limits.SessionDuration = new(sessionDuration.String())
+		limits.SessionDuration = new(fmt.Sprintf("%ds", int64(sessionDuration/time.Second)))
 		if !accessrules.ValidSessionLength(*limits.SessionDuration) {
-			return nil, exitcode.UsageError(errors.New("--session-duration must be from 1s to 24h for this item's link limits"))
+			return exitcode.UsageError(errors.New("--session-duration must be from 1s to 24h when minting a link with explicit limits"))
 		}
 	}
+	return nil
+}
+
+// shareWithLimits mints a link with the limits the share was published with;
+// --ttl and --session-duration replace their parts.
+func (opts *globalOpts) shareWithLimits(cmd *cobra.Command, id string, limits accessrules.LinkLimits) (*qurlapi.ShareLink, error) {
 	client, err := opts.newClient(cmd.Context())
 	if err != nil {
 		return nil, fmt.Errorf(msgShareNeedsDevice, err)
 	}
-	return client.MintLimitedLink(cmd.Context(), id, limits)
+	link, err := client.MintLimitedLink(cmd.Context(), id, limits)
+	if err != nil {
+		return nil, err
+	}
+	// A minted link carries no publisher, so read it as a plain share shows
+	// it; the link is valid either way, so a failed read only loses the rows.
+	if resource, readErr := client.Resource(cmd.Context(), id); readErr == nil {
+		link.Publisher, link.ResourceCreatedAt = resource.Publisher, resource.CreatedAt
+	}
+	return link, nil
 }
