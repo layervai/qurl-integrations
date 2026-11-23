@@ -274,6 +274,7 @@ type Proposal struct {
 	Env        string // protect-connector environment
 	Port       string // protect-connector local port
 	Reason     string // audit reason distilled from the natural-language intent
+	Rule       string // access rule name or ID for get; empty mints the default one-time link
 	Summary    string // one-sentence description for the confirm card
 	AdminGated bool   // whether the confirm path must re-check CheckAdmin
 }

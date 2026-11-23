@@ -840,6 +840,39 @@ workspace, and for a non-`event_callback` envelope that merely carried a lifecyc
 inner type. `drift_field` names the first field that moved — every drifted field
 is zeroed, but only the first is reported, so treat it as a lead, not an inventory.
 
+## Resources that require verified access
+
+A resource with a consumer access policy (for example, "verify an email at
+one domain") issues no one-time links: qurl-service refuses the mint with
+`403 consumer_access_required` (older builds answered `500 creation_failed`).
+`/qurl get`, `/qurl crid` and the agent's get then read the resource (with the
+install's `qurl:read` scope) and, if it has a policy, deliver its CRID entry
+page instead, where the user verifies once and later opens it with a passkey.
+The bot checks that the CRID is the digest of the resource's key before it
+delivers the page. If the read fails, for example for an install without
+`qurl:read`, the bot answers the 403 with its refusal message and logs
+`get: resource read after a refused mint failed`.
+
+The agent's inspect (summary) action cannot open such a resource either: it
+answers that the resource requires verified access and points to a get of the
+same `$token`, logged at Info rather than as a failure.
+
+The bot mints nothing for these requests, so no mint audit event is written.
+Each answer logs `get: answering with the CRID entry page ...` at Info, with
+the team, channel, user and any `reason:`. That line is the bot's only record
+of it; a failed `dm:true` post also logs `get: DM post failed`. qurl-service
+records the access grant when the recipient verifies.
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `QURL_LINK_ORIGIN` | `https://qurl.link` | https origin of the link site that serves this environment's CRIDs. Set it in every non-production environment: production's link site cannot open their CRIDs. The startup line `CRID entry pages configured` names the origin in use. |
+| `QURL_LINK_SITE_ACCESS_URL` | unset | Page that unlocks a private link site. When set, the reply shows it as the first step. |
+
+Neither value may contain `<`, `>`, `|`, `&` or a space: the reply's plain-text
+fallback carries them as typed, and Slack reads those characters as markup or
+as the end of the link. An unlock URL can therefore carry at most one query
+parameter.
+
 ## Endpoints
 
 | Endpoint | Purpose |

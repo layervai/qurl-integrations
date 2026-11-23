@@ -4,12 +4,10 @@ Slack OAuth rate limits use the rightmost `X-Forwarded-For` (XFF) address.
 That address is trustworthy only when one controlled Application Load Balancer
 (ALB) appends it and clients cannot reach the application by another path.
 The network requirements apply to both account connection (`/oauth/qurl/*`)
-and app installation (`/oauth/slack/*`). Current main applies the in-app source-IP
-limiter and its fallback warning only to account connection. App-install limits
-are tracked by [#857](https://github.com/layervai/qurl-integrations/issues/857)
-and [PR #1934](https://github.com/layervai/qurl-integrations/pull/1934); do not assume
-they are active until the corresponding source is deployed. Keep this ingress
-boundary before enabling either flow.
+and app installation (`/oauth/slack/*`). The source wraps each flow's two routes
+in its own in-app source-IP limiter. Confirm the deployed source revision before
+assuming both flows are protected; merged code does not prove a served feature.
+Keep this ingress boundary before enabling either flow.
 
 ## Required deployment settings
 
@@ -80,3 +78,21 @@ through the normal reviewed deployment path.
 Budgets are per process, and clients behind one NAT share a bucket. This
 limiter groups IPv6 addresses by /64 and supplements edge controls; it is not a
 global fleet limit.
+
+## Fallback alert context
+
+After the issue #866 metric filter and alarms are adopted, the environment's
+`OAuthClientIPFallbackWarnings` metric has only two bounded dimensions:
+`Reason` and `Fallback`. The alarm name, description and metric dimensions
+identify the pair in the notification. Reasons are `missing_x_forwarded_for`,
+`empty_x_forwarded_for`, and `invalid_x_forwarded_for`; fallbacks are
+`remote_addr` and `unknown`. No address, header, query, state or identity is a
+metric dimension. There are six fixed pairs.
+
+One breaching minute in a five-period evaluation window notifies the existing
+runtime alerts topic. This keeps first-warning detection and reduces recovery
+flapping after isolated warnings. A quiet evaluation window can send recovery; it does not prove emitter/filter
+health. The app limits warning logs per reason/fallback pair per process, so
+this counts warning records, not requests or clients. Check ALB append mode and
+the complete ingress boundary above first. Do not disable the limiter, trust a
+client-selected XFF value, or widen task ingress to silence the alarm.
