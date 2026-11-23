@@ -101,7 +101,7 @@ func TestPublishAccessFlagsAgainstEveryTarget(t *testing.T) {
 					if flag != "no flag" {
 						flags = []string{flag}
 					}
-					opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget}, flags...)}
+					opts := &runOpts{args: append([]string{"--endpoint", srv.URL, "publish", privacyRemoteTarget, "--name", "Example"}, flags...)}
 					switch {
 					case local && outcome.code != 0:
 						opts = refusingLocalPublish(t, srv, flags...)

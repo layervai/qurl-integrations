@@ -1,5 +1,132 @@
 # Changelog
 
+## [4.4.4](https://github.com/layervai/qurl-integrations/compare/v4.4.3...v4.4.4) (2026-11-18)
+
+
+### Bug Fixes
+
+* **cli:** return confirmed identity when local publish setup fails ([#2070](https://github.com/layervai/qurl-integrations/issues/2070)) ([bce911c](https://github.com/layervai/qurl-integrations/commit/bce911c97492e7da1b167f42f5beb4522d2f568b))
+
+## [4.4.3](https://github.com/layervai/qurl-integrations/compare/v4.4.2...v4.4.3) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cli:** document Go dependency verification for release builds ([#2060](https://github.com/layervai/qurl-integrations/issues/2060)) ([acbe159](https://github.com/layervai/qurl-integrations/commit/acbe15942be409337a674d1064e961f170c31e01))
+
+## [4.4.2](https://github.com/layervai/qurl-integrations/compare/v4.4.1...v4.4.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cli:** release direct UDP compatibility ([#2047](https://github.com/layervai/qurl-integrations/issues/2047)) ([080d407](https://github.com/layervai/qurl-integrations/commit/080d407c3349f6f89aa43939f5f4c63699f8ec85))
+
+## [4.4.1](https://github.com/layervai/qurl-integrations/compare/v4.4.0...v4.4.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **cli:** use Connector v0.14.6 ([#2042](https://github.com/layervai/qurl-integrations/issues/2042)) ([115b6a0](https://github.com/layervai/qurl-integrations/commit/115b6a013d662eaf90e112ffe4e61d64f10e46fc))
+
+## [4.4.0](https://github.com/layervai/qurl-integrations/compare/v4.3.1...v4.4.0) (2026-11-15)
+
+
+### Features
+
+* **cli:** set CRID credit prices ([#2040](https://github.com/layervai/qurl-integrations/issues/2040)) ([afb7422](https://github.com/layervai/qurl-integrations/commit/afb7422e3f287f660e1aa477b34a13c11de989fb))
+
+## [4.3.1](https://github.com/layervai/qurl-integrations/compare/v4.3.0...v4.3.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **cli:** accept the stopped Connector conflict in release checks ([#2036](https://github.com/layervai/qurl-integrations/issues/2036)) ([deb373f](https://github.com/layervai/qurl-integrations/commit/deb373f00c4c6ea40710d7f8ca28e2513e70ad88))
+
+## [4.3.0](https://github.com/layervai/qurl-integrations/compare/v4.2.0...v4.3.0) (2026-11-15)
+
+
+### Features
+
+* **cli:** support scheduled invitations ([#2033](https://github.com/layervai/qurl-integrations/issues/2033)) ([b2313bc](https://github.com/layervai/qurl-integrations/commit/b2313bc05c0abb57a35d4b77ddd3ae55a9e3a670))
+
+## [4.2.0](https://github.com/layervai/qurl-integrations/compare/v4.1.0...v4.2.0) (2026-11-13)
+
+
+### Features
+
+* **cli:** add local and account-synced access rules ([#1656](https://github.com/layervai/qurl-integrations/issues/1656)) ([1f8afdb](https://github.com/layervai/qurl-integrations/commit/1f8afdbe105863a51d866be8b02846b1668082bd))
+* **cli:** name Sandbox URL apps from their homepage ([#2020](https://github.com/layervai/qurl-integrations/issues/2020)) ([06c0cf3](https://github.com/layervai/qurl-integrations/commit/06c0cf350e4e7f87ca98e56c4356e909c0d5a694))
+* **cli:** show Stripe account status and add qurl payments disconnect ([#1995](https://github.com/layervai/qurl-integrations/issues/1995)) ([54fc086](https://github.com/layervai/qurl-integrations/commit/54fc08661943b9db62df0b4e378c27a2eeca9843))
+
+
+### Bug Fixes
+
+* **cli:** hide revoked resources from the default list ([#2017](https://github.com/layervai/qurl-integrations/issues/2017)) ([aa85e77](https://github.com/layervai/qurl-integrations/commit/aa85e7799c24475f2e9b5f92eb5d323ef6786981))
+* **cli:** recover unsaved public link limits on republish ([#1951](https://github.com/layervai/qurl-integrations/issues/1951)) ([211d96a](https://github.com/layervai/qurl-integrations/commit/211d96ac3c7299f3697516925e9f4eef72ae174c))
+* **cli:** report partial publication and confirm link settings ([#1952](https://github.com/layervai/qurl-integrations/issues/1952)) ([1d25ad3](https://github.com/layervai/qurl-integrations/commit/1d25ad3b421ff634101b85cab89db7300e668793))
+
+## [4.1.0](https://github.com/layervai/qurl-integrations/compare/v4.0.1...v4.1.0) (2026-11-10)
+
+
+### Features
+
+* **cli:** set a price and connect Stripe from the publisher device ([#1999](https://github.com/layervai/qurl-integrations/issues/1999)) ([0213c22](https://github.com/layervai/qurl-integrations/commit/0213c225316cf856ef666c2f87856c35a708f5c8))
+* **cli:** set a secret origin header on a remote URL resource ([#2012](https://github.com/layervai/qurl-integrations/issues/2012)) ([204c9eb](https://github.com/layervai/qurl-integrations/commit/204c9eb355fdbc1edc40e62bf7edb34e60787678))
+
+## [4.0.1](https://github.com/layervai/qurl-integrations/compare/v4.0.0...v4.0.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **ci:** keep the CLI Linux lifecycle gate on Ubuntu 24.04 ([#2003](https://github.com/layervai/qurl-integrations/issues/2003)) ([656111e](https://github.com/layervai/qurl-integrations/commit/656111ee35a48223afba5faf0cc7d605ae438c2f))
+* **cli:** require the granted origin for a peer refusal ([#2009](https://github.com/layervai/qurl-integrations/issues/2009)) ([a206c42](https://github.com/layervai/qurl-integrations/commit/a206c42e3f82599ab24ffd104997e098b03c2695))
+
+## [4.0.0](https://github.com/layervai/qurl-integrations/compare/v3.7.1...v4.0.0) (2026-11-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** require a public name when publishing ([#1992](https://github.com/layervai/qurl-integrations/issues/1992))
+
+### Features
+
+* **cli:** require a public name when publishing ([#1992](https://github.com/layervai/qurl-integrations/issues/1992)) ([ba6d4a7](https://github.com/layervai/qurl-integrations/commit/ba6d4a72449fd77a60d35c264a25baa4f385e70f))
+
+
+### Bug Fixes
+
+* **cli:** preserve publisher streams through session renewal ([#1984](https://github.com/layervai/qurl-integrations/issues/1984)) ([a0e0ba4](https://github.com/layervai/qurl-integrations/commit/a0e0ba4d07d7b03f4ab47243d146ae22d63d074d))
+
+## [3.7.1](https://github.com/layervai/qurl-integrations/compare/v3.7.0...v3.7.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **cli:** retain real user service paths in daemon journeys ([#1976](https://github.com/layervai/qurl-integrations/issues/1976)) ([f5079ce](https://github.com/layervai/qurl-integrations/commit/f5079ce6eadfb4cf97c95f82acc4f6069b862ddc))
+
+## [3.7.0](https://github.com/layervai/qurl-integrations/compare/v3.6.1...v3.7.0) (2026-11-03)
+
+
+### Features
+
+* add CRID Stripe payment commands and policy flags ([#1879](https://github.com/layervai/qurl-integrations/issues/1879)) ([3883553](https://github.com/layervai/qurl-integrations/commit/3883553341faa3af51b8f4a13c7980fc0008e08f))
+* **cli:** configure exact email-domain access policies ([#1970](https://github.com/layervai/qurl-integrations/issues/1970)) ([5310365](https://github.com/layervai/qurl-integrations/commit/531036524a1625753b3b6facb1352992abe4b693))
+* **cli:** let host apps name themselves in the User-Agent ([#1657](https://github.com/layervai/qurl-integrations/issues/1657)) ([80ca51a](https://github.com/layervai/qurl-integrations/commit/80ca51a1e5c69d84f6765a6b21c48e0cb637b955))
+* **cli:** show the first-use Terms notice without prompting ([#1730](https://github.com/layervai/qurl-integrations/issues/1730)) ([e05286a](https://github.com/layervai/qurl-integrations/commit/e05286aa7f5252f11b01688f19a84e6f74e2647d))
+
+
+### Bug Fixes
+
+* **cli:** bind daemon control to its state namespace ([#1747](https://github.com/layervai/qurl-integrations/issues/1747)) ([87a9dfe](https://github.com/layervai/qurl-integrations/commit/87a9dfecf60a0cd6fec90589ab2d935f86a633e7))
+* **cli:** confirm committed revocation after stopping local sharing ([#1708](https://github.com/layervai/qurl-integrations/issues/1708)) ([081f004](https://github.com/layervai/qurl-integrations/commit/081f004dcf7ff774ce3467f8057e1270e176c2c7))
+* **cli:** keep daemon diagnostic timestamps unambiguous ([#1852](https://github.com/layervai/qurl-integrations/issues/1852)) ([6989c7d](https://github.com/layervai/qurl-integrations/commit/6989c7ddfa86f929dd54b35b44d5e18d61641d99))
+* **cli:** preserve host product in native daemon jobs ([#1728](https://github.com/layervai/qurl-integrations/issues/1728)) ([7053bb9](https://github.com/layervai/qurl-integrations/commit/7053bb91277502226aa0ee1df2a85f6b867f3b7e)), closes [#1658](https://github.com/layervai/qurl-integrations/issues/1658)
+
+
+### Performance Improvements
+
+* **cli:** cross-compile images with a native compiler ([#1699](https://github.com/layervai/qurl-integrations/issues/1699)) ([4d172bc](https://github.com/layervai/qurl-integrations/commit/4d172bc69e376e0da27cbe5bd2f8a62bb900fd5d))
+
 ## [3.6.1](https://github.com/layervai/qurl-integrations/compare/v3.6.0...v3.6.1) (2026-10-24)
 
 
