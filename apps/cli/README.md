@@ -13,6 +13,7 @@ resource owner's devices and, for a private resource, on the devices the
 publisher allowed; any other device gets "not found".
 
 [Publish localhost in 60 seconds](#publish-localhost-in-60-seconds) ·
+[Agent setup](#let-a-coding-agent-share-your-app) ·
 [Command reference](#commands) · [Scripting](#scripting-contract)
 
 ## Publish localhost in 60 seconds
@@ -113,6 +114,10 @@ you do not need public DNS, a public IP, or custom Connector configuration.
 Publishing a remote URL instead? `qurl publish https://api.example.com/reports --name "Reports API"`
 prints its CRID and exits immediately.
 
+Sharing a local app with qURL for the first time?
+[Volunteer for a short pilot](https://github.com/layervai/qurl-integrations/discussions/2062)
+and tell us where the steps were clear or where you got stuck.
+
 ### If the first run fails
 
 | What you see | What to do |
@@ -127,6 +132,36 @@ prints its CRID and exits immediately.
 For direct UDP access to qURL resources, use CLI 4.4.2 or later. The CLI
 completes the server's cookie challenge automatically.
 
+## Let a coding agent share your app
+
+If you use the `skills` installer, you can add the existing public qURL skill
+to your project. This installs the main instructions, not the qURL CLI, and
+does not publish an app.
+[Install the CLI](#install) first.
+
+<!-- TODO(upstream-contract): skills 1.9.0 needs Node.js >=22.20 and supports public SKILL.md downloads plus project-local --agent/--copy installation. -->
+This tested example needs Node.js 22.20 or later. The installer writes to
+`.claude/skills/qurl` in the current project for Claude Code:
+
+```bash
+DISABLE_TELEMETRY=1 npx --yes skills@1.9.0 add https://layerv.ai/skills/qurl/SKILL.md \
+  --agent claude-code --skill qurl --yes --copy
+```
+
+The URL follows the latest public skill, so later installs can receive updated
+instructions. Review `.claude/skills/qurl/SKILL.md` before use. The skill explains
+how to fetch its public reference files when needed; this single-file download
+does not install them. Then ask your agent:
+
+> Use the qURL skill to help me share a local app with one reviewer. Ask which
+> app to share and get my approval before publishing it privately.
+
+The `DISABLE_TELEMETRY=1` prefix disables the installer's telemetry and remote
+audit requests. Remove it to use the installer's defaults. See the
+[installer documentation](https://skills.sh/docs/cli)
+for other agents and options. Installing a skill is not a successful share:
+confirm that your intended reviewer can load the actual app.
+
 ## Install
 
 **Homebrew** (macOS / Linux):
@@ -137,6 +172,8 @@ brew install layervai/tap/qurl
 
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
+
+To verify Go dependencies in a source checkout, run `go mod verify` from the repository root.
 
 **Install script** (macOS / Linux, no Homebrew or `sudo` needed):
 
@@ -1071,6 +1108,37 @@ keep the one-command path unambiguous. `--foreground` runs the same production
 daemon engine in the current process for CI and debugging. Scripts can use
 `--quiet` to read the full CRID on the first line; an item shared with link
 limits adds its new link on a second line.
+
+#### Streamlit widgets stay on the loading screen
+
+<!-- TODO(upstream-contract): Streamlit origin checks, corsAllowedOrigins and log text verified on 1.67.0. -->
+
+Streamlit 1.67.0 can serve its page through qURL but reject the widget WebSocket
+because the browser's origin differs from the forwarded host. Check the Streamlit
+log for `Rejecting WebSocket connection with disallowed Origin or Host header`.
+A page load alone does not prove that widgets work.
+
+After opening an authorized link, copy only the browser origin
+(`https://q-<session>.qurl.site`, without a path or access link fragment).
+Restart Streamlit with that exact origin as a temporary command-line setting:
+
+```bash
+streamlit run app.py --server.address=127.0.0.1 --server.corsAllowedOrigins=https://q-REPLACE-WITH-YOUR-SESSION.qurl.site
+```
+
+Replace the example with the origin shown in your browser, then reload that
+same session. This keeps Streamlit bound to loopback and avoids storing a review
+origin in a committed config file. Preserve any other trusted origins your app
+requires. If a later link opens a different origin, restart with that origin;
+restarting can reset active Streamlit session state. Do not allow all `qurl.site`
+subdomains or disable CORS/XSRF protection to make the preview load.
+
+With qURL CLI 4.4.3 and Streamlit 1.67.0, a browser link issued from an approved
+device loaded the app and a button updated server-side session state with this
+exact origin setting. The command-line option also passed an exact-origin
+WebSocket handshake check and refused an unlisted origin. These checks did not
+cover uploads, custom components, or older Streamlit versions. Device approval
+and the browser link's limits still apply.
 
 #### Remote URLs
 
@@ -2135,3 +2203,70 @@ video only after Play. Use `-o json` for structured revision, media and job stat
 A revision conflict never retries automatically. The API owns verification and
 all limits. Supervisors may also GET/PATCH `/v1/resources/{id}/preview` and POST
 `/v1/resources/{id}/preview/uploads` through the existing `qurl request` command.
+
+### A local publish that fails after creation
+
+If local setup fails after the API confirms a resource, `qurl publish -o json`
+keeps its nonzero exit and prints one recovery receipt. It contains `crid`,
+`resource_id`, `error: "publication_setup_failed"`, the confirmed `private`
+setting, `settings_differ`, and `found_existing` when the service knows it.
+It contains no share link or successful serving status. Check the exit code
+before treating any publish output as success. Text and quiet modes keep stdout
+empty and put the recovery hint on stderr.
+
+The receipt identifies a resource to inspect; it does not authorize automatic
+deletion. Existing or uncertain resources stay unchanged. An unconfirmed create
+returns no recovery identity. The separate `link_creation_failed` receipt means
+setup reached serving but link creation failed; that valid publication remains.
+
+## Signed identity for your app
+
+In an environment that offers signed identity, you can require it for your own
+private URL or Connector resource. No per-resource operator enablement is needed.
+Production is not enabled yet. The Sandbox endpoint is `https://api.layerv.xyz`.
+
+First make your HTTPS origin refuse requests without your secret origin header,
+and verify `X-QURL-Identity` on every request. Then publish with email access:
+
+```sh
+qurl --endpoint https://api.layerv.xyz publish https://your-app.example.com \
+  --name "My app" --access email_capture --origin-header X-Origin-Secret
+# Enter the origin secret at the hidden prompt. Save the returned CRID.
+CRID='your-crid'
+qurl --endpoint https://api.layerv.xyz identity enable "$CRID"
+qurl --endpoint https://api.layerv.xyz identity status "$CRID"
+printf 'https://qurl.link.layerv.xyz/%s\n' "$CRID"
+```
+
+Share the printed CRID address. It opens the existing email-access page;
+`qurl share` creates device-authorized links and does not bypass consumer access.
+The visitor opens the address and completes email verification. qURL sends a fresh,
+short-lived signed JWT on each authorized app request, including static assets.
+Email is included only with verified mailbox control and disclosure consent.
+
+Pin the Sandbox issuer `https://qurl.link.layerv.xyz`, your CRID as both audience
+and `crid`, and your resource owner ID as `tenant_id`. Use public keys from
+`https://api.layerv.xyz/.well-known/jwks.json`. Require `alg=Ed25519` (not legacy
+`EdDSA`) and `typ=qurl-identity+jwt`; verify the signature, required claims and
+`iat`/`nbf`/`exp`. Lifetime is at most 60 seconds, with at most 15 seconds of clock
+leeway. Check `auth_time` against your app's authentication-age requirement.
+Require exactly one identity header on every request, even with an app session.
+Map users by verified issuer plus subject, not email alone. Your app still
+controls permissions and CSRF protection. Never log or reflect an assertion.
+
+Cache JWKS for 60 seconds. Permit one bounded refresh for an unknown key ID,
+limit refresh frequency, and fail closed if the key cannot be resolved. Never
+use a key URL from a token. Keep the origin reachable only through your trusted
+qURL path; an assertion is a bearer credential until expiry, not a single-use token.
+
+To stop new assertions:
+
+```sh
+qurl --endpoint https://api.layerv.xyz identity disable "$CRID"
+```
+
+Your app will refuse requests while it still requires signed identity. Disabling
+does not revoke already-issued assertions before their short expiry. Setting
+identity does not change grants or login state; an older session may need fresh
+email verification. CLI settings are confirmed by the API; an older service that
+ignores the field is reported as an error, never as successful enablement.

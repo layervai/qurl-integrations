@@ -141,6 +141,10 @@ homebrew_casks:
       - manpages/qurl-account-setup.1
       - manpages/qurl-account-recover.1
       - manpages/qurl-login.1
+      - manpages/qurl-identity.1
+      - manpages/qurl-identity-enable.1
+      - manpages/qurl-identity-disable.1
+      - manpages/qurl-identity-status.1
       - manpages/qurl-origin-header.1
       - manpages/qurl-origin-header-clear.1
       - manpages/qurl-origin-header-set.1
