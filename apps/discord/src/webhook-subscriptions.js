@@ -23,6 +23,7 @@
 const db = require('./store');
 const config = require('./config');
 const crypto = require('crypto');
+const scrypt = require('node:util').promisify(crypto.scrypt);
 const { setTimeout: sleep } = require('node:timers/promises');
 const logger = require('./logger');
 const { AUDIT_EVENTS, LOG_EVENTS } = require('./constants');
@@ -37,8 +38,8 @@ const OWNER_DISCOVERY_BUDGET_MS = 60_000;
 const QURL_PER_REQUEST_TIMEOUT_MS = 10_000;
 // Node/undici network error codes that are transient despite carrying a code.
 const TRANSIENT_NETWORK_CODE_RE = /^(E(CONNRESET|CONNREFUSED|TIMEDOUT|NOTFOUND|AI_AGAIN|PIPE)|UND_ERR_)/;
-// Process-local HMAC keeps diagnostic key fingerprints unlinkable across restarts.
-const pageBudgetFingerprintKey = crypto.randomBytes(32);
+// A process-local salt keeps diagnostic key fingerprints unlinkable across restarts.
+const pageBudgetFingerprintSalt = crypto.randomBytes(32);
 const pageBudgetWarned = new Set();
 // Every error_code produced by the discovery walk, enumerable for runbooks and
 // alarms (resolution config codes and store codes are documented separately).
@@ -278,7 +279,7 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', requiredUrl = null
     // Keyed by a process-local key fingerprint (never the raw key) so empty early pages
     // (no owner yet) still warn once per distinct key.
     const budgetKey = page === OWNER_DISCOVERY_WARN_PAGE
-      ? `${subject}:${crypto.createHmac('sha256', pageBudgetFingerprintKey).update(apiKey).digest('hex').slice(0, 16)}`
+      ? `${subject}:${(await scrypt(apiKey, pageBudgetFingerprintSalt, 8)).toString('hex')}`
       : null;
     if (budgetKey && !pageBudgetWarned.has(budgetKey)) {
       // Coarse bound: forgets all entries at 1000 distinct subject+key pairs.
