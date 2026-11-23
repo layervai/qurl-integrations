@@ -263,7 +263,7 @@ func TestReadDeviceStaticPrivateKeyChecksTheState(t *testing.T) {
 			},
 		},
 		{name: "no public key", change: func(s *qurl.AgentState) { s.PublicKeyB64 = "" }, why: NoDeviceKeyInvalid},
-		{name: "no private key", change: func(s *qurl.AgentState) { s.PrivateKeyB64 = "" }, why: NoDeviceKeyInvalid},
+		{name: "no private key", change: func(s *qurl.AgentState) { s.PrivateKeyB64 = "" }, why: NoDeviceKeyUnreadable},
 		{
 			// What a wiped key holds. The public key in the state is the one
 			// that belongs to those bytes, so the pair is consistent and only

@@ -30,6 +30,9 @@ const (
 	hintNotFound      = "Hint: the CRID may be mistyped, expired, or no longer published. Ask whoever shared it for a current one."
 	hintQuotaExceeded = "Hint: if this device is not linked to an account, run `qurl account setup`. For account plan limits, see https://layerv.ai/pricing."
 	hintRetryAfter    = "Retry after %ds."
+
+	hintConsumerEmailLimit = "Hourly email limits apply per recipient, resource, and account, plus a limit shared with other customers. The server does not identify which limit was reached. Retry after the next UTC hour begins. These email limits apply equally to all account tiers."
+
 	// The two lines after a "too many requests" answer to an approval or to
 	// a denial by code. %s is the wait in words.
 	hintTryCodeAgainIn = "Try again in %s."
@@ -123,6 +126,13 @@ const (
 	// documents must not change shape (--quiet and JSON); full text mode
 	// says it in the document itself via msgPublishFoundExisting.
 	msgAlreadyPublished = "This target was already published; showing the existing resource."
+
+	// msgPublishSettingsDiffer warns that an existing share keeps the
+	// settings it was created with, not the chosen rule's.
+	msgPublishSettingsDiffer = "This item is already shared with other settings, which were kept. Use qurl access configure to change its access, or delete and publish it again for new link limits."
+
+	// msgWorksOnce follows a one-time link in a text document; %s is its CRID.
+	msgWorksOnce = "Only the first person can open this link. Run qurl share %s for a new link."
 
 	// msgPublishFoundExisting is the text-document note for that same case:
 	// what happened, then the one next step.
@@ -386,6 +396,7 @@ func CustomerMessages() []string {
 		hintCRIDNotFoundNoDevice,
 		hintQuotaExceeded,
 		hintRetryAfter, hintTryCodeAgainIn, hintAskForCode,
+		hintConsumerEmailLimit,
 		hintRevoked,
 		hintRetired,
 		hintScope,
@@ -395,10 +406,12 @@ func CustomerMessages() []string {
 		hintKeyInvalid,
 		labelCRID,
 		labelWarning,
+		labelOriginHeader, msgOriginHeaderNone, msgOriginHeaderSaved, msgOriginHeaderRemoved,
 		placeholderCRID,
 		msgDeviceEnrolled,
 		msgSavedTo,
 		msgAlreadyPublished,
+		msgPublishSettingsDiffer, msgWorksOnce,
 		msgPublishFoundExisting,
 		labelAccess, msgPublishPrivate, msgPublishPublic,
 		hintPublishExistingPublic, hintPublishExistingPrivate, hintPublishAccessDiffers, hintPublishOtherDevices,

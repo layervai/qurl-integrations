@@ -316,7 +316,7 @@ jobs:
         # version, interactive commands run on the same fail-closed runner as
         # automatic review, and it is past the v1.0.140/141 issue-comment
         # crash. Moving the pin forward keeps both; do not pin below that floor.
-        uses: anthropics/claude-code-action@12dd8d74c712f5f3669365b2369b558c495b1104 # v1.0.238
+        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1.0.264
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Omit github_token so the action uses its OIDC/GitHub App token path.
@@ -359,6 +359,24 @@ jobs:
             echo "::error::Claude did not produce a completed execution artifact; failing closed."
             exit 1
           fi
+          # A file alone is not proof: require the last terminal result to
+          # declare success and contain final text, independent of action status.
+          # Commands need a final disposition: tool-only activity is not a
+          # completed review, even when individual tool calls succeeded.
+          # TODO(upstream-contract): recheck the action's execution-file.ts array
+          # and SDK terminal-result fields when either upstream version changes.
+          # Both filters are exercised by internal/ciworkflows/claude_result_test.go.
+          if ! jq -ers '
+            select(length == 1) | .[0] | select(type == "array") |
+            [ .[] | select(type == "object") | select(.type == "result") ] | last |
+            select(.subtype == "success" and .is_error == false) |
+            .result | select(type == "string") |
+            select((gsub("[[:space:]]"; "") | length) > 0)
+          ' "${EXECUTION_FILE}" >/dev/null; then
+            echo "::error::Claude produced no successful terminal message; failing closed."
+            exit 1
+          fi
+
           if [[ "${HEAD_REF}" == "@" || ! "${HEAD_REF}" =~ ^[A-Za-z0-9@_][A-Za-z0-9/_.#+,@-]*$ ]] ||
              ! git check-ref-format --branch "${HEAD_REF}" >/dev/null 2>&1 ||
              [[ "${BASE_REF}" == "@" || ! "${BASE_REF}" =~ ^[A-Za-z0-9@_][A-Za-z0-9/_.#+,@-]*$ ]] ||

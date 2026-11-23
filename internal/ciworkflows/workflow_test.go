@@ -503,6 +503,10 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if fmt.Sprint(cleanup.Env["QURL_JOURNEY_OWNER_ID"]) != "${{ secrets.QURL_JOURNEY_OWNER_ID }}" {
 		t.Errorf("terminal cleanup exposes its owner ID through a non-secret source: %#v", cleanup.Env)
 	}
+	if len(cleanup.Steps) == 0 || !strings.HasPrefix(cleanup.Steps[0].Uses, checkoutActionPrefix) ||
+		cleanup.Steps[0].With["ref"] != "${{ github.sha }}" || cleanup.Steps[0].With["persist-credentials"] != false {
+		t.Error("terminal cleanup must use the trusted workflow source with no persisted credentials")
+	}
 	var cleanupRun *step
 	for index := range cleanup.Steps {
 		if cleanup.Steps[index].Name == "Revoke run resources and credentials" {
@@ -1663,6 +1667,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 // struct to spend, and none to reclaim by reordering: every field is
 // pointer-aligned and pointer-sized, so neither carries any padding.
 type githubWorkflow struct {
+	Env         map[string]any        `yaml:"env"`
 	On          any                   `yaml:"on"`
 	Permissions any                   `yaml:"permissions"`
 	Jobs        map[string]*githubJob `yaml:"jobs"`
@@ -2118,7 +2123,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	if needs := parseWorkflowNeeds(t, "release-cli", releaseCLI.Needs); !slices.Equal(needs, []string{"cli-release-gate"}) {
 		t.Errorf("release-cli.needs = %v, want only cli-release-gate", needs)
 	}
-	wantReleaseIf := "!cancelled() && needs.cli-release-gate.result == 'success' && needs.cli-release-gate.outputs.required == 'true'" //nolint:misspell // GitHub expression function spelling.
+	wantReleaseIf := "!cancelled() && !inputs.production_proof_only && needs.cli-release-gate.result == 'success' && needs.cli-release-gate.outputs.required == 'true'" //nolint:misspell // GitHub expression function spelling.
 	if got := strings.Join(strings.Fields(releaseCLI.If), " "); got != wantReleaseIf {
 		t.Errorf("release-cli.if = %q, want %q", got, wantReleaseIf)
 	}
@@ -2798,7 +2803,7 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	}
 	download := archiveSteps["Download the staged Windows release archive"]
 	windows := archiveSteps["Validate the exact Windows archive command roster"]
-	if download == nil || download.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" ||
+	if download == nil || download.Uses != "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333" ||
 		download.With["digest-mismatch"] != "error" || windows == nil {
 		t.Fatal("Windows release archive validation is not exact and fail closed")
 	}
@@ -3068,6 +3073,11 @@ type pullRequestTriggerSpec struct {
 // exactly the ones that guard cannot see.
 var otherPullRequestWorkflows = []pullRequestTriggerSpec{
 	{
+		path:  "edge-templates.yml",
+		paths: []string{"templates/**", ".github/workflows/edge-templates.yml"},
+		why:   "Tests only the standalone edge examples; no required context or application deployment.",
+	},
+	{
 		path:     "codeql.yml",
 		branches: []string{"main"},
 		why: "Deliberately narrow. CodeQL produces no required context, so a stacked PR " +
@@ -3110,23 +3120,27 @@ var otherPullRequestWorkflows = []pullRequestTriggerSpec{
 	},
 	{
 		path:                    "dependency-age-check-actions.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:                    "dependency-age-check-docker.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:                    "dependency-age-check-go.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:                    "dependency-age-check-pip.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "labeled", "unlabeled"},
 		producesRequiredContext: true,
-		why:                     "Already unfiltered, and produces a required context.",
+		why:                     "Runs for every PR base; label events refresh the bypass decision instead of reusing a stale payload.",
 	},
 	{
 		path:  "pr-title.yml",

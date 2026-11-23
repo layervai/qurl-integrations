@@ -150,6 +150,9 @@ const (
 // /oauth/qurl/start rather than rendering a generic "auth failed" error.
 var ErrWorkspaceNotConfigured = errors.New("workspace not configured — admin must complete /oauth/qurl/start")
 
+// ErrWorkspaceAPIKeyConflict means another setup attempt stored a different key.
+var ErrWorkspaceAPIKeyConflict = errors.New("workspace API key already configured")
+
 // ErrSlackBotTokenNotConfigured is returned when a workspace has not completed
 // the Slack app OAuth install/reinstall path that grants a per-workspace bot
 // token. The Slack handler catches this distinctly from decrypt/transport
@@ -894,18 +897,25 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 // preserved. The apiKey value is stored exactly as minted by qurl-service;
 // APIKey returns the same plaintext without trimming.
 func (p *DDBProvider) SetAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error {
+	return p.setAPIKey(ctx, "DDBProvider.SetAPIKeyWithMetadata", workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy, false)
+}
+
+// SetInitialAPIKeyWithMetadata saves setup credentials without replacing a different key.
+// Replaying the same binding-backed key is safe and remains idempotent.
+// Legacy rows without key identity can be healed after validation rejects their key.
+func (p *DDBProvider) SetInitialAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error {
+	return p.setAPIKey(ctx, "DDBProvider.SetInitialAPIKeyWithMetadata", workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy, true)
+}
+
+func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string, initial bool) error {
 	keyID = strings.TrimSpace(keyID)
 	if keyID == "" {
-		return errors.New("DDBProvider.SetAPIKeyWithMetadata: keyID is empty")
+		return fmt.Errorf("%s: keyID is empty", operation)
 	}
 	keyPrefix = strings.TrimSpace(keyPrefix)
 	if keyPrefix == "" {
-		return errors.New("DDBProvider.SetAPIKeyWithMetadata: keyPrefix is empty")
+		return fmt.Errorf("%s: keyPrefix is empty", operation)
 	}
-	return p.setAPIKey(ctx, "DDBProvider.SetAPIKeyWithMetadata", workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy)
-}
-
-func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error {
 	if workspaceID == "" {
 		return fmt.Errorf("%s: workspaceID is empty", operation)
 	}
@@ -947,13 +957,15 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 		values[":account_id"] = &ddbtypes.AttributeValueMemberS{Value: qurlAccountID}
 	}
 	updateExpr := "SET " + strings.Join(setParts, ", ")
-	// TODO(#265): this UpdateItem closes the old GetItem+PutItem row-clobber
-	// window and preserves Slack install metadata, but the upstream qurl-service
-	// mint still happens before this write. If concurrent admins mint different
-	// keys, the earlier key can still be overwritten here and left orphaned
-	// upstream because there is no losing-write signal to trigger a revoke.
+	var condition *string
+	if initial {
+		// The database picks one setup winner across processes; a losing legacy mint is revoked.
+		condition = aws.String("attribute_not_exists(" + attrQURLAPIKey + ") OR attribute_not_exists(" + attrQURLAPIKeyID + ") OR " + attrQURLAPIKeyID + " = :empty_key_id OR " + attrQURLAPIKeyID + " = :key_id")
+		values[":empty_key_id"] = &ddbtypes.AttributeValueMemberS{Value: ""}
+	}
 	out, err := p.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(p.TableName),
+		ConditionExpression: condition,
+		TableName:           aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
@@ -962,6 +974,10 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 		ReturnValues:              ddbtypes.ReturnValueUpdatedOld,
 	})
 	if err != nil {
+		var conflict *ddbtypes.ConditionalCheckFailedException
+		if initial && errors.As(err, &conflict) {
+			return fmt.Errorf("%s: UpdateItem: %w: %w", operation, ErrWorkspaceAPIKeyConflict, err)
+		}
 		return fmt.Errorf("%s: UpdateItem: %w", operation, err)
 	}
 	if out != nil {

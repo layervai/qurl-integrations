@@ -19,6 +19,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 - `apps/edge-extension/` — Edge version and store documents
 - `apps/teams/` — Node.js (TypeScript ESM, `src/*.ts`); Microsoft Teams bot, OAuth start/callback routes, `@microsoft/teams.apps` SDK adapter, and a production HTTP entrypoint (`bin: qurl-teams`)
 - `origins/s3-static-connector/` — reusable private S3 static origin image
+- `templates/` — standalone edge mint examples; no release track or provider deploy from this repository
 - `internal/ciworkflows/` — repo-wide tests for required-check workflow contracts
 - `shared/` — Go packages consumed by every Go app; changes here affect all of them
 - `e2e/` — TypeScript end-to-end tests (Jest)
@@ -43,7 +44,7 @@ each package checks every shipped non-PNG file and reports each offender.
 <type>(<scope>): <description>
 
 type:  feat | fix | docs | style | refactor | perf | test | build | ci | chore | revert
-scope: slack | teams | discord | cli | chrome-extension | edge-extension | origins | shared | ci
+scope: slack | teams | discord | cli | chrome-extension | edge-extension | origins | shared | infra | ci | deps
 ```
 
 > Keep this type list aligned with CONTRIBUTING.md and `.github/workflows/pr-title.yml`'s `types:` block.
@@ -51,12 +52,11 @@ scope: slack | teams | discord | cli | chrome-extension | edge-extension | origi
 > - When adding a new type: touch CLAUDE.md, CONTRIBUTING.md, and
 >   `.github/workflows/pr-title.yml`.
 >
-> Keep this scope list aligned with the Component dropdown in `.github/ISSUE_TEMPLATE/bug_report.yml`. `.github/workflows/pr-title.yml`'s `scopes:` block is the CI-enforced superset:
+> Keep this scope list aligned with the Component dropdown in `.github/ISSUE_TEMPLATE/bug_report.yml`. `.github/workflows/pr-title.yml`'s `scopes:` block enforces the same set:
 >
-> - It currently lists two extra scopes (`infra`, `deps`) that aren't in this list or the issue template — tracked in #463 for sync.
 > - `requireScope: false`, so a scope is optional in PR titles; but when one is present, `amannn/action-semantic-pull-request` validates it against the workflow's list.
 > - When adding a new scope: touch CLAUDE.md, CONTRIBUTING.md, and
->   `bug_report.yml`, plus `pr-title.yml` if it isn't already in its superset.
+>   `bug_report.yml`, and `pr-title.yml` in the same PR.
 > - The dropdown's `other` option is a reporter-UX escape hatch — do NOT add it here (not a valid commit scope).
 
 ## Brand spelling
@@ -71,7 +71,7 @@ The following stay literal — don't "finish" the rebrand:
 - Go identifiers: types/structs/funcs (`QURL`, `QURLClient`, `Qurl`, `CreateQurlRequest`, `QURLLink`)
 - Env vars (`QURL_API_KEY`, `QURL_ENDPOINT`, `QURL_BASE_URL`, `QURL_TIMEOUT`)
 - DDB table/column names and JSON keys (`qurl_sends`, `qurl_send_configs`, `qurl_link`, `qurl_id`)
-- Wire-protocol HTTP headers (`QURL-Signature`, `X-QURL-*`) and User-Agent strings (`qurl-cli/...`, `qurl-go-client/...`, `qurl-discord-bot/1.0`)
+- Wire-protocol HTTP headers (`QURL-Signature`, `X-QURL-*`) and User-Agent strings (`qurl-cli/...`, `qurl-go-client/...`, `qurl-bot-slack/...`, `qurl-discord-bot/1.0`)
 - Slash command names (`/qurl file`, `/qurl map`, `/qurl help`) and the CLI binary `qurl`
 - OAuth scope identifiers (`qurl:read`, `qurl:write`, `qurl:resolve`)
 - Domain literals (`qurl.link`, `qurl.site`)

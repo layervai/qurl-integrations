@@ -189,7 +189,7 @@ func TestCreate(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"})
+	got, err := c.Create(context.Background(), &CreateInput{TargetURL: "https://example.com"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestCreateIdempotencyKeyHeaderSet(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	_, err := c.Create(context.Background(), CreateInput{
+	_, err := c.Create(context.Background(), &CreateInput{
 		TargetURL:      "https://example.com",
 		IdempotencyKey: "slack:T123:trig_456",
 	})
@@ -453,7 +453,7 @@ func TestCreateIdempotencyKeyAbsentWhenEmpty(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	_, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"})
+	_, err := c.Create(context.Background(), &CreateInput{TargetURL: "https://example.com"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -475,10 +475,10 @@ func TestCreateBodyByteIdenticalWithAndWithoutIdempotencyKey(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+	if _, err := c.Create(context.Background(), &CreateInput{TargetURL: "https://example.com"}); err != nil {
 		t.Fatalf("Create #1: %v", err)
 	}
-	if _, err := c.Create(context.Background(), CreateInput{
+	if _, err := c.Create(context.Background(), &CreateInput{
 		TargetURL:      "https://example.com",
 		IdempotencyKey: "slack:T999:trig_xyz",
 	}); err != nil {
@@ -520,7 +520,7 @@ func TestCreateIdempotencyKeyPreservedAcrossRetry(t *testing.T) {
 		WithRetry(3),
 		withDelaysForTest(),
 	)
-	_, err := c.Create(context.Background(), CreateInput{
+	_, err := c.Create(context.Background(), &CreateInput{
 		TargetURL:      "https://example.com",
 		IdempotencyKey: "slack:T1:trig_retry",
 	})
@@ -550,7 +550,7 @@ func TestCreateIdempotencyKeyTooLong(t *testing.T) {
 
 	c := testClient(srv.URL, "test-key")
 	tooLong := strings.Repeat("a", MaxIdempotencyKeyLength+1)
-	_, err := c.Create(context.Background(), CreateInput{
+	_, err := c.Create(context.Background(), &CreateInput{
 		TargetURL:      "https://example.com",
 		IdempotencyKey: tooLong,
 	})
@@ -575,7 +575,7 @@ func TestCreateIdempotencyKeyAtMaxBoundary(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{
+	if _, err := c.Create(context.Background(), &CreateInput{
 		TargetURL:      "https://example.com",
 		IdempotencyKey: atMax,
 	}); err != nil {
@@ -641,7 +641,7 @@ func TestCreateIdempotencyKeyRejectsInvalidBytes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := c.Create(context.Background(), CreateInput{
+			_, err := c.Create(context.Background(), &CreateInput{
 				TargetURL:      "https://example.com",
 				IdempotencyKey: tc.key,
 			})
@@ -678,7 +678,7 @@ func TestCreateIdempotencyKeyAcceptsValidBytes(t *testing.T) {
 			b.WriteByte(byteVal)
 		}
 		want := b.String()
-		if _, err := c.Create(context.Background(), CreateInput{
+		if _, err := c.Create(context.Background(), &CreateInput{
 			TargetURL:      "https://example.com",
 			IdempotencyKey: want,
 		}); err != nil {
@@ -693,7 +693,7 @@ func TestCreateIdempotencyKeyAcceptsValidBytes(t *testing.T) {
 		// Mid-key space is permitted; only boundary whitespace
 		// triggers OWS-trim by the wire.
 		want := "key with spaces"
-		if _, err := c.Create(context.Background(), CreateInput{
+		if _, err := c.Create(context.Background(), &CreateInput{
 			TargetURL:      "https://example.com",
 			IdempotencyKey: want,
 		}); err != nil {
@@ -707,7 +707,7 @@ func TestCreateIdempotencyKeyAcceptsValidBytes(t *testing.T) {
 	t.Run("internal tab accepted and preserved", func(t *testing.T) {
 		// Mid-key tab is permitted by the validator; pin it.
 		want := "key\twith\ttabs"
-		if _, err := c.Create(context.Background(), CreateInput{
+		if _, err := c.Create(context.Background(), &CreateInput{
 			TargetURL:      "https://example.com",
 			IdempotencyKey: want,
 		}); err != nil {
@@ -812,7 +812,7 @@ func TestCreatePathIsPlural(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+	if _, err := c.Create(context.Background(), &CreateInput{TargetURL: "https://example.com"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if gotPath != "/v1/qurls" {
@@ -843,7 +843,7 @@ func TestCreateResourceIDFlow(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{ResourceID: testResourceID}); err != nil {
+	if _, err := c.Create(context.Background(), &CreateInput{ResourceID: testResourceID}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -878,7 +878,7 @@ func TestCreateTargetURLOnlyOmitsResourceID(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+	if _, err := c.Create(context.Background(), &CreateInput{TargetURL: "https://example.com"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	var raw map[string]any
@@ -913,7 +913,7 @@ func TestCreateSessionDurationOnWire(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := testClient(srv.URL, "test-key")
-			if _, err := c.Create(context.Background(), tc.input); err != nil {
+			if _, err := c.Create(context.Background(), &tc.input); err != nil {
 				t.Fatalf("Create: %v", err)
 			}
 			var raw map[string]any
@@ -937,7 +937,7 @@ func TestCreateForPublicResourceID(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{ResourceID: publicResourceID}); err != nil {
+	if _, err := c.Create(context.Background(), &CreateInput{ResourceID: publicResourceID}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	wantPath := "/v1/resources/" + publicResourceID + "/qurls"
@@ -956,7 +956,7 @@ func TestCreateSessionDurationOmittedWhenEmpty(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+	if _, err := c.Create(context.Background(), &CreateInput{TargetURL: "https://example.com"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	var raw map[string]any
@@ -990,7 +990,7 @@ func TestCreateLabelOnWire(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := testClient(srv.URL, "test-key")
-			if _, err := c.Create(context.Background(), tc.input); err != nil {
+			if _, err := c.Create(context.Background(), &tc.input); err != nil {
 				t.Fatalf("Create: %v", err)
 			}
 			var raw map[string]any
@@ -1015,7 +1015,7 @@ func TestCreateLabelOnWire(t *testing.T) {
 // this test pins the invalid combination.
 func TestCreateTargetURLAndResourceIDMutuallyExclusive(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
-	_, err := c.Create(context.Background(), CreateInput{
+	_, err := c.Create(context.Background(), &CreateInput{
 		TargetURL:  "https://example.com",
 		ResourceID: testResourceID,
 	})
@@ -1030,7 +1030,15 @@ func TestCreateTargetURLAndResourceIDMutuallyExclusive(t *testing.T) {
 // anything; failing fast saves a 400 round-trip.
 func TestCreateNeitherTargetURLNorResourceIDRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
-	_, err := c.Create(context.Background(), CreateInput{})
+	_, err := c.Create(context.Background(), &CreateInput{})
+	if !errors.Is(err, ErrCreateRequiresTarget) {
+		t.Fatalf("expected ErrCreateRequiresTarget, got %v", err)
+	}
+}
+
+func TestCreateNilInputRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.Create(context.Background(), nil)
 	if !errors.Is(err, ErrCreateRequiresTarget) {
 		t.Fatalf("expected ErrCreateRequiresTarget, got %v", err)
 	}
@@ -1044,7 +1052,7 @@ func TestCreateNeitherTargetURLNorResourceIDRejected(t *testing.T) {
 // TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst.
 func TestCreateNoTargetBeatsInvalidIdempotencyKey(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
-	_, err := c.Create(context.Background(), CreateInput{
+	_, err := c.Create(context.Background(), &CreateInput{
 		// No TargetURL, no ResourceID, AND a key with a control byte
 		// (would also fail validateIdempotencyKey). Target check runs
 		// first.
@@ -1062,7 +1070,7 @@ func TestCreateNoTargetBeatsInvalidIdempotencyKey(t *testing.T) {
 // ensures a future reorder of guards trips a test.
 func TestCreateBothPopulatedBeatsInvalidIdempotencyKey(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
-	_, err := c.Create(context.Background(), CreateInput{
+	_, err := c.Create(context.Background(), &CreateInput{
 		TargetURL:      "https://example.com",
 		ResourceID:     testResourceID,
 		IdempotencyKey: "bad\nkey",
@@ -2489,7 +2497,7 @@ func TestMintBodiesCarryOnlyDeclaredFields(t *testing.T) {
 
 			input := fullyPopulatedCreateInput()
 			tc.mutate(&input)
-			if _, err := testClient(srv.URL, "k").Create(context.Background(), input); err != nil {
+			if _, err := testClient(srv.URL, "k").Create(context.Background(), &input); err != nil {
 				t.Fatalf("Create: %v", err)
 			}
 
@@ -2565,5 +2573,37 @@ func TestMe(t *testing.T) {
 				t.Fatalf("Me = %+v; an empty api_key object must not count as a principal", got)
 			}
 		})
+	}
+}
+
+func TestResourceKeyDER(t *testing.T) {
+	for _, tc := range []struct {
+		name, id string
+		wantOK   bool
+	}{
+		{name: "public key", id: testSharingID, wantOK: true},
+		{name: "empty", id: ""},
+		{name: "padded", id: testSharingID + "=="},
+		{name: "embedded newline", id: testSharingID[:20] + "\n" + testSharingID[20:]},
+		{name: "standard alphabet", id: "+" + testSharingID[1:]},
+		{name: "legacy id", id: "r_2"},
+		{name: "URL", id: "https://example.com/x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			der, ok := ResourceKeyDER(tc.id)
+			if ok != tc.wantOK || ok != (der != nil) {
+				t.Fatalf("ResourceKeyDER(%q) = %d bytes, %v; want ok=%v", tc.id, len(der), ok, tc.wantOK)
+			}
+		})
+	}
+}
+
+// validateSharingState rejects an id the base64 decoder would read past: Strict
+// decoding skips line breaks, so only the canonical round-trip catches them.
+func TestValidateSharingStateRejectsNonCanonicalID(t *testing.T) {
+	id := testSharingID[:20] + "\n" + testSharingID[20:]
+	sharing := &SharingState{ResourceID: id, CRID: testSharingCRID, DesiredState: desiredStateOff, ConnectionState: "stopped"}
+	if err := validateSharingState(id, sharing); err == nil || !strings.Contains(err.Error(), "resource identity is invalid") {
+		t.Fatalf("validateSharingState = %v, want the invalid-identity error", err)
 	}
 }

@@ -626,18 +626,6 @@ func (c closeTracker) Close() error {
 	return nil
 }
 
-func emptyManager(t *testing.T) *Manager {
-	t.Helper()
-	manager, err := NewManager(
-		&memoryRegistry{shares: map[string]connectorstate.LocalShare{}},
-		newFakeGroupFactory(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return manager
-}
-
 func TestOverlayIPCBoundsRouteCount(t *testing.T) {
 	t.Parallel()
 	overlay := make(map[string]map[string]string)

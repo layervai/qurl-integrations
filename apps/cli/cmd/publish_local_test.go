@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -31,10 +32,15 @@ func TestLocalPublishBindsAuthenticatedOwnerBeforeNativeOpen(t *testing.T) {
 	stop := errors.New("stop after owner binding")
 	res := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000"},
-		env:           map[string]string{"QURL_API_KEY": testAPIKey},
+		env:           map[string]string{"QURL_API_KEY": testAPIKey, clientProductEnv: "qurl-desktop/1.2.3"},
 		shareRegistry: registry, shareStateDir: stateDir,
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource: func(_ context.Context, cfg *connectorshare.NativeRuntimeConfig, _ func(string) (string, error)) (*agent.ResolvedResource, error) {
+			// The product comes from the environment through resolveSettings,
+			// which must run before the runtime is configured.
+			if cfg.Version != "test+desktop" {
+				t.Fatalf("registration version = %q, want %q", cfg.Version, "test+desktop")
+			}
 			if cfg.SessionOperations.OwnerID != "" {
 				t.Fatalf("discovery-only runtime retained session authority: %#v", cfg.SessionOperations)
 			}
@@ -127,10 +133,10 @@ func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) 
 		{name: "empty description still explicit", args: []string{"publish", "http://127.0.0.1:3000", "--description="}, want: "--description is not supported"},
 		{name: "tag", args: []string{"publish", "http://localhost:3000", "--tag", "dev"}, want: "--tag is not supported"},
 		{name: "alias", args: []string{"publish", "http://[::1]:3000", "--alias", "dev"}, want: "--alias is not supported"},
-		{name: "https", args: []string{"publish", "https://localhost:3000"}, want: "cleartext http"},
+		{name: "https", args: []string{"publish", "https://localhost:3000", "--name", "Example"}, want: "cleartext http"},
 		{name: "path", args: []string{"publish", "http://127.0.0.1:3000/api"}, want: "without a path"},
-		{name: "remote id", args: []string{"publish", "https://example.com", "--id", "local-test"}, want: "--id applies only"},
-		{name: "remote foreground", args: []string{"publish", "https://example.com", "--foreground"}, want: "--foreground applies only"},
+		{name: "remote id", args: []string{"publish", "https://example.com", "--name", "Example", "--id", "local-test"}, want: "--id applies only"},
+		{name: "remote foreground", args: []string{"publish", "https://example.com", "--name", "Example", "--foreground"}, want: "--foreground applies only"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -316,7 +322,14 @@ func TestLocalPublishReuseConflictExplainsDeleteRecovery(t *testing.T) {
 					t.Fatalf("reuse conflict lacks %q: %s", want, res.stderr.String())
 				}
 			}
-			mustEmptyStdout(t, res)
+			if configured {
+				var receipt map[string]any
+				if err := json.Unmarshal(res.stdout.Bytes(), &receipt); err != nil || receipt["error"] != "publication_setup_failed" || receipt["crid"] != srv.Key.CRID {
+					t.Fatal("identity conflict lost the confirmed create receipt")
+				}
+			} else {
+				mustEmptyStdout(t, res)
+			}
 		})
 	}
 }

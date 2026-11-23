@@ -68,3 +68,16 @@ credential. The publisher's fragment-only settings stay unchanged.
 Operator soaks use a separate concurrency group for each exact source commit.
 Every source still runs all customer lanes and the full 80-minute soak; the
 single protected macOS peer keeps its existing serialization.
+
+## Browser session continuity and native replacement
+
+The production CLI proof retains one admitted browser request across stop/start
+and restart. It requires the same request to return the exact fixture content
+before its original deadline and to reach the fixture backend. A new CLI read
+and a changed serving epoch do not replace this browser capability. This follows
+the API session-retention contract.
+
+This check does not prove that an old native Connector/controller session is
+refused after replacement. That separate native-replacement rollout task remains open.
+HTTP 200 alone is not proof of content, and no production proof run is claimed
+by this source correction.

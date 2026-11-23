@@ -14,18 +14,24 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	connectorservice "github.com/layervai/qurl-connector/pkg/service"
+	"github.com/layervai/qurl-go/qurl"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 )
 
 const productionProofEndpoint = "https://api.layerv.ai"
+
+const productionFixtureSessionDuration = 5 * time.Minute
 
 type productionPublishDoc struct {
 	CRID          string `json:"crid"`
@@ -52,7 +58,8 @@ func TestProductionReleaseJourney(t *testing.T) {
 	if !filepath.IsAbs(binary) {
 		t.Fatal("production proof requires the exact unpacked release binary")
 	}
-	key := sandboxSecret(t, "QURL_API_KEY")
+	binary = productionExecutable(t, binary)
+	key := productionCredential(t)
 	owner := os.Getenv("QURL_PRODUCTION_OWNER_ID")
 	if key == "" || owner == "" {
 		t.Fatal("production proof requires disposable credentials and their expected owner")
@@ -61,7 +68,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stateDir, err := filepath.EvalSymlinks(t.TempDir())
+	stateDir, err := filepath.EvalSymlinks(productionStateDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,11 +132,11 @@ func TestProductionReleaseJourney(t *testing.T) {
 			}
 			productionCLI(t, binary, env, "", "list", "-o", "json")
 			productionGet(t, binary, env, published.CRID, marker, false)
-			consumer := map[string]string{"QURL_ENDPOINT": productionProofEndpoint, connectorstate.EnvStateDirPrimary: t.TempDir(), "LAYERV_KEY_PROVIDER": "file"}
+			consumer := map[string]string{"QURL_ENDPOINT": productionProofEndpoint, connectorstate.EnvStateDirPrimary: productionStateDir(t), "LAYERV_KEY_PROVIDER": "file"}
 			var shared struct {
 				QURL string `json:"qurl"`
 			}
-			productionDecode(t, productionCLI(t, binary, env, "", "share", published.CRID, "-o", "json", "--session-duration", "5m"), &shared)
+			productionDecode(t, productionCLI(t, binary, env, "", "share", published.CRID, "-o", "json", "--session-duration", productionFixtureSessionDuration.String()), &shared)
 			if shared.QURL == "" {
 				t.Fatal("production sharing returned no link")
 			}
@@ -145,6 +152,7 @@ func TestProductionReleaseJourney(t *testing.T) {
 			if reused.CRID != published.CRID || reused.ResourceID != published.ResourceID || reused.FoundExisting == nil || !*reused.FoundExisting || reused.Private == nil || *reused.Private != test.private {
 				t.Fatal("repeat publication did not reuse the same resource and privacy")
 			}
+			oldRequest, oldSessionDeadline := productionRetainSession(t, shared.QURL, marker)
 			for _, command := range []string{"stop", "start", "restart"} {
 				next := productionSharing(t, binary, env, command, published)
 				if command != "stop" && next <= epoch {
@@ -162,6 +170,22 @@ func TestProductionReleaseJourney(t *testing.T) {
 						t.Fatal("stopped production route wrote a download")
 					}
 				} else {
+					// The admitted browser session survives a temporary Connector stop.
+					// This is separate from the replaced native controller session.
+					productionGet(t, binary, env, published.CRID, marker, false)
+					if !time.Now().Before(oldSessionDeadline) {
+						t.Fatal("original production session expired before the continuity assertion")
+					}
+					before := hits.Load()
+					if err := productionRetainedSessionFetch(oldRequest, marker, nil); err != nil {
+						t.Fatal(err)
+					}
+					if !time.Now().Before(oldSessionDeadline) {
+						t.Fatal("original production session expired during the continuity assertion")
+					}
+					if hits.Load() <= before {
+						t.Fatal("original production session did not reach the backend")
+					}
 					productionGet(t, binary, env, published.CRID, marker, false)
 				}
 			}
@@ -169,6 +193,55 @@ func TestProductionReleaseJourney(t *testing.T) {
 			productionGet(t, binary, env, published.CRID, marker, true)
 		})
 	}
+}
+
+// The Windows sandbox helper deliberately has no file reader. Reuse the
+// customer reader so production proof retains its Windows ACL and link fences.
+func productionCredential(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return sandboxSecret(t, "QURL_API_KEY")
+	}
+	key, source, err := auth.Resolve(os.LookupEnv)
+	if err != nil || source != auth.SourceEnvironmentFile {
+		t.Fatalf("production proof requires one protected Windows API-key file: %s", productionCredentialFailureClass(err, source))
+	}
+	return key
+}
+
+// Classify only fixed reader failures; a hostile path or key must stay private.
+func productionCredentialFailureClass(err error, source auth.Source) string {
+	if errors.Is(err, auth.ErrCredentialConflict) {
+		return "credential_conflict"
+	}
+	if errors.Is(err, auth.ErrNoCredential) {
+		return "credential_missing"
+	}
+	if err == nil {
+		if source != auth.SourceEnvironmentFile {
+			return "credential_not_file"
+		}
+		return "none"
+	}
+	for _, known := range []struct{ message, class string }{
+		{"must name one exact absolute private file", "file_path"},
+		{"not one bounded owner-private regular file", "file_metadata"},
+		{"not owned by the current user", "file_owner"},
+		{"ACL must be protected from inheritance", "file_acl_inheritance"},
+		{"DACL grants another principal access", "file_acl_principal"},
+		{"unsafe ownership or link authority", "file_authority"},
+		{"cannot open QURL_API_KEY_FILE without following links", "file_open"},
+		{"changed while opening", "file_changed_on_open"},
+		{"changed while reading", "file_changed_on_read"},
+		{"exact key bytes plus one LF or CRLF", "file_line_format"},
+		{"cannot read exact bounded", "file_read"},
+		{"does not look like a qURL API key", "key_shape"},
+	} {
+		if strings.Contains(err.Error(), known.message) {
+			return known.class
+		}
+	}
+	return "reader_unclassified"
 }
 
 func productionDecode(t *testing.T, raw []byte, target any) {
@@ -193,6 +266,17 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	}
 	cmd.Stdin = strings.NewReader(input)
 	// Never print command output: it can contain bearer links or credentials.
+	var daemonLog string
+	var daemonLogOffset int64
+	sharingDiagnostic := args[0] == "restart" || (args[0] == "start" && runtime.GOOS == "linux")
+	if sharingDiagnostic && runtime.GOOS == "linux" {
+		if dir, err := connectordaemon.DefaultLogDir(env[connectorstate.EnvStateDirPrimary]); err == nil {
+			daemonLog = filepath.Join(dir, "share-daemon.err.log")
+			if info, err := os.Stat(daemonLog); err == nil {
+				daemonLogOffset = info.Size()
+			}
+		}
+	}
 	raw, err := cmd.Output()
 	if ctx.Err() != nil {
 		t.Fatal("production candidate command timed out")
@@ -202,6 +286,17 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
+		t.Logf("production candidate failure class: %s", productionFailureClass(exit.Stderr))
+		if sharingDiagnostic {
+			if daemonLog != "" {
+				logProductionRestartStage(t, args[0], daemonLog, daemonLogOffset)
+			}
+			for _, pattern := range productionRestartDiagnostics {
+				if detail := pattern.FindSubmatch(exit.Stderr); len(detail) == 2 {
+					t.Logf("production %s diagnostic: %s", args[0], detail[1])
+				}
+			}
+		}
 		if status := regexp.MustCompile(`HTTP \d{3}`).Find(exit.Stderr); len(status) > 0 {
 			t.Logf("production API rejected %s: %s", args[0], status)
 		}
@@ -209,6 +304,146 @@ func productionCommand(t *testing.T, binary string, env map[string]string, input
 	}
 	t.Fatal("production candidate could not start")
 	return nil, -1
+}
+
+// Read a bounded tail of the fixture daemon log and emit only a fixed label.
+func logProductionRestartStage(t *testing.T, command, path string, offset int64) {
+	t.Helper()
+	f, err := os.Open(path) //nolint:gosec // Proof-owned daemon state.
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() < offset {
+		return
+	}
+	const maxTail = 64 << 10
+	if _, err := f.Seek(max(offset, info.Size()-maxTail), io.SeekStart); err != nil {
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxTail))
+	if err == nil {
+		t.Logf("production %s daemon recovery stage: %s", command, productionRestartStage(string(raw)))
+	}
+}
+
+func productionRestartStage(log string) string {
+	lines := strings.Split(log, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := lines[i]
+		if !strings.Contains(line, "share daemon session group attempt failed; retrying") {
+			continue
+		}
+		// TODO(upstream-contract): Match the recovery stages reported by qurl-connector.
+		switch {
+		case strings.Contains(line, "recover prior native session operation before replacement:"):
+			return "recover_operation"
+		case strings.Contains(line, "retire prior native NHP session before replacement:"):
+			return "retire_session"
+		default:
+			return "unclassified"
+		}
+	}
+	return "no_group_retry"
+}
+
+func TestProductionRestartStage(t *testing.T) {
+	for _, tt := range []struct{ log, want string }{
+		{"unrelated recover prior native session operation before replacement: private", "no_group_retry"},
+		{"share daemon session group attempt failed; retrying error=private", "unclassified"},
+		{"share daemon session group attempt failed; retrying error=recover prior native session operation before replacement: private", "recover_operation"},
+		{"share daemon session group attempt failed; retrying error=retire prior native NHP session before replacement: private", "retire_session"},
+	} {
+		if got := productionRestartStage(tt.log); got != tt.want {
+			t.Errorf("stage = %q, want %q", got, tt.want)
+		}
+	}
+}
+
+// Capture only the structured fields emitted by the CLI. Raw stderr can
+// contain customer URLs, resource IDs, and credentials.
+var productionRestartDiagnostics = []*regexp.Regexp{
+	regexp.MustCompile(`qURL share did not become ready \((daemon state (?:starting|retrying|serving|failed|stopped|not_running|unavailable)(?:, failure category (?:assignment|enrollment|identity|local_state|network|peer_timeout|platform_denied|resource_unavailable|unknown|verification))?(?:, failure code [0-9]{1,5})?(?:, retry attempt [0-9]{1,9})?)\)`),
+	regexp.MustCompile(`did not start serving within [0-9]+s \((last state: desired=(?:on|off), connection=(?:stopped|connecting|serving), serving_epoch=[0-9]{1,20}|no sharing-state response completed)\)`),
+}
+
+func TestProductionRestartDiagnostics(t *testing.T) {
+	stderr := []byte("qURL share did not become ready (daemon state retrying, failure category peer_timeout, retry attempt 2): qURL share private-resource did not start serving within 30s (last state: desired=on, connection=connecting, serving_epoch=4): context deadline exceeded")
+	for i, want := range []string{
+		"daemon state retrying, failure category peer_timeout, retry attempt 2",
+		"last state: desired=on, connection=connecting, serving_epoch=4",
+	} {
+		got := productionRestartDiagnostics[i].FindSubmatch(stderr)
+		if len(got) != 2 || string(got[1]) != want {
+			t.Fatalf("diagnostic %d did not extract the expected fields", i)
+		}
+	}
+	if productionRestartDiagnostics[0].MatchString("qURL share did not become ready (daemon state retrying, failure category secret-value)") {
+		t.Fatal("unrecognized diagnostic category escaped the allowlist")
+	}
+}
+
+// Emit only a fixed class, never the stderr beside a public error message.
+func productionFailureClass(stderr []byte) string {
+	for _, known := range []struct{ message, class string }{
+		{consume.MsgCRIDNotFound, "crid_not_found"},
+		{consume.MsgCRIDLinkUnavailable, "crid_link_unavailable"},
+		{consume.MsgCRIDLinkNoAnswer, "crid_link_no_answer"},
+		{consume.MsgAccessBusy, "access_busy"},
+		{consume.MsgLinkUnavailable, "download_host_unavailable"},
+		{consume.MsgCRIDLinkRateLimited, "crid_link_rate_limited"},
+		{consume.MsgCRIDPublisherOffline, "crid_publisher_offline"},
+		{consume.MsgCRIDResourceClosed, "crid_resource_closed"},
+		{consume.MsgCRIDLinkRequestRejected, "crid_link_request_rejected"},
+		{consume.MsgCRIDLinkRefused, "crid_link_refused"},
+		{"qURL could not start this Connector's device enrollment because the CLI's local enrollment settings are invalid.", "enrollment_config"},
+		{"This Connector's device enrollment did not finish before its safe retry period ended.", "enrollment_unavailable"},
+		{"The qURL platform could not verify this Connector during device enrollment.", "enrollment_identity"},
+		{"The qURL platform refused this Connector's device enrollment request.", "enrollment_request_rejected"},
+		{"The qURL platform and this CLI did not agree on this Connector's device enrollment, so qURL stopped safely.", "enrollment_mismatch"},
+		{"qURL could not safely save this Connector's device enrollment state on this machine, so it stopped.", "enrollment_persistence"},
+		{"The qURL platform isn't accepting new Connector enrollments here right now.", "enrollment_disabled"},
+		{"qurl: platform denied access (errCode=", "platform_denied"},
+		{"so qURL can't safely keep its files under it.", "unsafe_directory"},
+		// TODO(upstream-contract): keep these fixed classes aligned with qurl-go Windows state errors.
+		{"is not owned by the current Windows user", "state_owner"},
+		{"grants access to another Windows principal", "state_acl"},
+		{"grants delete or ACL control to an untrusted Windows principal", "state_ancestor_control"},
+		{"is not owned by a trusted Windows principal", "state_ancestor_owner"},
+		{"ACL must be protected from inheritance", "state_acl_inheritance"},
+		{"has an inherited or inherit-only ACE", "state_acl_flags"},
+		// TODO(upstream-contract): keep these fixed classes aligned with qurl-connector Windows user-job errors.
+		{"validate Windows user job executable", "windows_job_executable"},
+		{"create Windows user job directory", "windows_job_directory"},
+		{"create Windows user job log", "windows_job_log"},
+		{"temporary Windows user job definition", "windows_job_definition"},
+		{"install Windows user job", "windows_job_install"},
+		{"inspect Windows user job", "windows_job_inspect"},
+		{"Windows task user identity could not be resolved", "windows_job_identity"},
+		{"Windows user job", "windows_job"},
+		{"local share registry", "local_registry"},
+		{"share daemon", "share_daemon"},
+		{"qURL invocation path", "invocation_path"},
+		{"Access is denied.", "os_access_denied"},
+		{"The process cannot access the file because it is being used by another process.", "os_sharing_violation"},
+		{"The system cannot find the file specified.", "os_file_missing"},
+		{"context deadline exceeded", "native_deadline"},
+	} {
+		if strings.Contains(string(stderr), known.message) {
+			if known.class == "windows_job_inspect" {
+				_, suffix, _ := strings.Cut(string(stderr), known.message)
+				switch {
+				case strings.Contains(suffix, "context deadline exceeded"):
+					return "windows_job_inspect_timeout"
+				case strings.Contains(suffix, "parse Windows user job state"):
+					return "windows_job_inspect_state"
+				}
+			}
+			return known.class
+		}
+	}
+	return "unclassified"
 }
 
 func productionSharing(t *testing.T, binary string, env map[string]string, command string, resource productionPublishDoc) uint64 {
@@ -238,7 +473,7 @@ func productionCLI(t *testing.T, binary string, env map[string]string, input str
 func productionGet(t *testing.T, binary string, env map[string]string, crid, marker string, denied bool) {
 	t.Helper()
 	destination := filepath.Join(t.TempDir(), "content")
-	_, code := productionCommand(t, binary, env, "", "get", crid, "--file", destination, "--session-duration", "5m")
+	_, code := productionCommand(t, binary, env, "", "get", crid, "--file", destination, "--session-duration", productionFixtureSessionDuration.String())
 	if denied {
 		if code != 5 {
 			t.Fatalf("production access denial exit = %d, want not found (5)", code)
@@ -255,4 +490,29 @@ func productionGet(t *testing.T, binary string, env map[string]string, crid, mar
 	if err != nil || string(content) != marker {
 		t.Fatal("production route did not return the exact local backend bytes")
 	}
+}
+
+// productionRetainSession opens once and proves the captured capability works.
+// The fetch helper reuses the same request and cannot resolve, mint, or renew it.
+func productionRetainSession(t *testing.T, link, marker string) (*http.Request, time.Time) {
+	t.Helper()
+	// Browser lifetime uses the requested fixture duration, not the network ACK window.
+	// Starting before admission is conservative for the later first application use.
+	started := time.Now()
+	handle, err := qurl.EnterPortal(t.Context(), link)
+	if err != nil || handle == nil || handle.SessionID == 0 || handle.OpenSeconds == 0 {
+		t.Fatal("could not retain the original production access session")
+	}
+	deadline := started.Add(productionFixtureSessionDuration)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, handle.ResourceURL, http.NoBody)
+	if err != nil || handle.AuthorizeContentRequest(request) != nil {
+		t.Fatal("could not authorize the original production access session")
+	}
+	if err := productionRetainedSessionFetch(request, marker, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !time.Now().Before(deadline) {
+		t.Fatal("original production session expired during its positive control")
+	}
+	return request, deadline
 }

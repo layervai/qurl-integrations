@@ -75,7 +75,7 @@ jobs:
           node-version-file: apps/chrome-extension/.nvmrc
           cache: npm
           cache-dependency-path: apps/chrome-extension/package-lock.json
-      - run: npm ci
+      - run: npm ci --no-audit
       - run: npm run lint
       - name: Syntax check
         # xargs preserves a failing node --check exit; find -exec can hide it.

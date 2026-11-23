@@ -2497,3 +2497,33 @@ func TestEnvProviderDeleteAPIKey(t *testing.T) {
 // KMSEncryptor itself is covered by a round-trip test that exercises
 // real AES-GCM under a fixed data key returned by a stub KMSClient.
 // See ddb_provider_kms_test.go.
+
+func TestDDBProviderInitialKeySaveIsConditional(t *testing.T) {
+	ddb := &fakeDDBClient{}
+	p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+	save := func(id string) error {
+		return p.SetInitialAPIKeyWithMetadata(context.Background(), testTeamID, testNewAPIKey, id, testKeyPrefix, testQURLAccount, "U_ADMIN")
+	}
+	if err := save(testKeyID); err != nil {
+		t.Fatal(err)
+	}
+	want := "attribute_not_exists(" + attrQURLAPIKey + ") OR attribute_not_exists(" + attrQURLAPIKeyID + ") OR " + attrQURLAPIKeyID + " = :empty_key_id OR " + attrQURLAPIKeyID + " = :key_id"
+	if got := aws.ToString(ddb.updateInput.ConditionExpression); got != want {
+		t.Fatalf("condition = %q, want %q", got, want)
+	}
+	if got := ddb.updateInput.ExpressionAttributeValues[":key_id"].(*ddbtypes.AttributeValueMemberS).Value; got != testKeyID {
+		t.Fatalf("key ID = %q", got)
+	}
+	conflict := &ddbtypes.ConditionalCheckFailedException{}
+	ddb.updateErr = conflict
+	if err := save("losing-key"); !errors.Is(err, conflict) || !errors.Is(err, ErrWorkspaceAPIKeyConflict) {
+		t.Fatalf("conflict lost: %v", err)
+	}
+	ddb.updateErr = nil
+	if err := p.SetAPIKeyWithMetadata(context.Background(), testTeamID, testNewAPIKey, "replacement", testKeyPrefix, testQURLAccount, "U_ADMIN"); err != nil {
+		t.Fatal(err)
+	}
+	if ddb.updateInput.ConditionExpression != nil {
+		t.Fatal("explicit replacement must remain writable")
+	}
+}

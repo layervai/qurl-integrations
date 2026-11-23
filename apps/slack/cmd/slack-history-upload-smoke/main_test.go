@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,11 +39,29 @@ func testEnv(token string) func(string) string {
 
 func fixedNow() time.Time { return time.Unix(1723600000, 0).UTC() }
 
+type historyCountingTransport struct {
+	base  http.RoundTripper
+	calls *atomic.Int64
+}
+
+func (tr historyCountingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tr.calls.Add(1)
+	return tr.base.RoundTrip(req)
+}
+
 // runCLI drives run end to end and returns the exit code plus both streams.
-func runCLI(t *testing.T, args []string, getenv func(string) string) (code int, stdoutText, stderrText string) {
+func runCLI(t *testing.T, srv *httptest.Server, args []string, getenv func(string) string) (code int, stdoutText, stderrText string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code = run(context.Background(), &stdout, &stderr, args, getenv, fixedNow)
+	var transport http.RoundTripper
+	var calls atomic.Int64
+	if srv != nil {
+		transport = historyCountingTransport{base: srv.Client().Transport, calls: &calls}
+	}
+	code = run(context.Background(), &stdout, &stderr, args, getenv, fixedNow, transport)
+	if srv != nil && calls.Load() == 0 {
+		t.Fatal("CLI requests bypassed the fake-server transport")
+	}
 	return code, stdout.String(), stderr.String()
 }
 
@@ -52,7 +73,7 @@ func TestRunSucceedsWhenTheContractHolds(t *testing.T) {
 		methodConversationsHistory: messagesBody(textMessage("100.1"), uploadMessage("100.2")),
 	})
 
-	code, stdout, stderr := runCLI(t, []string{
+	code, stdout, stderr := runCLI(t, srv, []string{
 		flagTokenEnv, testTokenEnv, flagBaseURL, srv.URL, flagMaxPages, "1",
 	}, testEnv(testToken))
 	if code != 0 {
@@ -82,7 +103,7 @@ func TestRunEmitsTheReportWhenTheContractBreaks(t *testing.T) {
 		methodConversationsHistory: messagesBody(textMessage("100.1")),
 	})
 
-	code, stdout, stderr := runCLI(t, []string{
+	code, stdout, stderr := runCLI(t, srv, []string{
 		flagTokenEnv, testTokenEnv, flagBaseURL, srv.URL, flagMaxPages, "1",
 	}, testEnv(testToken))
 	if code != 1 {
@@ -179,7 +200,7 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			args := append([]string{flagTokenEnv, testTokenEnv, flagBaseURL, testLoopbackURL}, tt.args...)
-			code, stdout, stderr := runCLI(t, args, testEnv(tt.env))
+			code, stdout, stderr := runCLI(t, nil, args, testEnv(tt.env))
 			if code != 2 {
 				t.Fatalf("exit = %d, want 2 (stdout %q, stderr %q)", code, stdout, stderr)
 			}
@@ -235,7 +256,7 @@ func TestRunDoesNotEchoTokenEnvName(t *testing.T) {
 			// token: with the guard gone the run lands in writeConfigValidationError's
 			// ErrMissingBotToken branch, the one that prints the name. The loopback
 			// base URL keeps even a compound regression off the real Slack API.
-			code, stdout, stderr := runCLI(t, []string{
+			code, stdout, stderr := runCLI(t, nil, []string{
 				flagTokenEnv, tt.tokenEnv, flagBaseURL, testLoopbackURL,
 			}, testEnv(""))
 			if code != 2 {
@@ -258,7 +279,7 @@ func TestRunDoesNotEchoTokenEnvName(t *testing.T) {
 func TestRunHelpExitsZero(t *testing.T) {
 	t.Parallel()
 
-	code, stdout, _ := runCLI(t, []string{"-h"}, testEnv(testToken))
+	code, stdout, _ := runCLI(t, nil, []string{"-h"}, testEnv(testToken))
 	if code != 0 {
 		t.Errorf("exit = %d, want 0 for -h", code)
 	}
@@ -362,7 +383,7 @@ func TestRunCarriesOperatorNotesIntoTheReport(t *testing.T) {
 		methodConversationsList:    listBody(testChannel),
 		methodConversationsHistory: messagesBody(uploadMessage("100.1")),
 	})
-	code, stdout, stderr := runCLI(t, []string{
+	code, stdout, stderr := runCLI(t, srv, []string{
 		flagTokenEnv, testTokenEnv, flagBaseURL, srv.URL, flagMaxPages, "1",
 		"-workspace-shape", "Enterprise Grid org install",
 		"-token-owner", "enterprise",
@@ -390,7 +411,7 @@ func TestRunCarriesOperatorNotesIntoTheReport(t *testing.T) {
 func TestRunRejectsAChannelListLongerThanTheCap(t *testing.T) {
 	t.Parallel()
 
-	code, stdout, stderr := runCLI(t, []string{
+	code, stdout, stderr := runCLI(t, nil, []string{
 		flagTokenEnv, testTokenEnv, flagBaseURL, testLoopbackURL,
 		"-channels", "C0000000001,C0000000002,C0000000003", "-max-conversations", "2",
 	}, testEnv(testToken))
@@ -407,7 +428,7 @@ func TestRunRejectsAChannelListLongerThanTheCap(t *testing.T) {
 func TestRunBoundsMaxThreads(t *testing.T) {
 	t.Parallel()
 
-	code, _, stderr := runCLI(t, []string{
+	code, _, stderr := runCLI(t, nil, []string{
 		flagTokenEnv, testTokenEnv, flagBaseURL, testLoopbackURL,
 		"-max-threads", "100000000",
 	}, testEnv(testToken))

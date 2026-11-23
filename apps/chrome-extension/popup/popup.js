@@ -50,6 +50,26 @@ let selectedFiles = [];
 let lastSuccessfulResults = [];
 let settingsPanelCloseTimer = null;
 let pendingPermissionRequest = null;
+let activeInsertion = null;
+
+chrome.runtime.onMessage.addListener(function (message, sender) {
+  if (!message || message.type !== 'INSERT_LINKS_LATE_SUCCESS' || !activeInsertion
+    || message.requestId !== activeInsertion.requestId || !sender
+    || sender.id !== chrome.runtime.id || !sender.tab
+    || typeof sender.url !== 'string' || !sender.url.startsWith('https://mail.google.com/mail/')) {
+    return false;
+  }
+  activeInsertion.confirmed = true;
+  if (activeInsertion.report) {
+    showResults(activeInsertion.report.results, activeInsertion.report.errors, null);
+    footer.textContent = lateInsertionMessage();
+  }
+  return false;
+});
+
+function lateInsertionMessage() {
+  return getMessage('gmail_insert_late_success', 'Links were inserted into Gmail after the earlier timeout. Check the draft before inserting again.');
+}
 
 applyLocalizedText();
 initializePopup();
@@ -113,7 +133,7 @@ document.addEventListener('keydown', (event) => {
 
 saveConfigBtn.addEventListener('click', async () => {
   const value = apiBaseInput.value;
-  let confirmation = null;
+  let confirmation;
   try {
     confirmation = getCustomServerPermissionConfirmation(value);
   } catch (err) {
@@ -385,10 +405,14 @@ uploadBtn.addEventListener('click', async () => {
   // intentionally does not accumulate across uploads.
   lastSuccessfulResults = results.slice();
 
+  // Keep the current report so a late confirmation can correct its insertion state.
+  if (activeInsertion) activeInsertion.report = { results, errors };
   // Show results
   showResults(results, errors, insertionError);
   setLoading(false);
-  footer.textContent = getMessage('footer_hint', 'Make sure a Gmail compose window is open.');
+  footer.textContent = activeInsertion && activeInsertion.confirmed
+    ? lateInsertionMessage()
+    : getMessage('footer_hint', 'Make sure a Gmail compose window is open.');
 });
 
 copyBtn.addEventListener('click', async () => {
@@ -459,14 +483,19 @@ function formatExpiry(isoString) {
 // ==================== Gmail Draft Insertion ====================
 
 async function insertIntoGmailDraft(results) {
+  const message = createInsertLinksMessage(results);
+  const insertion = { requestId: message.requestId, confirmed: false, report: null };
+  activeInsertion = insertion;
   try {
-    const response = await sendRuntimeMessageWithRetry(createInsertLinksMessage(results));
+    const response = await sendRuntimeMessageWithRetry(message);
+    if (insertion.confirmed) return null;
     if (!response || !response.success) {
       return (response && response.error)
         || getMessage('gmail_insert_failed', 'Failed to insert links into the Gmail draft.');
     }
     return null;
   } catch (err) {
+    if (insertion.confirmed) return null;
     console.warn('[qURL] Could not insert links into Gmail draft:', err.message);
     return err.message
       || getMessage('gmail_insert_failed', 'Failed to insert links into the Gmail draft.');
@@ -586,6 +615,7 @@ function showResults(results, errors, insertionError) {
 }
 
 function clearResults() {
+  activeInsertion = null;
   progressArea.innerHTML = '';
   progressArea.classList.add('hidden');
   resultArea.innerHTML = '';
@@ -893,7 +923,7 @@ function copyViaExecCommand(html, text) {
   };
 
   document.addEventListener('copy', listener, { once: true });
-  let copied = false;
+  let copied;
   try {
     copied = document.execCommand('copy');
   } finally {

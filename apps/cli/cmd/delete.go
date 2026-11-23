@@ -9,14 +9,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/layervai/qurl-go/crid"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func deleteCmd(opts *globalOpts) *cobra.Command {
@@ -65,7 +69,10 @@ scripts and pipelines must pass --yes.`,
 			result, err := client.Delete(cmd.Context(), assessment.Input)
 			if err != nil {
 				cleanupAfterDeleteFailure(cmd.Context(), opts, client, assessment.Input, err)
-				return err
+				result, err = confirmPendingDelete(cmd.Context(), opts, client, assessment.Input, err)
+				if err != nil {
+					return err
+				}
 			}
 			if result.AlreadyGone {
 				// Idempotent delete: already-gone is the requested outcome.
@@ -90,6 +97,49 @@ scripts and pipelines must pass --yes.`,
 	return cmd
 }
 
+// TODO(upstream-contract): qurl-service#1998 reserves this code for a saved revoke.
+func pendingRevocationError(err error) *qurlapi.Error {
+	var pending *qurlapi.Error
+	if errors.As(err, &pending) && pending.StatusCode == http.StatusServiceUnavailable && pending.Code == "revocation_pending" {
+		return pending
+	}
+	return nil
+}
+
+func confirmPendingDelete(ctx context.Context, opts *globalOpts, client qurlapi.Client, id string, firstError error) (*qurlapi.DeleteResult, error) {
+	pending := pendingRevocationError(firstError)
+	// Local wait ceiling; the service currently requests 30 seconds.
+	if pending == nil || pending.RetryAfter == 0 || pending.RetryAfter > 35 {
+		return nil, firstError
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(firstError, err)
+	}
+	if !opts.quiet && opts.resolvedFormat != output.FormatJSON {
+		opts.printer().Notef("Revocation is saved. Waiting %d seconds before checking that access is closed.", pending.RetryAfter)
+	}
+	delay := time.Duration(pending.RetryAfter) * time.Second
+	if opts.sleep != nil {
+		opts.sleep(delay)
+	} else {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, errors.Join(firstError, ctx.Err())
+		case <-timer.C:
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(firstError, err)
+	}
+	result, err := client.Delete(ctx, id)
+	if err != nil {
+		return nil, errors.Join(firstError, err)
+	}
+	return result, nil
+}
+
 // cleanupAfterDeleteFailure withdraws a confirmed revoked route without
 // replacing the original error: protection still needs the caller to retry.
 func cleanupAfterDeleteFailure(ctx context.Context, opts *globalOpts, client qurlapi.Client, id string, deleteErr error) {
@@ -97,12 +147,13 @@ func cleanupAfterDeleteFailure(ctx context.Context, opts *globalOpts, client qur
 	if ctx.Err() != nil || !errors.As(deleteErr, &apiErr) || apiErr.StatusCode < http.StatusInternalServerError {
 		return
 	}
-	// A server failure can follow a committed revoke. Client failures need
-	// no extra request; a server failure alone is not proof of the commit.
-	resource, readErr := client.Resource(ctx, id)
-	// TODO(upstream-contract): only qurl-service's revoked status confirms the commit.
-	if readErr != nil || resource == nil || resource.Status != "revoked" {
-		return
+	// Stop local serving before waiting for proof. A generic server failure still
+	// needs a management read; only the dedicated code proves the write committed.
+	if pendingRevocationError(deleteErr) == nil {
+		resource, readErr := client.Resource(ctx, id)
+		if readErr != nil || resource == nil || resource.Status != "revoked" {
+			return
+		}
 	}
 	if cleanupErr := cleanupDeletedLocalShare(ctx, opts, id); cleanupErr != nil {
 		opts.printer().Warnf("Revocation is committed, but local sharing cleanup did not finish: %v", cleanupErr)
@@ -112,13 +163,19 @@ func cleanupAfterDeleteFailure(ctx context.Context, opts *globalOpts, client qur
 // cleanupDeletedLocalShare converges local desired state after the service has
 // committed deletion. It signals an existing daemon through IPC but never
 // installs or starts one.
-func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) error {
+func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) (err error) {
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
 		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
 			return nil
 		}
 		return err
+	}
+	if crid.Validate(id) == nil {
+		// A deleted share's link limits are never used again; forgetting them
+		// never blocks the cleanup below, and callers report a cleanup error
+		// as a warning after the committed delete.
+		defer func() { err = errors.Join(err, forgetLinkLimits(ctx, stateDir, id)) }()
 	}
 	registry, local, err := findDeletedLocalShare(ctx, opts, stateDir, id)
 	if err != nil {
@@ -201,17 +258,23 @@ func retireDeletedConnectorBinding(ctx context.Context, stateDir, id string, loc
 // confirmDelete asks on the terminal. Without a terminal it refuses instead
 // of hanging a pipeline: non-interactive deletion requires --yes.
 func confirmDelete(opts *globalOpts, id string) (bool, error) {
+	return confirmOnTerminal(opts, "delete", fmt.Sprintf("Delete %s? This cannot be undone. [y/N] ", id))
+}
+
+// confirmOnTerminal asks prompt and reads a yes; without a terminal it refuses
+// instead of hanging a pipeline, so non-interactive runs require --yes.
+func confirmOnTerminal(opts *globalOpts, action, prompt string) (bool, error) {
 	if !opts.streams.InIsTTY {
 		return false, exitcode.UsageError(errors.New(msgNeedsYes))
 	}
 	// The prompt is conversation, not data: it goes to stderr.
-	if _, err := fmt.Fprintf(opts.streams.Err, "Delete %s? This cannot be undone. [y/N] ", id); err != nil {
+	if _, err := fmt.Fprint(opts.streams.Err, prompt); err != nil {
 		return false, err
 	}
 	scanner := bufio.NewScanner(opts.streams.In)
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
-			return false, fmt.Errorf("read delete confirmation: %w", err)
+			return false, fmt.Errorf("read %s confirmation: %w", action, err)
 		}
 		return false, nil
 	}

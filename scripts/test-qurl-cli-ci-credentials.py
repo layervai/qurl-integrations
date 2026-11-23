@@ -53,6 +53,7 @@ class FakeAPI:
                 "description": "qurl CLI journey v2 resource 1231/2/host",
                 "resource_id": "r_customer_ci",
                 "status": "active",
+                "type": "url",
                 "target_url": "https://example.com/?qurl-private-sandbox-device-journey=1",
             },
             {
@@ -241,11 +242,17 @@ class FakeAPI:
                 row = self.connector_resources.get(query["slug"][0])
                 return 200, json.dumps({"data": [] if row is None else [row]}).encode()
             self.resource_inventory_requests += 1
-            assert query == {"limit": [str(credentials.INVENTORY_PAGE_SIZE)]}
+            assert query == {
+                "limit": [str(credentials.INVENTORY_PAGE_SIZE)],
+                "type": ["url"],
+            }
             return (
                 200,
                 json.dumps(
-                    {"data": self.resources, "meta": {"has_more": False}}
+                    {
+                        "data": [row for row in self.resources if row["type"] == "url"],
+                        "meta": {"has_more": False},
+                    }
                 ).encode(),
             )
         if parsed.path.startswith("/v1/resources/") and method == "DELETE":
@@ -654,6 +661,24 @@ def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_ru
         assert fake.identity_checks == 1
         assert fake.api_key_inventory_requests == 1
         assert fake.resource_inventory_requests == 1
+
+
+def test_identity_failure_reports_only_http_status() -> None:
+    secret_canary = "private-response-token-owner-url"
+    with mock.patch.object(
+        credentials,
+        "request",
+        return_value=(401, json.dumps({"error": secret_canary}).encode()),
+    ) as request:
+        try:
+            credentials.identity("https://example.com", "private-token")
+        except credentials.CredentialError as exc:
+            assert str(exc) == "qURL identity check failed (HTTP 401)"
+            assert secret_canary not in str(exc)
+            assert "private-token" not in str(exc)
+        else:
+            raise AssertionError("failed identity response was accepted")
+        assert request.call_count == 1
 
 
 def test_pair_rejects_invalid_input_before_authentication() -> None:
@@ -1172,6 +1197,24 @@ def read_inventory() -> list[dict[str, object]]:
         status_filter=None,
         deadline=time.monotonic() + 60,
     )
+
+
+def test_resource_inventory_rejects_a_wrong_type() -> None:
+    with mock.patch.object(credentials, "request", return_value=(200, inventory_page([{"type": "tunnel"}]))):
+        try:
+            credentials.paged_rows(
+                "https://sandbox.example",
+                "automation_key",
+                "/v1/resources",
+                "qURL resource cleanup",
+                status_filter=None,
+                resource_type="url",
+                deadline=time.monotonic() + 60,
+            )
+        except credentials.CredentialError as exc:
+            assert "did not honor the resource type" in str(exc)
+        else:
+            raise AssertionError("resource inventory accepted an unexpected type")
 
 
 def test_a_page_of_rows_has_the_bound_of_a_page() -> None:
@@ -1996,6 +2039,7 @@ def main() -> None:
     test_scheduled_soak_workflow_contract()
     test_pair_and_batch_each_validate_one_automation_key()
     test_batch_rejects_invalid_input_before_authentication_and_attempts_every_run()
+    test_identity_failure_reports_only_http_status()
     test_pair_rejects_invalid_input_before_authentication()
     test_pair_failure_revokes_both_exact_keys_with_the_same_token()
     test_pair_first_create_failure_never_mints_a_recovery_key()
@@ -2003,6 +2047,7 @@ def main() -> None:
     test_automation_key_identity_and_lifetime_fail_closed()
     test_bounded_valid_pagination()
     test_a_page_of_rows_has_the_bound_of_a_page()
+    test_resource_inventory_rejects_a_wrong_type()
     test_pagination_safety_limits_fail_closed()
     test_reconciliation_reserves_time_for_resource_inventory()
     test_connector_cleanup_lookup_fails_closed()

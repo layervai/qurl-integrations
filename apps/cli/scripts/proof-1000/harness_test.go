@@ -137,8 +137,9 @@ func TestManifestPersistsAndResumes(t *testing.T) {
 func TestCollectDaemonLogsFiltersWindowAndNeedles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	stamp := func(at time.Time) string { return at.Local().Format(daemonLogTimeLayout) }
-	now := time.Now()
+	stamp := func(at time.Time) string { return "time=" + at.Format(time.RFC3339Nano) }
+	// Timestamp digits must not count as throttling evidence.
+	now := time.Date(2026, time.November, 1, 12, 0, 0, 429000000, time.UTC)
 	lines := []string{
 		stamp(now.Add(-2*time.Hour)) + " WARN old line crid=abc",
 		stamp(now.Add(-time.Minute)) + " WARN share daemon session attempt failed; retrying crid=abc error=\"denied (errCode=\\\"52005\\\")\"",
@@ -574,7 +575,7 @@ func TestPublishRetryExhaustionIsATerminalFailure(t *testing.T) {
 	if r.Passed || !strings.Contains(strings.Join(r.Verdict, "\n"), "requested shares") {
 		t.Fatalf("verdict = %v", r.Verdict)
 	}
-	if _, all := waitAllServing(context.Background(), nil, env.SocketPath, time.Now(), time.Minute, time.Second, func(statusSample) {}); all {
+	if _, all := waitAllServing(context.Background(), nil, env.StateDir, env.SocketPath, time.Now(), time.Minute, time.Second, func(statusSample) {}); all {
 		t.Fatal("an empty resource set must never be all serving")
 	}
 }

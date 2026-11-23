@@ -28,8 +28,7 @@ type Error struct {
 	// InvalidFields maps field names to what is wrong with them, when the
 	// problem document carried per-field validation errors.
 	InvalidFields map[string]string
-	// RetryAfter is the server-requested wait in seconds for 429 responses
-	// that survived the transport's bounded retry, 0 when absent.
+	// RetryAfter is the server-requested wait in seconds, 0 when absent or invalid.
 	RetryAfter uint64
 	// RequestID correlates the failure with server logs, when provided.
 	RequestID string
@@ -91,7 +90,7 @@ func (e *Error) ShareNotFound() bool {
 func CustomerMessages() []string {
 	return []string{
 		msgPreviewFileSize, msgPreviewFileType, msgPreviewStillSize, msgPreviewUploadAddress, msgPreviewUploadTransport, msgPreviewUploadStatus,
-		errTemplate, msgAccountCallbackInvalid, msgAccountCallbackComplete, msgAccountLoadFailed, msgAccountUnavailable, msgAccountPortBusy, msgAccountBrowserFailed, msgAccountTimedOut, msgAccountCanceled, msgAccountExchangeFailed, msgAccountHTTPSRequired, msgAccountLinkInvalid, msgAccountOwnersInvalid,
+		errTemplate, accountSignInPageHTML, msgAccountCanceledPage, msgAccountCallbackInvalid, msgAccountCallbackComplete, msgAccountLoadFailed, msgAccountUnavailable, msgAccountPortBusy, msgAccountBrowserFailed, msgAccountTimedOut, msgAccountCanceled, msgAccountExchangeFailed, msgAccountHTTPSRequired, msgAccountLinkInvalid, msgAccountOwnersInvalid,
 		msgPublishAccessConflict, msgPublishExistingPublic, msgPublishExistingPrivate, msgPublishOtherDevices, msgPublishAccessDiffers,
 		msgPrivateUnconfirmed, msgPublicUnconfirmed, msgUnaskedPublicDeleted, msgUnaskedPublicNotDeleted,
 		msgGrantEditUnconfirmed,
@@ -101,6 +100,9 @@ func CustomerMessages() []string {
 		msgRequestCodeNotFound, msgRequestDeviceNotFound, msgDeviceIDNotFound, msgDeviceIDsNotFound, msgRemovedThenNotFound, msgRemovedThenFailed,
 		msgRemovedThenKeysFailed, msgRemovedThenUnexplained, msgRemovedThenListNotRead, msgRemovedButStillListed, msgAnsweredButStillListed, msgRemovalListMissingAfter, msgRemovalListNeverSaid, msgNothingMoreFromService,
 		msgStillHasAccess, msgStillHaveAccess, msgSeeWhoHasAccess, msgApprovedPersonNotFound, msgRemovalUnconfirmed, msgRemovalListNotSaid,
+		msgOriginHeaderNameLength, msgOriginHeaderNameToken, msgOriginHeaderNameReserved,
+		msgOriginHeaderValueLength, msgOriginHeaderValueUTF8, msgOriginHeaderValueSpace, msgOriginHeaderValueControl,
+		msgOriginHeaderMismatch, msgOriginHeaderUnconfirmed, msgOriginHeaderChangeUnconfirmed,
 	}
 }
 
@@ -726,6 +728,8 @@ const (
 )
 
 const msgAccountCallbackInvalid = "Invalid sign-in response."
+const msgAccountCanceledPage = "Account sign-in was canceled. You can close this tab."
+
 const msgAccountCallbackComplete = "Return to qURL to finish sign-in. You can close this tab."
 
 // Account sign-in failures retain stable exit classes for scripts.

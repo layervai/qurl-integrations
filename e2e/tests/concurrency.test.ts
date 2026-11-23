@@ -107,8 +107,8 @@ describe('Concurrency: Parallel Access', () => {
     // on helpers/qurl-api.ts's mintLink. Racing real knocks would need
     // ten parallel browsers; the single-consumption guarantee itself is
     // pinned knock-driven in file-revoke.test.ts ("a consumed one-time
-    // link does not serve a second knock"), and URL-target knock
-    // coverage is #951. This management coherence check depends on terminal-token
+    // link does not serve a second knock") and url-target-one-time.test.ts.
+    // This management coherence check depends on terminal-token
     // retention in the preview.
     // TODO(upstream-contract): layervai/qurl-service#1233 tracks that behavior.
     // The summary must resolve and its use_count must stay coherent.

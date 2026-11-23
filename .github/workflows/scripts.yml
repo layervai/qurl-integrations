@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: scripts-${{ github.head_ref || github.ref_name }}
+  group: scripts-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -49,6 +49,14 @@ jobs:
       - name: shellcheck
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: shellcheck scripts/*.sh
+
+      - name: Test S3 origin default release check
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 scripts/test-check-s3-origin-default.py
+
+      - name: Test signed public CLI proof staging
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 scripts/test-stage-public-cli-proof.py
 
       - name: Test install.sh
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

@@ -23,8 +23,8 @@ const path = require('node:path');
 const FIELD_VALUE_MAX = 1024;
 const FIELD_COUNT_MAX = 25;
 const TOTAL_EMBED_MAX = 6000;
-// Leave 500 chars of headroom for title + description + footer +
-// JSON envelope; trip the budget while building fields, not after.
+// Reserve 500 characters for the truncation note and payload headroom.
+// Title, description, run link, and footer are counted below.
 const FIELDS_BUDGET = TOTAL_EMBED_MAX - 500;
 const MAX_FAILING_TESTS_PER_FILE = 5;
 const COLOR_GREEN = 0x2ecc71;
@@ -72,13 +72,14 @@ function footerText() {
  * @returns {{ name: string, value: string }}
  */
 function buildField(suite) {
+  // shortcut: basenames identify our flat test directory; use rootDir-relative names when nesting suites.
   const file = path.basename(suite.testFilePath);
   // TODO(upstream-contract): Jest TestResult.testResults remains one entry per
   // assertion and testExecError remains the per-file execution-failure signal.
   // Jest has no per-file `numTotalTests`; that field is aggregate-only.
   // Every assertion, including pending/todo entries, is present in
   // `testResults`, so its length is the per-file equivalent.
-  // Using pass+fail here would make `3 passes + 1 it.skip` render 3/3.
+  // Count skipped assertions separately from the pass/fail denominator.
   const total = suite.testResults.length;
   const ran = suite.numPassingTests + suite.numFailingTests;
   const skipped = total - ran;
@@ -94,7 +95,9 @@ function buildField(suite) {
     ? '❌'
     : suite.numPassingTests > 0 ? '✅' : '⚠️';
   const skippedSuffix = skipped > 0 ? ` ⏭ ${skipped}` : '';
-  let value = `${icon} ${suite.numPassingTests}/${total}${skippedSuffix}`;
+  let value = ran > 0
+    ? `${icon} ${suite.numPassingTests}/${ran}${skippedSuffix}`
+    : `${icon} 0 ran${skippedSuffix}`;
   const details = [];
 
   if (hasExecError) {
@@ -112,7 +115,9 @@ function buildField(suite) {
     details.push(...failing);
     if (overflow > 0) details.push(`• … and ${overflow} more`);
   }
-  if (details.length > 0) value = `${value}\n${details.join('\n')}`.slice(0, FIELD_VALUE_MAX);
+  // Avoid leaving half of a UTF-16 surrogate pair at the field boundary.
+  if (details.length > 0) value = `${value}\n${details.join('\n')}`
+    .slice(0, FIELD_VALUE_MAX).replace(/[\uD800-\uDBFF]$/, '');
 
   return { name: file, value };
 }
@@ -167,8 +172,14 @@ function buildEmbed(results) {
   // they originate in our own test code, not user input — Discord
   // embeds don't render markdown the way messages do, so this is the
   // intended trust boundary.
+  const footer = footerText();
+  // Run URL belongs in the description, not the footer — Discord
+  // doesn't linkify footer text.
+  const url = runUrl();
+  const linkLine = url ? `\n[View run on GitHub](${url})` : '';
+
   const fields = [];
-  let usedChars = title.length + description.length + footerText().length;
+  let usedChars = title.length + description.length + footer.length + linkLine.length;
   for (const suite of results.testResults) {
     if (fields.length >= FIELD_COUNT_MAX) break;
     const field = buildField(suite);
@@ -180,17 +191,13 @@ function buildEmbed(results) {
   const truncated = results.testResults.length - fields.length;
   const truncatedNote = truncated > 0 ? ` (showing ${fields.length}/${results.testResults.length} files)` : '';
 
-  // Run URL belongs in the description, not the footer — Discord
-  // doesn't linkify footer text.
-  const url = runUrl();
-  const linkLine = url ? `\n[View run on GitHub](${url})` : '';
 
   return {
     title,
     description: description + truncatedNote + linkLine,
     color,
     fields,
-    footer: { text: footerText() },
+    footer: { text: footer },
     // Run-start time, not post time — matches what's on the GH run page.
     timestamp: new Date(results.startTime).toISOString(),
   };
@@ -228,7 +235,7 @@ async function postEmbed(embed) {
       );
     }
   } catch (err) {
-    const isAbort = err instanceof Error && err.name === 'AbortError';
+    const isAbort = controller.signal.aborted || (err instanceof Error && err.name === 'AbortError');
     const msg = isAbort
       ? `timeout after ${POST_TIMEOUT_MS}ms`
       : err instanceof Error ? err.message : String(err);
@@ -239,8 +246,6 @@ async function postEmbed(embed) {
 }
 
 class DiscordReporter {
-  constructor(_globalConfig, _reporterOptions) {}
-
   async onRunComplete(_contexts, results) {
     try {
       const embed = buildEmbed(results);

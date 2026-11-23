@@ -23,9 +23,7 @@ func TestLoginValidatesAndEnrolls(t *testing.T) {
 	}
 
 	requests := srv.Requests()
-	if len(requests) != 1 || requests[0].Method != http.MethodGet || requests[0].Path != "/v1/me" {
-		t.Fatalf("expected exactly one GET /v1/me, got %+v", requests)
-	}
+	assertLoginIdentityAndRuleRead(t, requests, testAPIKey)
 	if got := requests[0].Header.Get("Authorization"); got != "Bearer "+testAPIKey {
 		t.Errorf("login must validate the just-typed key, sent %d bytes", len(got))
 	}
