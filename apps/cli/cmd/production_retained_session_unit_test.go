@@ -98,7 +98,7 @@ func TestProductionRetainedSessionReadinessKeepsOriginalGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability"})
+	request.AddCookie(&http.Cookie{Name: "qurl_vsession", Value: "original-capability", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	calls := 0
 	transport := retainedSessionRoundTrip(func(r *http.Request) (*http.Response, error) {
 		calls++
@@ -159,7 +159,7 @@ func TestProductionRetainedSessionReadinessStopsOnCancellation(t *testing.T) {
 		return nil, io.EOF
 	})
 	if err := productionWaitRetainedSession(ctx, request, "marker", transport); !errors.Is(err, context.Canceled) || calls != 1 {
-		t.Fatalf("cancelled readiness = %v, calls = %d", err, calls)
+		t.Fatalf("canceled readiness = %v, calls = %d", err, calls)
 	}
 }
 
