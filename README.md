@@ -18,7 +18,7 @@ extension for Chrome and Edge, and the Microsoft Teams integration source.
 | --- | --- |
 | Share a local app with one reviewer | `qurl publish http://127.0.0.1:3000 --access invite_only`, then `qurl access invite <CRID> --email ana@example.com` |
 | See who you invited and who is in | `qurl access list_invitations <CRID>` · `qurl access list_grants <CRID>` |
-| Take one person's access away | `qurl access revoke_grant <CRID> <decision-id>` |
+| Take one person's access away | `qurl access revoke_grant <CRID> <decision-id> --version <current-version>` |
 | Turn the app off and back on | `qurl stop <CRID>` · `qurl start <CRID>` |
 | Let your coding agent do the sharing | Add the [qURL agent skill](apps/cli/README.md#let-a-coding-agent-share-your-app) |
 
@@ -29,6 +29,9 @@ brew install layervai/tap/qurl
 qurl publish http://127.0.0.1:3000 --access invite_only
 qurl access invite <CRID> --email ana@example.com
 ```
+
+For access removal, read the decision ID and current version from
+`qurl access list_grants <CRID>` first.
 
 `publish` prints the app's CRID. No account or API key is needed. The
 [CLI guide](apps/cli/README.md) covers Windows, other installs, and every
