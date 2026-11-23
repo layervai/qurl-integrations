@@ -19,6 +19,9 @@ qURL closes any other public route to your app.
 Have a CLI-enabled AI agent with its own device identity? You can use the
 [agent review](agent-review.md) instead; it does not require a second person.
 
+For a Python API, use the [FastAPI request-counter example](fastapi/). It checks
+unapproved, approved and revoked device access with a disposable app.
+
 ## Before you start
 
 Use Python 3.7 or later and the [qURL CLI](../../apps/cli/README.md#install), version 4.4.3
