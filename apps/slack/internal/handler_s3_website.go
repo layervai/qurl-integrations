@@ -20,7 +20,7 @@ import (
 const (
 	// TODO(upstream-contract): keep this digest in lockstep with the
 	// origins/s3-static-connector image promoted for Slack S3 website installs.
-	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:5b47bdd2e66f2f0692971d15f05bb24b07a41e30a3d52449d45935fa5d8e823f"
+	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:5ec69eff39f61721dac6e4251c01da0059bb69f97d0102c5bb1579b51c4b6820"
 	defaultS3WebsiteDescription   = "Slack qURL Connector install for S3 website"
 	defaultS3WebsiteIndexDocument = "index.html"
 	// TODO(upstream-contract): keep in lockstep with
