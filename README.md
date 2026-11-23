@@ -9,10 +9,14 @@ is: the CLI connects out to LayerV, so there is no port to open and nothing to
 deploy. You invite people by email, and only they get in. Each one clicks the
 invitation and confirms their email. They install nothing.
 
+Keep the app running. Its own sign-in still applies. Protecting an existing
+remote URL through qURL does not close any separate public route to that URL.
+
 This repository holds the qURL CLI, qURL for Slack and Discord, the Gmail
 extension for Chrome and Edge, and the Microsoft Teams integration source.
+Teams deployment is managed separately; the source does not establish a public rollout.
 
-## What you can do in two minutes
+## Quick start
 
 | You want to… | How |
 | --- | --- |
@@ -22,7 +26,7 @@ extension for Chrome and Edge, and the Microsoft Teams integration source.
 | Turn the app off and back on | `qurl stop <CRID>` · `qurl start <CRID>` |
 | Let your coding agent do the sharing | Add the [qURL agent skill](apps/cli/README.md#let-a-coding-agent-share-your-app) |
 
-On macOS or Linux, install the CLI and share the app on port 3000:
+With Homebrew on macOS or Linux, install the CLI and share the app on port 3000:
 
 ```bash
 brew install layervai/tap/qurl
@@ -81,6 +85,9 @@ protected resources. Start with the guide for the task you want to complete:
 [Product overview](https://layerv.ai/qurl/) · [Private links](https://qurl.link/)
 
 ## Share a localhost web app
+
+This flow creates a short-lived access link that anyone holding it can use.
+For email-verified invitations, use the [quick start](#quick-start) above.
 
 For example, let a teammate review a preview running on your laptop without
 deploying a staging server. Your app stays on your machine; the CLI runs the
