@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -75,14 +74,14 @@ func TestExternalLoginEnrollsFreshNamespaceFromTheTokenFile(t *testing.T) {
 	providerCalls := 0
 	res := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "login", "--enrollment-token-file", tokenPath},
-		env:           externalLoginEnv(connectorstate.EnvRuntimeSupervision, string(connectorstate.RuntimeSupervisionExternal)),
+		env:           externalLoginEnv(connectorstate.EnvRuntimeSupervision, string(connectorstate.RuntimeSupervisionExternal), clientProductEnv, "qurl-desktop/1.2.3"),
 		shareStateDir: stateDir,
 		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 			if err := connectorstate.RequireRuntimeSupervision(stateDir, connectorstate.RuntimeSupervisionExternal); err != nil {
 				t.Fatalf("runtime opened before the external policy was established: %v", err)
 			}
 			if cfg.StateDir != stateDir || cfg.ClientBaseURL != srv.URL || cfg.AgentID != connectorstate.ConfiguredAgentID() ||
-				cfg.Hostname == "" || cfg.Version != "test" || cfg.RefreshMode != connectorRefreshModeAuto ||
+				cfg.Hostname == "" || cfg.Version != "test+desktop" || cfg.RefreshMode != connectorRefreshModeAuto ||
 				cfg.EnrollmentCredential != "" || cfg.EnrollmentCredentialProvider == nil || cfg.RecoveryCredentialProvider != nil {
 				t.Fatalf("external native runtime config = %+v", cfg)
 			}
@@ -125,10 +124,7 @@ func TestExternalLoginEnrollsFreshNamespaceFromTheTokenFile(t *testing.T) {
 		t.Fatalf("external login wrote a plaintext agent state envelope: %v", err)
 	}
 	requests := srv.Requests()
-	if len(requests) != 1 || requests[0].Method != http.MethodGet || requests[0].Path != "/v1/me" ||
-		requests[0].Header.Get("Authorization") != "Bearer "+state.DeviceAPIKey {
-		t.Fatalf("external login requests = %+v, want one device-authenticated GET /v1/me", requests)
-	}
+	assertLoginIdentityAndRuleRead(t, requests, state.DeviceAPIKey)
 	mustNotLeakEnrollmentToken(t, srv, res)
 	if !strings.Contains(res.stderr.String(), apitest.MeOwnerID) {
 		t.Fatalf("login confirmation = %q, want the owner id", res.stderr.String())
@@ -190,9 +186,7 @@ func TestExternalLoginWarmRunNeverReadsTheTokenFile(t *testing.T) {
 		t.Fatalf("warm login rewrote the owner binding: %v", err)
 	}
 	requests := srv.Requests()
-	if len(requests) != 1 || requests[0].Header.Get("Authorization") != "Bearer "+state.DeviceAPIKey {
-		t.Fatalf("warm external login requests = %+v, want one device-authenticated request", requests)
-	}
+	assertLoginIdentityAndRuleRead(t, requests, state.DeviceAPIKey)
 }
 
 // TestOpenNativeExternalRegisteredClientKeepsHandedOffStore pins that the
@@ -436,9 +430,7 @@ func TestExternalLoginWarmRealRuntimeOpensSealedStateWithoutToken(t *testing.T) 
 		t.Fatalf("real warm login exit=%d stderr=%s", res.code, res.stderr.String())
 	}
 	requests := srv.Requests()
-	if len(requests) != 1 || requests[0].Header.Get("Authorization") != "Bearer "+state.DeviceAPIKey {
-		t.Fatal("warm login did not use the saved device credential")
-	}
+	assertLoginIdentityAndRuleRead(t, requests, state.DeviceAPIKey)
 	if _, err := os.Stat(filepath.Join(stateDir, connectoragentstate.AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("plaintext agent state exists: %v", err)
 	}

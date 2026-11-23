@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
@@ -80,6 +81,9 @@ type globalOpts struct {
 	// openBrowser launches the user's browser at an already-verified link;
 	// tests inject a recorder so no real browser ever starts under test.
 	openBrowser func(ctx context.Context, link string) error
+	// readHidden reads one line from the terminal without echo, for a
+	// secret typed at a prompt; tests inject the typed text.
+	readHidden func() ([]byte, error)
 	// Browser authentication is injected separately from command wiring tests.
 	signInAccount func(context.Context, *qurlapi.Config, func(context.Context, string) error) (string, error)
 	// httpClient is the HTTP client every qURL API client sends with. Nil is
@@ -149,6 +153,9 @@ type globalOpts struct {
 	newShareDaemon       func(string, string) (shareDaemonController, error)
 	preflightTarget      func(context.Context, string, int) error
 	resolveShareStateDir func(string) (string, error)
+	pendingTermsNotice   string
+	termsNoticeHandled   bool
+	saveTermsNotice      func()
 	resolveLocalResource localResourceResolver
 	resolveHubBootstrap  func() (qurl.HubBootstrap, error)
 	resolveSessionConfig func(string) (connectorshare.NativeSessionOperationAuthority, error)
@@ -296,7 +303,7 @@ automatically. Use "qurl account setup" to enable recovery and other devices.
 Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		Example: "  qurl publish http://127.0.0.1:3000\n" +
 			"  qurl get " + exampleCRID + "\n" +
-			"  qurl publish https://api.example.com/reports",
+			"  qurl publish https://api.example.com/reports --name \"Reports API\"",
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -354,6 +361,7 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 
 	cmd.AddCommand(
 		accountCmd(opts),
+		rulesCmd(opts),
 		publishCmd(opts),
 		shareCmd(opts),
 		grantsCmd(opts),
@@ -375,6 +383,8 @@ Existing accounts can still use "qurl login" or QURL_API_KEY for enrollment.`,
 		whoamiCmd(opts),
 		publisherCmd(opts),
 		previewCmd(opts),
+		originHeaderCmd(opts),
+		identityCmd(opts),
 		requestCmd(opts),
 		versionCmd(opts),
 		completionCmd(),
@@ -436,6 +446,9 @@ func (o *globalOpts) applyDefaults() {
 	if o.openBrowser == nil {
 		launcher := &consume.Launcher{LookupEnv: o.lookupEnv, GOOS: runtime.GOOS}
 		o.openBrowser = launcher.Open
+	}
+	if o.readHidden == nil {
+		o.readHidden = readTerminalHidden
 	}
 	o.applyLinkDefaults()
 	if o.redirectFRPLogs == nil {
@@ -566,7 +579,9 @@ func (o *globalOpts) requireRuntimeSupervisionIfNamespace() error {
 
 // printer builds the per-invocation Printer from the resolved settings.
 func (o *globalOpts) printer() *output.Printer {
-	return output.New(o.streams, o.resolvedFormat, o.quiet, o.outColor, o.ascii, o.now)
+	printer := output.New(o.streams, o.resolvedFormat, o.quiet, o.outColor, o.ascii, o.now)
+	printer.TermsNotice = o.pendingTermsNotice
+	return printer
 }
 
 // insecureEndpointWarning returns a warning when the endpoint would carry an
@@ -698,6 +713,36 @@ func (o *globalOpts) resolveClientProduct() string {
 		log("ignoring invalid %s: expected %s", clientProductEnv, qurlapi.ClientProductRule)
 	}
 	return ""
+}
+
+// maxAgentRegistrationVersionRunes is the service's limit, in runes, on the
+// agent registration version.
+const maxAgentRegistrationVersionRunes = 64
+
+// agentRegistrationVersion appends the host product to the CLI version as
+// SemVer build metadata in the agent registration version: +cli without a
+// host product, +desktop for qURL Desktop, +other for any other host. An
+// overlong result keeps the bare version.
+//
+// TODO(upstream-contract): qurl-service caps this field at
+// maxAgentRegistrationVersionRunes and recognizes the desktop, cli, and other
+// identifiers.
+func agentRegistrationVersion(version, clientProduct string) string {
+	host := "other"
+	switch name, _, _ := strings.Cut(clientProduct, "/"); name {
+	case "":
+		host = "cli"
+	case "qurl-desktop":
+		host = "desktop"
+	}
+	sep := "+"
+	if strings.Contains(version, "+") {
+		sep = "."
+	}
+	if tagged := version + sep + host; utf8.RuneCountInString(tagged) <= maxAgentRegistrationVersionRunes {
+		return tagged
+	}
+	return version
 }
 
 // apiConfig is the transport configuration every API client shares. Build
@@ -987,7 +1032,7 @@ func (o *globalOpts) openNativeRegisteredClient(
 		AgentID:                      connectorstate.ConfiguredAgentID(),
 		Hub:                          hubBootstrap,
 		Hostname:                     hostname,
-		Version:                      o.version,
+		Version:                      agentRegistrationVersion(o.version, o.resolvedClientProduct),
 		ClientBaseURL:                origin,
 		EnrollmentCredentialProvider: bootstrap.enrollmentCredential,
 		RecoveryCredentialProvider:   bootstrap.recoveryCredential,
@@ -1070,7 +1115,7 @@ func (o *globalOpts) openNativeExternalRegisteredClient(
 		AgentID:                      connectorstate.ConfiguredAgentID(),
 		Hub:                          hubBootstrap,
 		Hostname:                     hostname,
-		Version:                      o.version,
+		Version:                      agentRegistrationVersion(o.version, o.resolvedClientProduct),
 		ClientBaseURL:                origin,
 		EnrollmentCredentialProvider: enroll,
 		RecoveryCredentialProvider:   recovery,
