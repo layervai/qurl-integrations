@@ -1850,3 +1850,22 @@ func TestHandleGet_DMWithRuleCarriesRuleNotice(t *testing.T) {
 		t.Errorf("DM fallback = %q, want the One-time link notice", dmText)
 	}
 }
+
+func TestGetClientSanitizesAuthFailureLog(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+	h := &Handler{cfg: Config{AuthProvider: failingAuthProvider{err: errors.New("backend\r\nforged entry")}}}
+	c, err := h.getClient(t.Context(), log, testAdminTeamID)
+	if c != nil || err == nil || err.Error() != authFailureMessage {
+		t.Fatalf("auth failure = %v, %v", c, err)
+	}
+	var entry struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Error != `backend\r\nforged entry` {
+		t.Fatalf("log error = %q, want escaped control bytes", entry.Error)
+	}
+}

@@ -543,7 +543,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 func (h *Handler) getClient(ctx context.Context, log *slog.Logger, teamID string) (*client.Client, error) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("get: API key lookup failed", "error", err)
+		log.Error("get: API key lookup failed", "error", sanitizeLogValue(err.Error()))
 		return nil, &userError{msg: authErrorMessage(err)}
 	}
 	return c, nil
