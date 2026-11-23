@@ -31,12 +31,16 @@ func validateSandboxDeletedCommandResult(name string, gotCode int, stdout, stder
 }
 
 // sandboxSharePublisherNotice is the exact shape of the one line a piped
-// `qurl share` writes to stderr: the publisher notice, always UNVERIFIED
-// because no publisher can be verified, with an optional creation date. The
+// `qurl share` writes to stderr: the unverified publisher notice, with an
+// optional creation date. The
 // name is the publisher's quoted, escaped text; a sandbox running a service
 // that predates publisher metadata reports no name and no date.
 var sandboxSharePublisherNotice = regexp.MustCompile(
 	`^Warning: UNVERIFIED publisher(?:, no name provided \(not confirmed by LayerV\)| "(?:[^"\\[:cntrl:]]|\\.)*" \(self-declared name, not confirmed by LayerV\))\.(?: Created [0-9]{4}-[0-9]{2}-[0-9]{2}\.)?\n$`,
+)
+
+var sandboxVerifiedPublisherNotice = regexp.MustCompile(
+	`^Publisher (?:"(?:[^"\\[:cntrl:]]|\\.)*" \(verified by LayerV\)|no name provided, verified by LayerV)\.(?: Created [0-9]{4}-[0-9]{2}-[0-9]{2}\.)?\n$`,
 )
 
 // validateSandboxShareCommandResult holds the piped share contract: stdout is
@@ -44,7 +48,7 @@ var sandboxSharePublisherNotice = regexp.MustCompile(
 // other stderr - an environment-guard warning, a clamp note, a second line -
 // still fails. Like the deleted-result validator, the diagnostic reports only
 // lengths and fixed booleans.
-func validateSandboxShareCommandResult(name string, gotCode int, stdout, stderr string) (string, error) {
+func validateSandboxShareCommandResult(name string, gotCode int, stdout, stderr string, verified bool) (string, error) {
 	if gotCode != 0 {
 		return "", fmt.Errorf("%s = exit code %d, stdout %d bytes, stderr %d bytes; private details withheld", name, gotCode, len(stdout), len(stderr))
 	}
@@ -56,9 +60,13 @@ func validateSandboxShareCommandResult(name string, gotCode int, stdout, stderr 
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return "", fmt.Errorf("%s returned a non-HTTPS access link; private details withheld", name)
 	}
-	if !sandboxSharePublisherNotice.MatchString(stderr) {
-		return "", fmt.Errorf("%s wrote %d stderr bytes that are not exactly the UNVERIFIED publisher notice (contains UNVERIFIED: %t); private details withheld",
-			name, len(stderr), strings.Contains(stderr, "UNVERIFIED"))
+	notice := sandboxSharePublisherNotice
+	if verified {
+		notice = sandboxVerifiedPublisherNotice
+	}
+	if !notice.MatchString(stderr) {
+		return "", fmt.Errorf("%s wrote %d stderr bytes that are not exactly the expected publisher notice (verified: %t); private details withheld",
+			name, len(stderr), verified)
 	}
 	return link, nil
 }
@@ -95,7 +103,7 @@ func TestSandboxShareCommandDiagnosticWithholdsChildOutput(t *testing.T) {
 		"unnamed without date": "Warning: UNVERIFIED publisher, no name provided (not confirmed by LayerV).\n",
 		"escaped name":         "Warning: UNVERIFIED publisher \"Acme \\\"Docs\\\" \\u202e\" (self-declared name, not confirmed by LayerV).\n",
 	} {
-		link, err := validateSandboxShareCommandResult("share", 0, validLink+"\n", notice)
+		link, err := validateSandboxShareCommandResult("share", 0, validLink+"\n", notice, false)
 		if err != nil || link != validLink {
 			t.Fatalf("%s: valid share = link length %d, error %v", name, len(link), err)
 		}
@@ -145,7 +153,7 @@ func TestSandboxShareCommandDiagnosticWithholdsChildOutput(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := validateSandboxShareCommandResult("share", test.code, test.stdout, test.stderr)
+			_, err := validateSandboxShareCommandResult("share", test.code, test.stdout, test.stderr, false)
 			if err == nil {
 				t.Fatal("invalid share result was accepted")
 			}
@@ -155,5 +163,25 @@ func TestSandboxShareCommandDiagnosticWithholdsChildOutput(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSandboxShareVerifiedPublisherNotice(t *testing.T) {
+	for _, notice := range []string{
+		"Publisher \"LayerV\" (verified by LayerV). Created 2026-11-03.\n",
+		"Publisher \"LayerV\" (verified by LayerV).\n",
+		"Publisher no name provided, verified by LayerV.\n",
+	} {
+		if _, err := validateSandboxShareCommandResult("share", 0, "https://access.invalid/#secret\n", notice, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, notice := range []string{
+		"Warning: UNVERIFIED publisher, no name provided (not confirmed by LayerV).\n",
+		"Publisher \"LayerV\" (verified by LayerV).\nextra\n",
+	} {
+		if _, err := validateSandboxShareCommandResult("share", 0, "https://access.invalid/#secret\n", notice, true); err == nil {
+			t.Fatal("accepted wrong publisher status or extra output")
+		}
 	}
 }

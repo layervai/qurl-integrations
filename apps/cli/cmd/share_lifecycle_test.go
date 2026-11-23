@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -205,6 +206,8 @@ func (d *journeyDaemon) Ensure(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// JobController.Ensure reloads an existing daemon after durable intent changes.
+	d.manager.Trigger()
 	return nil
 }
 
@@ -2526,17 +2529,22 @@ func TestPublishTargetChangeReconcilesAmbiguousRestart(t *testing.T) {
 	}
 }
 
-// sharingRequests returns what one local publish sent after its first
-// request. The first is always the create request that states the resource's
-// privacy, and the test fails if it is anything else; the rest are the sharing
-// lifecycle requests these tests count.
+// sharingRequests verifies the initial resource create and returns the
+// subsequent requests, excluding the FRP close callback.
 func sharingRequests(t *testing.T, srv *apitest.Server) []apitest.RecordedRequest {
 	t.Helper()
 	requests := srv.Requests()
 	if len(requests) == 0 || requests[0].Method != http.MethodPost || requests[0].Path != "/v1/resources" {
 		t.Fatalf("local publish did not begin with the create request that states privacy: %#v", requests)
 	}
-	return requests[1:]
+	return slices.DeleteFunc(requests[1:], func(request apitest.RecordedRequest) bool {
+		// TODO(upstream-contract): FRP teardown sends this plugin callback to the shared mock.
+		if request.Method != http.MethodPost || request.Path != "/" {
+			return false
+		}
+		query, err := url.ParseQuery(request.Query)
+		return err == nil && query.Get("op") == "CloseProxy"
+	})
 }
 
 func sharingResponse(t *testing.T, srv *apitest.Server, desired string, epoch uint64, connection string) http.HandlerFunc {
@@ -3216,6 +3224,13 @@ func TestForegroundPublishServingTimeoutIsNotMaskedByDaemonCancellation(t *testi
 }
 
 func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) { runForegroundPublishCancellation(t, format) })
+	}
+}
+
+func runForegroundPublishCancellation(t *testing.T, format string) {
+	t.Helper()
 	srv := apitest.NewServer(t)
 	stateDir := foregroundLifecycleStateDir(t, "qurl-fg-")
 	registry, err := openOwnedTestShareRegistry(stateDir)
@@ -3230,15 +3245,17 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 	)
 	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", 1, "serving"))
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	started := make(chan struct{})
 	stopped := make(chan struct{})
 	done := make(chan *runResult, 1)
 	go func() {
 		done <- runCLI(t, &runOpts{
-			ctx:           ctx,
-			args:          []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000", "--foreground"},
-			env:           map[string]string{"QURL_API_KEY": testAPIKey},
-			shareRegistry: registry, shareStateDir: stateDir,
+			ctx:              ctx,
+			firstTermsNotice: true,
+			args:             []string{"--endpoint", srv.URL, "-o", format, "publish", "http://127.0.0.1:3000", "--foreground"},
+			env:              map[string]string{"QURL_API_KEY": testAPIKey},
+			shareRegistry:    registry, shareStateDir: stateDir,
 			preflightTarget:  func(context.Context, string, int) error { return nil },
 			localResource:    resolvedLocalResource(srv, false),
 			foregroundDaemon: foregroundIPCTestDaemon(started, stopped),
@@ -3260,6 +3277,22 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// The foreground command is still running: JSON must already be delivered
+	// and recorded, not delayed until this command exits on cancellation.
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		shown, err := connectorstate.TermsNoticeShown(stateDir, termsVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if shown {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("foreground notice was not recorded while serving")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	cancel()
 	var res *runResult
 	select {
@@ -3274,6 +3307,17 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 	case <-stopped:
 	default:
 		t.Fatal("foreground daemon was not joined before command returned")
+	}
+	if format == "json" {
+		var document map[string]any
+		if err := json.Unmarshal(res.stdout.Bytes(), &document); err != nil {
+			t.Fatal(err)
+		}
+		if document["terms_notice"] != termsNotice {
+			t.Fatal("foreground JSON lost notice")
+		}
+	} else if !strings.Contains(res.stderr.String(), termsNotice) {
+		t.Fatal("foreground text lost notice")
 	}
 	requests := sharingRequests(t, srv)
 	if len(requests) != 4 || requests[3].Method != http.MethodPut {

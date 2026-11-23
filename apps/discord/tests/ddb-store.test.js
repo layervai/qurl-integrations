@@ -96,6 +96,15 @@ describe('guild configs', () => {
     expect(input.ReturnValues).toBe('UPDATED_OLD');
   });
 
+  test('setGuildApiKey: refuses the write if encryption is unavailable', async () => {
+    mockEncryptStrict.mockImplementationOnce(() => {
+      throw new Error('KEY_ENCRYPTION_KEY is required');
+    });
+    await expect(store.setGuildApiKey('g-1', 'plain-key', 'admin', SETUP_VIA.PASTE))
+      .rejects.toThrow('KEY_ENCRYPTION_KEY is required');
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
   test('setGuildApiKey: audits when configured_by changes on an existing guild', async () => {
     ddbMock.on(UpdateCommand).resolves({ Attributes: {
       configured_by: 'old-admin',
