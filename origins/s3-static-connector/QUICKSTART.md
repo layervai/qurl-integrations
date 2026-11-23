@@ -154,8 +154,9 @@ Make both files readable by UID 65532; keep the token owner-only (`0400`).
 
 Set an explicit EFS file-system resource policy: the
 [default policy permits anonymous mount-target clients](https://docs.aws.amazon.com/efs/latest/ug/iam-access-control-nfs-efs.html).
-Require TLS and bind the task role's client actions to these
-[access-point ARNs](https://docs.aws.amazon.com/efs/latest/ug/access-points-iam-policy.html).
+Require TLS and scope client permissions to this file system, using
+[`elasticfilesystem:AccessPointArn` conditions](https://docs.aws.amazon.com/efs/latest/ug/access-points-iam-policy.html)
+for the three access points.
 Grant `elasticfilesystem:ClientMount` on all three and
 `elasticfilesystem:ClientWrite` only on state. Give the provisioning role the
 separate config/bootstrap write access needed for setup and token removal.
