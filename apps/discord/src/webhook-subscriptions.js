@@ -37,6 +37,8 @@ const OWNER_DISCOVERY_BUDGET_MS = 60_000;
 const QURL_PER_REQUEST_TIMEOUT_MS = 10_000;
 // Node/undici network error codes that are transient despite carrying a code.
 const TRANSIENT_NETWORK_CODE_RE = /^(E(CONNRESET|CONNREFUSED|TIMEDOUT|NOTFOUND|AI_AGAIN|PIPE)|UND_ERR_)/;
+// Process-local HMAC keeps diagnostic key fingerprints unlinkable across restarts.
+const pageBudgetFingerprintKey = crypto.randomBytes(32);
 const pageBudgetWarned = new Set();
 // Every error_code produced by the discovery walk, enumerable for runbooks and
 // alarms (resolution config codes and store codes are documented separately).
@@ -273,10 +275,10 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', requiredUrl = null
     // *_PAGE_CAP failure (orphaned subscriptions only accumulate; see #1380).
     // Once per subject+key per process: the refresh tick would otherwise
     // repeat it, while other guild keys keep their own early warning.
-    // Keyed by a short key digest (never the raw key) so empty early pages
+    // Keyed by a process-local key fingerprint (never the raw key) so empty early pages
     // (no owner yet) still warn once per distinct key.
     const budgetKey = page === OWNER_DISCOVERY_WARN_PAGE
-      ? `${subject}:${crypto.createHash('sha256').update(apiKey).digest('hex').slice(0, 16)}`
+      ? `${subject}:${crypto.createHmac('sha256', pageBudgetFingerprintKey).update(apiKey).digest('hex').slice(0, 16)}`
       : null;
     if (budgetKey && !pageBudgetWarned.has(budgetKey)) {
       // Coarse bound: forgets all entries at 1000 distinct subject+key pairs.
