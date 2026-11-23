@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.4.4](https://github.com/layervai/qurl-integrations/compare/v4.4.3...v4.4.4) (2026-11-18)
+
+
+### Bug Fixes
+
+* **cli:** return confirmed identity when local publish setup fails ([#2070](https://github.com/layervai/qurl-integrations/issues/2070)) ([bce911c](https://github.com/layervai/qurl-integrations/commit/bce911c97492e7da1b167f42f5beb4522d2f568b))
+
+## [4.4.3](https://github.com/layervai/qurl-integrations/compare/v4.4.2...v4.4.3) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cli:** document Go dependency verification for release builds ([#2060](https://github.com/layervai/qurl-integrations/issues/2060)) ([acbe159](https://github.com/layervai/qurl-integrations/commit/acbe15942be409337a674d1064e961f170c31e01))
+
 ## [4.4.2](https://github.com/layervai/qurl-integrations/compare/v4.4.1...v4.4.2) (2026-11-16)
 
 
