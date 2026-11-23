@@ -25,6 +25,9 @@ import (
 // --- pure-unit coverage ---
 
 func TestAdminGatedFor(t *testing.T) {
+	if !adminGatedFor(agent.ActionGet, "once") {
+		t.Fatal("rule selection must require admin status")
+	}
 	gated := map[agent.ActionKind]bool{
 		agent.ActionGet:              false,
 		agent.ActionInspect:          false,
@@ -36,7 +39,7 @@ func TestAdminGatedFor(t *testing.T) {
 		agent.ActionKind("mystery"):  true, // unknown kinds fail closed (gated)
 	}
 	for kind, want := range gated {
-		if got := adminGatedFor(kind); got != want {
+		if got := adminGatedFor(kind, ""); got != want {
 			t.Errorf("adminGatedFor(%q) = %v, want %v", kind, got, want)
 		}
 	}
@@ -2094,7 +2097,7 @@ func TestAgentConfirmCardRendersRuleLiterally(t *testing.T) {
 func confirmRuleGet(t *testing.T, rule string, saved ...map[string]any) (map[string]any, *confirmHarness) {
 	t.Helper()
 	names := defaultTestTableNames()
-	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
+	hc := newConfirmHarnessWithSeed(t, testAskerUserID, map[string][]map[string]ddbtypes.AttributeValue{
 		names.channelPolicy: {seedChannelPolicySet("T1", "D1", "", []string{testAgentGetResourceID})},
 	})
 	backend := qurlBackendServer(t)
@@ -2155,4 +2158,30 @@ func postedTexts(hc *confirmHarness) string {
 		texts = append(texts, p.text)
 	}
 	return strings.Join(texts, "\n")
+}
+
+func TestConfirm_RuleSelectionRechecksAdminBeforeClaim(t *testing.T) {
+	for _, mode := range []string{"member", "removed admin", "lookup failure"} {
+		t.Run(mode, func(t *testing.T) {
+			admin := "Uadmin"
+			if mode == "removed admin" {
+				admin = testAskerUserID
+			}
+			if mode == "lookup failure" {
+				admin = ""
+			}
+			hc := newConfirmHarness(t, admin)
+			id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Rule: "once", Asker: testAskerUserID, ChannelID: "C1"})
+			if mode == "removed admin" {
+				if err := hc.h.cfg.AdminStore.RemoveAdmin(context.Background(), "T1", testAskerUserID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", testAskerUserID, hc.respURL, id), id, true, time.Now())
+			replaced, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+			if replaced || hc.claimed(id) {
+				t.Fatal("unauthorized rule selection claimed the action")
+			}
+		})
+	}
 }

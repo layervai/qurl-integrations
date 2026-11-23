@@ -253,11 +253,14 @@ func (h *Handler) confirmDeliverable(prop *agent.Proposal) bool {
 // adminGatedFor is the SINGLE source of truth for whether an action needs an
 // admin re-check at confirm time, used both when snapshotting a proposal and at
 // click time. An unrecognized kind fails closed (gated). Get and inspect are the
-// only non-gated kinds: both are channel-member reads of a channel-reachable
+// only non-gated kinds when no rule is selected: both read a channel-reachable
 // resource (inspect reveals strictly less than the link get hands out), so both
 // match /qurl get's "any channel member" posture rather than the admin verbs.
-func adminGatedFor(kind agent.ActionKind) bool {
-	return kind != agent.ActionGet && kind != agent.ActionInspect
+func adminGatedFor(kind agent.ActionKind, rule string) bool {
+	if kind == agent.ActionGet {
+		return rule != ""
+	}
+	return kind != agent.ActionInspect
 }
 
 // askerOnly reports whether a kind may be approved ONLY by the member who requested
@@ -516,10 +519,10 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		return
 	}
 
-	// Admin re-gate, derived from the STORED ActionKind (never the wire), applied
+	// Admin re-gate, derived from the stored action and rule (never the wire), applied
 	// to BOTH Approve and Reject. A non-admin click is denied ephemerally and
 	// claims NOTHING, so an admin can still act on the pending action.
-	if adminGatedFor(pa.Action) {
+	if adminGatedFor(pa.Action, pa.Rule) {
 		if !h.requireAdminForClick(log, responseURL, teamID, payload.User.ID, agentConfirmAdminOnlyReply) {
 			return
 		}

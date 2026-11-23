@@ -1,8 +1,12 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"reflect"
@@ -189,6 +193,7 @@ const accessRulesPath = "/v1/me/access-rules"
 func ruleGet(t *testing.T, flags string, rules http.HandlerFunc) (reply string, mint map[string]any) {
 	t.Helper()
 	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	if rules != nil {
 		ts.addCustomer(http.MethodGet, accessRulesPath, rules)
@@ -362,5 +367,80 @@ func TestHandleGet_RuleSavedByID(t *testing.T) {
 	})
 	if mint == nil || mint["one_time_use"] != false {
 		t.Fatalf("by-ID mint = %v", mint)
+	}
+}
+
+func TestRuleSelectionRequiresWorkspaceAdmin(t *testing.T) {
+	for _, command := range []string{"get $tunnel", "crid " + testTunnelCRID} {
+		for _, actor := range []struct {
+			name, user       string
+			allowed, removed bool
+		}{
+			{name: "owner", user: testAdminOwnerID, allowed: true},
+			{name: "admin", user: testAdminUserID, allowed: true},
+			{name: "member", user: "UMEMBER001"},
+			{name: "removed admin", user: testAdminUserID, removed: true},
+		} {
+			t.Run(command+"/"+actor.name, func(t *testing.T) {
+				ts := newAdminTestServers(t)
+				ts.seedAdmin(t)
+				if actor.removed {
+					ts.seedNonAdmin(t)
+				}
+				ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel", []string{testTunnelResourceID})
+				var reads, mints atomic.Int32
+				var minted map[string]any
+				ts.addCustomer(http.MethodGet, accessRulesPath, func(w http.ResponseWriter, _ *http.Request) { reads.Add(1); writeAccessRules(t, w) })
+				ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, r *http.Request) {
+					mints.Add(1)
+					if err := json.NewDecoder(r.Body).Decode(&minted); err != nil {
+						t.Error(err)
+					}
+					writeCreateFixture(t, w, "https://qurl.link/admin-rule", testTunnelResourceID)
+				})
+				h := newAdminTestHandler(t, ts)
+				enableAdminStoreRateLimit(t, h, 1)
+				inv := newAdminSlashInvoker(t, h)
+				_, _, reply := inv.invokeAdminAsync(command+" rule:once", testAdminTeamID, actor.user)
+				if actor.allowed {
+					if reads.Load() != 1 || mints.Load() != 1 || !strings.Contains(reply, "https://qurl.link/admin-rule") {
+						t.Fatalf("allowed request: reads=%d mints=%d reply=%q", reads.Load(), mints.Load(), reply)
+					}
+					return
+				}
+				if reads.Load() != 0 || mints.Load() != 0 || !strings.Contains(reply, "owner or admin") {
+					t.Fatalf("denied request: reads=%d mints=%d reply=%q", reads.Load(), mints.Load(), reply)
+				}
+				_, _, reply = newAdminSlashInvoker(t, h).invokeAdminAsync(command, testAdminTeamID, actor.user)
+				if mints.Load() != 1 || reads.Load() != 0 || minted["one_time_use"] != true || minted["expires_in"] != resourceLinkExpiry || !strings.Contains(reply, "https://qurl.link/admin-rule") {
+					t.Fatalf("default sharing or quota changed: reads=%d mints=%d body=%v reply=%q", reads.Load(), mints.Load(), minted, reply)
+				}
+			})
+		}
+	}
+}
+
+func TestRuleSelectionAdminLookupFailureStopsBeforeMint(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprint("missing store ", missing), func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			h := newAdminTestHandler(t, ts)
+			if missing {
+				h.cfg.AdminStore = nil
+			} else {
+				ts.ddb.SetGetItemErr(ts.tableNames.workspace, errors.New("private admin lookup failure"))
+			}
+			var calls atomic.Int32
+			ts.addCustomer(http.MethodGet, accessRulesPath, func(w http.ResponseWriter, _ *http.Request) { calls.Add(1); writeAccessRules(t, w) })
+			ts.addCustomer(http.MethodPost, mintByTestTunnelPath, func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				writeCreateFixture(t, w, "https://qurl.link/admin-rule", testTunnelResourceID)
+			})
+			_, err := h.mintForResource(context.Background(), slog.Default(), &getWorkArgs{cmd: &Command{Subcommand: SubcmdGet, Flags: map[string]string{"rule": "once"}}, teamID: testAdminTeamID, channelID: "C_test", userID: testAdminUserID}, testTunnelResourceID)
+			if err == nil || calls.Load() != 0 || strings.Contains(err.Error(), "private admin lookup failure") {
+				t.Fatalf("admin lookup failure: calls=%d err=%v", calls.Load(), err)
+			}
+		})
 	}
 }

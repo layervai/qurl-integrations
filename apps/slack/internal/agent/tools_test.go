@@ -60,6 +60,7 @@ func TestParseProposal(t *testing.T) {
 			input:      map[string]any{fieldToken: testSlugSigil, fieldRule: " Team only "},
 			wantOK:     true,
 			wantAction: ActionGet,
+			wantGated:  true,
 			check: func(t *testing.T, p *Proposal) {
 				if p.Rule != "Team only" || !strings.Contains(p.Summary, `access rule "Team only"`) || !strings.Contains(p.Summary, "may let it open more than once") {
 					t.Errorf("got %+v", p)

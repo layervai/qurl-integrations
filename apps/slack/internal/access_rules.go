@@ -28,6 +28,8 @@ import (
 
 const accessRuleModePublic = "public"
 
+const accessRuleAdminOnlyMessage = "Only a qURL workspace owner or admin can choose an access rule. Omit `rule:` to use the default settings."
+
 // privateRuleModes decide who can open the resource; catalog.v1.json "modes"
 // minus public (TestDefaultAccessRulesMatchCatalog checks it).
 var privateRuleModes = []string{"keys", "invite_only", "email_capture", "email_domain", "review", "contract"}
@@ -208,4 +210,21 @@ func ruleLinkNotice(input *client.CreateInput, expiresAt *time.Time) string {
 		notice += " · link expires in " + escapeMrkdwnText(input.ExpiresIn)
 	}
 	return notice
+}
+
+func (h *Handler) requireAccessRuleAdmin(ctx context.Context, log *slog.Logger, teamID, userID string) error {
+	if h.cfg.AdminStore == nil {
+		return &userError{msg: "Workspace admin checks are unavailable. Contact your qURL operator."}
+	}
+	gateCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
+	isAdmin, _, gateErr := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
+	cancel()
+	if gateErr != nil {
+		log.Error("get: access-rule admin check failed", "error", gateErr)
+		return &userError{msg: "Could not verify workspace admin status. Try again."}
+	}
+	if !isAdmin {
+		return &userError{msg: accessRuleAdminOnlyMessage}
+	}
+	return nil
 }

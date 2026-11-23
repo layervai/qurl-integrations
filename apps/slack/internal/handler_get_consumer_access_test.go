@@ -31,6 +31,7 @@ const (
 func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 	for _, tc := range []struct {
 		name string
+		rule string
 		// legacy answers the mint with qurl-service's earlier 500 instead of the 403.
 		legacy bool
 		// foreign authorizes a resource whose key testTunnelCRID does not digest.
@@ -50,6 +51,8 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		// wantLog is the operator signal the case must leave.
 		wantLog string
 	}{
+		{name: "public rule preserves verified access", rule: "builtin.public", version: 1,
+			want: []string{"Verified access required", testEntryURL}, wantAbsent: []string{"Anyone with the link", "one-time use"}},
 		{name: "403 consumer_access_required", version: 1, wantLog: "answering with the CRID entry page",
 			want: []string{"Verified access required", testEntryURL}, wantAbsent: []string{commonGetMintFailedMessage}},
 		{name: "legacy 500 creation_failed", legacy: true, version: 3, wantLog: `"status":500`,
@@ -121,6 +124,10 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 				}
 				writeConsumerAccessResource(t, w, resourceID, cridValue, tc.version)
 			})
+			if tc.rule != "" {
+				ts.seedAdmin(t)
+				ts.addCustomer(http.MethodGet, accessRulesPath, func(w http.ResponseWriter, _ *http.Request) { writeAccessRules(t, w) })
+			}
 			h := newAdminTestHandler(t, ts)
 			if !tc.noLinkOrigin {
 				h.cfg.LinkOrigin = testLinkOrigin
@@ -132,7 +139,11 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 			logs := captureDefaultSlog(t)
 			t.Cleanup(h.Wait) // Runs before the logger is restored.
 
-			_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync("get $dashboard", testAdminTeamID, testAdminUserID)
+			command := "get $dashboard"
+			if tc.rule != "" {
+				command += " rule:" + tc.rule
+			}
+			_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(command, testAdminTeamID, testAdminUserID)
 			h.Wait()
 			if tc.wantLog != "" && !logs.contains(tc.wantLog) {
 				t.Errorf("logs missing %q", tc.wantLog)

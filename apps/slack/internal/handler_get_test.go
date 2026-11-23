@@ -1833,6 +1833,7 @@ func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
 // rule link with the rule's notice, not the default one.
 func TestHandleGet_DMWithRuleCarriesRuleNotice(t *testing.T) {
 	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer(http.MethodGet, accessRulesPath, func(w http.ResponseWriter, _ *http.Request) { writeAccessRules(t, w) })
 	ts.addCustomer(http.MethodPost, mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {

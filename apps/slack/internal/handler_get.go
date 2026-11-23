@@ -573,6 +573,9 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 		err  error
 	)
 	if selector := args.cmd.Rule(); selector != "" {
+		if err := h.requireAccessRuleAdmin(ctx, log, args.teamID, args.userID); err != nil {
+			return getResult{}, err
+		}
 		if c, err = h.getClient(ctx, log, args.teamID); err != nil {
 			return getResult{}, err
 		}

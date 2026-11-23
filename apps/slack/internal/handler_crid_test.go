@@ -367,6 +367,7 @@ func TestHandleCRID_DenialSanitizesLogIDs(t *testing.T) {
 // TestHandleCRID_Rule pins that `/qurl crid` applies `rule:` like `/qurl get`.
 func TestHandleCRID_Rule(t *testing.T) {
 	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel", []string{testResourceIDFix, testTunnelResourceID})
 	ts.addCustomer(http.MethodGet, accessRulesPath, func(w http.ResponseWriter, _ *http.Request) { writeAccessRules(t, w) })
 	var body map[string]any
