@@ -341,8 +341,9 @@ Normal unreserved paths need no header rewrite; cache hits stay in nginx.
 
 Spaces, literal percent signs, `?`, `#`, control bytes and non-ASCII keys are
 rejected with the normal viewer 404 before reaching the signer. Supporting
-those keys needs a different first-hop escaping strategy. The fixture matrix defines the tested punctuation contract; other ASCII
-punctuation retains legacy proxy behavior and needs its own validation before use.
+those keys needs a different first-hop escaping strategy. The fixture matrix
+defines the tested punctuation contract. Other ASCII punctuation is encoded by
+the same filter but is not covered by that matrix; validate it before use.
 
 The local S3 fixture verifies SigV4 HMACs with synthetic credentials. Its
 canonical-request verifier is checked against AWS's published S3 signing
@@ -366,11 +367,10 @@ before signing. Range behavior is tested on the nginx response/cache path;
 the AWS unit vector covers signing a Range header. HEAD uses real signed
 upstream requests. The fixture also requires zero signature mismatches across
 all upstream paths, including simulated error responses.
-See [the complete fixture matrix](test/sigv4_fixtures.txt). Use an image built
-from this contract before depending on exotic keys: the existing Slack-pinned
-image predates it and must be replaced after producer publication. Its existing
-exact-digest test exception excludes the new exotic-key contract, but never
-skips signature verification of the baseline static-key requests.
+See [the complete fixture matrix](test/sigv4_fixtures.txt). The Slack default
+pins an image qualified against this contract. Producer and consumer tests run
+the full contract without image waivers. Release validation also checks that
+the default digest matches the normal publisher's promoted image.
 
 Successful responses pass through the object's `Content-Type` and `Cache-Control`
 verbatim. These security headers are set on **every** response (200/404/405/5xx):
