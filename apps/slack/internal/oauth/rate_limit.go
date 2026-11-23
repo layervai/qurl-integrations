@@ -13,8 +13,8 @@ import (
 )
 
 // In-memory buckets are per process. Multiple Slack OAuth replicas behind the
-// ALB each enforce this budget independently. Within one replica, /start and
-// /callback share a source-IP bucket, so shared NAT egresses share budget; ALB
+// ALB each enforce this budget independently. Each flow shares one source-IP
+// bucket across its routes; flows have separate budgets. NAT egresses share budget; ALB
 // routing can still send a client's flow to different replicas. IPv6 clients
 // are grouped by /64 to avoid per-address rotation within one client network.
 const (
@@ -177,6 +177,14 @@ func oauthSecondsPerToken() int {
 	return (60 + oauthRateLimitRequestsPerMinute - 1) / oauthRateLimitRequestsPerMinute
 }
 
+// NewRateLimitMiddleware shares one source-IP budget across a flow's routes.
+// Budgets are per process, trust the existing single-ALB forwarding boundary,
+// and group IPv6 sources by /64. Separate flows get separate budgets.
+func NewRateLimitMiddleware(now func() time.Time) func(http.Handler) http.Handler {
+	limiter := newOAuthRateLimiter(now)
+	return func(next http.Handler) http.Handler { return rateLimitOAuth(limiter, next) }
+}
+
 func rateLimitOAuth(limiter *oauthRateLimiter, next http.Handler) http.Handler {
 	if limiter == nil {
 		return next
@@ -202,7 +210,7 @@ func rateLimitOAuth(limiter *oauthRateLimiter, next http.Handler) http.Handler {
 		}
 		renderOAuthErrorPage(w, http.StatusTooManyRequests, "Too many setup attempts",
 			"Too many qURL™ setup requests came from this IP address.",
-			"Wait a moment, then return to Slack and try again.")
+			"Wait a moment, then try again.")
 	})
 }
 
