@@ -1,6 +1,6 @@
 # Check whether an unauthorized client can reach a private FastAPI app
 
-This disposable app logs `APP_REQUEST` for every HTTP request it receives.
+This disposable app logs `APP_REQUEST` for every HTTP request that reaches the FastAPI app.
 It contains no secrets, database, application login or real user data.
 Use it to check admission before sharing a real API. Keep the real API's own
 authentication, authorization and Host/Origin checks.
@@ -8,11 +8,11 @@ authentication, authorization and Host/Origin checks.
 ## Run the local fixture
 
 From this directory (`docs/approval-first-demo/fastapi`), run the commands below.
-Install the [qURL CLI](../../../apps/cli/README.md#install) before the access test.
+Install the [qURL™ CLI](../../../apps/cli/README.md#install) before the access test.
 
 These shell commands use macOS/Linux paths. Use Python 3.13 and a separate
-virtual environment. This example was tested with
-FastAPI 0.163.1, Uvicorn 0.54.0 and qURL CLI 4.4.4 on macOS.
+virtual environment. Use qURL CLI 4.4.4 or later. This example was tested with
+Python 3.13, FastAPI 0.163.1, Uvicorn 0.54.0 and qURL CLI 4.4.4 on macOS.
 
 ```sh
 python3 -m venv .venv
@@ -37,10 +37,11 @@ the publisher its `device_public_key_b64` through a trusted conversation. This
 is a public key, not their private identity state. Verify whom the key belongs
 to before allowing it.
 
-The publisher replaces `PUBLIC_DEVICE_KEY` below and chooses a new `DEMO_ID`:
+The publisher replaces `PUBLIC_DEVICE_KEY` below. The ID uses the current
+second; wait at least a second before running it again:
 
 ```sh
-qurl publish http://127.0.0.1:8766 --id DEMO_ID --name "Private FastAPI test" --allow-device-key "PUBLIC_DEVICE_KEY" --foreground -o json
+qurl publish http://127.0.0.1:8766 --id "fastapi-demo-$(date +%s)" --name "Private FastAPI test" --allow-device-key "PUBLIC_DEVICE_KEY" --foreground -o json
 ```
 
 Before sharing, require `status: serving`, `private: true`, and
@@ -50,7 +51,7 @@ resource as though this test created it. Keep the foreground publisher running.
 
 1. On the unapproved device, run `qurl get CRID --file -`. Require access denial (exit code 5), without
    returning app bytes. A timeout or network error is not a passing result. The app terminal must show no additional `APP_REQUEST`.
-2. On the approved device, run the same command. Require this actual JSON:
+2. On the approved device, run the same command. Require exactly this JSON body:
    `{"message":"This request reached the private FastAPI app."}`.
    The controlled single-fetch test must add one `APP_REQUEST`.
 3. On the publisher, run `qurl delete CRID --yes -o json`. This permanently
