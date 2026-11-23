@@ -7,7 +7,7 @@ const express = require('express');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
-const { AUDIT_EVENTS, SETUP_VIA } = require('../constants');
+const { QUERY_ONLY_AUDIT_EVENTS, SETUP_VIA } = require('../constants');
 const { sendDM } = require('../discord');
 const {
   verifyQurlOAuthState,
@@ -486,7 +486,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // JWKS-verified but not nonce-bound, so this is observability only; durable
   // owner identity and fail-closed comparison belong in #1366.
   try {
-    logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
+    logger.audit(QUERY_ONLY_AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
       guild_id: guildId,
       configured_by: discordUserId,
       // Prefix is already shown in the success page and info log; including it

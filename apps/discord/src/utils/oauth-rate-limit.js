@@ -30,11 +30,17 @@ const INSTALL_ENTRY_BUCKET = 'discord-install-entry';
 const CALLBACK_BUCKET = 'callback';
 const MAX_RATE_LIMIT_STORE_SIZE = 20000;
 
-class IndexedRateLimitStore extends Map {
+class IndexedRateLimitStore {
+  #entries = new Map();
   #installOnlyIps = new Set();
 
+  get size() { return this.#entries.size; }
+  get(ip) { return this.#entries.get(ip); }
+  has(ip) { return this.#entries.has(ip); }
+  [Symbol.iterator]() { return this.#entries[Symbol.iterator](); }
+
   set(ip, buckets) {
-    super.set(ip, buckets);
+    this.#entries.set(ip, buckets);
     this.#installOnlyIps.delete(ip);
     // Set iteration order is the eviction order. Re-adding a still
     // install-only IP moves it to the back, giving O(1) least-recently-active
@@ -45,22 +51,22 @@ class IndexedRateLimitStore extends Map {
 
   delete(ip) {
     this.#installOnlyIps.delete(ip);
-    return super.delete(ip);
+    return this.#entries.delete(ip);
   }
 
   clear() {
     this.#installOnlyIps.clear();
-    super.clear();
+    this.#entries.clear();
   }
 
   replaceAfterSweep(ip, buckets) {
-    const previous = super.get(ip);
+    const previous = this.#entries.get(ip);
     const wasInstallOnly = Boolean(previous?.[INSTALL_ENTRY_BUCKET] && !previous[CALLBACK_BUCKET]);
     const isInstallOnly = Boolean(buckets[INSTALL_ENTRY_BUCKET] && !buckets[CALLBACK_BUCKET]);
     // Sweeping timestamps is not activity. Preserve an existing install-only
     // entry's eviction position, but index a real callback -> install-only
     // transition at the time it becomes eligible for eviction.
-    super.set(ip, buckets);
+    this.#entries.set(ip, buckets);
     if (wasInstallOnly === isInstallOnly) return;
     if (isInstallOnly) this.#installOnlyIps.add(ip);
     else this.#installOnlyIps.delete(ip);
