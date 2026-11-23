@@ -7,18 +7,19 @@ mentions the bot with `get` and receives a fresh one-time link, posted in
 place or sent to them privately. The person who gets the link just clicks.
 
 This directory holds the Teams bot. Your operator builds the app package for
-your tenant and uploads it as a custom app; see
+the deployment, and a tenant admin uploads it as a custom app; see
 [App package (sideloading)](#app-package-sideloading).
 
 ## Common tasks
 
-In a team channel, mention the bot, then type the command:
+Open a personal chat with the bot first. Then, in a team channel, mention
+the bot and type the command:
 
 | You want to… | How |
 | --- | --- |
 | Connect your tenant to qURL | `setup you@company.com` |
 | Protect an internal URL (admin) | `protect-url url:https://internal.example.com as:$docs` |
-| Protect a service with the qURL Connector (admin) | `protect-connector internal-web env:compose service:web port:8080 alias:$docs` |
+| Protect a service with the qURL Connector (admin) | `protect-connector internal-web env:compose service:web port:8080 alias:$web` |
 | Get a one-time link | `get $docs` |
 | Get the link in a private chat instead | `get $docs dm:true` |
 | See what this channel can reach | `list` |
