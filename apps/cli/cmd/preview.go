@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	msgPreviewFieldRequired = "provide --name or --description; use an empty string to remove it"
+	msgPreviewFieldRequired = "provide --name or --description; an empty --description removes it"
 	msgPreviewAltRequired   = "provide --alt to describe the image or clip"
 	msgPreviewUploaded      = "File uploaded. Processing keeps current media visible. Check with qurl preview get %s."
 	msgPreviewMediaMissing  = "media ID not found; read qurl preview get first"
@@ -56,7 +56,7 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 	upload.Flags().StringVar(&alt, "alt", "", "description for people who cannot see the image or clip")
 	upload.Flags().StringVar(&replaceID, "replace", "", "media ID to replace after processing succeeds")
 	remove := previewRemoveCmd(opts)
-	clearCmd := &cobra.Command{Use: "clear <CRID>", Short: "Remove name, description and media and cancel pending uploads", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	clearCmd := &cobra.Command{Use: "clear <CRID>", Short: "Remove description and media and cancel pending uploads; the name stays", Args: exactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := opts.newClient(cmd.Context())
 		if err != nil {
 			return err
@@ -67,7 +67,7 @@ func previewCmd(opts *globalOpts) *cobra.Command {
 		}
 		text := ""
 		ids := []string{}
-		next, err := client.UpdatePreview(cmd.Context(), args[0], qurlapi.PreviewPatch{Revision: current.Revision, Name: &text, Description: &text, MediaIDs: &ids})
+		next, err := client.UpdatePreview(cmd.Context(), args[0], qurlapi.PreviewPatch{Revision: current.Revision, Description: &text, MediaIDs: &ids})
 		if err != nil {
 			return err
 		}
@@ -115,6 +115,13 @@ func previewSetCmd(opts *globalOpts) *cobra.Command {
 		if !cmd.Flags().Changed("name") && !cmd.Flags().Changed("description") {
 			return exitcode.UsageError(errors.New(msgPreviewFieldRequired))
 		}
+		// Every resource needs its name: it can be changed, never removed.
+		if cmd.Flags().Changed("name") {
+			var err error
+			if name, err = checkPublicName(name); err != nil {
+				return err
+			}
+		}
 		client, err := opts.newClient(cmd.Context())
 		if err != nil {
 			return err
@@ -136,7 +143,7 @@ func previewSetCmd(opts *globalOpts) *cobra.Command {
 		}
 		return opts.printer().Preview(next)
 	}}
-	set.Flags().StringVar(&name, "name", "", "public app name; empty removes it")
+	set.Flags().StringVar(&name, "name", "", "public name recipients see, up to 100 characters; it cannot be removed")
 	set.Flags().StringVar(&description, "description", "", "public preview text; empty removes it")
 	return set
 }

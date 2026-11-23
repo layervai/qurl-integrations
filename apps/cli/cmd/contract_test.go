@@ -25,7 +25,7 @@ import (
 
 func TestPublishContract(t *testing.T) {
 	srv := apitest.NewServer(t)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "publish", "https://example.com/data"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "publish", "https://example.com/data", "--name", "Example"}})
 
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
@@ -56,6 +56,9 @@ func TestPublishContract(t *testing.T) {
 func TestListContractHeadersAndPagination(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("status"); got != "active" {
+			t.Errorf("status = %q, want active", got)
+		}
 		if got := r.URL.Query().Get("cursor"); got != "page2" {
 			t.Errorf("cursor = %q, want page2", got)
 		}
@@ -81,6 +84,25 @@ func TestListContractHeadersAndPagination(t *testing.T) {
 	req := srv.Requests()[0]
 	if req.Header.Get("User-Agent") != "qurl-cli/test" || req.Header.Get("X-Request-Id") == "" {
 		t.Errorf("direct REST path missing CLI headers: %+v", req.Header)
+	}
+}
+
+func TestListExplicitStatus(t *testing.T) {
+	for _, status := range []string{"revoked", "active,revoked"} {
+		t.Run(status, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("status"); got != status {
+					t.Errorf("status = %q, want %q", got, status)
+				}
+				apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{}, nil)
+			})
+
+			res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "list", "--status", status}})
+			if res.code != 0 {
+				t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+			}
+		})
 	}
 }
 
@@ -337,7 +359,7 @@ func TestShareInsufficientScope(t *testing.T) {
 func TestPublishFoundExistingNote(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishFoundExisting(true)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "publish", "https://example.com/data"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "publish", "https://example.com/data", "--name", "Example"}})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
@@ -355,7 +377,7 @@ func TestPublishFoundExistingNote(t *testing.T) {
 func TestPublishFoundExistingTextAnatomy(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishFoundExisting(true)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data", "--name", "Example"}})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
@@ -386,7 +408,7 @@ func TestPublishFoundExistingTextAnatomy(t *testing.T) {
 func TestPublishNoCRIDFailsClosed(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishOmitCRID(true)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data", "--name", "Example"}})
 	if res.code == 0 {
 		t.Fatalf("exit = 0, stdout: %s", res.stdout.String())
 	}
@@ -790,7 +812,7 @@ func TestListJSONCarriesHasMore(t *testing.T) {
 func TestPublishJSONCarriesFoundExisting(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishFoundExisting(true)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-o", "json", "publish", "https://example.com/data"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-o", "json", "publish", "https://example.com/data", "--name", "Example"}})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}

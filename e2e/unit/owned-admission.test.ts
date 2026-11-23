@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { recordAdmissionAttempt, checkOwnershipConfig } from '../helpers/tunnelView';
 
-jest.mock('node:child_process', () => ({ spawnSync: jest.fn() }));
+jest.mock('node:child_process', () => ({ ...jest.requireActual('node:child_process'), spawnSync: jest.fn() }));
 
 test.each(['cell0', ''])('receipt with optional cell_id=%s contains only public ownership and failed verification writes nothing', async (cellID) => {
   const dir = mkdtempSync(join(tmpdir(), 'owned-admission-'));

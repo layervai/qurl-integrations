@@ -136,14 +136,9 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit
 
-      # The wider of the two gates: tsconfig.json includes **/*.ts, so this
-      # covers helpers/ and the live tests/ too, while the unit run below
-      # executes only unit/**. For the live suite this is the only gate there
-      # is. -p is explicit rather than relying on tsc's upward search, and
-      # names the same config ts-jest compiles with (neither jest config
-      # overrides it).
+      # Typecheck helpers and live tests as well as unit tests.
       - name: Typecheck
-        run: npx tsc -p tsconfig.json --noEmit
+        run: npm run typecheck
 
       # Deliberately `test:unit`, never `npm test` — that script chains the
       # live suite, which mints real qURL resources and posts real Discord
