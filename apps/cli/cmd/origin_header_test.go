@@ -109,19 +109,20 @@ func TestPublishOriginHeaderRefusedBeforeAnyRequest(t *testing.T) {
 		stdin string
 		want  string
 	}{
-		"local app":          {[]string{"publish", "http://127.0.0.1:3000", "--origin-header", "X-Key"}, originSecret + "\n", msgOriginHeaderLocal},
-		"empty stdin":        {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, "", msgNoOriginHeaderValue},
-		"empty line":         {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, "\n", msgNoOriginHeaderValue},
-		"empty name":         {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", ""}, originSecret + "\n", "1 to 256"},
-		"reserved name":      {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Forwarded-For"}, originSecret + "\n", "qURL sets that header"},
-		"name with a colon":  {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key:"}, originSecret + "\n", "letters, digits"},
-		"leading space":      {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, " " + originSecret + "\n", "start or end"},
-		"trailing tab":       {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, originSecret + "\t\n", "start or end"},
-		"control character":  {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, originSecret + "\x00x\n", "control characters"},
-		"value too long":     {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, originSecret + strings.Repeat("v", 4096) + "\n", "4096 bytes"},
-		"set: empty stdin":   {[]string{"origin-header", "set", "CRID", "X-Key"}, "", msgNoOriginHeaderValue},
-		"set: reserved name": {[]string{"origin-header", "set", "CRID", "cookie"}, originSecret + "\n", "qURL sets that header"},
-		"set: bad value":     {[]string{"origin-header", "set", "CRID", "X-Key"}, originSecret + "\x7f\n", "control characters"},
+		"local app":                {[]string{"publish", "http://127.0.0.1:3000", "--origin-header", "X-Key"}, originSecret + "\n", msgOriginHeaderLocal},
+		"rule and secret on stdin": {[]string{"publish", "https://example.com", "--rule-file", "-", "--origin-header", "X-Key"}, originSecret + "\n", "both read standard input"},
+		"empty stdin":              {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, "", msgNoOriginHeaderValue},
+		"empty line":               {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, "\n", msgNoOriginHeaderValue},
+		"empty name":               {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", ""}, originSecret + "\n", "1 to 256"},
+		"reserved name":            {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Forwarded-For"}, originSecret + "\n", "qURL sets that header"},
+		"name with a colon":        {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key:"}, originSecret + "\n", "letters, digits"},
+		"leading space":            {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, " " + originSecret + "\n", "start or end"},
+		"trailing tab":             {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, originSecret + "\t\n", "start or end"},
+		"control character":        {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, originSecret + "\x00x\n", "control characters"},
+		"value too long":           {[]string{"publish", "https://example.com", "--name", "A", "--origin-header", "X-Key"}, originSecret + strings.Repeat("v", 4096) + "\n", "4096 bytes"},
+		"set: empty stdin":         {[]string{"origin-header", "set", "CRID", "X-Key"}, "", msgNoOriginHeaderValue},
+		"set: reserved name":       {[]string{"origin-header", "set", "CRID", "cookie"}, originSecret + "\n", "qURL sets that header"},
+		"set: bad value":           {[]string{"origin-header", "set", "CRID", "X-Key"}, originSecret + "\x7f\n", "control characters"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := apitest.NewServer(t)

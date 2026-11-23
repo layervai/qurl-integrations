@@ -31,14 +31,17 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
-	ConsumerAccess        *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
-	ConsumerAccessVersion int64                      `json:"consumer_access_version"`
+	// TODO(upstream-contract): signed_identity is the owner setting; absent means an older reader.
+	SignedIdentity        *bool               `json:"signed_identity"`
+	ConsumerAccess        *consumerPolicyWire `json:"consumer_access,omitempty"`
+	ConsumerAccessVersion int64               `json:"consumer_access_version"`
 
 	AllowedDeviceKeys []string     `json:"allowed_device_keys"`
 	Private           *bool        `json:"private"`
 	ResourceID        string       `json:"resource_id"`
 	CRID              string       `json:"crid"`
 	TargetURL         string       `json:"target_url"`
+	Name              string       `json:"name"`
 	Type              string       `json:"type"`
 	Status            string       `json:"status"`
 	DesiredState      DesiredState `json:"desired_state"`
@@ -215,7 +218,7 @@ type envelopeMeta struct {
 // TODO(upstream-contract): consumer_access, privacy, and tunnel find-or-create fields mirror
 // the service's create-resource request; privacy is immutable after creation.
 type publishRequest struct {
-	ConsumerAccess *qurl.ConsumerAccessPolicy `json:"consumer_access,omitempty"`
+	ConsumerAccess *consumerPolicyWire `json:"consumer_access,omitempty"`
 	// Private is stated in every create request but one. What an absent
 	// field means for a new resource is the service's choice and has changed:
 	// a newer service reads it as private, an older one as public. The one
@@ -232,10 +235,11 @@ type publishRequest struct {
 	TargetURL      string `json:"target_url,omitempty"`
 	// Name is the public name recipients see. The service requires it to
 	// create a resource and ignores it when the target is already published.
-	Name        string   `json:"name,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Alias       string   `json:"alias,omitempty"`
+	Name             string   `json:"name,omitempty"`
+	UseHomepageTitle bool     `json:"use_homepage_title,omitempty"`
+	Description      string   `json:"description,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
+	Alias            string   `json:"alias,omitempty"`
 	// OriginHeader is sent only when the publisher asked for one. Omitted,
 	// the service reuses an existing resource with the header it has.
 	OriginHeader *originHeaderWire `json:"origin_header,omitempty"`
@@ -280,7 +284,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if err != nil {
 		return nil, err
 	}
-	if err := confirmPublishConsumerPolicy(opts.ConsumerAccess, published); err != nil {
+	if err := confirmPublishConsumerPolicy(opts.ConsumerAccess, opts.CreditPrice, published); err != nil {
 		return nil, err
 	}
 	// The row must say which privacy the resource has, and it must be the one
@@ -320,7 +324,6 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 // wantPrivate: a URL resource, or a Connector find-or-create.
 func newPublishRequest(targetURL string, opts *PublishOptions, wantPrivate bool) publishRequest {
 	body := publishRequest{
-		ConsumerAccess:    opts.ConsumerAccess,
 		Private:           &wantPrivate,
 		AllowedDeviceKeys: opts.AllowedDeviceKeys,
 		AccessRequests:    opts.AllowRequests,
@@ -332,10 +335,15 @@ func newPublishRequest(targetURL string, opts *PublishOptions, wantPrivate bool)
 		Alias:             opts.Alias,
 		OriginHeader:      opts.OriginHeader.wire(),
 	}
+	if opts.ConsumerAccess != nil {
+		body.ConsumerAccess = &consumerPolicyWire{ConsumerAccessPolicy: *opts.ConsumerAccess, Credits: opts.CreditPrice}
+	}
 	if opts.ConnectorID != "" {
 		body.Type = "tunnel"
 		body.Slug = opts.ConnectorID
 		body.FindOrCreate = true
+	} else {
+		body.UseHomepageTitle = opts.UseHomepageTitle && opts.Name == ""
 	}
 	return body
 }
@@ -382,12 +390,14 @@ func publishedFromReply(reply *restReply) (*Published, []string, error) {
 		return nil, nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
 	}
 	return &Published{
-		ConsumerAccess: env.Data.ConsumerAccess,
+		ConsumerAccess: env.Data.ConsumerAccess.policy(),
+		CreditPrice:    env.Data.ConsumerAccess.price(),
 		AccessRequests: env.Data.AccessRequests,
 		Private:        env.Data.Private,
 		CRID:           env.Data.CRID,
 		ResourceID:     env.Data.ResourceID,
 		TargetURL:      env.Data.TargetURL,
+		Name:           env.Data.Name,
 		Status:         env.Data.Status,
 		CreatedAt:      knownTime(env.Data.CreatedAt),
 		ExpiresAt:      knownTime(env.Data.ExpiresAt),
@@ -751,7 +761,7 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		return nil, err
 	}
 	return &ResourceSummary{
-		ConsumerAccess: row.ConsumerAccess, ConsumerAccessVersion: row.ConsumerAccessVersion, AccessRequests: row.AccessRequests,
+		ConsumerAccess: row.ConsumerAccess.policy(), CreditPrice: row.ConsumerAccess.price(), ConsumerAccessVersion: row.ConsumerAccessVersion, AccessRequests: row.AccessRequests,
 		AllowedPasskeys:   people,
 		AllowedDeviceKeys: row.AllowedDeviceKeys,
 		Private:           row.Private,
@@ -761,6 +771,7 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		CreatedAt: knownTime(row.CreatedAt), ExpiresAt: knownTime(row.ExpiresAt),
 		Publisher:        row.Publisher.publisher(),
 		OriginHeaderName: row.OriginHeaderName,
+		SignedIdentity:   row.SignedIdentity,
 	}, nil
 }
 
@@ -1018,12 +1029,17 @@ func (c *client) doRESTRequest(ctx context.Context, method, path string, body an
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
+	limit := maxResponseBody
+	if path == accessRulesPath {
+		// The service JSON-escapes libraries up to 256 KiB.
+		limit = 2 << 20
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
 		return nil, fmt.Errorf("read qURL API response: %w", err)
 	}
-	if len(respBody) > maxResponseBody {
-		return nil, fmt.Errorf("%w: response exceeds %d-byte cap", qurl.ErrInvalidAPIResponse, maxResponseBody)
+	if len(respBody) > limit {
+		return nil, fmt.Errorf("%w: response exceeds %d-byte cap", qurl.ErrInvalidAPIResponse, limit)
 	}
 	return &restReply{status: resp.StatusCode, header: resp.Header, body: respBody}, nil
 }
@@ -1233,7 +1249,7 @@ func validateConsumerPolicy(policy *qurl.ConsumerAccessPolicy) error {
 	if policy.Version != 1 {
 		return qurl.ErrInvalidResourceRequest
 	}
-	return ValidateConsumerPolicyFields(policy.Mode, policy.ContractID, policy.EmailDomain)
+	return policy.Validate()
 }
 
 var consumerEmailDomain = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -1253,7 +1269,7 @@ func ValidateConsumerPolicyFields(mode, contract, emailDomain string) error {
 		if contract != "" {
 			return qurl.ErrInvalidResourceRequest
 		}
-	case "contract":
+	case consumerContractMode:
 		if strings.TrimSpace(contract) == "" || strings.TrimSpace(contract) != contract || len(contract) > 128 {
 			return qurl.ErrInvalidResourceRequest
 		}
@@ -1264,6 +1280,10 @@ func ValidateConsumerPolicyFields(mode, contract, emailDomain string) error {
 }
 
 func validatePublishConsumerPolicy(opts *PublishOptions) error {
+	if opts.CreditPrice != 0 && (!ValidCreditPrice(opts.CreditPrice) || opts.ConnectorID != "" || opts.ConsumerAccess == nil ||
+		opts.ConsumerAccess.Mode != consumerContractMode || opts.ConsumerAccess.Payment != nil) {
+		return fmt.Errorf("%w: credit pricing requires private URL contract access", qurl.ErrInvalidResourceRequest)
+	}
 	if opts.ConsumerAccess == nil {
 		return nil
 	}
@@ -1277,23 +1297,22 @@ func consumerPolicyConfirmed(requested, received *qurl.ConsumerAccessPolicy, fou
 	if requested == nil {
 		return true
 	}
-	return received != nil && received.Mode == requested.Mode && received.ContractID == requested.ContractID && received.EmailDomain == requested.EmailDomain && samePaymentPolicy(received.Payment, requested.Payment) &&
-		(received.Version == requested.Version || (foundExisting != nil && *foundExisting && received.Version > requested.Version && received.Version < 1<<53))
+	existing := foundExisting != nil && *foundExisting
+	want := *requested
+	if existing && received != nil {
+		// A rule setting that differs is a warning for the caller, not a conflict.
+		want.ApprovalExpiresIn = received.ApprovalExpiresIn
+	}
+	return received != nil && received.Validate() == nil && received.SameDefinition(want) &&
+		(received.Version == requested.Version || (existing && received.Version > requested.Version && received.Version < 1<<53))
 }
 
-func confirmPublishConsumerPolicy(requested *qurl.ConsumerAccessPolicy, published *Published) error {
-	if consumerPolicyConfirmed(requested, published.ConsumerAccess, published.FoundExisting) {
+func confirmPublishConsumerPolicy(requested *qurl.ConsumerAccessPolicy, credits int64, published *Published) error {
+	if (requested == nil || credits == published.CreditPrice) && consumerPolicyConfirmed(requested, published.ConsumerAccess, published.FoundExisting) {
 		return nil
 	}
 	if published.FoundExisting != nil && *published.FoundExisting {
 		return fmt.Errorf("%w: the existing resource has a different private access policy; check `qurl status <CRID>` and use `qurl access configure` to change it", ErrPublishAccessConflict)
 	}
 	return fmt.Errorf("%w: API did not confirm the requested private access policy; the resource may exist; check `qurl list` before you retry", qurl.ErrInvalidAPIResponse)
-}
-
-func samePaymentPolicy(a, b *qurl.CRIDPaymentPolicy) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
 }

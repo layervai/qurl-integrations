@@ -23,13 +23,21 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 )
 
 const schemeHTTPS = "https"
 
 // Client is what commands program against.
 type Client interface {
+	AccessRules() accessrules.Remote
 	ConsumerManagement() ConsumerManagementClient
+	// PublisherStripe is part of Client so the registered wrapper keeps it.
+	PublisherStripe
+	// MintLimitedLink mints a temporary link to an existing resource with an
+	// access rule's link limits, so the permanent address is never shared.
+	MintLimitedLink(ctx context.Context, crid string, limits accessrules.LinkLimits) (*ShareLink, error)
 	Preview(ctx context.Context, id string) (*Preview, error)
 	UpdatePreview(ctx context.Context, id string, patch PreviewPatch) (*Preview, error)
 	UploadPreview(ctx context.Context, id, path, alt, replaceID string) (*Preview, error)
@@ -53,6 +61,7 @@ type Client interface {
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
 	// Resource returns one owner-visible resource by CRID or public resource ID.
 	Resource(ctx context.Context, id string) (*ResourceSummary, error)
+	SetCreditPrice(ctx context.Context, crid string, credits, version int64) (*ConsumerManagementResult, error)
 	// SetDeviceGrants replaces the complete private-resource device grant
 	// list. The CLI calls it only with an empty list, to clear the grants; a
 	// single device is allowed or removed with EditDeviceGrants.
@@ -113,6 +122,8 @@ type Client interface {
 	// or removes it when header is nil, and returns the resource as the
 	// service confirmed it. The answer names the header, never its value.
 	SetOriginHeader(ctx context.Context, id string, header *OriginHeader) (*ResourceSummary, error)
+	// SetSignedIdentity changes the saved app identity requirement, without replay.
+	SetSignedIdentity(ctx context.Context, id string, enabled bool) (*ResourceSummary, error)
 }
 
 // AccountClient adds the one account-authorized bootstrap operation. The CLI
@@ -125,6 +136,7 @@ type AccountClient interface {
 
 // PublishOptions carries creation policy and optional metadata.
 type PublishOptions struct {
+	CreditPrice    int64
 	ConsumerAccess *qurl.ConsumerAccessPolicy
 	// Public asks for a resource that anyone who has its CRID can open. The
 	// zero value asks for a private one, limited to its owner and the devices
@@ -154,14 +166,19 @@ type PublishOptions struct {
 	// of them. They are carried into a conflict, so that its next step can
 	// name the flag to leave out instead of a command line that cannot work.
 	NamedAccessFlags []string
+	// Rule is the access rule the publisher chose, carried for the settings
+	// applied once the resource exists. Publish sends nothing of it; its
+	// policy reaches the request through Public and ConsumerAccess.
+	Rule *accessrules.Definition
 	// ConnectorID selects a tunnel resource instead of a URL.
 	ConnectorID string
 	// Name is the public name recipients see; the service requires it to
 	// create a resource and ignores it when the target is already published.
-	Name        string
-	Description string
-	Tags        []string
-	Alias       string
+	Name             string
+	UseHomepageTitle bool
+	Description      string
+	Tags             []string
+	Alias            string
 	// OriginHeader is the header the gateway adds to every request it
 	// forwards to the target URL, for a URL resource only. Publish requires
 	// the answer to name it. A target that is already published with
@@ -189,6 +206,7 @@ type ListOptions struct {
 
 // Published is the repo-owned result of Publish.
 type Published struct {
+	CreditPrice    int64
 	ConsumerAccess *qurl.ConsumerAccessPolicy
 	// Private is the privacy the service confirmed. Publish never returns a
 	// result without it. Nil means privacy was not returned or queried, never
@@ -197,6 +215,7 @@ type Published struct {
 	CRID       string
 	ResourceID string
 	TargetURL  string
+	Name       string
 	Status     string
 	CreatedAt  *time.Time
 	ExpiresAt  *time.Time
@@ -225,6 +244,12 @@ type Published struct {
 	// with no CLI opens it. The service does not send it: the command sets it
 	// when this install knows that site for its deployment.
 	LinkSiteURL string
+	// LimitedLink is the temporary link minted with a public access rule's
+	// link limits; the permanent address is not shared with limits.
+	LimitedLink *ShareLink
+	// OtherSettings is set when the resource already existed and keeps
+	// settings other than the chosen access rule's.
+	OtherSettings bool
 }
 
 // AllowedPasskey is one person the publisher approved for a private resource.
@@ -315,6 +340,8 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
+	SignedIdentity        *bool
+	CreditPrice           int64
 	ConsumerAccess        *qurl.ConsumerAccessPolicy
 	ConsumerAccessVersion int64
 
@@ -556,6 +583,45 @@ func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*Shar
 	if access.ResourceCreatedAt != nil && !access.ResourceCreatedAt.IsZero() {
 		createdAt := *access.ResourceCreatedAt
 		link.ResourceCreatedAt = &createdAt
+	}
+	return link, nil
+}
+
+// MintLimitedLink uses POST /v1/resources/{id}/qurls: unlike share by CRID,
+// it can set one_time_use. one_time_use and an unlimited max_sessions are
+// always sent, because a Connector link is single-use when they are omitted.
+func (c *client) MintLimitedLink(ctx context.Context, crid string, limits accessrules.LinkLimits) (*ShareLink, error) {
+	var expiry qurl.PortalOption
+	if limits.Window != nil {
+		expiry = qurl.WithAccessWindow(limits.Window.Start, limits.Window.End)
+	} else {
+		expiresIn, ok := accessrules.LinkExpiry.Parse(limits.ExpiresIn)
+		if !ok {
+			return nil, errors.New("access rule link expiry is out of range")
+		}
+		// Saved rules can contain fractions. Round down so a link never lasts longer.
+		expiry = qurl.ValidFor(expiresIn.Truncate(time.Second))
+	}
+	oneBrowser := limits.OneTimeUse != nil && *limits.OneTimeUse
+	use := qurl.Reusable()
+	if oneBrowser {
+		use = qurl.OneTimeUse()
+	}
+	opts := []qurl.PortalOption{expiry, use, qurl.MaxSessions(0)}
+	if limits.SessionDuration != nil {
+		session, ok := accessrules.SessionLength.Parse(*limits.SessionDuration)
+		if !ok {
+			return nil, errors.New("access rule session length is out of range")
+		}
+		opts = append(opts, qurl.WithSessionDuration(session))
+	}
+	portal, err := c.sdk.CreatePortal(ctx, &qurl.Resource{CRID: crid}, opts...)
+	if err != nil {
+		return nil, mapShareError(err)
+	}
+	link := &ShareLink{QURL: portal.Link, CRID: portal.CRID, SingleUse: oneBrowser}
+	if portal.ExpiresAt != nil {
+		link.ExpiresAt = *portal.ExpiresAt
 	}
 	return link, nil
 }

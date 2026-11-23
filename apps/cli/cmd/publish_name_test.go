@@ -234,3 +234,26 @@ func TestPublishNameSkipsTheDirectoryWhenTheNoteIsHidden(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxHomepageName(t *testing.T) {
+	for _, tc := range []struct {
+		endpoint string
+		target   string
+		hasName  bool
+		want     bool
+	}{
+		{"https://api.layerv.xyz/", "HTTPS://example.com/app", false, true},
+		{"https://api.layerv.xyz", "https://example.com/app", true, false},
+		{"https://api.layerv.xyz", "http://example.com/app", false, false},
+		{"https://api.layerv.xyz", "http://localhost:3000", false, false},
+		{"https://api.layerv.ai", "https://example.com/app", false, false},
+	} {
+		target, err := classifyPublishTarget(tc.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sandboxHomepageName(tc.endpoint, target, tc.hasName); got != tc.want {
+			t.Errorf("%s %s, explicit name %t: auto name = %t, want %t", tc.endpoint, tc.target, tc.hasName, got, tc.want)
+		}
+	}
+}

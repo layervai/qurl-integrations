@@ -112,6 +112,7 @@ external identity is reopened, never replaced.`,
 			}
 			opts.registeredClient = client
 			opts.registeredIdentity = deviceIdentity
+			opts.reconcileRulesAfterLink(cmd.Context())
 			return opts.printer().Login(deviceIdentity)
 		},
 	}
@@ -147,6 +148,7 @@ func runExternalLogin(ctx context.Context, opts *globalOpts, tokenPath string) e
 	}
 	opts.registeredClient = client
 	opts.registeredIdentity = deviceIdentity
+	opts.reconcileRulesAfterLink(ctx)
 	return opts.printer().Login(deviceIdentity)
 }
 

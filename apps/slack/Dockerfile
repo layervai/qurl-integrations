@@ -4,8 +4,8 @@
 # ignore list (default frontend reads only `<context>/.dockerignore`,
 # which is the wrong place for a multi-app monorepo).
 
-# Go 1.26.11 fixes GO-2026-6859 and matches go.mod.
-# SHA-pinned to the multi-arch index digest, same as
+# Bumped 1.26.10 → 1.26.11 for the standard-library fixes caught by govulncheck;
+# go.mod requires go 1.26.11. SHA-pinned to the multi-arch index digest, same as
 # the rest of the repo's base images — GOTOOLCHAIN stays the image default
 # `local`, so there's no unpinned build-time toolchain fetch.
 # Compile on the builder CPU; TARGETOS/TARGETARCH select the runtime output.

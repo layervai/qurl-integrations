@@ -1,5 +1,70 @@
 # Changelog
 
+## [4.4.4](https://github.com/layervai/qurl-integrations/compare/v4.4.3...v4.4.4) (2026-11-18)
+
+
+### Bug Fixes
+
+* **cli:** return confirmed identity when local publish setup fails ([#2070](https://github.com/layervai/qurl-integrations/issues/2070)) ([bce911c](https://github.com/layervai/qurl-integrations/commit/bce911c97492e7da1b167f42f5beb4522d2f568b))
+
+## [4.4.3](https://github.com/layervai/qurl-integrations/compare/v4.4.2...v4.4.3) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cli:** document Go dependency verification for release builds ([#2060](https://github.com/layervai/qurl-integrations/issues/2060)) ([acbe159](https://github.com/layervai/qurl-integrations/commit/acbe15942be409337a674d1064e961f170c31e01))
+
+## [4.4.2](https://github.com/layervai/qurl-integrations/compare/v4.4.1...v4.4.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cli:** release direct UDP compatibility ([#2047](https://github.com/layervai/qurl-integrations/issues/2047)) ([080d407](https://github.com/layervai/qurl-integrations/commit/080d407c3349f6f89aa43939f5f4c63699f8ec85))
+
+## [4.4.1](https://github.com/layervai/qurl-integrations/compare/v4.4.0...v4.4.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **cli:** use Connector v0.14.6 ([#2042](https://github.com/layervai/qurl-integrations/issues/2042)) ([115b6a0](https://github.com/layervai/qurl-integrations/commit/115b6a013d662eaf90e112ffe4e61d64f10e46fc))
+
+## [4.4.0](https://github.com/layervai/qurl-integrations/compare/v4.3.1...v4.4.0) (2026-11-15)
+
+
+### Features
+
+* **cli:** set CRID credit prices ([#2040](https://github.com/layervai/qurl-integrations/issues/2040)) ([afb7422](https://github.com/layervai/qurl-integrations/commit/afb7422e3f287f660e1aa477b34a13c11de989fb))
+
+## [4.3.1](https://github.com/layervai/qurl-integrations/compare/v4.3.0...v4.3.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **cli:** accept the stopped Connector conflict in release checks ([#2036](https://github.com/layervai/qurl-integrations/issues/2036)) ([deb373f](https://github.com/layervai/qurl-integrations/commit/deb373f00c4c6ea40710d7f8ca28e2513e70ad88))
+
+## [4.3.0](https://github.com/layervai/qurl-integrations/compare/v4.2.0...v4.3.0) (2026-11-15)
+
+
+### Features
+
+* **cli:** support scheduled invitations ([#2033](https://github.com/layervai/qurl-integrations/issues/2033)) ([b2313bc](https://github.com/layervai/qurl-integrations/commit/b2313bc05c0abb57a35d4b77ddd3ae55a9e3a670))
+
+## [4.2.0](https://github.com/layervai/qurl-integrations/compare/v4.1.0...v4.2.0) (2026-11-13)
+
+
+### Features
+
+* **cli:** add local and account-synced access rules ([#1656](https://github.com/layervai/qurl-integrations/issues/1656)) ([1f8afdb](https://github.com/layervai/qurl-integrations/commit/1f8afdbe105863a51d866be8b02846b1668082bd))
+* **cli:** name Sandbox URL apps from their homepage ([#2020](https://github.com/layervai/qurl-integrations/issues/2020)) ([06c0cf3](https://github.com/layervai/qurl-integrations/commit/06c0cf350e4e7f87ca98e56c4356e909c0d5a694))
+* **cli:** show Stripe account status and add qurl payments disconnect ([#1995](https://github.com/layervai/qurl-integrations/issues/1995)) ([54fc086](https://github.com/layervai/qurl-integrations/commit/54fc08661943b9db62df0b4e378c27a2eeca9843))
+
+
+### Bug Fixes
+
+* **cli:** hide revoked resources from the default list ([#2017](https://github.com/layervai/qurl-integrations/issues/2017)) ([aa85e77](https://github.com/layervai/qurl-integrations/commit/aa85e7799c24475f2e9b5f92eb5d323ef6786981))
+* **cli:** recover unsaved public link limits on republish ([#1951](https://github.com/layervai/qurl-integrations/issues/1951)) ([211d96a](https://github.com/layervai/qurl-integrations/commit/211d96ac3c7299f3697516925e9f4eef72ae174c))
+* **cli:** report partial publication and confirm link settings ([#1952](https://github.com/layervai/qurl-integrations/issues/1952)) ([1d25ad3](https://github.com/layervai/qurl-integrations/commit/1d25ad3b421ff634101b85cab89db7300e668793))
+
 ## [4.1.0](https://github.com/layervai/qurl-integrations/compare/v4.0.1...v4.1.0) (2026-11-10)
 
 
