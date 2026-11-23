@@ -80,6 +80,7 @@ test.each([
     (k) => !(qurl.CREATE_QURL_ALLOWED_KEYS as readonly string[]).includes(k),
   );
   expect(undeclared).toEqual([]);
+  expect(body.name).toBe('E2E test resource');
 });
 
 test('mintLink omits target_url entirely when unset rather than sending undefined', () => {
