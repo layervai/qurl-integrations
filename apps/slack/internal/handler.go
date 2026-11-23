@@ -329,6 +329,15 @@ type Config struct {
 	// tunnel setup writes it into every rendered runtime definition so sandbox
 	// installs never silently fall back to production.
 	ConnectorAPIURL string
+	// LinkOrigin is the https origin of this environment's qURL link site. A
+	// resource that requires verified recipient access is delivered as its
+	// CRID entry page on this origin. main always sets it (production's link
+	// site unless QURL_LINK_ORIGIN says otherwise); only a Handler built
+	// without it, as in tests, skips that delivery.
+	LinkOrigin string
+	// LinkSiteAccessURL, when set, is the page that unlocks a private link
+	// site (sandbox). The CRID entry reply shows it as a first step.
+	LinkSiteAccessURL string
 
 	// BaseContext is the server-lifetime parent of every async work
 	// goroutine's context. SIGTERM cancels it, which propagates to
@@ -1880,7 +1889,7 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 		command = commandUser
 	}
 	purgeIDs := slashUninstallPurgeWorkspaceIDs(values, teamID)
-	respondSlackBlocks(w, uninstallConfirmFallbackText, uninstallConfirmBlocks(command, purgeIDs))
+	respondSlackBlocks(w, uninstallConfirmFallbackText, uninstallConfirmBlocks(command, purgeIDs, h.now()))
 }
 
 func slashUninstallPurgeWorkspaceIDs(values url.Values, teamID string) []string {

@@ -50,6 +50,10 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: shellcheck scripts/*.sh
 
+      - name: Test S3 origin default release check
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 scripts/test-check-s3-origin-default.py
+
       - name: Test signed public CLI proof staging
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: python3 scripts/test-stage-public-cli-proof.py
