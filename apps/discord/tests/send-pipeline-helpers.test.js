@@ -506,6 +506,7 @@ describe('qURL client', () => {
       expect(body.target_url).toBe('https://example.com');
       expect(body.expires_in).toBe('24h');
       expect(body.label).toBe('test label');
+      expect(body.name).toBe('test label');
       expect(body.description).toBeUndefined();
 
       expect(result.resource_id).toBe('res-1');

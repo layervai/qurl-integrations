@@ -2,12 +2,15 @@
 process.env.AUTH0_DOMAIN = 'layerv-test.auth0.com';
 process.env.AUTH0_CLIENT_ID = 'test-client-id';
 
-jest.mock('jose', () => ({
+jest.unstable_mockModule('jose', () => ({
   createRemoteJWKSet: jest.fn(() => 'fake-jwks-fn'),
   jwtVerify: jest.fn(),
 }));
 
-const jose = require('jose');
+let jose;
+beforeAll(async () => {
+  jose = await import('jose');
+});
 const { verifyAuth0IdToken } = require('../src/utils/auth0-jwks');
 
 beforeEach(() => {
