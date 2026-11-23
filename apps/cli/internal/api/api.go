@@ -122,6 +122,8 @@ type Client interface {
 	// or removes it when header is nil, and returns the resource as the
 	// service confirmed it. The answer names the header, never its value.
 	SetOriginHeader(ctx context.Context, id string, header *OriginHeader) (*ResourceSummary, error)
+	// SetSignedIdentity changes the saved app identity requirement, without replay.
+	SetSignedIdentity(ctx context.Context, id string, enabled bool) (*ResourceSummary, error)
 }
 
 // AccountClient adds the one account-authorized bootstrap operation. The CLI
@@ -338,6 +340,7 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
+	SignedIdentity        *bool
 	CreditPrice           int64
 	ConsumerAccess        *qurl.ConsumerAccessPolicy
 	ConsumerAccessVersion int64
