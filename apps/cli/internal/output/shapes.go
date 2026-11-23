@@ -15,6 +15,7 @@ import (
 // cannot silently change the CLI's output.
 
 type publishJSON struct {
+	TermsNotice    string              `json:"terms_notice,omitempty"`
 	ConsumerAccess *consumerAccessJSON `json:"consumer_access,omitempty"`
 	Private        *bool               `json:"private,omitempty"`
 	// KeptPublic is true, and otherwise absent, when the target was already
@@ -26,14 +27,15 @@ type publishJSON struct {
 	// can ask for access. ResourceURL is the resource's address on the link
 	// site for private access requests or a consumer policy, when this install
 	// knows that site.
-	AccessRequests *bool      `json:"access_requests,omitempty"`
-	ResourceURL    string     `json:"resource_url,omitempty"`
-	CRID           string     `json:"crid,omitempty"`
-	ResourceID     string     `json:"resource_id"`
-	TargetURL      string     `json:"target_url"`
-	Status         string     `json:"status,omitempty"`
-	CreatedAt      *time.Time `json:"created_at,omitempty"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	AccessRequests *bool             `json:"access_requests,omitempty"`
+	Name           escapedJSONString `json:"name,omitempty"`
+	ResourceURL    string            `json:"resource_url,omitempty"`
+	CRID           string            `json:"crid,omitempty"`
+	ResourceID     string            `json:"resource_id"`
+	TargetURL      string            `json:"target_url"`
+	Status         string            `json:"status,omitempty"`
+	CreatedAt      *time.Time        `json:"created_at,omitempty"`
+	ExpiresAt      *time.Time        `json:"expires_at,omitempty"`
 	// FoundExisting mirrors the text-mode already-published note for scripts.
 	// Known remote and local outcomes emit true or false; an uncertain local
 	// reconciliation omits the field rather than claiming a fresh publish.
@@ -44,6 +46,9 @@ type publishJSON struct {
 	// SettingsDiffer is true when an existing share keeps settings other
 	// than the chosen rule's.
 	SettingsDiffer *bool `json:"settings_differ,omitempty"`
+	// OriginHeaderName names the header added to requests to the target;
+	// the value is never part of any output.
+	OriginHeaderName string `json:"origin_header_name,omitempty"`
 }
 
 type limitedLinkJSON struct {
@@ -64,6 +69,7 @@ func limitedLinkDocument(link *qurlapi.ShareLink) *limitedLinkJSON {
 }
 
 type shareLinkJSON struct {
+	TermsNotice      string     `json:"terms_notice,omitempty"`
 	QURL             string     `json:"qurl"`
 	CRID             string     `json:"crid,omitempty"`
 	Type             string     `json:"type,omitempty"`
@@ -165,6 +171,7 @@ type SharingInspection struct {
 }
 
 type resourceStatusJSON struct {
+	SignedIdentity    *bool               `json:"signed_identity,omitempty"`
 	ConsumerAccess    *consumerAccessJSON `json:"consumer_access,omitempty"`
 	AllowedDeviceKeys []string            `json:"allowed_device_keys"`
 	Private           *bool               `json:"private,omitempty"`
@@ -178,6 +185,8 @@ type resourceStatusJSON struct {
 	CreatedAt  *time.Time    `json:"created_at,omitempty"`
 	ExpiresAt  *time.Time    `json:"expires_at,omitempty"`
 	Publisher  publisherJSON `json:"publisher"`
+	// OriginHeaderName names the header added to requests to the target.
+	OriginHeaderName string `json:"origin_header_name,omitempty"`
 }
 
 type downloadJSON struct {
@@ -202,6 +211,20 @@ func publishSettingsDiffer(res *qurlapi.Published) *bool {
 // PublishLinkFailure reports the resource that exists when its link failed.
 // Outside JSON mode this writes nothing; stderr remains the failure diagnostic.
 func (p *Printer) PublishLinkFailure(res *qurlapi.Published) error {
+	return p.publishFailure(res, "link_creation_failed")
+}
+
+// PublishSetupFailure names a confirmed resource without claiming it serves.
+// TODO(upstream-contract): Keep publication_setup_failed in sync with Desktop recovery.
+func (p *Printer) PublishSetupFailure(res *qurlapi.Published) error {
+	if p.format != FormatJSON {
+		p.Warnf("The resource exists. Check it with `qurl status %s` before retrying.", res.CRID)
+		return nil
+	}
+	return p.publishFailure(res, "publication_setup_failed")
+}
+
+func (p *Printer) publishFailure(res *qurlapi.Published, reason string) error {
 	if p.format != FormatJSON {
 		return nil
 	}
@@ -212,7 +235,7 @@ func (p *Printer) PublishLinkFailure(res *qurlapi.Published) error {
 		Private        *bool  `json:"private,omitempty"`
 		FoundExisting  *bool  `json:"found_existing,omitempty"`
 		SettingsDiffer bool   `json:"settings_differ"`
-	}{CRID: res.CRID, ResourceID: res.ResourceID, Error: "link_creation_failed", Private: res.Private, FoundExisting: res.FoundExisting, SettingsDiffer: res.OtherSettings})
+	}{CRID: res.CRID, ResourceID: res.ResourceID, Error: reason, Private: res.Private, FoundExisting: res.FoundExisting, SettingsDiffer: res.OtherSettings})
 }
 
 // Publish renders a publish result. Text mode says in one row who can open
@@ -242,21 +265,24 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
-			ConsumerAccess: policyDocument(res.ConsumerAccess),
-			Private:        res.Private,
-			KeptPublic:     res.KeptPublic,
-			AccessRequests: res.AccessRequests,
-			ResourceURL:    requestAddress(res),
-			CRID:           res.CRID,
-			ResourceID:     res.ResourceID,
-			TargetURL:      res.TargetURL,
-			Status:         res.Status,
-			CreatedAt:      res.CreatedAt,
-			ExpiresAt:      res.ExpiresAt,
-			FoundExisting:  res.FoundExisting,
-			Publisher:      publisherDocument(res.Publisher),
-			Link:           limitedLinkDocument(res.LimitedLink),
-			SettingsDiffer: publishSettingsDiffer(res),
+			TermsNotice:      p.TermsNotice,
+			ConsumerAccess:   policyDocumentWithCredits(res.ConsumerAccess, res.CreditPrice),
+			Private:          res.Private,
+			KeptPublic:       res.KeptPublic,
+			AccessRequests:   res.AccessRequests,
+			ResourceURL:      requestAddress(res),
+			Name:             escapedJSONString(res.Name),
+			CRID:             res.CRID,
+			ResourceID:       res.ResourceID,
+			TargetURL:        res.TargetURL,
+			Status:           res.Status,
+			CreatedAt:        res.CreatedAt,
+			ExpiresAt:        res.ExpiresAt,
+			FoundExisting:    res.FoundExisting,
+			Publisher:        publisherDocument(res.Publisher),
+			Link:             limitedLinkDocument(res.LimitedLink),
+			SettingsDiffer:   publishSettingsDiffer(res),
+			OriginHeaderName: res.OriginHeaderName,
 		})
 	case p.quiet:
 		// A rule's temporary link follows the CRID; with once it is the only copy.
@@ -375,13 +401,15 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(resourceStatusJSON{
-			ConsumerAccess:    policyDocument(resource.ConsumerAccess),
+			ConsumerAccess:    policyDocumentWithCredits(resource.ConsumerAccess, resource.CreditPrice),
 			AllowedDeviceKeys: append([]string{}, resource.AllowedDeviceKeys...),
 			Private:           resource.Private,
 			CRID:              resource.CRID, ResourceID: resource.ResourceID,
 			TargetURL: resource.TargetURL, Type: resource.Type, Status: resource.Status,
 			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
-			Publisher: publisherDocument(resource.Publisher),
+			Publisher:        publisherDocument(resource.Publisher),
+			OriginHeaderName: resource.OriginHeaderName,
+			SignedIdentity:   resource.SignedIdentity,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, resource.CRID)
@@ -404,11 +432,20 @@ func (p *Printer) resourceStatusRows(ew *errWriter, resource *qurlapi.ResourceSu
 	}
 	ew.printf("%s\t%s\n", p.bold("Type:"), resource.Type)
 	ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
+	if resource.SignedIdentity != nil {
+		ew.printf("%s\t%t\n", p.bold("Signed identity:"), *resource.SignedIdentity)
+	}
 	if resource.Private != nil {
 		ew.printf("%s\t%t\n", p.bold("Private:"), *resource.Private)
 	}
+	if resource.CreditPrice > 0 {
+		ew.printf("%s\t%d per hour\n", p.bold("Credit price:"), resource.CreditPrice)
+	}
 	if resource.ConsumerAccess != nil {
 		ew.printf("%s\t%s (version %d)\n", p.bold("Policy:"), resource.ConsumerAccess.Mode, resource.ConsumerAccess.Version)
+	}
+	if resource.OriginHeaderName != "" {
+		ew.printf("%s\t%s\n", p.bold(labelOriginHeader), resource.OriginHeaderName)
 	}
 	if grants && resource.AccessRequests != nil {
 		state := msgStateOff
@@ -456,24 +493,13 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
-	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
-	// A publish result always carries the privacy the service confirmed. The
-	// row is left out only for a value that has none, never guessed.
-	if res.Private != nil {
-		access := msgPublishPublic
-		if *res.Private {
-			access = msgPublishPrivate
-			if res.ConsumerAccess != nil {
-				access = "private — consumers must meet the publisher's access policy"
-			}
-		}
-		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
+	if res.Name != "" {
+		twe.printf("  %s\t%s\n", p.bold("App name:"), p.previewText(res.Name))
 	}
-	if res.ConsumerAccess != nil {
-		twe.printf("  %s\t%s (version %d)\n", p.bold("Policy:"), res.ConsumerAccess.Mode, res.ConsumerAccess.Version)
-		if address := requestAddress(res); address != "" {
-			twe.printf("  %s\t%s\n", p.bold("Address:"), address)
-		}
+	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
+	p.publishAccessRows(twe, res)
+	if res.OriginHeaderName != "" {
+		twe.printf("  %s\t%s\n", p.bold(labelOriginHeader), res.OriginHeaderName)
 	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)
@@ -487,6 +513,10 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	p.limitedLinkRows(twe, res.LimitedLink)
 	if err := twe.flush(tw); err != nil {
 		return err
+	}
+
+	if res.Name != "" && !foundExisting(res) {
+		ew.printf("\nTo rename this app, run qurl preview set %s --name \"New name\".\n", res.CRID)
 	}
 
 	// The note says the existing CRID is shown, so it may only appear when
@@ -518,6 +548,30 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	}
 	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	return ew.flush(nil)
+}
+
+func (p *Printer) publishAccessRows(twe *errWriter, res *qurlapi.Published) {
+	// A publish result always carries the privacy the service confirmed. The
+	// row is left out only for a value that has none, never guessed.
+	if res.Private != nil {
+		access := msgPublishPublic
+		if *res.Private {
+			access = msgPublishPrivate
+			if res.ConsumerAccess != nil {
+				access = "private — consumers must meet the publisher's access policy"
+			}
+		}
+		twe.printf("  %s\t%s\n", p.bold(labelAccess), access)
+	}
+	if res.CreditPrice > 0 {
+		twe.printf("  %s\t%d per hour\n", p.bold("Credit price:"), res.CreditPrice)
+	}
+	if res.ConsumerAccess != nil {
+		twe.printf("  %s\t%s (version %d)\n", p.bold("Policy:"), res.ConsumerAccess.Mode, res.ConsumerAccess.Version)
+		if address := requestAddress(res); address != "" {
+			twe.printf("  %s\t%s\n", p.bold("Address:"), address)
+		}
+	}
 }
 
 // limitedLinkRows shows the temporary link a rule with link limits minted.
@@ -583,6 +637,7 @@ func (p *Printer) publisherRows(ew *errWriter, publisher qurlapi.Publisher, crea
 func (p *Printer) ShareLink(link *qurlapi.ShareLink) error {
 	if p.format == FormatJSON {
 		out := shareLinkJSON{
+			TermsNotice:       p.TermsNotice,
 			QURL:              link.QURL,
 			CRID:              link.CRID,
 			Type:              link.Type,
@@ -680,7 +735,7 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 				servingEpoch = &epoch
 			}
 			out.Resources = append(out.Resources, listItemJSON{
-				ConsumerAccess:    policyDocument(item.ConsumerAccess),
+				ConsumerAccess:    policyDocumentWithCredits(item.ConsumerAccess, item.CreditPrice),
 				AllowedDeviceKeys: append([]string{}, item.AllowedDeviceKeys...),
 				CRID:              item.CRID,
 				ResourceID:        item.ResourceID,
@@ -779,7 +834,7 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 
 func (p *Printer) notefMore(cursor string) {
 	if cursor != "" {
-		p.Notef("More results available: add --cursor %s", cursor)
+		p.Notef("More results available: repeat the command with the same filters and add --cursor %s", cursor)
 		return
 	}
 	p.Notef("More results available.")

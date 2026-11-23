@@ -103,8 +103,13 @@ type runOpts struct {
 	stdin io.Reader
 	inTTY bool
 	tty   bool // stdout+stderr TTY-ness
+	// hiddenInput is what is typed at a hidden prompt, without its line
+	// ending; nil fails a test that reads one.
+	hiddenInput *string
 
 	configDir string
+	// Existing fixtures represent an install that already saw the current Terms.
+	firstTermsNotice bool
 	// home is the home directory the invocation looks under for a saved copy
 	// of the qURL agent skill. Empty means it does not look, so no test
 	// reads the home directory of the person who runs the suite.
@@ -278,6 +283,7 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 	browser.stdout = &res.stdout
 
 	root, opts := newRoot("test", streams, func(g *globalOpts) {
+		g.termsNoticeHandled = !o.firstTermsNotice
 		// Exercise the injected background-job/daemon boundary on every host. The
 		// separate platform-contract test keeps unsupported hosts fail-closed.
 		g.backgroundShareGOOS = o.platformGOOS
@@ -319,6 +325,13 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			g.resolveHubBootstrap = func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil }
 		}
 		g.openBrowser = browser.open
+		g.readHidden = func() ([]byte, error) {
+			if o.hiddenInput == nil {
+				t.Error("the command read hidden terminal input, and the test gave none")
+				return nil, io.EOF
+			}
+			return []byte(*o.hiddenInput), nil
+		}
 		switch {
 		case o.egress != nil:
 			g.httpClient = o.egress.client()

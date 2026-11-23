@@ -17,7 +17,9 @@ import (
 )
 
 const accessRulesFile = "access_rules.json"
-const accessRulesMaxJournal = accessrules.MaxBytes * 4
+
+// The journal holds two libraries, each of which can grow to 2 MiB as escaped JSON.
+const accessRulesMaxJournal = 4 << 20
 
 // ErrAccessRulesFile marks an access rules file that cannot be read safely.
 var ErrAccessRulesFile = errors.New("access rules file is damaged or unreadable")
@@ -26,6 +28,8 @@ var ErrAccessRulesFile = errors.New("access rules file is damaged or unreadable"
 type AccessRulesFileError struct {
 	Path string
 	Err  error
+	// LinkLimits marks the per-share link limits file, not the rules journal.
+	LinkLimits bool
 }
 
 func (e *AccessRulesFileError) Error() string   { return ErrAccessRulesFile.Error() + ": " + e.Path }
@@ -164,9 +168,8 @@ func (s *AccessRuleStore) update(ctx context.Context, change func(*accessRuleJou
 	if err != nil {
 		return accessrules.Snapshot{}, err
 	}
-	// Only rules and conflicts move the revision a caller edits against; a
-	// status-only change such as pending to offline must not invalidate it.
-	edited, err := json.Marshal([]any{j.Items, j.Conflicts})
+	// A status-only change such as pending to offline must not invalidate a revision.
+	beforeChoices, err := j.editableState()
 	if err != nil {
 		return accessrules.Snapshot{}, err
 	}
@@ -180,9 +183,9 @@ func (s *AccessRuleStore) update(ctx context.Context, change func(*accessRuleJou
 	if bytes.Equal(before, after) {
 		return j.snapshot(), nil
 	}
-	if now, err := json.Marshal([]any{j.Items, j.Conflicts}); err != nil {
+	if now, err := j.editableState(); err != nil {
 		return accessrules.Snapshot{}, err
-	} else if !bytes.Equal(edited, now) {
+	} else if !bytes.Equal(beforeChoices, now) {
 		if j.LocalVersion >= accessrules.MaxVersion {
 			return accessrules.Snapshot{}, accessrules.ErrConflict
 		}
@@ -202,6 +205,18 @@ func (s *AccessRuleStore) update(ctx context.Context, change func(*accessRuleJou
 		return accessrules.Snapshot{}, err
 	}
 	return j.snapshot(), nil
+}
+
+// editableState includes the account definition a conflict resolution can apply.
+func (j *accessRuleJournal) editableState() ([]byte, error) {
+	accountChoices := make(map[string]*accessrules.Definition, len(j.Conflicts))
+	for i := range j.Base {
+		rule := &j.Base[i]
+		if slices.Contains(j.Conflicts, rule.ID) {
+			accountChoices[rule.ID] = rule
+		}
+	}
+	return json.Marshal([]any{j.Items, j.Conflicts, accountChoices})
 }
 
 // Snapshot reads the validated journal without authentication or network. It
@@ -224,6 +239,10 @@ func (s *AccessRuleStore) Save(ctx context.Context, version int64, d *accessrule
 			return accessrules.ErrRuleConflict
 		}
 		index := slices.IndexFunc(j.Items, func(item accessrules.Definition) bool { return item.ID == d.ID })
+		// Replacing a rule with settings this CLI doesn't know would drop them.
+		if d.HasUnknownFields() || index >= 0 && j.Items[index].HasUnknownFields() {
+			return accessrules.ErrNewerRule
+		}
 		// An edit that keeps its name is never refused for a duplicate a merge brought in.
 		renamed := index < 0 || j.Items[index].Name != d.Name
 		if renamed && accessrules.NameTaken(j.Items, d) {
@@ -239,7 +258,7 @@ func (s *AccessRuleStore) Save(ctx context.Context, version int64, d *accessrule
 	})
 }
 
-// Delete removes the preset with this ID or exact name; no resource is changed.
+// Delete removes the saved rule with this ID or exact name; no resource is changed.
 func (s *AccessRuleStore) Delete(ctx context.Context, version int64, selector string) (accessrules.Snapshot, error) {
 	return s.update(ctx, func(j *accessRuleJournal) error {
 		if version >= 0 && version != j.LocalVersion {
@@ -381,10 +400,11 @@ func (s *AccessRuleStore) switchAccount(j *accessRuleJournal, accountID string) 
 }
 func (s *AccessRuleStore) syncFailure(ctx context.Context, cause error) (accessrules.Snapshot, error) {
 	snapshot, err := s.update(ctx, func(j *accessRuleJournal) error {
-		// A journal never linked to an account has nothing to be offline from.
-		j.Sync = accessrules.SyncOffline
-		if j.AccountID == "" {
-			j.Sync = accessrules.SyncLocal
+		// A journal never linked to an account has nothing to be offline from,
+		// and an unresolved conflict still needs resolving.
+		j.status()
+		if j.Sync != accessrules.SyncLocal && j.Sync != accessrules.SyncConflict {
+			j.Sync = accessrules.SyncOffline
 		}
 		return nil
 	})

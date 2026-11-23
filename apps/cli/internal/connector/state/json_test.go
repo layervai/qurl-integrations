@@ -12,11 +12,14 @@ func TestDecodeStrictJSONRejectsAmbiguousSpellings(t *testing.T) {
 	if err := DecodeStrictJSON([]byte(`{"id":"`+id+`","name":"\ud83d\ude00","mode":"keys"}`), &d); err != nil || d.Name != "\U0001F600" {
 		t.Fatalf("paired surrogate: %q %v", d.Name, err)
 	}
+	// A field the CLI doesn't model is kept, not refused; commands refuse such a rule.
+	if err := DecodeStrictJSON([]byte(`{"id":"`+id+`","name":"Team","mode":"keys","extra":1}`), &d); err != nil || !d.HasUnknownFields() {
+		t.Fatalf("unknown field: %v", err)
+	}
 	for _, raw := range []string{
 		`{"id":"` + id + `","name":"\ud800","mode":"keys"}`,
 		`{"id":"` + id + `","name":"Team","mode":"keys","mode":"public"}`,
 		`{"id":"` + id + `","name":"Team","mode":"keys"} {}`,
-		`{"id":"` + id + `","name":"Team","mode":"keys","extra":1}`,
 		"{\"id\":\"" + id + "\",\"name\":\"\xff\",\"mode\":\"keys\"}",
 	} {
 		if DecodeStrictJSON([]byte(raw), &d) == nil {

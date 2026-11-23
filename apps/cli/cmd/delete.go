@@ -258,17 +258,23 @@ func retireDeletedConnectorBinding(ctx context.Context, stateDir, id string, loc
 // confirmDelete asks on the terminal. Without a terminal it refuses instead
 // of hanging a pipeline: non-interactive deletion requires --yes.
 func confirmDelete(opts *globalOpts, id string) (bool, error) {
+	return confirmOnTerminal(opts, "delete", fmt.Sprintf("Delete %s? This cannot be undone. [y/N] ", id))
+}
+
+// confirmOnTerminal asks prompt and reads a yes; without a terminal it refuses
+// instead of hanging a pipeline, so non-interactive runs require --yes.
+func confirmOnTerminal(opts *globalOpts, action, prompt string) (bool, error) {
 	if !opts.streams.InIsTTY {
 		return false, exitcode.UsageError(errors.New(msgNeedsYes))
 	}
 	// The prompt is conversation, not data: it goes to stderr.
-	if _, err := fmt.Fprintf(opts.streams.Err, "Delete %s? This cannot be undone. [y/N] ", id); err != nil {
+	if _, err := fmt.Fprint(opts.streams.Err, prompt); err != nil {
 		return false, err
 	}
 	scanner := bufio.NewScanner(opts.streams.In)
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
-			return false, fmt.Errorf("read delete confirmation: %w", err)
+			return false, fmt.Errorf("read %s confirmation: %w", action, err)
 		}
 		return false, nil
 	}

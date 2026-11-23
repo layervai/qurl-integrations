@@ -12,6 +12,8 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 )
 
+const accessRulesPath = "/v1/me/access-rules"
+
 // AccessRules exposes only the canonical account's versioned preset library.
 func (c *client) AccessRules() accessrules.Remote { return accountAccessRules{client: c} }
 
@@ -34,7 +36,7 @@ func (a accountAccessRules) Replace(ctx context.Context, version int64, items []
 }
 func (a accountAccessRules) request(ctx context.Context, method string, body any) (accessrules.AccountLibrary, error) {
 	// Version CAS, rather than replay keys, owns recovery from an uncertain PUT.
-	reply, err := a.client.doRESTOnce(ctx, method, "/v1/me/access-rules", body)
+	reply, err := a.client.doRESTOnce(ctx, method, accessRulesPath, body)
 	if err != nil {
 		return accessrules.AccountLibrary{}, err
 	}
@@ -46,6 +48,8 @@ func (a accountAccessRules) request(ctx context.Context, method string, body any
 		if reply.status == http.StatusForbidden {
 			// A frozen account keeps its own standing message; any other 403
 			// means this identity has no linked account library.
+			// TODO(upstream-contract): qurl-service documents only
+			// account_frozen and device_not_linked for this route.
 			var problem *Error
 			if errors.As(reply.problem(), &problem) && strings.EqualFold(problem.Code, "account_frozen") {
 				fixed.Code = problem.Code
@@ -56,7 +60,7 @@ func (a accountAccessRules) request(ctx context.Context, method string, body any
 		return accessrules.AccountLibrary{}, fixed
 	}
 	// Unknown envelope fields, including the service's built-ins, are ignored
-	// so the service can evolve; each rule still decodes strictly because the
+	// so the service can evolve; a rule keeps its unknown fields because the
 	// whole list is written back.
 	var envelope struct {
 		Data struct {

@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/layervai/qurl-go/qurl"
 )
 
 const testID = "11111111-1111-4111-8111-111111111111"
@@ -27,12 +31,61 @@ func TestDefinitionRejectsUnsupportedOrContradictoryRules(t *testing.T) {
 	if err := valid.Validate(false); err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{`{"id":"` + testID + `","name":"x","mode":"public","contract_id":"plan"}`, `{"id":"` + testID + `","name":"x","mode":"future"}`, `{"id":"` + testID + `","name":"x","mode":"keys","secret":"value"}`} {
+	for _, raw := range []string{`{"id":"` + testID + `","name":"x","mode":"public","contract_id":"plan"}`, `{"id":"` + testID + `","name":"x","mode":"future"}`, `{"id":"` + testID + `","name":"x","mode":"review","Mode":"public"}`} {
 		if decodeDefinition(raw) == nil {
 			t.Fatal("unsafe definition accepted")
 		}
 	}
 }
+
+// A rule field from a newer service, on the rule or inside a setting, is kept
+// and written back exactly as read; a change to it is still a change.
+func TestDefinitionKeepsUnknownFields(t *testing.T) {
+	raw := `{"id":"` + testID + `","name":"Quick","mode":"public","region":"eu","link_limits":{"expires_in":"1h","max_opens":3}}`
+	var d Definition
+	if err := json.Unmarshal([]byte(raw), &d); err != nil || d.Validate(false) != nil || !d.HasUnknownFields() || d.LinkLimits.ExpiresIn != "1h" {
+		t.Fatalf("decode %+v: %v", d, err)
+	}
+	if out, err := json.Marshal([]Definition{d}); err != nil || string(out) != "["+raw+"]" {
+		t.Fatalf("write-back %s %v", out, err)
+	}
+	var other Definition
+	if json.Unmarshal([]byte(strings.Replace(raw, `"eu"`, `"us"`, 1)), &other) != nil || EqualItems([]Definition{d}, []Definition{other}) {
+		t.Fatal("a change to an unknown field went unseen")
+	}
+	if sameJSON(json.RawMessage(`{"n":9007199254740993}`), json.RawMessage(`{"n":9007199254740992}`)) || !sameJSON(json.RawMessage(`{"a":1,"b":2}`), json.RawMessage(`{"b":2, "a":1}`)) {
+		t.Fatal("kept fields compare by value, exactly")
+	}
+	if d.Name = "Edited"; d.Validate(false) == nil {
+		if _, err := json.Marshal(d); !errors.Is(err, ErrNewerRule) {
+			t.Fatalf("an edited newer rule was written: %v", err)
+		}
+	}
+	var known Definition
+	if json.Unmarshal([]byte(`{"id":"`+testID+`","name":"x","mode":"keys"}`), &known) != nil || known.HasUnknownFields() {
+		t.Fatal("a rule of known fields reads as newer")
+	}
+}
+
+// The SDK decides which fields are unknown, so it must model exactly the
+// fields Definition does; otherwise one would be dropped or flagged wrongly.
+func TestDefinitionFieldsMatchTheSDK(t *testing.T) {
+	names := func(v any) []string {
+		var out []string
+		for f := range reflect.TypeOf(v).Fields() {
+			if tag, _, _ := strings.Cut(f.Tag.Get("json"), ","); tag != "" && tag != "-" {
+				out = append(out, tag)
+			}
+		}
+		return out
+	}
+	for _, pair := range [][2]any{{Definition{}, qurl.AccessRule{}}, {LinkLimits{}, qurl.AccessRuleLinkLimits{}}, {Payment{}, qurl.AccessRulePayment{}}} {
+		if a, b := names(pair[0]), names(pair[1]); !slices.Equal(a, b) {
+			t.Errorf("%T fields %v, SDK %v", pair[0], a, b)
+		}
+	}
+}
+
 func TestMergeKeepsUnrelatedChangesAndRequiresSameRuleResolution(t *testing.T) {
 	base := []Definition{{ID: testID, Name: "Base", Mode: "keys"}}
 	local := []Definition{{ID: testID, Name: "Local", Mode: "keys"}}
@@ -49,6 +102,31 @@ func TestMergeKeepsUnrelatedChangesAndRequiresSameRuleResolution(t *testing.T) {
 	got, conflicts = Merge(base, nil, remote)
 	if len(got) != 1 || !reflect.DeepEqual(conflicts, []string{testID}) {
 		t.Fatalf("delete/edit merge %+v conflicts %v", got, conflicts)
+	}
+}
+
+func TestRuleNamesMatchTheServiceGrammar(t *testing.T) {
+	for name, ok := range map[string]bool{
+		"Café":                      true,
+		"e\u0301\u0301\u0301":       true,
+		"e\u0301\u0301\u0301\u0301": false,
+		"\u0301team":                false,
+		"a \u0301":                  false,
+		"\u2714\ufe0f Reviewers":    true,
+		"Team\u2028":                false,
+		// Names the service accepts must never fail a sync on read.
+		"Family \U0001F468\u200d\U0001F469\u200d\U0001F467":                              true,
+		"\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F England": true,
+		"\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645":                               true,
+		"\U0001F469\U0001F3FD\u200d\U0001F4BB Devs":                                      true,
+		"a\u200db":              false,
+		"Team \U0001F468\u200d": false,
+		"\U0001F3F4" + "\U000E0061\U000E0061\U000E0061\U000E0061\U000E0061\U000E0061\U000E0061" + "\U000E007F": false,
+	} {
+		d := Definition{ID: testID, Name: name, Mode: ModeKeys}
+		if got := d.Validate(false) == nil; got != ok {
+			t.Errorf("name %q valid = %v, want %v", name, got, ok)
+		}
 	}
 }
 
@@ -80,6 +158,7 @@ func TestFrozenCatalogContract(t *testing.T) {
 			Summary    string      `json:"summary"`
 			Mode       string      `json:"mode"`
 			LinkLimits *LinkLimits `json:"link_limits"`
+			Payment    bool        `json:"payment"`
 		} `json:"defaults"`
 		// Display copy shared by every surface; output checks labels and levels.
 		Presentation map[string]struct {
@@ -112,11 +191,18 @@ func TestFrozenCatalogContract(t *testing.T) {
 		}
 	}
 	once := OnlyFirstPerson()
-	if len(catalog.Defaults) != 4 || catalog.Defaults[1].ID != once.ID || catalog.Defaults[1].Label != once.Name ||
-		catalog.Defaults[1].Mode != once.Mode || !sameLinkLimits(catalog.Defaults[1].LinkLimits, once.LinkLimits) {
-		t.Fatal("Only the first person drifted from the catalog's defaults")
+	if len(catalog.Defaults) != 4 || catalog.Defaults[0].ID != once.ID || catalog.Defaults[0].Label != once.Name ||
+		catalog.Defaults[0].Mode != once.Mode || !sameLinkLimits(catalog.Defaults[0].LinkLimits, once.LinkLimits) {
+		t.Fatal("One-time link drifted from the catalog's defaults")
 	}
 	for _, d := range catalog.Defaults {
+		// People who pay is a contract preset with its own presentation entry.
+		if d.Payment {
+			if d.Mode != ModeContract || d.Label != catalog.Presentation[d.ID].Label {
+				t.Errorf("payment default %s is %s %q", d.ID, d.Mode, d.Label)
+			}
+			continue
+		}
 		if d.Label != catalog.Presentation[d.Mode].Label && d.ID != once.ID {
 			t.Errorf("default %s is labeled %q, not its mode's label", d.ID, d.Label)
 		}
@@ -193,12 +279,15 @@ func TestFindSelectsByIDOrExactName(t *testing.T) {
 
 func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
 	head := `{"id":"` + testID + `","name":"Team",`
+	paid := head + `"mode":"contract","contract_id":"buyers","payment":`
 	for _, raw := range []string{
 		head + `"mode":"public","link_limits":{"expires_in":"1h","one_time_use":true,"session_duration":"30m"}}`,
 		head + `"mode":"public","link_limits":{"expires_in":"30d","one_time_use":false}}`,
 		head + `"mode":"review","approval_expires_in":"7d"}`,
 		head + `"mode":"keys","approval_expires_in":"365d"}`,
 		head + `"mode":"email_domain","email_domain":"studio.com"}`,
+		head + `"mode":"contract","contract_id":"buyers","payment":{"price_id":"price_1PqA2b","access_seconds":0}}`,
+		head + `"mode":"contract","contract_id":"buyers","payment":{"price_id":"price_1","access_seconds":315360000}}`,
 	} {
 		var d Definition
 		if err := json.Unmarshal([]byte(raw), &d); err != nil || d.Validate(false) != nil {
@@ -216,9 +305,6 @@ func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
 		head + `"mode":"public","approval_expires_in":"7d"}`,
 		head + `"mode":"public","link_limits":{"one_time_use":true}}`,
 		head + `"mode":"public","link_limits":{"expires_in":"1h","session_duration":null}}`,
-		head + `"mode":"public","link_limits":{"expires_in":"1h","max_sessions":1}}`,
-		head + `"mode":"review","allow_download":true}`,
-		head + `"mode":"public","link_limits":{"expires_in":"1h","extra":1}}`,
 		head + `"mode":"public","link_limits":null}`,
 		head + `"mode":"review","approval_expires_in":null}`,
 		head + `"mode":"public","link_limits":{"expires_in":"30s"}}`,
@@ -228,6 +314,19 @@ func TestRuleSettingsDecodeStrictlyAndRoundTrip(t *testing.T) {
 		head + `"mode":"keys","approval_expires_in":"366d"}`,
 		head + `"mode":"public","link_limits":{"expires_in":"1h","session_duration":"1500ms"}}`,
 		head + `"mode":"review","approval_expires_in":""}`,
+		paid + `{"price_id":"price_1"}}`,
+		paid + `{"access_seconds":0}}`,
+		paid + `{"price_id":null,"access_seconds":0}}`,
+		paid + `{"price_id":"price_1","access_seconds":null}}`,
+		paid + `null}`,
+		paid + `{"price_id":"prod_1","access_seconds":0}}`,
+		paid + `{"price_id":"price_","access_seconds":0}}`,
+		paid + `{"price_id":"price_1","access_seconds":-1}}`,
+		paid + `{"price_id":"price_1","access_seconds":315360001}}`,
+		paid + `{"price_id":"price_1","access_seconds":1.5}}`,
+		head + `"mode":"review","payment":{"price_id":"price_1","access_seconds":0}}`,
+		head + `"mode":"public","payment":{"price_id":"price_1","access_seconds":0}}`,
+		head + `"mode":"contract","payment":{"price_id":"price_1","access_seconds":0}}`,
 	} {
 		if decodeDefinition(raw) == nil {
 			t.Errorf("invalid settings accepted: %s", raw)
@@ -241,6 +340,18 @@ func TestRuleSettingsAreComparedAndBuiltInsCarryNone(t *testing.T) {
 	b.ApprovalExpiresIn = new("30d")
 	if EqualItems([]Definition{a}, []Definition{b}) {
 		t.Fatal("approval lifetime change not seen")
+	}
+	paid := Definition{ID: testID, Name: "Buyers", Mode: ModeContract, ContractID: "buyers", Payment: &Payment{PriceID: "price_1", AccessSeconds: 0}}
+	// The account is filled in when the rule is shared; until then the policy is refused.
+	if policy := paid.Policy(1); paid.Validate(false) != nil || policy.Validate() == nil {
+		t.Fatal("a paid rule's policy must be valid only with an account")
+	}
+	for _, other := range []*Payment{nil, {PriceID: "price_2"}, {PriceID: "price_1", AccessSeconds: 60}} {
+		changed := paid
+		changed.Payment = other
+		if EqualItems([]Definition{paid}, []Definition{changed}) {
+			t.Fatalf("payment change to %+v not seen", other)
+		}
 	}
 	if (&Definition{ID: "builtin.review", Name: "People you approve", Mode: "review", ApprovalExpiresIn: new("7d")}).Validate(true) == nil {
 		t.Fatal("built-in with settings accepted")
@@ -270,6 +381,10 @@ func TestValidateItemsCountsRuleSettings(t *testing.T) {
 	if got, want := settingsSize(&limits), 19+2+3+11+10+2+12+1+16+3; got != want {
 		t.Fatalf("settings size %d, want %d", got, want)
 	}
+	paid := Definition{Payment: &Payment{PriceID: "price_1", AccessSeconds: 3600}}
+	if got, want := settingsSize(&paid), 3+7+8+7+14+4; got != want {
+		t.Fatalf("payment size %d, want %d", got, want)
+	}
 }
 
 func TestParseDurationMatchesServiceGrammar(t *testing.T) {
@@ -295,11 +410,16 @@ func TestSameEffectiveLinkLimitsIgnoresExplicitDefaults(t *testing.T) {
 		{&LinkLimits{ExpiresIn: "1h", OneTimeUse: new(true)}, false},
 		{&LinkLimits{ExpiresIn: "1h", SessionDuration: new("30m")}, false},
 		{&LinkLimits{ExpiresIn: "2h"}, false},
+		{&LinkLimits{ExpiresIn: "60m"}, true},
+		{&LinkLimits{ExpiresIn: "3600s", SessionDuration: new("30m")}, false},
 		{nil, false},
 	} {
 		if got := SameEffectiveLinkLimits(omitted, tc.other); got != tc.same {
 			t.Errorf("SameEffectiveLinkLimits(%+v, %+v) = %v", omitted, tc.other, got)
 		}
+	}
+	if !SameEffectiveLinkLimits(&LinkLimits{ExpiresIn: "1d", SessionDuration: new("24h")}, &LinkLimits{ExpiresIn: "24h", SessionDuration: new("1440m")}) {
+		t.Error("equal durations in other units must match")
 	}
 	if sameLinkLimits(omitted, &LinkLimits{ExpiresIn: "1h", OneTimeUse: new(false)}) {
 		t.Error("library comparison must keep an explicit false")

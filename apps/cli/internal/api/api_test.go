@@ -15,6 +15,7 @@ import (
 
 	"github.com/layervai/qurl-go/qurl"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/accessrules"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
@@ -499,6 +500,30 @@ func TestPublishSendsPinnedWireShape(t *testing.T) {
 	}
 	if res.FoundExisting == nil || !*res.FoundExisting {
 		t.Errorf("replayed publish FoundExisting = %v, want known true", res.FoundExisting)
+	}
+}
+
+func TestPublishHomepageTitleRoundTrip(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			UseHomepageTitle bool   `json:"use_homepage_title"`
+			Name             string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || !body.UseHomepageTitle || body.Name != "" {
+			t.Errorf("automatic name request = %+v, decode error = %v", body, err)
+		}
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "private": true,
+			"target_url": "https://example.com/data", "name": "Example Domain",
+		}, nil)
+	})
+	res, err := newTestClient(t, srv, nil).Publish(t.Context(), "https://example.com/data", PublishOptions{UseHomepageTitle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Name != "Example Domain" {
+		t.Fatalf("published name = %q", res.Name)
 	}
 }
 
@@ -1754,6 +1779,48 @@ func TestEditDeviceGrantsThatLostToOtherWritersIsNotRetried(t *testing.T) {
 			}
 			if got := len(srv.Requests()); got != 1 || len(sleeps) != 0 {
 				t.Fatalf("the edit was sent %d times with %d waits, want once and no wait", got, len(sleeps))
+			}
+		})
+	}
+}
+
+func TestMintLimitedLinkUsesScheduledExpiry(t *testing.T) {
+	start := time.Date(2030, time.January, 2, 16, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	for _, name := range []string{"duration", "scheduled"} {
+		t.Run(name, func(t *testing.T) {
+			scheduled := name == "scheduled"
+			srv := apitest.NewServer(t)
+			limits := accessrules.LinkLimits{ExpiresIn: "5m", OneTimeUse: new(true)}
+			if scheduled {
+				limits.Window = &accessrules.AccessWindow{Start: start, End: end}
+			}
+			srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/qurls", func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					ExpiresIn  string `json:"expires_in"`
+					NotBefore  string `json:"not_before"`
+					ExpiresAt  string `json:"expires_at"`
+					OneTimeUse bool   `json:"one_time_use"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				if scheduled {
+					if body.NotBefore != start.Format(time.RFC3339) || body.ExpiresAt != end.Format(time.RFC3339) || body.ExpiresIn != "" {
+						t.Errorf("scheduled request = %+v", body)
+					}
+				} else if body.ExpiresIn != "5m" || body.NotBefore != "" || body.ExpiresAt != "" {
+					t.Errorf("duration request = %+v", body)
+				}
+				if !body.OneTimeUse {
+					t.Error("single-use flag missing")
+				}
+				apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "qurl_link": "https://qurl.link/#example",
+				}, nil)
+			})
+			if _, err := newTestClient(t, srv, nil).MintLimitedLink(t.Context(), srv.Key.CRID, limits); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
