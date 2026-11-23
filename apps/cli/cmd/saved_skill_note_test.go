@@ -59,7 +59,7 @@ var savedSkillCommands = []struct {
 	{"--version", func(_ *apitest.Server, flags ...string) []string { return append(flags, "--version") }},
 	{"version", func(_ *apitest.Server, flags ...string) []string { return append(flags, "version") }},
 	{"publish", func(srv *apitest.Server, flags ...string) []string {
-		return append(append([]string{"--endpoint", srv.URL}, flags...), "publish", "https://example.com/data")
+		return append(append([]string{"--endpoint", srv.URL}, flags...), "publish", "https://example.com/data", "--name", "Example")
 	}},
 }
 
