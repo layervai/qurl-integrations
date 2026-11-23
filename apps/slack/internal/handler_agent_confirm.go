@@ -89,6 +89,7 @@ type pendingAction struct {
 	Action      agent.ActionKind `json:"action"`
 	Token       string           `json:"token,omitempty"`        // slug/alias (sigil stripped) for get/revoke
 	Reason      string           `json:"reason,omitempty"`       // audit reason, forwarded to the mint on get
+	Rule        string           `json:"rule,omitempty"`         // access rule for get; resolved again at execute
 	Alias       string           `json:"alias,omitempty"`        // alias name for set/unset-alias; channel alias for protect-url
 	Target      string           `json:"target,omitempty"`       // target slug for set-alias
 	URL         string           `json:"url,omitempty"`          // target URL for protect-url
@@ -252,11 +253,14 @@ func (h *Handler) confirmDeliverable(prop *agent.Proposal) bool {
 // adminGatedFor is the SINGLE source of truth for whether an action needs an
 // admin re-check at confirm time, used both when snapshotting a proposal and at
 // click time. An unrecognized kind fails closed (gated). Get and inspect are the
-// only non-gated kinds: both are channel-member reads of a channel-reachable
+// only non-gated kinds when no rule is selected: both read a channel-reachable
 // resource (inspect reveals strictly less than the link get hands out), so both
 // match /qurl get's "any channel member" posture rather than the admin verbs.
-func adminGatedFor(kind agent.ActionKind) bool {
-	return kind != agent.ActionGet && kind != agent.ActionInspect
+func adminGatedFor(kind agent.ActionKind, rule string) bool {
+	if kind == agent.ActionGet {
+		return rule != ""
+	}
+	return kind != agent.ActionInspect
 }
 
 // askerOnly reports whether a kind may be approved ONLY by the member who requested
@@ -332,6 +336,7 @@ func (h *Handler) postAgentConfirmScoped(log *slog.Logger, env *slackEventEnvelo
 		Action:            prop.Action,
 		Token:             prop.Token,
 		Reason:            prop.Reason,
+		Rule:              prop.Rule,
 		Alias:             prop.Alias,
 		Target:            prop.Target,
 		URL:               prop.URL,
@@ -514,10 +519,10 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		return
 	}
 
-	// Admin re-gate, derived from the STORED ActionKind (never the wire), applied
+	// Admin re-gate, derived from the stored action and rule (never the wire), applied
 	// to BOTH Approve and Reject. A non-admin click is denied ephemerally and
 	// claims NOTHING, so an admin can still act on the pending action.
-	if adminGatedFor(pa.Action) {
+	if adminGatedFor(pa.Action, pa.Rule) {
 		if !h.requireAdminForClick(log, responseURL, teamID, payload.User.ID, agentConfirmAdminOnlyReply) {
 			return
 		}
@@ -1039,6 +1044,9 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			// intent) are the same person — same actor/reason parity as a typed get.
 			flags["reason"] = pa.Reason
 		}
+		if pa.Rule != "" {
+			flags["rule"] = pa.Rule
+		}
 		cmd := &Command{Subcommand: SubcmdGet, Alias: pa.Token, Flags: flags, Raw: "get $" + pa.Token}
 		res, err := h.getWork(ctx, log, &getWorkArgs{
 			cmd:          cmd,
@@ -1063,7 +1071,7 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		// keep the public card neutral. The asker-only gate (processAgentConfirm) ensures
 		// the clicker IS the asker, so the private delivery reaches the right person.
 		//
-		// INVARIANT: cmd carries no dm flag (flags only ever holds "reason" above), so
+		// INVARIANT: cmd carries no dm flag (flags only ever holds "reason" and "rule" above), so
 		// getWork takes the in-channel render branch and res.blocks is ALWAYS non-nil
 		// here — deliverConfirmPrivate posts the Enter Portal button. The guard below
 		// ENFORCES it rather than only documenting it: if a future change set dm:true on
