@@ -573,6 +573,8 @@ func TestShareSavedLimitsReportsOnlyServerClamp(t *testing.T) {
 		wantNote bool
 	}{
 		{name: "old server"},
+		{name: "zero receipt", seconds: new(0)},
+		{name: "negative receipt", seconds: new(-5)},
 		{name: "full lifetime", seconds: new(3600)},
 		{name: "clamped lifetime", seconds: new(60), wantNote: true},
 	} {
@@ -593,7 +595,7 @@ func TestShareSavedLimitsReportsOnlyServerClamp(t *testing.T) {
 			}
 			result := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID, "--ttl", "1h"}, shareStateDir: dir})
 			note := "Note: the service granted a 1m0s link lifetime instead of the requested 1h0m0s."
-			if result.code != 0 || result.stdout.String() != "https://qurl.link/at_limited\n" || strings.Contains(result.stderr.String(), note) != receipt.wantNote {
+			if result.code != 0 || result.stdout.String() != "https://qurl.link/at_limited\n" || strings.Contains(result.stderr.String(), "Note: the service granted") != receipt.wantNote || (receipt.wantNote && !strings.Contains(result.stderr.String(), note)) {
 				t.Fatalf("share: %d stdout=%q stderr=%q", result.code, result.stdout.String(), result.stderr.String())
 			}
 		})
