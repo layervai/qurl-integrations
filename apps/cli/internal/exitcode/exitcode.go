@@ -309,6 +309,8 @@ func cliSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the close
 		// change after creation. A request that conflicts with state which
 		// already exists is the Conflict row, as for ErrFileExists above.
 		return Conflict, true
+	case errors.Is(err, qurlapi.ErrSignedIdentityUnsupported):
+		return ServerError, true
 	case errors.Is(err, qurlapi.ErrOriginHeaderMismatch):
 		// The same 400 shape: publishing again does not change the origin
 		// header of a resource that exists.
