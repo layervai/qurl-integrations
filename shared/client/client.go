@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-go/crid"
+	"github.com/layervai/qurl-go/qurl"
 )
 
 const (
@@ -326,10 +327,12 @@ type CreateInput struct {
 	// `description` — the resource-level `description` lives on the Update /
 	// Resource bodies and on the GET response (QurlData.description).
 	// TODO(upstream-rebrand): keep aligned with qurl-service's openapi.
-	Label       string `json:"label,omitempty"`
-	ExpiresIn   string `json:"expires_in,omitempty"`
-	OneTimeUse  bool   `json:"one_time_use,omitempty"`
-	MaxSessions int    `json:"max_sessions,omitempty"`
+	Label     string `json:"label,omitempty"`
+	ExpiresIn string `json:"expires_in,omitempty"`
+	// OneTimeUse is always sent on a resource mint: leaving it false mints a
+	// reusable link, not the service's one-time tunnel default.
+	OneTimeUse  bool `json:"one_time_use,omitempty"`
+	MaxSessions int  `json:"max_sessions,omitempty"`
 	// SessionDuration is the per-qURL session lifetime (e.g. "1h"): how
 	// long access lasts after a visitor reaches the content, distinct
 	// from ExpiresIn (the link's own expiry). Server-side it maps to
@@ -493,9 +496,12 @@ type createQurlBody struct {
 // the same reason — the resource already owns it).
 type createForResourceBody struct {
 	// `label` per CreateQurlForResourceRequest (not `description`).
-	Label           string        `json:"label,omitempty"`
-	ExpiresIn       string        `json:"expires_in,omitempty"`
-	OneTimeUse      bool          `json:"one_time_use,omitempty"`
+	Label     string `json:"label,omitempty"`
+	ExpiresIn string `json:"expires_in,omitempty"`
+	// Always sent: the service defaults an omitted one_time_use to true on a
+	// tunnel, so false must be explicit for a reusable link.
+	// TODO(upstream-contract): qurl-service's tunnel one_time_use default.
+	OneTimeUse      bool          `json:"one_time_use"`
 	MaxSessions     int           `json:"max_sessions,omitempty"`
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
@@ -556,6 +562,14 @@ type Resource struct {
 	// distinct from the public-key ResourceID and must be passed to connectors
 	// verbatim rather than derived client-side.
 	ConnectorRoutingID string `json:"connector_routing_id,omitempty"`
+	// CRID is the resource's permanent public identifier.
+	CRID string `json:"crid,omitempty"`
+	// ConsumerAccessVersion is the revision of the resource's consumer access
+	// policy; zero means it never had one. A resource that has or had one
+	// issues no bearer links: recipients enter by its CRID and verify there.
+	// TODO(upstream-contract): qurl-service `consumer_access_version`, and its
+	// rule that a resource that has or had a policy never mints a bearer link.
+	ConsumerAccessVersion int64 `json:"consumer_access_version,omitempty"`
 }
 
 // SharingState is the account-authorized lifecycle state for one tunnel.
@@ -1022,6 +1036,21 @@ func (c *Client) doSharing(ctx context.Context, method, resourceID string, input
 	return &out, nil
 }
 
+// ResourceKeyDER decodes a resource_id to the DER public key that its CRID
+// fingerprints, so a caller can check a CRID with crid.KeyMatches. ok is false
+// when the value is not canonical unpadded base64url, such as a URL; other bytes
+// that decode, such as some legacy ids, simply fail crid.KeyMatches.
+//
+// TODO(upstream-contract): qurl-service encodes resource_id as unpadded
+// base64url.
+func ResourceKeyDER(resourceID string) (der []byte, ok bool) {
+	der, err := base64.RawURLEncoding.Strict().DecodeString(resourceID)
+	if err != nil || len(der) == 0 || base64.RawURLEncoding.EncodeToString(der) != resourceID {
+		return nil, false
+	}
+	return der, true
+}
+
 func validateSharingState(requestResourceID string, sharing *SharingState) error {
 	if sharing == nil || sharing.ResourceID != requestResourceID {
 		return errors.New("sharing response identity does not match request")
@@ -1029,8 +1058,8 @@ func validateSharingState(requestResourceID string, sharing *SharingState) error
 	if sharing.CRID == "" {
 		return errors.New("sharing response CRID is missing")
 	}
-	der, err := base64.RawURLEncoding.Strict().DecodeString(sharing.ResourceID)
-	if err != nil {
+	der, ok := ResourceKeyDER(sharing.ResourceID)
+	if !ok {
 		return errors.New("sharing response resource identity is invalid")
 	}
 	matched, err := crid.KeyMatches(sharing.CRID, der)
@@ -1329,6 +1358,33 @@ func (c *Client) GetQuota(ctx context.Context) (*QuotaOutput, error) {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// ErrInvalidAccessRules is returned when GET /v1/me/access-rules answers
+// without a rule list.
+var ErrInvalidAccessRules = errors.New("access rules: response has no items")
+
+// AccessRules returns the saved access rules of the qURL account that owns
+// the API key (GET /v1/me/access-rules). Rules keep fields this client does
+// not model, so HasUnknownFields reports a rule that is unsafe to apply.
+func (c *Client) AccessRules(ctx context.Context) ([]qurl.AccessRule, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/me/access-rules", http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	// TODO(upstream-contract): the service returns the whole library (at most
+	// 100 rules) in one unpaginated response.
+	var out struct {
+		Items []qurl.AccessRule `json:"items"`
+	}
+	// One attempt: it sits on a slash command's deadline, and callers retry.
+	if _, err := c.doOnce(req, &out, "GET /v1/me/access-rules"); err != nil {
+		return nil, err
+	}
+	if out.Items == nil {
+		return nil, ErrInvalidAccessRules
+	}
+	return out.Items, nil
 }
 
 // --- Error types (RFC 7807) ---

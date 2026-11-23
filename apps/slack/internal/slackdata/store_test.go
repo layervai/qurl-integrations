@@ -620,7 +620,7 @@ func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
 	if table := aws.ToString(got.TableName); table != "ws" {
 		t.Errorf("TableName = %q, want ws", table)
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, updated_at = :now ADD admin_slack_user_ids :owner_set" {
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :owner_set" {
 		t.Errorf("UpdateExpression = %q", exp)
 	}
 	if cond := aws.ToString(got.ConditionExpression); cond != "attribute_exists(slack_team_id) AND owner_id = :current_owner" {
@@ -1663,4 +1663,24 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 			t.Fatalf("deleted channels = %v, want %v", deletedChannels, want)
 		}
 	})
+}
+
+func TestCheckAdminRejectsRemovedMembership(t *testing.T) {
+	store := newStore(&stubDDB{
+		getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			item := map[string]ddbtypes.AttributeValue{
+				attrSlackTeamID: stringAttr("T"),
+				attrOwnerID:     stringAttr(testOwnerSlackID),
+			}
+			// An eventual read may still see membership from before removal.
+			if !aws.ToBool(in.ConsistentRead) {
+				item[attrAdminSlackUserIDs] = &ddbtypes.AttributeValueMemberSS{Value: []string{testCallerSlackID}}
+			}
+			return &dynamodb.GetItemOutput{Item: item}, nil
+		},
+	})
+	isAdmin, _, err := store.CheckAdmin(context.Background(), "T", testCallerSlackID)
+	if err != nil || isAdmin {
+		t.Fatalf("removed admin authorized: isAdmin=%v err=%v", isAdmin, err)
+	}
 }

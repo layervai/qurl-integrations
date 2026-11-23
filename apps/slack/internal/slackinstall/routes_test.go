@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -769,5 +770,147 @@ func TestSafeSlackOAuthErrorCode(t *testing.T) {
 	}
 	if got := safeSlackOAuthErrorCode("not_authed"); got != slackOAuthErrorUnrecognized {
 		t.Fatalf("unexpected Slack API error = %q, want %s", got, slackOAuthErrorUnrecognized)
+	}
+}
+
+func TestInstallRoutesShareSourceBudget(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1800000000, 0)
+	store := &fakeTokenStore{}
+	cfg := testConfig(store)
+	cfg.Now = func() time.Time { return now }
+	mux := http.NewServeMux()
+	if err := RegisterRoutes(mux, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	request := func(path, ip string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+		r.Header.Set("X-Forwarded-For", ip)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+	for i := 0; i < 10; i++ {
+		path, want := InstallPath, http.StatusFound
+		if i%2 == 1 {
+			path, want = CallbackPath, http.StatusBadRequest
+		}
+		if got := request(path, "192.0.2.1").Code; got != want {
+			t.Fatalf("request %d: got %d want %d", i, got, want)
+		}
+	}
+	for _, path := range []string{InstallPath, CallbackPath} {
+		w := request(path, "192.0.2.1")
+		if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != "6" {
+			t.Fatalf("%s: got %d retry %q", path, w.Code, w.Header().Get("Retry-After"))
+		}
+	}
+	if got := request(InstallPath, "192.0.2.2").Code; got != http.StatusFound {
+		t.Fatalf("separate IP: %d", got)
+	}
+	if store.workspaceID != "" {
+		t.Fatal("rejected callbacks stored a token")
+	}
+	now = now.Add(6 * time.Second)
+	if got := request(InstallPath, "192.0.2.1").Code; got != http.StatusFound {
+		t.Fatalf("refilled budget: %d", got)
+	}
+}
+
+func TestInstallRoutesGroupIPv6Sources(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(&fakeTokenStore{})
+	mux := http.NewServeMux()
+	if err := RegisterRoutes(mux, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		ip := fmt.Sprintf("2001:db8:1::%x", i+1)
+		want := http.StatusFound
+		if i == 10 {
+			want = http.StatusTooManyRequests
+		}
+		if i == 11 {
+			ip = "2001:db8:2::1"
+		}
+		r := httptest.NewRequest(http.MethodGet, InstallPath, http.NoBody)
+		r.Header.Set("X-Forwarded-For", ip)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("%s: got %d want %d", ip, w.Code, want)
+		}
+	}
+}
+
+func TestInstallCallbackThrottleBeforeExchange(t *testing.T) {
+	t.Parallel()
+	var exchanges atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		exchanges.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "access_token": testWorkspaceToken, "token_type": "bot", "scope": testScopeCSV,
+			"team":        map[string]string{"id": testWorkspaceID},
+			"authed_user": map[string]string{"id": testInstallerUserID},
+		})
+	}))
+	defer provider.Close()
+	store := &fakeTokenStore{}
+	cfg := testConfig(store)
+	cfg.OAuthAccessURL = provider.URL
+	mux := http.NewServeMux()
+	if err := RegisterRoutes(mux, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	app := httptest.NewServer(mux)
+	defer app.Close()
+	client := app.Client()
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	var cookie *http.Cookie
+	request := func(path, ip string) int {
+		r, err := http.NewRequestWithContext(context.Background(), http.MethodGet, app.URL+path, http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("X-Forwarded-For", ip)
+		if cookie != nil {
+			r.AddCookie(cookie)
+		}
+		resp, err := client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if cookie == nil {
+			for _, c := range resp.Cookies() {
+				if c.Name == stateCookieName {
+					cookie = c
+					break
+				}
+			}
+		}
+		return resp.StatusCode
+	}
+	for i := 0; i < 10; i++ {
+		if got := request(InstallPath, "192.0.2.1"); got != http.StatusFound {
+			t.Fatalf("install %d: %d", i, got)
+		}
+	}
+	if cookie == nil {
+		t.Fatal("install did not issue state cookie")
+	}
+	callback := testSlackInstallURL + url.QueryEscape(cookie.Value)
+	if got := request(callback, "192.0.2.1"); got != http.StatusTooManyRequests {
+		t.Fatalf("limited callback: %d", got)
+	}
+	if exchanges.Load() != 0 || store.workspaceID != "" {
+		t.Fatal("limited callback exchanged a code or stored a token")
+	}
+	if got := request(callback, "192.0.2.2"); got != http.StatusOK {
+		t.Fatalf("separate IP callback: %d", got)
+	}
+	if exchanges.Load() != 1 || store.workspaceID != testWorkspaceID {
+		t.Fatal("allowed callback did not exchange and persist exactly once")
 	}
 }
