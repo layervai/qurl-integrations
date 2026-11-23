@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/layervai/qurl-go/crid"
+
 	slackoauth "github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/shared/auth"
@@ -116,6 +118,23 @@ func ambiguousResourceAliasMessage(alias string) string {
 // TODO(upstream-contract): keep in lockstep with qurl-service's public
 // connector-disabled error contract (layervai/qurl-service#1211).
 const errCodeConnectorDisabled = "connector_disabled"
+
+// errCodeConsumerAccessRequired is qurl-service's 403 for a mint against a
+// resource that requires verified recipient access (it issues no bearer link).
+// TODO(upstream-contract): keep in lockstep with qurl-service's
+// `consumer_access_required` error code.
+const errCodeConsumerAccessRequired = "consumer_access_required"
+
+// consumerAccessRequiredMessage answers [errCodeConsumerAccessRequired] when
+// the entry page could not be delivered.
+func consumerAccessRequiredMessage(requestID string) string {
+	return appendSlackReference("This resource requires verified access and has no one-time links", requestID) + ". Open it from its access page, or ask its owner for that page."
+}
+
+// errCodeCreationFailed is the 500 that qurl-service builds without the
+// consumer_access_required arm return for the same refusal.
+// TODO(#1980): remove with the legacy arm of consumerAccessEntryURL.
+const errCodeCreationFailed = "creation_failed"
 
 // connectorDisabledMessage is shown when qurl-service returns
 // [errCodeConnectorDisabled].
@@ -573,6 +592,19 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 
 	out, err := c.Create(ctx, input)
 	if err != nil {
+		entryURL, gated := h.consumerAccessEntryURL(ctx, log, c, args, input.ResourceID, err)
+		if entryURL != "" {
+			// Nothing was minted, so the minted-link checks and mint audits below do not
+			// apply. The bot grants nothing: qurl-service records access when the
+			// recipient verifies on the entry page.
+			fallbackText, blocks := renderConsumerAccessEntry(entryURL, h.cfg.LinkSiteAccessURL)
+			return h.deliverGetRender(ctx, log, args, fallbackText, blocks), nil
+		}
+		if gated {
+			// The policy is confirmed, so even a legacy 500 must not invite a retry.
+			apiErr, _, _ := consumerAccessRefusal(err)
+			return getResult{}, &userError{msg: consumerAccessRequiredMessage(apiErr.RequestID)}
+		}
 		return getResult{}, mapMintError(ctx, log, err)
 	}
 	// Never deliver a mint response naming a different resource from the
@@ -623,15 +655,117 @@ func (h *Handler) mintForResource(ctx context.Context, log *slog.Logger, args *g
 	// headline: that window is tight, so a recipient who taps after it lapses
 	// gets a dead portal, and the copy tells them why.
 	fallbackText, blocks := renderGetSuccess(out.QURLLink)
-	if args.cmd.DM() {
-		// deliverGetDM posts the Enter Portal blocks to the user's DM and returns
-		// the plain-text ":incoming_envelope: Sent to your DM." status. The link
-		// render already went to the DM, so this result carries no blocks — the
-		// status confirmation is delivered as plain text in-channel.
-		return getResult{text: h.deliverGetDM(ctx, log, args.teamID, args.enterpriseID, args.userID, fallbackText, blocks)}, nil
-	}
-	return getResult{text: fallbackText, blocks: blocks}, nil
+	return h.deliverGetRender(ctx, log, args, fallbackText, blocks), nil
 }
+
+// deliverGetRender returns a link render for in-channel delivery, or hands it to
+// [Handler.deliverGetDM] for `dm:true`, whose plain-text status carries no blocks.
+func (h *Handler) deliverGetRender(ctx context.Context, log *slog.Logger, args *getWorkArgs, fallbackText string, blocks []any) getResult {
+	if args.cmd.DM() {
+		return getResult{text: h.deliverGetDM(ctx, log, args.teamID, args.enterpriseID, args.userID, fallbackText, blocks)}
+	}
+	return getResult{text: fallbackText, blocks: blocks}
+}
+
+// consumerAccessRefusal reports whether mintErr may be qurl-service refusing a
+// mint because the resource requires verified recipient access. legacy marks the
+// 500 creation_failed that builds without the 403 answer the same refusal with;
+// that shape is also a real failure, so a caller confirms it with the resource's
+// consumer_access_version.
+func consumerAccessRefusal(mintErr error) (apiErr *client.APIError, legacy, ok bool) {
+	if !errors.As(mintErr, &apiErr) {
+		return nil, false, false
+	}
+	if apiErr.StatusCode == http.StatusForbidden && apiErr.Code == errCodeConsumerAccessRequired {
+		return apiErr, false, true
+	}
+	// shortcut: qurl-service without the 403 answers this refusal with 500
+	// creation_failed; drop this arm once every environment serves the 403 (#1980).
+	legacy = apiErr.StatusCode == http.StatusInternalServerError && apiErr.Code == errCodeCreationFailed
+	return apiErr, legacy, legacy
+}
+
+// consumerAccessEntryURL returns the CRID entry page of a resource whose mint
+// was refused because it requires verified recipient access. Such a resource
+// issues no bearer link by design: recipients open its entry page and get
+// access there, so that page is what `/qurl get` delivers. gated reports that the
+// resource has a policy even when the page cannot be delivered; with neither,
+// the failure keeps its usual error mapping.
+func (h *Handler) consumerAccessEntryURL(ctx context.Context, log *slog.Logger, c *client.Client, args *getWorkArgs, resourceID string, mintErr error) (entryURL string, gated bool) {
+	apiErr, legacy, ok := consumerAccessRefusal(mintErr)
+	if h.cfg.LinkOrigin == "" || !ok {
+		return "", false
+	}
+	// An id that does not even decode, such as a URL, is not a key: it has no CRID.
+	der, ok := client.ResourceKeyDER(resourceID)
+	if !ok {
+		return "", false
+	}
+	// The request log scope carries team and channel; the user and any reason
+	// complete "who asked, and why", since no mint audit is written here.
+	log = log.With("user_id", sanitizeLogValue(args.userID))
+	if reason := strings.TrimSpace(args.cmd.Reason()); reason != "" {
+		log = log.With("reason", sanitizeLogValue(truncateRunes(reason, getReasonAuditMaxRunes)))
+	}
+	res, err := c.GetResource(ctx, resourceID)
+	if err != nil {
+		// After a legacy 500 the read often fails for the same outage, so only a
+		// failed read after the 403 is unexpected.
+		level := slog.LevelWarn
+		if legacy {
+			level = slog.LevelInfo
+		}
+		log.Log(ctx, level, "get: resource read after a refused mint failed", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID), "mint_status", apiErr.StatusCode, "error", err)...)
+		return "", false
+	}
+	// qurl-service never mints for a resource that has or had a policy, so from
+	// here even a transient legacy 500 is a refusal: a retry could not mint either.
+	if res.ConsumerAccessVersion <= 0 {
+		if !legacy {
+			log.Warn("get: consumer_access_required for a resource read without a policy (consumer_access_version absent or zero)", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID))...)
+		}
+		return "", false
+	}
+	if res.CRID == "" {
+		log.Warn("get: resource read has no CRID", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID))...)
+		return "", true
+	}
+	// The entry page must be this resource's: the CRID is a digest of its key.
+	matched, err := crid.KeyMatches(res.CRID, der)
+	if err != nil {
+		log.Error("get: resource CRID is malformed", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID), "error", err)...)
+		return "", true
+	}
+	if !matched {
+		log.Error("get: resource CRID does not match its key", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID))...)
+		return "", true
+	}
+	// status shows which refusal shape still reaches the bot (#1980).
+	log.Info("get: answering with the CRID entry page of a resource that requires verified access", withRequestIDAttr(apiErr.RequestID, "resource_id", sanitizeLogValue(resourceID), "status", apiErr.StatusCode)...)
+	return h.cfg.LinkOrigin + "/" + url.PathEscape(res.CRID), true
+}
+
+// renderConsumerAccessEntry renders the CRID entry page of a resource that
+// requires verified recipient access, with the link-site unlock step first when
+// the environment's link site is private. Every string is a static template or
+// operator config: no user or LLM input reaches the mrkdwn.
+func renderConsumerAccessEntry(entryURL, linkSiteAccessURL string) (fallbackText string, blocks []any) {
+	const headline = ":lock: *Verified access required* — open its page to get access."
+	entry := primaryURLButtonElement(enterPortalButtonLabel, enterPortalActionID, entryURL)
+	if linkSiteAccessURL != "" {
+		unlock := urlButtonElement(linkSiteAccessButtonLabel, linkSiteAccessActionID, linkSiteAccessURL)
+		return ":lock: Verified access required. First open " + linkSiteAccessURL + ", then " + entryURL + " (get access there)",
+			[]any{sectionBlock(headline + "\nThe link site is private: select *" + linkSiteAccessButtonLabel + "* first."), actionsBlock(unlock, entry)}
+	}
+	return ":lock: Verified access required: " + entryURL + " (get access there)", []any{sectionBlock(headline), actionsBlock(entry)}
+}
+
+// linkSiteAccessActionID and linkSiteAccessButtonLabel name the unlock button
+// of a private link site. Like Enter Portal, its click is a no-op ack.
+const (
+	linkSiteAccessActionID    = "qurl_open_link_site"
+	linkSiteAccessButtonLabel = "Open link site"
+)
 
 // resolveTokenForGet resolves a `$<token>` (channel alias, tunnel slug, or URL
 // resource alias) to a mintable resource for /qurl get, enforcing channel
@@ -909,6 +1043,13 @@ func mapMintError(ctx context.Context, log *slog.Logger, err error) error {
 		case http.StatusForbidden:
 			if apiErr.Code == errCodeConnectorDisabled {
 				return &userError{msg: connectorDisabledMessage}
+			}
+			// Reached only when the CRID entry delivery could not run (see
+			// consumerAccessEntryURL). A policy refusal, not a credential
+			// failure, so it stays out of the dependency-auth alarm.
+			if apiErr.Code == errCodeConsumerAccessRequired {
+				log.Info("get: mint refused for a resource that requires verified access", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code)...)
+				return &userError{msg: consumerAccessRequiredMessage(apiErr.RequestID)}
 			}
 			if isExpectedGetMintForbiddenCode(apiErr.Code) {
 				log.Info("get: mint rejected with expected quota-class 403", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code, "detail", apiErr.Detail)...)
