@@ -10,7 +10,7 @@ This directory holds the Teams bot. Your operator builds the app package for
 your tenant and uploads it as a custom app; see
 [App package (sideloading)](#app-package-sideloading).
 
-## What you can do in two minutes
+## Common tasks
 
 In a team channel, mention the bot, then type the command:
 
@@ -23,8 +23,8 @@ In a team channel, mention the bot, then type the command:
 | Get the link in a private chat instead | `get $docs dm:true` |
 | See what this channel can reach | `list` |
 
-The setup link and any Connector enrollment token arrive in your personal chat
-with the bot, so open that chat first.
+Setup links, Connector enrollment tokens, and `dm:true` links arrive in your
+personal chat with the bot, so open that chat first.
 
 ### For AI agents and tools
 
@@ -33,7 +33,7 @@ with the bot, so open that chat first.
 - Admin commands: `protect-url`, `protect-connector`, `set-alias`,
   `unset-alias`, `set-display-name`, `unset-display-name`, `revoke`,
   `add @user`, `remove @user`, `admins`, `uninstall`
-- Resource commands run in team channels; personal chat supports `help`,
+- Resource commands run in team channels; the personal-chat menu lists `help`,
   `setup`, and `admins`
 - The first member to complete `setup <email>` becomes the tenant owner
 - Resources are visible per channel; `revoke $<crid>` revokes tenant-wide
@@ -47,7 +47,7 @@ with the bot, so open that chat first.
 ## Architecture
 
 This package is the deployable, dependency-injected TypeScript implementation
-for the qURL™ Microsoft Teams integration. It implements opaque one-shot state,
+for the qURL Microsoft Teams integration. It implements opaque one-shot state,
 PKCE S256, OIDC nonce binding, a hardened confidential-client token exchange,
 ID-token verification, and a production provider-binding adapter.
 
