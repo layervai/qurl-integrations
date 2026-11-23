@@ -789,19 +789,21 @@ func (s *Store) TransferOwnership(ctx context.Context, teamID, currentOwnerID, n
 	if newOwnerID != currentOwnerID {
 		ownerSet = append(ownerSet, newOwnerID)
 	}
-	nowISO := s.nowOrDefault().UTC().Format(time.RFC3339)
+	now := s.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrUpdatedAt + " = " + exprNow + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
+		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
 		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ") AND " + attrOwnerID + " = :current_owner"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":current_owner": stringAttr(currentOwnerID),
 			":new_owner":     stringAttr(newOwnerID),
 			":owner_set":     &ddbtypes.AttributeValueMemberSS{Value: ownerSet},
 			exprNow:          stringAttr(nowISO),
+			exprNowNano:      unixNanoAttr(now),
 		},
 	})
 	if err == nil {
