@@ -439,9 +439,9 @@ func (h *Handler) handleAgentConfirmClick(w http.ResponseWriter, payload *intera
 	triggerReceivedAt := h.now()
 	log := slog.With(
 		"surface", "agent_confirm",
-		"team_id", payload.Team.ID,
-		"channel_id", payload.Channel.ID,
-		"user_id", payload.User.ID,
+		"team_id", sanitizeLogValue(payload.Team.ID),
+		"channel_id", sanitizeLogValue(payload.Channel.ID),
+		"user_id", sanitizeLogValue(payload.User.ID),
 		"approve", approve,
 	)
 

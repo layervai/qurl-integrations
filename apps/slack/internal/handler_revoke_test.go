@@ -463,6 +463,7 @@ func TestHandleList_NoRevokeButtonForNonAdmin(t *testing.T) {
 // Revoke (after the confirm) acks 200 and revokes the row's resource via
 // DELETE /v1/resources/{id}, posting the confirmation to response_url.
 func TestHandleListRevokeClick_Revokes(t *testing.T) {
+	// This test changes the default logger and must remain sequential.
 	var logs bytes.Buffer
 	previousLog := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
@@ -494,6 +495,11 @@ func TestHandleListRevokeClick_Revokes(t *testing.T) {
 		t.Errorf("async reply missing revoke confirmation: %q", async)
 	}
 	h.Wait()
+	for _, key := range []string{"team_id", "user_id", "resource_id"} {
+		if !bytes.Contains(logs.Bytes(), []byte(`"`+key+`":`)) {
+			t.Fatalf("missing click identity field %s", key)
+		}
+	}
 	if logs.Len() == 0 {
 		t.Fatal("revoke click emitted no log records")
 	}
@@ -941,7 +947,10 @@ func TestRevokeResourceEscapesUntrustedLogFields(t *testing.T) {
 			h := newAdminTestHandler(t, ts)
 			ts.ddb.SetQueryErr(ts.tableNames.channelPolicy, errors.New("sweep\r\nforged"))
 			var logs bytes.Buffer
-			log := slog.New(slog.NewJSONHandler(&logs, nil))
+			log := slog.New(slog.NewJSONHandler(&logs, nil)).With(
+				"team_id", sanitizeLogValue("T_probe\r\nforged"),
+				"user_id", sanitizeLogValue("U_probe\r\nforged"),
+			)
 			result := h.revokeResourceResult(t.Context(), log, "T_probe\r\nforged", "U_probe\r\nforged", resourceID, testRevokeAlias)
 			if result.audit.success != (tc.deleteStatus == http.StatusNoContent) || deletes.Load() != 1 {
 				t.Fatalf("success=%v, DELETE calls=%d", result.audit.success, deletes.Load())

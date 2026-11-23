@@ -187,8 +187,9 @@ func (h *Handler) revokeResource(ctx context.Context, log *slog.Logger, teamID, 
 	return h.revokeResourceResult(ctx, log, teamID, userID, resourceID, displayToken).cardText
 }
 
+// Callers supply escaped workspace/user log fields; this core adds the resource.
 func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, teamID, userID, resourceID, displayToken string) actionCoreResult {
-	log = log.With("team_id", sanitizeLogValue(teamID), "user_id", sanitizeLogValue(userID), "resource_id", sanitizeLogValue(resourceID))
+	log = log.With("resource_id", sanitizeLogValue(resourceID))
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("revoke: failed to get API key", "error", sanitizeLogValue(err.Error()))
@@ -356,6 +357,8 @@ func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, t
 func (h *Handler) handleListRevokeClick(w http.ResponseWriter, payload *interactionPayload, action interactionAction) {
 	log := slog.With(
 		"command", "list_revoke_tunnel",
+		"team_id", sanitizeLogValue(payload.Team.ID),
+		"user_id", sanitizeLogValue(payload.User.ID),
 		"channel_id", sanitizeLogValue(payload.Channel.ID),
 	)
 	responseURL := payload.ResponseURL
