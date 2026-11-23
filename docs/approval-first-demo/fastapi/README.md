@@ -8,7 +8,7 @@ authentication, authorization and Host/Origin checks.
 ## Run the local fixture
 
 From this directory (`docs/approval-first-demo/fastapi`), run the commands below.
-Install the [qURL CLI](../../../../apps/cli/README.md#install) before the access test.
+Install the [qURL CLI](../../../apps/cli/README.md#install) before the access test.
 
 Use Python 3.13 and a separate virtual environment. This example was tested with
 FastAPI 0.163.1, Uvicorn 0.54.0 and qURL CLI 4.4.4 on macOS.
