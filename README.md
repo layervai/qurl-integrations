@@ -1,19 +1,67 @@
-# qURL CLI and integrations for private app sharing
+# qURL CLI and integrations
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Use [qURL™ by LayerV](https://layerv.ai/qurl/) to share localhost web apps,
-private APIs, and files through expiring access links. Share a development
-preview, an internal dashboard, or a document with a teammate or AI agent.
-This repository contains
-LayerV's CLI, Slack and Discord integrations, browser extensions for Gmail,
-and Microsoft Teams integration source.
+**Share an app running on your machine privately, with only the people you invite.**
+[qURL™ by LayerV](https://layerv.ai/qurl/) turns a local app, an internal
+dashboard, or a private API into a link you control. Your app stays where it
+is: the CLI connects out to LayerV, so there is no port to open and nothing to
+deploy. You invite people by email, and only they get in. Each one clicks the
+invitation and confirms their email. They install nothing.
 
-For an app running on localhost, the CLI connects outward to LayerV without
-opening an inbound port. Publish the app, create a short-lived access link,
-and send that link to its recipient. The app must stay running, and its own
-sign-in still applies. Adding a link to an existing remote URL does not
-restrict any separate public route to that URL.
+Keep the app running. Its own sign-in still applies. Protecting an existing
+remote URL through qURL does not close any separate public route to that URL.
+
+This repository holds the qURL CLI, qURL for Slack and Discord, the Gmail
+extension for Chrome and Edge, and the Microsoft Teams integration source.
+Teams deployment is managed separately; the source does not establish a public rollout.
+
+## Quick start
+
+| You want to… | How |
+| --- | --- |
+| Share a local app with one reviewer | `qurl publish http://127.0.0.1:3000 --access invite_only`, then `qurl access invite <CRID> --email ana@example.com` |
+| See who you invited and who is in | `qurl access list_invitations <CRID>` · `qurl access list_grants <CRID>` |
+| Take one person's access away | `qurl access revoke_grant <CRID> <decision-id> --version <current-version>` |
+| Turn the app off and back on | `qurl stop <CRID>` · `qurl start <CRID>` |
+| Let your coding agent do the sharing | Add the [qURL agent skill](apps/cli/README.md#let-a-coding-agent-share-your-app) |
+
+With Homebrew on macOS or Linux, install the CLI and share the app on port 3000:
+
+```bash
+brew install layervai/tap/qurl
+qurl publish http://127.0.0.1:3000 --access invite_only
+qurl access invite <CRID> --email ana@example.com
+```
+
+For access removal, read the decision ID and current version from
+`qurl access list_grants <CRID>` first.
+
+`publish` prints the app's CRID. No account or API key is needed. The
+[CLI guide](apps/cli/README.md) covers Windows, other installs, and every
+command.
+
+### For AI agents and tools
+
+- Binary: `qurl` · install: `brew install layervai/tap/qurl`, or
+  `curl -fsSL https://raw.githubusercontent.com/layervai/qurl-integrations/main/scripts/install.sh | sh` (no `sudo`)
+- Auth: none to publish; the first command registers a device identity. Keep
+  its local state to keep control of your resources.
+- Core flow: `qurl publish <url> --access invite_only --name "<public name>" -o json`
+  → confirm `private: true` and `consumer_access` in the reply →
+  `qurl access invite <CRID> --email <address> -o json`
+- Invite only the addresses the user named. Each recipient verifies their
+  mailbox before access.
+- With `-o json`, the first `publish` returns `terms_notice`; relay it to the user.
+- The `--name` value is public: recipients see it on the link page.
+- Agent skill: [layerv.ai/skills/qurl/SKILL.md](https://layerv.ai/skills/qurl/SKILL.md) ·
+  plugins for [Claude Code](https://github.com/layervai/claude-plugins) and
+  [Codex](https://github.com/layervai/codex-plugins)
+- SDKs and MCP: [Python](https://github.com/layervai/qurl-python) ·
+  [TypeScript](https://github.com/layervai/qurl-typescript) ·
+  [Go](https://github.com/layervai/qurl-go) · [MCP server](https://github.com/layervai/qurl-mcp)
+
+## Guides
 
 qURL uses [OpenNHP](https://github.com/OpenNHP/opennhp) to authorize access to
 protected resources. Start with the guide for the task you want to complete:
@@ -31,16 +79,15 @@ protected resources. Start with the guide for the task you want to complete:
 | Serve a private S3 static site through a connector | [Private S3 origin image](origins/s3-static-connector/README.md) |
 | Mint links from Cloudflare, Netlify, or Vercel | [Edge function templates](templates/README.md) |
 
-The CLI guide documents local publishing and sharing. Each integration guide
-lists its own setup requirements. Teams deployment is managed outside this
-repository; the presence of its source does not establish a public rollout.
-
 [Localhost quickstart](#share-a-localhost-web-app) ·
 [File sharing](#share-files-and-documents) · [Vercel deployments](#protect-a-vercel-deployment) · [Sharing comparison](#choose-how-to-share-an-app-or-file) ·
 [Sharing questions](#localhost-and-file-sharing-questions) ·
 [Product overview](https://layerv.ai/qurl/) · [Private links](https://qurl.link/)
 
 ## Share a localhost web app
+
+This flow creates a short-lived access link that anyone holding it can use.
+For email-verified invitations, use the [quick start](#quick-start) above.
 
 For example, let a teammate review a preview running on your laptop without
 deploying a staging server. Your app stays on your machine; the CLI runs the
