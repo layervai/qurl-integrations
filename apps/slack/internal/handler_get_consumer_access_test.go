@@ -52,7 +52,7 @@ func TestHandleGet_ConsumerAccessDeliversCRIDEntry(t *testing.T) {
 		wantLog string
 	}{
 		{name: "public rule preserves verified access", rule: "builtin.public", version: 1,
-			want: []string{"Verified access required", testEntryURL}, wantAbsent: []string{"Anyone with the link", "one-time use"}},
+			want: []string{"Verified access required", testEntryURL}, wantAbsent: []string{"anyone with the link can open it", "one-time use"}},
 		{name: "403 consumer_access_required", version: 1, wantLog: "answering with the CRID entry page",
 			want: []string{"Verified access required", testEntryURL}, wantAbsent: []string{commonGetMintFailedMessage}},
 		{name: "legacy 500 creation_failed", legacy: true, version: 3, wantLog: `"status":500`,
