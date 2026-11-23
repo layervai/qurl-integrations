@@ -23,6 +23,7 @@
 const db = require('./store');
 const config = require('./config');
 const crypto = require('crypto');
+const scrypt = require('node:util').promisify(crypto.scrypt);
 const { setTimeout: sleep } = require('node:timers/promises');
 const logger = require('./logger');
 const { AUDIT_EVENTS, LOG_EVENTS } = require('./constants');
@@ -37,6 +38,8 @@ const OWNER_DISCOVERY_BUDGET_MS = 60_000;
 const QURL_PER_REQUEST_TIMEOUT_MS = 10_000;
 // Node/undici network error codes that are transient despite carrying a code.
 const TRANSIENT_NETWORK_CODE_RE = /^(E(CONNRESET|CONNREFUSED|TIMEDOUT|NOTFOUND|AI_AGAIN|PIPE)|UND_ERR_)/;
+// A process-local salt keeps diagnostic key fingerprints unlinkable across restarts.
+const pageBudgetFingerprintSalt = crypto.randomBytes(32);
 const pageBudgetWarned = new Set();
 // Every error_code produced by the discovery walk, enumerable for runbooks and
 // alarms (resolution config codes and store codes are documented separately).
@@ -247,7 +250,7 @@ function removeGuild({ guildId, ownerId }) {
 // passes its bridge URL so "reuse the default subscription" is never claimed
 // for a subscription that delivers somewhere else (a shared qURL account
 // across environments).
-async function discoverOwnerId(apiKey, { subject = 'DEFAULT', requiredUrl = null } = {}) {
+async function discoverOwnerId(apiKey, { subject = 'DEFAULT', requiredUrl = null, requiredWebhookId = null } = {}) {
   if (!apiKey || !config.QURL_ENDPOINT) return null;
   // Walk the same bounded surface the registrar can select from. Validating
   // only page 1 would let it mutate a malformed default subscription on a
@@ -273,10 +276,10 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', requiredUrl = null
     // *_PAGE_CAP failure (orphaned subscriptions only accumulate; see #1380).
     // Once per subject+key per process: the refresh tick would otherwise
     // repeat it, while other guild keys keep their own early warning.
-    // Keyed by a short key digest (never the raw key) so empty early pages
+    // Keyed by a process-local key fingerprint (never the raw key) so empty early pages
     // (no owner yet) still warn once per distinct key.
     const budgetKey = page === OWNER_DISCOVERY_WARN_PAGE
-      ? `${subject}:${crypto.createHash('sha256').update(apiKey).digest('hex').slice(0, 16)}`
+      ? `${subject}:${(await scrypt(apiKey, pageBudgetFingerprintSalt, 8)).toString('hex')}`
       : null;
     if (budgetKey && !pageBudgetWarned.has(budgetKey)) {
       // Coarse bound: forgets all entries at 1000 distinct subject+key pairs.
@@ -323,7 +326,8 @@ async function discoverOwnerId(apiKey, { subject = 'DEFAULT', requiredUrl = null
         throw err;
       }
       ownerId = webhook.owner_id;
-      if (targetUrl && canonicalUrl(webhook.url) === targetUrl) targetFound = true;
+      if (targetUrl && canonicalUrl(webhook.url) === targetUrl
+          && (!requiredWebhookId || webhook.webhook_id === requiredWebhookId)) targetFound = true;
     }
     // TODO(upstream-contract): qurl-service paginates GET /v1/webhooks via
     // `meta.next_cursor` (same shape findExistingSubscriptions walks).
@@ -426,6 +430,24 @@ async function resolveDefaultOwnerForApiKey(apiKey, { bridgeUrl } = {}) {
     ? ownerId
     : await discoverOwnerId(apiKey, { subject: 'CANDIDATE' });
   return candidateOwnerId === ownerId ? ownerId : null;
+}
+
+// Only GET the protected subscription; alias keys must never rotate its secret.
+async function resolveConnectorOwnerForApiKey(guildId, apiKey, bridgeUrl) {
+  const binding = await db.getConnectorWebhookBinding();
+  if (!binding) return null;
+  const guild = await db.getGuildConfigWithApiKey(guildId);
+  if (!guild || guild.qurl_api_key !== apiKey || !guild.qurl_owner_id) {
+    throw new Error('Verified guild key binding is required');
+  }
+  if (guild.qurl_owner_id !== binding.ownerId) return null;
+  const owner = await discoverOwnerId(apiKey, { subject: 'CONNECTOR', requiredUrl: bridgeUrl, requiredWebhookId: binding.webhookId });
+  if (owner !== binding.ownerId) throw new Error('Connector webhook owner could not be verified');
+  const cached = subscriptions.get(owner);
+  if (cached && cached.webhookSecret !== binding.webhookSecret) {
+    throw new Error('Connector webhook secret conflicts with receiver cache');
+  }
+  return binding;
 }
 
 // One refresh pass. Rebuilds the per-owner map from `guild_configs`
@@ -698,6 +720,7 @@ module.exports = {
   stop,
   getSecretForOwner,
   resolveDefaultOwnerForApiKey,
+  resolveConnectorOwnerForApiKey,
   isPrimed,
   isWithinSiblingLagWindow,
   upsertGuild,

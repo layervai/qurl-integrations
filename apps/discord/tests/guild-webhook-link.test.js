@@ -26,6 +26,7 @@ jest.mock('../src/webhook-subscriptions', () => ({
   ensureDefaultOwnerCacheEntry: mockEnsureDefaultOwnerCacheEntry,
   removeGuild: mockRemoveGuild,
   resolveDefaultOwnerForApiKey: mockResolveDefaultOwnerForApiKey,
+  resolveConnectorOwnerForApiKey: jest.fn().mockResolvedValue(null),
   isPrimed: () => true,
   getSecretForOwner: () => null,
   start: jest.fn(),

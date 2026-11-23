@@ -1578,7 +1578,7 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
 
 // `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
 async function setGuildApiKey(guildId, apiKey, configuredBy, via, verifiedOwnerId) {
-  if (guildId === '__default_owner__') throw new Error('Reserved guild owner metadata key');
+  if (['__default_owner__', '__connector_webhook__'].includes(guildId)) throw new Error('Reserved guild owner metadata key');
   if (verifiedOwnerId !== undefined && (typeof verifiedOwnerId !== 'string'
       || !verifiedOwnerId.length || verifiedOwnerId.length > 512)) {
     throw new Error('Invalid verified qURL owner');
@@ -1679,10 +1679,32 @@ async function getGuildConfigWithApiKey(guildId) {
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
+    ConsistentRead: true,
   }));
   const row = res.Item;
   if (!row) return row;
   return { ...row, qurl_api_key: row.qurl_api_key ? decrypt(row.qurl_api_key) : row.qurl_api_key };
+}
+
+// Preserve the connector-owned callback when the bot default moves to another owner.
+async function getConnectorWebhookBinding() {
+  const { Item: row } = await ddb.send(new GetCommand({
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: '__connector_webhook__' },
+    ConsistentRead: true,
+  }));
+  if (!row) return null;
+  if (Object.hasOwn(row, 'qurl_api_key') || Object.hasOwn(row, 'qurl_owner_id')
+      || ![row.webhook_owner_id, row.webhook_id, row.webhook_secret]
+        .every(value => typeof value === 'string' && value.length)) {
+    throw new Error('Invalid connector webhook binding');
+  }
+  if (!row.webhook_secret.startsWith('enc:v1:')) throw new Error('Connector webhook secret must be encrypted');
+  const webhookSecret = decrypt(row.webhook_secret);
+  if (typeof webhookSecret !== 'string' || !webhookSecret.length) {
+    throw new Error('Invalid connector webhook secret');
+  }
+  return { ownerId: row.webhook_owner_id, webhookId: row.webhook_id, webhookSecret };
 }
 
 // ── Guild webhook linkage (default-owner mapping + BYOK subscriptions) ──
@@ -2097,7 +2119,7 @@ module.exports = {
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs
-  getGuildApiKey, setGuildApiKey, setDefaultGuildOwner, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
+  getGuildApiKey, setGuildApiKey, setDefaultGuildOwner, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey, getConnectorWebhookBinding,
   // Per-guild webhook subscriptions (BYOK view counter)
   setGuildWebhookSubscription, setGuildDefaultWebhookOwner, clearGuildWebhookSubscription,
   listCompleteGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
