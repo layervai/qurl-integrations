@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.6.2](https://github.com/layervai/qurl-integrations/compare/slack-v0.6.1...slack-v0.6.2) (2026-11-23)
+
+
+### Features
+
+* **slack:** observe OAuth state write latency ([#1937](https://github.com/layervai/qurl-integrations/issues/1937)) ([cd42f09](https://github.com/layervai/qurl-integrations/commit/cd42f09543ebfb42944d5a33d0b469b1fb9fd96e))
+* **slack:** render ECS EFS volume definitions ([#1902](https://github.com/layervai/qurl-integrations/issues/1902)) ([f3e5786](https://github.com/layervai/qurl-integrations/commit/f3e57868d1b7e2914df28b64e08dda96ea3d5144))
+* **slack:** send a public name when creating resources ([#1993](https://github.com/layervai/qurl-integrations/issues/1993)) ([f00097a](https://github.com/layervai/qurl-integrations/commit/f00097a3be7efeac354a77f538a3250a0ab6fc2c))
+* **slack:** share links with Default access rules and saved rules ([#2023](https://github.com/layervai/qurl-integrations/issues/2023)) ([d39a7fa](https://github.com/layervai/qurl-integrations/commit/d39a7fa9b3e3e3c9c8b450a66807111191a2e5e2))
+
+
+### Bug Fixes
+
+* **cli:** hide revoked resources from the default list ([#2017](https://github.com/layervai/qurl-integrations/issues/2017)) ([aa85e77](https://github.com/layervai/qurl-integrations/commit/aa85e7799c24475f2e9b5f92eb5d323ef6786981))
+* **origins:** block caching of upstream error responses ([#1926](https://github.com/layervai/qurl-integrations/issues/1926)) ([dca03f0](https://github.com/layervai/qurl-integrations/commit/dca03f0e3a2df96f5fe669650b6cd1efa2581f3f))
+* **origins:** verify S3 signing and reject ambiguous object keys ([#1956](https://github.com/layervai/qurl-integrations/issues/1956)) ([47ae387](https://github.com/layervai/qurl-integrations/commit/47ae3875503b3c964d4102e45dc63aac8a88772f))
+* patch Go security and align sandbox fixtures ([#1611](https://github.com/layervai/qurl-integrations/issues/1611)) ([05ea8df](https://github.com/layervai/qurl-integrations/commit/05ea8df07d58362bdecf5260ca5981f4936e4622))
+* **slack:** adopt the promoted S3 signing and cache image ([#2101](https://github.com/layervai/qurl-integrations/issues/2101)) ([9b5428c](https://github.com/layervai/qurl-integrations/commit/9b5428c2b548c345fd5039f2210a34d5f935b554))
+* **slack:** adopt the public origin release check ([#2083](https://github.com/layervai/qurl-integrations/issues/2083)) ([19cd4b6](https://github.com/layervai/qurl-integrations/commit/19cd4b66da8ce2765c00a2557f1a2008b122abaf))
+* **slack:** align client and operational contracts ([#1898](https://github.com/layervai/qurl-integrations/issues/1898)) ([2b35702](https://github.com/layervai/qurl-integrations/commit/2b3570268eed01e08dc2c1b79af8a4b2c18b1209))
+* **slack:** deliver the CRID entry page for resources that require verified access ([#1979](https://github.com/layervai/qurl-integrations/issues/1979)) ([d163869](https://github.com/layervai/qurl-integrations/commit/d1638695ad57aed6f8315d22d3889daf35c55953))
+* **slack:** expire disconnect confirmation cards ([#1943](https://github.com/layervai/qurl-integrations/issues/1943)) ([eb85639](https://github.com/layervai/qurl-integrations/commit/eb856390e66930428c387bb8afa71ce976aaca42))
+* **slack:** preserve fresh ownership through stale purges ([#1925](https://github.com/layervai/qurl-integrations/issues/1925)) ([b54aa15](https://github.com/layervai/qurl-integrations/commit/b54aa15d802f61a531c9692ee20a4448a9b375a4))
+* **slack:** preserve rate budgets across clock skew ([#1899](https://github.com/layervai/qurl-integrations/issues/1899)) ([aaa971c](https://github.com/layervai/qurl-integrations/commit/aaa971c1ad853ddafaaa90f9b055fd70c2f05509))
+* **slack:** prevent concurrent setup key overwrites ([#1881](https://github.com/layervai/qurl-integrations/issues/1881)) ([5e5efdb](https://github.com/layervai/qurl-integrations/commit/5e5efdb1f0a48da477a8f8bf112511f69c8592ef))
+* **slack:** rate limit app install OAuth routes ([#1934](https://github.com/layervai/qurl-integrations/issues/1934)) ([33557bf](https://github.com/layervai/qurl-integrations/commit/33557bfbf5d48634e349d1ca7896c761337edf50))
+* **slack:** read bound metadata without catalog scans ([#2079](https://github.com/layervai/qurl-integrations/issues/2079)) ([63a2830](https://github.com/layervai/qurl-integrations/commit/63a28306eb8ea61c039a174828350651bd5ac3f6))
+* **slack:** revoke resources despite failed metadata inspection ([#1908](https://github.com/layervai/qurl-integrations/issues/1908)) ([a933497](https://github.com/layervai/qurl-integrations/commit/a93349753a7e927861a651e21c17711ee3f6e4dd))
+* **slack:** rotate S3 static connector default to promoted digest ([#2102](https://github.com/layervai/qurl-integrations/issues/2102)) ([5103522](https://github.com/layervai/qurl-integrations/commit/5103522cd2a2487bf4cad1f64be1010a1d9f0487))
+* **slack:** standardize admin and owner log identifiers ([#1935](https://github.com/layervai/qurl-integrations/issues/1935)) ([b748ccf](https://github.com/layervai/qurl-integrations/commit/b748ccffd0b409c5c2bd4fd9307431853c7ef6d2))
+
 ## [0.6.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.6.0...slack-v0.6.1) (2026-10-09)
 
 
