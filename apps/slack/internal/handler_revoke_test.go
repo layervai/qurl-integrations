@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -879,5 +881,61 @@ func TestRevokeResource_AdvisoryTimeoutsReserveDeleteBudget(t *testing.T) {
 	result := h.revokeResourceResult(ctx, slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
 	if probes != 2 || deletes != 1 || !result.audit.success || revokeAliasBound(t, h) {
 		t.Errorf("probes=%d, deletes=%d, success=%v; want two bounded failures followed by confirmed revoke and cleanup", probes, deletes, result.audit.success)
+	}
+}
+
+func TestRevokeResourceEscapesUntrustedLogFields(t *testing.T) {
+	for name, readFails := range map[string]bool{"read failure": true, "unknown type": false} {
+		t.Run(name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			const resourceID = "r_probe\r\nforged"
+			path := "/v1/resources/" + resourceID
+			upstreamFailure := func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"title": "upstream\r\nforged", "status": 500}})
+			}
+			ts.addCustomer(http.MethodGet, path, func(w http.ResponseWriter, r *http.Request) {
+				if readFails {
+					upstreamFailure(w, r)
+					return
+				}
+				respondQURLEnvelope(t, w, map[string]any{"resource": map[string]any{"resource_id": resourceID, "type": "future\r\nforged"}})
+			})
+			ts.addCustomer(http.MethodPut, path+"/sharing", upstreamFailure)
+			var deletes atomic.Int32
+			ts.addCustomer(http.MethodDelete, path, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != path {
+					t.Error("log escaping changed the resource identity")
+				}
+				deletes.Add(1)
+				upstreamFailure(w, r)
+			})
+			h := newAdminTestHandler(t, ts)
+			var logs bytes.Buffer
+			log := slog.New(slog.NewJSONHandler(&logs, nil))
+			result := h.revokeResourceResult(t.Context(), log, "T_probe\r\nforged", "U_probe\r\nforged", resourceID, testRevokeAlias)
+			if result.audit.success || deletes.Load() != 1 {
+				t.Fatalf("success=%v, DELETE calls=%d", result.audit.success, deletes.Load())
+			}
+			decoder := json.NewDecoder(&logs)
+			entries := 0
+			for {
+				var entry map[string]any
+				if err := decoder.Decode(&entry); err == io.EOF {
+					break
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				entries++
+				for key, value := range entry {
+					if text, ok := value.(string); ok && strings.ContainsAny(text, "\r\n") {
+						t.Fatalf("log field %s contains raw control bytes: %q", key, text)
+					}
+				}
+			}
+			if entries < 3 {
+				t.Fatalf("log entries=%d, want read/type, sharing, and DELETE failures", entries)
+			}
+		})
 	}
 }
