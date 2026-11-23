@@ -210,6 +210,9 @@ func TestOpenNativeRegisteredClient_OneTimeAccountEnrollment(t *testing.T) {
 		if cfg.ClientBaseURL != srv.URL || cfg.AgentID != connectorstate.ConfiguredAgentID() {
 			t.Errorf("native config base/agent = %q/%q", cfg.ClientBaseURL, cfg.AgentID)
 		}
+		if cfg.Version != "bootstrap-test+cli" {
+			t.Errorf("native config version = %q, want %q", cfg.Version, "bootstrap-test+cli")
+		}
 		for range 2 {
 			credential, providerErr := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{AgentID: "agent-durable-01"})
 			if providerErr != nil || credential != agentEnrollmentToken {
