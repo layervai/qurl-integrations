@@ -1,0 +1,76 @@
+{
+  "source": "AWS CLI S3 GetObject signed requests to a loopback receiver; fixed synthetic test/test credentials",
+  "cli": "aws-cli/2.36.45 Python/3.14.7 Darwin/25.6.0 source/arm64",
+  "vectors": [
+    {
+      "target": "/example-bucket/a%20b.txt",
+      "headers": {
+        "host": "127.0.0.1:57805",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T225328Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=52b8142282a82a61aafdfc69ce7a9e465f15e325ca6121fe603db050084eca93"
+      }
+    },
+    {
+      "target": "/example-bucket/a%2Bb.txt",
+      "headers": {
+        "host": "127.0.0.1:57805",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T225328Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=3422a03bffa0fc3b0b69c65531bc53bb9c9e98b52fe11c344cf0be2ccda8b0a0"
+      }
+    },
+    {
+      "target": "/example-bucket/a/b.txt",
+      "headers": {
+        "host": "127.0.0.1:57805",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T225328Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=cceae43111626e7b5d9c169ed5ab0f65cb16512eab9dbccb1a594775013fb8d8"
+      }
+    },
+    {
+      "target": "/example-bucket/a%252Fb.txt",
+      "headers": {
+        "host": "127.0.0.1:57805",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T225329Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=2406aa9a1ff615588f7c06216efd794a599305eaf69c74265e3e606172e52550"
+      }
+    },
+    {
+      "target": "/example-bucket/dir//file.txt",
+      "headers": {
+        "host": "127.0.0.1:57805",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T225329Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=c5c95ddfb2a6672d73e5626ca14723da5cd705d0586ab2dcf20665430085c06f"
+      }
+    },
+    {
+      "target": "/example-bucket/bundle%402x%5Bslug%5D~%281%29%21%2C%3D%3B.js",
+      "headers": {
+        "host": "127.0.0.1:57805",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T225329Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=0624bed7f775f2d8b42c4d1fba8595dc61956d86e28b1d185fa84ec4ff2db7ea"
+      }
+    },
+    {
+      "target": "/example-bucket/caf%C3%A9.txt",
+      "headers": {
+        "host": "127.0.0.1:57805",
+        "x-amz-checksum-mode": "ENABLED",
+        "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date": "20261102T225329Z",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, Signature=ecea9a33fef4798a5ae9422ca10ae74581ce844787c46b1f53a6ddb749b7099e"
+      }
+    }
+  ]
+}
