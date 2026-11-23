@@ -102,6 +102,7 @@ var sandboxLocalStateMarkers = []sandboxLocalStateMarker{
 	{text: "qurl: agent state setup lock failed", reason: "agent_state_lock"},
 }
 
+// This is best-effort: macOS uses a shared user log, not a per-journey log.
 func readSandboxDaemonLocalStateReason(stateDir string) string {
 	logDir, err := connectordaemon.DefaultLogDir(stateDir)
 	if err != nil {
@@ -109,7 +110,7 @@ func readSandboxDaemonLocalStateReason(stateDir string) string {
 	}
 	reason := sandboxLocalStateUnclassified
 	for _, name := range []string{"share-daemon.log", "share-daemon.err.log"} {
-		raw, err := os.ReadFile(filepath.Join(logDir, name)) //nolint:gosec // Exact test-owned protected state path.
+		raw, err := os.ReadFile(filepath.Join(logDir, name)) //nolint:gosec // Known daemon log paths; only closed reasons leave this helper.
 		if err != nil {
 			continue
 		}
@@ -152,8 +153,10 @@ func sandboxLocalStateReason(logText string) string {
 	// a later one. Ignore records before the latest retry, but retain later
 	// primary and error-log lines. The last line with a known reason is the
 	// latest event; within that line the first marker is the outer wrapper.
+	// TODO(upstream-contract): both retry phrases mirror the pinned daemon.
 	const retryRecord = "share daemon session attempt failed; retrying"
-	if start := strings.LastIndex(lower, retryRecord); start >= 0 {
+	const groupRetryRecord = "share daemon session group attempt failed; retrying"
+	if start := max(strings.LastIndex(lower, retryRecord), strings.LastIndex(lower, groupRetryRecord)); start >= 0 {
 		lower = lower[start:]
 	}
 	reason := sandboxLocalStateUnclassified
@@ -939,6 +942,7 @@ func TestSandboxLocalStateReasonIsClosedAndUsesLatestCause(t *testing.T) {
 	}{
 		{name: "prior retirement", log: "retire prior native NHP session before replacement: context deadline exceeded " + privateDetail, want: "prior_session_retirement"},
 		{name: "prior recovery", log: "recover prior native session operation before replacement: " + privateDetail, want: "prior_operation_recovery"},
+		{name: "recovery stage keeps its outer wrapper", log: "recover prior native session operation before replacement: native session operation journal is corrupt", want: "prior_operation_recovery"},
 		{name: "journal", log: privateDetail + ": native session operation journal is corrupt", want: "operation_journal_corrupt"},
 		{name: "conflict", log: "NATIVE SESSION OPERATION STATE CONFLICT: " + privateDetail, want: "operation_conflict"},
 		{name: "invalid operation", log: "prepare: qurl: invalid native session operation: " + privateDetail, want: "invalid_session_operation"},
@@ -957,6 +961,12 @@ func TestSandboxLocalStateReasonIsClosedAndUsesLatestCause(t *testing.T) {
 			name: "latest retry does not reuse stale reason",
 			log: "share daemon session attempt failed; retrying qurl: invalid native session operation\n" +
 				"share daemon session attempt failed; retrying arbitrary later cause",
+			want: sandboxLocalStateUnclassified,
+		},
+		{
+			name: "latest group retry does not reuse stale reason",
+			log: "share daemon session attempt failed; retrying retire prior native NHP session before replacement\n" +
+				"share daemon session group attempt failed; retrying arbitrary later cause",
 			want: sandboxLocalStateUnclassified,
 		},
 		{name: "unknown", log: "arbitrary private failure: " + privateDetail, want: sandboxLocalStateUnclassified},

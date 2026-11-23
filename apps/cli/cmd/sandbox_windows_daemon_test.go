@@ -471,7 +471,7 @@ func windowsSandboxLifecycle(t *testing.T, binary string, env map[string]string,
 	result := runWindowsSandboxCLI(t, binary, env, "-o", "json", command, cridValue)
 	if result.err != nil {
 		reason := readSandboxDaemonLocalStateReason(env[connectorstate.EnvStateDirPrimary])
-		t.Fatalf("Windows qurl %s: %v; stderr %q; closed daemon reason %s", command, result.err, result.stderr, reason)
+		t.Fatalf("Windows qurl %s: %v; stderr %q; possible daemon reason from logs %s", command, result.err, result.stderr, reason)
 	}
 	var document windowsSandboxSharingDoc
 	if err := json.Unmarshal([]byte(result.stdout), &document); err != nil {
