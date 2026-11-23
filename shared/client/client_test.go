@@ -2575,3 +2575,35 @@ func TestMe(t *testing.T) {
 		})
 	}
 }
+
+func TestResourceKeyDER(t *testing.T) {
+	for _, tc := range []struct {
+		name, id string
+		wantOK   bool
+	}{
+		{name: "public key", id: testSharingID, wantOK: true},
+		{name: "empty", id: ""},
+		{name: "padded", id: testSharingID + "=="},
+		{name: "embedded newline", id: testSharingID[:20] + "\n" + testSharingID[20:]},
+		{name: "standard alphabet", id: "+" + testSharingID[1:]},
+		{name: "legacy id", id: "r_2"},
+		{name: "URL", id: "https://example.com/x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			der, ok := ResourceKeyDER(tc.id)
+			if ok != tc.wantOK || ok != (der != nil) {
+				t.Fatalf("ResourceKeyDER(%q) = %d bytes, %v; want ok=%v", tc.id, len(der), ok, tc.wantOK)
+			}
+		})
+	}
+}
+
+// validateSharingState rejects an id the base64 decoder would read past: Strict
+// decoding skips line breaks, so only the canonical round-trip catches them.
+func TestValidateSharingStateRejectsNonCanonicalID(t *testing.T) {
+	id := testSharingID[:20] + "\n" + testSharingID[20:]
+	sharing := &SharingState{ResourceID: id, CRID: testSharingCRID, DesiredState: desiredStateOff, ConnectionState: "stopped"}
+	if err := validateSharingState(id, sharing); err == nil || !strings.Contains(err.Error(), "resource identity is invalid") {
+		t.Fatalf("validateSharingState = %v, want the invalid-identity error", err)
+	}
+}
