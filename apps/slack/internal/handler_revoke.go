@@ -315,6 +315,7 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 // Best-effort: an AdminStore-nil deployment has no channel policies to sweep, and
 // any read/write failure is logged and skipped rather than surfaced — the revoke
 // already succeeded upstream, and a missed binding is recoverable.
+// The caller supplies the escaped workspace/resource log context.
 func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, teamID, resourceID string) {
 	if h.cfg.AdminStore == nil {
 		return
@@ -322,19 +323,19 @@ func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, t
 	channels, err := h.cfg.AdminStore.ChannelsForResource(ctx, teamID, resourceID)
 	if err != nil {
 		log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "revoke: channel-binding sweep failed; an orphaned alias may remain",
-			"error", err, "team_id", teamID, "resource_id", resourceID)
+			"error", sanitizeLogValue(err.Error()))
 		return
 	}
 	for _, channelID := range channels {
 		unbound, err := h.cfg.AdminStore.PurgeResourceFromChannel(ctx, teamID, channelID, resourceID)
 		if err != nil {
 			log.Log(ctx, storeErrorLogLevel(ctx, err, slog.LevelWarn), "revoke: failed to purge resource from a channel; an orphaned alias may remain",
-				"error", err, "team_id", teamID, "channel_id", channelID, "resource_id", resourceID)
+				"error", sanitizeLogValue(err.Error()), "channel_id", sanitizeLogValue(channelID))
 			continue
 		}
 		if len(unbound) > 0 {
 			log.Info("revoke: unbound orphaned channel aliases",
-				"team_id", teamID, "channel_id", channelID, "resource_id", resourceID, "aliases", unbound)
+				"channel_id", sanitizeLogValue(channelID), "aliases", unbound)
 		}
 	}
 }
@@ -355,9 +356,7 @@ func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, t
 func (h *Handler) handleListRevokeClick(w http.ResponseWriter, payload *interactionPayload, action interactionAction) {
 	log := slog.With(
 		"command", "list_revoke_tunnel",
-		"team_id", payload.Team.ID,
-		"channel_id", payload.Channel.ID,
-		"user_id", payload.User.ID,
+		"channel_id", sanitizeLogValue(payload.Channel.ID),
 	)
 	responseURL := payload.ResponseURL
 

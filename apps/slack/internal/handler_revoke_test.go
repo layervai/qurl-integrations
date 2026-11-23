@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -462,6 +463,10 @@ func TestHandleList_NoRevokeButtonForNonAdmin(t *testing.T) {
 // Revoke (after the confirm) acks 200 and revokes the row's resource via
 // DELETE /v1/resources/{id}, posting the confirmation to response_url.
 func TestHandleListRevokeClick_Revokes(t *testing.T) {
+	var logs bytes.Buffer
+	previousLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLog) })
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	addRevokeResourceRead(t, ts, testRevokeResourceID, client.ResourceTypeURL)
@@ -487,6 +492,17 @@ func TestHandleListRevokeClick_Revokes(t *testing.T) {
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
 	if !strings.Contains(async, "Revoked") || !strings.Contains(async, testRevokeAlias) {
 		t.Errorf("async reply missing revoke confirmation: %q", async)
+	}
+	h.Wait()
+	if logs.Len() == 0 {
+		t.Fatal("revoke click emitted no log records")
+	}
+	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		for _, key := range []string{"team_id", "user_id", "resource_id"} {
+			if bytes.Count(line, []byte(`"`+key+`":`)) > 1 {
+				t.Fatalf("duplicate click log field %s", key)
+			}
+		}
 	}
 	if hits.Load() != 1 {
 		t.Errorf("DELETE fired %d times, want 1", hits.Load())
@@ -885,7 +901,15 @@ func TestRevokeResource_AdvisoryTimeoutsReserveDeleteBudget(t *testing.T) {
 }
 
 func TestRevokeResourceEscapesUntrustedLogFields(t *testing.T) {
-	for name, readFails := range map[string]bool{"read failure": true, "unknown type": false} {
+	for name, tc := range map[string]struct {
+		readFails    bool
+		deleteStatus int
+	}{
+		"read failure":              {true, http.StatusInternalServerError},
+		"unknown type":              {false, http.StatusInternalServerError},
+		"read failure with cleanup": {true, http.StatusNoContent},
+		"unknown type with cleanup": {false, http.StatusNoContent},
+	} {
 		t.Run(name, func(t *testing.T) {
 			ts := newAdminTestServers(t)
 			const resourceID = "r_probe\r\nforged"
@@ -895,7 +919,7 @@ func TestRevokeResourceEscapesUntrustedLogFields(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"title": "upstream\r\nforged", "status": 500}})
 			}
 			ts.addCustomer(http.MethodGet, path, func(w http.ResponseWriter, r *http.Request) {
-				if readFails {
+				if tc.readFails {
 					upstreamFailure(w, r)
 					return
 				}
@@ -908,17 +932,30 @@ func TestRevokeResourceEscapesUntrustedLogFields(t *testing.T) {
 					t.Error("log escaping changed the resource identity")
 				}
 				deletes.Add(1)
+				if tc.deleteStatus == http.StatusNoContent {
+					w.WriteHeader(tc.deleteStatus)
+					return
+				}
 				upstreamFailure(w, r)
 			})
 			h := newAdminTestHandler(t, ts)
+			ts.ddb.SetQueryErr(ts.tableNames.channelPolicy, errors.New("sweep\r\nforged"))
 			var logs bytes.Buffer
 			log := slog.New(slog.NewJSONHandler(&logs, nil))
 			result := h.revokeResourceResult(t.Context(), log, "T_probe\r\nforged", "U_probe\r\nforged", resourceID, testRevokeAlias)
-			if result.audit.success || deletes.Load() != 1 {
+			if result.audit.success != (tc.deleteStatus == http.StatusNoContent) || deletes.Load() != 1 {
 				t.Fatalf("success=%v, DELETE calls=%d", result.audit.success, deletes.Load())
+			}
+			for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+				for _, key := range []string{"team_id", "user_id", "resource_id"} {
+					if bytes.Count(line, []byte(`"`+key+`":`)) > 1 {
+						t.Fatalf("duplicate log field %s", key)
+					}
+				}
 			}
 			decoder := json.NewDecoder(&logs)
 			entries := 0
+			sawSweep := false
 			for {
 				var entry map[string]any
 				if err := decoder.Decode(&entry); err == io.EOF {
@@ -927,11 +964,17 @@ func TestRevokeResourceEscapesUntrustedLogFields(t *testing.T) {
 					t.Fatal(err)
 				}
 				entries++
+				if entry["msg"] == "revoke: channel-binding sweep failed; an orphaned alias may remain" {
+					sawSweep = true
+				}
 				for key, value := range entry {
 					if text, ok := value.(string); ok && strings.ContainsAny(text, "\r\n") {
 						t.Fatalf("log field %s contains raw control bytes: %q", key, text)
 					}
 				}
+			}
+			if tc.deleteStatus == http.StatusNoContent && !sawSweep {
+				t.Fatal("successful revoke did not exercise binding cleanup")
 			}
 			if entries < 3 {
 				t.Fatalf("log entries=%d, want read/type, sharing, and DELETE failures", entries)
