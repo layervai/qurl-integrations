@@ -511,7 +511,9 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		Type:         client.ResourceTypeTunnel,
 		Slug:         args.Slug,
 		FindOrCreate: true,
-		Description:  defaultS3WebsiteDescription,
+		// The Connector ID, not the bucket: the bucket names the private origin.
+		Name:        args.Slug,
+		Description: defaultS3WebsiteDescription,
 	})
 	if err != nil {
 		log.Error("S3 website install: create/find resource failed", withAPIErrorAttrs(err, "error", err, "slug", sanitizeLogValue(args.Slug))...)

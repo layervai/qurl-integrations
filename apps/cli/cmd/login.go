@@ -86,7 +86,7 @@ external identity is reopened, never replaced.`,
 			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
 				return err
 			}
-			key, err := readSecret(opts, "qURL API key (input hidden): ")
+			key, err := readSecret(opts, secretInput{prompt: "qURL API key (input hidden): ", missing: msgNoKeyProvided})
 			if err != nil {
 				return err
 			}
@@ -112,6 +112,7 @@ external identity is reopened, never replaced.`,
 			}
 			opts.registeredClient = client
 			opts.registeredIdentity = deviceIdentity
+			opts.reconcileRulesAfterLink(cmd.Context())
 			return opts.printer().Login(deviceIdentity)
 		},
 	}
@@ -147,6 +148,7 @@ func runExternalLogin(ctx context.Context, opts *globalOpts, tokenPath string) e
 	}
 	opts.registeredClient = client
 	opts.registeredIdentity = deviceIdentity
+	opts.reconcileRulesAfterLink(ctx)
 	return opts.printer().Login(deviceIdentity)
 }
 
@@ -199,43 +201,69 @@ func validLocalKeyDescriptor(raw string) bool {
 // below the values a typo produces.
 const maxLocalKeyDescriptor = 1 << 20
 
-// readSecret reads a secret from piped stdin or an interactive hidden
-// prompt. It never echoes and never hangs: piped-but-empty input is an
-// error, not a wait.
-func readSecret(opts *globalOpts, prompt string) (string, error) {
+// secretInput says how readSecret asks for one secret.
+type secretInput struct {
+	// prompt is written to stderr before a hidden terminal read.
+	prompt string
+	// missing is the usage error for empty input.
+	missing string
+	// exact keeps the secret as it was given, less its line ending. Without
+	// it, surrounding white space is trimmed. A secret that is compared
+	// byte for byte elsewhere, such as an origin header value, must not be
+	// changed silently: its own check refuses surrounding space instead.
+	exact bool
+}
+
+// readSecret reads a secret from piped stdin (its first line) or an
+// interactive hidden prompt. It never echoes and never hangs: piped-but-empty
+// input is an error, not a wait. The secret never appears in an error.
+func readSecret(opts *globalOpts, in secretInput) (string, error) {
+	clean := strings.TrimSpace
+	if in.exact {
+		clean = func(s string) string { return strings.TrimSuffix(s, "\r") }
+	}
 	if !opts.streams.InIsTTY {
 		scanner := bufio.NewScanner(opts.streams.In)
 		if scanner.Scan() {
-			if secret := strings.TrimSpace(scanner.Text()); secret != "" {
+			if secret := clean(scanner.Text()); secret != "" {
 				return secret, nil
 			}
 		}
 		if err := scanner.Err(); err != nil {
 			return "", err
 		}
-		return "", exitcode.UsageError(errors.New(msgNoKeyProvided))
+		return "", exitcode.UsageError(errors.New(in.missing))
 	}
 
-	if _, err := fmt.Fprint(opts.streams.Err, prompt); err != nil {
+	if _, err := fmt.Fprint(opts.streams.Err, in.prompt); err != nil {
 		return "", err
 	}
-	// Deliberate seam gap: term.ReadPassword needs a real terminal fd, so the
-	// hidden-prompt read bypasses the injected opts.streams.In that selected
-	// this branch (via InIsTTY). The piped path above stays fully injectable;
-	// this branch is only reachable on a real TTY, where os.Stdin is the
-	// stream the injector wrapped anyway.
-	secretBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	readHidden := opts.readHidden
+	if readHidden == nil {
+		readHidden = readTerminalHidden
+	}
+	secretBytes, err := readHidden()
 	if _, printErr := fmt.Fprintln(opts.streams.Err); printErr != nil {
 		return "", printErr
 	}
 	if err != nil {
-		return "", fmt.Errorf("read key: %w", err)
+		return "", fmt.Errorf("read hidden input: %w", err)
 	}
-	secret := strings.TrimSpace(string(secretBytes))
+	secret := clean(string(secretBytes))
 	if secret == "" {
-		return "", exitcode.UsageError(errors.New(msgNoKeyProvided))
+		return "", exitcode.UsageError(errors.New(in.missing))
 	}
 	return secret, nil
+}
+
+// readTerminalHidden reads one line from the terminal without echo.
+// term.ReadPassword needs a real terminal fd, so the hidden read bypasses the
+// injected opts.streams.In that selected this branch (via InIsTTY); it is
+// reachable only on a real TTY, where os.Stdin is the stream the injector
+// wrapped anyway. It reads one byte at a time, so a line typed after it, such
+// as a name prompted for next, is left for the next reader.
+func readTerminalHidden() ([]byte, error) {
+	return term.ReadPassword(int(os.Stdin.Fd()))
 }
 
 // runAnonymousExternalLogin enrolls an account-free device into an externally
