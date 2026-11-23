@@ -833,7 +833,11 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 201,
           json: () => Promise.resolve({ data: { key_id: 'key-1', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
-        });
+        })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: {
+          owner_id: 'owner-verified', auth_type: 'api_key',
+          api_key: { kind: 'api_key', scopes: ['qurl:read', 'qurl:write'] },
+        } }) });
       const stage1Callback = await request(app)
         .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(stateFromRedirect)}`)
         .set('Cookie', `${QURL_OAUTH_SESSION_COOKIE}=${encodeURIComponent(sessionCookieValue)}; `

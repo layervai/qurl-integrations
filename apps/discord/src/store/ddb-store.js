@@ -170,7 +170,10 @@ async function countAll(TableName) {
   let total = 0;
   let ExclusiveStartKey;
   do {
-    const res = await ddb.send(new ScanCommand({ TableName, Select: 'COUNT', ExclusiveStartKey }));
+    const res = await ddb.send(new ScanCommand({ TableName, Select: 'COUNT', ExclusiveStartKey,
+      // Owner metadata and health sentinels are not configured Discord servers.
+      ...(TableName === TABLES.guild_configs ? { FilterExpression: 'attribute_exists(qurl_api_key)' } : {}),
+    }));
     total += res.Count || 0;
     ExclusiveStartKey = res.LastEvaluatedKey;
   } while (ExclusiveStartKey);
@@ -1574,7 +1577,12 @@ function auditSetupAdminChange(prior, { guildId, configuredBy, door }) {
 }
 
 // `via` (a SETUP_VIA value) names the setup door for the admin-change audit.
-async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
+async function setGuildApiKey(guildId, apiKey, configuredBy, via, verifiedOwnerId) {
+  if (guildId === '__default_owner__') throw new Error('Reserved guild owner metadata key');
+  if (verifiedOwnerId !== undefined && (typeof verifiedOwnerId !== 'string'
+      || !verifiedOwnerId.length || verifiedOwnerId.length > 512)) {
+    throw new Error('Invalid verified qURL owner');
+  }
   const door = normalizeSetupVia(via);
   // Validate on every call so caller drift (including a forgotten argument)
   // shows up on first setups too; such doors audit as unknown.
@@ -1593,11 +1601,13 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
   const res = await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
-    UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
+    UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)'
+      + (verifiedOwnerId ? ', qurl_owner_id = :owner' : ' REMOVE qurl_owner_id'),
     ExpressionAttributeValues: {
       ':k': encryptStrict(apiKey),
       ':b': configuredBy,
       ':u': now,
+      ...(verifiedOwnerId ? { ':owner': verifiedOwnerId } : {}),
     },
     // Return old values for touched attrs: keeps the old configured_by
     // read atomic with the re-key without returning the entire previous
@@ -1618,6 +1628,21 @@ async function setGuildApiKey(guildId, apiKey, configuredBy, via) {
     updatedAt: prior.updated_at,
     hadKey: 'qurl_api_key' in prior,
   }, { guildId, configuredBy, door });
+}
+
+async function setDefaultGuildOwner(verifiedOwnerId) {
+  // Subscription scans require webhook fields; stats require qurl_api_key, so this row is excluded.
+  if (typeof verifiedOwnerId !== 'string' || !verifiedOwnerId.length || verifiedOwnerId.length > 512) {
+    throw new Error('Invalid verified default qURL owner');
+  }
+  // An owner change needs the explicit credential cutover; old replicas cannot undo it.
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: '__default_owner__' },
+    UpdateExpression: 'SET qurl_owner_id = :owner',
+    ConditionExpression: 'attribute_not_exists(qurl_owner_id) OR qurl_owner_id = :owner',
+    ExpressionAttributeValues: { ':owner': verifiedOwnerId },
+  }));
 }
 
 // Raw delete. No qurl-service subscription teardown. Today there is no
@@ -2072,7 +2097,7 @@ module.exports = {
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs
-  getGuildApiKey, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
+  getGuildApiKey, setGuildApiKey, setDefaultGuildOwner, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
   // Per-guild webhook subscriptions (BYOK view counter)
   setGuildWebhookSubscription, setGuildDefaultWebhookOwner, clearGuildWebhookSubscription,
   listCompleteGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,

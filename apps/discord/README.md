@@ -102,8 +102,12 @@ This release upgrades `@layervai/qurl` from 0.6.x to 2.x. Detect uses CRIDs
 and binds the signed link to the expected CRID. The image omits the optional
 native state store; the bot does not use producer state.
 
-Deploy and validate the connector revoke endpoint before deploying this
-consumer. Until that endpoint is enabled, ordinary children use the SDK
+For feature activation, deploy and validate the connector revoke endpoint
+before enabling consumer revocation. A preparation deployment may replace the
+legacy caller while the connector endpoint remains off. Keep existing grants
+and callbacks, drain every old replica, and reconcile historical sends before
+changing owners or enabling the endpoint. This preparation does not qualify
+production revocation. Until that endpoint is enabled, ordinary children use the SDK
 fallback. Watermarked children cannot be confirmed through that fallback;
 the send stays available for retry. Legacy send rows with no usable `qurl_id`
 also remain unconfirmed after endpoint activation; deleting their shared parent
@@ -112,6 +116,19 @@ after one bounded retry, without an SDK fallback. Revoke buttons and selects
 share a process-local guard for each sender and send. The guard remains active
 after the 13-minute result wait while revocation continues. Store checks still
 enforce ownership and prevent new recipients across processes.
+
+Guild setup verifies the key owner through `/v1/me` and saves `qurl_owner_id`
+with the encrypted key in the same update. The subscription registry also
+publishes the verified fallback owner in `__default_owner__`; it refuses to
+change that owner automatically. Default discovery is strict: malformed upstream
+rows or a marker conflict keep default delivery closed while BYOK stays
+available. Persistent discovery or marker failures emit
+`qurl_webhook_default_discovery_fail` once per outage at the third failed scan. Deploy this binding producer and reconcile
+existing configured guilds before enabling connector guild-owner enforcement.
+During a default-owner cutover, drain old replicas before updating the marker.
+Historical attribution without a verified owner stays retained but must not
+identify recipients. The coordinated rollout is tracked in infrastructure
+issue #1555 and the #1664 rollout ledger.
 
 Before deployment, configure alarms for `Connector mint_link returned a link
 without a valid qurl_id`, `Connector mint_link over-minted`, `Connector mint_link
@@ -123,7 +140,8 @@ token identity`, and `resource_ref`. The load-test warning now says
 `carried no usable resource identifier`.
 
 Each mint request allows 65 seconds for the connector’s 55-second deadline
-and response transport. Only the connector’s `request_admission_rejected` 429
+and response transport. Only the connector’s `request_admission_rejected` or
+`tenant_admission_rejected` 429
 with `success: false` and an empty `links` array is retried, up to five times,
 with bounded backoff and a 100-second total mint budget. Other errors and
 partial results are never retried. A failing mint and its cleanup can take

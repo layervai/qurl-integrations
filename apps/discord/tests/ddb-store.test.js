@@ -81,6 +81,32 @@ afterAll(async () => {
 });
 
 describe('guild configs', () => {
+  test('guild key setup cannot overwrite the default owner marker', async () => {
+    await expect(store.setGuildApiKey('__default_owner__', 'key', 'admin', SETUP_VIA.PASTE, 'owner'))
+      .rejects.toThrow('Reserved');
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+  test('saves verified owner atomically with the key; legacy writers clear the binding', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setGuildApiKey('guild-a', 'key-a', 'admin', SETUP_VIA.PASTE, 'owner-a');
+    let input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain('qurl_owner_id = :owner');
+    expect(input.ExpressionAttributeValues[':owner']).toBe('owner-a');
+    await store.setGuildApiKey('guild-a', 'key-b', 'admin', SETUP_VIA.PASTE);
+    input = ddbMock.commandCalls(UpdateCommand)[1].args[0].input;
+    expect(input.UpdateExpression).toContain('REMOVE qurl_owner_id');
+  });
+
+  test('default owner cannot be changed by a stale replica', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setDefaultGuildOwner('owner-a');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ guild_id: '__default_owner__' });
+    expect(input.ConditionExpression).toBe('attribute_not_exists(qurl_owner_id) OR qurl_owner_id = :owner');
+    ddbMock.on(UpdateCommand).rejects(new Error('ConditionalCheckFailedException'));
+    await expect(store.setDefaultGuildOwner('owner-b')).rejects.toThrow('ConditionalCheckFailedException');
+  });
+
   test('setGuildApiKey: encrypts apiKey before write, preserves configured_at on re-key', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'configurer');
@@ -2269,6 +2295,7 @@ describe('stats', () => {
     ddbMock.on(ScanCommand).callsFake((input) => {
       pages[input.TableName] += 1;
       if (input.TableName === 'test-prefix-guild-configs') {
+        expect(input.FilterExpression).toBe('attribute_exists(qurl_api_key)');
         return pages[input.TableName] === 1
           ? Promise.resolve({ Count: 75, LastEvaluatedKey: { guild_id: 'p1' } })
           : Promise.resolve({ Count: 50 });

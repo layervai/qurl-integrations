@@ -325,8 +325,8 @@ describe('Connector client — coverage boost', () => {
       });
       const mint = () => connector.mintLinks('res-1', { expiresAt: '2099-01-01T00:00:00Z', n: 1 });
 
-      it('retries zero-side-effect admission refusals with bounded backoff', async () => {
-        globalThis.fetch = jest.fn().mockImplementation(() => refused());
+      it.each(['request_admission_rejected', 'tenant_admission_rejected'])('retries zero-side-effect %s refusals with bounded backoff', async (code) => {
+        globalThis.fetch = jest.fn().mockImplementation(() => refused({ ...admission, code }));
         await expect(mint()).rejects.toMatchObject({ status: 429 });
         expect(globalThis.fetch).toHaveBeenCalledTimes(6);
         expect(wait.mock.calls.map(args => args[0])).toEqual([1000, 2000, 4000, 8000, 16000]);

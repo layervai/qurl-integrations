@@ -22,6 +22,7 @@ const {
 const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
+const { qurlKeyOwner } = require('./utils/qurl-key-owner');
 const logger = require('./logger');
 const {
   COLORS,
@@ -4204,8 +4205,9 @@ async function handleSetupModal(interaction, { flow_id }) {
   }
 
   await interaction.deferReply({ ephemeral: true });
+  let verifiedOwnerId;
   try {
-    const resp = await fetch(`${config.QURL_ENDPOINT}/v1/qurls?limit=1`, {
+    const resp = await fetch(`${config.QURL_ENDPOINT}/v1/me`, {
       headers: { 'Authorization': `Bearer ${submittedKey}`, 'Accept': 'application/json' },
       signal: AbortSignal.timeout(10000),
     });
@@ -4217,7 +4219,11 @@ async function handleSetupModal(interaction, { flow_id }) {
       logger.warn('validate-key non-2xx from qURL API', { ...logFields, status: resp.status });
       return interaction.editReply({ content: `❌ **qURL API error** (${resp.status}). Try again later.` });
     }
+    verifiedOwnerId = qurlKeyOwner(await resp.json());
   } catch (err) {
+    if (err?.code === 'QURL_KEY_OWNER_INVALID') {
+      return interaction.editReply({ content: 'Could not verify this API key. Use an ordinary qURL API key with read and write access, then run `/qurl setup` again.' });
+    }
     // Don't reflect err.message to Discord — network errors can
     // contain internal hostnames/IPs (e.g. "connect ECONNREFUSED
     // 10.0.0.5:8080") that should not leak to a guild admin's
@@ -4228,7 +4234,7 @@ async function handleSetupModal(interaction, { flow_id }) {
     });
   }
 
-  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE);
+  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id, SETUP_VIA.PASTE, verifiedOwnerId);
   logger.info('Guild API key configured', logFields);
 
   fireAndForgetLinkGuildWebhookSubscription({
@@ -8616,7 +8622,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const results = await batchSettled(resourceEntries, async ([resourceId, children]) => {
     await revokeMintedLinks(resourceId, children.map(child => child.qurlId), apiKey);
     return resourceId;
-  }, 5);
+  }, 2); // Leave connector request capacity for other authenticated owners.
 
   // User-centric: strict-success = recipient whose every link was
   // revoked (in success but not in failure). Mixed-outcome users

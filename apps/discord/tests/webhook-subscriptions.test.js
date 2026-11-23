@@ -4,6 +4,7 @@ const realFetch = global.fetch;
 const mockScan = jest.fn();
 jest.mock('../src/store', () => ({
   scanGuildSubscriptions: mockScan,
+  setDefaultGuildOwner: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../src/logger', () => ({
@@ -37,6 +38,42 @@ afterAll(() => {
 });
 
 describe('webhook-subscriptions registry — priming + lookup', () => {
+  it('keeps BYOK delivery primed when the default owner marker cannot be saved', async () => {
+    const db = require('../src/store');
+    db.setDefaultGuildOwner.mockRejectedValueOnce(Object.assign(new Error('conflict'), { name: 'ConditionalCheckFailedException' }));
+    mockScan.mockResolvedValueOnce([{ guildId: 'g1', webhookId: 'wh_g1', webhookSecret: 'byok-secret', webhookOwnerId: 'owner-byok' }]);
+    await subs.scanOnce();
+    expect(subs.isPrimed()).toBe(true);
+    expect(subs.getSecretForOwner('owner-byok')).toBe('byok-secret');
+    expect(subs.getSecretForOwner('usr_default')).toBeNull();
+    expect(require('../src/logger').warn).toHaveBeenCalledWith(
+      'default-key owner marker unavailable (BYOK path unaffected)',
+      { error_code: 'DEFAULT_WEBHOOK_OWNER_MARKER_CONFLICT', consecutiveFailures: 1 },
+    );
+  });
+  it('pages once for persistent marker failure and resets after empty discovery', async () => {
+    const db = require('../src/store');
+    const logger = require('../src/logger');
+    logger.audit.mockClear();
+    mockScan.mockResolvedValue([]);
+    for (let i = 0; i < 4; i++) {
+      db.setDefaultGuildOwner.mockRejectedValueOnce(Object.assign(new Error('conflict'), { name: 'ConditionalCheckFailedException' }));
+      // eslint-disable-next-line no-await-in-loop
+      await subs.scanOnce();
+    }
+    const pages = () => logger.audit.mock.calls.filter(([event]) => event === 'qurl_webhook_default_discovery_fail');
+    expect(pages()).toHaveLength(1);
+    expect(pages()[0][1].error_code).toBe('DEFAULT_WEBHOOK_OWNER_MARKER_CONFLICT');
+    global.fetch.mockResolvedValueOnce({ ok: true, text: async () => JSON.stringify({ data: [] }) });
+    await subs.scanOnce();
+    for (let i = 0; i < 3; i++) {
+      global.fetch = jest.fn(async () => ({ ok: false, status: 503, text: async () => '' }));
+      // eslint-disable-next-line no-await-in-loop
+      await subs.scanOnce();
+    }
+    expect(pages()).toHaveLength(2);
+  });
+
   it('returns null + isPrimed()=false before any scan completes', () => {
     expect(subs.isPrimed()).toBe(false);
     expect(subs.getSecretForOwner('usr_test')).toBeNull();
@@ -469,14 +506,14 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     expect(global.fetch.mock.calls[2][1].headers.Authorization).toBe('Bearer lv_alias');
   });
 
-  it('primes the receiver from valid rows while linking still rejects a malformed sibling', async () => {
+  it('refuses a persistent default binding from a malformed owner listing', async () => {
     mockScan.mockResolvedValueOnce([]);
     global.fetch = jest.fn(async () => ({
       ok: true, status: 200,
       text: async () => JSON.stringify({ data: [{}, { owner_id: 'usr_default' }] }),
     }));
     await subs.scanOnce();
-    expect(subs.getSecretForOwner('usr_default')).toBe('whsec_default_key_secret_value');
+    expect(subs.getSecretForOwner('usr_default')).toBeNull();
     await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
       .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_CONTRACT' });
   });

@@ -15,6 +15,7 @@ jest.mock('../src/discord', () => ({
 const mockScanGuildSubscriptions = jest.fn();
 jest.mock('../src/store', () => ({
   scanGuildSubscriptions: mockScanGuildSubscriptions,
+  setDefaultGuildOwner: jest.fn().mockResolvedValue(undefined),
   recordQurlView: jest.fn(async () => ({ result: 'recorded', firstView: true })),
   findSendsByQurlId: jest.fn(async () => []),
   getQurlViews: jest.fn(async () => new Map()),
