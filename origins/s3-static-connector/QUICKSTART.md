@@ -324,7 +324,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           env:
-            - {name: QURL_ENDPOINT, value: https://api.layerv.ai}
+            - {name: QURL_ENDPOINT, value: "https://api.layerv.ai"}
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
             - {name: state, mountPath: /var/lib/qurl-volume}
