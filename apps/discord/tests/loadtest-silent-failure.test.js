@@ -59,9 +59,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const parser = require('@babel/parser');
-const traverseModule = require('@babel/traverse');
 
-const traverse = traverseModule.default || traverseModule;
+let traverse;
+beforeAll(async () => {
+  ({ default: traverse } = await import('@babel/traverse'));
+});
 
 const {
   FLAGS, flagSpec, readFlag, readBooleanFlag, resolveBooleanArgs,
@@ -862,7 +864,10 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     };
   };
 
-  const calleeName = makeCalleeName(ast);
+  let calleeName;
+  beforeAll(() => {
+    calleeName = makeCalleeName(ast);
+  });
 
   const flagLiterals = () => {
     const found = [];

@@ -58,16 +58,20 @@ func TestGoldens(t *testing.T) {
 
 	cases := []goldenCase{
 		{
-			name:         "publish",
-			args:         func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			name: "publish",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--name", "Example"}
+			},
 			variants:     goldenVariants(),
 			stdoutGolden: true,
 		},
 		{
 			// Publishing a URL that already has an active resource: the
 			// text document says so itself, so stderr stays empty.
-			name:         "publish_existing",
-			args:         func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			name: "publish_existing",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--name", "Example"}
+			},
 			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
 			variants:     []string{"tty", "plain"},
 			stdoutGolden: true,
@@ -75,8 +79,10 @@ func TestGoldens(t *testing.T) {
 		{
 			// The JSON document only gains found_existing: true; the replay
 			// note is a stderr status line.
-			name:         "publish_existing",
-			args:         func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			name: "publish_existing",
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--name", "Example"}
+			},
 			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
 			variants:     []string{"json"},
 			stdoutGolden: true,
@@ -87,7 +93,7 @@ func TestGoldens(t *testing.T) {
 			// document says private: false. Nothing else differs.
 			name: "publish_public",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--public"}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--public"}
 			},
 			variants:     goldenVariants(),
 			stdoutGolden: true,
@@ -98,7 +104,9 @@ func TestGoldens(t *testing.T) {
 			// no privacy: the resource is kept, the Access row says public,
 			// and the document warns that it stays public.
 			name: "publish_kept_public",
-			args: func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--name", "Example"}
+			},
 			prepare: func(srv *apitest.Server) {
 				srv.SetResourceAccess(false)
 				srv.SetPublishFoundExisting(true)
@@ -111,7 +119,9 @@ func TestGoldens(t *testing.T) {
 			// says private: false, kept_public: true and found_existing:
 			// true, and the warning is on stderr.
 			name: "publish_kept_public_script",
-			args: func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--name", "Example"}
+			},
 			prepare: func(srv *apitest.Server) {
 				srv.SetResourceAccess(false)
 				srv.SetPublishFoundExisting(true)
@@ -127,7 +137,7 @@ func TestGoldens(t *testing.T) {
 			// Nothing on stdout.
 			name: "error_publish_existing_public",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--allow-device-key", goldenDevicePublicKey}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--allow-device-key", goldenDevicePublicKey}
 			},
 			prepare: func(srv *apitest.Server) {
 				srv.SetResourceAccess(false)
@@ -142,7 +152,7 @@ func TestGoldens(t *testing.T) {
 			// of allowed devices: exit 7, and the commands that change it.
 			name: "error_publish_other_devices",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--allow-device-key", goldenDevicePublicKey}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--allow-device-key", goldenDevicePublicKey}
 			},
 			prepare: func(srv *apitest.Server) {
 				srv.SetResourceAccess(true, goldenSecondDevicePublicKey)
@@ -156,7 +166,7 @@ func TestGoldens(t *testing.T) {
 			// The other direction: --public for a target that is private.
 			name: "error_publish_existing_private",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--public"}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--public"}
 			},
 			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
 			variants:     []string{"plain"},
@@ -168,7 +178,7 @@ func TestGoldens(t *testing.T) {
 			// it gives a privacy difference, so the message claims neither.
 			name: "error_publish_access_differs",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--allow-device-key", goldenDevicePublicKey}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--allow-device-key", goldenDevicePublicKey}
 			},
 			prepare: func(srv *apitest.Server) {
 				srv.PlayPublicByDefault()
@@ -182,7 +192,9 @@ func TestGoldens(t *testing.T) {
 			// The create answer does not say the resource is private: exit 10,
 			// no CRID anywhere, and what the publisher should check.
 			name: "error_publish_unconfirmed",
-			args: func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			args: func(*apitest.Server) []string {
+				return []string{"publish", "https://example.com/data", "--name", "Example"}
+			},
 			prepare: func(srv *apitest.Server) {
 				srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 					apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
@@ -251,7 +263,7 @@ func TestGoldens(t *testing.T) {
 			// what happens next, before the CRID line.
 			name: "publish_requests",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--allow-requests"}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--allow-requests"}
 			},
 			linkSite:     testLinkSite,
 			variants:     goldenVariants(),
@@ -262,7 +274,7 @@ func TestGoldens(t *testing.T) {
 			// CRID is what to send, and no address is named.
 			name: "publish_requests_no_site",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--allow-requests"}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--allow-requests"}
 			},
 			variants:     []string{"plain", "json"},
 			stdoutGolden: true,
@@ -273,7 +285,7 @@ func TestGoldens(t *testing.T) {
 			// document says so in one line before what to send to people.
 			name: "publish_requests_existing",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--allow-requests"}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--allow-requests"}
 			},
 			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
 			linkSite:     testLinkSite,
@@ -284,7 +296,7 @@ func TestGoldens(t *testing.T) {
 			// The JSON document keeps its shape; the one line is on stderr.
 			name: "publish_requests_existing",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--allow-requests"}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--allow-requests"}
 			},
 			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
 			linkSite:     testLinkSite,
@@ -298,7 +310,7 @@ func TestGoldens(t *testing.T) {
 			// why, and the command that tries again with the CRID in it.
 			name: "error_publish_requests_not_turned_on",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--allow-requests"}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--allow-requests"}
 			},
 			prepare: func(srv *apitest.Server) {
 				srv.SetPublishFoundExisting(true)
@@ -317,7 +329,7 @@ func TestGoldens(t *testing.T) {
 			// command gives there, and that nothing was published.
 			name: "error_publish_requests_refused",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--allow-requests"}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--allow-requests"}
 			},
 			prepare:      func(srv *apitest.Server) { srv.PlayStrictWithoutAccessRequests() },
 			variants:     []string{"plain"},
@@ -340,7 +352,7 @@ func TestGoldens(t *testing.T) {
 			// A service from before access requests: exit 11 and no CRID.
 			name: "error_publish_requests_unsupported",
 			args: func(*apitest.Server) []string {
-				return []string{"publish", "https://example.com/data", "--allow-requests"}
+				return []string{"publish", "https://example.com/data", "--name", "Example", "--allow-requests"}
 			},
 			prepare:      func(srv *apitest.Server) { srv.PlayNoAccessRequests() },
 			variants:     []string{"plain"},
