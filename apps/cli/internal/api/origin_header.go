@@ -193,17 +193,17 @@ func (e *OriginHeaderMismatchError) Unwrap() []error {
 	return []error{ErrOriginHeaderMismatch, e.problem}
 }
 
-// originHeaderUnconfirmedError is an answer that does not name the origin
+// resourceSettingUnconfirmedError is an answer that does not name the origin
 // header that was asked for. It is an answer outside the contract, so it
 // matches the SDK's invalid-response sentinel and has that exit code.
-type originHeaderUnconfirmedError struct{ message string }
+type resourceSettingUnconfirmedError struct{ message string }
 
-func (e *originHeaderUnconfirmedError) Error() string { return e.message }
+func (e *resourceSettingUnconfirmedError) Error() string { return e.message }
 
 // UserMessage is the text the terminal rendering shows.
-func (e *originHeaderUnconfirmedError) UserMessage() string { return e.message }
+func (e *resourceSettingUnconfirmedError) UserMessage() string { return e.message }
 
-func (e *originHeaderUnconfirmedError) Unwrap() error { return qurl.ErrInvalidAPIResponse }
+func (e *resourceSettingUnconfirmedError) Unwrap() error { return qurl.ErrInvalidAPIResponse }
 
 // validatePublishOriginHeader refuses an origin header a publish cannot send:
 // one for a Connector resource, or one the service would refuse.
@@ -244,7 +244,7 @@ func confirmOriginHeader(header *OriginHeader, published *Published) error {
 	if header == nil || published.OriginHeaderName == http.CanonicalHeaderKey(header.Name) {
 		return nil
 	}
-	return &originHeaderUnconfirmedError{message: fmt.Sprintf(msgOriginHeaderUnconfirmed, published.CRID, published.CRID)}
+	return &resourceSettingUnconfirmedError{message: fmt.Sprintf(msgOriginHeaderUnconfirmed, published.CRID, published.CRID)}
 }
 
 // originHeaderPatch is the PATCH body that sets, rotates or removes the
@@ -292,7 +292,7 @@ func (c *client) SetOriginHeader(ctx context.Context, id string, header *OriginH
 		want = http.CanonicalHeaderKey(header.Name)
 	}
 	if env.Data.OriginHeaderName != want {
-		return nil, &originHeaderUnconfirmedError{message: msgOriginHeaderChangeUnconfirmed}
+		return nil, &resourceSettingUnconfirmedError{message: msgOriginHeaderChangeUnconfirmed}
 	}
 	return summarizeResourceRow(&env.Data, "origin header change")
 }
