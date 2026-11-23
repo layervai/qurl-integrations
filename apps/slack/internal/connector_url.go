@@ -51,7 +51,11 @@ func ParseConnectorEndpoint(raw string) (endpoint, apiURL string, err error) {
 	if reason := connectorURLShape(endpoint, true); reason != connectorURLValid {
 		return "", "", reason
 	}
-	return endpoint, endpoint + connectorAPIVersionPath, nil
+	apiURL = endpoint + connectorAPIVersionPath
+	if ValidateConnectorAPIURL(apiURL) != nil {
+		return "", "", ConnectorURLInvalid
+	}
+	return endpoint, apiURL, nil
 }
 
 // ValidateConnectorAPIURL keeps the renderer's sentinel error contract.
@@ -93,13 +97,6 @@ func connectorURLShape(raw string, origin bool) ConnectorURLFailure {
 		}
 		if parsed.Path != "" {
 			return ConnectorURLPath
-		}
-		// Preserve rejection of empty query/fragment delimiters after appending /v1.
-		if parsed.ForceQuery || strings.Contains(raw, "#") {
-			return ConnectorURLInvalid
-		}
-		if _, err := url.ParseRequestURI(raw + connectorAPIVersionPath); err != nil {
-			return ConnectorURLInvalid
 		}
 	} else if strings.TrimRight(parsed.Path, "/") != connectorAPIVersionPath {
 		return ConnectorURLPath
