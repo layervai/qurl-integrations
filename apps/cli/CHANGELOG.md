@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.7.0](https://github.com/layervai/qurl-integrations/compare/v4.6.0...v4.7.0) (2026-11-23)
+
+
+### Features
+
+* **cli:** accept protected Windows enrollment files ([#2064](https://github.com/layervai/qurl-integrations/issues/2064)) ([a8ba6f1](https://github.com/layervai/qurl-integrations/commit/a8ba6f1ad3f094586e550f36301c236d51789361))
+
 ## [4.6.0](https://github.com/layervai/qurl-integrations/compare/v4.5.0...v4.6.0) (2026-11-23)
 
 
