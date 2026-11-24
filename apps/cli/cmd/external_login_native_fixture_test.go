@@ -1,4 +1,4 @@
-//go:build unix || (windows && connectorpreview)
+//go:build unix || windows
 
 package main
 

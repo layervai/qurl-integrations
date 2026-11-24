@@ -9,10 +9,10 @@ cloud.google.com/go/compute/metadata v0.10.0 h1:pyKMUQSwchgkIBBJGdILqQbs/BNJXqwS
 cloud.google.com/go/compute/metadata v0.10.0/go.mod h1:rGFHRrIif570kSibjFTMbt6/4/tzgJWFGI/HVol4GIk=
 cloud.google.com/go/iam v1.14.0 h1:YRIB1/4xxwJ+NfI6RQr1WaOoHHeV0MizJEj940nBXJA=
 cloud.google.com/go/iam v1.14.0/go.mod h1:JTPZfbHdGXJrOYREtkRoFzCDGaBdbA7ILLKO/DDuav0=
-cloud.google.com/go/kms v1.36.1 h1:jIXDoN/lxjVt/zc219tIwqAWPVWVzcLJ7s6Oq3n0Y5U=
-cloud.google.com/go/kms v1.36.1/go.mod h1:1oVAwTvmgswE8PiQeyffdNxpRLw2F0UfQlLwTrYlRNg=
-cloud.google.com/go/longrunning v1.3.0 h1:lZ6c8SJJBmILp/Wnr3vGnBLa0q+cYfSHRCcUfVI2hpI=
-cloud.google.com/go/longrunning v1.3.0/go.mod h1:wpgLxCn+UA3/TZ1bj/fW39mfDpwVlMPu1xKJyoMt7V0=
+cloud.google.com/go/kms v1.37.0 h1:JIVi+qr6MP+s8esyiXCYAczwBQ3icKkPNp1zFDYf8sk=
+cloud.google.com/go/kms v1.37.0/go.mod h1:R58XvLUocyjbOb59X2qXTaBV6sjH+7XKoWmGY2ckQbw=
+cloud.google.com/go/longrunning v1.5.0 h1:aGonu6LHQl38DyozLs2jxGieI4Ixk+7GTnmHVcHt8zA=
+cloud.google.com/go/longrunning v1.5.0/go.mod h1:vjM1U85ZQuTv8lJoUBSA44HLWvM6BBFeaSJYGFF1Q00=
 github.com/Azure/go-ntlmssp v0.1.1 h1:l+FM/EEMb0U9QZE7mKNEDw5Mu3mFiaa2GKOoTSsNDPw=
 github.com/Azure/go-ntlmssp v0.1.1/go.mod h1:NYqdhxd/8aAct/s4qSYZEerdPuH1liG2/X9DiVTbhpk=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
@@ -166,8 +166,8 @@ github.com/layervai/frp v1.0.6-0.20261105061151-e091a7ca0123 h1:a0AxvQwMXCqO/XA9
 github.com/layervai/frp v1.0.6-0.20261105061151-e091a7ca0123/go.mod h1:lslKzb/LZt9/jt1me8og9W2l39bf3WiGpOFILbjyRu0=
 github.com/layervai/qurl-conformance v0.17.2 h1:wwQRoRNOrc21s7SrkKEf/cePJ56OQr2rn8NRAVmun40=
 github.com/layervai/qurl-conformance v0.17.2/go.mod h1:NHtczZdj7SRFqLj9iS4dCGyYZSZKfpILnBRhC53W7WA=
-github.com/layervai/qurl-connector v0.14.6 h1:nCEo4kVOzoWDZAyV7lrLqll7WfNtTuzlP2f1my/L6Cg=
-github.com/layervai/qurl-connector v0.14.6/go.mod h1:HEWNIpRHbcJ78HPpdhspUw/sLI9xgPnsnfbGy5m+R+c=
+github.com/layervai/qurl-connector v0.14.7 h1:aisWHZ5fETdgCNEhZ+pMu8/kACfKqwz9ZaEGDKptxpU=
+github.com/layervai/qurl-connector v0.14.7/go.mod h1:XSVnZuPIBo5c+EiHD9JRceaRtTjhZaeHY/t03sWBcSk=
 github.com/layervai/qurl-go v0.30.1 h1:1ciZ0SmN5sSJXf9arLXUIFLlH7ZDU/JcmzCuMM8qFVc=
 github.com/layervai/qurl-go v0.30.1/go.mod h1:j1sklkuKEtedkj40DdsTS/pBg/V7WJyK0iE9xZi5t6M=
 github.com/lestrrat-go/blackmagic v1.0.4 h1:IwQibdnf8l2KoO+qC3uT4OaTWsW7tuRQXy9TRN9QanA=

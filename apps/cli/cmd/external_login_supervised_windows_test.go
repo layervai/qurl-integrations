@@ -1,4 +1,4 @@
-//go:build windows && connectorpreview
+//go:build windows
 
 package main
 
@@ -22,8 +22,6 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
-// This source-only gate uses the reviewed Connector candidate. After its real
-// release is pinned, remove the preview tag and run this in the normal suite.
 // Registration uses real client code with local protocol fixtures; live cold
 // enrollment and packaged Desktop qualification remain separate release gates.
 func TestWindowsNodeSupervisedColdAndWarmLogin(t *testing.T) {

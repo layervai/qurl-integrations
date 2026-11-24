@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -16,7 +15,6 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
-	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 func TestWindowsExternalLoginRejectsInvalidPathsBeforeNamespace(t *testing.T) {
@@ -58,7 +56,7 @@ func TestWindowsExternalLoginRejectsInheritedTokenACL(t *testing.T) {
 		args: []string{"--endpoint", srv.URL, "--supervision", "external", "login", "--enrollment-token-file", path},
 		env:  externalLoginEnv(), shareStateDir: filepath.Join(t.TempDir(), "state"),
 		// The runtime mode is recorded before enrollment. Exercise the real
-		// credential provider without claiming the unreleased local-key backend works.
+		// credential provider directly to isolate the token ACL check.
 		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 			called = true
 			_, err := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{})
@@ -73,52 +71,5 @@ func TestWindowsExternalLoginRejectsInheritedTokenACL(t *testing.T) {
 	}
 	if len(srv.Requests()) != 0 {
 		t.Fatal("rejected credential reached the service")
-	}
-}
-
-// This pins the current connector dependency's unsupported Windows transport.
-// Update it to successful enrollment when the Windows local-key release is pinned.
-func TestWindowsUnsupportedEnrollmentLeavesRetryableExternalNamespace(t *testing.T) {
-	srv := apitest.NewServer(t)
-	stateDir := filepath.Join(t.TempDir(), "state")
-	// A clean absolute missing path proves the lazy token reader is never reached.
-	tokenPath := filepath.Join(t.TempDir(), "missing-token")
-	env := externalLoginEnv()
-	for key, value := range env {
-		// The real connector reads process environment, unlike the CLI harness.
-		t.Setenv(key, value)
-	}
-	var marker []byte
-	for attempt := 0; attempt < 2; attempt++ {
-		res := runCLI(t, &runOpts{
-			args: []string{"--endpoint", srv.URL, "--supervision", "external", "login", "--enrollment-token-file", tokenPath},
-			env:  env, shareStateDir: stateDir,
-			// Stub only Hub bootstrap resolution; use the real connector opener.
-			openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
-				return connectorshare.OpenNativeRuntime(ctx, cfg)
-			},
-		})
-		if res.code != 3 || !strings.Contains(res.stderr.String(), "local-key inherited-descriptor transport is unsupported") {
-			t.Fatalf("attempt %d: exit=%d stderr=%q", attempt, res.code, res.stderr.String())
-		}
-		entries, err := os.ReadDir(stateDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) != 2 || entries[0].Name() != ".connector_resources.lock" || entries[1].Name() != connectorstate.RuntimeModeFile {
-			t.Fatalf("unexpected state after failed enrollment: %v", entries)
-		}
-		current, err := os.ReadFile(filepath.Join(stateDir, connectorstate.RuntimeModeFile)) // #nosec G304 -- Fixed marker name under this test's private temporary directory.
-		if err != nil {
-			t.Fatal(err)
-		}
-		if attempt == 0 {
-			marker = current
-		} else if !bytes.Equal(marker, current) {
-			t.Fatal("retry changed the supervision policy marker")
-		}
-		if len(srv.Requests()) != 0 {
-			t.Fatal("unsupported enrollment contacted the service")
-		}
 	}
 }

@@ -534,10 +534,8 @@ the TPM: without a usable one it exits 3, and with one that is not responding
 it exits 11. The other providers seal the state under a key held elsewhere. With
 `local-key`, the 32-byte wrapping key arrives on the inherited descriptor
 named by `LAYERV_LOCAL_KEY_FD`. Unix supervisors use an anonymous pipe or
-socketpair. Windows support is not yet available with the pinned connector:
-it requires [qurl-connector#162](https://github.com/layervai/qurl-connector/pull/162)
-to be released and the CLI dependency bumped. That implementation uses
-Node.js/libuv's inherited CRT pipe table. There is deliberately no
+socketpair. Windows supervisors use Node.js/libuv's inherited CRT pipe table.
+There is deliberately no
 flag: the supervisor that owns the key (for example qURL Desktop) sets the
 environment. A namespace sealed by such a provider requires `--supervision
 external`, because the background job `qurl` installs under native
@@ -693,20 +691,18 @@ JSON
 ```
 
 On Windows, supply the canonical `http+npipe` target to the same command.
-Private Unix origins require Unix. The Windows enrollment-token reader accepts
-protected credential files, but complete Windows external enrollment remains
-blocked on the connector release and dependency bump described above.
+Private Unix origins require Unix. Windows supports external enrollment with a
+protected credential file and a wrapping key supplied through Node.js/libuv's
+inherited pipe.
 
-The Windows CI matrix also tests the combined source using an immutable
-Connector candidate and a temporary module replacement. This nonshipping check
-proves Node's inherited key pipe, the protected one-shot token reader, cold
-registration from an empty namespace, and reopening sealed device state through
-the CLI after process restart. Registration runs the real client against local
-Hub/cell fixtures using public conformance replies; it does not prove live
-service enrollment, OAuth, or a packaged Desktop application. The shipped
-module remains unchanged. When the real Connector release is pinned, remove
-the candidate checkout and replacement, remove the `connectorpreview` test tag,
-and replace the unsupported-provider regression with the supported journey.
+The Windows CI matrix tests the pinned Connector dependency with Node's inherited
+key pipe, the protected one-shot token reader, cold registration from an empty
+namespace, and reopening sealed device state after process restart. A wrong key
+must fail without network access or a state change. Registration uses local
+Hub/cell fixtures with public conformance replies. The draft-release production
+journey separately requires the exact packaged CLI to pass supervised cold and
+warm login against the real service before publication. Packaged Desktop
+acceptance remains a separate requirement.
 
 The command uses the normal profile/state-directory settings. It requires an
 existing externally supervised namespace and matching durable owner, reserves
@@ -1894,11 +1890,8 @@ A supervisor such as qURL Desktop can instead run
 It must supply a one-time token minted for `target=agent`, set
 `LAYERV_KEY_PROVIDER=local-key`, and pass the 32-byte wrapping key through the
 inherited descriptor named by `LAYERV_LOCAL_KEY_FD`. Do not set `QURL_API_KEY`
-or `QURL_API_KEY_FILE` for this form. Token-file login is tested on macOS and
-Linux. Windows has protected credential-file validation, but the pinned connector
-does not yet support the required Windows `local-key` provider; complete Windows
-enrollment requires the connector release and dependency bump described in
-[Key storage](#key-storage). Other non-Unix platforms reject token-file login.
+or `QURL_API_KEY_FILE` for this form. Token-file login is tested on macOS,
+Linux, and Windows. Other platforms reject token-file login.
 
 The token file must be an owner-owned regular file with one hard link and
 mode `0400` or `0600` on Unix. Windows requires a protected ACL allowing only
