@@ -4,12 +4,15 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
@@ -79,6 +82,44 @@ func TestWindowsDaemonPipeNameIsCaseInsensitiveAndPathScoped(t *testing.T) {
 	}
 	if first, second := windowsDaemonPipeName(path), windowsDaemonPipeName(path+"-other"); first == second {
 		t.Fatalf("different Windows paths mapped to the same pipe: %q", first)
+	}
+}
+
+// TODO(upstream-contract): Desktop mirrors Go Unicode 15 simple lowercasing.
+// Keep these wire hashes in sync with qurl-desktop cli-paths.test.ts; a Go
+// Unicode upgrade must not silently change an existing profile's pipe name.
+func TestWindowsDaemonPipeNameUnicodeWireContract(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		path   string
+		digest string
+	}{
+		{"TurkishAndGreek", `C:\Users\İpek\ΟΣ\state\daemon.sock`, "ff6fffc0cdd17367ee83b0e1d00ac7eec2d89519becdfa44666fac9b2829117b"},
+		// These newer letters intentionally remain uncased under Go Unicode 15.
+		{"NewerUnicodeLetters", `C:\Users\ᲉꟋꟌ꟎꟒꟔ꟚꟜ𐵐𖺠\state\daemon.sock`, "7efd5756e27a12a2e7e021cd9d71168692f408ed5ccba17aea161822650b9c25"},
+		{"SharpSKelvinAndDeseret", `C:\Users\ẞK𐐀\state\daemon.sock`, "860493d1a89cc91ebbd7cd22f96be188cd6d1d109b322cea34268c13a8acb65d"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := `\\.\pipe\layerv-qurl-share-daemon-` + tc.digest
+			if got := windowsDaemonPipeName(tc.path); got != want {
+				t.Fatalf("Windows Unicode pipe contract changed: got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestWindowsDaemonPipeUnicodeScalarContract(t *testing.T) {
+	digest := sha256.New()
+	for code := rune(0); code <= unicode.MaxRune; code++ {
+		if code >= 0xd800 && code <= 0xdfff {
+			continue
+		}
+		_, _ = digest.Write([]byte(string(unicode.ToLower(code))))
+	}
+	// Mirrors Desktop's exhaustive scalar test, not the current Go table.
+	const want = "137590953b837f1ec8b7c02b3a0425d0789df789a59ad256e7a63416f9fc4c11"
+	if got := hex.EncodeToString(digest.Sum(nil)); got != want {
+		t.Fatalf("Windows pipe Unicode casing contract changed: got %s, want %s", got, want)
 	}
 }
 

@@ -34,6 +34,19 @@ The parent key never enters artifacts or the customer process environment.
 Children cannot hold `qurl:keys`, exceed parent scopes, or outlive their parent.
 Interactive Discord, Slack, and Teams login is unchanged.
 
+The draft CLI release proof also uses the primary child key to mint one
+one-hour `target=agent` enrollment token. The exact packaged binary performs
+externally supervised cold login, then a fresh process performs warm login
+after the token file is removed. Node supplies the same in-memory wrapping key
+through a fresh inherited descriptor for each process; neither process gets an
+account API key. The independent production cleanup revokes the exact run-named
+enrollment token if still active, revokes the device, and retires its assignment
+using the existing `failure` AgentID. It needs no runner credential artifact.
+
+This gate requires a real released Connector version that supports Windows
+inherited local keys. The source-only Windows protocol fixture does not satisfy
+it, and adding the gate is not evidence that production enrollment has passed.
+
 The unlimited requirement is the account plan, not a recommendation to keep
 credentials forever. Rotate the automation key at least every 90 days: create
 a replacement under the same owner, update both protected environments, verify

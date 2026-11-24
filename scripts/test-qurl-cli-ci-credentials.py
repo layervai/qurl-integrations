@@ -2254,6 +2254,35 @@ def main() -> None:
             )
         assert malformed_device_key_id not in fake.deleted_keys
 
+    # A cancelled supervised release proof can leave its one-shot token unused.
+    # Cleanup must find it without a runner artifact and must not widen its scope.
+    for profile, valid in (("production", True), ("full", True), ("production", False)):
+        fake = FakeAPI()
+        enrollment_id = "key_Enrollmnt123"
+        fake.keys[enrollment_id] = {
+            "key_id": enrollment_id,
+            "name": "qurl CLI journey v2 1231/2/linux/enrollment",
+            "kind": "enrollment_token", "target": "agent" if valid else "connector",
+            "scopes": ["qurl:agent"], "status": "active",
+        }
+        with (
+            tempfile.TemporaryDirectory() as raw_root,
+            mock.patch.object(credentials, "request", fake),
+            mock.patch.object(credentials.time, "sleep", lambda _: None),
+        ):
+            args = auth_args(pathlib.Path(raw_root))
+            run_args = argparse.Namespace(
+                **vars(args), lane="linux", run_attempt="2", run_id="1231",
+                runtime="host", profile=profile,
+            )
+            try:
+                reconcile_one(run_args)
+            except credentials.CredentialError as exc:
+                assert not valid and str(exc) == "run cleanup did not converge (credential_shape=1)"
+            else:
+                assert valid, "cleanup accepted a token for another enrollment target"
+            assert (enrollment_id in fake.deleted_keys) == (profile == "production" and valid)
+
     print("qurl CLI journey credential tests passed")
 
 

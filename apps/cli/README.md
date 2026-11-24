@@ -390,7 +390,9 @@ opens it. It reads no account key from anywhere and refuses to run while
 Create the file in an owner-only directory and delete it on every exit path,
 including failures. The path must be absolute and clean, and the file must be
 a regular file — never a symlink — that you own, with exactly one hard link
-and mode `0400` or `0600`, holding one non-empty token without whitespace, at
+and, on Unix, mode `0400` or `0600`. Windows requires a protected ACL granting
+access only to your user, SYSTEM and Administrators, and refuses reparse points.
+The file holds one non-empty token without whitespace, at
 most 16 KiB, and at most one trailing line ending. This reader is stricter than the
 projected-secret reader behind `qurl daemon run --enrollment-token-file` in
 [headless deployments](#headless-deployments): links and group access are
@@ -531,7 +533,9 @@ with `-o json`).
 the TPM: without a usable one it exits 3, and with one that is not responding
 it exits 11. The other providers seal the state under a key held elsewhere. With
 `local-key`, the 32-byte wrapping key arrives on the inherited descriptor
-named by `LAYERV_LOCAL_KEY_FD`, on macOS and Linux. There is deliberately no
+named by `LAYERV_LOCAL_KEY_FD`. Unix supervisors use an anonymous pipe or
+socketpair. Windows supervisors use Node.js/libuv's inherited CRT pipe table.
+There is deliberately no
 flag: the supervisor that owns the key (for example qURL Desktop) sets the
 environment. A namespace sealed by such a provider requires `--supervision
 external`, because the background job `qurl` installs under native
@@ -687,8 +691,18 @@ JSON
 ```
 
 On Windows, supply the canonical `http+npipe` target to the same command.
-Private Unix origins and external `--enrollment-token-file` handoff still require
-Unix; ordinary account-API-key login remains available on Windows.
+Private Unix origins require Unix. Windows supports external enrollment with a
+protected credential file and a wrapping key supplied through Node.js/libuv's
+inherited pipe.
+
+The Windows CI matrix tests the pinned Connector dependency with Node's inherited
+key pipe, the protected one-shot token reader, cold registration from an empty
+namespace, and reopening sealed device state after process restart. A wrong key
+must fail without network access or a state change. Registration uses local
+Hub/cell fixtures with public conformance replies. The draft-release production
+journey separately requires the exact packaged CLI to pass supervised cold and
+warm login against the real service before publication. Packaged Desktop
+acceptance remains a separate requirement.
 
 The command uses the normal profile/state-directory settings. It requires an
 existing externally supervised namespace and matching durable owner, reserves
@@ -1876,12 +1890,14 @@ A supervisor such as qURL Desktop can instead run
 It must supply a one-time token minted for `target=agent`, set
 `LAYERV_KEY_PROVIDER=local-key`, and pass the 32-byte wrapping key through the
 inherited descriptor named by `LAYERV_LOCAL_KEY_FD`. Do not set `QURL_API_KEY`
-or `QURL_API_KEY_FILE` for this form. Token-file login is tested on macOS and
-Linux. Non-Unix platforms, including Windows, reject it before changing local state.
+or `QURL_API_KEY_FILE` for this form. Token-file login is tested on macOS,
+Linux, and Windows. Other platforms reject token-file login.
 
 The token file must be an owner-owned regular file with one hard link and
-mode `0400` or `0600`. The CLI reads it only when enrollment needs it. The
-supervisor must remove it after the command exits, including on failure.
+mode `0400` or `0600` on Unix. Windows requires a protected ACL allowing only
+the current user, SYSTEM and Administrators. The supervisor must finish writing
+and close the file before invoking the CLI, which reads it only when enrollment
+needs it. Remove the file after the command exits, including on failure.
 An enrolled device can log in again with the same path after the file is
 removed. Invalid command options return exit code 2; an unusable token file
 returns 4; incompatible encrypted-state settings return 3. Correct a token

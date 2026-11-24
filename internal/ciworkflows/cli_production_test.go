@@ -97,6 +97,9 @@ func TestCLIPublicationRequiresExactProductionProof(t *testing.T) {
 	if strings.Contains(string(raw), "t.Skip") || !strings.Contains(string(raw), `const productionProofEndpoint = "https://api.layerv.ai"`) {
 		t.Fatal("production proof must target production and never skip")
 	}
+	if !strings.Contains(string(raw), "productionSupervisedLogin(t, binary, key, owner)") {
+		t.Fatal("packaged production proof must include supervised cold and warm enrollment")
+	}
 }
 
 func TestCLIProductionCredentialsUseNativeWindowsPermissionsAndCleanup(t *testing.T) {

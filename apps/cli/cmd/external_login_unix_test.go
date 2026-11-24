@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	conformance "github.com/layervai/qurl-conformance"
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
@@ -369,9 +370,8 @@ func TestOneShotEnrollmentTokenReplaysItsFirstFailure(t *testing.T) {
 	}
 }
 
-// Exercise the real Connector runtime and sealed store on the warm path. Cold
-// enrollment is a separate network journey; this test seeds a completed device.
-func TestExternalLoginWarmRealRuntimeOpensSealedStateWithoutToken(t *testing.T) {
+func externalLoginSealedEnv(t *testing.T) map[string]string {
+	t.Helper()
 	var fds [2]int
 	if err := unix.Pipe(fds[:]); err != nil {
 		t.Fatal(err)
@@ -395,6 +395,56 @@ func TestExternalLoginWarmRealRuntimeOpensSealedStateWithoutToken(t *testing.T) 
 	for key, value := range env {
 		t.Setenv(key, value)
 	}
+	return env
+}
+
+func TestExternalLoginColdRealRuntimeAgainstProtocolFixtures(t *testing.T) {
+	env := externalLoginSealedEnv(t)
+	srv := apitest.NewServer(t)
+	stateDir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(stateDir, "enrollment-token")
+	if err := os.WriteFile(tokenPath, []byte(conformance.AgentAssignmentBootstrapCredentialFixture), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	var deviceKey string
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "--supervision", "external", "login", "--enrollment-token-file", tokenPath},
+		env:  env, shareStateDir: stateDir,
+		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+			runtime, err := openNativeEnrollmentFixture(ctx, t, &cfg)
+			if err != nil {
+				return nil, err
+			}
+			store, err := runtime.Handoff()
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := store.LoadAgentState(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deviceKey = state.DeviceAPIKey
+			return runtime, nil
+		},
+	})
+	if res.code != 0 {
+		t.Fatalf("cold external login: exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	assertLoginIdentityAndRuleRead(t, srv.Requests(), deviceKey)
+	if _, err := os.Stat(filepath.Join(stateDir, connectoragentstate.SealedAgentStateFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, connectoragentstate.AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plaintext agent state exists: %v", err)
+	}
+}
+
+// This separate warm test starts with a completed device and no token file.
+func TestExternalLoginWarmRealRuntimeOpensSealedStateWithoutToken(t *testing.T) {
+	env := externalLoginSealedEnv(t)
 	srv := apitest.NewServer(t)
 	stateDir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
 	if err != nil {

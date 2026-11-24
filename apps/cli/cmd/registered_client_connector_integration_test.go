@@ -163,7 +163,15 @@ func (s *nativeRecoveryUDPServer) serve() {
 			continue
 		}
 
-		opened, openErr := relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, packet)
+		var opened *relayknock.Reply
+		var openErr error
+		if len(s.agentPub) == 0 {
+			// Cold enrollment generates its own key. Learn it only from an
+			// authenticated packet, then pin every subsequent request to it.
+			opened, s.agentPub, openErr = relayknocktest.OpenUnknownInitiatorMessage(s.serverPriv, packet)
+		} else {
+			opened, openErr = relayknocktest.OpenInitiatorMessage(s.serverPriv, s.agentPub, packet)
+		}
 		if openErr != nil {
 			s.t.Errorf("open synthetic native request: %v", openErr)
 			continue
@@ -193,7 +201,11 @@ func (s *nativeRecoveryUDPServer) serve() {
 			s.t.Errorf("build synthetic cell result: %v", replyErr)
 			continue
 		}
-		if writeErr := s.writeReply(remote, relayknock.TypeListResult, opened.Counter, body, sequence); writeErr != nil {
+		replyType := relayknock.TypeListResult
+		if opened.Type == relayknock.TypeRegister {
+			replyType = relayknock.TypeRegisterAck
+		}
+		if writeErr := s.writeReply(remote, replyType, opened.Counter, body, sequence); writeErr != nil {
 			s.t.Errorf("write synthetic cell result: %v", writeErr)
 		}
 		sequence++

@@ -582,6 +582,22 @@ jobs:
             exit 1
           }
 
+      - name: Verify Windows supervised CLI integration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $eventsPath = Join-Path $env:RUNNER_TEMP 'supervised-login-events.jsonl'
+          $testName = 'TestWindowsNodeSupervisedColdAndWarmLogin'
+          & go test -count=1 -json -run "^${testName}$" ./apps/cli/cmd |
+            Tee-Object -FilePath $eventsPath
+          if ($LASTEXITCODE -ne 0) { throw 'supervised CLI integration failed' }
+          $events = @(Get-Content -LiteralPath $eventsPath | ForEach-Object { $_ | ConvertFrom-Json })
+          $passed = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'pass' })
+          $skipped = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'skip' })
+          if ($passed.Count -ne 1 -or $skipped.Count -ne 0) {
+            throw 'supervised CLI integration must report one PASS and no SKIP'
+          }
+
       - name: Run pinned Windows Task Scheduler integration
         if: runner.os == 'Windows'
         shell: pwsh
