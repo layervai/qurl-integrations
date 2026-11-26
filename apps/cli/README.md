@@ -334,7 +334,12 @@ Supervisors can use `qurl request METHOD /v1/... --supervision external -o json`
 for the registered device's existing resource operations. It requires the same
 sealed key provider as enrollment and refuses natively supervised namespaces and
 account API-key configuration, so it never enrolls or recovers a device
-implicitly. For POST, PUT and PATCH, pipe an optional JSON body through stdin;
+implicitly. The selected sealed device authorizes this raw request directly:
+there is no preliminary `/v1/me` call, local share-owner lookup, or identity cache.
+The service checks that credential and resource ownership on the requested route;
+login and publish still validate and bind the local share owner. Opening state may
+maintain filesystem locks, but does not enroll, refresh, recover, or change shares.
+For POST, PUT and PATCH, pipe an optional JSON body through stdin;
 when there is no body, redirect stdin from the null device (`/dev/null`, or
 `NUL` on Windows) rather than closing it, because a closed stdin is a read
 error. The CLI sets no timeout, so impose a deadline on the process; it covers

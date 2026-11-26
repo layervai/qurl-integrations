@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -244,16 +248,16 @@ func TestRequestBodylessMutations(t *testing.T) {
 
 // A supervised device that needs recovery gets the supervisor's remedy, not
 // the native account-recover advice.
-func TestRequestExplainsSupervisedRecovery(t *testing.T) {
+func TestRequestMissingStateDoesNotEnrollOrRecover(t *testing.T) {
 	dir := connectorStateTestDir(t)
 	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
 		t.Fatal(err)
 	}
 	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
-		_, err := cfg.RecoveryCredentialProvider(ctx)
-		return nil, err
+		t.Fatal("raw request attempted native runtime enrollment or recovery")
+		return nil, errors.New("unexpected runtime open")
 	}})
-	if res.code != 4 || !strings.Contains(res.stderr.String(), "The supervising app can restore") || strings.Contains(res.stderr.String(), "qurl account recover") {
+	if res.code != 4 || !strings.Contains(res.stderr.String(), "no enrolled device") || strings.Contains(res.stderr.String(), "qurl account recover") {
 		t.Fatalf("exit %d: %s", res.code, res.stderr.String())
 	}
 }
@@ -278,6 +282,7 @@ func TestRequestRejectsConnectorScopedDevice(t *testing.T) {
 	}
 	state := bootstrapRegisteredState(t)
 	state.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindConnectorBootstrap)
+	saveDeviceState(t, dir, state)
 	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/resources", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 		return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}, nil
 	}})
@@ -297,9 +302,10 @@ func TestRequestEnrolledExternalNamespaceReturnsEnvelope(t *testing.T) {
 	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+	saveDeviceState(t, dir, bootstrapRegisteredState(t))
 	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
-		return runtime, nil
+		t.Fatal("raw request opened native runtime")
+		return nil, errors.New("unexpected runtime open")
 	}})
 	var envelope struct {
 		Status int `json:"status"`
@@ -307,8 +313,8 @@ func TestRequestEnrolledExternalNamespaceReturnsEnvelope(t *testing.T) {
 	if res.code != 0 || json.Unmarshal(res.stdout.Bytes(), &envelope) != nil || envelope.Status != http.StatusOK {
 		t.Fatalf("exit %d: %s %s", res.code, res.stdout.String(), res.stderr.String())
 	}
-	if !runtime.closed {
-		t.Fatal("request left the native runtime open")
+	if got := len(srv.Requests()); got != 1 {
+		t.Fatalf("supervisor target request count = %d, want 1", got)
 	}
 }
 
@@ -333,4 +339,207 @@ func TestReadRequestBodyYieldsToCancellation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stdin read ignored cancellation")
 	}
+}
+
+func TestRequestEnrolledRateLimitPreservesSingleResponse(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.ScriptRepeat(http.MethodGet, "/v1/me", 3, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "1")
+		apitest.WriteProblem(t, w, http.StatusTooManyRequests, "rate_limit_exceeded", "Too many requests", "bounded fixture")
+	})
+	dir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	saveDeviceState(t, dir, bootstrapRegisteredState(t))
+	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		t.Fatal("raw request opened native runtime")
+		return nil, errors.New("unexpected runtime open")
+	}})
+	var envelope struct {
+		Status  int               `json:"status"`
+		Headers map[string]string `json:"headers"`
+	}
+	if res.code != 0 || json.Unmarshal(res.stdout.Bytes(), &envelope) != nil || envelope.Status != 429 || envelope.Headers["retry-after"] != "1" || len(srv.Requests()) != 1 {
+		t.Fatalf("request contract: exit=%d status=%d calls=%d, want exit0 status429 one call", res.code, envelope.Status, len(srv.Requests()))
+	}
+}
+
+func TestRequestExistingDevicePassesServerAuthorityWithoutLocalWrites(t *testing.T) {
+	for _, status := range []int{200, 401, 403, 429} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			target := "/v1/resources/r_foreign/sharing"
+			srv.Script(http.MethodPut, target, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", "7")
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"result":"fixture"}`))
+			})
+			dir := connectorStateTestDir(t)
+			if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+				t.Fatal(err)
+			}
+			saveDeviceState(t, dir, bootstrapRegisteredState(t))
+			registry, err := connectorstate.OpenLocalShareRegistry(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := registry.BindOwner(context.Background(), "different-local-share-owner"); err != nil {
+				t.Fatal(err)
+			}
+			paths := []string{connectorstate.AgentStateFile, connectorstate.LocalSharesFile}
+			before := make(map[string]string)
+			for _, name := range paths {
+				b, err := readRequestFixture(t, dir, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before[name] = string(b)
+			}
+			res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "PUT", target, "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, stdin: strings.NewReader(`{"desired_state":"off"}`), openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+				t.Fatal("request opened native lifecycle")
+				return nil, errors.New("unexpected")
+			}})
+			var envelope struct {
+				Status  int               `json:"status"`
+				Headers map[string]string `json:"headers"`
+			}
+			if res.code != 0 || json.Unmarshal(res.stdout.Bytes(), &envelope) != nil || envelope.Status != status || len(srv.Requests()) != 1 || srv.Requests()[0].Path != target {
+				t.Fatalf("exit=%d status=%d calls=%d", res.code, envelope.Status, len(srv.Requests()))
+			}
+			if status == 429 && envelope.Headers["retry-after"] != "7" {
+				t.Fatal("lost Retry-After")
+			}
+			for _, name := range paths {
+				after, err := readRequestFixture(t, dir, name)
+				if err != nil || string(after) != before[name] {
+					t.Fatal("raw request changed local state")
+				}
+			}
+		})
+	}
+}
+
+func TestRequestRejectsInvalidPersistedDevice(t *testing.T) {
+	for _, mode := range []string{"scope", "incomplete", "wrong-agent", "corrupt"} {
+		t.Run(mode, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			dir := connectorStateTestDir(t)
+			if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+				t.Fatal(err)
+			}
+			state := bootstrapRegisteredState(t)
+			if mode == "scope" {
+				state.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindConnectorBootstrap)
+			}
+			if mode == "incomplete" {
+				state.RegisteredAt = nil
+			}
+			saveDeviceState(t, dir, state)
+			if mode == "wrong-agent" {
+				t.Setenv(connectorstate.EnvAgentID, "another-agent")
+			}
+			if mode == "corrupt" {
+				if err := os.WriteFile(filepath.Join(dir, connectorstate.AgentStateFile), []byte("invalid-json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/resources", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+				t.Fatal("invalid raw request opened native lifecycle")
+				return nil, errors.New("unexpected")
+			}})
+			if res.code == 0 || len(srv.Requests()) != 0 {
+				t.Fatalf("invalid device mode=%s exit=%d calls=%d", mode, res.code, len(srv.Requests()))
+			}
+		})
+	}
+}
+
+func TestRequestAbsentEnvelopeDoesNotCreateState(t *testing.T) {
+	for _, marked := range []bool{false, true} {
+		t.Run(strconv.FormatBool(marked), func(t *testing.T) {
+			parent := t.TempDir()
+			dir := filepath.Join(parent, "absent-device")
+			if marked {
+				if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, _ := os.ReadDir(dir)
+			res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+				t.Fatal("missing device opened lifecycle")
+				return nil, errors.New("unexpected")
+			}})
+			after, err := os.ReadDir(dir)
+			if res.code == 0 || len(after) != len(before) {
+				t.Fatal("missing envelope was accepted or created state")
+			}
+			if !marked && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("request created absent namespace")
+			}
+		})
+	}
+}
+
+func TestRequestPersistedRecoveryNeedsExplicitSupervisorAction(t *testing.T) {
+	for _, mode := range []string{"missing-credential", "retired-state", "refresh-required"} {
+		t.Run(mode, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			dir := connectorStateTestDir(t)
+			if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+				t.Fatal(err)
+			}
+			state := bootstrapRegisteredState(t)
+			switch mode {
+			case "missing-credential":
+				state.DeviceAPIKey = ""
+			case "retired-state":
+				state.Assignment = nil
+				state.DeviceAPIKeyID = ""
+			case "refresh-required":
+				state.SchemaVersion = 8
+				state.CredentialRecoveryRefreshRequired = true
+			}
+			saveDeviceState(t, dir, state)
+			before, err := readRequestFixture(t, dir, connectorstate.AgentStateFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+				t.Fatal("recovery state opened native lifecycle")
+				return nil, errors.New("unexpected")
+			}})
+			expected := exitcode.Auth
+			if mode == "refresh-required" {
+				expected = exitcode.Unavailable
+			}
+			if res.code != expected || len(srv.Requests()) != 0 {
+				t.Fatalf("mode=%s exit=%d want=%d calls=%d", mode, res.code, expected, len(srv.Requests()))
+			}
+			if mode != "refresh-required" && !strings.Contains(res.stderr.String(), "keep this state directory intact") {
+				t.Fatal("recovery lost supervisor remedy")
+			}
+			if mode == "refresh-required" && strings.Contains(res.stderr.String(), "enroll a new") {
+				t.Fatal("promoted credential incorrectly suggested reenrollment")
+			}
+			after, err := readRequestFixture(t, dir, connectorstate.AgentStateFile)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("recovery check changed state")
+			}
+		})
+	}
+}
+
+func readRequestFixture(t *testing.T, dir, name string) ([]byte, error) {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := root.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	return root.ReadFile(name)
 }

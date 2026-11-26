@@ -563,3 +563,35 @@ func TestExternalLoginAcceptsBothOwnerScopedKinds(t *testing.T) {
 		})
 	}
 }
+
+// Exercise the same retained sealed state and local wrapping key as Desktop.
+func TestRequestRealSealedDeviceHasOneHTTPCall(t *testing.T) {
+	env := externalLoginSealedEnv(t)
+	srv := apitest.NewServer(t)
+	dir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	saveDeviceState(t, dir, bootstrapRegisteredState(t))
+	before, err := readRequestFixture(t, dir, connectoragentstate.SealedAgentStateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{nativeClient: true, env: env, shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		t.Fatal("raw request entered native lifecycle")
+		return nil, errors.New("unexpected")
+	}})
+	if res.code != 0 || len(srv.Requests()) != 1 {
+		t.Fatalf("exit=%d calls=%d", res.code, len(srv.Requests()))
+	}
+	after, err := readRequestFixture(t, dir, connectoragentstate.SealedAgentStateFile)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("raw request changed sealed credential")
+	}
+	if _, err := os.Stat(filepath.Join(dir, connectorstate.AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("raw request created plaintext credential")
+	}
+}
