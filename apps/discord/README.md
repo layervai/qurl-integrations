@@ -1,8 +1,45 @@
-# qURL Discord Bot
+# qURL for Discord
 
-Share files and locations in Discord as **one-time, expiring qURL™ links** —
-delivered privately to each recipient's DMs, never posted in the channel, and
-revocable at any time.
+**Send a file to the people you pick, each with a private link that works once.**
+qURL™ for Discord shares a file as one-time links. Each recipient you pick
+gets their own link by direct message, never in the channel. A link opens
+once, expires (after 24 hours by default), and you can revoke every link from
+a send with one command. Recipients just click.
+
+## What you can do in two minutes
+
+| You want to… | How |
+| --- | --- |
+| Send a file to two people | `/qurl send attachment:<file> recipients:@alice @bob` |
+| Add a note to each message | Add `personal-message:` to `/qurl send` |
+| Choose how long links stay valid | Add `expires-in:` to `/qurl send` |
+| Revoke every link from a send | `/qurl revoke` |
+| Check this server's connection (admin) | `/qurl status` |
+
+Add the bot with the **Add to Discord** link on layerv.ai and sign in to qURL
+when asked. Then send your first file:
+
+```
+/qurl send attachment:<file> recipients:@alice @bob
+```
+
+### For AI agents and tools
+
+- Slash command: `/qurl` with `send`, `revoke`, and `help`; admins also have
+  `setup` and `status`; `map` shares a Google Maps location where enabled
+- Install: **Add to Discord** chains the bot install into qURL sign-in; a server
+  admin can run `/qurl setup` to complete or replace the connection
+- Each server connects its own qURL account; its key is encrypted at rest
+- Core flow: `/qurl send` → each recipient gets a one-time link by DM →
+  `/qurl revoke` kills every link from that send
+- Recipients must allow direct messages from server members
+- On the multi-tenant public bot, commands can take up to an hour to appear
+  the first time the bot joins a server
+- Running it yourself: [Configuration](#configuration) ·
+  [Development](#development)
+- Other ways to share: [qURL CLI](../cli/README.md) ·
+  [Slack](../slack/README.md) · [Gmail extension](../chrome-extension/README.md) ·
+  [MCP server](https://github.com/layervai/qurl-mcp)
 
 ## Features
 
