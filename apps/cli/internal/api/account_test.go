@@ -35,7 +35,7 @@ func TestAccountOwnerSelectionAndLinkProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	if account, err := client.LinkAccount(context.Background(), "verified-account-token", "device:owner"); err != nil || account != "auth0|account" {
-		t.Fatal(err)
+		t.Fatalf("LinkAccount = %q, %v", account, err)
 	}
 	if _, err := client.LinkAccount(context.Background(), "verified-account-token", "device:other"); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
 		t.Fatalf("mismatched owner = %v", err)

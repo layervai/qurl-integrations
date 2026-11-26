@@ -163,7 +163,11 @@ func (p *Printer) loginText(id *qurlapi.Identity) error {
 func (p *Printer) Account(ownerID, accountID, status, message string) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(map[string]string{"owner_id": ownerID, "account_id": accountID, "status": status})
+		result := map[string]string{"owner_id": ownerID, "status": status}
+		if accountID != "" {
+			result["account_id"] = accountID
+		}
+		return p.writeJSON(result)
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, ownerID)
 		return err

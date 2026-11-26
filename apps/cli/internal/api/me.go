@@ -16,8 +16,10 @@ import (
 // the identity endpoint answers from authentication state alone, so it is
 // cheap enough for login validation and whoami to call freely.
 type Identity struct {
-	// OwnerID identifies the account the credential belongs to.
-	OwnerID   string
+	// OwnerID identifies the resource owner, including device namespaces.
+	OwnerID string
+	// AccountID is the linked browser account, when echoed by the service.
+	// TODO(upstream-contract): qurl-service exposes this optional /v1/me field.
 	AccountID string
 	// AuthType is how the request authenticated ("api_key" for CLI keys).
 	AuthType string

@@ -19,8 +19,8 @@ import (
 )
 
 // TODO(upstream-contract): Auth0 requires this exact registered callback URI.
-const accountCallbackAddress = "127.0.0.1:8765"
-const accountCallback = "http://" + accountCallbackAddress + "/callback"
+const AccountCallbackAddress = "127.0.0.1:8765"
+const accountCallback = "http://" + AccountCallbackAddress + "/callback"
 const accountStateParam = "state"
 
 const accountSignInPageHTML = `<!doctype html>
@@ -90,7 +90,7 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 	verifier := base64.RawURLEncoding.EncodeToString(nonce[:32])
 	state := base64.RawURLEncoding.EncodeToString(nonce[32:])
 	challenge := sha256.Sum256([]byte(verifier))
-	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp4", accountCallbackAddress)
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp4", AccountCallbackAddress)
 	if err != nil {
 		return "", ErrAccountPort
 	}
@@ -107,7 +107,7 @@ func SignInAccount(ctx context.Context, cfg *Config, openBrowser func(context.Co
 		_ = server.Close()
 	}()
 	go func() { _ = server.Serve(listener) }()
-	if err := openBrowser(ctx, "http://"+accountCallbackAddress+"/?"+url.Values{accountStateParam: {state}}.Encode()); err != nil {
+	if err := openBrowser(ctx, "http://"+AccountCallbackAddress+"/?"+url.Values{accountStateParam: {state}}.Encode()); err != nil {
 		return "", fmt.Errorf(msgAccountBrowserFailed, err)
 	}
 	var code string
@@ -166,7 +166,7 @@ func accountBrowserHandler(state string, authorizeURL *url.URL, codes chan<- str
 			http.NotFound(w, r)
 			return
 		}
-		if r.Method != http.MethodGet || r.Host != accountCallbackAddress || subtle.ConstantTimeCompare([]byte(r.URL.Query().Get(accountStateParam)), []byte(state)) != 1 {
+		if r.Method != http.MethodGet || r.Host != AccountCallbackAddress || subtle.ConstantTimeCompare([]byte(r.URL.Query().Get(accountStateParam)), []byte(state)) != 1 {
 			http.Error(w, msgAccountCallbackInvalid, http.StatusBadRequest)
 			return
 		}
@@ -178,7 +178,7 @@ func accountBrowserHandler(state string, authorizeURL *url.URL, codes chan<- str
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		if r.Method != http.MethodGet || r.Host != accountCallbackAddress || subtle.ConstantTimeCompare([]byte(r.URL.Query().Get(accountStateParam)), []byte(state)) != 1 {
+		if r.Method != http.MethodGet || r.Host != AccountCallbackAddress || subtle.ConstantTimeCompare([]byte(r.URL.Query().Get(accountStateParam)), []byte(state)) != 1 {
 			http.Error(w, msgAccountCallbackInvalid, http.StatusBadRequest)
 			return
 		}

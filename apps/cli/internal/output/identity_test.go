@@ -270,3 +270,20 @@ func TestWhoAmILinkedAccount(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountOmitsAnUnavailableAccountID(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).Account("device:owner", "", "recovered", "Recovered"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "account_id") {
+		t.Fatal("unavailable account ID must be omitted")
+	}
+	out.Reset()
+	if err := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false).Account("device:owner", "auth0|account", "linked", "Linked"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"account_id": "auth0|account"`) {
+		t.Fatalf("account ID missing: %s", out.String())
+	}
+}

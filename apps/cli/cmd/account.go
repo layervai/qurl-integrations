@@ -62,7 +62,7 @@ func accountCmd(opts *globalOpts) *cobra.Command {
 			return opts.printer().Account(id.OwnerID, accountID, "linked", msgAccountLinked)
 		},
 	})
-	command.PersistentFlags().BoolVar(&headless, "headless", false, "print the sign-in URL; forward local port 8765 to this server with SSH")
+	command.PersistentFlags().BoolVar(&headless, "headless", false, fmt.Sprintf("print the sign-in URL; forward %s to this server with SSH", qurlapi.AccountCallbackAddress))
 	command.AddCommand(accountRecoverCmd(opts, &headless))
 	return command
 }
@@ -151,7 +151,7 @@ func signInAccount(ctx context.Context, opts *globalOpts, headless bool) (string
 	open := opts.openBrowser
 	if headless {
 		open = func(_ context.Context, link string) error {
-			_, err := fmt.Fprintf(opts.streams.Err, "Forward port 8765 with SSH, then open this URL on your computer:\n%s\n", link)
+			_, err := fmt.Fprintf(opts.streams.Err, "Forward %s to this server with SSH, then open this URL on your computer:\n%s\n", qurlapi.AccountCallbackAddress, link)
 			return err
 		}
 	}
