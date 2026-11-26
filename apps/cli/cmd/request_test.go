@@ -246,8 +246,7 @@ func TestRequestBodylessMutations(t *testing.T) {
 	}
 }
 
-// A supervised device that needs recovery gets the supervisor's remedy, not
-// the native account-recover advice.
+// An absent supervised device fails without starting enrollment or recovery.
 func TestRequestMissingStateDoesNotEnrollOrRecover(t *testing.T) {
 	dir := connectorStateTestDir(t)
 	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
@@ -272,8 +271,7 @@ func TestRequestRequiresSealedKeyProvider(t *testing.T) {
 	}
 }
 
-// A correctly enrolled external namespace returns an envelope through the
-// production registered-client path and closes its runtime.
+// Connector-scoped devices cannot use the raw owner-scoped resource surface.
 func TestRequestRejectsConnectorScopedDevice(t *testing.T) {
 	srv := apitest.NewServer(t)
 	dir := connectorStateTestDir(t)
@@ -284,7 +282,8 @@ func TestRequestRejectsConnectorScopedDevice(t *testing.T) {
 	state.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindConnectorBootstrap)
 	saveDeviceState(t, dir, state)
 	res := runCLI(t, &runOpts{nativeClient: true, env: externalLoginEnv(), shareStateDir: dir, args: []string{"request", "GET", "/v1/resources", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
-		return &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}, nil
+		t.Fatal("scoped raw request opened native lifecycle")
+		return nil, errors.New("unexpected runtime open")
 	}})
 	if res.code != exitcode.Auth || res.stdout.Len() != 0 {
 		t.Fatalf("exit %d: %s %s", res.code, res.stdout.String(), res.stderr.String())

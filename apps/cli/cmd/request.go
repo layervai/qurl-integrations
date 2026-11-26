@@ -219,6 +219,5 @@ func validateRequestDeviceIdentity(state *qurl.AgentState) error {
 	if state != nil && state.RegisteredAt != nil && strings.TrimSpace(state.DeviceAPIKey) == "" {
 		return auth.ErrExternalAnonymousRecovery
 	}
-
 	return nil
 }
