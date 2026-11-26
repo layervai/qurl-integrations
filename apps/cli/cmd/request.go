@@ -203,7 +203,9 @@ func openRequestClient(ctx context.Context, opts *globalOpts) (_ qurlapi.Client,
 		return nil, nil, auth.ErrExternalDeviceMissing
 	}
 	if err != nil {
-		return nil, nil, err
+		// Match the SDK's registered-runtime load classification while retaining
+		// the underlying credential/continuity sentinel for specific remedies.
+		return nil, nil, fmt.Errorf("%w: load agent state: %w", qurl.ErrInvalidRegisterConfig, err)
 	}
 	if err := validateRequestDeviceIdentity(state); err != nil {
 		return nil, nil, err

@@ -374,17 +374,22 @@ func TestOneShotEnrollmentTokenReplaysItsFirstFailure(t *testing.T) {
 
 func externalLoginSealedEnv(t *testing.T) map[string]string {
 	t.Helper()
+	return externalLoginSealedEnvWithKey(t, 0x7a, 512)
+}
+
+func externalLoginSealedEnvWithKey(t *testing.T, key byte, minimumFD int) map[string]string {
+	t.Helper()
 	var fds [2]int
 	if err := unix.Pipe(fds[:]); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := unix.Write(fds[1], bytes.Repeat([]byte{0x7a}, 32)); err != nil {
+	if _, err := unix.Write(fds[1], bytes.Repeat([]byte{key}, 32)); err != nil {
 		t.Fatal(err)
 	}
 	if err := unix.Close(fds[1]); err != nil {
 		t.Fatal(err)
 	}
-	fd, err := unix.FcntlInt(uintptr(fds[0]), unix.F_DUPFD_CLOEXEC, 512)
+	fd, err := unix.FcntlInt(uintptr(fds[0]), unix.F_DUPFD_CLOEXEC, minimumFD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,5 +639,31 @@ func TestRequestCompletedResponseSurvivesCloseContinuityFailure(t *testing.T) {
 	}
 	if !strings.Contains(res.stderr.String(), "local native-state cleanup reported a problem") || strings.Contains(res.stderr.String(), dir) {
 		t.Fatal("missing fixed cleanup warning or leaked namespace")
+	}
+}
+
+func TestRequestWrongSealedKeyKeepsConfigurationExit(t *testing.T) {
+	externalLoginSealedEnv(t)
+	srv := apitest.NewServer(t)
+	dir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	saveDeviceState(t, dir, bootstrapRegisteredState(t))
+	before, err := readRequestFixture(t, dir, connectoragentstate.SealedAgentStateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := externalLoginSealedEnvWithKey(t, 0x7b, 768)
+	res := runCLI(t, &runOpts{nativeClient: true, env: env, shareStateDir: dir, args: []string{"request", "GET", "/v1/resources", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}})
+	if res.code != 3 || len(srv.Requests()) != 0 || res.stdout.Len() != 0 {
+		t.Fatalf("wrong key exit=%d calls=%d", res.code, len(srv.Requests()))
+	}
+	after, err := readRequestFixture(t, dir, connectoragentstate.SealedAgentStateFile)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("wrong key changed sealed state")
 	}
 }
