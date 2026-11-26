@@ -47,7 +47,7 @@ func TestAccountBrowserPKCEAndState(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if u.Host != accountCallbackAddress || u.Path != "/" || u.Query().Get("state") == "" {
+		if u.Host != AccountCallbackAddress || u.Path != "/" || u.Query().Get("state") == "" {
 			t.Fatalf("browser did not open the nonce-bound local method chooser: %s", link)
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, link, http.NoBody)
@@ -196,11 +196,11 @@ func TestAccountMethodChooserRejectsForeignRequests(t *testing.T) {
 	authorizeURL := url.URL{Scheme: "https", Host: "auth.example.test", Path: "/authorize", RawQuery: url.Values{"state": {"expected"}, "redirect_uri": {accountCallback}}.Encode()}
 	handler := accountBrowserHandler("expected", &authorizeURL, codes)
 	for _, tc := range []struct{ method, host, state string }{
-		{http.MethodPost, accountCallbackAddress, "expected"},
+		{http.MethodPost, AccountCallbackAddress, "expected"},
 		{http.MethodGet, "attacker.example", "expected"},
-		{http.MethodGet, accountCallbackAddress, "attacker-state"},
+		{http.MethodGet, AccountCallbackAddress, "attacker-state"},
 	} {
-		request := httptest.NewRequest(tc.method, "http://"+accountCallbackAddress+"/?state="+tc.state, http.NoBody)
+		request := httptest.NewRequest(tc.method, "http://"+AccountCallbackAddress+"/?state="+tc.state, http.NoBody)
 		request.Host = tc.host
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
@@ -208,7 +208,7 @@ func TestAccountMethodChooserRejectsForeignRequests(t *testing.T) {
 			t.Fatalf("foreign request exposed sign-in links: %d", response.Code)
 		}
 	}
-	request := httptest.NewRequest(http.MethodGet, "http://"+accountCallbackAddress+"/?state=expected&redirect_uri=https://attacker.example&connection=attacker", http.NoBody)
+	request := httptest.NewRequest(http.MethodGet, "http://"+AccountCallbackAddress+"/?state=expected&redirect_uri=https://attacker.example&connection=attacker", http.NoBody)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("X-Frame-Options") != "DENY" || response.Header().Get("Referrer-Policy") != "no-referrer" || !strings.Contains(response.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") || !strings.Contains(response.Header().Get("Content-Security-Policy"), "form-action 'none'") {

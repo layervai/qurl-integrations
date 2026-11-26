@@ -94,7 +94,7 @@ func TestSelectAccountOwner(t *testing.T) {
 // PKCE exchange in internal/api) and the native enrollment runtime tests.
 func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 	for _, command := range []string{"setup", "recover"} {
-		for _, format := range []string{"text", "json", "quiet", "denied", "occupied"} {
+		for _, format := range []string{"text", "json", "quiet", "denied", "occupied", "headless"} {
 			if command == "setup" && format == "occupied" {
 				continue
 			}
@@ -140,13 +140,19 @@ func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 					stateDir := connectorStateTestDir(t)
 					g.resolveShareStateDir = func(string) (string, error) { return stateDir, nil }
 					g.openAPIClient = func(context.Context) (qurlapi.Client, error) { return device, nil }
-					g.signInAccount = func(_ context.Context, cfg *qurlapi.Config, _ func(context.Context, string) error) (string, error) {
+					g.openBrowser = func(context.Context, string) error { t.Fatal("server browser opened"); return nil }
+					g.signInAccount = func(ctx context.Context, cfg *qurlapi.Config, open func(context.Context, string) error) (string, error) {
 						signedIn = true
 						if cfg.APIKey != "" || cfg.OwnerID != "" || cfg.BaseURL != server.URL {
 							t.Error("browser sign-in carried device authority")
 						}
 						if format == "denied" {
 							return "", errors.New("sign-in denied")
+						}
+						if format == "headless" {
+							if err := open(ctx, "http://127.0.0.1:8765/?state=command-test"); err != nil {
+								return "", err
+							}
 						}
 						return "account-token", nil
 					}
@@ -158,7 +164,7 @@ func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 							return nil, nil, &deviceAccountConflictError{stateDir: stateDir, currentOwner: "device:existing", requestedOwner: owner}
 						}
 						enrolled = true
-						return device, &qurlapi.Identity{OwnerID: owner, AuthType: "api_key"}, nil
+						return device, &qurlapi.Identity{OwnerID: owner, AuthType: "api_key", AccountID: "auth0|account"}, nil
 					}
 				})
 				args := []string{"account", command, "--endpoint", server.URL}
@@ -170,6 +176,9 @@ func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 				}
 				if format == "quiet" {
 					args = append(args, "--quiet")
+				}
+				if format == "headless" {
+					args = append(args, "--headless")
 				}
 				root.SetArgs(args)
 				code := run(context.Background(), root, opts)
@@ -201,6 +210,9 @@ func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 					if command == "recover" {
 						want = "recovered"
 					}
+					if result["account_id"] != "auth0|account" {
+						t.Fatalf("account identity missing: %v", result)
+					}
 					if result["status"] != want {
 						t.Fatalf("status=%q", result["status"])
 					}
@@ -208,7 +220,14 @@ func TestAccountCommandsRespectOutputAndAccountBoundaries(t *testing.T) {
 					if stdout.String() != owner+"\n" || stderr.Len() != 0 {
 						t.Fatalf("quiet stdout=%q stderr=%q", stdout.String(), stderr.String())
 					}
+				case "headless":
+					if !strings.Contains(stderr.String(), "http://127.0.0.1:8765/?state=command-test") || !strings.Contains(stderr.String(), "-L 8765:127.0.0.1:8765") || strings.Contains(stderr.String(), "account-token") {
+						t.Fatalf("bad headless instructions: %s", stderr.String())
+					}
 				case "text":
+					if !strings.Contains(stderr.String(), "Linked account: auth0|account") {
+						t.Fatalf("linked account missing: %s", stderr.String())
+					}
 					if stdout.Len() != 0 || !strings.Contains(stderr.String(), "Existing links are unchanged.") && !strings.Contains(stderr.String(), "Your existing links are unchanged.") {
 						t.Fatalf("text stdout=%q stderr=%q", stdout.String(), stderr.String())
 					}
@@ -226,5 +245,20 @@ func TestAccountRejectsUnknownSubcommand(t *testing.T) {
 	cmd.SetArgs([]string{"setupp"})
 	if err := cmd.Execute(); exitcode.FromError(err) != exitcode.Usage {
 		t.Fatalf("unknown subcommand: %v", err)
+	}
+}
+
+func TestHeadlessAccountSignInPrintsURLWithoutOpeningBrowser(t *testing.T) {
+	var stderr bytes.Buffer
+	opts := &globalOpts{streams: &output.Streams{Err: &stderr}, openBrowser: func(context.Context, string) error { t.Fatal("opened browser on server"); return nil }}
+	opts.signInAccount = func(ctx context.Context, _ *qurlapi.Config, open func(context.Context, string) error) (string, error) {
+		return "verified-token", open(ctx, "http://127.0.0.1:8765/?state=test")
+	}
+	token, err := signInAccount(context.Background(), opts, true)
+	if err != nil || token != "verified-token" || !strings.Contains(stderr.String(), "127.0.0.1:8765/?state=test") {
+		t.Fatalf("headless sign-in failed: %v", err)
+	}
+	if strings.Contains(stderr.String(), token) {
+		t.Fatal("account token printed")
 	}
 }
