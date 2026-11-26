@@ -69,7 +69,16 @@ to your resources, use "qurl requests".`,
 			if err != nil {
 				return err
 			}
-			defer func() { retErr = errors.Join(retErr, closeClient()) }()
+			defer func() {
+				closeErr := closeClient()
+				if retErr != nil {
+					retErr = errors.Join(retErr, closeErr)
+				} else if closeErr != nil {
+					// As in Main, teardown cannot undo a completed remote operation.
+					// Keep the response truthful without exposing local state paths.
+					opts.printer().Warnf("local native-state cleanup reported a problem")
+				}
+			}()
 			reply, err := qurlapi.Request(cmd.Context(), client, args[0], args[1], body, idempotencyKey)
 			if err != nil {
 				return err

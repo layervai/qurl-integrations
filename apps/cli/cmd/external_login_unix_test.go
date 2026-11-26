@@ -5,7 +5,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -593,5 +595,44 @@ func TestRequestRealSealedDeviceHasOneHTTPCall(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, connectorstate.AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("raw request created plaintext credential")
+	}
+}
+
+// A completed remote mutation remains a completed operation even when local
+// namespace continuity fails during teardown. Never turn it into a retry hint.
+func TestRequestCompletedResponseSurvivesCloseContinuityFailure(t *testing.T) {
+	env := externalLoginSealedEnv(t)
+	srv := apitest.NewServer(t)
+	dir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	saveDeviceState(t, dir, bootstrapRegisteredState(t))
+	srv.Script(http.MethodDelete, "/v1/resources/fixture", func(w http.ResponseWriter, _ *http.Request) {
+		if err := os.Rename(dir, dir+"-retained"); err != nil {
+			t.Error(err)
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"deleted":true}`))
+	})
+	res := runCLI(t, &runOpts{nativeClient: true, env: env, shareStateDir: dir, args: []string{"request", "DELETE", "/v1/resources/fixture", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}})
+	var envelope struct {
+		Status int
+		Body   struct{ Deleted bool }
+	}
+	if err := json.Unmarshal(res.stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("missing completed response: exit=%d", res.code)
+	}
+	if res.code != 0 || envelope.Status != 200 || !envelope.Body.Deleted || len(srv.Requests()) != 1 {
+		t.Fatalf("exit=%d status=%d calls=%d", res.code, envelope.Status, len(srv.Requests()))
+	}
+	if !strings.Contains(res.stderr.String(), "local native-state cleanup reported a problem") || strings.Contains(res.stderr.String(), dir) {
+		t.Fatal("missing fixed cleanup warning or leaked namespace")
 	}
 }
