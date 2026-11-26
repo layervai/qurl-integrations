@@ -1,6 +1,7 @@
 package qurlapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -64,14 +65,25 @@ func TestAccountBrowserPKCEAndState(t *testing.T) {
 			return readErr
 		}
 		links := accountTestMethodLinks(t, string(body))
-		if len(links) != 3 {
-			t.Fatalf("method links = %d, want email, Google and password", len(links))
+		if len(links) != 4 {
+			t.Fatalf("method links = %d, want email, Google, Apple and password", len(links))
 		}
-		for _, method := range []string{"email", "google-oauth2", "Username-Password-Authentication"} {
+		for _, method := range []string{"email", "google-oauth2", "apple", "Username-Password-Authentication"} {
 			chosen := links[method]
 			if chosen == nil || chosen.Host != strings.TrimPrefix(server.URL, "https://") || chosen.Query().Get("state") != u.Query().Get("state") || chosen.Query().Get("redirect_uri") != accountCallback || chosen.Query().Get("code_challenge") != links["email"].Query().Get("code_challenge") || chosen.Query().Get("code_challenge_method") != "S256" || chosen.Query().Get("scope") != "openid email qurl:read qurl:write qurl:agent" {
 				t.Fatalf("method %s changed the OAuth transaction", method)
 			}
+		}
+		last := -1
+		for _, label := range []string{"Continue with Email", "Continue with Google", "Continue with Apple"} {
+			at := bytes.Index(body, []byte(label+"</a>"))
+			if at <= last {
+				t.Fatalf("chooser method %q missing or out of order", label)
+			}
+			last = at
+		}
+		if strings.Count(string(body), "<svg") != 3 {
+			t.Fatal("each primary method needs one icon")
 		}
 		authQuery = links["email"].Query()
 		if authQuery.Get("prompt") != "login consent" {
