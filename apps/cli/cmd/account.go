@@ -151,7 +151,7 @@ func signInAccount(ctx context.Context, opts *globalOpts, headless bool) (string
 	open := opts.openBrowser
 	if headless {
 		open = func(_ context.Context, link string) error {
-			_, err := fmt.Fprintf(opts.streams.Err, "Forward %s to this server with SSH, then open this URL on your computer:\n%s\n", qurlapi.AccountCallbackAddress, link)
+			_, err := fmt.Fprintf(opts.streams.Err, msgAccountHeadless, qurlapi.AccountCallbackPort, qurlapi.AccountCallbackAddress, link)
 			return err
 		}
 	}

@@ -230,7 +230,7 @@ Account access is optional:
 qurl account setup
 ```
 
-On an SSH server, run `ssh -L 8765:127.0.0.1:8765 app@your-server` from your
+On an SSH server, run `ssh -o ExitOnForwardFailure=yes -L 8765:127.0.0.1:8765 app@your-server` from your
 computer, then `qurl account setup --headless` in that server session. Open the
 printed URL in your computer's browser. Finish within 15 minutes. This uses the
 same PKCE browser flow and loopback callback; it does not use a device code.
