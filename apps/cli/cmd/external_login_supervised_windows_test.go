@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -22,7 +23,8 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
-// Registration uses real client code with local protocol fixtures; live cold
+// Registration and raw requests use real sealed state and fresh Node pipes.
+// Registration uses local protocol fixtures; live cold
 // enrollment and packaged Desktop qualification remain separate release gates.
 func TestWindowsNodeSupervisedColdAndWarmLogin(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -37,10 +39,10 @@ const child=spawn(process.argv[1],['-test.run=^TestWindowsNodeSupervisedLoginChi
 });
 const watchdog=setTimeout(()=>child.kill(),15000);
 child.stdio[3].on('error',()=>{});
-child.stdio[3].end(Buffer.alloc(32,process.argv[3]==='wrong-key'?0x7b:0x7a));
+child.stdio[3].end(Buffer.alloc(32,process.argv[3].includes('wrong-key')?0x7b:0x7a));
 child.on('error',()=>{clearTimeout(watchdog);process.exit(1)});
 child.on('exit',code=>{clearTimeout(watchdog);process.exit(code??1)});`
-	for _, phase := range []string{"cold", "warm", "wrong-key", "warm"} {
+	for _, phase := range []string{"cold", "warm", "wrong-key", "warm", "request", "request-wrong-key", "request"} {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		command := exec.CommandContext(ctx, node, "-e", script, "--", os.Args[0], stateDir, phase) // #nosec G204 G702 -- Resolved Node runs a fixed fixture and this test executable, without a shell.
 		output, err := command.CombinedOutput()
@@ -76,10 +78,14 @@ func TestWindowsNodeSupervisedLoginChild(t *testing.T) {
 	}
 	srv := apitest.NewServer(t)
 	var deviceKey string
-	res := runCLI(t, &runOpts{
+	requestPhase := strings.HasPrefix(phase, "request")
+	opts := &runOpts{
 		args: []string{"--endpoint", srv.URL, "--supervision", "external", "login", "--enrollment-token-file", tokenPath},
 		env:  externalLoginEnv(), shareStateDir: stateDir,
 		openNativeRuntime: func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+			if requestPhase {
+				t.Fatal("raw request entered native lifecycle")
+			}
 			// Warm login must stay offline; no UDP target is allowed here.
 			route := nativeRecoveryRoute{}
 			cfg.UDPOptions = []qurl.AgentRuntimeUDPOption{qurl.WithAgentRuntimeUDPResolver(route), qurl.WithAgentRuntimeUDPDialer(route)}
@@ -110,26 +116,42 @@ func TestWindowsNodeSupervisedLoginChild(t *testing.T) {
 			deviceKey = state.DeviceAPIKey
 			return runtime, nil
 		},
-	})
+	}
+	if requestPhase {
+		opts.nativeClient = true
+		opts.args = []string{"--endpoint", srv.URL, "--supervision", "external", "request", "GET", "/v1/resources", "-o", "json"}
+	}
+	res := runCLI(t, opts)
 	if strings.Contains(res.stdout.String()+res.stderr.String(), conformance.AgentAssignmentBootstrapCredentialFixture) {
 		t.Fatal("enrollment credential reached command output")
 	}
-	if phase == "wrong-key" {
+	if strings.Contains(phase, "wrong-key") {
 		if res.code != 3 || len(srv.Requests()) != 0 {
 			t.Fatalf("wrong wrapping key was not rejected before network access: exit=%d stderr=%s", res.code, res.stderr.String())
 		}
 	} else {
 		if res.code != 0 {
-			t.Fatalf("real Windows %s login exit=%d stderr=%s", phase, res.code, res.stderr.String())
+			t.Fatalf("real Windows %s command exit=%d stderr=%s", phase, res.code, res.stderr.String())
 		}
-		assertLoginIdentityAndRuleRead(t, srv.Requests(), deviceKey)
+		if requestPhase {
+			requests := srv.Requests()
+			if len(requests) != 1 || requests[0].Method != "GET" || requests[0].Path != "/v1/resources" {
+				t.Fatalf("raw request did not make exactly one target call: calls=%d", len(requests))
+			}
+			var envelope struct{ Status int }
+			if err := json.Unmarshal(res.stdout.Bytes(), &envelope); err != nil || envelope.Status != 200 {
+				t.Fatal("raw request did not return the successful response envelope")
+			}
+		} else {
+			assertLoginIdentityAndRuleRead(t, srv.Requests(), deviceKey)
+		}
 	}
 	sealedAfter, err := os.ReadFile(sealedPath) // #nosec G304 -- Test-owned sealed state path.
 	if err != nil || len(sealedAfter) == 0 {
 		t.Fatalf("sealed identity is missing: %v", err)
 	}
 	if phase != "cold" && !bytes.Equal(sealedBefore, sealedAfter) {
-		t.Fatalf("warm login rewrote sealed identity: %v", err)
+		t.Fatalf("supervised command rewrote sealed identity: %v", err)
 	}
 	if bytes.Contains(sealedAfter, []byte(conformance.AgentAssignmentBootstrapCredentialFixture)) ||
 		(deviceKey != "" && bytes.Contains(sealedAfter, []byte(deviceKey))) {
