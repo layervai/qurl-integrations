@@ -230,6 +230,17 @@ Account access is optional:
 qurl account setup
 ```
 
+On an SSH server, run `ssh -L 8765:127.0.0.1:8765 app@your-server` from your
+computer, then `qurl account setup --headless` in that server session. Open the
+printed URL in your computer's browser. Finish within 15 minutes. This uses the
+same PKCE browser flow and loopback callback; it does not use a device code.
+`account recover --headless` uses the same tunnel. Account tokens stay in memory.
+
+Setup reports the linked `account_id`. `qurl whoami -o json` also reports it when
+the service supports account identity echo. The device `owner_id` stays unchanged.
+Choose the device in the dashboard's Protected Resources owner selector to manage
+its existing resources. Account linking does not move resources or change CRIDs.
+
 Commands that open device state, including `list` and `whoami`, create a device identity on first use.
 `get <CRID>` manages access to your own resource; it is not a recipient link opener.
 

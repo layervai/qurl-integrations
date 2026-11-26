@@ -17,7 +17,8 @@ import (
 // cheap enough for login validation and whoami to call freely.
 type Identity struct {
 	// OwnerID identifies the account the credential belongs to.
-	OwnerID string
+	OwnerID   string
+	AccountID string
 	// AuthType is how the request authenticated ("api_key" for CLI keys).
 	AuthType string
 	// Key identifies the API key itself; nil when the platform omitted the
@@ -39,9 +40,10 @@ type KeyIdentity struct {
 
 // meData mirrors the GET /v1/me response document this CLI consumes.
 type meData struct {
-	OwnerID  string `json:"owner_id"`
-	AuthType string `json:"auth_type"`
-	APIKey   *struct {
+	OwnerID   string `json:"owner_id"`
+	AccountID string `json:"account_id"`
+	AuthType  string `json:"auth_type"`
+	APIKey    *struct {
 		KeyID     string     `json:"key_id"`
 		Kind      string     `json:"kind"`
 		Scopes    []string   `json:"scopes"`
@@ -68,7 +70,7 @@ func (c *client) Me(ctx context.Context) (*Identity, error) {
 	if strings.TrimSpace(env.Data.OwnerID) == "" {
 		return nil, fmt.Errorf("%w: identity response missing owner_id", qurl.ErrInvalidAPIResponse)
 	}
-	id := &Identity{OwnerID: env.Data.OwnerID, AuthType: env.Data.AuthType}
+	id := &Identity{OwnerID: env.Data.OwnerID, AccountID: env.Data.AccountID, AuthType: env.Data.AuthType}
 	if k := env.Data.APIKey; k != nil {
 		id.Key = &KeyIdentity{
 			KeyID:     k.KeyID,

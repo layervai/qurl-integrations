@@ -228,3 +228,18 @@ func TestAccountRejectsUnknownSubcommand(t *testing.T) {
 		t.Fatalf("unknown subcommand: %v", err)
 	}
 }
+
+func TestHeadlessAccountSignInPrintsURLWithoutOpeningBrowser(t *testing.T) {
+	var stderr bytes.Buffer
+	opts := &globalOpts{streams: &output.Streams{Err: &stderr}, openBrowser: func(context.Context, string) error { t.Fatal("opened browser on server"); return nil }}
+	opts.signInAccount = func(ctx context.Context, _ *qurlapi.Config, open func(context.Context, string) error) (string, error) {
+		return "verified-token", open(ctx, "http://127.0.0.1:8765/?state=test")
+	}
+	token, err := signInAccount(context.Background(), opts, true)
+	if err != nil || token != "verified-token" || !strings.Contains(stderr.String(), "127.0.0.1:8765/?state=test") {
+		t.Fatalf("headless sign-in failed: %v", err)
+	}
+	if strings.Contains(stderr.String(), token) {
+		t.Fatal("account token printed")
+	}
+}

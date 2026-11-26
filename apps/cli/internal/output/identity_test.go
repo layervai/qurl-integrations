@@ -256,3 +256,17 @@ func TestWhoAmIReportsKeyStorage(t *testing.T) {
 		t.Fatalf("JSON without local state must omit key_storage:\n%s", out.String())
 	}
 }
+
+func TestWhoAmILinkedAccount(t *testing.T) {
+	for _, format := range []Format{FormatText, FormatJSON} {
+		var out, errBuf bytes.Buffer
+		id := fixtureIdentity()
+		id.AccountID = "google-oauth2|verified-account"
+		if err := newTestPrinter(&out, &errBuf, format, false, false, false).WhoAmI(id, "", KeyStorage{}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), id.AccountID) {
+			t.Fatal("linked account missing")
+		}
+	}
+}
