@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.7.1](https://github.com/layervai/qurl-integrations/compare/v4.7.0...v4.7.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **cli:** confirm linked accounts and support headless setup ([#2113](https://github.com/layervai/qurl-integrations/issues/2113)) ([a1cd90f](https://github.com/layervai/qurl-integrations/commit/a1cd90f4cf1868e42373fceeb9c9440c1b4b5d2a))
+
 ## [4.7.0](https://github.com/layervai/qurl-integrations/compare/v4.6.0...v4.7.0) (2026-11-23)
 
 
