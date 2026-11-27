@@ -108,7 +108,7 @@ describe('webhook-registrar Lambda — input validation', () => {
           {
             webhook_id: 'wh_orphan',
             url: 'https://oldhost.example/webhooks/qurl',
-            description: 'Discord bot view counter (region=us-east-2, env=sandbox-old)',
+            description: 'Discord bot view counter (region=us-east-2, env=sandbox-old) [ORPHAN]',
             events: ['qurl.accessed', 'qurl.expired'],
             failure_count: 1475,
             last_delivery_success: false,
@@ -143,7 +143,7 @@ describe('webhook-registrar Lambda — input validation', () => {
           {
             webhook_id: 'wh_orphan',
             url: 'https://oldhost.example/webhooks/qurl',
-            description: 'Discord bot view counter (region=us-east-2, env=sandbox-old)',
+            description: 'Discord bot view counter (region=us-east-2, env=sandbox-old) [ORPHAN]',
             events: ['qurl.accessed', 'qurl.expired'],
             failure_count: 1475,
             last_delivery_success: false,

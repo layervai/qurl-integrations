@@ -213,6 +213,36 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   defunct URL until manually deleted. Recovery: run the manual
   `DELETE /v1/webhooks/{old_id}` curl from the appendix below for the
   old sub after confirming the new one is healthy.
+- **Automatic cleanup requires explicit retirement (#827)**: before a URL
+  migration, confirm that the old endpoint is retired in every region that
+  shares the API owner and that the new subscription is healthy. To allow
+  automatic cleanup, PATCH only the retired subscription's `description`,
+  preserving its existing text and appending the exact suffix ` [ORPHAN]`.
+  For example, `Discord bot view counter (region=us-east-2, env=sandbox)`
+  becomes `Discord bot view counter (region=us-east-2, env=sandbox) [ORPHAN]`.
+  Use `PATCH /v1/webhooks/{old_id}` with that `description` field; this uses
+  the existing owner-authenticated webhook update API. Never mark a live
+  peer because its delivery attempts fail. The registrar does not add this
+  marker. Unmarked legacy subscriptions remain registered until an operator
+  marks or deletes them. Marked rows must still pass the existing host, path,
+  description-prefix and failed-delivery checks. Deploy the updated library
+  to the central Lambda and all bot replicas before any shared-owner
+  active-active rollout; old registrars still use the unsafe signal-only rule.
+  Keep the sweep disabled until every registrar is confirmed upgraded.
+  Any registrar sharing the API owner can clean a marked row; the marker is
+  not scoped to one region or environment. If the last delivery succeeded,
+  cleanup waits for failed deliveries even after marking. The API limits
+  descriptions to 500 characters; preserve room for the nine-character suffix.
+  A bounded INFO count reports matching rows retained without retirement;
+  inspect the webhook list and this runbook before marking any row.
+- **Rollback to a retired URL**: disable the URL-migration sweep in every
+  registrar sharing the API owner, then wait for in-flight registrar invocations
+  and DELETE requests to finish. The switch does not cancel work already started.
+  Before reusing the old URL, remove every trailing ` [ORPHAN]` marker with an
+  owner-authenticated description PATCH and read it back. Confirm that the
+  restored subscription is healthy before enabling cleanup again. Reusing a
+  marked row emits a WARN; that warning does not remove its marker or stop a
+  different registrar from deleting it. Never use the warning as rollback safety.
 - **API-key blast radius**: the Lambda's `QURL_API_KEY` can list /
   create / PATCH / rotate-secret / DELETE webhook subscriptions in
   addition to minting qURLs. Factor into rotation drills.

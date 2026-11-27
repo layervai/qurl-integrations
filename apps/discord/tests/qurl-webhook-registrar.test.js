@@ -1079,13 +1079,88 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     return {
       webhook_id: 'wh_orphan',
       url: OLD_URL,
-      description: BOT_DESC,
+      description: `${BOT_DESC} [ORPHAN]`,
       events: ['qurl.accessed', 'qurl.expired'],
       failure_count: 1475,
       last_delivery_success: false,
       ...overrides,
     };
   }
+
+  it.each([30, 1475, Number.MAX_SAFE_INTEGER])('requires an explicit retirement marker even after %s failed deliveries', async (failureCount) => {
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [deadOrphan({
+        webhook_id: 'wh_live_peer',
+        url: 'https://discord.eu-central-1.example/webhooks/qurl',
+        description: 'Discord bot view counter (region=eu-central-1, env=sandbox)',
+        failure_count: failureCount,
+      })] } }),
+      'DELETE /v1/webhooks/wh_live_peer': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
+    });
+    await expect(ensureWebhookSubscription(BOT_OPTS)).resolves.toMatchObject({ action: 'created' });
+    expect(deleted).toBe(false);
+  });
+
+  it('logs retained unmarked counts once per count without deleting peers', async () => {
+    _internals._resetUrlMigrationOrphanDeleteSuppressionCache();
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    let reads = 0;
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => {
+          reads += 1;
+          const rows = [deadOrphan({ description: BOT_DESC })];
+          if (reads > 2) rows.push(deadOrphan({ webhook_id: 'wh_typo', description: `${BOT_DESC} [ORPHAN] ` }));
+          rows.push(deadOrphan({ webhook_id: 'wh_other', description: 'Other service [ORPHAN]' }));
+          return { body: { data: rows } };
+        },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      const lines = logSpy.mock.calls.map(([line]) => line)
+        .filter(line => line.includes('retained without retirement markers'));
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain('"unmarked_count":1');
+      expect(lines[1]).toContain('"unmarked_count":2');
+      expect(global.fetch.mock.calls.filter(([, options]) => options.method === 'DELETE')).toHaveLength(0);
+    } finally {
+      logSpy.mockRestore();
+      _internals._resetUrlMigrationOrphanDeleteSuppressionCache();
+    }
+  });
+
+  it('warns when a live same-URL subscription is still marked retired without mutating it', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const secret = 'whsec_1234567890abcdef';
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [deadOrphan({ url: NEW_URL })] } }),
+      });
+      await expect(ensureWebhookSubscription({ ...BOT_OPTS, initialSecret: secret }))
+        .resolves.toMatchObject({ action: 'reused', webhookId: 'wh_orphan', secret });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Active webhook subscription is marked retired'));
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(secret);
+      expect(logSpy.mock.calls.some(([line]) => line.includes('retained without retirement markers'))).toBe(false);
+      expect(global.fetch.mock.calls.every(([, options]) => options.method === 'GET')).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
+  it.each([undefined, null, 42, {}, []])('preserves same-URL reuse with a non-string description: %s', async (description) => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [deadOrphan({ url: NEW_URL, description })] } }),
+    });
+    await expect(ensureWebhookSubscription({ ...BOT_OPTS, initialSecret: 'whsec_1234567890abcdef' }))
+      .resolves.toMatchObject({ action: 'reused', webhookId: 'wh_orphan' });
+    expect(global.fetch.mock.calls.every(([, options]) => options.method === 'GET')).toBe(true);
+  });
 
   it('deletes a cross-host orphan with matching description + dead liveness before creating fresh at the new URL', async () => {
     let orphanDeleted = false;
@@ -1164,7 +1239,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         {
           webhook_id: 'wh_other_region',
           url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl', // different host, same path, same description prefix
-          description: 'Discord bot view counter (region=eu-central-1, env=sandbox)',
+          description: 'Discord bot view counter (region=eu-central-1, env=sandbox) [ORPHAN]',
           events: ['qurl.accessed', 'qurl.expired'],
           failure_count: 0,
           last_delivery_success: true, // healthy
@@ -1187,7 +1262,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     const sub = {
       webhook_id: 'wh_no_deliveries_yet',
       url: 'https://otherhost.example/webhooks/qurl',
-      description: BOT_DESC,
+      description: `${BOT_DESC} [ORPHAN]`,
       events: ['qurl.accessed'],
       failure_count: 0,
     };
@@ -1372,7 +1447,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         {
           webhook_id: 'wh_same_host_diff_port',
           url: 'https://discord.connector.layerv.xyz:8443/webhooks/qurl',
-          description: BOT_DESC,
+          description: `${BOT_DESC} [ORPHAN]`,
           events: ['qurl.accessed'],
           failure_count: 9999,
           last_delivery_success: false,
@@ -1392,7 +1467,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         {
           webhook_id: 'wh_other_path',
           url: 'https://example.test/webhooks/something-else',
-          description: BOT_DESC, // same prefix
+          description: `${BOT_DESC} [ORPHAN]`, // same prefix
           events: ['qurl.accessed'],
           failure_count: 100,
           last_delivery_success: false,
@@ -1426,7 +1501,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       expect(meta).toMatchObject({
         old_url: OLD_URL,
         webhook_id: 'wh_orphan_log',
-        description: BOT_DESC,
+        description: `${BOT_DESC} [ORPHAN]`,
         failure_count: 99,
         last_delivery_success: false,
       });
@@ -1498,7 +1573,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         {
           webhook_id: 'wh_transient',
           url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
-          description: BOT_DESC,
+          description: `${BOT_DESC} [ORPHAN]`,
           events: ['qurl.accessed', 'qurl.expired'],
           failure_count: 1, // below MIN_FAILURES (30)
           last_delivery_success: false,
@@ -1518,7 +1593,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         {
           webhook_id: 'wh_negative',
           url: OLD_URL,
-          description: BOT_DESC,
+          description: `${BOT_DESC} [ORPHAN]`,
           events: ['qurl.accessed', 'qurl.expired'],
           last_delivery_success: false,
           failure_count: -1,
@@ -1538,7 +1613,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         {
           webhook_id: 'wh_no_count',
           url: OLD_URL,
-          description: BOT_DESC,
+          description: `${BOT_DESC} [ORPHAN]`,
           events: ['qurl.accessed', 'qurl.expired'],
           last_delivery_success: false,
         },
@@ -1560,7 +1635,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           {
             webhook_id: 'wh_healthy',
             url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
-            description: BOT_DESC,
+            description: `${BOT_DESC} [ORPHAN]`,
             events: ['qurl.accessed'],
             failure_count: 0,
             last_delivery_success: true,
@@ -1568,7 +1643,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           {
             webhook_id: 'wh_transient',
             url: 'https://discord.eu-west-1.layerv.xyz/webhooks/qurl',
-            description: BOT_DESC,
+            description: `${BOT_DESC} [ORPHAN]`,
             events: ['qurl.accessed'],
             failure_count: 1,
             last_delivery_success: false,
@@ -1602,7 +1677,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           {
             webhook_id: 'wh_healthy',
             url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
-            description: BOT_DESC,
+            description: `${BOT_DESC} [ORPHAN]`,
             events: ['qurl.accessed'],
             failure_count: 0,
             last_delivery_success: true,
@@ -1634,7 +1709,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           const subs = [{
             webhook_id: 'wh_healthy_a',
             url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
-            description: BOT_DESC,
+            description: `${BOT_DESC} [ORPHAN]`,
             events: ['qurl.accessed'],
             failure_count: 0,
             last_delivery_success: true,
@@ -1643,7 +1718,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
             subs.push({
               webhook_id: 'wh_healthy_b',
               url: 'https://discord.eu-west-1.layerv.xyz/webhooks/qurl',
-              description: BOT_DESC,
+              description: `${BOT_DESC} [ORPHAN]`,
               events: ['qurl.accessed'],
               failure_count: 0,
               last_delivery_success: true,
@@ -1689,7 +1764,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     let createCalled = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        { webhook_id: 'wh_junk_url', url: 'not://a valid url with spaces', description: BOT_DESC, events: [], failure_count: 999, last_delivery_success: false },
+        { webhook_id: 'wh_junk_url', url: 'not://a valid url with spaces', description: `${BOT_DESC} [ORPHAN]`, events: [], failure_count: 999, last_delivery_success: false },
       ] } }),
       'POST /v1/webhooks': () => { createCalled = true; return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }; },
     });
@@ -1701,7 +1776,8 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     let deleted = false;
     let nearMissLogged = false;
     const logSpy = jest.spyOn(console, 'log').mockImplementation((line) => {
-      if (typeof line === 'string' && line.includes('liveness-gated near-misses')) {
+      if (typeof line === 'string' && (line.includes('liveness-gated near-misses')
+          || line.includes('retained without retirement markers'))) {
         nearMissLogged = true;
       }
     });
@@ -1709,7 +1785,8 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [
           deadOrphan({ webhook_id: 'wh_would_orphan' }),
-          { webhook_id: 'wh_would_near_miss', url: OLD_URL, description: BOT_DESC, events: ['qurl.accessed'], failure_count: 0, last_delivery_success: true },
+          deadOrphan({ webhook_id: 'wh_unmarked', description: BOT_DESC }),
+          { webhook_id: 'wh_would_near_miss', url: OLD_URL, description: `${BOT_DESC} [ORPHAN]`, events: ['qurl.accessed'], failure_count: 0, last_delivery_success: true },
         ] } }),
         'DELETE /v1/webhooks/wh_would_orphan': () => { deleted = true; return { status: 204, body: '' }; },
         'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
@@ -1781,6 +1858,26 @@ describe('isTruthyEnvFlag — env-var normalization (kill-switch semantics)', ()
 describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () => {
   const { buildUrlMigrationOrphanFilter, ORPHAN_FILTER_RESULTS, URL_MIGRATION_ORPHAN_MIN_FAILURES } = _internals;
 
+  it.each([
+    undefined, null, 42, 'X (env=prod)', 'X (env=prod) [orphan]',
+    'X (env=prod) [ORPHAN] trailing', 'X (env=prod [ORPHAN])',
+  ])('rejects an absent or inexact retirement suffix: %s', (description) => {
+    const filter = buildUrlMigrationOrphanFilter({ bridgeUrl: 'https://bot.example/webhooks/qurl', descriptionPrefix: 'X' });
+    expect(filter({ url: 'https://peer.example/webhooks/qurl', description,
+      last_delivery_success: false, failure_count: Number.MAX_SAFE_INTEGER })).toBe(
+      typeof description === 'string' ? ORPHAN_FILTER_RESULTS.NEAR_MISS_RETIREMENT : ORPHAN_FILTER_RESULTS.NO_MATCH,
+    );
+  });
+
+  it.each([
+    ['X [ORPHAN]', ORPHAN_FILTER_RESULTS.MATCH],
+    ['Xylophone [ORPHAN]', ORPHAN_FILTER_RESULTS.NO_MATCH],
+  ])('retains the exact prefix boundary with a retirement suffix: %s', (description, expected) => {
+    const filter = buildUrlMigrationOrphanFilter({ bridgeUrl: 'https://bot.example/webhooks/qurl', descriptionPrefix: 'X' });
+    expect(filter({ url: 'https://peer.example/webhooks/qurl', description,
+      last_delivery_success: false, failure_count: 1475 })).toBe(expected);
+  });
+
   it('returns null when descriptionPrefix is empty (sweep disabled)', () => {
     expect(buildUrlMigrationOrphanFilter({ bridgeUrl: 'https://bot.example/webhooks/qurl', descriptionPrefix: '' })).toBeNull();
   });
@@ -1796,7 +1893,7 @@ describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () =>
     });
     expect(f({
       url: 'https://other.test.example/webhooks/qurl',
-      description: 'X (env=prod)',
+      description: 'X (env=prod) [ORPHAN]',
       failure_count: 0,
       last_delivery_success: true,
     })).toBe(ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS);
@@ -1809,7 +1906,7 @@ describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () =>
     });
     expect(f({
       url: 'https://other.test.example/webhooks/qurl',
-      description: 'X (env=prod)',
+      description: 'X (env=prod) [ORPHAN]',
       failure_count: URL_MIGRATION_ORPHAN_MIN_FAILURES - 1, // just under
       last_delivery_success: false,
     })).toBe(ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS);
@@ -1822,7 +1919,7 @@ describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () =>
     });
     expect(f({
       url: 'https://other.test.example/webhooks/qurl',
-      description: 'X (env=prod)',
+      description: 'X (env=prod) [ORPHAN]',
       failure_count: URL_MIGRATION_ORPHAN_MIN_FAILURES,
       last_delivery_success: false,
     })).toBe(ORPHAN_FILTER_RESULTS.MATCH);
@@ -1835,7 +1932,7 @@ describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () =>
     });
     expect(f({
       url: 'https://bot.test.example/webhooks/qurl',
-      description: 'X (env=prod)',
+      description: 'X (env=prod) [ORPHAN]',
       failure_count: 9999,
       last_delivery_success: false,
     })).toBe(ORPHAN_FILTER_RESULTS.NO_MATCH);
@@ -1852,7 +1949,7 @@ describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () =>
     });
     expect(f({
       url: 'https://other.test.example/webhooks/qurl',
-      description: 'X (env=prod)',
+      description: 'X (env=prod) [ORPHAN]',
       failure_count: failureCount,
       last_delivery_success: false,
     })).toBe(ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS);
