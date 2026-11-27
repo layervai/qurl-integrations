@@ -397,7 +397,7 @@ describe('partitionRecipients', () => {
 describe('resolveMentionableSelection', () => {
   const GUILD_ID = 'guild-1';
 
-  function makeRole({ id, members = [], mentionable = true, name }) {
+  function makeRole({ id, members = [], mentionable = false, name }) {
     const memberMap = new Map(members.map((m) => [m.user.id, m]));
     return [id, { id, name: name ?? `role-${id}`, members: memberMap, mentionable }];
   }
@@ -441,6 +441,14 @@ describe('resolveMentionableSelection', () => {
     expect(r.users.map((u) => u.id)).toEqual([u1.id]);
   });
 
+  test('role fixture without mentionable defaults to deny', () => {
+    const user = makeUser('100000000000000001');
+    const int = makeMentionableInteraction({ pickedRoles: [makeRole({ id: 'role-default', members: [{ user }] })] });
+    const result = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(result.users).toEqual([]);
+    expect(result.roleMentionsDenied).toEqual(['role-default']);
+  });
+
   test('named role expands its members onto the user list, filters bots', () => {
     const u1 = makeUser('100000000000000001');
     const bot1 = makeUser('100000000000000099', { bot: true });
@@ -448,6 +456,7 @@ describe('resolveMentionableSelection', () => {
     const int = makeMentionableInteraction({
       pickedRoles: [
         makeRole({
+          mentionable: true,
           id: 'role-eng',
           members: [{ user: u1 }, { user: bot1 }, { user: u2 }],
         }),
@@ -462,9 +471,10 @@ describe('resolveMentionableSelection', () => {
     const u1 = makeUser('100000000000000001');
     const int = makeMentionableInteraction({
       pickedUsers: [u1],
-      pickedRoles: [makeRole({ id: 'role-eng', members: [{ user: u1 }] })],
+      pickedRoles: [makeRole({ mentionable: true, id: 'role-eng', members: [{ user: u1 }] })],
     });
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.roleMentionsDenied).toEqual([]);
     expect(r.users.map((u) => u.id)).toEqual([u1.id]);
   });
 
@@ -503,7 +513,7 @@ describe('resolveMentionableSelection', () => {
       user: makeUser(`100000000000000${String(i).padStart(3, '0')}`),
     }));
     const int = makeMentionableInteraction({
-      pickedRoles: [makeRole({ id: 'role-eng', members })],
+      pickedRoles: [makeRole({ mentionable: true, id: 'role-eng', members })],
     });
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
     expect(r.users.length).toBe(25);
@@ -545,7 +555,7 @@ describe('resolveMentionableSelection', () => {
       user: makeUser(`100000000000000${String(i).padStart(3, '0')}`, { bot: true }),
     }));
     const int = makeMentionableInteraction({
-      pickedRoles: [makeRole({ id: 'role-bots', members: bots })],
+      pickedRoles: [makeRole({ mentionable: true, id: 'role-bots', members: bots })],
     });
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
     expect(r.users).toEqual([]);
@@ -563,8 +573,8 @@ describe('resolveMentionableSelection', () => {
     }));
     const int = makeMentionableInteraction({
       pickedRoles: [
-        makeRole({ id: 'role-a-bots', members: botsA }),
-        makeRole({ id: 'role-b-humans', members: humansB }),
+        makeRole({ mentionable: true, id: 'role-a-bots', members: botsA }),
+        makeRole({ mentionable: true, id: 'role-b-humans', members: humansB }),
       ],
     });
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
@@ -578,8 +588,9 @@ describe('resolveMentionableSelection', () => {
     }));
     const overlapBot = roleABots[0].user; // same User ref as role A's first bot
     const human = makeUser('100000000000000001');
-    const roleA = makeRole({ id: 'role-a', members: roleABots });
+    const roleA = makeRole({ mentionable: true, id: 'role-a', members: roleABots });
     const roleB = makeRole({
+      mentionable: true,
       id: 'role-b',
       members: [{ user: overlapBot }, { user: human }],
     });
@@ -593,10 +604,12 @@ describe('resolveMentionableSelection', () => {
     const bot1 = makeUser('100000000000000099', { bot: true });
     const u1 = makeUser('100000000000000001');
     const roleA = makeRole({
+      mentionable: true,
       id: 'role-a',
       members: [{ user: bot1 }, { user: u1 }],
     });
     const roleB = makeRole({
+      mentionable: true,
       id: 'role-b',
       members: [{ user: bot1 }],
     });
@@ -612,6 +625,7 @@ describe('resolveMentionableSelection', () => {
     const u1Picked = makeUser('100000000000000001');
     const u1FromRole = { ...makeUser('100000000000000001'), tag: 'from-role-view' };
     const role = makeRole({
+      mentionable: true,
       id: 'role-eng',
       members: [{ user: u1FromRole }],
     });
@@ -620,6 +634,7 @@ describe('resolveMentionableSelection', () => {
       pickedRoles: [role],
     });
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.roleMentionsDenied).toEqual([]);
     expect(r.users.length).toBe(1);
     expect(r.users[0]).toBe(u1Picked);
     expect(r.users[0]).not.toBe(u1FromRole);
@@ -628,6 +643,7 @@ describe('resolveMentionableSelection', () => {
   test('directly-picked bot + same bot in role → droppedFromRoles 0 (partition reports it via droppedBots)', () => {
     const bot1 = makeUser('100000000000000099', { bot: true });
     const role = makeRole({
+      mentionable: true,
       id: 'role-with-bot',
       members: [{ user: bot1 }],
     });
@@ -636,6 +652,7 @@ describe('resolveMentionableSelection', () => {
       pickedRoles: [role],
     });
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.roleMentionsDenied).toEqual([]);
     expect(r.users.map((u) => u.id)).toEqual([bot1.id]);
     expect(r.droppedFromRoles).toBe(0);
   });
@@ -645,6 +662,7 @@ describe('resolveMentionableSelection', () => {
     const bot2 = makeUser('100000000000000092', { bot: true });
     const int = makeMentionableInteraction({
       pickedRoles: [makeRole({
+        mentionable: true,
         id: 'role-bots',
         members: [{ user: bot1 }, { user: bot2 }],
       })],
@@ -660,6 +678,7 @@ describe('resolveMentionableSelection', () => {
     const bot1 = makeUser('100000000000000091', { bot: true });
     const int = makeMentionableInteraction({
       pickedRoles: [makeRole({
+        mentionable: true,
         id: 'role-eng',
         members: [{ user: u1 }, { user: bot1 }],
       })],
