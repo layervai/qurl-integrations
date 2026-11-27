@@ -638,20 +638,38 @@ describe('POST /webhooks/qurl — bad-signature rate limit', () => {
     isolatedApp = require('../src/server').app;
   });
   it('returns 429 once an IP crosses BAD_SIG_MAX failed-signature attempts', async () => {
-    const raw = JSON.stringify(VALID_PAYLOAD);
-    for (let i = 0; i < 30; i++) {
-      // eslint-disable-next-line no-await-in-loop
+    // Socket scheduling must not move attempts into a different limiter window.
+    let now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const raw = JSON.stringify(VALID_PAYLOAD);
+      for (let i = 0; i < 30; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await request(isolatedApp)
+          .post('/webhooks/qurl')
+          .set('Content-Type', 'application/json')
+          .set('QURL-Signature', signBody(raw, 'wrong-secret'))
+          .send(raw)
+          .expect(401);
+      }
+      const res = await request(isolatedApp)
+        .post('/webhooks/qurl')
+        .set('Content-Type', 'application/json')
+        .set('QURL-Signature', signBody(raw))
+        .send(raw);
+      expect(res.status).toBe(429);
+      expect(res.body.error).toBe('Too many invalid webhook attempts');
+
+      // Prove the injected clock controls the real route, including expiry.
+      now += 60_001;
       await request(isolatedApp)
         .post('/webhooks/qurl')
         .set('Content-Type', 'application/json')
-        .set('QURL-Signature', signBody(raw, 'wrong-secret'))
-        .send(raw);
+        .set('QURL-Signature', signBody(raw))
+        .send(raw)
+        .expect(200);
+    } finally {
+      clock.mockRestore();
     }
-    const res = await request(isolatedApp)
-      .post('/webhooks/qurl')
-      .set('Content-Type', 'application/json')
-      .set('QURL-Signature', signBody(raw))
-      .send(raw);
-    expect(res.status).toBe(429);
   });
 });
