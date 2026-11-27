@@ -644,6 +644,37 @@ describe('parseRecipientMentions — channel mentions (voice / stage-voice)', ()
 });
 
 describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
+
+  test.each([
+    [true, 10, true],
+    [true, 2, false],
+    [true, 1, false],
+    [true, undefined, false],
+    [false, 10, false],
+  ])('partial cache: permission=%s total=%s reports=%s', (allowed, total, partial) => {
+    const int = makeInteraction({ users: { '101': {}, '102': {} } });
+    int.guild.memberCount = total;
+    const result = parseRecipientMentions('@everyone', int, { allowMassMention: allowed });
+    expect(result.partialCache).toBe(partial);
+    expect(result.partialMemberCache).toEqual(partial ? { cachedCount: 2, totalCount: 10 } : null);
+  });
+
+  test('empty known cache reports zero cached members', () => {
+    const int = makeInteraction();
+    int.guild.memberCount = 10;
+    const result = parseRecipientMentions('@everyone', int, { allowMassMention: true });
+    expect(result.partialCache).toBe(true);
+    expect(result.partialMemberCache).toEqual({ cachedCount: 0, totalCount: 10 });
+  });
+
+  test('partial cache is absent for DMs and explicit mentions', () => {
+    const int = makeInteraction({ users: { '101': {} } });
+    int.guild.memberCount = 10;
+    expect(parseRecipientMentions('<@101>', int).partialCache).toBe(false);
+    int.guild = null;
+    expect(parseRecipientMentions('@everyone', int, { allowMassMention: true }).partialCache).toBe(false);
+  });
+
   test('allowed: expands to all non-bot guild members', () => {
     const int = makeInteraction({
       users: { '101': {}, '102': {}, '801': { bot: true }, '103': {} },
@@ -781,7 +812,7 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
 });
 
 describe('parseRecipientMentions — result-shape contract', () => {
-  test('result shape pins exactly six keys (ids, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, roleMentionsDenied)', () => {
+  test('result shape includes recipient and cache-warning fields', () => {
     const int = makeInteraction({ users: { '111': {} } });
     const res = parseRecipientMentions('<@111>', int);
     expect(Object.keys(res).sort()).toEqual([
@@ -790,6 +821,8 @@ describe('parseRecipientMentions — result-shape contract', () => {
       'invalidTokens',
       'massMentionDenied',
       'massMentionExpanded',
+      'partialCache',
+      'partialMemberCache',
       'roleMentionsDenied',
     ]);
   });

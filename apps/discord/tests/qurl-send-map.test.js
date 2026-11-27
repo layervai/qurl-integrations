@@ -2242,6 +2242,37 @@ describe('handleQurlSend — slash entry', () => {
       expect(payload.recipientIds).toEqual([u1]);
     });
 
+    test('DM everyone does not show a guild-cache warning', async () => {
+      const int = makeInteraction({ guildId: null, options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' } });
+      await handleQurlSend(int);
+      const replies = [...int.reply.mock.calls, ...int.editReply.mock.calls];
+      expect(replies.length).toBeGreaterThan(0);
+      expect(replies.every(([reply]) => !reply.content?.includes('members were cached'))).toBe(true);
+    });
+
+    test('empty typed everyone shows zero cached counts in the rejection', async () => {
+      const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' } });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = 10;
+      await handleQurlSend(int);
+      expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+      expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Only 0 of 10 members') }));
+      expect(int.editReply.mock.calls.some(([reply]) => reply.content?.includes('Member cache not yet ready'))).toBe(false);
+    });
+
+    test.each([3, 10])('typed everyone shows partial counts only when needed (total=%s)', async (total) => {
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
+        guildMembers: { [SENDER_ID]: {}, '100000000000000051': {}, '100000000000000052': {} },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = total;
+      await handleQurlSend(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.warningsBlock.includes('Only 3 of 10 members')).toBe(total === 10);
+      if (total === 10) expect(int.editReply.mock.calls.some(([reply]) => reply.content?.includes('Only 3 of 10 members'))).toBe(true);
+    });
+
     test('text `@everyone` in recipients → EVERYONE mode (picker hidden, no auto-fill)', async () => {
       const int = makeInteraction({
         options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
@@ -4813,6 +4844,14 @@ describe('handleConfirmEveryone', () => {
 
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     expect(int.editReply).not.toHaveBeenCalled();
+  });
+
+  test.each([4, 10])('everyone button shows partial counts only when needed (total=%s)', async (memberCount) => {
+    const int = makeEveryoneInteraction({ memberCount });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.warningsBlock.includes('Only 4 of 10 members')).toBe(memberCount === 10);
+    if (memberCount === 10) expect(int.editReply.mock.calls.some(([reply]) => reply.content?.includes('Only 4 of 10 members'))).toBe(true);
   });
 
   test('happy path → expands to all non-bot members, transitions flow', async () => {

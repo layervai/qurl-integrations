@@ -4280,6 +4280,7 @@ async function handleSetupModal(interaction, { flow_id }) {
 
 const {
   parseRecipientMentions,
+  getPartialMemberCache,
   isVoiceChannelType,
   isBotMember,
   MAX_SLASH_OPTION_LENGTH: RECIPIENTS_SLASH_MAX_LENGTH,
@@ -4845,6 +4846,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  *   droppedFromRoles?: number,
  *   massMentionDenied?: boolean,
  *   everyoneCacheCold?: boolean,
+ *   partialMemberCache?: {cachedCount: number, totalCount: number} | null,
  *   roleMentionsDeniedNames?: string[],
  * }} [opts]
  */
@@ -4857,6 +4859,7 @@ function renderRecipientWarnings({
   droppedFromRoles = 0,
   massMentionDenied = false,
   everyoneCacheCold = false,
+  partialMemberCache = null,
   roleMentionsDeniedNames = [],
 } = {}) {
   const lines = [];
@@ -4912,6 +4915,9 @@ function renderRecipientWarnings({
     // user took a different picker action (selecting a role rather
     // than an individual bot).
     lines.push(`• ${droppedFromRoles} bot(s) filtered from picked role(s) — skipped.`);
+  }
+  if (partialMemberCache) {
+    lines.push(`• Only ${partialMemberCache.cachedCount} of ${partialMemberCache.totalCount} members were cached when resolving \`@everyone\`; some people may be missing.`);
   }
   if (everyoneCacheCold) {
     // Symmetric with droppedFromRoles: surfaced even on partial-valid
@@ -5629,6 +5635,7 @@ async function handleQurlSlashSend(interaction, params) {
       unresolvedIds: resolved.unresolvedIds,
       transientFailureIds: resolved.transientFailureIds,
       droppedBots,
+      partialMemberCache: parsed.partialCache && !isDmContext ? parsed.partialMemberCache : null,
       massMentionDenied: parsed.massMentionDenied && !isDmContext,
       roleMentionsDeniedNames,
     });
@@ -7589,6 +7596,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   let senderInCache = false;
   let hasOtherNonBotInCache = false;
   const cache = interaction.guild.members?.cache;
+  const partialMemberCache = getPartialMemberCache(interaction.guild);
   // Guard matches the operation: `for ... of` reads `[Symbol.iterator]`,
   // which both `Map` and discord.js `Collection` provide. Truthy-check
   // alone would NPE on a degraded `{}` cache shape from a partial init.
@@ -7677,7 +7685,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
     return rejectEveryone(`⚠\u{FE0F} Guild has ${valid.length} non-bot members (max ${config.QURL_SEND_MAX_RECIPIENTS}). Use the picker or @mentions to choose a subset.\n\n`);
   }
 
-  const newWarningsBlock = renderRecipientWarnings({ droppedBots });
+  const newWarningsBlock = renderRecipientWarnings({ droppedBots, partialMemberCache });
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
   );
