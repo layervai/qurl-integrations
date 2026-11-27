@@ -1882,6 +1882,30 @@ describe('handleQurlSend — slash entry', () => {
     expect(lastEdit.content).toMatch(/role\.mentionable: true/);
   });
 
+  test('all-invalid typed mentions log denial counts without recipient input', async () => {
+    const int = makeInteraction({ options: {
+      attachment: VALID_ATTACHMENT,
+      recipients: '@everyone <@&7002> private-invalid-token',
+    } });
+    int.guild.roles.cache.set('7002', { id: '7002', name: 'private-role-name', mentionable: false, members: new Map() });
+    await handleQurlSend(int);
+    expect(logger.debug).toHaveBeenCalledWith('handleQurlSlashSend: all-invalid mention input', {
+      user_id: SENDER_ID,
+      resource_type: 'file',
+      dropped_bots: 0,
+      unresolved_ids: 0,
+      transient_failure_ids: 0,
+      invalid_tokens: 1,
+      capped_count: 0,
+      mass_mention_denied: true,
+      role_mentions_denied: 1,
+    });
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+    const entries = logger.debug.mock.calls.filter(([message]) => message === 'handleQurlSlashSend: all-invalid mention input');
+    expect(entries).toHaveLength(1);
+    expect(JSON.stringify(entries)).not.toMatch(/private-invalid-token|private-role-name|7002/);
+  });
+
   test('text path: every recipient denied-role-only → "no valid recipients" but NOT misleading bot-only log nor transient-retry copy', async () => {
     const aliceId = '400000000000000030';
     const logger = require('../src/logger');
