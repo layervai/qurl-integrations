@@ -441,6 +441,21 @@ describe('resolveMentionableSelection', () => {
     expect(r.users.map((u) => u.id)).toEqual([u1.id]);
   });
 
+  test('only unavailable allowed named roles are flagged, not empty or denied roles', () => {
+    const user = makeUser('100000000000000001');
+    const int = makeMentionableInteraction({ pickedRoles: [
+      ['missing', { mentionable: true }],
+      ['malformed', { mentionable: true, members: {} }],
+      ['valid', { mentionable: true, members: new Map([[user.id, { user }]]) }],
+      ['empty', { mentionable: true, members: new Map() }],
+      ['denied', { mentionable: false }],
+    ] });
+    const result = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(result.namedRoleMembersUnavailable).toEqual(new Set(['missing', 'malformed']));
+    expect(result.users).toEqual([user]);
+    expect(result.roleMentionsDenied).toEqual(['denied']);
+  });
+
   test('named role expands its members onto the user list, filters bots', () => {
     const u1 = makeUser('100000000000000001');
     const bot1 = makeUser('100000000000000099', { bot: true });
@@ -536,6 +551,16 @@ describe('resolveMentionableSelection', () => {
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
     expect(r.users).toEqual([]);
     expect(r.massMentionDenied).toBe(false);
+  });
+
+  test.each([100, 101])('role scan flags only an incomplete scan (%s members)', (count) => {
+    const members = Array.from({ length: count }, (_, i) => ({
+      user: makeUser(`700000000000000${String(i).padStart(3, '0')}`, { bot: true }),
+    }));
+    const int = makeMentionableInteraction({ pickedRoles: [makeRole({ id: 'large-role', members })] });
+    const result = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(result.iterationBoundHit).toBe(count > 100);
+    expect(result.droppedFromRoles).toBe(Math.min(count, 100));
   });
 
   test('pathological all-bot role iteration bounded at exactly 4× cap (=100, pins the multiplier)', () => {
@@ -717,10 +742,10 @@ describe('resolveMentionableSelection', () => {
     expect(r.droppedFromRoles).toBe(0);
   });
 
-  test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold, roleMentionsDenied }', () => {
+  test('returns the documented resolver result fields', () => {
     const int = makeMentionableInteraction({});
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
-    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'massMentionDenied', 'roleMentionsDenied', 'users']);
+    expect(Object.keys(r).sort()).toEqual(['alreadyDeliveredCount', 'droppedFromEveryoneRoleOnly', 'droppedFromRoles', 'everyoneCacheCold', 'iterationBoundHit', 'massMentionDenied', 'namedRoleMembersUnavailable', 'roleMentionsDenied', 'users']);
   });
 
   describe('role-mention permission gate (#326)', () => {
@@ -4110,6 +4135,72 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Mention Everyone/);
   });
 
+  test('bot-only everyone pick identifies everyone in its rejection', async () => {
+    const bot = makeUser('700000000000000001', { bot: true });
+    const int = makeSelectInteraction({ users: [], canMentionEveryone: true,
+      guildMemberCache: new Map([[bot.id, { user: bot }]]) });
+    int.roles = new Map([[int.guild.id, { id: int.guild.id }]]);
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain('`@everyone` has no non-bot members');
+  });
+
+  test.each(['everyone', 'named', 'mixed'])('filtered bot warning identifies %s picks', async (source) => {
+    const user = makeUser('100000000000000001');
+    const bot = makeUser('700000000000000001', { bot: true });
+    const members = new Map([[user.id, { user }], [bot.id, { user: bot }]]);
+    const int = makeSelectInteraction({ users: [], canMentionEveryone: true, guildMemberCache: members });
+    const named = ['named-role', { id: 'named-role', mentionable: true, members }];
+    const everyone = [int.guild.id, { id: int.guild.id }];
+    int.roles = new Map(source === 'everyone' ? [everyone] : source === 'named' ? [named] : [named, everyone]);
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const warning = mockTransitionFlow.mock.calls[0][2].payload.warningsBlock;
+    expect(warning).toContain(source === 'everyone'
+      ? '1 bot(s) skipped from `@everyone` — bots cannot receive qURL links.'
+      : '1 bot(s) filtered from picked role(s) — skipped.');
+    expect(int.editReply.mock.calls.at(-1)[0].content).toContain(warning.trim());
+  });
+
+  test.each([false, true])('bounded role scan gives a visible limit warning (valid user=%s)', async (withUser) => {
+    const user = makeUser('100000000000000001');
+    const bots = Array.from({ length: 101 }, (_, i) => {
+      const bot = makeUser(`700000000000000${String(i).padStart(3, '0')}`, { bot: true });
+      return [bot.id, { user: bot }];
+    });
+    const int = makeSelectInteraction({
+      users: withUser ? [user] : [],
+      roles: [['large-role', { id: 'large-role', mentionable: true, members: new Map([...bots, [user.id, { user }]]) }]],
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const reply = int.editReply.mock.calls.at(-1)[0];
+    expect(reply.content).toContain('Picked role(s) are too large to fully evaluate — try fewer or smaller roles');
+    expect(reply.content).not.toContain('have no non-bot members');
+    if (withUser) {
+      expect(mockTransitionFlow.mock.calls[0][2].payload.warningsBlock).toContain('too large to fully evaluate');
+    } else {
+      expect(mockTransitionFlow).not.toHaveBeenCalled();
+    }
+  });
+
+  test.each([false, true])('unavailable named role gives a visible retry warning (valid user=%s)', async (withUser) => {
+    const user = makeUser('100000000000000001');
+    const int = makeSelectInteraction({
+      users: withUser ? [user] : [],
+      roles: [['role-unavailable', { id: 'role-unavailable', mentionable: true }]],
+      canMentionEveryone: false,
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const reply = int.editReply.mock.calls.at(-1)[0];
+    expect(reply.content).toContain("Picked role(s) couldn't be loaded — try again in a few seconds");
+    if (withUser) {
+      const payload = mockTransitionFlow.mock.calls[0][2].payload;
+      expect(payload.recipientIds).toEqual([user.id]);
+      expect(payload.warningsBlock).toContain("Picked role(s) couldn't be loaded");
+    } else {
+      expect(mockTransitionFlow).not.toHaveBeenCalled();
+    }
+  });
+
   test('mentionable picker: partial-valid pick with cold-cache @everyone → flow advances AND everyoneCacheCold warning surfaces', async () => {
     const u1 = makeUser('100000000000000001');
     const int = makeSelectInteraction({
@@ -4289,6 +4380,17 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/@admin-team/);
     expect(updated.content).toMatch(/Mention Everyone/);
     expect(updated.content).toMatch(/role\.mentionable: true/);
+  });
+
+  test.each([false, true])('denied cold role skips confirm prewarm (everyone=%s)', async (everyone) => {
+    const int = makeSelectInteraction({ users: [], roles: [], canMentionEveryone: false });
+    const role = { id: everyone ? int.guild.id : 'role-denied', mentionable: false, members: new Map() };
+    int.roles.set(role.id, role);
+    int.guild.members = { cache: new Map(), list: jest.fn() };
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(int.guild.members.list).not.toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply.mock.calls.at(-1)[0].content).toMatch(/permission|Mention Everyone/i);
   });
 
   test('mentionable picker: denied role with deleted-from-cache name → fallback "unknown-role" renders', async () => {
