@@ -245,7 +245,7 @@ describe('parseRecipientMentions — role mentions', () => {
       .toMatchObject({ ids: [], invalidTokens: ['<@&999>'], cappedCount: 0 });
   });
 
-  test('direct mentions always win the cap over role-expansion members', () => {
+  test('direct mentions precede all role-expansion candidates', () => {
     const roleMembers = [];
     const users = {};
     const directIds = ['8000000001', '8000000002', '8000000003', '8000000004', '8000000005'];
@@ -258,9 +258,9 @@ describe('parseRecipientMentions — role mentions', () => {
     const int = makeInteraction({ users, roles: { '7000': roleMembers } });
     const directMentions = directIds.map(id => `<@${id}>`).join(' ');
     const res = parseRecipientMentions(`<@&7000> ${directMentions}`, int);
-    expect(res.ids).toHaveLength(25);
-    expect(res.ids).toEqual(expect.arrayContaining(directIds));
-    expect(res.cappedCount).toBe(30);
+    expect(res.ids).toHaveLength(55);
+    expect(res.ids.slice(0, directIds.length)).toEqual(directIds);
+    expect(res.cappedCount).toBe(0);
   });
 
   test('user listed BOTH directly AND via a role mention appears once in ids, role is not flagged useless', () => {
@@ -608,7 +608,7 @@ describe('parseRecipientMentions — channel mentions (voice / stage-voice)', ()
     expect(res.invalidTokens).toEqual(['<#500>']);
   });
 
-  test('explicit channel mentions claim cap slots BEFORE @everyone (priority ordering)', () => {
+  test('explicit channel candidates precede @everyone', () => {
     const users = {};
     for (let i = 1; i <= 100; i++) {
       users[`9${String(i).padStart(17, '0')}`] = {};
@@ -621,25 +621,18 @@ describe('parseRecipientMentions — channel mentions (voice / stage-voice)', ()
     });
     const res = parseRecipientMentions('@everyone <#500>', int, { allowMassMention: true });
     for (const id of voiceMembers) expect(res.ids).toContain(id);
-    expect(res.ids).toHaveLength(25);
+    expect(res.ids).toHaveLength(103);
+    expect(res.ids.slice(0, 3)).toEqual(voiceMembers);
   });
 
-  test('voice channel after cap-filling user mentions: silently no-ops (NOT marked invalid)', () => {
-    const users = { '111': {}, '222': {}, '333': {}, 'aaa': {}, 'bbb': {} };
+  test('voice candidates follow direct mentions without parser capping', () => {
     const int = makeInteraction({
-      users,
+      users: { '111': {}, '222': {}, '333': {}, 'aaa': {}, 'bbb': {} },
       channels: { '500': { type: GUILD_VOICE, members: ['aaa', 'bbb'] } },
     });
-    const config = require('../src/config');
-    const origCap = config.QURL_SEND_MAX_RECIPIENTS;
-    config.QURL_SEND_MAX_RECIPIENTS = 3;
-    try {
-      const res = parseRecipientMentions('<@111> <@222> <@333> <#500>', int);
-      expect(res.ids.sort()).toEqual(['111', '222', '333']);
-      expect(res.invalidTokens).toEqual([]);
-    } finally {
-      config.QURL_SEND_MAX_RECIPIENTS = origCap;
-    }
+    const result = parseRecipientMentions('<@111> <@222> <@333> <#500>', int);
+    expect(result.ids).toEqual(['111', '222', '333', 'aaa', 'bbb']);
+    expect(result.invalidTokens).toEqual([]);
   });
 });
 
@@ -710,7 +703,7 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
     expect(res.massMentionDenied).toBe(false);
   });
 
-  test('explicit `<@id>` mentions take priority over @everyone expansion when cap is hit', () => {
+  test('explicit mentions precede every @everyone candidate', () => {
     const cachedUsers = {};
     for (let i = 0; i < 30; i++) {
       cachedUsers[`2000000000000${String(i).padStart(5, '0')}`] = {};
@@ -722,8 +715,8 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
       int,
       { allowMassMention: true },
     );
-    expect(res.ids.length).toBe(25);
-    expect(res.ids).toContain(explicitId);
+    expect(res.ids.length).toBe(31);
+    expect(res.ids[0]).toBe(explicitId);
     expect(res.massMentionDenied).toBe(false);
   });
 
@@ -742,12 +735,12 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
     expect(res.massMentionDenied).toBe(false);
   });
 
-  test('allowed: cap short-circuits the cache scan (large guild cap behavior)', () => {
+  test('allowed: returns every cached candidate for post-resolution capping', () => {
     const users = {};
     for (let i = 0; i < 40; i++) users[`u${String(i).padStart(18, '0')}`] = {};
     const int = makeInteraction({ users });
     const res = parseRecipientMentions('@everyone', int, { allowMassMention: true });
-    expect(res.ids.length).toBe(25);
+    expect(res.ids.length).toBe(40);
     expect(res.cappedCount).toBe(0);
   });
 
@@ -895,8 +888,29 @@ describe('parseRecipientMentions — invalid tokens', () => {
   });
 });
 
+describe('parseRecipientMentions — repeated expansion work', () => {
+  test.each(['role', 'voice'])('a repeated %s token expands its collection once', (kind) => {
+    const int = makeInteraction({
+      users: { '111': {}, '222': {} },
+      roles: { '7000': ['111', '222'] },
+      channels: { '500': { type: VOICE_CHANNEL_TYPE, members: ['111', '222'] } },
+    });
+    const cache = kind === 'role' ? int.guild.roles.cache : int.guild.channels.cache;
+    const lookup = jest.spyOn(cache, 'get');
+    const token = kind === 'role' ? '<@&7000>' : '<#500>';
+    try {
+      const result = parseRecipientMentions(`${token} ${token} ${token}`, int);
+      expect(result.ids).toEqual(['111', '222']);
+      expect(result.invalidTokens).toEqual([]);
+      expect(lookup).toHaveBeenCalledTimes(1);
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+});
+
 describe('parseRecipientMentions — cap + length safety', () => {
-  test('caps the result at QURL_SEND_MAX_RECIPIENTS + reports cappedCount', () => {
+  test('returns all candidates without applying the send cap', () => {
     const users = {};
     const mentions = [];
     for (let i = 0; i < 30; i++) {
@@ -906,10 +920,10 @@ describe('parseRecipientMentions — cap + length safety', () => {
     }
     const int = makeInteraction({ users });
     const res = parseRecipientMentions(mentions.join(' '), int);
-    expect(res.ids).toHaveLength(25);
+    expect(res.ids).toHaveLength(30);
     expect(res.ids[0]).toBe('1000000000');
     expect(res.ids[24]).toBe('1000000024');
-    expect(res.cappedCount).toBe(5);
+    expect(res.cappedCount).toBe(0);
   });
 
   test('truncates input above MAX_INPUT_LENGTH before scanning (ReDoS guard)', () => {
@@ -928,7 +942,7 @@ describe('parseRecipientMentions — cap + length safety', () => {
     expect(parseRecipientMentions(input, int).ids).toEqual(['777']);
   });
 
-  test('cappedCount reflects POST-dedupe count, not raw mention count', () => {
+  test('deduplication keeps all unique candidates', () => {
     const users = {};
     const mentions = [];
     for (let i = 0; i < 28; i++) {
@@ -941,11 +955,11 @@ describe('parseRecipientMentions — cap + length safety', () => {
     ]).join(' ');
     const int = makeInteraction({ users });
     const res = parseRecipientMentions(dupedInput, int);
-    expect(res.ids).toHaveLength(25);
-    expect(res.cappedCount).toBe(3);  // 28 unique - 25 cap
+    expect(res.ids).toHaveLength(28);
+    expect(res.cappedCount).toBe(0);
   });
 
-  test('cappedCount accounts for role-expansion overflow (not just direct mentions)', () => {
+  test('role expansion keeps all candidates beyond the send cap', () => {
     const role1Members = [];
     const role2Members = [];
     const users = {};
@@ -964,12 +978,12 @@ describe('parseRecipientMentions — cap + length safety', () => {
       roles: { '7000': role1Members, '7001': role2Members },
     });
     const res = parseRecipientMentions('<@&7000> <@&7001>', int);
-    expect(res.ids).toHaveLength(25);
-    expect(res.cappedCount).toBe(45);
+    expect(res.ids).toHaveLength(70);
+    expect(res.cappedCount).toBe(0);
     expect(res.invalidTokens).toEqual([]);
   });
 
-  test('cap and invalidTokens are populated independently in the same call', () => {
+  test('all candidates and invalidTokens are populated independently', () => {
     const users = {};
     const mentions = [];
     for (let i = 0; i < 30; i++) {
@@ -979,7 +993,7 @@ describe('parseRecipientMentions — cap + length safety', () => {
     }
     const int = makeInteraction({ users });
     const res = parseRecipientMentions(`${mentions.join(' ')} <#456>`, int);
-    expect(res.ids).toHaveLength(25);
+    expect(res.ids).toHaveLength(30);
     expect(res.invalidTokens).toEqual(['<#456>']);
   });
 
@@ -1035,51 +1049,20 @@ describe('parseRecipientMentions — cap + length safety', () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  test('cap-overshoot logging escalates to warn past 2x the cap', () => {
+  test.each([26, 50, 51])('parser returns %s candidates without cap logs', (count) => {
     const users = {};
     const mentions = [];
-    for (let i = 0; i < 26; i++) {
+    for (let i = 0; i < count; i++) {
       const id = `${6000000000 + i}`;
       users[id] = {};
       mentions.push(`<@${id}>`);
     }
-    let int = makeInteraction({ users });
     logger.debug.mockClear();
     logger.warn.mockClear();
-    parseRecipientMentions(mentions.join(' '), int);
-    expect(logger.debug).toHaveBeenCalledTimes(1);
-    expect(logger.debug).toHaveBeenCalledWith(
-      expect.stringContaining('capping recipient list'),
-      expect.objectContaining({ uniqueCount: 26, cap: 25, cappedCount: 1 }),
-    );
-    expect(logger.warn).not.toHaveBeenCalled();
-
-    for (let i = 26; i < 50; i++) {
-      const id = `${6000000000 + i}`;
-      users[id] = {};
-      mentions.push(`<@${id}>`);
-    }
-    int = makeInteraction({ users });
-    logger.debug.mockClear();
-    logger.warn.mockClear();
-    parseRecipientMentions(mentions.join(' '), int);
-    expect(logger.debug).toHaveBeenCalledTimes(1);
-    expect(logger.warn).not.toHaveBeenCalled();
-
-    for (let i = 26; i < 51; i++) {
-      const id = `${6000000000 + i}`;
-      users[id] = {};
-      mentions.push(`<@${id}>`);
-    }
-    int = makeInteraction({ users });
-    logger.debug.mockClear();
-    logger.warn.mockClear();
-    parseRecipientMentions(mentions.join(' '), int);
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('capping recipient list'),
-      expect.objectContaining({ uniqueCount: 51, cap: 25, cappedCount: 26 }),
-    );
+    const result = parseRecipientMentions(mentions.join(' '), makeInteraction({ users }));
+    expect(result.ids).toHaveLength(count);
+    expect(result.cappedCount).toBe(0);
     expect(logger.debug).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 });

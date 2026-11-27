@@ -74,10 +74,9 @@
 //
 // Output shape:
 //   {
-//     ids:                  [<user_id>, ...],   // deduped, cap-applied
+//     ids:                  [<user_id>, ...],   // all deduped candidates
 //     invalidTokens:        [<raw_token>, ...], // pre-escaped (see above)
-//     cappedCount:          <number>,           // 0 if not capped; else
-//                                               // `total_pre_cap - cap`
+//     cappedCount:          0,                  // deprecated; caller caps after resolution
 //     massMentionDenied:    <boolean>,          // true when @everyone
 //                                               // appeared but the caller
 //                                               // denied via the
@@ -91,24 +90,19 @@
 //                                               // in `ids` via a prior
 //                                               // named mention — dedup
 //                                               // happens inside
-//                                               // `consider()`; the flag
+//                                               // the Set; the flag
 //                                               // records that the
 //                                               // expansion ran, not
 //                                               // that it added new
 //                                               // entries). False when
-//                                               // cache was cold,
-//                                               // all-bot, or cap-
-//                                               // saturated before the
-//                                               // walk reached it.
+//                                               // cache was cold or all-bot.
 //                                               // Mutually exclusive
 //                                               // with massMentionDenied.
 //   }
 //
-// `ids` is deduped, capped at `config.QURL_SEND_MAX_RECIPIENTS` (the
-// same per-send cap the in-channel form enforces), and excludes bots
-// (matches the form's bot rejection). The invoking user IS allowed as
-// a recipient — self-send is a supported use case (test the link
-// before forwarding, cross-device handoff, etc.).
+// `ids` contains every deduped candidate from the bounded input and allowed
+// cached expansions. Cached bots are removed here; uncached bots are filtered
+// after resolution. Self-send remains supported. The caller owns the final cap.
 //
 // Role expansion uses interaction.guild.members.cache via discord.js's
 // `Role.members` getter, which filters the guild's member cache for
@@ -122,9 +116,6 @@
 // vs `role.members.size` when they diverge, and the user-facing copy
 // should say "expanded N members" so users notice if a role appears
 // to expand to far fewer recipients than they expect.
-
-const config = require('./config');
-const logger = require('./logger');
 
 // Capture group is the snowflake ID. Discord IDs are 17-20 digit
 // integers; the regex is intentionally loose on length (matches any
@@ -221,12 +212,6 @@ const MAX_SLASH_OPTION_LENGTH = Math.floor(MAX_INPUT_LENGTH / SLASH_OPTION_HEADR
 // width and don't need it.
 const MAX_INVALID_TOKEN_LENGTH = 256;
 
-// Cap-overshoot logging threshold: above this multiple of the cap,
-// escalate the log level from `debug` to `warn`. The signal is "user
-// pasted an untrimmed list" (vs the more common "typed too many"),
-// which oncall benefits from seeing as a pattern.
-const MASSIVE_OVERSHOOT_MULTIPLIER = 2;
-
 // Single-source the GuildMember-shape bot check used by every
 // expansion path (direct user mention, role expansion, @everyone
 // expansion). A future discord.js rename of `.user.bot` only needs
@@ -236,7 +221,8 @@ function isBotMember(member) {
 }
 
 // Resolve a list of mention tokens (raw "<@..>" / "<@&..>" / `@everyone`)
-// to a flat user-ID list with the cap + bot filter applied. Returns
+// to all candidate user IDs with cached bots filtered. The caller resolves
+// uncached users, filters bots, then applies its recipient cap. Returns
 // `{ ids, invalidTokens, cappedCount, massMentionDenied, roleMentionsDenied }`;
 // never throws on parse errors — invalid tokens always land in
 // `invalidTokens` for caller-side surfacing. Sender is NOT filtered —
@@ -324,35 +310,16 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
 
-  // `seen` is the canonical post-filter unique-candidate set (every
-  // ID we considered, regardless of cap). `ids` is the cap-bounded
-  // subset returned to the caller. `cappedCount` is computed post-hoc
-  // as `seen.size - ids.size` — accurate even when role expansion is
-  // the source of the overflow.
+  // Keep all candidates: uncached bots must not consume the send's human slots.
   const seen = new Set();
-  const ids = new Set();
   const invalidTokens = [];
   const guild = interaction.guild;
-  // `cap > 0` is guaranteed by the `intEnv(..., { minPositive: true })`
-  // validator on QURL_SEND_MAX_RECIPIENTS in config.js — if the env
-  // override ever flipped to ≤ 0, that validator would crash boot,
-  // not silently produce an empty result here.
-  const cap = config.QURL_SEND_MAX_RECIPIENTS;
-
-  // Mark an ID as considered: dedupe via `seen`, add to `ids` only
-  // while under cap. Role-contribution detection lives in the role
-  // loop's `usable` counter — see comment there.
-  function consider(id) {
-    if (seen.has(id)) return;
-    seen.add(id);
-    if (ids.size < cap) ids.add(id);
-  }
 
   // Detect-and-strip `@everyone` BEFORE the mention passes so the
   // token doesn't leak into the residue (which would U+200B-defuse
   // it into `invalidTokens` regardless of allow/deny). The actual
   // expansion runs LAST (after user + role mentions), so explicit
-  // mentions get cap priority. Detect-via-replace (compare strings)
+  // mentions get priority. Detect-via-replace (compare strings)
   // instead of `.test()` so the shared module-scope `/g` regex's
   // `lastIndex` doesn't carry state across calls.
   let massMentionDenied = false;
@@ -382,7 +349,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // filtered bots.
     const member = guild?.members?.cache?.get(id);
     if (isBotMember(member)) continue;
-    consider(id);
+    seen.add(id);
   }
 
   // Role expansion: missing role / empty role / DM-context guild
@@ -425,8 +392,11 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // pattern as invalidRoleIds above.
   const roleMentionsDenied = [];
   const roleMentionsDeniedIds = new Set();
+  const visitedRoleIds = new Set();
   for (const m of input.matchAll(ROLE_MENTION_RE)) {
     const roleId = m[1];
+    if (visitedRoleIds.has(roleId)) continue;
+    visitedRoleIds.add(roleId);
     // `<@&{guildId}>` is Discord's wire form for the @everyone role —
     // the @everyone role's ID always equals `guild.id`. Semantically
     // this is the same action as the `@everyone` text token, so route
@@ -481,22 +451,13 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // already direct-mentioned still contributes — dedupe counts).
     // Drives ONLY the "no usable members" → invalidTokens branch
     // below: empty role / bots-only role. Critically, `usable++` runs
-    // BEFORE the seen-check inside `consider`, so the "fully-duplicate
-    // role isn't useless" test catches a future refactor reversing
-    // that order.
+    // before deduplication, so a fully duplicated role is still usable.
     //
-    // Intentionally NO `ids.size >= cap` early-break here (unlike the
-    // channel-expansion and @everyone loops): role expansion walks
-    // every member so `consider()` can grow `seen` past the cap,
-    // giving downstream `cappedCount` an accurate "you typed 55, we
-    // kept 25" signal. Early-breaking would zero out cappedCount
-    // because seen never grows past cap once break fires. Pinned by
-    // the "cappedCount accounts for role-expansion overflow" test.
     let usable = 0;
     for (const [memberId, roleMember] of members) {
       if (isBotMember(roleMember)) continue;
       usable++;
-      consider(memberId);
+      seen.add(memberId);
     }
     if (usable === 0) {
       // Role had members but they were all filtered out as bots.
@@ -508,7 +469,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
 
   // Channel expansion: voice / stage-voice channels expand to their
   // currently-connected non-bot member set. Runs BEFORE @everyone so
-  // explicit channel mentions claim cap slots first. `channel.members`
+  // explicit channel mentions keep priority. `channel.members`
   // reads the voice-state cache, which is only populated when the
   // `GuildVoiceStates` gateway intent is declared (pinned by the boot
   // canary in discord.js).
@@ -525,8 +486,11 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // (stage channels with thousands of audience members) needs to
   // revisit this.
   const invalidChannelIds = new Set();
+  const visitedChannelIds = new Set();
   for (const m of input.matchAll(CHANNEL_MENTION_RE)) {
     const channelId = m[1];
+    if (visitedChannelIds.has(channelId)) continue;
+    visitedChannelIds.add(channelId);
     const channel = guild?.channels?.cache?.get(channelId);
     if (!channel) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
@@ -576,105 +540,31 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
       continue;
     }
-    // Early-break on cap, mirroring the @everyone loop's
-    // `if (ids.size >= cap) break;` (see the ordering comment block
-    // there for the full rationale on cache-insertion-order semantics
-    // — voice expansion inherits the same caveat: under-cap overflow
-    // wins remaining slots by Discord Collection insertion order, not
-    // alphabetical / role-ordered / recently-active). Without the
-    // break, a stage channel with thousands of members + a small
-    // env-overridden cap would walk the entire member set after the
-    // cap was hit — bounded but wasted work.
-    //
-    // `capHit` separates "no usable members" (empty / bots-only) from
-    // "cap was already filled by earlier expansions, voice silently
-    // no-ops" — the latter must NOT push to invalidTokens, since the
-    // channel itself was perfectly valid; the cap just had no room.
-    //
-    // Loop ordering: cap check FIRST (avoid wasting cycles after the
-    // cap fills on a bot-heavy channel), then bot filter (a bot at
-    // index N where ids.size === cap-1 correctly skips without
-    // claiming the last slot), then consider. Reversing cap-vs-bot
-    // order would let a bot's `continue` hide the cap fill.
-    //
-    // Intentionally DIVERGES from the role-expansion loop above
-    // (which has no early-break): role expansion preserves the
-    // `cappedCount` overshoot signal by walking every member;
-    // voice/stage expansion can have ~10k-member iteration cost,
-    // and the user's mental model for "everyone in this voice
-    // channel" doesn't need a precise overshoot count the way
-    // `<@&role>` does.
     let usable = 0;
-    let capHit = false;
     for (const [memberId, channelMember] of members) {
-      if (ids.size >= cap) { capHit = true; break; }
       if (isBotMember(channelMember)) continue;
       usable++;
-      consider(memberId);
+      seen.add(memberId);
     }
-    if (usable === 0 && !capHit) {
+    if (usable === 0) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
     }
   }
 
   // @everyone expansion runs LAST so explicit mentions (user / role /
-  // channel) get cap priority. If the user typed
-  // `@everyone <@uncachedUser>`, the direct mention claims a cap slot
-  // first, and @everyone fills the remainder. Reversing this order
+  // channel) keep priority. If the user typed
+  // `@everyone <@uncachedUser>`, the direct mention comes first. Reversing this order
   // silently drops explicit mentions when the cache is partial.
   let massMentionExpanded = false;
   if (everyonePresent && allowMassMention) {
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
-      // PARTIAL-CACHE BLIND SPOT: same caveat as role expansion
-      // above — in large guilds without a recent GUILD_MEMBERS
-      // chunk, the cache reflects only the currently-loaded subset,
-      // not the guild's true member count. Acceptable v1; in
-      // realistic guilds (where bots are <1% of members) the cap
-      // (QURL_SEND_MAX_RECIPIENTS) bounds the iteration via the
-      // `break` below. The pathological all-bots case still walks
-      // the entire cache — bounded only by cache size, not the cap.
-      //
-      // ORDERING is cache-insertion-order (discord.js Collection
-      // is a Map): when the cap short-circuits the loop, members
-      // win the remaining slots BY CACHE INSERTION ORDER — not
-      // alphabetical, role-ordered, or recently-active. Users may
-      // see a different subset across invocations as the cache
-      // churns. v2 picker (#324 — MentionableSelectMenu) shifts the
-      // selection burden onto the user and removes this ambiguity.
-      //
-      // ITERATION ASSUMES NO CONCURRENT MUTATION: discord.js itself
-      // doesn't guarantee iteration safety for Collections under
-      // gateway-driven mutation (member join/leave events). This
-      // parser runs synchronously inside the slash-command handler
-      // — no awaits between the start of this loop and its `break`
-      // — so the cache snapshot is effectively frozen for the loop
-      // body. A future refactor that introduced an `await` here
-      // would break that assumption.
+      // Synchronous walk: gateway events cannot mutate this snapshot mid-loop.
+      // The caller caps only after user resolution.
+      // A partial cache still expands only the members it contains.
       for (const [memberId, member] of everyoneMembers) {
-        // Short-circuit once we've filled the cap. We accept the
-        // tradeoff of inaccurate cappedCount (no past-cap members
-        // get added to `seen`) over scanning a 10k-member cache.
-        // The cap message still surfaces from any explicit mentions
-        // that overflowed.
-        if (ids.size >= cap) break;
         if (isBotMember(member)) continue;
-        consider(memberId);
-        // Set inside the walk (rather than deriving from
-        // `everyonePresent && allowMassMention` at the bottom) so the
-        // flag means "expansion iterated at least one non-bot member,"
-        // not "expansion was permitted." Robust against future short-
-        // circuits — cap exhausted by named mentions before this loop
-        // runs, empty cache, all-bot cache — that would otherwise
-        // leave the flag overstating.
-        //
-        // NOTE: `consider()` is a silent no-op when `seen.has(id)`, so
-        // a mixed-mentions input like `<@alice> @everyone` where alice
-        // is also in the @everyone set still sets the flag — the walk
-        // iterated alice and dedup'd internally. Documented call-site
-        // behavior (`commands.js`'s MIXED MENTIONS comment) intentionally
-        // treats this as EVERYONE-mode, so the dedup-then-set ordering
-        // matches the intended downstream semantic.
+        seen.add(memberId);
         massMentionExpanded = true;
       }
     }
@@ -741,34 +631,17 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     invalidTokens.push(escaped);
   }
 
-  // Cap was enforced inline during the two passes (`ids` never
-  // exceeds `cap`; over-cap candidates live in `seen` but not `ids`).
-  // The back-half re-enforces the cap too; surfacing `cappedCount`
-  // here lets the caller say "I kept N of M — drop these or split"
-  // before they hit Send rather than waiting for the back-half error.
-  const finalIds = [...ids];
-  const cappedCount = seen.size - ids.size;
-  if (cappedCount > 0) {
-    const logFn = seen.size > cap * MASSIVE_OVERSHOOT_MULTIPLIER
-      ? logger.warn
-      : logger.debug;
-    logFn('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
-      uniqueCount: seen.size, cap, cappedCount,
-    });
-  }
-
+  const finalIds = [...seen];
   // `massMentionExpanded` was set inside the @everyone walk above
   // (true iff the walk iterated at least one non-bot member —
-  // `consider()` dedups internally, so a mixed-mentions input still
+  // `seen` dedups internally, so a mixed-mentions input still
   // sets the flag). Surfacing it lets callers route the slash-text
   // "@everyone" path into RECIPIENT_MODE_EVERYONE without duplicating
   // the regex-match-and-permission-check (or reaching past the parser
   // to detect the `<@&{guildId}>` wire form). False when the user typed
   // @everyone but lacked permission (the denied path lands on
-  // `massMentionDenied` instead) or when the cache was cold /
-  // cap-saturated by the time the walk reached it (caller's
-  // `valid.length` check still catches that downstream).
-  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, roleMentionsDenied };
+  // `massMentionDenied` instead) or when the cache was cold or all-bot.
+  return { ids: finalIds, invalidTokens, cappedCount: 0, massMentionDenied, massMentionExpanded, roleMentionsDenied };
 }
 
 // `isVoiceChannelType` is the same voice/stage-voice predicate the
