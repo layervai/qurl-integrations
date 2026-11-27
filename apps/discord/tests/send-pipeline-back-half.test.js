@@ -2436,7 +2436,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
 });
 
 describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)', () => {
-  async function setupRevocableSend() {
+  async function setupRevocableSend(recipients = [{ id: 'u1', username: 'Alice' }]) {
     const collectHandlers = {};
     const response = {
       createMessageComponentCollector: jest.fn(() => ({
@@ -2470,9 +2470,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
       return undefined;
     });
 
-    await executeSendPipeline(interaction, makePipelineParams({
-      recipients: [{ id: 'u1', username: 'Alice' }],
-    }));
+    await executeSendPipeline(interaction, makePipelineParams({ recipients }));
     expect(collectHandlers.collect).toEqual(expect.any(Function));
     const sendId = mockDb.saveSendConfig.mock.calls[0][0].sendId;
     const makeClick = (action) => ({
@@ -2746,8 +2744,10 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(2);
   });
 
-  it('allows Add Recipients after Revoke fails because links still exist', async () => {
-    const { collect, makeClick, interaction } = await setupRevocableSend();
+  it.each([false, true])('allows Add Recipients after failed Revoke without changing caller recipients (frozen=%s)', async (frozen) => {
+    const callerRecipients = [{ id: 'u1', username: 'Alice' }];
+    if (frozen) Object.freeze(callerRecipients);
+    const { collect, makeClick, interaction } = await setupRevocableSend(callerRecipients);
     mockDb.getSendItems.mockReset();
     mockDb.getSendItems.mockRejectedValueOnce(new Error('ddb unavailable'));
 
@@ -2799,6 +2799,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
         content: 'Added 1 recipient',
         components: [],
       });
+      expect(callerRecipients).toEqual([{ id: 'u1', username: 'Alice' }]);
     } finally {
       clearCooldown('sender-1');
     }
@@ -3629,6 +3630,30 @@ describe('executeSendPipeline — personalMessage shape gate', () => {
 });
 
 describe('executeSendPipeline — recipients shape + cap gates', () => {
+  test.each([null, { name: 'no-id' }, { id: 123 }, { id: '' }, ['u1'], 'u1', undefined])(
+    'rejects malformed recipient before any upload or write (%p)', async (recipient) => {
+      const interaction = makeInteraction();
+      _test.setCooldown(interaction.user.id);
+      await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: [recipient] })))
+        .rejects.toThrow(/recipients\[0\].*non-empty string id/);
+      expect(_test.isOnCooldown(interaction.user.id)).toBe(false);
+      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/), components: [],
+      }));
+      expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+      expect(mockMintLinks).not.toHaveBeenCalled();
+      expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    },
+  );
+
+  test('reports the bad index without exposing recipient contents, including holes', async () => {
+    const recipients = [{ id: 'u1', username: 'Alice' }, { id: 'u2' }, { id: 'u3' }];
+    delete recipients[1];
+    await expect(executeSendPipeline(makeInteraction(), makePipelineParams({ recipients })))
+      .rejects.toThrow('executeSendPipeline: recipients[1] must be an object with a non-empty string id');
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+  });
+
   const { QURL_SEND_MAX_RECIPIENTS: RECIPIENT_CAP } = require('../src/config');
 
   test.each([
@@ -3821,4 +3846,88 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     const [, message] = mockSendChannelMessage.mock.calls[0];
     expect(message.content).not.toMatch(/\u202E/u);
   });
+});
+
+describe('executeSendPipeline — direct caller contract (#278)', () => {
+  it('pins location upload failure audit kind and status (#303)', async () => {
+    mockUploadJsonToConnector.mockRejectedValueOnce(Object.assign(new Error('owned location upload failed'), { status: 503 }));
+    await executeSendPipeline(makeInteraction(), makePipelineParams({
+      resourceType: 'maps', locationUrl: 'https://maps.example.com/place', locationName: 'Place',
+    }));
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      kind: 'location', reason: 'upstream_5xx', status_code: 503,
+    }));
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
+
+  function prepareUpload(resourceType) {
+    if (resourceType === 'file') {
+      mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-contract', fileBuffer: new ArrayBuffer(8) });
+    } else {
+      mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-contract' });
+    }
+    return makePipelineParams({ resourceType, locationUrl: 'https://maps.example.com/place', locationName: 'Place' });
+  }
+
+  it.each(['file', 'maps'])('direct %s send persists before DM dispatch and saves config afterwards', async (resourceType) => {
+    const params = prepareUpload(resourceType);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/contract', resource_id: 'res-contract', qurl_id: 'q_contract' }]);
+    mockDb.recordQURLSendBatch.mockResolvedValueOnce(undefined);
+    mockSendDM.mockResolvedValueOnce({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.saveSendConfig.mockResolvedValueOnce(undefined);
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, params);
+    expect(mockMintLinks.mock.invocationCallOrder[0]).toBeLessThan(mockDb.recordQURLSendBatch.mock.invocationCallOrder[0]);
+    expect(mockDb.recordQURLSendBatch.mock.invocationCallOrder[0]).toBeLessThan(mockSendDM.mock.invocationCallOrder[0]);
+    expect(mockSendDM.mock.invocationCallOrder[0]).toBeLessThan(mockDb.saveSendConfig.mock.invocationCallOrder[0]);
+    expect(logger.audit).toHaveBeenCalledWith('upload_success', expect.objectContaining({ kind: resourceType === 'file' ? 'file' : 'location' }));
+    if (resourceType === 'maps') {
+      expect(mockUploadJsonToConnector).toHaveBeenCalledWith({ type: 'google-map', url: params.locationUrl, name: 'Place' }, 'location.json', 'apikey', null);
+    }
+    // Omitted recipientMode keeps the ordinary picker/text-channel behavior.
+    expect(mockSendChannelMessage).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringMatching(/Sent to 1 user/) }));
+  });
+
+  it('rejects a full file-send pool at the actual slot claim without uploading', async () => {
+    const previous = _test.getActiveFileSends();
+    _test.setActiveFileSends(Number.MAX_SAFE_INTEGER);
+    const interaction = makeInteraction();
+    try {
+      await executeSendPipeline(interaction, makePipelineParams());
+      expect(interaction.editReply).toHaveBeenCalledWith({
+        content: 'The bot is processing too many file sends right now. Please try again in a moment.', components: [],
+      });
+      expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+      expect(mockMintLinks).not.toHaveBeenCalled();
+      expect(_test.getActiveFileSends()).toBe(Number.MAX_SAFE_INTEGER);
+    } finally {
+      _test.setActiveFileSends(previous);
+    }
+  });
+
+  it('logs a saveSendConfig failure after successful delivery and still resolves', async () => {
+    const params = prepareUpload('file');
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/contract', resource_id: 'res-contract', qurl_id: 'q_contract' }]);
+    mockDb.recordQURLSendBatch.mockResolvedValueOnce(undefined);
+    mockSendDM.mockResolvedValueOnce({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.saveSendConfig.mockRejectedValueOnce(new Error('owned config write failure'));
+    await expect(executeSendPipeline(makeInteraction(), params)).resolves.toBeUndefined();
+    expect(mockSendDM).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith('saveSendConfig failed; Add Recipients will be unavailable for this send',
+      expect.objectContaining({ error: 'owned config write failure' }));
+  });
+
+  it.each([['file', 're-upload the file'], ['maps', 'edit the location query and resend']])(
+    'direct %s quota failure gives the correct recovery action', async (resourceType, action) => {
+      const params = prepareUpload(resourceType);
+      mockMintLinks.mockRejectedValueOnce(Object.assign(new Error('owned quota failure'), { apiCode: 'quota_exceeded' }));
+      const interaction = makeInteraction();
+      await executeSendPipeline(interaction, params);
+      expect(interaction.editReply).toHaveBeenCalledWith({ content: expect.stringContaining(action) });
+      expect(mockSendDM).not.toHaveBeenCalled();
+      expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    },
+  );
 });
