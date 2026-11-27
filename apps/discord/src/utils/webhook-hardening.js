@@ -22,6 +22,7 @@ function createBadSigLimiter({
   perIpCap,
   sweepMs = 5 * 60 * 1000,
   globalCap = 10_000,
+  preserveAtCapacity = false,
 } = {}) {
   // perIpCap defaults to max * 4 so a caller bumping max=60 doesn't
   // leave the per-IP array sized for max=30.
@@ -41,11 +42,14 @@ function createBadSigLimiter({
     // Skip the .filter() allocation when there's no prior entry — the
     // happy path of legit traffic never has a bad-sig history.
     shouldThrottle(ip) {
+      // Unknown-owner buckets must not evict active counters under owner rotation.
+      if (preserveAtCapacity && attempts.size >= globalCap && !attempts.has(ip)) return true;
       const list = attempts.get(ip);
       if (!list) return false;
       return list.filter(t => t > Date.now() - windowMs).length >= max;
     },
     recordBadSig(ip) {
+      if (preserveAtCapacity && attempts.size >= globalCap && !attempts.has(ip)) return max;
       const now = Date.now();
       let list = (attempts.get(ip) || []).filter(t => t > now - windowMs);
       list.push(now);

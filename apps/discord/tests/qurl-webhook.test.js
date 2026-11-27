@@ -1,6 +1,7 @@
 
 const crypto = require('crypto');
 const express = require('express');
+const { AUDIT_EVENTS } = require('../src/constants');
 
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
@@ -449,6 +450,117 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
       .set('QURL-Signature', signBody(unknownRaw))
       .send(unknownRaw);
     expect(limited.status).toBe(429);
+  });
+});
+
+describe('POST /webhooks/qurl — unknown-owner fairness behind shared NAT', () => {
+  beforeAll(() => {
+    jest.resetModules();
+  });
+
+  it('isolates unknown-owner budgets, admits valid siblings and recovers when an owner becomes known', async () => {
+    // eslint-disable-next-line global-require
+    const isolatedApp = require('../src/server').app;
+    isolatedApp.set('trust proxy', true);
+    mockPrimed = true;
+    mockWithinLag = false;
+    mockOwnerSecrets.clear();
+    mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
+    const owner = 'usr_' + 'x'.repeat(128) + 'A';
+    const sibling = 'usr_' + 'x'.repeat(128) + 'B';
+    const send = (ownerId, ip = '192.0.2.1') => {
+      const raw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: ownerId });
+      return request(isolatedApp).post('/webhooks/qurl')
+        .set('X-Forwarded-For', ip).set('Content-Type', 'application/json')
+        .set('QURL-Signature', signBody(raw)).send(raw);
+    };
+    for (let i = 0; i < 150; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await send(owner)).status).toBe(401);
+    }
+    expect((await send(owner)).status).toBe(429);
+    expect((await send(owner, '192.0.2.2')).status).toBe(401);
+    expect((await send(sibling)).status).toBe(401);
+    for (let i = 0; i < 150; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await send(null)).status).toBe(401);
+    }
+    expect((await send(null)).status).toBe(429);
+    expect((await send('usr_test')).status).toBe(200);
+    mockOwnerSecrets.set(owner, 'test-qurl-secret');
+    expect((await send(owner)).status).toBe(200);
+  });
+});
+
+describe('POST /webhooks/qurl — coarse unknown-owner IP budget', () => {
+  beforeAll(() => {
+    jest.resetModules();
+  });
+
+  function send(app, ownerId, ip) {
+    const raw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: ownerId });
+    return request(app).post('/webhooks/qurl')
+      .set('X-Forwarded-For', ip).set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw)).send(raw);
+  }
+
+  it('bounds rotating-owner failures while admitting a verified sibling', async () => {
+    // eslint-disable-next-line global-require
+    const isolatedApp = require('../src/server').app;
+    isolatedApp.set('trust proxy', true);
+    for (let i = 0; i < 1500; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await send(isolatedApp, `usr_rotating_${i}`, '198.51.100.1')).status).toBe(401);
+    }
+    expect((await send(isolatedApp, 'usr_next', '198.51.100.1')).status).toBe(429);
+    expect((await send(isolatedApp, 'usr_test', '198.51.100.1')).status).toBe(200);
+    expect(jest.requireMock('../src/logger').audit)
+      .toHaveBeenCalledWith(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, {});
+  });
+
+  it('does not let a single exhausted owner consume the wider IP budget', async () => {
+    // eslint-disable-next-line global-require
+    const isolatedApp = require('../src/server').app;
+    isolatedApp.set('trust proxy', true);
+    for (let i = 0; i < 1500; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await send(isolatedApp, 'usr_drifted', '198.51.100.2')).status).toBe(i < 150 ? 401 : 429);
+    }
+    expect((await send(isolatedApp, 'usr_sibling', '198.51.100.2')).status).toBe(401);
+    expect((await send(isolatedApp, 'usr_test', '198.51.100.2')).status).toBe(200);
+  });
+});
+
+describe('POST /webhooks/qurl — unknown-owner capacity preservation', () => {
+  beforeAll(() => {
+    jest.resetModules();
+  });
+
+  it('keeps exhausted owner counters at capacity while admitting a valid known owner', async () => {
+    const hardening = jest.requireActual('../src/utils/webhook-hardening');
+    const createLimiter = hardening.createBadSigLimiter;
+    const factory = jest.spyOn(hardening, 'createBadSigLimiter').mockImplementation((options = {}) =>
+      createLimiter({ ...options, globalCap: options.max === 150 ? 2 : options.globalCap }));
+    let isolatedApp;
+    try {
+      // eslint-disable-next-line global-require
+      isolatedApp = require('../src/server').app;
+    } finally {
+      factory.mockRestore();
+    }
+    const send = (ownerId) => {
+      const raw = JSON.stringify({ ...VALID_PAYLOAD, owner_id: ownerId });
+      return request(isolatedApp).post('/webhooks/qurl')
+        .set('Content-Type', 'application/json').set('QURL-Signature', signBody(raw)).send(raw);
+    };
+    for (let i = 0; i < 150; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await send('usr_drifted')).status).toBe(401);
+    }
+    expect((await send('usr_second')).status).toBe(401);
+    expect((await send('usr_rotated')).status).toBe(429);
+    expect((await send('usr_drifted')).status).toBe(429);
+    expect((await send('usr_test')).status).toBe(200);
   });
 });
 
