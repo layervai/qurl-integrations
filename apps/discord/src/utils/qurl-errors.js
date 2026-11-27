@@ -44,5 +44,6 @@ module.exports = {
   isGoneQurlApiError,
   qurlApiError,
   qurlApiErrorMessage,
+  qurlApiErrorCode,
   qurlApiErrorStatus,
 };

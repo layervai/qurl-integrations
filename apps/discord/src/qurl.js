@@ -199,16 +199,26 @@ async function getIdentity(apiKey, guildId) {
     const endpoint = config.QURL_ENDPOINT.replace(/\/+$/, '');
     // TODO(upstream-contract): keep the explicit /v1 prefix aligned with
     // qurl-service until #1377 removes this SDK-gap shim.
-    const response = await globalThis.fetch(`${endpoint}/v1/me`, {
-      method: 'GET',
-      redirect: 'error',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: 'application/json',
-        'User-Agent': USER_AGENT,
-      },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    let response;
+    try {
+      response = await globalThis.fetch(`${endpoint}/v1/me`, {
+        method: 'GET',
+        redirect: 'error',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
+          'User-Agent': USER_AGENT,
+        },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (cause) {
+      // Fetch rejects redirects and URL failures too; keep this category broad and body-free.
+      const code = cause?.name === 'TimeoutError' || cause?.name === 'AbortError'
+        ? ERROR_CODE_TIMEOUT : ERROR_CODE_NETWORK;
+      const error = qurlApiError('GET', '/me', code);
+      error.code = code;
+      throw error;
+    }
     if (!response.ok) {
       try {
         await response.body?.cancel();
@@ -221,14 +231,20 @@ async function getIdentity(apiKey, guildId) {
     let body;
     try {
       body = await response.json();
-    } catch {
-      throw new Error('qURL identity response was not valid JSON');
+    } catch (cause) {
+      const code = cause?.name === 'TimeoutError' || cause?.name === 'AbortError'
+        ? ERROR_CODE_TIMEOUT : 'identity_invalid_json';
+      const error = qurlApiError('GET', '/me', code);
+      error.code = code;
+      throw error;
     }
     // TODO(upstream-contract): mirrors qurl-service's GET /v1/me envelope.
     const identity = body?.data;
     const key = identity?.api_key;
     if (!key || typeof key !== 'object' || Array.isArray(key)) {
-      throw new Error('qURL identity response had an unexpected shape');
+      const error = new Error('qURL identity response had an unexpected shape');
+      error.code = 'identity_invalid_shape';
+      throw error;
     }
     // A 200 already proves the service accepted the key. Display fields are
     // optional in the shared /v1/me consumer contract, so degrade them rather
