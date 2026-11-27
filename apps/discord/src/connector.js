@@ -164,8 +164,13 @@ async function throwConnectorError(label, response) {
   try {
     bodyText = await response.text();
   } catch { /* network read failed, fall through with empty body */ }
-  const { apiCode, apiDetail } = parseConnectorBody(bodyText);
-  throwConnectorErrorFromBody(label, response, { bodyText, apiCode, apiDetail });
+  const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
+  // TODO(upstream-contract): /api/upload returns 400 + this fixed size error.
+  const uploadTooLarge = response.status === 400 && parsed?.success === false
+    && typeof parsed.error === 'string' && /^File too large(?:, max \d+MB)?$/.test(parsed.error);
+  throwConnectorErrorFromBody(label, response, {
+    bodyText, apiCode: uploadTooLarge ? 'upload_too_large' : apiCode, apiDetail,
+  });
 }
 
 // The connector answers `/api/upload` with HTTP 200 + `success: true` but no
