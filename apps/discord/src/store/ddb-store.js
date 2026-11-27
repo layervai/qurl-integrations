@@ -40,6 +40,7 @@ const {
 
 const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
 const logger = require('../logger');
+const { guildSenderKey } = require('../utils/guild-sender-key');
 const {
   DM_STATUS,
   AUDIT_EVENTS,
@@ -261,6 +262,7 @@ async function recordQURLSend({
   if (typeof guildId === 'string' && guildId.length > 0) {
     Item.guild_id = guildId;
   }
+  Item.guild_sender_id = guildSenderKey(guildId === '' ? null : guildId ?? null, senderDiscordId);
   await ddb.send(new PutCommand({
     TableName: TABLES.qurl_sends,
     Item,
@@ -295,6 +297,7 @@ function qurlSendBatchItem(s, createdAt) {
   if (typeof s.guildId === 'string' && s.guildId.length > 0) {
     Item.guild_id = s.guildId;
   }
+  Item.guild_sender_id = guildSenderKey(s.guildId === '' ? null : s.guildId ?? null, s.senderDiscordId);
   return Item;
 }
 
