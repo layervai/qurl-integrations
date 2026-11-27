@@ -4,7 +4,6 @@ jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test-api-key',
   QURL_ENDPOINT: 'https://api.test.local',
   CONNECTOR_URL: 'https://connector.test.local',
-  GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
@@ -165,12 +164,10 @@ const mockUploadToConnector = jest.fn();
 const mockDownloadAndUpload = jest.fn();
 const mockReUploadBuffer = jest.fn();
 const mockMintLinks = jest.fn();
-const mockUploadJsonToConnector = jest.fn();
 jest.mock('../src/connector', () => ({
   downloadAndUpload: mockDownloadAndUpload,
   reUploadBuffer: mockReUploadBuffer,
   mintLinks: mockMintLinks,
-  uploadJsonToConnector: mockUploadJsonToConnector,
   isAllowedSourceUrl: (url) => typeof url === 'string' && url.startsWith('https://cdn.discordapp.com'),
 }));
 
@@ -183,9 +180,6 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: mockGetResourceStatus,
 }));
 
-const { mockPlacesModule } = require('./helpers/places-mock');
-jest.mock('../src/places', () => mockPlacesModule);
-
 const crypto = require('crypto');
 const originalRandomBytes = crypto.randomBytes;
 const MOCK_NONCE = 'deadbeef01234567';
@@ -196,7 +190,7 @@ crypto.randomBytes = jest.fn((size) => {
 crypto.randomUUID = jest.fn(() => 'mock-uuid-9999');
 
 const { commands, handleCommand, _test } = require('../src/commands');
-const { sendCooldowns, setCooldown, isGoogleMapsURL } = _test;
+const { sendCooldowns, setCooldown } = _test;
 
 function makeInteraction(overrides = {}) {
   const base = {
@@ -278,7 +272,7 @@ describe('handleCommand — autocomplete edge cases', () => {
     expect(interaction.reply).not.toHaveBeenCalled();
   });
 
-  it('routes autocomplete to the /qurl map location handler (which gates on /qurl + map + location)', async () => {
+  it('cached Maps autocomplete returns no choices', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       guildId: 'guild-1',
@@ -312,14 +306,5 @@ describe('handleCommand — supported guild-install context', () => {
     } finally {
       qurlCommand.execute = realExecute;
     }
-  });
-});
-
-describe('isGoogleMapsURL — goo.gl edge cases', () => {
-  it('rejects goo.gl link without /maps/ path', () => {
-    expect(isGoogleMapsURL('https://goo.gl/abcdef')).toBe(false);
-  });
-  it('rejects goo.gl link with other path', () => {
-    expect(isGoogleMapsURL('https://goo.gl/search/abc')).toBe(false);
   });
 });

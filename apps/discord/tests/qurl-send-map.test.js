@@ -3,7 +3,6 @@ jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test-api-key',
   QURL_ENDPOINT: 'https://api.test.local',
   CONNECTOR_URL: 'https://connector.test.local',
-  GOOGLE_MAPS_API_KEY: 'test-google-key',
   MAP_COMMAND_ENABLED: true,
   DETECT_COMMAND_ENABLED: true,
   QURL_SEND_COOLDOWN_MS: 30000,
@@ -99,7 +98,6 @@ jest.mock('../src/connector', () => ({
   reUploadBuffer: jest.fn(),
   mintLinks: jest.fn(),
   detectWatermark: (...a) => mockDetectWatermark(...a),
-  uploadJsonToConnector: jest.fn(),
   isAllowedSourceUrl: (url) => typeof url === 'string' && url.startsWith('https://cdn.discordapp.com'),
 }));
 
@@ -109,13 +107,8 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: jest.fn(),
 }));
 
-const {
-  mockPlacesModule,
-  mockSearchPlaces,
-  mockFindPlaceFromText,
-  mockGetPlaceDetails,
-} = require('./helpers/places-mock');
-jest.mock('../src/places', () => mockPlacesModule);
+
+
 
 const mockCreateFlow = jest.fn();
 const mockLoadFlow = jest.fn();
@@ -137,20 +130,12 @@ const { sendDM: mockSendDM } = require('../src/discord');
 const { mintLinks: mockMintLinks } = require('../src/connector');
 const {
   handleQurlSend,
-  handleQurlMap,
   resolveRecipientUsers,
   partitionRecipients,
   selfDestructOptionToSeconds,
   renderRecipientWarnings,
   renderConfirmCardContent,
   resolveMentionableSelection,
-  parseLocationInput,
-  resolveLocation,
-  RESOLVE_REASON,
-  handleAutocomplete,
-  _resetAutocompleteFailureBurst,
-  AUTOCOMPLETE_FAILURE_LOG_BURST,
-  safeDecodeURIComponent,
   SEND_STAGE_AWAITING_CONFIRM,
   CONFIRM_USER_SELECT_CUSTOM_ID,
   CONFIRM_SEND_CUSTOM_ID,
@@ -281,9 +266,6 @@ beforeEach(() => {
   mockDeleteFlow.mockReset();
   mockTransitionFlow.mockReset();
   mockDb.getGuildApiKey.mockReset();
-  mockSearchPlaces.mockReset().mockResolvedValue([]);
-  mockFindPlaceFromText.mockReset().mockResolvedValue(null);
-  mockGetPlaceDetails.mockReset().mockResolvedValue(null);
   mockSupersedeOrCreate.mockResolvedValue({ created: true, version: 1 });
   mockDeleteFlow.mockResolvedValue({ deleted: true });
   mockTransitionFlow.mockResolvedValue({ result: 'ok', version: 2 });
@@ -902,423 +884,13 @@ describe('setCooldown LRU iteration order', () => {
   });
 });
 
-describe('parseLocationInput', () => {
-  test('Google Maps short URL passes through verbatim', () => {
-    const r = parseLocationInput('https://goo.gl/maps/abc123');
-    expect(r.locationUrl).toBe('https://goo.gl/maps/abc123');
-    expect(r.placeId).toBeUndefined();
-    expect(r.text).toBeUndefined();
-  });
 
-  test('Google Maps place URL passes through with derived name', () => {
-    const r = parseLocationInput('https://www.google.com/maps/place/Eiffel+Tower/@48.85,2.29,17z');
-    expect(r.locationUrl).toContain('google.com/maps/place');
-    expect(r.locationName).toBeTruthy();
-  });
 
-  test('api=1&query= form extracts the name (round-trip for re-shared qURL map URLs)', () => {
-    const url = 'https://www.google.com/maps/search/?api=1&query=Eiffel+Tower&query_place_id=ChIJxxx';
-    const r = parseLocationInput(url);
-    expect(r.locationUrl).toBe(url);
-    expect(r.locationName).toBe('Eiffel Tower');
-  });
 
-  test('place_id sentinel parses into a placeId branch (no URL synthesized)', () => {
-    const r = parseLocationInput('qurl_place:ChIJ37FjGE63t4kRD2_jXSF1F9o');
-    expect(r.placeId).toBe('ChIJ37FjGE63t4kRD2_jXSF1F9o');
-    expect(r.locationUrl).toBeNull();
-    expect(r.locationName).toBeNull();
-  });
 
-  test('plain place name returns text branch for server-side resolution', () => {
-    const r = parseLocationInput('Eiffel Tower, Paris');
-    expect(r.locationUrl).toBeNull();
-    expect(r.locationName).toBeNull();
-    expect(r.text).toBe('Eiffel Tower, Paris');
-  });
 
-  test('plain non-URL text returns text branch', () => {
-    const r = parseLocationInput('not a url just plain text input');
-    expect(r.text).toBe('not a url just plain text input');
-    expect(r.locationUrl).toBeNull();
-  });
 
-  test('https URL that does NOT match MAPS_URL_PATTERNS falls through to text branch', () => {
-    const r = parseLocationInput('https://evil.example.com/maps/place/x');
-    expect(r.locationUrl).toBeNull();
-    expect(r.text).toBe('https://evil.example.com/maps/place/x');
-  });
 
-  test('malformed %-encoding in the input does not throw', () => {
-    expect(() => parseLocationInput('https://www.google.com/maps/place/%ZZ-broken')).not.toThrow();
-  });
-
-  test('spoofed host (google.com.evil.com) fails the regex AND falls through to text branch', () => {
-    const spoofed = 'https://google.com.evil.com/maps/place/Eiffel-Tower';
-    const r = parseLocationInput(spoofed);
-    expect(r.locationUrl).toBeNull();
-    expect(r.text).toBe(spoofed);
-  });
-});
-
-describe('resolveLocation', () => {
-  beforeEach(() => {
-    mockSearchPlaces.mockReset().mockResolvedValue([]);
-    mockFindPlaceFromText.mockReset().mockResolvedValue(null);
-    mockGetPlaceDetails.mockReset().mockResolvedValue(null);
-  });
-
-  test('URL branch passes through without an API call', async () => {
-    const r = await resolveLocation({
-      locationUrl: 'https://goo.gl/maps/abc123',
-      locationName: 'My Place',
-    });
-    expect(r.ok).toBe(true);
-    expect(r.locationUrl).toBe('https://goo.gl/maps/abc123');
-    expect(r.locationName).toBe('My Place');
-    expect(mockFindPlaceFromText).not.toHaveBeenCalled();
-    expect(mockGetPlaceDetails).not.toHaveBeenCalled();
-  });
-
-  test('placeId branch calls getPlaceDetails and builds a place_id-pinned URL', async () => {
-    mockGetPlaceDetails.mockResolvedValueOnce({
-      placeId: 'ChIJ37FjGE63t4kRD2_jXSF1F9o',
-      name: 'The White House',
-      address: '1600 Pennsylvania Ave NW, Washington, DC',
-    });
-    const r = await resolveLocation({ placeId: 'ChIJ37FjGE63t4kRD2_jXSF1F9o' });
-    expect(r.ok).toBe(true);
-    expect(r.locationName).toBe('The White House');
-    expect(r.locationUrl).toContain('query_place_id=ChIJ37FjGE63t4kRD2_jXSF1F9o');
-    expect(mockGetPlaceDetails).toHaveBeenCalledWith('ChIJ37FjGE63t4kRD2_jXSF1F9o');
-  });
-
-  test('text branch calls findPlaceFromText and pins to the top result', async () => {
-    mockFindPlaceFromText.mockResolvedValueOnce({
-      placeId: 'ChIJxxx',
-      name: 'The White House',
-      address: '1600 Pennsylvania Ave NW',
-    });
-    const r = await resolveLocation({ text: 'the whitehouse' });
-    expect(r.ok).toBe(true);
-    expect(r.locationUrl).toContain('query_place_id=ChIJxxx');
-    expect(r.locationName).toBe('The White House');
-  });
-
-  test('text branch returns not_found when Places has no candidates', async () => {
-    mockFindPlaceFromText.mockResolvedValueOnce(null);
-    const r = await resolveLocation({ text: 'asdfasdfasdf' });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe(RESOLVE_REASON.NOT_FOUND);
-  });
-
-  test('placeId branch returns not_found when Place Details returns null', async () => {
-    mockGetPlaceDetails.mockResolvedValueOnce(null);
-    const r = await resolveLocation({ placeId: 'ChIJ-deleted-place' });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe(RESOLVE_REASON.NOT_FOUND);
-  });
-
-  test('text branch returns error when the Places call throws', async () => {
-    mockFindPlaceFromText.mockRejectedValueOnce(new Error('upstream timeout'));
-    const r = await resolveLocation({ text: 'somewhere' });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe(RESOLVE_REASON.ERROR);
-  });
-
-  test('hard-fails with no_api_key when GOOGLE_MAPS_API_KEY is unset', async () => {
-    const configMock = require('../src/config');
-    const orig = configMock.GOOGLE_MAPS_API_KEY;
-    delete configMock.GOOGLE_MAPS_API_KEY;
-    try {
-      const r = await resolveLocation({ text: 'eiffel tower' });
-      expect(r.ok).toBe(false);
-      expect(r.reason).toBe(RESOLVE_REASON.NO_API_KEY);
-    } finally {
-      configMock.GOOGLE_MAPS_API_KEY = orig;
-    }
-  });
-});
-
-describe('handleAutocomplete', () => {
-  beforeEach(() => {
-    mockSearchPlaces.mockReset().mockResolvedValue([]);
-    _resetAutocompleteFailureBurst();
-  });
-
-  function makeAutocompleteInteraction({
-    subcommand = 'map',
-    focused = { name: 'location', value: 'whitehouse' },
-    guildId = 'guild-1',
-    authorizingIntegrationOwners,
-  } = {}) {
-    const respond = jest.fn().mockResolvedValue(undefined);
-    return {
-      commandName: 'qurl',
-      guildId,
-      authorizingIntegrationOwners,
-      respond,
-      options: {
-        getSubcommand: () => subcommand,
-        getFocused: () => focused,
-      },
-    };
-  }
-
-  function fakePlaceId(seed) {
-    const s = String(seed);
-    return s.length >= 16 ? s : `ChIJ${'a'.repeat(16 - s.length)}${s}`;
-  }
-
-  test('responds empty for non-qurl commands', async () => {
-    const int = makeAutocompleteInteraction();
-    int.commandName = 'link';
-    await handleAutocomplete(int);
-    expect(int.respond).toHaveBeenCalledWith([]);
-    expect(mockSearchPlaces).not.toHaveBeenCalled();
-  });
-
-  test('responds empty for DM autocomplete (no guildId)', async () => {
-    const int = makeAutocompleteInteraction({ guildId: null });
-    await handleAutocomplete(int);
-    expect(int.respond).toHaveBeenCalledWith([]);
-    expect(mockSearchPlaces).not.toHaveBeenCalled();
-  });
-
-  test('responds empty for user-install autocomplete invoked inside a guild', async () => {
-    const int = makeAutocompleteInteraction({
-      authorizingIntegrationOwners: { 1: 'user-1' },
-    });
-    await handleAutocomplete(int);
-    expect(int.respond).toHaveBeenCalledWith([]);
-    expect(mockSearchPlaces).not.toHaveBeenCalled();
-  });
-
-  test('responds empty for /qurl send (only /qurl map has suggestions)', async () => {
-    const int = makeAutocompleteInteraction({ subcommand: 'send' });
-    await handleAutocomplete(int);
-    expect(int.respond).toHaveBeenCalledWith([]);
-    expect(mockSearchPlaces).not.toHaveBeenCalled();
-  });
-
-  test('responds empty for /qurl map with a non-location focused option', async () => {
-    const int = makeAutocompleteInteraction({ focused: { name: 'personal-message', value: 'hi' } });
-    await handleAutocomplete(int);
-    expect(int.respond).toHaveBeenCalledWith([]);
-    expect(mockSearchPlaces).not.toHaveBeenCalled();
-  });
-
-  test('skips Places call for partial queries below the min-length cap', async () => {
-    const int = makeAutocompleteInteraction({ focused: { name: 'location', value: 'a' } });
-    await handleAutocomplete(int);
-    expect(int.respond).toHaveBeenCalledWith([]);
-    expect(mockSearchPlaces).not.toHaveBeenCalled();
-  });
-
-  test('skips Places call when input already looks like a URL', async () => {
-    const int = makeAutocompleteInteraction({ focused: { name: 'location', value: 'https://goo.gl/maps/abc' } });
-    await handleAutocomplete(int);
-    expect(int.respond).toHaveBeenCalledWith([]);
-    expect(mockSearchPlaces).not.toHaveBeenCalled();
-  });
-
-  test('returns sentinel-encoded choices with name + address labels', async () => {
-    mockSearchPlaces.mockResolvedValueOnce([
-      { placeId: fakePlaceId('whitehouse_dc_id'), name: 'The White House', address: '1600 Pennsylvania Ave NW, Washington, DC' },
-      { placeId: fakePlaceId('whitehouse_uk_id'), name: 'Whitehouse Pub', address: 'Manchester, UK' },
-    ]);
-    const int = makeAutocompleteInteraction();
-    await handleAutocomplete(int);
-    expect(mockSearchPlaces).toHaveBeenCalledWith('whitehouse');
-    expect(int.respond).toHaveBeenCalledTimes(1);
-    const choices = int.respond.mock.calls[0][0];
-    expect(choices).toHaveLength(2);
-    expect(choices[0]).toEqual({
-      name: 'The White House — 1600 Pennsylvania Ave NW, Washington, DC',
-      value: `qurl_place:${fakePlaceId('whitehouse_dc_id')}`,
-    });
-    expect(choices[1].value).toBe(`qurl_place:${fakePlaceId('whitehouse_uk_id')}`);
-    expect(choices[0].name).not.toBe(choices[1].name);
-  });
-
-  test('truncates a label exceeding the 100-char Discord cap (UTF-16 units)', async () => {
-    const longAddress = '1234 Very Long Street Name, Somewhere Far Away, In A Large City With A Long Name, Region, Country 99999';
-    mockSearchPlaces.mockResolvedValueOnce([{ placeId: fakePlaceId('longlabel'), name: 'Place', address: longAddress }]);
-    const int = makeAutocompleteInteraction();
-    await handleAutocomplete(int);
-    const choice = int.respond.mock.calls[0][0][0];
-    expect(choice.name.length).toBeLessThanOrEqual(100);
-    expect(choice.value.length).toBeLessThanOrEqual(100);
-  });
-
-  test('boundary — exactly 100 UTF-16 units ending in a lone high surrogate gets backed off', async () => {
-    const malformed = 'a'.repeat(99) + '\uD83D'; // lone high surrogate at index 99 → length 100
-    expect(malformed.length).toBe(100);
-    mockSearchPlaces.mockResolvedValueOnce([{ placeId: fakePlaceId('boundary1'), name: malformed, address: '' }]);
-    const int = makeAutocompleteInteraction();
-    await handleAutocomplete(int);
-    const choice = int.respond.mock.calls[0][0][0];
-    expect(choice.name.length).toBe(99);
-    const loneHigh = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
-    expect(choice.name).not.toMatch(loneHigh);
-  });
-
-  test('truncation does not split a surrogate pair (emoji-heavy label stays valid UTF-16)', async () => {
-    const emoji = '🏛️'; // 🏛 + variation selector — 3 UTF-16 units
-    const name = (emoji + 'X').repeat(40); // 160 UTF-16 units of mixed surrogate + ASCII
-    mockSearchPlaces.mockResolvedValueOnce([{ placeId: fakePlaceId('emojiplace'), name, address: '' }]);
-    const int = makeAutocompleteInteraction();
-    await handleAutocomplete(int);
-    const choice = int.respond.mock.calls[0][0][0];
-    expect(choice.name.length).toBeLessThanOrEqual(100);
-    const loneHigh = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
-    expect(choice.name).not.toMatch(loneHigh);
-  });
-
-  test('drops a choice whose value would exceed the 100-char Discord cap', async () => {
-    const good1 = fakePlaceId('good1_id');
-    const good2 = fakePlaceId('good2_id');
-    mockSearchPlaces.mockResolvedValueOnce([
-      { placeId: good1, name: 'Good', address: 'addr' },
-      { placeId: 'x'.repeat(95), name: 'Bad (too long)', address: 'addr' },
-      { placeId: good2, name: 'Also Good', address: 'addr' },
-    ]);
-    const int = makeAutocompleteInteraction();
-    await handleAutocomplete(int);
-    const choices = int.respond.mock.calls[0][0];
-    expect(choices).toHaveLength(2);
-    expect(choices.map(c => c.value)).toEqual([`qurl_place:${good1}`, `qurl_place:${good2}`]);
-  });
-
-  test('drops a choice whose name is missing (Places returned no main_text + no description)', async () => {
-    const valid = fakePlaceId('valid_for_label');
-    mockSearchPlaces.mockResolvedValueOnce([
-      { placeId: valid, name: 'Valid', address: 'addr' },
-      { placeId: fakePlaceId('no_name_entry'), name: undefined, address: 'addr2' },
-      { placeId: fakePlaceId('empty_name_xx'), name: '', address: 'addr3' },
-    ]);
-    const int = makeAutocompleteInteraction();
-    await handleAutocomplete(int);
-    const choices = int.respond.mock.calls[0][0];
-    expect(choices).toHaveLength(1);
-    expect(choices[0].value).toBe(`qurl_place:${valid}`);
-  });
-
-  test('outer-catch handles a rejection from an early-return respond() (return await contract)', async () => {
-    const int = makeAutocompleteInteraction({ guildId: null });
-    let respondCallCount = 0;
-    int.respond = jest.fn(async () => {
-      respondCallCount += 1;
-      if (respondCallCount === 1) throw new Error('Unknown interaction');
-    });
-    await handleAutocomplete(int);
-    expect(respondCallCount).toBe(2);
-  });
-
-  test('drops a choice whose place_id fails the documented shape check', async () => {
-    const valid = fakePlaceId('valid_id_one');
-    mockSearchPlaces.mockResolvedValueOnce([
-      { placeId: valid, name: 'Valid', address: 'addr' },
-      { placeId: 'tooshort', name: 'Bad short', address: 'addr' },
-      { placeId: 'has spaces in it just bad', name: 'Bad chars', address: 'addr' },
-    ]);
-    const int = makeAutocompleteInteraction();
-    await handleAutocomplete(int);
-    const choices = int.respond.mock.calls[0][0];
-    expect(choices).toHaveLength(1);
-    expect(choices[0].value).toBe(`qurl_place:${valid}`);
-  });
-
-  test('caps results at 25 (Discord choice limit)', async () => {
-    mockSearchPlaces.mockResolvedValueOnce(
-      Array.from({ length: 40 }, (_, i) => ({
-        placeId: fakePlaceId(`place_id_${i}_padding_xyz`),
-        name: `Place ${i}`,
-        address: 'addr',
-      })),
-    );
-    const int = makeAutocompleteInteraction();
-    await handleAutocomplete(int);
-    expect(int.respond.mock.calls[0][0]).toHaveLength(25);
-  });
-
-  test('responds empty (does not throw) when Places API throws', async () => {
-    mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: OVER_QUERY_LIMIT'));
-    const int = makeAutocompleteInteraction();
-    await handleAutocomplete(int);
-    expect(int.respond).toHaveBeenCalledWith([]);
-  });
-
-  test('failure burst counter emits one warn per BURST failures (SRE outage signal)', async () => {
-    const logger = require('../src/logger');
-    logger.warn.mockClear();
-    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST - 1; i++) {
-      mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
-      await handleAutocomplete(makeAutocompleteInteraction());
-    }
-    const burstWarns = () => logger.warn.mock.calls.filter(
-      (call) => call[0] === 'autocomplete handler failure burst',
-    ).length;
-    expect(burstWarns()).toBe(0);
-
-    mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
-    await handleAutocomplete(makeAutocompleteInteraction());
-    expect(burstWarns()).toBe(1);
-    expect(logger.warn).toHaveBeenCalledWith(
-      'autocomplete handler failure burst',
-      expect.objectContaining({ count: AUTOCOMPLETE_FAILURE_LOG_BURST }),
-    );
-
-    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST - 1; i++) {
-      mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
-      await handleAutocomplete(makeAutocompleteInteraction());
-    }
-    expect(burstWarns()).toBe(1);
-  });
-
-  test('failure burst counter does not increment when the early-return respond() throws', async () => {
-    const logger = require('../src/logger');
-    logger.warn.mockClear();
-    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST + 5; i++) {
-      const int = makeAutocompleteInteraction({ guildId: null }); // hits DM gate early-return
-      int.respond = jest.fn(async () => { throw new Error('Unknown interaction'); });
-      await handleAutocomplete(int);
-    }
-    const burstWarns = logger.warn.mock.calls.filter(
-      (call) => call[0] === 'autocomplete handler failure burst',
-    ).length;
-    expect(burstWarns).toBe(0);
-  });
-
-  test('failure burst counter does not increment on the success path', async () => {
-    const logger = require('../src/logger');
-    logger.warn.mockClear();
-    mockSearchPlaces.mockResolvedValue([{ placeId: 'ChIJ1', name: 'X', address: 'Y' }]);
-    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST + 5; i++) {
-      await handleAutocomplete(makeAutocompleteInteraction());
-    }
-    const burstWarns = logger.warn.mock.calls.filter(
-      (call) => call[0] === 'autocomplete handler failure burst',
-    ).length;
-    expect(burstWarns).toBe(0);
-  });
-});
-
-describe('safeDecodeURIComponent', () => {
-  test('decodes normal percent-encoding', () => {
-    expect(safeDecodeURIComponent('Hello%20World')).toBe('Hello World');
-  });
-
-  test('returns raw input on malformed encoding (does not throw)', () => {
-    expect(safeDecodeURIComponent('%ZZ')).toBe('%ZZ');
-    expect(safeDecodeURIComponent('%')).toBe('%');
-    expect(safeDecodeURIComponent('valid%20but%incomplete')).toBe('valid%20but%incomplete');
-  });
-
-  test('handles control chars passing through', () => {
-    expect(safeDecodeURIComponent('plain')).toBe('plain');
-  });
-});
 
 describe('cross-command cooldown contract', () => {
   beforeEach(() => sendCooldowns.clear());
@@ -1775,24 +1347,7 @@ describe('handleQurlSend — slash entry', () => {
     expect(reply.components.length).toBeGreaterThan(0);
   });
 
-  test('/qurl map slash entry persists recipientAliases (parity with /qurl send)', async () => {
-    const u1 = '100000000000000001';
-    const int = makeInteraction({
-      options: {
-        _sub: 'map',
-        location: 'https://maps.app.goo.gl/abcXYZ',
-        recipients: `<@${u1}>`,
-      },
-      guildMembers: { [u1]: {} },
-    });
-    await handleQurlMap(int);
-    expect(mockSupersedeOrCreate).toHaveBeenCalled();
-    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.resourceType).toBe('maps');
-    expect(payload.recipientAliases).toEqual(
-      expect.objectContaining({ [u1]: expect.any(String) })
-    );
-  });
+
 
   test('happy path without recipients → confirm card with picker', async () => {
     const int = makeInteraction({
@@ -3101,242 +2656,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
   });
 });
 
-describe('handleQurlMap — slash entry', () => {
-  test('Google Maps URL → URL preserved + name extracted from /place/', async () => {
-    const int = makeInteraction({
-      options: {
-        location: 'https://www.google.com/maps/place/Eiffel+Tower/@48.8,2.3',
-        recipients: '<@100000000000000001>',
-      },
-      guildMembers: { '100000000000000001': {} },
-    });
-    await handleQurlMap(int);
-    expect(mockSupersedeOrCreate).toHaveBeenCalled();
-    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.resourceType).toBe('maps');
-    expect(payload.locationUrl).toMatch(/google\.com\/maps\/place\/Eiffel/);
-    expect(payload.locationName).toMatch(/Eiffel Tower/);
-  });
 
-  test('deferReply throws (expired token) → cooldown cleared, no flow row, no editReply', async () => {
-    const int = makeInteraction({
-      options: { location: 'somewhere', recipients: '<@100000000000000001>' },
-      guildMembers: { '100000000000000001': {} },
-    });
-    int.deferReply = jest.fn(async () => { const e = new Error('Unknown interaction'); e.code = 10062; throw e; });
-    await handleQurlMap(int);
-    expect(isOnCooldown(SENDER_ID)).toBe(false);
-    expect(int.editReply).not.toHaveBeenCalled();
-    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
-  });
-
-  test('defers ONCE — handleQurlSlashSend skips its own defer when already deferred', async () => {
-    mockFindPlaceFromText.mockResolvedValueOnce({ placeId: 'ChIJ1', name: 'Place', address: '' });
-    const int = makeInteraction({
-      options: { location: 'somewhere', recipients: '<@100000000000000001>' },
-      guildMembers: { '100000000000000001': {} },
-    });
-    await handleQurlMap(int);
-    expect(int.deferReply).toHaveBeenCalledTimes(1);
-  });
-
-  test('arbitrary text → resolved through Places to a place_id-pinned URL', async () => {
-    mockFindPlaceFromText.mockResolvedValueOnce({
-      placeId: 'ChIJ4zGFAZpYwokRGUGph3Mf37k',
-      name: 'Central Park',
-      address: 'New York, NY',
-    });
-    const int = makeInteraction({
-      options: {
-        location: 'Central Park, NYC',
-        recipients: '<@100000000000000001>',
-      },
-      guildMembers: { '100000000000000001': {} },
-    });
-    await handleQurlMap(int);
-    expect(mockFindPlaceFromText).toHaveBeenCalledWith('Central Park, NYC');
-    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.locationUrl).toContain('query_place_id=ChIJ4zGFAZpYwokRGUGph3Mf37k');
-    expect(payload.locationName).toMatch(/Central Park/);
-  });
-
-  test('free-text input is trimmed + 500-char-capped before reaching Places', async () => {
-    mockFindPlaceFromText.mockResolvedValueOnce({
-      placeId: 'ChIJ4zGFAZpYwokRGUGph3Mf37k', name: 'X', address: 'Y',
-    });
-    const padding = '  '.repeat(40); // 80 chars of leading whitespace, trimmed first
-    const content = 'a'.repeat(600); // 600 chars of content, slice() caps at 500
-    const int = makeInteraction({
-      options: {
-        location: padding + content + padding,
-        recipients: '<@100000000000000001>',
-      },
-      guildMembers: { '100000000000000001': {} },
-    });
-    await handleQurlMap(int);
-    const calledWith = mockFindPlaceFromText.mock.calls[0][0];
-    expect(calledWith.length).toBe(500);
-    expect(calledWith.startsWith('a')).toBe(true);
-    expect(calledWith.endsWith('a')).toBe(true);
-  });
-
-  test('place_id sentinel from autocomplete → resolved through Place Details', async () => {
-    mockGetPlaceDetails.mockResolvedValueOnce({
-      placeId: 'ChIJ37FjGE63t4kRD2_jXSF1F9o',
-      name: 'The White House',
-      address: '1600 Pennsylvania Ave NW',
-    });
-    const int = makeInteraction({
-      options: {
-        location: 'qurl_place:ChIJ37FjGE63t4kRD2_jXSF1F9o',
-        recipients: '<@100000000000000001>',
-      },
-      guildMembers: { '100000000000000001': {} },
-    });
-    await handleQurlMap(int);
-    expect(mockGetPlaceDetails).toHaveBeenCalledWith('ChIJ37FjGE63t4kRD2_jXSF1F9o');
-    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.locationUrl).toContain('query_place_id=ChIJ37FjGE63t4kRD2_jXSF1F9o');
-    expect(payload.locationName).toBe('The White House');
-  });
-
-  test('Places returns no match → actionable ephemeral, cooldown cleared, no flow row', async () => {
-    mockFindPlaceFromText.mockResolvedValueOnce(null);
-    const int = makeInteraction({
-      options: {
-        location: 'zzzz-no-such-place',
-        recipients: '<@100000000000000001>',
-      },
-      guildMembers: { '100000000000000001': {} },
-    });
-    await handleQurlMap(int);
-    expect(int.deferReply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
-    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/Couldn't find/),
-    }));
-    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
-    expect(isOnCooldown(SENDER_ID)).toBe(false);
-  });
-
-  test('stale-sentinel NOT_FOUND → place-specific message (does NOT echo the wire sentinel)', async () => {
-    mockGetPlaceDetails.mockResolvedValueOnce(null);
-    const int = makeInteraction({
-      options: {
-        location: 'qurl_place:ChIJ-deleted-place',
-        recipients: '<@100000000000000001>',
-      },
-      guildMembers: { '100000000000000001': {} },
-    });
-    await handleQurlMap(int);
-    const editReplyCall = int.editReply.mock.calls[0][0];
-    expect(editReplyCall.content).toMatch(/no longer available/);
-    expect(editReplyCall.content).not.toContain('qurl_place:');
-    expect(isOnCooldown(SENDER_ID)).toBe(false);
-  });
-
-  test('Places call throws → actionable ephemeral, cooldown cleared, no flow row', async () => {
-    mockFindPlaceFromText.mockRejectedValueOnce(new Error('upstream timeout'));
-    const int = makeInteraction({
-      options: {
-        location: 'somewhere',
-        recipients: '<@100000000000000001>',
-      },
-      guildMembers: { '100000000000000001': {} },
-    });
-    await handleQurlMap(int);
-    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/lookup failed/),
-    }));
-    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
-    expect(isOnCooldown(SENDER_ID)).toBe(false);
-  });
-
-  test('location-name override wins over URL-derived name', async () => {
-    const int = makeInteraction({
-      options: {
-        location: 'https://www.google.com/maps/place/Eiffel+Tower',
-        'location-name': 'Custom Label',
-        recipients: '<@100000000000000001>',
-      },
-      guildMembers: { '100000000000000001': {} },
-    });
-    await handleQurlMap(int);
-    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.locationName).toBe('Custom Label');
-  });
-
-  test('empty location string → ephemeral error, cooldown CLEARED (honest user error)', async () => {
-    const int = makeInteraction({
-      options: { location: '   ', recipients: '<@100000000000000001>' },
-    });
-    await handleQurlMap(int);
-    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/empty/),
-    }));
-    expect(isOnCooldown(SENDER_ID)).toBe(false);
-  });
-
-  test('rejects in DM context', async () => {
-    const int = makeInteraction({
-      guildId: null,
-      options: { location: 'Eiffel', recipients: '<@100000000000000001>' },
-    });
-    await handleQurlMap(int);
-    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/in a server/),
-    }));
-  });
-
-  test('locationName strips bidi/zero-width control chars (RLO spoof defense)', async () => {
-    const int = makeInteraction({
-      options: {
-        location: 'https://www.google.com/maps/place/Cafe',
-        'location-name': '‮Backwards Cafe',
-        recipients: '<@100000000000000001>',
-      },
-      guildMembers: { '100000000000000001': {} },
-    });
-    await handleQurlMap(int);
-    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.locationName).toBe('Backwards Cafe');
-    expect(payload.locationName).not.toContain('‮');
-  });
-
-  test('locationName 256-cap is codepoint-aware (no surrogate split)', async () => {
-    const name = 'a'.repeat(254) + '😀' + 'extra';  // 254 + 2 surrogates + 5 = 261 code units
-    const int = makeInteraction({
-      options: {
-        location: 'https://www.google.com/maps/place/Cafe',
-        'location-name': name,
-        recipients: '<@100000000000000001>',
-      },
-      guildMembers: { '100000000000000001': {} },
-    });
-    await handleQurlMap(int);
-    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
-    expect(payload.locationName).not.toMatch(lone);
-  });
-
-  test('forged interaction missing required `location` → actionable ephemeral, no flow row, cooldown cleared', async () => {
-    const int = makeInteraction({ options: {} });
-    int.options.getString = jest.fn((name, required) => {
-      if (name === 'location' && required) {
-        const err = new Error('CommandInteractionOptionNotFound');
-        err.code = 'CommandInteractionOptionNotFound';
-        throw err;
-      }
-      return null;
-    });
-    await handleQurlMap(int);
-    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/`location:` option is required/),
-      ephemeral: true,
-    }));
-    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
-    expect(isOnCooldown(SENDER_ID)).toBe(false);
-  });
-});
 
 describe('handleConfirmSendClick', () => {
   const u1 = '100000000000000001';
@@ -3490,7 +2810,7 @@ describe('handleConfirmSendClick', () => {
     );
   });
 
-  test('partial transient lookup at Send click — /qurl map payload produces /qurl map rerun hint', async () => {
+  test('stale Maps confirmation recommends the supported file command, never the retired command', async () => {
     const flaky = '100000000000000099';
     const mapPayload = {
       ...validPayload,
@@ -3508,11 +2828,11 @@ describe('handleConfirmSendClick', () => {
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
     await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: mapPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/rerun \/qurl map/),
+      content: expect.stringMatching(/rerun \/qurl send/),
       ephemeral: true,
     }));
     expect(int.followUp).not.toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/rerun \/qurl send/),
+      content: expect.stringMatching(/rerun \/qurl map/),
     }));
   });
 
@@ -6671,7 +5991,8 @@ describe('constants + exports', () => {
   test('siblingMessage is keyed by stage so any of the three confirm-card customIds surfaces the same message', () => {
     const { siblingMessageForStage } = require('../src/flow-dispatch');
     const msg = siblingMessageForStage(SEND_STAGE_AWAITING_CONFIRM);
-    expect(msg).toMatch(/qurl send.*qurl map.*confirm card/i);
+    expect(msg).toMatch(/qurl send.*confirm card/i);
+    expect(msg).not.toMatch(/qurl map/i);
     expect(msg).toBeTruthy();
   });
 

@@ -4,7 +4,6 @@ jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test-api-key',
   QURL_ENDPOINT: 'https://api.test.local',
   CONNECTOR_URL: 'https://connector.test.local',
-  GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
@@ -138,22 +137,18 @@ jest.mock('../src/discord-rest', () => ({
 const mockDownloadAndUpload = jest.fn();
 const mockReUploadBuffer = jest.fn();
 const mockMintLinks = jest.fn();
-const mockUploadJsonToConnector = jest.fn();
 const mockRevokeMintedLinks = jest.fn();
 jest.mock('../src/connector', () => ({
   revokeMintedLinks: mockRevokeMintedLinks,
   downloadAndUpload: mockDownloadAndUpload,
   reUploadBuffer: mockReUploadBuffer,
   mintLinks: mockMintLinks,
-  uploadJsonToConnector: mockUploadJsonToConnector,
   isAllowedSourceUrl: (url) => typeof url === 'string' && url.startsWith('https://cdn.discordapp.com'),
 }));
 
 jest.mock('../src/qurl', () => ({
   createOneTimeLink: jest.fn(),
 }));
-
-jest.mock('../src/places', () => ({ searchPlaces: jest.fn().mockResolvedValue([]) }));
 
 jest.mock('../src/flow-state', () => ({
   createFlow: jest.fn(),
@@ -799,10 +794,10 @@ describe('revokeAllLinks', () => {
     recipient_discord_id: `user-${i + 1}`,
   }));
 
-  it('revokes every recorded child of a shared resource in one call and never deletes the parent', async () => {
+  it.each(['file', 'location', 'maps'])('revokes every recorded child of a shared %s resource without deleting the parent', async (resourceType) => {
     mockDb.getSendItems.mockResolvedValueOnce([
-      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_aaa' },
-      { resource_id: 'res-1', recipient_discord_id: 'user-2', qurl_id: 'q_bbb' },
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_aaa', resource_type: resourceType },
+      { resource_id: 'res-1', recipient_discord_id: 'user-2', qurl_id: 'q_bbb', resource_type: resourceType },
     ]);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
@@ -2041,21 +2036,6 @@ describe('handleAddRecipients — file path failure modes', () => {
     expect(result.delivered).toBe(0);
   });
 
-  it('surfaces "Link pool exhausted" on a 429 error from the location path (outer catch)', async () => {
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower', expires_in: '30m',
-    });
-    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
-    mockMintLinks.mockRejectedValueOnce(new Error('HTTP 429: rate limit exceeded'));
-
-    const result = await handleAddRecipients(
-      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
-      makeInteraction(), 'apikey',
-    );
-
-    expect(result.msg).toMatch(/pool exhausted/i);
-  });
 });
 
 describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)', () => {
@@ -2078,27 +2058,6 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
       send_id: 'send-fail',
       kind: 'file',
       reason: 'unknown',
-    }));
-  });
-
-  it('outer location catch: emits with kind=location when the location upload fails', async () => {
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower', expires_in: '30m',
-    });
-    mockUploadJsonToConnector.mockRejectedValueOnce(Object.assign(new Error('connector 502'), { status: 502 }));
-
-    const result = await handleAddRecipients(
-      'send-loc', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
-      makeInteraction(), 'apikey',
-    );
-
-    expect(result.msg).toBe('Failed to create links for new recipients.');
-    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
-      send_id: 'send-loc',
-      kind: 'location',
-      reason: 'upstream_5xx',
-      status_code: 502,
     }));
   });
 
@@ -2133,10 +2092,9 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
       makeInteraction(), 'apikey',
     );
 
-    expect(result.msg).toMatch(/mixed file and location sends are not supported/);
+    expect(result.msg).toMatch(/location\/URL sharing through this bot has been retired/);
     expect(result.newRecipients).toEqual([]);
     expect(mockDownloadAndUpload).not.toHaveBeenCalled();
-    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
     expect(mockMintLinks).not.toHaveBeenCalled();
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(logger.audit).not.toHaveBeenCalledWith('qurl_send_create_link_failure', expect.anything());
@@ -2158,10 +2116,9 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
       makeInteraction(), 'apikey',
     );
 
-    expect(result.msg).toMatch(/stored send configuration is unsupported/);
+    expect(result.msg).toMatch(/location\/URL sharing through this bot has been retired/);
     expect(result.newRecipients).toEqual([]);
     expect(mockDownloadAndUpload).not.toHaveBeenCalled();
-    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
     expect(mockMintLinks).not.toHaveBeenCalled();
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
   });
@@ -3053,175 +3010,6 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
   });
 });
 
-describe('handleAddRecipients — happy path (location)', () => {
-  it('mints, records, DMs, returns delivered count', async () => {
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      resource_type: 'maps',
-      connector_resource_id: 'res-existing-location',
-      actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower', expires_in: '30m', personal_message: 'check this out',
-    });
-    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
-    mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
-      { qurl_id: 'q_2', qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
-    ]);
-    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
-    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
-
-    const result = await handleAddRecipients(
-      'send-1', makeUsersCollection([
-        { id: 'u1', username: 'Alice', bot: false },
-        { id: 'u2', username: 'Bob', bot: false },
-      ]),
-      makeInteraction(), 'apikey',
-    );
-
-    expect(result.delivered).toBe(2);
-    expect(result.failed).toBe(0);
-    expect(result.msg).toMatch(/Added 2 recipients/);
-    expect(mockDb.markSendDMDelivered).toHaveBeenCalledTimes(2);
-    const emitted = logger.audit.mock.calls.map(c => c[0]);
-    expect(emitted).toEqual(expect.arrayContaining(['upload_success', 'dispatch_sent']));
-    expect(logger.audit).toHaveBeenCalledWith('upload_success', expect.objectContaining({
-      send_id: 'send-1', kind: 'location',
-    }));
-    expect(emitted.filter(e => e === 'dispatch_sent')).toHaveLength(2);
-    expect(emitted).not.toContain('mint_success');
-    expect(emitted).not.toContain('mint_failed');
-  });
-
-  it('packs the trust button once at the bottom (not per-link) for the bulk path', async () => {
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower', expires_in: '30m',
-    });
-    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-pack' });
-    mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_pack', qurl_link: 'https://q.test/pack', resource_id: 'res-loc-pack' },
-    ]);
-    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
-    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
-
-    await handleAddRecipients(
-      'send-pack', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
-      makeInteraction(), 'apikey',
-    );
-
-    expect(mockSendDM).toHaveBeenCalledTimes(1);
-    const [, payload] = mockSendDM.mock.calls[0];
-    expect(payload.components).toHaveLength(1);
-    const buttons = payload.components[0].components;
-    expect(buttons).toHaveLength(2);
-  });
-
-  it('delivers an over-512-character qv2 link without invalid Discord components', async () => {
-    const qv2Link = `https://qurl.link/#qv2t1.${'A'.repeat(600)}`;
-    expect(qv2Link.length).toBeGreaterThan(512);
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower', expires_in: '30m',
-    });
-    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-qv2' });
-    mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_qv2', qurl_link: qv2Link, resource_id: 'res-loc-qv2' },
-    ]);
-    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
-    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
-
-    await handleAddRecipients(
-      'send-qv2', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
-      makeInteraction(), 'apikey',
-    );
-
-    const [, payload] = mockSendDM.mock.calls[0];
-    expect(payload.components).toEqual([]);
-    const description = payload.embeds[0].setDescription.mock.calls[0][0];
-    expect(description).toContain(`[🚪 Step Through](${qv2Link})`);
-    expect(description).toContain('[🛡️ What is qURL?](https://layerv.ai/qurl/)');
-  });
-
-  it('shares one EmbedBuilder reference across N>1 embeds in the bulk payload primitives', () => {
-    const qurlLinks = ['https://q.test/share-file', 'https://q.test/share-loc'];
-    const embed = buildDeliveryEmbed({
-      senderAlias: 'Sender',
-      guildName: 'Guild',
-      guildIconUrl: null,
-      expiresAt: Math.floor(Date.now() / 1000) + 3600,
-      personalMessage: null,
-    });
-    const payload = {
-      embeds: Array(qurlLinks.length).fill(embed),
-      components: packBulkDeliveryComponents(qurlLinks),
-    };
-
-    expect(payload.embeds).toHaveLength(2);
-    expect(payload.embeds[0]).toBe(payload.embeds[1]);
-    if (typeof payload.embeds[0].toJSON === 'function') {
-      expect(payload.embeds[0].toJSON()).toEqual(payload.embeds[1].toJSON());
-    }
-    const urls = payload.components
-      .flatMap(row => row.components)
-      .map(b => b.setURL.mock.calls[0]?.[0])
-      .filter(Boolean);
-    expect(urls).toEqual([
-      'https://q.test/share-file',
-      'https://q.test/share-loc',
-      'https://layerv.ai/qurl/',
-    ]);
-  });
-
-  it('does not emit upload_success for unsupported mixed file + location configs', async () => {
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-file-orig', expires_in: '30m',
-      attachment_url: 'https://cdn.discordapp.com/x.png',
-      attachment_name: 'x.png', attachment_content_type: 'image/png',
-      actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower',
-    });
-
-    const result = await handleAddRecipients(
-      'send-mixed', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
-      makeInteraction(), 'apikey',
-    );
-
-    expect(result.msg).toMatch(/mixed file and location sends are not supported/);
-    const uploadEvents = logger.audit.mock.calls.filter(c => c[0] === 'upload_success');
-    expect(uploadEvents).toHaveLength(0);
-    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
-    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
-    expect(mockMintLinks).not.toHaveBeenCalled();
-    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
-  });
-
-  it('reports failed DMs as failed in the return value', async () => {
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower', expires_in: '30m',
-    });
-    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
-    mockMintLinks.mockResolvedValueOnce([
-      { qurl_id: 'q_1', qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
-      { qurl_id: 'q_2', qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
-    ]);
-    mockSendDM.mockResolvedValueOnce({ ok: false })
-      .mockResolvedValueOnce({ ok: true, channelId: 'dm-c-2', messageId: 'dm-m-2' });
-    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
-
-    const result = await handleAddRecipients(
-      'send-1', makeUsersCollection([
-        { id: 'u1', username: 'Alice', bot: false },
-        { id: 'u2', username: 'Bob', bot: false },
-      ]),
-      makeInteraction(), 'apikey',
-    );
-
-    expect(result.delivered).toBe(1);
-    expect(result.failed).toBe(1);
-    expect(result.msg).toMatch(/1 could not be reached/);
-  });
-});
-
 describe('mintLinksInBatches', () => {
   it('mints once for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
     mockMintLinks.mockResolvedValueOnce([
@@ -3364,7 +3152,6 @@ describe('mintLinksInBatches', () => {
       unrevoked_overflow_qurl_ids: ['q_x21', 'q_x22', 'q_x23'],
     });
   });
-
 
   it('returns empty array when recipientCount = 0', async () => {
     const result = await mintLinksInBatches({
@@ -3820,5 +3607,87 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(mockSendChannelMessage).toHaveBeenCalledTimes(1);
     const [, message] = mockSendChannelMessage.mock.calls[0];
     expect(message.content).not.toMatch(/\u202E/u);
+  });
+});
+
+// Stored Maps sends remain revocable, but cannot create any new grants.
+describe('retired Maps creation', () => {
+  it('refuses a stale Maps confirmation before upload, mint or persistence', async () => {
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, makePipelineParams({ resourceType: 'maps', attachment: null }));
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: _test.QURL_MAP_DISABLED_REPLY, components: [] });
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
+  it.each([
+    { resource_type: 'maps' },
+    { actual_url: 'https://maps.app.goo.gl/historical' },
+    { resource_type: 'url', actual_url: 'https://example.com/historical' },
+  ])('refuses additional recipients on a retired row: %j', async (legacy) => {
+    mockDb.getSendConfig.mockResolvedValueOnce({ expires_in: '30m', ...legacy });
+    const result = await handleAddRecipients('old-send', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]), makeInteraction(), 'apikey');
+    expect(result.msg).toMatch(/location\/URL sharing through this bot has been retired/);
+    expect(result.newLinks).toEqual([]);
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
+});
+
+describe('file delivery compatibility', () => {
+it('delivers an over-512-character qv2 link without invalid Discord components', async () => {
+    const qv2Link = `https://qurl.link/#qv2t1.${'A'.repeat(600)}`;
+    expect(qv2Link.length).toBeGreaterThan(512);
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      resource_type: 'file', attachment_url: 'https://cdn.discordapp.com/file.txt',
+      attachment_name: 'file.txt', expires_in: '30m',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-qv2', fileBuffer: Buffer.from('file') });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_id: 'q_qv2', qurl_link: qv2Link, resource_id: 'res-file-qv2' },
+    ]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await handleAddRecipients(
+      'send-qv2', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    const [, payload] = mockSendDM.mock.calls[0];
+    expect(payload.components).toEqual([]);
+    const description = payload.embeds[0].setDescription.mock.calls[0][0];
+    expect(description).toContain(`[🚪 Step Through](${qv2Link})`);
+    expect(description).toContain('[🛡️ What is qURL?](https://layerv.ai/qurl/)');
+  });
+it('shares one EmbedBuilder reference across N>1 embeds in the bulk payload primitives', () => {
+    const qurlLinks = ['https://q.test/share-file', 'https://q.test/share-file-2'];
+    const embed = buildDeliveryEmbed({
+      senderAlias: 'Sender',
+      guildName: 'Guild',
+      guildIconUrl: null,
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      personalMessage: null,
+    });
+    const payload = {
+      embeds: Array(qurlLinks.length).fill(embed),
+      components: packBulkDeliveryComponents(qurlLinks),
+    };
+
+    expect(payload.embeds).toHaveLength(2);
+    expect(payload.embeds[0]).toBe(payload.embeds[1]);
+    if (typeof payload.embeds[0].toJSON === 'function') {
+      expect(payload.embeds[0].toJSON()).toEqual(payload.embeds[1].toJSON());
+    }
+    const urls = payload.components
+      .flatMap(row => row.components)
+      .map(b => b.setURL.mock.calls[0]?.[0])
+      .filter(Boolean);
+    expect(urls).toEqual([
+      'https://q.test/share-file',
+      'https://q.test/share-file-2',
+      'https://layerv.ai/qurl/',
+    ]);
   });
 });

@@ -4,7 +4,6 @@ jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test-api-key',
   QURL_ENDPOINT: 'https://api.test.local',
   CONNECTOR_URL: 'https://connector.test.local',
-  GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
@@ -126,7 +125,6 @@ const { CRID_RESOURCE_ID } = require('./helpers/qurl-fixtures');
 
 const { _test } = require('../src/commands');
 const {
-  isGoogleMapsURL,
   sanitizeFilename,
   sanitizeMessage,
   isAllowedFileType,
@@ -138,54 +136,7 @@ const {
 } = _test;
 
 describe('Helper functions', () => {
-  describe('isGoogleMapsURL', () => {
-    it('matches google.com/maps paths', () => {
-      expect(isGoogleMapsURL('https://www.google.com/maps/place/Eiffel+Tower')).toBe(true);
-      expect(isGoogleMapsURL('http://google.com/maps?q=paris')).toBe(true);
-      expect(isGoogleMapsURL('https://google.co.uk/maps/')).toBe(true);
-    });
 
-    it('matches maps.google.* domains', () => {
-      expect(isGoogleMapsURL('https://maps.google.com/')).toBe(true);
-      expect(isGoogleMapsURL('https://maps.google.co.uk/')).toBe(true);
-      expect(isGoogleMapsURL('http://maps.google.de/?q=berlin')).toBe(true);
-    });
-
-    it('matches goo.gl/maps short links', () => {
-      expect(isGoogleMapsURL('https://goo.gl/maps/abc123')).toBe(true);
-      expect(isGoogleMapsURL('http://goo.gl/maps/xyz')).toBe(true);
-    });
-
-    it('matches maps.app.goo.gl short links', () => {
-      expect(isGoogleMapsURL('https://maps.app.goo.gl/abc123')).toBe(true);
-    });
-
-    it('rejects non-maps URLs', () => {
-      expect(isGoogleMapsURL('https://www.google.com/search?q=test')).toBe(false);
-      expect(isGoogleMapsURL('https://example.com/maps')).toBe(false);
-      expect(isGoogleMapsURL('https://github.com')).toBe(false);
-    });
-
-    it('rejects spoofed domains', () => {
-      expect(isGoogleMapsURL('https://maps.google.evil.com/exploit')).toBe(false);
-      expect(isGoogleMapsURL('https://fakegoogle.com/maps')).toBe(false);
-      expect(isGoogleMapsURL('https://goo.gl.evil.com/maps/abc')).toBe(false);
-    });
-
-    it('host-anchor contract: hostname must END at google.{tld} — no suffix attack', () => {
-      expect(isGoogleMapsURL('https://google.com.evil.com/maps/place/x')).toBe(false);
-      expect(isGoogleMapsURL('https://www.google.com.evil.com/maps')).toBe(false);
-      expect(isGoogleMapsURL('https://google.co.uk.evil.com/maps')).toBe(false);
-      expect(isGoogleMapsURL('https://evil-google.com/maps')).toBe(false);
-      expect(isGoogleMapsURL('https://notgoogle.com/maps')).toBe(false);
-    });
-
-    it('handles edge cases', () => {
-      expect(isGoogleMapsURL('')).toBe(false);
-      expect(isGoogleMapsURL('not a url')).toBe(false);
-      expect(isGoogleMapsURL('ftp://google.com/maps')).toBe(false);
-    });
-  });
 
   describe('sanitizeFilename', () => {
     it('replaces path traversal sequences', () => {
@@ -798,142 +749,7 @@ describe('Connector client', () => {
   });
 });
 
-describe('Places client', () => {
-  let places;
-  const configModule = require('../src/config');
 
-  beforeEach(() => {
-    jest.resetModules();
-    jest.mock('../src/logger', () => ({
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn(),
-      debug: jest.fn(),
-      audit: jest.fn(),
-    }));
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  describe('searchPlaces', () => {
-    it('calls Google Places API with correct parameters', async () => {
-      jest.mock('../src/config', () => ({
-        GOOGLE_MAPS_API_KEY: 'test-google-key',
-      }));
-      places = require('../src/places');
-
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          status: 'OK',
-          predictions: [
-            {
-              place_id: 'ChIJ1',
-              structured_formatting: {
-                main_text: 'Eiffel Tower',
-                secondary_text: 'Paris, France',
-              },
-              description: 'Eiffel Tower, Paris, France',
-            },
-          ],
-        }),
-      });
-
-      const results = await places.searchPlaces('Eiffel Tower');
-
-      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-      const calledUrl = globalThis.fetch.mock.calls[0][0];
-      expect(calledUrl).toContain('maps.googleapis.com/maps/api/place/autocomplete');
-      expect(calledUrl).toContain('input=Eiffel');
-      expect(calledUrl).toContain('key=test-google-key');
-      expect(calledUrl).toContain('types=');
-
-      expect(results).toHaveLength(1);
-      expect(results[0].placeId).toBe('ChIJ1');
-      expect(results[0].name).toBe('Eiffel Tower');
-      expect(results[0].address).toBe('Paris, France');
-    });
-
-    it('returns empty array when API key is not set', async () => {
-      jest.mock('../src/config', () => ({
-        GOOGLE_MAPS_API_KEY: undefined,
-      }));
-      places = require('../src/places');
-
-      const results = await places.searchPlaces('test');
-      expect(results).toEqual([]);
-    });
-
-    it('throws on HTTP error', async () => {
-      jest.mock('../src/config', () => ({
-        GOOGLE_MAPS_API_KEY: 'key',
-      }));
-      places = require('../src/places');
-
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: false,
-        status: 500,
-      });
-
-      await expect(places.searchPlaces('test')).rejects.toThrow(/Places API error: 500/);
-    });
-
-    it('throws on non-OK API status', async () => {
-      jest.mock('../src/config', () => ({
-        GOOGLE_MAPS_API_KEY: 'key',
-      }));
-      places = require('../src/places');
-
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ status: 'REQUEST_DENIED' }),
-      });
-
-      await expect(places.searchPlaces('test')).rejects.toThrow(/Places API status: REQUEST_DENIED/);
-    });
-
-    it('returns empty array for ZERO_RESULTS', async () => {
-      jest.mock('../src/config', () => ({
-        GOOGLE_MAPS_API_KEY: 'key',
-      }));
-      places = require('../src/places');
-
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ status: 'ZERO_RESULTS', predictions: [] }),
-      });
-
-      const results = await places.searchPlaces('xyznonexistent');
-      expect(results).toEqual([]);
-    });
-
-    it('handles missing structured_formatting', async () => {
-      jest.mock('../src/config', () => ({
-        GOOGLE_MAPS_API_KEY: 'key',
-      }));
-      places = require('../src/places');
-
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          status: 'OK',
-          predictions: [
-            {
-              place_id: 'p1',
-              description: 'Some Place, Country',
-            },
-          ],
-        }),
-      });
-
-      const results = await places.searchPlaces('some');
-      expect(results[0].name).toBe('Some Place, Country');
-      expect(results[0].address).toBe('');
-    });
-  });
-});
 
 describe('handleAddRecipients', () => {
   let handleAddRecipients;
@@ -941,7 +757,6 @@ describe('handleAddRecipients', () => {
   let mockMintLinks;
   let mockDownloadAndUpload;
   let mockReUploadBuffer;
-  let mockUploadJsonToConnector;
   let mockCreateOneTimeLink;
   let mockSendDM;
 
@@ -952,7 +767,6 @@ describe('handleAddRecipients', () => {
       QURL_API_KEY: 'test-api-key',
       QURL_ENDPOINT: 'https://api.test.local',
       CONNECTOR_URL: 'https://connector.test.local',
-      GOOGLE_MAPS_API_KEY: 'test-google-key',
       QURL_SEND_COOLDOWN_MS: 30000,
       QURL_DETECT_COOLDOWN_MS: 30000,
       QURL_SEND_MAX_RECIPIENTS: 50,
@@ -1080,19 +894,15 @@ describe('handleAddRecipients', () => {
     mockMintLinks = jest.fn();
     mockDownloadAndUpload = jest.fn();
     mockReUploadBuffer = jest.fn();
-    mockUploadJsonToConnector = jest.fn();
     jest.mock('../src/connector', () => ({
       uploadToConnector: jest.fn(),
       downloadAndUpload: mockDownloadAndUpload,
       reUploadBuffer: mockReUploadBuffer,
       mintLinks: mockMintLinks,
-      uploadJsonToConnector: mockUploadJsonToConnector,
       isAllowedSourceUrl: (url) => typeof url === 'string' && url.startsWith('https://cdn.discordapp.com'),
     }));
 
-    jest.mock('../src/places', () => ({
-      searchPlaces: jest.fn(),
-    }));
+
 
     jest.mock('form-data', () => {
       return jest.fn().mockImplementation(() => ({
@@ -1144,8 +954,8 @@ describe('handleAddRecipients', () => {
 
   it('returns error when all recipients are bots', async () => {
     mockDb.getSendConfig.mockReturnValue({
-      resource_type: 'url',
-      actual_url: 'https://example.com',
+      resource_type: 'file',
+      attachment_url: 'https://cdn.discordapp.com/file.txt',
       expires_in: '24h',
     });
 
@@ -1160,8 +970,8 @@ describe('handleAddRecipients', () => {
 
   it('returns error when only recipient is the sender', async () => {
     mockDb.getSendConfig.mockReturnValue({
-      resource_type: 'url',
-      actual_url: 'https://example.com',
+      resource_type: 'file',
+      attachment_url: 'https://cdn.discordapp.com/file.txt',
       expires_in: '24h',
     });
 
@@ -1175,8 +985,8 @@ describe('handleAddRecipients', () => {
 
   it('returns error when all recipients are bots or sender', async () => {
     mockDb.getSendConfig.mockReturnValue({
-      resource_type: 'url',
-      actual_url: 'https://example.com',
+      resource_type: 'file',
+      attachment_url: 'https://cdn.discordapp.com/file.txt',
       expires_in: '24h',
     });
 
@@ -1272,122 +1082,24 @@ describe('handleAddRecipients', () => {
     );
   });
 
-  it('URL send: uploads location JSON and mints links', async () => {
-    mockDb.getSendConfig.mockReturnValue({
-      resource_type: 'url',
-      connector_resource_id: null,
-      actual_url: 'https://example.com/doc',
-      expires_in: '24h',
-      personal_message: null,
-      location_name: null,
-      attachment_name: null,
-    });
 
-    mockUploadJsonToConnector.mockResolvedValue({
-      resource_id: 'res-loc-1',
-      hash: 'loc-hash',
-    });
-    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_otl_1', qurl_link: 'https://q.test/otl-1' }]);
-    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
-    const users = makeUsersCollection([
-      { id: 'rcpt-1', bot: false, username: 'Charlie' },
-    ]);
 
-    const result = await handleAddRecipients('send-url-1', users, mockOriginalInteraction, 'test-api-key');
 
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map', url: 'https://example.com/doc' }),
-      'location.json', 'test-api-key',
-      null,
-    );
-    expect(mockMintLinks).toHaveBeenCalledWith('res-loc-1', { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: null });
-    expect(mockSendDM).toHaveBeenCalledTimes(1);
-    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
-    expect(mockDb.recordQURLSendBatch.mock.calls[0][0]).toHaveLength(1);
-    expect(result.msg).toMatch(/Added 1 recipient/);
-  });
 
-  it('URL/maps send: inherits the original send\'s self-destruct timer into the re-upload', async () => {
-    mockDb.getSendConfig.mockReturnValue({
-      resource_type: 'url',
-      connector_resource_id: null,
-      actual_url: 'https://example.com/doc',
-      expires_in: '24h',
-      personal_message: null,
-      location_name: null,
-      attachment_name: null,
-      self_destruct_seconds: 300,
-    });
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'res-loc-2', hash: 'loc-hash' });
-    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_otl_2', qurl_link: 'https://q.test/otl-2' }]);
-    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
-
-    const users = makeUsersCollection([
-      { id: 'rcpt-2', bot: false, username: 'Dave' },
-    ]);
-
-    await handleAddRecipients('send-url-2', users, mockOriginalInteraction, 'test-api-key');
-
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map', url: 'https://example.com/doc' }),
-      'location.json',
-      'test-api-key',
-      300,
-    );
-    expect(mockMintLinks).toHaveBeenCalledWith(
-      'res-loc-2',
-      { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: 300 },
-    );
-  });
-
-  it('maps send: uploads location JSON with location_name and mints links', async () => {
-    mockDb.getSendConfig.mockReturnValue({
-      resource_type: 'maps',
-      connector_resource_id: null,
-      actual_url: 'https://www.google.com/maps/place/Eiffel+Tower',
-      expires_in: '1h',
-      personal_message: null,
-      location_name: 'Eiffel Tower',
-      attachment_name: null,
-    });
-
-    mockUploadJsonToConnector.mockResolvedValue({
-      resource_id: 'conn-loc-maps',
-      hash: 'h-maps',
-      success: true,
-    });
-    mockMintLinks.mockResolvedValue([{ qurl_id: 'q_maps_1', qurl_link: 'https://q.test/maps-1' }]);
-    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
-
-    const users = makeUsersCollection([
-      { id: 'rcpt-1', bot: false, username: 'Dana' },
-    ]);
-
-    const result = await handleAddRecipients('send-maps-1', users, mockOriginalInteraction, 'test-api-key');
-
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map', url: 'https://www.google.com/maps/place/Eiffel+Tower', name: 'Eiffel Tower' }),
-      'location.json', 'test-api-key',
-      null,
-    );
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-maps', { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: null });
-    expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
-    expect(result.msg).toMatch(/Added 1 recipient/);
-  });
 
   it('reports partial DM failures', async () => {
     mockDb.getSendConfig.mockReturnValue({
-      resource_type: 'url',
+      resource_type: 'file',
       connector_resource_id: null,
-      actual_url: 'https://example.com',
+      attachment_url: 'https://cdn.discordapp.com/file.txt',
       expires_in: '24h',
       personal_message: null,
       location_name: null,
       attachment_name: null,
     });
 
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-partial', hash: 'hp', success: true });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-loc-partial', hash: 'hp', success: true });
     mockMintLinks.mockResolvedValue([
       { qurl_id: 'q_link1', qurl_link: 'https://q.test/link1' },
       { qurl_id: 'q_link2', qurl_link: 'https://q.test/link2' },
@@ -1431,16 +1143,16 @@ describe('handleAddRecipients', () => {
 
   it('filters bots from mixed collection and sends only to real users', async () => {
     mockDb.getSendConfig.mockReturnValue({
-      resource_type: 'url',
+      resource_type: 'file',
       connector_resource_id: null,
-      actual_url: 'https://example.com',
+      attachment_url: 'https://cdn.discordapp.com/file.txt',
       expires_in: '24h',
       personal_message: null,
       location_name: null,
       attachment_name: null,
     });
 
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-mixed', hash: 'hm', success: true });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-loc-mixed', hash: 'hm', success: true });
     mockMintLinks.mockResolvedValue([
       { qurl_id: 'q_link1', qurl_link: 'https://q.test/link1' },
       { qurl_id: 'q_link2', qurl_link: 'https://q.test/link2' },
@@ -1458,7 +1170,7 @@ describe('handleAddRecipients', () => {
     const result = await handleAddRecipients('send-mixed', users, mockOriginalInteraction, 'test-api-key');
 
     expect(mockSendDM).toHaveBeenCalledTimes(2);
-    expect(mockUploadJsonToConnector).toHaveBeenCalledTimes(1);
+    expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-mixed', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(result.msg).toMatch(/Added 2 recipients/);
   });
@@ -1516,19 +1228,10 @@ describe('handleAddRecipients', () => {
       attachment_content_type: 'application/octet-stream',
       attachment_url: 'https://cdn.discordapp.com/attachments/1/2/file.bin',
     };
-    const MAPS_CONFIG = {
-      resource_type: 'maps',
-      connector_resource_id: null,
-      actual_url: 'https://www.google.com/maps/place/Eiffel+Tower',
-      expires_in: '1h',
-      personal_message: null,
-      location_name: 'Eiffel Tower',
-      attachment_name: null,
-    };
+
     const RAW = 'RAW-UNREDACTED-BODY lv_live_secretsecretsecretsecret';
     const sites = [
       ['file', 'addRecipients file re-upload failed', FILE_CONFIG, () => mockDownloadAndUpload],
-      ['location', 'Failed to create links for additional recipients', MAPS_CONFIG, () => mockUploadJsonToConnector],
     ];
     const errWith = (fields) => Object.assign(new Error('upload failed'), fields);
     async function runSite(config, uploadMock, err) {
@@ -1636,74 +1339,5 @@ describe('handleAddRecipients', () => {
     expect(result.msg).toMatch(/Added 8 recipients/);
   });
 
-  it('URL send: returns failure when uploadJsonToConnector rejects', async () => {
-    mockDb.getSendConfig.mockReturnValue({
-      resource_type: 'url',
-      connector_resource_id: null,
-      actual_url: 'https://example.com/failing',
-      expires_in: '24h',
-      personal_message: null,
-      location_name: null,
-      attachment_name: null,
-    });
 
-    mockUploadJsonToConnector.mockRejectedValue(new Error('Connector upload failed'));
-
-    const users = makeUsersCollection([
-      { id: 'rcpt-1', bot: false, username: 'Alice' },
-      { id: 'rcpt-2', bot: false, username: 'Bob' },
-    ]);
-
-    const result = await handleAddRecipients('send-allfail', users, mockOriginalInteraction, 'test-api-key');
-    expect(result.msg).toBe('Failed to create links for new recipients.');
-    expect(mockSendDM).not.toHaveBeenCalled();
-  });
-});
-
-describe('isGoogleMapsURL — additional URL parsing', () => {
-  it('matches google.com.au/maps (two-part country TLD)', () => {
-    expect(isGoogleMapsURL('https://www.google.com.au/maps/place/Sydney')).toBe(true);
-    expect(isGoogleMapsURL('https://google.com.au/maps?q=melbourne')).toBe(true);
-  });
-
-  it('matches google.co.in/maps', () => {
-    expect(isGoogleMapsURL('https://google.co.in/maps/place/TajMahal')).toBe(true);
-  });
-
-  it('matches maps.google.com.au', () => {
-    expect(isGoogleMapsURL('https://maps.google.com.au/?q=sydney')).toBe(true);
-  });
-
-  it('matches maps.google.co.in', () => {
-    expect(isGoogleMapsURL('https://maps.google.co.in/')).toBe(true);
-  });
-
-  it('rejects ftp://google.com/maps (protocol check)', () => {
-    expect(isGoogleMapsURL('ftp://google.com/maps')).toBe(false);
-    expect(isGoogleMapsURL('ftp://www.google.com/maps/place/test')).toBe(false);
-  });
-
-  it('rejects file:// protocol', () => {
-    expect(isGoogleMapsURL('file://google.com/maps')).toBe(false);
-  });
-
-  it('rejects data: protocol', () => {
-    expect(isGoogleMapsURL('data:text/html,google.com/maps')).toBe(false);
-  });
-
-  it('rejects google.com without /maps path', () => {
-    expect(isGoogleMapsURL('https://www.google.com.au/search?q=maps')).toBe(false);
-  });
-
-  it('handles uppercase in hostname', () => {
-    expect(isGoogleMapsURL('https://WWW.GOOGLE.COM/maps/place/test')).toBe(true);
-  });
-
-  it('handles trailing slash on maps path', () => {
-    expect(isGoogleMapsURL('https://google.com.au/maps/')).toBe(true);
-  });
-
-  it('handles google.de/maps (single-part TLD)', () => {
-    expect(isGoogleMapsURL('https://google.de/maps/place/Berlin')).toBe(true);
-  });
 });
