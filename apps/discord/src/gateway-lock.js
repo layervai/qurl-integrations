@@ -99,6 +99,8 @@ const {
   DeleteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
+const { AUDIT_EVENTS } = require('./constants');
+
 // Lease duration in seconds. 6 s sets the cold-fallback floor at
 // ~6 s + RESUME RTT ≈ 7 s. Paired with the 2 s renew cadence elsewhere
 // — three missed renewals = lock becomes acquirable by a peer.
@@ -158,6 +160,9 @@ function createGatewayLock({
       logger.info('gateway-lock: acquired', {
         shardId, instanceId, version: newVersion, ttlSeconds,
       });
+      logger.audit?.(AUDIT_EVENTS.GATEWAY_LOCK_ACQUIRED, {
+        shard_id: shardId, instance_id: instanceId, result: 'acquired',
+      });
       return { acquired: true, version: newVersion };
     } catch (err) {
       if (err.name === 'ConditionalCheckFailedException') {
@@ -204,6 +209,9 @@ function createGatewayLock({
         },
       }));
       currentVersion = nextVersion;
+      logger.audit?.(AUDIT_EVENTS.GATEWAY_LOCK_RENEWED, {
+        shard_id: shardId, instance_id: instanceId, result: 'renewed',
+      });
       return { renewed: true, version: nextVersion };
     } catch (err) {
       if (err.name === 'ConditionalCheckFailedException') {
@@ -211,6 +219,9 @@ function createGatewayLock({
           shardId, instanceId, expectedVersion: currentVersion,
         });
         currentVersion = null;
+        logger.audit?.(AUDIT_EVENTS.GATEWAY_LOCK_LOST_CAS, {
+          shard_id: shardId, instance_id: instanceId, result: 'cas_failed',
+        });
         return { renewed: false };
       }
       throw err;
@@ -266,6 +277,9 @@ function createGatewayLock({
         version: nextVersion,
       });
       currentVersion = null;
+      logger.audit?.(AUDIT_EVENTS.GATEWAY_LOCK_RELEASED, {
+        shard_id: shardId, instance_id: instanceId, result: 'transferred',
+      });
       return { transferred: true, version: nextVersion };
     } catch (err) {
       if (err.name === 'ConditionalCheckFailedException') {
@@ -300,6 +314,9 @@ function createGatewayLock({
       }));
       logger.info('gateway-lock: released', { shardId, instanceId });
       currentVersion = null;
+      logger.audit?.(AUDIT_EVENTS.GATEWAY_LOCK_RELEASED, {
+        shard_id: shardId, instance_id: instanceId, result: 'released',
+      });
       return { released: true };
     } catch (err) {
       if (err.name === 'ConditionalCheckFailedException') {
