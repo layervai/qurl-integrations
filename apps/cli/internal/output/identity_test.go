@@ -287,3 +287,29 @@ func TestAccountOmitsAnUnavailableAccountID(t *testing.T) {
 		t.Fatalf("account ID missing: %s", out.String())
 	}
 }
+
+func TestWhoAmIUsesLinkedAccountEmail(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
+	id := fixtureIdentity()
+	id.AccountID = "email|internal"
+	id.AccountEmail = "builder@example.test"
+	if err := p.WhoAmI(id, "", KeyStorage{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), id.AccountEmail) || strings.Contains(out.String(), id.AccountID) {
+		t.Fatalf("unexpected account display: %s", out.String())
+	}
+	out.Reset()
+	p = newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
+	if err := p.WhoAmI(id, "", KeyStorage{}); err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["account_id"] != id.AccountID || doc["account_email"] != id.AccountEmail {
+		t.Fatal("JSON lost account identity")
+	}
+}

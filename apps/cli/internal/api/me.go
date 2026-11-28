@@ -13,14 +13,14 @@ import (
 
 // Identity is the repo-owned result of Me: who the configured credential is,
 // as echoed by the platform. It deliberately carries no plan or usage data —
-// the identity endpoint answers from authentication state alone, so it is
-// cheap enough for login validation and whoami to call freely.
+// linked devices also receive the verified account email.
 type Identity struct {
 	// OwnerID identifies the resource owner, including device namespaces.
 	OwnerID string
 	// AccountID is the linked browser account, when echoed by the service.
-	// TODO(upstream-contract): qurl-service exposes this optional /v1/me field.
-	AccountID string
+	// The account ID stays separate from the email for scripts.
+	AccountID    string
+	AccountEmail string
 	// AuthType is how the request authenticated ("api_key" for CLI keys).
 	AuthType string
 	// Key identifies the API key itself; nil when the platform omitted the
@@ -42,10 +42,11 @@ type KeyIdentity struct {
 
 // meData mirrors the GET /v1/me response document this CLI consumes.
 type meData struct {
-	OwnerID   string `json:"owner_id"`
-	AccountID string `json:"account_id"`
-	AuthType  string `json:"auth_type"`
-	APIKey    *struct {
+	OwnerID      string `json:"owner_id"`
+	AccountID    string `json:"account_id"`
+	AccountEmail string `json:"account_email"`
+	AuthType     string `json:"auth_type"`
+	APIKey       *struct {
 		KeyID     string     `json:"key_id"`
 		Kind      string     `json:"kind"`
 		Scopes    []string   `json:"scopes"`
@@ -72,7 +73,7 @@ func (c *client) Me(ctx context.Context) (*Identity, error) {
 	if strings.TrimSpace(env.Data.OwnerID) == "" {
 		return nil, fmt.Errorf("%w: identity response missing owner_id", qurl.ErrInvalidAPIResponse)
 	}
-	id := &Identity{OwnerID: env.Data.OwnerID, AccountID: env.Data.AccountID, AuthType: env.Data.AuthType}
+	id := &Identity{OwnerID: env.Data.OwnerID, AccountID: env.Data.AccountID, AccountEmail: env.Data.AccountEmail, AuthType: env.Data.AuthType}
 	if k := env.Data.APIKey; k != nil {
 		id.Key = &KeyIdentity{
 			KeyID:     k.KeyID,

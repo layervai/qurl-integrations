@@ -30,6 +30,7 @@ type KeyStorage struct {
 }
 
 type whoamiJSON struct {
+	AccountEmail       string           `json:"account_email,omitempty"`
 	AccountID          string           `json:"account_id,omitempty"`
 	OwnerID            string           `json:"owner_id"`
 	AuthType           string           `json:"auth_type"`
@@ -84,7 +85,7 @@ func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64 string, keySto
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(whoamiJSON{
-			OwnerID: id.OwnerID, AccountID: id.AccountID, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: devicePublicKeyB64,
+			OwnerID: id.OwnerID, AccountID: id.AccountID, AccountEmail: id.AccountEmail, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: devicePublicKeyB64,
 			KeyStorage: keyStorage.Provider,
 		})
 	case p.quiet:
@@ -100,7 +101,11 @@ func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64, keyStorag
 	ew := &errWriter{w: tw}
 	ew.printf("%s\t%s\n", p.bold("Owner:"), id.OwnerID)
 	if id.AccountID != "" {
-		ew.printf("%s\t%s\n", p.bold("Linked account:"), id.AccountID)
+		account := id.AccountID
+		if id.AccountEmail != "" {
+			account = p.escapedPublisherName(id.AccountEmail)
+		}
+		ew.printf("%s\t%s\n", p.bold("Linked account:"), account)
 	}
 	ew.printf("%s\t%s\n", p.bold("Auth:"), id.AuthType)
 	if k := id.Key; k != nil {
