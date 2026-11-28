@@ -313,3 +313,30 @@ func TestWhoAmIUsesLinkedAccountEmail(t *testing.T) {
 		t.Fatal("JSON lost account identity")
 	}
 }
+
+func TestWhoAmIEscapesLinkedAccountEmail(t *testing.T) {
+	for _, format := range []Format{FormatText, FormatJSON} {
+		var out, errBuf bytes.Buffer
+		p := newTestPrinter(&out, &errBuf, format, false, false, false)
+		id := fixtureIdentity()
+		id.AccountID = "auth0|account"
+		id.AccountEmail = "a\x1b[31m\u202e\u009b@example.test"
+		if err := p.WhoAmI(id, "", KeyStorage{}); err != nil {
+			t.Fatal(err)
+		}
+		for _, control := range []string{"\x1b", "\u202e", "\u009b"} {
+			if strings.Contains(out.String(), control) {
+				t.Fatalf("raw control in email: %q", out.String())
+			}
+		}
+		if format == FormatJSON {
+			var doc map[string]any
+			if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+				t.Fatal(err)
+			}
+			if doc["account_email"] != id.AccountEmail {
+				t.Fatal("JSON changed account email")
+			}
+		}
+	}
+}

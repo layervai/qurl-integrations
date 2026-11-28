@@ -12,14 +12,16 @@ import (
 )
 
 // Identity is the repo-owned result of Me: who the configured credential is,
-// as echoed by the platform. It deliberately carries no plan or usage data —
-// linked devices also receive the verified account email.
+// as echoed by the platform. It carries authentication identity, not plan or
+// usage data. Linked devices also receive the verified account email.
 type Identity struct {
 	// OwnerID identifies the resource owner, including device namespaces.
 	OwnerID string
 	// AccountID is the linked browser account, when echoed by the service.
-	// The account ID stays separate from the email for scripts.
-	AccountID    string
+	// TODO(upstream-contract): qurl-service /v1/me returns optional account_id
+	// and account_email (qurl-service#2217); keep both separate for scripts.
+	AccountID string
+	// AccountEmail is the linked account email, when returned by the service.
 	AccountEmail string
 	// AuthType is how the request authenticated ("api_key" for CLI keys).
 	AuthType string
