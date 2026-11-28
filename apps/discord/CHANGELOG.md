@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.9](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.8...discord-v0.2.9) (2026-11-28)
+
+
+### Bug Fixes
+
+* **discord:** keep install browser secrets out of OAuth state URLs ([#1958](https://github.com/layervai/qurl-integrations/issues/1958)) ([cca253b](https://github.com/layervai/qurl-integrations/commit/cca253b22648bb6a6252a4ffcd627eaa149dc43f))
+* **discord:** persist verified guild owner bindings atomically ([#2105](https://github.com/layervai/qurl-integrations/issues/2105)) ([4af59e4](https://github.com/layervai/qurl-integrations/commit/4af59e497919566c4f6dd5d575f0cbbef023484f))
+* **discord:** preserve connector callbacks across bot owner cutover ([#2109](https://github.com/layervai/qurl-integrations/issues/2109)) ([844f056](https://github.com/layervai/qurl-integrations/commit/844f056dceb6a05b58934eba8ba14f9770922e6d))
+* **discord:** require encryption for guild API keys ([#2038](https://github.com/layervai/qurl-integrations/issues/2038)) ([88a99af](https://github.com/layervai/qurl-integrations/commit/88a99aff8515075dfaeace42cf82d5efad843e7b))
+* **discord:** retain fatal status during shutdown races ([#1961](https://github.com/layervai/qurl-integrations/issues/1961)) ([73db9e7](https://github.com/layervai/qurl-integrations/commit/73db9e7be6abaadb7552bba644ba62111247af77))
+* **discord:** send a public name when creating one-time links ([#2000](https://github.com/layervai/qurl-integrations/issues/2000)) ([599bd8f](https://github.com/layervai/qurl-integrations/commit/599bd8f6306cabb64d42f64cf7314a556c4dee7e))
+* **discord:** suppress guild counts after gateway disconnect ([#1960](https://github.com/layervai/qurl-integrations/issues/1960)) ([985dfa9](https://github.com/layervai/qurl-integrations/commit/985dfa9aa3093945fbc37ced0733884a3ea0e299))
+* **discord:** use SDK 4.3.1 for native cookie proof ([#2107](https://github.com/layervai/qurl-integrations/issues/2107)) ([411b5c4](https://github.com/layervai/qurl-integrations/commit/411b5c4f8738eddb1e576934a4e9ff15617119f0))
+* **slack:** prevent concurrent setup key overwrites ([#1881](https://github.com/layervai/qurl-integrations/issues/1881)) ([5e5efdb](https://github.com/layervai/qurl-integrations/commit/5e5efdb1f0a48da477a8f8bf112511f69c8592ef))
+
 ## [0.2.8](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.7...discord-v0.2.8) (2026-09-29)
 
 
