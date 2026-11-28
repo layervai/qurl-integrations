@@ -8,11 +8,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+
+	"github.com/layervai/qurl-go/qurl"
 
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	connectoragent "github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -53,7 +57,7 @@ to your resources, use "qurl requests".`,
 			}
 			return nil
 		},
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (retErr error) {
 			if err := validateRequestInvocation(opts, args[0], args[1], idempotencyKey); err != nil {
 				return err
 			}
@@ -61,10 +65,20 @@ to your resources, use "qurl requests".`,
 			if err != nil {
 				return err
 			}
-			client, err := openRequestClient(cmd.Context(), opts)
+			client, closeClient, err := openRequestClient(cmd.Context(), opts)
 			if err != nil {
 				return err
 			}
+			defer func() {
+				closeErr := closeClient()
+				if retErr != nil {
+					retErr = errors.Join(retErr, closeErr)
+				} else if closeErr != nil {
+					// As in Main, teardown cannot undo a completed remote operation.
+					// Keep the response truthful without exposing local state paths.
+					opts.printer().Warnf("local native-state cleanup reported a problem")
+				}
+			}()
 			reply, err := qurlapi.Request(cmd.Context(), client, args[0], args[1], body, idempotencyKey)
 			if err != nil {
 				return err
@@ -149,29 +163,72 @@ func validateRequestInvocation(opts *globalOpts, method, target, idempotencyKey 
 	return nil
 }
 
-// openRequestClient opens the existing supervised device. Account keys were
-// refused before this, so a device that needs recovery gets the supervised
-// remedy, and a bare missing credential means no enrolled device.
-func openRequestClient(ctx context.Context, opts *globalOpts) (qurlapi.Client, error) {
-	client, err := opts.newClient(ctx)
-	switch {
-	case errors.Is(err, auth.ErrAnonymousRecovery):
-		return nil, fmt.Errorf("%w: %w", auth.ErrExternalAnonymousRecovery, err)
-	case errors.Is(err, auth.ErrNoCredential) && !errors.Is(err, auth.ErrAccountRecoveryState):
-		return nil, fmt.Errorf("%w: %w", auth.ErrExternalDeviceMissing, err)
-	case err != nil:
-		return nil, err
+// openRequestClient uses only the selected persisted device for this request.
+// It never binds or reads local shares: the service authorizes the requested
+// resource. Login and publish retain their online identity/owner checks.
+func openRequestClient(ctx context.Context, opts *globalOpts) (_ qurlapi.Client, closeClient func() error, retErr error) {
+	if opts.openAPIClient != nil { // Hermetic transport seam; production opens the retained state below.
+		client, err := opts.openAPIClient(ctx)
+		return client, func() error { return nil }, err
 	}
-	// Refuse a connector-scoped device with login's remedy rather than a raw
-	// service refusal on the first management call.
-	if opts.nativeRuntime != nil {
-		store, err := opts.nativeRuntime.Handoff()
-		if err != nil {
-			return nil, err
-		}
-		if err := requireExternalOwnerScopedAgentState(ctx, store); err != nil {
-			return nil, err
-		}
+	stateDir, err := opts.resolveShareStateDir("")
+	if err != nil {
+		return nil, nil, err
 	}
-	return client, nil
+	if err := opts.requireRuntimeSupervision(stateDir); err != nil {
+		return nil, nil, err
+	}
+	origin, err := connectoragent.ResourceSDKOrigin(opts.resolvedEndpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !connectorstate.EnvelopePresent(stateDir) {
+		return nil, nil, auth.ErrExternalDeviceMissing
+	}
+	store, err := connectorstate.Open(stateDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, store.Close())
+		}
+	}()
+	persisted, err := store.Handoff()
+	if err != nil {
+		return nil, nil, err
+	}
+	state, err := persisted.LoadAgentState(ctx)
+	if errors.Is(err, qurl.ErrAgentStateNotFound) {
+		return nil, nil, auth.ErrExternalDeviceMissing
+	}
+	if err != nil {
+		// Match the SDK's registered-runtime load classification while retaining
+		// the underlying credential/continuity sentinel for specific remedies.
+		return nil, nil, fmt.Errorf("%w: load agent state: %w", qurl.ErrInvalidRegisterConfig, err)
+	}
+	if err := validateRequestDeviceIdentity(state); err != nil {
+		return nil, nil, err
+	}
+	if err := requireExternalOwnerScopedAgentState(ctx, persisted); err != nil {
+		return nil, nil, err
+	}
+	client, err := opts.openRegisteredDeviceClient(ctx, origin, persisted)
+	if errors.Is(err, qurl.ErrCredentialRecoveryRequired) || errors.Is(err, qurl.ErrDeviceCredentialMissing) {
+		return nil, nil, errors.Join(auth.ErrExternalAnonymousRecovery, err)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, store.Close, nil
+}
+
+func validateRequestDeviceIdentity(state *qurl.AgentState) error {
+	if configured := connectorstate.ConfiguredAgentID(); configured != "" && (state == nil || strings.TrimSpace(state.AgentID) != configured) {
+		return qurl.ErrAgentStateContinuity
+	}
+	if state != nil && state.RegisteredAt != nil && strings.TrimSpace(state.DeviceAPIKey) == "" {
+		return auth.ErrExternalAnonymousRecovery
+	}
+	return nil
 }

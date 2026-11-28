@@ -5,7 +5,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -372,17 +374,22 @@ func TestOneShotEnrollmentTokenReplaysItsFirstFailure(t *testing.T) {
 
 func externalLoginSealedEnv(t *testing.T) map[string]string {
 	t.Helper()
+	return externalLoginSealedEnvWithKey(t, 0x7a, 512)
+}
+
+func externalLoginSealedEnvWithKey(t *testing.T, key byte, minimumFD int) map[string]string {
+	t.Helper()
 	var fds [2]int
 	if err := unix.Pipe(fds[:]); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := unix.Write(fds[1], bytes.Repeat([]byte{0x7a}, 32)); err != nil {
+	if _, err := unix.Write(fds[1], bytes.Repeat([]byte{key}, 32)); err != nil {
 		t.Fatal(err)
 	}
 	if err := unix.Close(fds[1]); err != nil {
 		t.Fatal(err)
 	}
-	fd, err := unix.FcntlInt(uintptr(fds[0]), unix.F_DUPFD_CLOEXEC, 512)
+	fd, err := unix.FcntlInt(uintptr(fds[0]), unix.F_DUPFD_CLOEXEC, minimumFD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,5 +568,102 @@ func TestExternalLoginAcceptsBothOwnerScopedKinds(t *testing.T) {
 				t.Fatalf("connector-scoped kind %q accepted: %v", kind, err)
 			}
 		})
+	}
+}
+
+// Exercise the same retained sealed state and local wrapping key as Desktop.
+func TestRequestRealSealedDeviceHasOneHTTPCall(t *testing.T) {
+	env := externalLoginSealedEnv(t)
+	srv := apitest.NewServer(t)
+	dir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	saveDeviceState(t, dir, bootstrapRegisteredState(t))
+	before, err := readRequestFixture(t, dir, connectoragentstate.SealedAgentStateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{nativeClient: true, env: env, shareStateDir: dir, args: []string{"request", "GET", "/v1/me", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}, openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		t.Fatal("raw request entered native lifecycle")
+		return nil, errors.New("unexpected")
+	}})
+	if res.code != 0 || len(srv.Requests()) != 1 {
+		t.Fatalf("exit=%d calls=%d", res.code, len(srv.Requests()))
+	}
+	after, err := readRequestFixture(t, dir, connectoragentstate.SealedAgentStateFile)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("raw request changed sealed credential")
+	}
+	if _, err := os.Stat(filepath.Join(dir, connectorstate.AgentStateFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("raw request created plaintext credential")
+	}
+}
+
+// A completed remote mutation remains a completed operation even when local
+// namespace continuity fails during teardown. Never turn it into a retry hint.
+func TestRequestCompletedResponseSurvivesCloseContinuityFailure(t *testing.T) {
+	env := externalLoginSealedEnv(t)
+	srv := apitest.NewServer(t)
+	dir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	saveDeviceState(t, dir, bootstrapRegisteredState(t))
+	srv.Script(http.MethodDelete, "/v1/resources/fixture", func(w http.ResponseWriter, _ *http.Request) {
+		if err := os.Rename(dir, dir+"-retained"); err != nil {
+			t.Error(err)
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"deleted":true}`))
+	})
+	res := runCLI(t, &runOpts{nativeClient: true, env: env, shareStateDir: dir, args: []string{"request", "DELETE", "/v1/resources/fixture", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}})
+	var envelope struct {
+		Status int
+		Body   struct{ Deleted bool }
+	}
+	if err := json.Unmarshal(res.stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("missing completed response: exit=%d", res.code)
+	}
+	if res.code != 0 || envelope.Status != 200 || !envelope.Body.Deleted || len(srv.Requests()) != 1 {
+		t.Fatalf("exit=%d status=%d calls=%d", res.code, envelope.Status, len(srv.Requests()))
+	}
+	if !strings.Contains(res.stderr.String(), "local native-state cleanup reported a problem") || strings.Contains(res.stderr.String(), dir) {
+		t.Fatal("missing fixed cleanup warning or leaked namespace")
+	}
+}
+
+func TestRequestWrongSealedKeyKeepsConfigurationExit(t *testing.T) {
+	externalLoginSealedEnv(t)
+	srv := apitest.NewServer(t)
+	dir, err := filepath.EvalSymlinks(connectorStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	saveDeviceState(t, dir, bootstrapRegisteredState(t))
+	before, err := readRequestFixture(t, dir, connectoragentstate.SealedAgentStateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := externalLoginSealedEnvWithKey(t, 0x7b, 768)
+	res := runCLI(t, &runOpts{nativeClient: true, env: env, shareStateDir: dir, args: []string{"request", "GET", "/v1/resources", "--endpoint", srv.URL, "--supervision", "external", "-o", "json"}})
+	if res.code != 3 || len(srv.Requests()) != 0 || res.stdout.Len() != 0 {
+		t.Fatalf("wrong key exit=%d calls=%d", res.code, len(srv.Requests()))
+	}
+	after, err := readRequestFixture(t, dir, connectoragentstate.SealedAgentStateFile)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("wrong key changed sealed state")
 	}
 }
