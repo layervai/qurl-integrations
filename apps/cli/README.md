@@ -237,7 +237,9 @@ same PKCE browser flow and loopback callback; it does not use a device code.
 `account recover --headless` uses the same tunnel. Account tokens stay in memory.
 
 Setup reports the linked `account_id`. `qurl whoami -o json` also reports it when
-the service supports account identity echo. The device `owner_id` stays unchanged.
+the service supports account identity echo. `qurl whoami` shows the linked email
+when the service returns `account_email`; JSON retains both fields. The device
+`owner_id` stays unchanged.
 Choose the device in the dashboard's Protected Resources owner selector to manage
 its existing resources. Account linking does not move resources or change CRIDs.
 

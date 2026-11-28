@@ -30,11 +30,12 @@ type KeyStorage struct {
 }
 
 type whoamiJSON struct {
-	AccountID          string           `json:"account_id,omitempty"`
-	OwnerID            string           `json:"owner_id"`
-	AuthType           string           `json:"auth_type"`
-	APIKey             *identityKeyJSON `json:"api_key,omitempty"`
-	DevicePublicKeyB64 string           `json:"device_public_key_b64,omitempty"`
+	AccountEmail       escapedJSONString `json:"account_email,omitempty"`
+	AccountID          string            `json:"account_id,omitempty"`
+	OwnerID            string            `json:"owner_id"`
+	AuthType           string            `json:"auth_type"`
+	APIKey             *identityKeyJSON  `json:"api_key,omitempty"`
+	DevicePublicKeyB64 string            `json:"device_public_key_b64,omitempty"`
 	// KeyStorage names the key provider protecting the local device state. It
 	// is the connector's provider id, drawn from a closed set; encoding/json
 	// escapes any control bytes, so it needs no text-side sanitizing here. It
@@ -84,7 +85,7 @@ func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64 string, keySto
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(whoamiJSON{
-			OwnerID: id.OwnerID, AccountID: id.AccountID, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: devicePublicKeyB64,
+			OwnerID: id.OwnerID, AccountID: id.AccountID, AccountEmail: escapedJSONString(id.AccountEmail), AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: devicePublicKeyB64,
 			KeyStorage: keyStorage.Provider,
 		})
 	case p.quiet:
@@ -99,8 +100,13 @@ func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64, keyStorag
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	ew := &errWriter{w: tw}
 	ew.printf("%s\t%s\n", p.bold("Owner:"), id.OwnerID)
-	if id.AccountID != "" {
-		ew.printf("%s\t%s\n", p.bold("Linked account:"), id.AccountID)
+	if id.AccountID != "" || id.AccountEmail != "" {
+		account := id.AccountID
+		if id.AccountEmail != "" {
+			// Reuse bounded terminal escaping; valid email addresses fit its 256-rune limit.
+			account = p.escapedPublisherName(id.AccountEmail)
+		}
+		ew.printf("%s\t%s\n", p.bold("Linked account:"), account)
 	}
 	ew.printf("%s\t%s\n", p.bold("Auth:"), id.AuthType)
 	if k := id.Key; k != nil {

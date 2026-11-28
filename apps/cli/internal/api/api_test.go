@@ -1829,7 +1829,7 @@ func TestMintLimitedLinkUsesScheduledExpiry(t *testing.T) {
 
 func TestMeParsesLinkedAccount(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"data":{"owner_id":"device:owner","auth_type":"api_key","account_id":"auth0|linked"}}`))
+		_, _ = w.Write([]byte(`{"data":{"owner_id":"device:owner","auth_type":"api_key","account_id":"auth0|linked","account_email":"builder@example.test"}}`))
 	}))
 	defer server.Close()
 	client, err := New(&Config{BaseURL: server.URL, APIKey: "device-key"})
@@ -1837,7 +1837,7 @@ func TestMeParsesLinkedAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity, err := client.Me(context.Background())
-	if err != nil || identity.AccountID != "auth0|linked" {
+	if err != nil || identity.AccountID != "auth0|linked" || identity.AccountEmail != "builder@example.test" {
 		t.Fatalf("linked account missing: %v", err)
 	}
 }
