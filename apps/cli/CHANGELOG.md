@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.7.2](https://github.com/layervai/qurl-integrations/compare/v4.7.1...v4.7.2) (2026-11-28)
+
+
+### Bug Fixes
+
+* **cli:** avoid identity preflights for supervised requests ([#2112](https://github.com/layervai/qurl-integrations/issues/2112)) ([b5ff82e](https://github.com/layervai/qurl-integrations/commit/b5ff82ebbe849aaadda6c4f8f410fbb410ead926))
+
 ## [4.7.1](https://github.com/layervai/qurl-integrations/compare/v4.7.0...v4.7.1) (2026-11-26)
 
 
