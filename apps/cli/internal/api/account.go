@@ -16,22 +16,22 @@ import (
 // TODO(upstream-contract): qurl request passes POST /v1/account/link through
 // unvalidated; its help text asks supervisors for this same owner_id and
 // account_id check. Update both together.
-func (c *client) LinkAccount(ctx context.Context, accountToken, ownerID string) error {
+func (c *client) LinkAccount(ctx context.Context, accountToken, ownerID string) (string, error) {
 	reply, err := c.doRESTOnce(ctx, http.MethodPost, "/v1/account/link", map[string]string{"account_token": accountToken})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if reply.status != http.StatusOK {
-		return reply.problem()
+		return "", reply.problem()
 	}
 	var result struct {
 		OwnerID   string `json:"owner_id"`
 		AccountID string `json:"account_id"`
 	}
 	if json.Unmarshal(reply.body, &result) != nil || ownerID == "" || result.OwnerID != ownerID || result.AccountID == "" {
-		return fmt.Errorf(msgAccountLinkInvalid, qurl.ErrInvalidAPIResponse)
+		return "", fmt.Errorf(msgAccountLinkInvalid, qurl.ErrInvalidAPIResponse)
 	}
-	return nil
+	return result.AccountID, nil
 }
 
 // AccountOwners discovers recoverable namespaces using the browser account.

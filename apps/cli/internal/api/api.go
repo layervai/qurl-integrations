@@ -42,7 +42,7 @@ type Client interface {
 	UpdatePreview(ctx context.Context, id string, patch PreviewPatch) (*Preview, error)
 	UploadPreview(ctx context.Context, id, path, alt, replaceID string) (*Preview, error)
 	// LinkAccount uses the device credential and a separate browser account token.
-	LinkAccount(ctx context.Context, accountToken, ownerID string) error
+	LinkAccount(ctx context.Context, accountToken, ownerID string) (string, error)
 	// MintConnectorEnrollmentToken creates a short-lived, one-shot credential
 	// bound to exactly one Connector. The caller supplies the idempotency key
 	// so a higher-level enrollment attempt can recover an ambiguous response

@@ -236,6 +236,7 @@ func customerMessages() []string {
 	return []string{
 		msgPreviewFieldRequired, msgPreviewAltRequired, msgPreviewUploaded, msgPreviewMediaMissing,
 		msgAccountSetup,
+		msgAccountHeadless,
 		msgAccountContinue,
 		msgAccountLinked,
 		msgAccountRecovered,
@@ -299,6 +300,7 @@ func customerMessages() []string {
 }
 
 const (
+	msgAccountHeadless  = "On your computer, run: ssh -o ExitOnForwardFailure=yes -L %s:%s <this-server>\nThen open this URL on your computer:\n%s\n"
 	msgAccountContinue  = "Continue in your browser to recover resource access."
 	msgAccountSetup     = "This device controls your qURL resources.\n\nLink an account to recover access and manage resources from other devices.\nYour existing links will keep working.\nLinking is permanent. Check the account you choose in the browser.\n\nContinue in your browser."
 	msgAccountLinked    = "Account linked. Your existing links are unchanged."

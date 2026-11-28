@@ -30,6 +30,7 @@ type KeyStorage struct {
 }
 
 type whoamiJSON struct {
+	AccountID          string           `json:"account_id,omitempty"`
 	OwnerID            string           `json:"owner_id"`
 	AuthType           string           `json:"auth_type"`
 	APIKey             *identityKeyJSON `json:"api_key,omitempty"`
@@ -83,7 +84,7 @@ func (p *Printer) WhoAmI(id *qurlapi.Identity, devicePublicKeyB64 string, keySto
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(whoamiJSON{
-			OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: devicePublicKeyB64,
+			OwnerID: id.OwnerID, AccountID: id.AccountID, AuthType: id.AuthType, APIKey: identityKey(id), DevicePublicKeyB64: devicePublicKeyB64,
 			KeyStorage: keyStorage.Provider,
 		})
 	case p.quiet:
@@ -98,6 +99,9 @@ func (p *Printer) whoamiText(id *qurlapi.Identity, devicePublicKeyB64, keyStorag
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	ew := &errWriter{w: tw}
 	ew.printf("%s\t%s\n", p.bold("Owner:"), id.OwnerID)
+	if id.AccountID != "" {
+		ew.printf("%s\t%s\n", p.bold("Linked account:"), id.AccountID)
+	}
 	ew.printf("%s\t%s\n", p.bold("Auth:"), id.AuthType)
 	if k := id.Key; k != nil {
 		ew.printf("%s\t%s\n", p.bold("Key:"), k.KeyID)
@@ -156,14 +160,21 @@ func (p *Printer) loginText(id *qurlapi.Identity) error {
 
 // Account reports an optional account operation using the normal output contract.
 // Human guidance stays on stderr; JSON and quiet output carry the resource owner.
-func (p *Printer) Account(ownerID, status, message string) error {
+func (p *Printer) Account(ownerID, accountID, status, message string) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(map[string]string{"owner_id": ownerID, "status": status})
+		result := map[string]string{"owner_id": ownerID, "status": status}
+		if accountID != "" {
+			result["account_id"] = accountID
+		}
+		return p.writeJSON(result)
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, ownerID)
 		return err
 	default:
+		if accountID != "" {
+			message += "\nLinked account: " + accountID
+		}
 		_, err := fmt.Fprintln(p.err, message)
 		return err
 	}

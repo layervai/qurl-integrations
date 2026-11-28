@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -15,6 +16,7 @@ import (
 )
 
 func accountCmd(opts *globalOpts) *cobra.Command {
+	var headless bool
 	command := &cobra.Command{
 		Use:     "account",
 		Args:    noArgs,
@@ -48,22 +50,24 @@ func accountCmd(opts *globalOpts) *cobra.Command {
 				opts.printer().Notef("%s", msgAccountSetup)
 			}
 			opts.warnInsecureEndpoint()
-			token, err := opts.signInAccount(cmd.Context(), opts.accountConfig("", ""), opts.openBrowser)
+			token, err := signInAccount(cmd.Context(), opts, headless)
 			if err != nil {
 				return err
 			}
-			if err := client.LinkAccount(cmd.Context(), token, id.OwnerID); err != nil {
+			accountID, err := client.LinkAccount(cmd.Context(), token, id.OwnerID)
+			if err != nil {
 				return err
 			}
 			opts.reconcileRulesAfterLink(cmd.Context())
-			return opts.printer().Account(id.OwnerID, "linked", msgAccountLinked)
+			return opts.printer().Account(id.OwnerID, accountID, "linked", msgAccountLinked)
 		},
 	})
-	command.AddCommand(accountRecoverCmd(opts))
+	command.PersistentFlags().BoolVar(&headless, "headless", false, fmt.Sprintf("print the sign-in URL; forward %s to this server with SSH", qurlapi.AccountCallbackAddress))
+	command.AddCommand(accountRecoverCmd(opts, &headless))
 	return command
 }
 
-func accountRecoverCmd(opts *globalOpts) *cobra.Command {
+func accountRecoverCmd(opts *globalOpts, headless *bool) *cobra.Command {
 	var selectedOwner string
 	recoverCmd := &cobra.Command{
 		Use:     "recover",
@@ -79,7 +83,7 @@ func accountRecoverCmd(opts *globalOpts) *cobra.Command {
 				opts.printer().Notef("%s", msgAccountContinue)
 			}
 			opts.warnInsecureEndpoint()
-			token, err := opts.signInAccount(cmd.Context(), opts.accountConfig("", ""), opts.openBrowser)
+			token, err := signInAccount(cmd.Context(), opts, *headless)
 			if err != nil {
 				return err
 			}
@@ -111,7 +115,7 @@ func accountRecoverCmd(opts *globalOpts) *cobra.Command {
 			}
 			opts.registeredClient, opts.registeredIdentity = client, deviceIdentity
 			opts.reconcileRulesAfterLink(cmd.Context())
-			return opts.printer().Account(deviceIdentity.OwnerID, "recovered", msgAccountRecovered)
+			return opts.printer().Account(deviceIdentity.OwnerID, deviceIdentity.AccountID, "recovered", msgAccountRecovered)
 		},
 	}
 	recoverCmd.Flags().StringVar(&selectedOwner, "owner", "", "resource owner to recover when the account has several devices")
@@ -140,4 +144,16 @@ func selectAccountOwner(owners []string, requested string) (string, error) {
 		return "", exitcode.UsageError(errors.New(msgAccountOwnerDenied))
 	}
 	return requested, nil
+}
+
+// Headless setup keeps the same PKCE and loopback callback as browser setup.
+func signInAccount(ctx context.Context, opts *globalOpts, headless bool) (string, error) {
+	open := opts.openBrowser
+	if headless {
+		open = func(_ context.Context, link string) error {
+			_, err := fmt.Fprintf(opts.streams.Err, msgAccountHeadless, qurlapi.AccountCallbackPort, qurlapi.AccountCallbackAddress, link)
+			return err
+		}
+	}
+	return opts.signInAccount(ctx, opts.accountConfig("", ""), open)
 }
